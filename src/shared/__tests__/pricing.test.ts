@@ -275,6 +275,45 @@ describe('equivalentCostUsd — openai pricing', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The models Codex's own catalog offers (ADR-066). Both sources are quoted in
+// OPENAI_PRICING; these pin every published column so a bad edit shows up as a
+// wrong cost rather than as a plausible one.
+// ---------------------------------------------------------------------------
+
+describe('equivalentCostUsd — the Codex catalog models', () => {
+  const rates: Array<[string, number, number, number, number]> = [
+    // model, input, cached input, cache write, output — all per MTok
+    ['gpt-6-astra', 10, 1, 12.5, 50],
+    ['gpt-5.6-sol', 4, 0.4, 5, 20],
+    ['gpt-5.6-terra', 2, 0.2, 2.5, 12],
+    ['gpt-5.6-luna', 0.2, 0.02, 0.25, 1.2],
+    ['gpt-5.2', 1.75, 0.175, 1.75, 14]
+  ]
+  for (const [model, input, cacheRead, cacheWrite, output] of rates)
+    it(`${model}: $${input} in / $${cacheRead} cached / $${cacheWrite} written / $${output} out`, () => {
+      expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+        input
+      )
+      expect(
+        equivalentCostUsd('openai', model, oneMTok({ cacheReadTokens: 1_000_000 }))
+      ).toBeCloseTo(cacheRead)
+      expect(
+        equivalentCostUsd('openai', model, oneMTok({ cacheWriteTokens: 1_000_000 }))
+      ).toBeCloseTo(cacheWrite)
+      expect(equivalentCostUsd('openai', model, oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(
+        output
+      )
+    })
+
+  // Codex's hidden models have no published price. A guess would be worse than
+  // "unknown", so the lookup must stay null for them.
+  for (const model of ['gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'codex-auto-review'])
+    it(`${model}: unpriced → null`, () => {
+      expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeNull()
+    })
+})
+
+// ---------------------------------------------------------------------------
 // Multi-vendor coverage — Google
 // ---------------------------------------------------------------------------
 
@@ -735,5 +774,129 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       oneMTok({ outputTokens: 1_000_000 })
     )
     expect(cost).toBeCloseTo(sonnet.pricing.outputPerMTok)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Supplemental indexing — the batch is now the whole models.dev catalog
+// (~7,400 entries across 222 providers), so registerSupplementalPricing builds
+// a vendor-scoped map plus a deliberately-ordered cross-vendor index instead of
+// leaving findPricing to scan the array per usage row.
+// ---------------------------------------------------------------------------
+
+describe('supplemental indexing', () => {
+  afterEach(() => {
+    registerSupplementalPricing([])
+  })
+
+  /** A supplemental entry whose every rate is `input`, for terse fixtures. */
+  function flat(vendorId: string, match: string, input: number, output = input * 4): PricingEntry {
+    return {
+      vendorId,
+      match,
+      pricing: {
+        inputPerMTok: input,
+        outputPerMTok: output,
+        cacheWritePerMTok: input,
+        cacheWrite1hPerMTok: input,
+        cacheReadPerMTok: input
+      }
+    }
+  }
+
+  it('vendor-scoped exact hit resolves from the vendor map', () => {
+    registerSupplementalPricing([flat('mistral', 'mistral-large-3', 5)])
+    expect(
+      equivalentCostUsd('mistral', 'mistral-large-3', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(5)
+  })
+
+  it('a vendor with entries is recognised, so its unpriced model is null — never a cross-vendor guess', () => {
+    registerSupplementalPricing([
+      flat('mistral', 'mistral-large-3', 5),
+      // The same model id is listed under another vendor; `mistral` must not
+      // reach it, because `mistral` is a vendor we know.
+      flat('some-reseller', 'shared-model-id', 9)
+    ])
+    expect(
+      equivalentCostUsd('mistral', 'shared-model-id', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeNull()
+  })
+
+  it('a vendor whose only listings are free is still recognised (empty cross-vendor index, not an unknown vendor)', () => {
+    registerSupplementalPricing([flat('freebies', 'gratis-model', 0, 0)])
+    // Recognised → a miss under it stays a miss instead of falling back to the
+    // built-in substring table, which would otherwise price this as OpenAI's.
+    expect(equivalentCostUsd('freebies', 'gpt-4o', oneMTok({ inputTokens: 1_000_000 }))).toBeNull()
+    expect(equivalentCostUsd('freebies', 'gratis-model', oneMTok({ inputTokens: 1_000_000 }))).toBe(
+      0
+    )
+  })
+
+  it('an unrecognised vendor prefers a built-in vendor listing over a reseller registered earlier', () => {
+    registerSupplementalPricing([
+      // Registration order puts the reseller first; the index must not.
+      flat('some-reseller', 'gpt-9-turbo', 12),
+      flat('openai', 'gpt-9-turbo', 4)
+    ])
+    expect(
+      equivalentCostUsd('acme-corp-gateway', 'gpt-9-turbo', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(4)
+  })
+
+  it('an unrecognised vendor falls back to registration order among non-built-in vendors', () => {
+    registerSupplementalPricing([
+      flat('reseller-a', 'gpt-9-turbo', 12),
+      flat('reseller-b', 'gpt-9-turbo', 20)
+    ])
+    expect(
+      equivalentCostUsd('acme-corp-gateway', 'gpt-9-turbo', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(12)
+  })
+
+  it('a free listing elsewhere is never used for an unrecognised vendor', () => {
+    registerSupplementalPricing([flat('freebies', 'some-internal-model-xyz', 0, 0)])
+    // A gateway we cannot identify is not billing us at another provider's $0.
+    expect(
+      equivalentCostUsd(
+        'acme-corp-gateway',
+        'some-internal-model-xyz',
+        oneMTok({ inputTokens: 1_000_000 })
+      )
+    ).toBeNull()
+  })
+
+  it('a free listing is skipped in favour of a priced listing of the same model', () => {
+    registerSupplementalPricing([
+      flat('freebies', 'gpt-9-turbo', 0, 0),
+      flat('reseller-a', 'gpt-9-turbo', 7)
+    ])
+    expect(
+      equivalentCostUsd('acme-corp-gateway', 'gpt-9-turbo', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(7)
+  })
+
+  it('within a vendor, the first entry for a model id wins (matching the old scan order)', () => {
+    registerSupplementalPricing([flat('mistral', 'dup-model', 1), flat('mistral', 'dup-model', 99)])
+    expect(
+      equivalentCostUsd('mistral', 'dup-model', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(1)
+  })
+
+  it('replace-all: a second registration drops the first batch from BOTH maps', () => {
+    registerSupplementalPricing([flat('reseller-a', 'gone-model', 11)])
+    registerSupplementalPricing([flat('reseller-b', 'kept-model', 22)])
+
+    // vendor-scoped map: the old vendor is no longer recognised at all …
+    expect(
+      equivalentCostUsd('reseller-a', 'gone-model', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeNull()
+    // … and the cross-vendor index no longer answers for its model either.
+    expect(
+      equivalentCostUsd('acme-corp-gateway', 'gone-model', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeNull()
+    expect(
+      equivalentCostUsd('acme-corp-gateway', 'kept-model', oneMTok({ inputTokens: 1_000_000 }))
+    ).toBeCloseTo(22)
   })
 })

@@ -1,14 +1,16 @@
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore } from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
+  ModelRef,
   SessionInfo,
   WorktreeInfo
 } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
+import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
 
@@ -17,6 +19,46 @@ type SidebarSessionData = {
   cwd: string
   isWatching: boolean
   firstUserText?: string
+}
+
+/**
+ * Seed `sessionEngines` for a session reopened from another engine's own store,
+ * before `loadHistoricalSession` reads it back.
+ *
+ * `model` comes from the transcript's last assistant message because a session
+ * that engine created on its own has nothing persisted here, and without it the
+ * composer's pill names the configured default — a model the session never ran
+ * and the resume will not spawn. A model already persisted for this routing id
+ * is the user's own last pick in this session and always wins.
+ */
+function seedHistoricalEngine(
+  routingId: string,
+  engineId: 'opencode' | 'pi',
+  lastModel: ModelRef | null | undefined
+): void {
+  const state = useSessionStore.getState()
+  const existing = state.sessionEngines[routingId]
+  const sessionEngines = {
+    ...state.sessionEngines,
+    [routingId]: {
+      ...existing,
+      engineId,
+      ...(!existing?.model && lastModel ? { model: lastModel } : {})
+    }
+  }
+  useSessionStore.setState({ sessionEngines })
+  window.api.saveSessionConfig({ sessionEngines })
+}
+
+function isCodexSession(sessionId: string): boolean {
+  const state = useSessionStore.getState()
+  return (
+    state.sessions[sessionId]?.selectedEngineId === 'codex' ||
+    state.sessionEngines[sessionId]?.engineId === 'codex' ||
+    state.directories.some((group) =>
+      group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
+    )
+  )
 }
 
 /** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
@@ -121,6 +163,8 @@ export function Sidebar({
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
+  const [deletePlan, setDeletePlan] = useState<CodexDeletePlan | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
@@ -141,6 +185,7 @@ export function Sidebar({
   const applyTitle = useCallback(
     (sessionId: string, title: string) => {
       setCustomTitle(sessionId, title)
+      if (isCodexSession(sessionId)) return
       const projectKey = findProjectKey(sessionId)
       if (projectKey && title) {
         window.api.writeCustomTitle(sessionId, projectKey, title)
@@ -152,6 +197,10 @@ export function Sidebar({
   const handleRename = useCallback(
     async (sessionId: string, newTitle: string) => {
       setRenamingKey(null)
+      if (!newTitle.trim() && isCodexSession(sessionId)) {
+        setCustomTitle(sessionId, '')
+        return
+      }
       if (newTitle.trim()) {
         applyTitle(sessionId, newTitle.trim())
         return
@@ -296,22 +345,20 @@ export function Sidebar({
     // engineId:'opencode' so loadHistoricalSession sets selectedEngineId, which
     // InputBox uses to pass routingId as resumeSessionId on the first createSession.
     if (info.engineId === 'opencode') {
-      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
-      // engine. Preserve any persisted model (from the DB) — overwriting it would
-      // wipe the session's remembered model so it'd reopen on the engine default.
-      const storeState = useSessionStore.getState()
-      const sessionEngines = {
-        ...storeState.sessionEngines,
-        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'opencode' as const }
-      }
-      useSessionStore.setState({ sessionEngines })
-      window.api.saveSessionConfig({ sessionEngines })
-      // Best-effort history load (returns [] if opencode is down) — paints the
+      // Best-effort history load (empty if opencode is down) — paints the
       // transcript immediately rather than waiting for the first new prompt.
-      const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      // The status line rides along, so the cost and token figures appear with
+      // it instead of only after the first new turn (S1d), and so does the
+      // model the transcript last answered on.
+      const { messages, statusLine, lastModel } = await window.api
+        .loadOpencodeHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
       // A newer click superseded this one while history loaded — discard.
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
+      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
+      // engine (and model) — it is the one that restores both onto the session.
+      seedHistoricalEngine(routingId, 'opencode', lastModel)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)
@@ -326,17 +373,51 @@ export function Sidebar({
     // messages), exactly like Claude. No extra sessionEngines/resumeSessionId
     // wiring is needed here beyond seeding engineId, same as the opencode branch.
     if (info.engineId === 'pi') {
-      const storeState = useSessionStore.getState()
+      const { messages, statusLine, lastModel } = await window.api
+        .loadPiHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
+      if (seq !== selectionSeq.current) return
+      seedHistoricalEngine(routingId, 'pi', lastModel)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
+      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
+      addRecentSession(routingId)
+      switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
+
+    if (info.engineId === 'codex') {
+      const state = useSessionStore.getState()
       const sessionEngines = {
-        ...storeState.sessionEngines,
-        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'pi' as const }
+        ...state.sessionEngines,
+        [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
       }
       useSessionStore.setState({ sessionEngines })
-      window.api.saveSessionConfig({ sessionEngines })
-      const messages = await window.api.loadPiHistory(info.sessionId).catch(() => [])
+      setHistoryError(null)
+      const history = await window.api
+        .loadSessionHistory(info.sessionId, info.projectKey)
+        .catch(() => {
+          if (seq === selectionSeq.current)
+            setHistoryError(
+              'Codex history could not be loaded. Check the native installation/account and retry; no transcript was replaced.'
+            )
+          return null
+        })
+      if (!history) return
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
-      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
+      loadHistoricalSession(
+        routingId,
+        history.messages,
+        info.cwd,
+        history.taskNotifications,
+        // Codex's reader returns the child threads' transcripts inline (they
+        // are native THREADS on the same connection, not JSONL sidecars), so
+        // there is no second fetch to make here as there is for Claude.
+        history.subagentMessages,
+        history.statusLine,
+        history.warnings
+      )
+      if (info.title) setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
@@ -561,6 +642,31 @@ export function Sidebar({
     })
   }, [])
 
+  /**
+   * What deleting the pending CODEX target would actually remove.
+   *
+   * Only Codex has a plan: its native delete is refused while a fork still
+   * references the thread's history, so a branched session is a subtree delete
+   * and the confirmation has to say so before the user agrees to it. The answer
+   * is advisory — main recomputes the plan when the delete runs and never
+   * trusts this copy — and a failed query just leaves the plain confirmation
+   * standing rather than blocking the delete.
+   */
+  useEffect(() => {
+    setDeletePlan(null)
+    if (deleteTarget?.kind !== 'session' || deleteTarget.engineId !== 'codex') return
+    let current = true
+    void window.api
+      .codexDeletePlan(deleteTarget.sessionId)
+      .then((plan) => {
+        if (current) setDeletePlan(plan)
+      })
+      .catch(() => {})
+    return () => {
+      current = false
+    }
+  }, [deleteTarget])
+
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
@@ -653,69 +759,84 @@ export function Sidebar({
   }, [directories, sidebarSessions, customTitles, sessionEngines])
 
   return (
-    <SidebarView
-      style={style}
-      platform={window.api.platform}
-      uiFontScale={uiFontScale}
-      activeSessionId={activeSessionId}
-      activeView={activeView}
-      pluginViews={pluginViews}
-      automationBadge={automationBadge}
-      pinnedSessionIds={pinnedSessionIds}
-      pinnedSessions={pinnedSessions}
-      watchingSessions={watchingSessions}
-      recentSessions={recentSessions}
-      augmentedDirs={augmentedDirs}
-      hiddenSessionSet={hiddenSessionSet}
-      hiddenProjectSet={hiddenProjectSet}
-      hasAnyHidden={hasAnyHidden}
-      showHidden={showHidden}
-      expandedDir={expandedDir}
-      renamingKey={renamingKey}
-      worktreesModalCwd={worktreesModalCwd}
-      deleteTarget={deleteTarget}
-      cleanupWorktree={cleanupWorktree}
-      onToggleCollapse={onToggleCollapse}
-      onNewSession={handleNewSession}
-      onNewSessionDblClick={handleNewSessionDblClick}
-      onSetActiveView={setActiveView}
-      onShowHiddenToggle={() => setShowHidden((v) => !v)}
-      onSetRenamingKey={setRenamingKey}
-      onClickSession={handleClickSession}
-      onToggleWatch={handleToggleWatch}
-      onPin={pinSession}
-      onUnpin={unpinSession}
-      onReorderPinned={reorderPinnedSessions}
-      onFinishRename={handleRename}
-      onAutoRename={handleAutoRename}
-      onRemoveRecent={handleRemoveRecent}
-      onDirClick={handleDirClick}
-      onDirDoubleClick={handleDirDoubleClick}
-      onSessionDoubleClick={(info) => addRecentSession(info.sessionId)}
-      onViewWorktrees={(cwd) => setWorktreesModalCwd(cwd)}
-      onCloseWorktreesModal={() => setWorktreesModalCwd(null)}
-      onHideSession={handleHideSession}
-      onUnhideSession={handleUnhideSession}
-      onDeleteSession={handleDeleteSessionRequest}
-      onHideProject={hideProject}
-      onUnhideProject={unhideProject}
-      onDeleteProject={handleDeleteProjectRequest}
-      onConfirmDelete={confirmDelete}
-      onCancelDelete={() => setDeleteTarget(null)}
-      onWorktreeCleanupKeep={() => {
-        if (cleanupWorktree) {
-          removeRecentSession(cleanupWorktree.sessionId)
-          setCleanupWorktree(null)
-        }
-      }}
-      onWorktreeCleanupRemove={() => {
-        if (cleanupWorktree) {
-          clearWorktreeInfo(cleanupWorktree.sessionId)
-          removeRecentSession(cleanupWorktree.sessionId)
-          setCleanupWorktree(null)
-        }
-      }}
-      onWorktreeCleanupCancel={() => setCleanupWorktree(null)}
-    />
+    <>
+      {historyError && (
+        <div
+          role="alert"
+          data-testid="Sidebar.nativeHistoryError"
+          className="fixed top-3 right-3 z-50 max-w-sm rounded-lg border border-border bg-bg-secondary p-3 text-sm"
+        >
+          {historyError}
+          <button onClick={() => setHistoryError(null)} className="block mt-2">
+            Dismiss
+          </button>
+        </div>
+      )}
+      <SidebarView
+        style={style}
+        platform={window.api.platform}
+        uiFontScale={uiFontScale}
+        activeSessionId={activeSessionId}
+        activeView={activeView}
+        pluginViews={pluginViews}
+        automationBadge={automationBadge}
+        pinnedSessionIds={pinnedSessionIds}
+        pinnedSessions={pinnedSessions}
+        watchingSessions={watchingSessions}
+        recentSessions={recentSessions}
+        augmentedDirs={augmentedDirs}
+        hiddenSessionSet={hiddenSessionSet}
+        hiddenProjectSet={hiddenProjectSet}
+        hasAnyHidden={hasAnyHidden}
+        showHidden={showHidden}
+        expandedDir={expandedDir}
+        renamingKey={renamingKey}
+        worktreesModalCwd={worktreesModalCwd}
+        deleteTarget={deleteTarget}
+        deletePlan={deletePlan}
+        cleanupWorktree={cleanupWorktree}
+        onToggleCollapse={onToggleCollapse}
+        onNewSession={handleNewSession}
+        onNewSessionDblClick={handleNewSessionDblClick}
+        onSetActiveView={setActiveView}
+        onShowHiddenToggle={() => setShowHidden((v) => !v)}
+        onSetRenamingKey={setRenamingKey}
+        onClickSession={handleClickSession}
+        onToggleWatch={handleToggleWatch}
+        onPin={pinSession}
+        onUnpin={unpinSession}
+        onReorderPinned={reorderPinnedSessions}
+        onFinishRename={handleRename}
+        onAutoRename={handleAutoRename}
+        onRemoveRecent={handleRemoveRecent}
+        onDirClick={handleDirClick}
+        onDirDoubleClick={handleDirDoubleClick}
+        onSessionDoubleClick={(info) => addRecentSession(info.sessionId)}
+        onViewWorktrees={(cwd) => setWorktreesModalCwd(cwd)}
+        onCloseWorktreesModal={() => setWorktreesModalCwd(null)}
+        onHideSession={handleHideSession}
+        onUnhideSession={handleUnhideSession}
+        onDeleteSession={handleDeleteSessionRequest}
+        onHideProject={hideProject}
+        onUnhideProject={unhideProject}
+        onDeleteProject={handleDeleteProjectRequest}
+        onConfirmDelete={confirmDelete}
+        onCancelDelete={() => setDeleteTarget(null)}
+        onWorktreeCleanupKeep={() => {
+          if (cleanupWorktree) {
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }
+        }}
+        onWorktreeCleanupRemove={() => {
+          if (cleanupWorktree) {
+            clearWorktreeInfo(cleanupWorktree.sessionId)
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }
+        }}
+        onWorktreeCleanupCancel={() => setCleanupWorktree(null)}
+      />
+    </>
   )
 }

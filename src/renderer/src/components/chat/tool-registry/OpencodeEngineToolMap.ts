@@ -74,7 +74,8 @@ function opencodeKindOf(toolName: string): ToolKind {
 function opencodeNormalize(
   kind: ToolKind,
   input: Record<string, unknown> | undefined,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView {
   const inp = input ?? {}
 
@@ -125,9 +126,17 @@ function opencodeNormalize(
       }
 
     case 'web':
+      // `websearch` takes `query`, `webfetch` takes `url` — reading only `url`
+      // made every search card a JSON dump of its own input (F20).
       return {
         kind: 'web',
-        target: inp.url != null ? String(inp.url) : JSON.stringify(inp)
+        target:
+          inp.url != null
+            ? String(inp.url)
+            : inp.query != null
+              ? String(inp.query)
+              : JSON.stringify(inp),
+        action: toolName === 'webfetch' ? 'fetch' : 'search'
       }
 
     case 'task': {

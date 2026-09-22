@@ -29,7 +29,7 @@ function openPickerDropdown(triggerTitle: string) {
   return within(dropdown as HTMLElement)
 }
 import { InputBoxView, type InputBoxViewProps, type ModelDisplay } from '../View'
-import { useSessionStore } from '../../../../stores/session-store'
+import { bootstrapPermissionMode, useSessionStore } from '../../../../stores/session-store'
 
 const baseModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -94,6 +94,59 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     ...overrides
   }
 }
+
+describe('Codex under the shared permission model', () => {
+  it('follows the global autonomy default, auto included', () => {
+    for (const defaultPermissionMode of ['auto', 'acceptEdits', 'plan'] as const) {
+      expect(
+        bootstrapPermissionMode({ ...useSessionStore.getState(), defaultPermissionMode }, 'codex')
+      ).toBe(defaultPermissionMode)
+    }
+  })
+  it.each([false, true])(
+    'shows the shared mode tab and no native policy pill, mobile=%s',
+    (isMobile) => {
+      render(
+        <InputBoxView
+          {...makeProps({
+            isMobile,
+            selectedEngineId: 'codex',
+            permissionMode: 'auto',
+            showModePicker: true
+          })}
+        />
+      )
+      expect(screen.queryByTestId('CodexPolicyPill')).not.toBeInTheDocument()
+      if (!isMobile) expect(screen.getByText('Auto ⏵⏵')).toBeInTheDocument()
+      else expect(screen.getByTestId('MobileConfigSheet.trigger')).toBeInTheDocument()
+    }
+  )
+  it('offers the engine-native effort tiers in place of the Claude ladder', () => {
+    const onSelectEffort = vi.fn()
+    render(
+      <InputBoxView
+        {...makeProps({
+          onSelectEffort,
+          selectedEngineId: 'codex',
+          effort: 'high',
+          effortSupported: true,
+          allowedEffortLevels: [],
+          nativeEffortOptions: [
+            { value: 'high', description: 'High' },
+            { value: 'ultra', description: 'Native ultra' }
+          ]
+        })}
+      />
+    )
+    const dropdown = openPickerDropdown('Effort level')
+    expect(dropdown.getByRole('button', { name: /ultra/ })).not.toBeDisabled()
+    expect(dropdown.getByRole('button', { name: /Native ultra/ })).toBeInTheDocument()
+    // The fixed Claude ladder is gone, not merged in.
+    expect(dropdown.queryByRole('button', { name: /^xhigh$/i })).not.toBeInTheDocument()
+    fireEvent.click(dropdown.getByRole('button', { name: /ultra/ }))
+    expect(onSelectEffort).toHaveBeenCalledWith('ultra')
+  })
+})
 
 beforeEach(() => {
   // The View renders a StatusLine sub-component that reads from the store.
@@ -376,5 +429,94 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     const { button, onVoiceStop } = renderVoice({ voiceState: 'recording' })
     fireEvent.mouseLeave(button)
     expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Status-line {cost} placeholder. `StatusLineData.totalCostUsd` is nullable:
+// null = the engine could not price the session, and printing "$0.00" for it
+// would read as "this turn was free".
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — {cost} placeholder', () => {
+  function renderWithCost(totalCostUsd: number | null) {
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, statusLineTemplate: 'Cost: {cost}' }
+    }))
+    render(
+      <InputBoxView
+        {...makeProps({
+          statusLine: {
+            totalCostUsd,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+            contextWindow: { used: 0, size: 0 },
+            usedPercentage: null,
+            remainingPercentage: null
+          }
+        })}
+      />
+    )
+    return screen.getByTestId('InputBox.statusLine')
+  }
+
+  it('renders the unknown placeholder for a null cost, not a dollar figure', () => {
+    const line = renderWithCost(null)
+    expect(line).toHaveTextContent('Cost: unknown')
+    expect(line.textContent).not.toContain('$')
+  })
+
+  it('renders a real $0.00 for a known-zero cost', () => {
+    expect(renderWithCost(0)).toHaveTextContent('Cost: $0.00')
+  })
+
+  it('renders a priced figure unchanged', () => {
+    expect(renderWithCost(1.5)).toHaveTextContent('Cost: $1.50')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Status-line context placeholders. An engine with no known window used to
+// have `{used}` STRIPPED, leaving the default template's bare `%` — a third
+// spelling of "unknown" beside the em-dash a null percentage already renders.
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — {used} with no context meter', () => {
+  function renderContext(showContextMeter: boolean, usedPercentage: number | null) {
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, statusLineTemplate: '{used}% context used' }
+    }))
+    render(
+      <InputBoxView
+        {...makeProps({
+          showContextMeter,
+          statusLine: {
+            totalCostUsd: 0,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+            contextWindow: { used: 0, size: 0 },
+            usedPercentage,
+            remainingPercentage: usedPercentage !== null ? 100 - usedPercentage : null
+          }
+        })}
+      />
+    )
+    return screen.getByTestId('InputBox.statusLine')
+  }
+
+  it('renders the em-dash, not a bare percent sign, when the meter is unavailable', () => {
+    expect(renderContext(false, null)).toHaveTextContent('–% context used')
+  })
+
+  it('renders the percentage when the meter is available', () => {
+    expect(renderContext(true, 42)).toHaveTextContent('42% context used')
   })
 })

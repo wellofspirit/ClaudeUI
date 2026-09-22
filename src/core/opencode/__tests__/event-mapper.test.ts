@@ -16,6 +16,20 @@ function makeEvent(type: string, properties: Record<string, unknown>): OpencodeE
   return { id: 'evt_1', type, properties }
 }
 
+function opened(messageId: string, partId: string, type: 'text' | 'reasoning' = 'text') {
+  return new Map<string, MessageAccumulator>([
+    [
+      messageId,
+      {
+        messageId,
+        role: 'assistant',
+        partOrder: [partId],
+        parts: new Map([[partId, { type, text: '' }]])
+      }
+    ]
+  ])
+}
+
 describe('mapEvent — cross-session filter', () => {
   it('ignores events from an UNKNOWN foreign session', () => {
     const ev = makeEvent('message.part.delta', {
@@ -25,7 +39,7 @@ describe('mapEvent — cross-session filter', () => {
       field: 'text',
       delta: 'hello'
     })
-    const accumulators = new Map<string, MessageAccumulator>()
+    const accumulators = opened('msg_1', 'p1')
     const totalCostRef = { value: 0 }
     // No childSessions entry for 'ses_OTHER' — must be ignored.
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
@@ -40,7 +54,7 @@ describe('mapEvent — cross-session filter', () => {
       field: 'text',
       delta: 'hello'
     })
-    const accumulators = new Map<string, MessageAccumulator>()
+    const accumulators = opened('msg_1', 'p1')
     const totalCostRef = { value: 0 }
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
     expect(out.kind).toBe('stream')
@@ -59,7 +73,14 @@ describe('mapEvent — cross-session filter', () => {
       field: 'text',
       delta: 'child text'
     })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    const out = mapEvent(
+      ev,
+      SESSION_ID,
+      opened('child_msg_1', 'cp1'),
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
     expect(out.kind).toBe('subagent-stream')
     if (out.kind === 'subagent-stream') {
       expect(out.toolUseId).toBe(PARENT_CALL_ID)
@@ -103,6 +124,7 @@ describe('mapEvent — message.part.delta', () => {
   })
 
   it('returns stream with text delta', () => {
+    accumulators = opened('msg_1', 'p1')
     const ev = makeEvent('message.part.delta', {
       sessionID: SESSION_ID,
       messageID: 'msg_1',
@@ -119,19 +141,20 @@ describe('mapEvent — message.part.delta', () => {
   })
 
   it('returns stream with thinking type for reasoning field', () => {
+    accumulators = opened('msg_1', 'p1', 'reasoning')
     const ev = makeEvent('message.part.delta', {
       sessionID: SESSION_ID,
       messageID: 'msg_1',
       partID: 'p1',
-      field: 'reasoning',
+      // The pinned processor emits field:'text' for reasoning deltas; the
+      // already-open native part determines the item kind.
+      field: 'text',
       delta: 'thinking...'
     })
-    // No accumulator entry yet — defaults to 'text' because no snap exists
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
     expect(out.kind).toBe('stream')
     if (out.kind === 'stream') {
-      // Default to text since no accumulator snap with type=reasoning
-      expect(out.streamType).toBe('text')
+      expect(out.streamType).toBe('thinking')
     }
   })
 
@@ -145,6 +168,147 @@ describe('mapEvent — message.part.delta', () => {
     })
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
     expect(out.kind).toBe('ignore')
+  })
+
+  it('addresses the rendered slot after filtered native parts and tool blocks', () => {
+    const acc: MessageAccumulator = {
+      messageId: 'msg_slots',
+      role: 'assistant',
+      timestamp: 123,
+      partOrder: ['step', 'text1', 'tool', 'reasoning2'],
+      parts: new Map([
+        ['step', { type: 'step-start' }],
+        ['text1', { type: 'text', text: 'answer' }],
+        ['tool', { type: 'tool', toolName: 'bash', callID: 'call1', state: { input: {} } }],
+        ['reasoning2', { type: 'reasoning', text: '' }]
+      ])
+    }
+    accumulators.set(acc.messageId, acc)
+    const out = mapEvent(
+      makeEvent('message.part.delta', {
+        sessionID: SESSION_ID,
+        messageID: acc.messageId,
+        partID: 'reasoning2',
+        field: 'reasoning',
+        delta: 'why'
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    expect(out).toMatchObject({
+      kind: 'stream',
+      item: { messageId: 'msg_slots', partId: 'reasoning2', blockIndex: 2, kind: 'thinking' }
+    })
+    expect(buildChatMessage(acc.messageId, acc).timestamp).toBe(123)
+    expect(buildChatMessage(acc.messageId, acc).content[2]).toMatchObject({
+      type: 'thinking',
+      text: 'why'
+    })
+  })
+
+  it('ignores a late delta after the native part has an end timestamp', () => {
+    const acc = opened('msg_done', 'p_done').get('msg_done')!
+    acc.parts.get('p_done')!.time = { start: 10, end: 20 }
+    accumulators.set(acc.messageId, acc)
+    expect(
+      mapEvent(
+        makeEvent('message.part.delta', {
+          sessionID: SESSION_ID,
+          messageID: acc.messageId,
+          partID: 'p_done',
+          field: 'text',
+          delta: 'late'
+        }),
+        SESSION_ID,
+        accumulators,
+        START_TIME,
+        totalCostRef
+      ).kind
+    ).toBe('ignore')
+    expect(acc.parts.get('p_done')!.text).toBe('')
+  })
+
+  it('preserves a fallback seal across a stale nonterminal snapshot', () => {
+    const acc = opened('msg_stopped', 'p_stopped').get('msg_stopped')!
+    acc.parts.set('p_stopped', {
+      type: 'text',
+      text: 'accepted partial',
+      time: { start: 10, end: 20 },
+      sealed: true
+    })
+    accumulators.set(acc.messageId, acc)
+    const snapshot = mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: SESSION_ID,
+        part: {
+          id: 'p_stopped',
+          messageID: 'msg_stopped',
+          type: 'text',
+          text: 'partial stale',
+          time: { start: 10 }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    expect(snapshot.kind).toBe('ignore')
+    expect(acc.parts.get('p_stopped')?.sealed).toBe(true)
+    expect(acc.parts.get('p_stopped')?.text).toBe('accepted partial')
+    expect(acc.parts.get('p_stopped')?.time).toEqual({ start: 10, end: 20 })
+    expect(
+      mapEvent(
+        makeEvent('message.part.delta', {
+          sessionID: SESSION_ID,
+          messageID: 'msg_stopped',
+          partID: 'p_stopped',
+          field: 'text',
+          delta: ' rejected'
+        }),
+        SESSION_ID,
+        accumulators,
+        START_TIME,
+        totalCostRef
+      ).kind
+    ).toBe('ignore')
+  })
+
+  it('drops a child stale nonterminal snapshot without changing its sealed partial', () => {
+    const childSessions = new Map([['ses_child_stopped', 'call_parent']])
+    const acc = opened('msg_child_stopped', 'p_child_stopped').get('msg_child_stopped')!
+    acc.parts.set('p_child_stopped', {
+      type: 'reasoning',
+      text: 'kept thought',
+      time: { start: 30, end: 50 },
+      sealed: true
+    })
+    accumulators.set(acc.messageId, acc)
+    const output = mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: 'ses_child_stopped',
+        part: {
+          id: 'p_child_stopped',
+          messageID: 'msg_child_stopped',
+          type: 'reasoning',
+          text: 'stale thought',
+          time: { start: 30 }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef,
+      childSessions
+    )
+    expect(output.kind).toBe('ignore')
+    expect(acc.parts.get('p_child_stopped')).toMatchObject({
+      text: 'kept thought',
+      time: { start: 30, end: 50 },
+      sealed: true
+    })
   })
 })
 
@@ -1321,7 +1485,14 @@ describe('mapEvent — Phase 8d: child message.part.delta → subagent-stream', 
       field: 'text',
       delta: 'hello from child'
     })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    const out = mapEvent(
+      ev,
+      SESSION_ID,
+      opened('child_msg_1', 'cp1'),
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
     expect(out.kind).toBe('subagent-stream')
     if (out.kind === 'subagent-stream') {
       expect(out.toolUseId).toBe(PARENT_CALL_ID)

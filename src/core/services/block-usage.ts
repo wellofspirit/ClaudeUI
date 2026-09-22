@@ -23,12 +23,26 @@ import type {
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 import { writeJsonAtomic } from './write-json-atomic'
-import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import {
+  canonicalizeWindowEnd,
+  accountForTimestamp,
+  claudeAccountAttribution,
+  isUnresolvedMarker,
+  unattributedClaude,
+  ATTRIBUTION_DEFERRED,
+  type AccountLogEntry,
+  type ClaudeAccountAttribution,
+  type ClaudeAttributionResult
+} from './usage-windows'
+import { APP_ENTRYPOINT } from '../sdk/args'
+import { getSecurestorageEnv } from '../sdk/securestorage-env'
 import {
   groupEntriesIntoBlocks,
   computeProjectionWLS as computeWLS,
   perEngineBreakdown,
   selectRowCostUsd,
+  bucketDisplayCostUsd,
+  floorToHour,
   type AggEntry,
   type ApiWindow as AggApiWindow,
   type ProjectionSample as AggProjectionSample
@@ -37,15 +51,16 @@ import {
   getUsageEventsSince,
   getWindowSamples,
   insertUsageEvents,
-  upsertDailyUsage,
-  seedDailyUsageIfAbsent,
-  getAllDailyUsage,
-  hasDailyUsage,
+  upsertUsageBuckets,
+  getUsageBucketsSince,
+  deleteSeedUsageBuckets,
+  type UsageEventInsert,
   type UsageEventRow,
-  type DailyUsageRow
+  type UsageBucketWrite
 } from './db'
-import { v4 as uuid } from 'uuid'
-import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
+import { claudeTranscriptRow } from './usage-recorder'
+import { recomputeUsageWindows } from './usage-window-ledger'
+import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
 
 // ---------------------------------------------------------------------------
@@ -57,6 +72,8 @@ const USAGE_DIR = path.join(os.homedir(), '.claude', 'ui', 'usage')
 const ACCOUNT_LOG_PATH = path.join(USAGE_DIR, 'account-log.jsonl')
 const SESSION_DURATION_MS = 5 * 60 * 60 * 1000 // 5 hours
 const SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 // only scan entries from last 7 days
+/** How far back the chart reads its hourly buckets — see dailyHistoryFromDb. */
+const CHART_WINDOW_MS = 91 * 24 * 60 * 60 * 1000
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
 const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change events
@@ -90,10 +107,28 @@ const DEFAULT_PRICING: ModelPricing = {
   cacheReadPerMTok: 0.3
 }
 
+/** Model ids already warned about, so a transcript scan reports each unknown
+ *  model once instead of once per assistant line (a multi-megabyte transcript
+ *  calls getPricing thousands of times). Per process, deliberately: the point
+ *  is to surface the model, not to count the rows. */
+const warnedUnpricedModels = new Set<string>()
+
 export function getPricing(model: string): ModelPricing {
   const lower = model.toLowerCase()
   for (const { match, pricing } of MODEL_PRICING) {
     if (lower.includes(match)) return pricing
+  }
+  // Falling back is silent money: DEFAULT_PRICING is a sonnet-tier guess, so an
+  // unrecognised Opus-tier id underprices by ~40%. Say which id missed, so the
+  // fix (add it to shared/pricing.ts, or stop keying cost on an alias) is
+  // actionable rather than a mystery in the totals.
+  if (!warnedUnpricedModels.has(model)) {
+    warnedUnpricedModels.add(model)
+    logger.warn(
+      'BlockUsage',
+      `No pricing entry for model "${model}" — applying the default $3/$15 per Mtok ` +
+        'sonnet-tier estimate. Costs attributed to this model are a guess.'
+    )
   }
   return DEFAULT_PRICING
 }
@@ -166,6 +201,17 @@ export interface ParsedEntry {
   /** Session UUID this entry belongs to, derived from the JSONL file path
    *  (Slice B backfill-attribution fix). Null only if derivation somehow fails. */
   sessionId: string | null
+  /**
+   * `CLAUDE_CODE_ENTRYPOINT` as the transcript line recorded it — `claude-desktop`
+   * for a session this app spawned, `cli` / `sdk-cli` / `sdk-ts` otherwise, and
+   * null for a line that carries no field at all.
+   *
+   * It is what separates a turn the app's active credential dir ran from one the
+   * default `~/.claude` login ran, which under multi-account are different
+   * accounts (S2g part 5) — `setSecurestorageEnv` is a module value overlaid onto
+   * our own spawns, not an environment the user's terminal inherits.
+   */
+  entrypoint: string | null
 }
 
 /**
@@ -246,6 +292,27 @@ function dateStrFromTimestamp(ts: number): string {
 
 // floorToHour was extracted into usage-aggregation.ts (Phase 7 Pass 2).
 
+/** Local midnight of the day containing `ts`. */
+function startOfLocalDay(ts: number): number {
+  const d = new Date(ts)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+/**
+ * Where migration v20 parked a migrated `daily_usage` day: 12:00 UTC of its
+ * date. The rollup needs the instant back to retire a seed whose day it has
+ * just rebuilt from the ledger (see deleteSeedUsageBuckets).
+ */
+function seedBucketHourForDate(date: string): number {
+  const [year, month, day] = date.split('-').map(Number)
+  return Date.UTC(year, month - 1, day, 12)
+}
+
+/** A cost column that holds an actual number — NaN, ±Infinity and null do not. */
+function isFiniteCost(value: number | null): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
 // ---------------------------------------------------------------------------
 // BlockUsageService
 // ---------------------------------------------------------------------------
@@ -303,7 +370,7 @@ export class BlockUsageService {
   /** Account filter for the usage view (email, null = all accounts). */
   private accountFilter: string | null = null
   /** Cached account log + file mtime for invalidation. */
-  private accountLog: AccountLogRecord[] = []
+  private accountLog: AccountLogEntry[] = []
   private accountLogMtime = 0
 
   /** Update the debounce interval for incremental recalculations. */
@@ -319,26 +386,64 @@ export class BlockUsageService {
   /**
    * Parse all Claude JSONL entries within the scan window (reusing the exact
    * parse + calculateCostFromTokens), each tagged with its time-attributed
-   * account (email + uuid from the account log). The Phase 7 reconciler calls
-   * this to import Claude usage_event rows — there is NO second JSONL parser.
+   * account (ADR-011 §4 resolved into ADR-071 §3's row columns). The Phase 7
+   * reconciler calls this to import Claude usage_event rows — there is NO
+   * second JSONL parser.
    */
   async getClaudeEntriesForReconcile(): Promise<
-    Array<ParsedEntry & { accountEmail: string | null; accountUuid: string | null }>
+    Array<ParsedEntry & { account: ClaudeAccountAttribution }>
   > {
-    const cutoff = Date.now() - SCAN_WINDOW_MS
-    const entries = await this.scanJsonlWithCutoff(cutoff)
+    const now = Date.now()
+    const entries = await this.scanJsonlWithCutoff(now - SCAN_WINDOW_MS)
     const accountLog = this.loadAccountLog()
-    // Build email → uuid from the log (latest wins).
-    const emailToUuid = new Map<string, string>()
-    for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
-    return entries.map((e) => {
-      const email = accountForTimestamp(accountLog, e.timestamp)
-      return {
-        ...e,
-        accountEmail: email,
-        accountUuid: email ? (emailToUuid.get(email) ?? null) : null
-      }
-    })
+    const out: Array<ParsedEntry & { account: ClaudeAccountAttribution }> = []
+    // ONE `now` for the whole pass: the deferral bound is a comparison against
+    // the clock, and letting each entry read it separately would let two
+    // entries under one marker straddle the bound (round 3, item 3).
+    for (const e of entries) {
+      const account = this.attributionForEntry(e, accountLog, now)
+      // Deferred: the account that ran this turn is not knowable yet, so the
+      // entry is withheld from the reconciler rather than handed over under the
+      // previous account's key (S2g). It comes back on a later pass — once the
+      // identity resolves, or once `DEFERRAL_MAX_MS` has passed and the entry
+      // is attributed to `unknown` instead. See {@link attributionForEntry}.
+      if (account === ATTRIBUTION_DEFERRED) continue
+      out.push({ ...e, account })
+    }
+    return out
+  }
+
+  /**
+   * Which account a transcript entry's row is keyed to — ADR-011's time-based
+   * attribution, plus the two rules the account log alone cannot express (S2g).
+   *
+   * DEFERRED, not `unknown`, while the log says the active folder moved and its
+   * identity could not be read: no row is ever re-keyed once written (ADR-072's
+   * hub reads the ledger as append-only), so a row that cannot be keyed yet is
+   * not written at all. The entry is offered again on every scan, and the pass
+   * that runs after the identity resolves writes it with its original
+   * timestamp. The dashboard therefore lags by the length of the gap, and is
+   * never wrong about whose spend it is showing. A gap that never resolves
+   * stops deferring after `DEFERRAL_MAX_MS` and its rows are written to the
+   * `unknown` account — a first write, not a re-key.
+   *
+   * `unknown` for a session this app did not spawn, when a credential dir is
+   * applied: such a turn ran on the DEFAULT `~/.claude` login, not on the
+   * active folder, so the log's record — which follows the app's switches —
+   * would name the wrong subscription. In single-account mode the app and a
+   * terminal `claude` share the one login, so nothing changes there. Owner's
+   * ruling: these rows show locally under the unknown account and no attempt is
+   * made to identify the default login.
+   */
+  private attributionForEntry(
+    entry: ParsedEntry,
+    accountLog: AccountLogEntry[],
+    now: number
+  ): ClaudeAttributionResult {
+    if (getSecurestorageEnv() !== null && entry.entrypoint !== APP_ENTRYPOINT) {
+      return unattributedClaude()
+    }
+    return claudeAccountAttribution(accountLog, entry.timestamp, now)
   }
 
   /** Set the account filter (email, null = all) and rebuild the view. */
@@ -411,17 +516,24 @@ export class BlockUsageService {
   // Account log
   // -------------------------------------------------------------------------
 
-  /** Load (and cache) the account log written by UsageFetcher. */
-  private loadAccountLog(): AccountLogRecord[] {
+  /**
+   * Load (and cache) the account log written by UsageFetcher.
+   *
+   * The sort is STABLE (V8), which S2g relies on: a resolved switch appends its
+   * real record at the marker's own `ts`, and the reader's "last entry at or
+   * before `ts` wins" only supersedes the marker while the two keep their file
+   * order.
+   */
+  private loadAccountLog(): AccountLogEntry[] {
     try {
       const mtime = fs.statSync(ACCOUNT_LOG_PATH).mtimeMs
       if (mtime === this.accountLogMtime) return this.accountLog
       const lines = fs.readFileSync(ACCOUNT_LOG_PATH, 'utf-8').split('\n')
-      const log: AccountLogRecord[] = []
+      const log: AccountLogEntry[] = []
       for (const line of lines) {
         if (!line.trim()) continue
         try {
-          const rec = JSON.parse(line) as AccountLogRecord
+          const rec = JSON.parse(line) as AccountLogEntry
           if (typeof rec.ts === 'number' && typeof rec.email === 'string') log.push(rec)
         } catch {
           // Skip malformed lines
@@ -436,9 +548,20 @@ export class BlockUsageService {
     }
   }
 
-  /** Distinct account emails known from the log. */
+  /**
+   * Distinct account emails known from the log — the usage view's filter list.
+   *
+   * S2g's markers are skipped: one names no account (its email is the empty
+   * string), so it would otherwise show up as a nameless entry in the picker.
+   */
   private knownAccounts(): string[] {
-    return [...new Set(this.loadAccountLog().map((r) => r.email))]
+    return [
+      ...new Set(
+        this.loadAccountLog()
+          .filter((entry) => !isUnresolvedMarker(entry))
+          .map((entry) => entry.email)
+      )
+    ]
   }
 
   /**
@@ -587,7 +710,7 @@ export class BlockUsageService {
     const apiUsage = usageFetcher.getLastUsage()
     const activeAccount = usageFetcher.getActiveAccount()
     let currentWindowEnd: number | null = null
-    if (apiUsage && !apiUsage.error && apiUsage.fiveHour.resetsAt) {
+    if (apiUsage && !apiUsage.error && apiUsage.fiveHour?.resetsAt) {
       currentWindowEnd = this.registerWindow(
         apiUsage.fiveHour.resetsAt,
         activeAccount?.email ?? null
@@ -604,7 +727,7 @@ export class BlockUsageService {
     // entries BACK from the DB for grouping. The reconciler keeps usage_event
     // complete for out-of-tool sessions; this inline upsert guarantees block-
     // usage's own JSONL data is present before it reads (no flash of empty).
-    this.upsertClaudeEntriesToDb(entries, accountLog)
+    this.upsertClaudeEntriesToDb(entries, accountLog, now)
     const dbEntries = this.claudeEntriesFromDb(now)
 
     // Apply the account filter for the view (persisted summaries stay unfiltered)
@@ -660,22 +783,31 @@ export class BlockUsageService {
     const snapshot = windowKnown ? this.buildSnapshot(currentBlock) : null
     const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
 
-    // Daily history (Full SQL): roll up usage_event per day into daily_usage,
-    // then read the 30-day chart from daily_usage (durable past the 7-day
-    // usage_event window — older days were seeded once from the legacy JSON
-    // files). The legacy JSON-file daily summaries keep being written for a
-    // release as a fallback — drive that from the JSONL `entries` exactly as
-    // before (allEntries === viewEntries when unfiltered) so persistDailySummary
-    // behavior is unchanged. The chart itself now reads SQL.
+    // Daily history: roll usage_event up into hourly usage_bucket rows, then
+    // read the 30-day chart from those (durable past the 7-day scan window and
+    // past usage_event's own 90-day retention — the buckets are kept forever).
+    // The legacy JSON-file daily summaries keep being written for a release as
+    // a fallback — drive that from the JSONL `entries` exactly as before
+    // (allEntries === viewEntries when unfiltered) so persistDailySummary
+    // behavior is unchanged. The chart itself reads SQL.
     const jsonlViewEntries = this.accountFilter
       ? entries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
       : entries
     const filteredDailyHistory = await this.loadDailyHistory(entries, jsonlViewEntries)
-    this.rollupDailyUsageFromDb(now)
-    // Account-filtered views can't read the all-account daily_usage rollup, so
-    // they use the entry-derived (account-attributable) history; unfiltered
-    // views read the durable SQL rollup.
-    const dailyHistory = this.accountFilter ? filteredDailyHistory : this.dailyHistoryFromDb()
+    this.rollupUsageBucketsFromDb(now)
+    // The window-value ledger (ADR-071 §7), from the SAME `now` the rollup just
+    // used, so an hour and the window containing it can never disagree about
+    // when this pass ran. It is here and nowhere else: "usage moved" is the only
+    // trigger either projection needs, and a second listener on the limits
+    // readings would buy nothing but a race — a reading that lands between two
+    // rebuilds is on disk and the next pass reads it, so the only cost is that a
+    // window's peak can lag a reading by one recalculation.
+    recomputeUsageWindows(now)
+    // Account-filtered views can't read the all-account buckets (the filter is
+    // ADR-011's time-based attribution, not the row's own account key — S3
+    // closes that gap), so they use the entry-derived history; unfiltered views
+    // read the durable rollup.
+    const dailyHistory = this.accountFilter ? filteredDailyHistory : this.dailyHistoryFromDb(now)
 
     // Per-engine breakdown over the scan window from usage_event (ALL engines).
     // This is how opencode usage surfaces — the Claude blocks above stay
@@ -699,9 +831,13 @@ export class BlockUsageService {
 
   /**
    * Per-engine usage breakdown over the scan window, from usage_event (Phase 7
-   * Pass 2). Both engines appear. Failures degrade to undefined (Claude-only
-   * dashboard unaffected). Uses selectRowCostUsd per row — real engine spend when
-   * nonzero, otherwise the best available list-price estimate.
+   * Pass 2). Every engine appears. Failures degrade to undefined (Claude-only
+   * dashboard unaffected). Uses selectRowCostUsd per row — ADR-071 §2's display
+   * figure for the row's billing type.
+   *
+   * DISPATCHED turns are in here (ADR-071 §1): delegated work is spend on the
+   * engine that ran it, and the dashboard's Delegated section shows the same
+   * turns again as a breakdown BY dispatch, not as a separate pool of money.
    */
   private computePerEngine(now: number): BlockUsageData['perEngine'] {
     try {
@@ -715,10 +851,6 @@ export class BlockUsageService {
         outputTokens: r.outputTokens,
         cacheCreationTokens: r.cacheWriteTokens,
         cacheReadTokens: r.cacheReadTokens,
-        // Cost fix: engineCostUsd is authoritative when it's a real nonzero spend.
-        // Null OR 0 (e.g. opencode on a pooled/enterprise plan that bills $0 per
-        // call) falls back to selectRowCostUsd's list-price estimate — see its
-        // doc comment. Genuinely-free models still show $0.
         costUsd: selectRowCostUsd(r),
         messageId: r.messageId,
         engineId: r.engineId
@@ -732,7 +864,7 @@ export class BlockUsageService {
   }
 
   // -------------------------------------------------------------------------
-  // Full SQL: usage_event-sourced blocks + daily_usage-sourced chart (Pass 2)
+  // Full SQL: usage_event-sourced blocks + usage_bucket-sourced chart
   // -------------------------------------------------------------------------
 
   /**
@@ -743,42 +875,38 @@ export class BlockUsageService {
    * table; engine_cost carries the exact calculateCostFromTokens value (so the
    * SQL-sourced block costs == the old JSONL block costs byte-for-byte).
    */
-  private upsertClaudeEntriesToDb(entries: ParsedEntry[], accountLog: AccountLogRecord[]): void {
+  private upsertClaudeEntriesToDb(
+    entries: ParsedEntry[],
+    accountLog: AccountLogEntry[],
+    now: number
+  ): void {
     try {
-      const emailToUuid = new Map<string, string>()
-      for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
-      const rows: UsageEventRow[] = []
+      const rows: UsageEventInsert[] = []
+      let deferred = 0
+      // ONE `now` for the whole pass — the rebuild's own, so an hour of the
+      // ledger cannot be half deferred and half `unknown` (round 3, item 3).
       for (const e of entries) {
         if (!e.messageId) continue
-        const email = accountForTimestamp(accountLog, e.timestamp)
-        const equiv = equivalentCostUsd('anthropic', e.model, {
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens
-        })
-        rows.push({
-          id: uuid(),
-          ts: e.timestamp,
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          accountId: null,
-          accountUuid: email ? (emailToUuid.get(email) ?? null) : null,
-          modelId: e.model,
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens,
-          equivCostUsd: equiv ?? e.costUsd,
-          engineCostUsd: e.costUsd,
-          sessionId: e.sessionId,
-          messageId: e.messageId,
-          source: 'backfill'
-        })
+        const account = this.attributionForEntry(e, accountLog, now)
+        // Deferred entries are SKIPPED, not written as `unknown`: the row would
+        // have to be re-keyed once the identity resolves, and the ledger is
+        // append-only (S2g). The entry is offered again on the next pass; the
+        // dashboard lags by the length of the gap and is never wrong. A gap
+        // that never resolves stops deferring after `DEFERRAL_MAX_MS`, and the
+        // rows are then written to the `unknown` account rather than lost.
+        if (account === ATTRIBUTION_DEFERRED) {
+          deferred++
+          continue
+        }
+        rows.push(claudeTranscriptRow({ entry: e, account, sessionId: e.sessionId }))
       }
       insertUsageEvents(rows)
+      if (deferred > 0) {
+        logger.debug(
+          'BlockUsage',
+          `${deferred} entr${deferred === 1 ? 'y' : 'ies'} deferred — the account that ran them is not resolved yet`
+        )
+      }
     } catch (err) {
       logger.debug('BlockUsage', `upsertClaudeEntriesToDb failed: ${err}`)
     }
@@ -787,10 +915,16 @@ export class BlockUsageService {
   /**
    * Read Claude entries back from usage_event as the ParsedEntry shape the block
    * grouping consumes. costUsd is sourced via selectRowCostUsd — for Claude rows
-   * engine_cost_usd (= the original calculateCostFromTokens value) is always the
-   * real nonzero spend, so blocks stay byte-identical to the old JSONL-sourced
-   * blocks. cacheCreationTokens = cache_write_tokens (combined 5m+1h, matching the
+   * api_cost_usd (= the original calculateCostFromTokens value) is what it
+   * returns, so blocks stay byte-identical to the old JSONL-sourced blocks.
+   * cacheCreationTokens = cache_write_tokens (combined 5m+1h, matching the
    * JSONL ParsedEntry).
+   *
+   * A DISPATCHED Claude turn belongs in these blocks (ADR-071 §1). ADR-011
+   * defines a block as one account's consumption of a 5-hour rate-limit
+   * window, and a dispatch target spends that window exactly as a session
+   * does — it just leaves no transcript, which is the only reason such turns
+   * were invisible here before the ledger held them.
    */
   private claudeEntriesFromDb(now: number): ParsedEntry[] {
     const cutoff = now - SCAN_WINDOW_MS
@@ -804,53 +938,82 @@ export class BlockUsageService {
       cacheReadTokens: r.cacheReadTokens,
       costUsd: selectRowCostUsd(r),
       messageId: r.messageId,
-      sessionId: r.sessionId
+      sessionId: r.sessionId,
+      // A row that is already IN the ledger was attributed when it was written;
+      // these entries only ever feed the block grouping, which never asks.
+      entrypoint: null
     }))
   }
 
   /**
-   * Roll up usage_event (last 7d, ALL engines) into daily_usage per
-   * (date, engine, vendor, model). Day bucketing uses dateStrFromTimestamp
-   * (LOCAL time) to match the historical chart exactly. Recomputed each
-   * rebuild (source 'rollup', REPLACE) — older seeded days are untouched.
-   * peak_api_percent is carried from the daily JSON snapshots when available.
+   * Roll `usage_event` up into hourly `usage_bucket` rows (ADR-071 §1).
+   *
+   * THE WINDOW. Every hour of every LOCAL DAY the ledger still covers in full:
+   * the cutoff is `now - 7d` pushed back to the start of its local day and then
+   * floored to the hour, so no hour is ever recomputed from a part of itself
+   * (usage_event holds 90 days, so the whole day is readable). Hours older than
+   * that are never touched again — they are the durable history, and the events
+   * they were built from will eventually be pruned. This is also what retires
+   * the H13 decay guard the daily rollup needed: a day no longer has to be
+   * skipped for being half in the window, because an HOUR never is.
+   *
+   * EVERY ORIGIN. A dispatched turn and a subagent's turn spend the same
+   * account as the session's own, so all three are in the buckets and the
+   * `origin` column is what lets a surface separate them again.
+   *
+   * COSTS ARE NOT GUESSED. A row's two cost columns are summed as they stand,
+   * and a null is counted, never added as a zero (ADR-030) — that is what the
+   * two unknown counts are for. A third sum, `unbilledApiCostUsd`, carries the
+   * API-equivalent of the rows that reported no charge, which is what lets
+   * `bucketDisplayCostUsd` reproduce the per-row rule exactly over an hour that
+   * mixes the two.
    */
-  private rollupDailyUsageFromDb(now: number): void {
+  private rollupUsageBucketsFromDb(now: number): void {
     try {
-      const cutoff = now - SCAN_WINDOW_MS
+      const cutoff = floorToHour(startOfLocalDay(now - SCAN_WINDOW_MS))
       const rows = getUsageEventsSince(cutoff)
       if (rows.length === 0) return
 
-      // The day that CONTAINS the cutoff is only PARTIALLY covered by the scan
-      // window — its events before `cutoff` are excluded. Rolling it up would
-      // overwrite the durable full-day total (stored by an earlier rollup while
-      // the day was fully inside the window) with a shrinking partial sum as the
-      // window slides forward, so days silently decay to near-zero once they
-      // cross the boundary while the app runs (H13). Skip it; every OTHER day in
-      // the window is fully covered (all its events are ≥ cutoff), and "today"
-      // only grows. This is a pure JS guard — no schema/upsert-semantics change.
-      const partialDate = dateStrFromTimestamp(cutoff)
-
-      // Bucket by (date, engineId, vendorId, modelId).
-      const buckets = new Map<string, DailyUsageRow>()
+      const buckets = new Map<string, UsageBucketWrite>()
+      const coveredDays = new Set<string>()
       for (const r of rows) {
-        const date = dateStrFromTimestamp(r.ts)
-        if (date === partialDate) continue // boundary day sliding out — leave its stored total intact
-        const key = `${date}|${r.engineId}|${r.vendorId}|${r.modelId}`
+        const hourUtc = floorToHour(r.ts)
+        // The local day of the HOUR, not of the event: that is the day the
+        // chart will file this bucket under, so it is the day whose seed has
+        // just been superseded. The two differ only in a timezone whose offset
+        // is not a whole hour, and only for an event in the first minutes of a
+        // local day — which the hour before it already carries.
+        coveredDays.add(dateStrFromTimestamp(hourUtc))
+        const key = [
+          hourUtc,
+          r.accountKey,
+          r.billingType,
+          r.engineId,
+          r.vendorId,
+          r.modelId,
+          r.origin
+        ].join('|')
         let b = buckets.get(key)
         if (!b) {
           b = {
-            date,
+            hourUtc,
+            accountKey: r.accountKey,
+            billingType: r.billingType,
             engineId: r.engineId,
             vendorId: r.vendorId,
             modelId: r.modelId,
+            origin: r.origin,
             inputTokens: 0,
             outputTokens: 0,
             cacheWriteTokens: 0,
+            cacheWrite1hTokens: 0,
             cacheReadTokens: 0,
-            costUsd: 0,
+            apiCostUsd: 0,
+            billedCostUsd: 0,
+            unbilledApiCostUsd: 0,
+            unknownApiCostCount: 0,
+            unknownBilledCostCount: 0,
             requestCount: 0,
-            peakApiPercent: 0,
             source: 'rollup'
           }
           buckets.set(key, b)
@@ -858,24 +1021,30 @@ export class BlockUsageService {
         b.inputTokens += r.inputTokens
         b.outputTokens += r.outputTokens
         b.cacheWriteTokens += r.cacheWriteTokens
+        b.cacheWrite1hTokens += r.cacheWrite1hTokens
         b.cacheReadTokens += r.cacheReadTokens
-        // Cost fix: selectRowCostUsd keeps real nonzero engine spend authoritative
-        // (Claude's engineCostUsd = calculateCostFromTokens, so this continues to
-        // match the historical entry-derived total) and falls back to a list-price
-        // estimate when the engine reports null/0 — see its doc comment.
-        b.costUsd += selectRowCostUsd(r)
+        if (isFiniteCost(r.apiCostUsd)) b.apiCostUsd += r.apiCostUsd
+        else b.unknownApiCostCount += 1
+        if (isFiniteCost(r.billedCostUsd)) {
+          b.billedCostUsd += r.billedCostUsd
+        } else {
+          b.unknownBilledCostCount += 1
+          // The `api` half of the row rule's `billed ?? api`, kept apart from
+          // `apiCostUsd` so an hour's display cost is the sum of its rows'
+          // display costs even when only some of them reported a charge.
+          if (isFiniteCost(r.apiCostUsd)) b.unbilledApiCostUsd += r.apiCostUsd
+        }
         b.requestCount += 1
       }
 
-      // Attach peak API % per date from the daily JSON snapshots (Claude only).
-      const peakByDate = this.peakApiPercentByDate()
-      for (const b of buckets.values()) {
-        if (b.engineId === 'claude') b.peakApiPercent = peakByDate.get(b.date) ?? 0
-      }
+      upsertUsageBuckets([...buckets.values()])
 
-      upsertDailyUsage([...buckets.values()])
+      // The seed buckets for the days just rebuilt are now a second, coarser
+      // copy of the same spend (see deleteSeedUsageBuckets). A seed sits at
+      // midday UTC of its date, which is how its instant is reconstructed here.
+      deleteSeedUsageBuckets([...coveredDays].map(seedBucketHourForDate))
     } catch (err) {
-      logger.debug('BlockUsage', `rollupDailyUsageFromDb failed: ${err}`)
+      logger.debug('BlockUsage', `rollupUsageBucketsFromDb failed: ${err}`)
     }
   }
 
@@ -907,29 +1076,46 @@ export class BlockUsageService {
   }
 
   /**
-   * Build the dashboard's dailyHistory from daily_usage (SQL). Per-model token
-   * maps merge generic→specific families (same as the old loadDailyHistory).
-   * costUsd rounded to cents to match the legacy output.
+   * Build the dashboard's dailyHistory from `usage_bucket` (ADR-071 §1).
+   *
+   * The buckets are hourly and in UTC; the chart is in the viewer's LOCAL days,
+   * because that is the day a person means. `new Date(hourUtc)` is read in the
+   * host's zone, exactly as the old `daily_usage` rollup bucketed events, so a
+   * viewer in the host's timezone sees the same days as before.
+   *
+   * `costUsd` is `bucketDisplayCostUsd` per bucket — the ONE cost rule, applied
+   * to an hour's sums. Per-model token maps merge generic→specific families
+   * (same as the old loadDailyHistory) and the cost is rounded to cents to
+   * match the legacy output. `peakApiPercent` still comes from the daily JSON
+   * snapshots and `blockCount` is still 0 — neither is a bucket fact.
+   *
+   * BOUNDED at 91 days. ADR-071 §8's widest range is 90; the extra day covers
+   * the local-midnight edge (the window starts at a local midnight, and a
+   * bucket's UTC hour can sit up to 14 hours either side of it). Buckets are
+   * hourly and kept forever, so an all-time read would grow without limit
+   * behind a chart that never shows more than the range.
    */
-  private dailyHistoryFromDb(): BlockUsageData['dailyHistory'] {
-    const rows = getAllDailyUsage()
-    // Group rows by date.
+  private dailyHistoryFromDb(now: number): BlockUsageData['dailyHistory'] {
+    const buckets = getUsageBucketsSince(floorToHour(startOfLocalDay(now - CHART_WINDOW_MS)))
+    const peakByDate = this.peakApiPercentByDate()
+    // Group buckets by local date.
     const byDate = new Map<
       string,
-      { tokens: number; cost: number; models: Record<string, number>; peak: number; reqs: number }
+      { tokens: number; cost: number; models: Record<string, number> }
     >()
-    for (const r of rows) {
-      let d = byDate.get(r.date)
+    for (const b of buckets) {
+      const date = dateStrFromTimestamp(b.hourUtc)
+      let d = byDate.get(date)
       if (!d) {
-        d = { tokens: 0, cost: 0, models: {}, peak: 0, reqs: 0 }
-        byDate.set(r.date, d)
+        d = { tokens: 0, cost: 0, models: {} }
+        byDate.set(date, d)
       }
-      const tok = r.inputTokens + r.outputTokens + r.cacheWriteTokens + r.cacheReadTokens
+      // cacheWrite1hTokens is a SUBSET of cacheWriteTokens — adding it would
+      // count those tokens twice.
+      const tok = b.inputTokens + b.outputTokens + b.cacheWriteTokens + b.cacheReadTokens
       d.tokens += tok
-      d.cost += r.costUsd
-      d.reqs += r.requestCount
-      if (r.peakApiPercent > d.peak) d.peak = r.peakApiPercent
-      const normalized = normalizeModelName(r.modelId)
+      d.cost += bucketDisplayCostUsd(b)
+      const normalized = normalizeModelName(b.modelId)
       if (normalized) d.models[normalized] = (d.models[normalized] || 0) + tok
     }
 
@@ -942,101 +1128,11 @@ export class BlockUsageService {
         totalTokens: d.tokens,
         costUsd: Math.round(d.cost * 100) / 100,
         models: mergeDailyModelFamilies(d.models),
-        peakApiPercent: d.peak,
+        peakApiPercent: peakByDate.get(date) ?? 0,
         blockCount: 0
       })
     }
     return history
-  }
-
-  /**
-   * One-time seed of daily_usage from the legacy daily JSON files, so historical
-   * days BEYOND the 7-day usage_event window aren't lost. Idempotent: only
-   * inserts (date, engine, vendor, model) keys not already present, and only
-   * runs when daily_usage is empty (first launch after this migration). Legacy
-   * files have a single all-Claude dailySummary (no per-model vendor split), so
-   * each seeded row is engine 'claude' / vendor 'anthropic' / model = the
-   * summary's model key.
-   */
-  seedDailyUsageFromFilesOnce(): void {
-    try {
-      if (hasDailyUsage()) return // already seeded / has rollups
-      if (!fs.existsSync(USAGE_DIR)) return
-      const seedRows: DailyUsageRow[] = []
-      for (const file of fs.readdirSync(USAGE_DIR)) {
-        if (!file.endsWith('.json')) continue
-        const date = file.replace('.json', '')
-        try {
-          const daily = JSON.parse(
-            fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
-          ) as DailyUsageFile
-          const summary = daily.dailySummary
-          if (!summary) continue
-          let peak = 0
-          for (const snap of daily.snapshots) {
-            if (snap.apiUsagePercent > peak) peak = snap.apiUsagePercent
-          }
-          // The legacy summary has per-model TOTAL tokens (models: Record<model, tokens>)
-          // but no per-model cost/request split — attribute total cost/requests to
-          // the largest model, and 0 to the rest (cost is summed per day anyway).
-          const modelEntries = Object.entries(summary.models)
-          if (modelEntries.length === 0) {
-            // No per-model breakdown — single synthetic row carrying the totals.
-            seedRows.push({
-              date,
-              engineId: 'claude',
-              vendorId: 'anthropic',
-              modelId: 'claude',
-              inputTokens: summary.totalTokens,
-              outputTokens: 0,
-              cacheWriteTokens: 0,
-              cacheReadTokens: 0,
-              costUsd: summary.costUsd,
-              requestCount: summary.requestCount ?? 0,
-              peakApiPercent: peak,
-              source: 'seed'
-            })
-            continue
-          }
-          // Largest model carries cost + requests + peak; others carry tokens only.
-          let largest = modelEntries[0][0]
-          let largestTok = -1
-          for (const [m, tok] of modelEntries) {
-            if (tok > largestTok) {
-              largestTok = tok
-              largest = m
-            }
-          }
-          for (const [model, tok] of modelEntries) {
-            seedRows.push({
-              date,
-              engineId: 'claude',
-              vendorId: 'anthropic',
-              modelId: model,
-              // Store the day's total tokens for this model on input_tokens — the
-              // chart only sums the four token columns, so attributing the whole
-              // model total to input_tokens preserves the per-day + per-model totals.
-              inputTokens: tok,
-              outputTokens: 0,
-              cacheWriteTokens: 0,
-              cacheReadTokens: 0,
-              costUsd: model === largest ? summary.costUsd : 0,
-              requestCount: model === largest ? (summary.requestCount ?? 0) : 0,
-              peakApiPercent: model === largest ? peak : 0,
-              source: 'seed'
-            })
-          }
-        } catch {
-          // skip corrupt
-        }
-      }
-      if (seedRows.length > 0) {
-        seedDailyUsageIfAbsent(seedRows)
-        logger.info('BlockUsage', `Seeded daily_usage from ${seedRows.length} legacy file rows`)
-      }
-    } catch (err) {
-      logger.debug('BlockUsage', `seedDailyUsageFromFilesOnce failed: ${err}`)
-    }
   }
 
   /** Main entry point — full scan on first call, incremental thereafter. */
@@ -1054,10 +1150,6 @@ export class BlockUsageService {
         this.cachedMessageIds = new Set(entries.filter((e) => e.messageId).map((e) => e.messageId))
         this.initialScanDone = true
         logger.debug('BlockUsage', `Initial scan complete: ${entries.length} entries cached`)
-        // Full SQL (Pass 2): one-time seed of daily_usage from the legacy daily
-        // JSON files so historical >7d days aren't lost. Idempotent + gated on
-        // an empty daily_usage table; runs before the first daily read below.
-        this.seedDailyUsageFromFilesOnce()
       }
 
       // On first run, backfill daily summaries for days beyond the 7-day scan
@@ -1169,7 +1261,9 @@ export class BlockUsageService {
     blockEntries: ParsedEntry[] = []
   ): UsageBlock['projectedUsage'] {
     const apiUsage = usageFetcher.getLastUsage()
-    if (!apiUsage || apiUsage.error) return null
+    // No five-hour window reported at all (an API-key account, S3c) is the same
+    // answer as an expired one: there is no percent to project against.
+    if (!apiUsage || apiUsage.error || !apiUsage.fiveHour) return null
 
     // No known window (expired / not yet reported): the percent denominator
     // is meaningless — pause the projection entirely.
@@ -1453,7 +1547,8 @@ export class BlockUsageService {
             cacheReadTokens: cacheRead,
             costUsd,
             messageId,
-            sessionId: deriveSessionIdFromPath(filePath)
+            sessionId: deriveSessionIdFromPath(filePath),
+            entrypoint: typeof data.entrypoint === 'string' ? data.entrypoint : null
           })
         } catch {
           // Skip malformed lines
@@ -1512,8 +1607,8 @@ export class BlockUsageService {
     const apiUsage = usageFetcher.getLastUsage()
     return {
       timestamp: Date.now(),
-      apiUsagePercent: apiUsage?.fiveHour.usedPercent ?? 0,
-      apiResetAt: apiUsage?.fiveHour.resetsAt ?? null,
+      apiUsagePercent: apiUsage?.fiveHour?.usedPercent ?? 0,
+      apiResetAt: apiUsage?.fiveHour?.resetsAt ?? null,
       activeBlockId: currentBlock?.id ?? null,
       blockTokens: currentBlock?.tokens ?? null,
       blockCostUsd: currentBlock?.costUsd ?? 0,

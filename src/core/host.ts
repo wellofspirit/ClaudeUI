@@ -10,11 +10,13 @@
  * implementations in at boot (`src/main`); a non-Electron entrypoint wires its
  * own or leaves them unset, and the fallbacks below are the headless behaviour.
  *
- * This file is deliberately Electron-free (only neutral `shared/types` and the
- * ambient `process`/`Buffer`), so it can live in `src/core` from the moment it
- * exists.
+ * This file is deliberately Electron-free (neutral `shared/types`, node built-ins
+ * and the ambient `process`/`Buffer`), so it can live in `src/core` from the
+ * moment it exists.
  */
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,56 @@ export function hostIsPackaged(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-account credential root (ADR-015)
+// ---------------------------------------------------------------------------
+
+let hostAccountsRoot: string | null = null
+
+/**
+ * Publish the directory holding the per-account credential dirs (or clear it).
+ *
+ * `AccountManager` owns `<root>/<localId>/.credentials.json` on the desktop and
+ * the default below is that layout, so nothing has to wire this in production.
+ * It exists because the ADR-071 §6 limits provider READS those directories for
+ * accounts that are not active, and a test must be able to point that read at a
+ * fixture tree instead of the real `~/.claude`.
+ */
+export function setHostAccountsDir(dir: string | null): void {
+  hostAccountsRoot = dir
+}
+
+/** The per-account credential root — `~/.claude/ui/accounts` unless redirected. */
+export function hostAccountsDir(): string {
+  return hostAccountsRoot ?? join(homedir(), '.claude', 'ui', 'accounts')
+}
+
+// ---------------------------------------------------------------------------
+// The build this process is (ADR-072 §5)
+// ---------------------------------------------------------------------------
+
+let hostVersion: string | null = null
+
+/**
+ * Publish the version string this host reports for itself.
+ *
+ * `app.getVersion()` is Electron-only and `src/main/index.ts` already derives
+ * the display form from it (`Local Build` for a dev run), so this is the same
+ * seam shape `setHostAccountsDir` uses: main publishes what only main can know,
+ * and core reads it. The usage hub is the one consumer — ADR-072 §5 sends the
+ * app version with each push so the hub's machine list can say which build a
+ * device is on, which is how "two machines priced the same model differently"
+ * becomes diagnosable rather than mysterious.
+ */
+export function setHostAppVersion(version: string | null): void {
+  hostVersion = version
+}
+
+/** The host's version, or `unknown` when nothing published one (vitest, a script). */
+export function hostAppVersion(): string {
+  return hostVersion ?? 'unknown'
+}
+
+// ---------------------------------------------------------------------------
 // Native directory picker
 // ---------------------------------------------------------------------------
 
@@ -133,6 +185,38 @@ export function setHostPicker(picker: HostPicker | null): void {
 /** Pick a directory, or `null` when cancelled OR when no host picker is wired. */
 export function pickHostDirectory(): Promise<string | null> {
   return hostPicker ? hostPicker() : Promise.resolve(null)
+}
+
+// ---------------------------------------------------------------------------
+// Vendor-OAuth loopback listener
+// ---------------------------------------------------------------------------
+
+let hostOAuthLoopbackEnabled: boolean | null = null
+
+/**
+ * Publish whether this host can RECEIVE the vendor-OAuth redirect on its own
+ * loopback (or clear it). The desktop wires `true` in `boot-core`: the browser
+ * it opens runs on the same machine, so `http://localhost:1455/auth/callback`
+ * lands on a listener this process owns.
+ */
+export function setHostOAuthLoopback(enabled: boolean | null): void {
+  hostOAuthLoopbackEnabled = enabled
+}
+
+/**
+ * Whether to bind the vendor-OAuth loopback listener. **Defaults to `false`** —
+ * i.e. the headless behaviour, which is the point of this seam.
+ *
+ * The ChatGPT client is registered to the fixed `http://localhost:1455/auth/callback`
+ * and the redirect URI cannot change (ADR-057), so on `claudeui-server` the
+ * redirect lands on the REMOTE browser's own loopback, never on the server box.
+ * A listener there would receive nothing, hold the fixed port for the flow's
+ * five-minute timeout, and make two concurrent sign-ins collide on `EADDRINUSE`.
+ * The code arrives by paste-back (`completeFromPastedInput`) or device code
+ * instead, neither of which needs a port.
+ */
+export function hostOAuthLoopback(): boolean {
+  return hostOAuthLoopbackEnabled ?? false
 }
 
 // ---------------------------------------------------------------------------

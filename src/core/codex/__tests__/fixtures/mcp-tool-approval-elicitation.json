@@ -1,0 +1,15 @@
+{
+  "threadId": "<threadId>",
+  "turnId": "<turnId>",
+  "serverName": "verify-stub",
+  "mode": "form",
+  "_meta": {
+    "codex_approval_kind": "mcp_tool_call",
+    "persist": ["session", "always"],
+    "tool_description": "Answer with a fixed string.",
+    "tool_params": {},
+    "tool_params_display": []
+  },
+  "message": "Allow the verify-stub MCP server to run tool \"ping\"?",
+  "requestedSchema": { "type": "object", "properties": {} }
+}

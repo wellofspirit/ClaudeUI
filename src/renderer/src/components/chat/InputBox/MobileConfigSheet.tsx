@@ -9,6 +9,7 @@
  * entirely unaffected — this component is only mounted when isMobile.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { useSessionStore } from '../../../stores/session-store'
 import {
   EFFORT_LEVELS,
   THINKING_MODES,
@@ -26,14 +27,17 @@ import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
   deriveModelGroups,
+  groupSignIn,
   unsupportedTooltip,
+  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
+import { accountDisplayName } from '../../../utils/sign-in-provider'
 
 const ENGINE_LOCKED_TOOLTIP =
   'Engine cannot change after session initialization or for historical sessions'
 
-type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort'
+type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort' | 'account'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
@@ -42,7 +46,8 @@ const PAGE_HEADING: Record<Page, string> = {
   model: 'Model',
   thinking: 'Thinking mode',
   variant: 'Reasoning variant',
-  effort: 'Effort level'
+  effort: 'Effort level',
+  account: 'ChatGPT account'
 }
 
 export interface MobileConfigSheetProps {
@@ -63,13 +68,23 @@ export interface MobileConfigSheetProps {
   reasoningVariant: string | null
   effort: string
   effortSupported: boolean
+  /** Engine-native effort tiers, in place of the fixed Claude ladder (see EffortPicker). */
+  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   allowedEffortLevels: readonly EffortLevel[]
+  /** The per-session ChatGPT account row and page (ADR-068 §2). Same gate as desktop. */
+  showAccountPicker: boolean
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinnedAccountId: string | null
+  onSelectAccount: (accountId: string | null) => void
+  onAddAccount: () => void
+  onAccountMenuOpen?: () => void
   onSelectMode: (mode: PermissionMode) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectModel: (value: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
   onSelectReasoningVariant: (variant: string | null) => void
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +176,8 @@ function OptionButton({
   dataValue,
   active,
   disabled,
+  /** Still selectable, just visibly de-emphasised (an unauthenticated provider's models). */
+  dimmed,
   title,
   onClick,
   children
@@ -169,6 +186,7 @@ function OptionButton({
   dataValue: string
   active: boolean
   disabled?: boolean
+  dimmed?: boolean
   title?: string
   onClick: () => void
   children: React.ReactNode
@@ -182,6 +200,8 @@ function OptionButton({
       title={title}
       onClick={onClick}
       className={`w-full flex items-center justify-between gap-3 px-4 min-h-[52px] text-left transition-colors border-b border-border/50 last:border-b-0 ${
+        !disabled && dimmed ? 'opacity-60 ' : ''
+      }${
         disabled
           ? 'opacity-40 cursor-not-allowed text-text-muted'
           : active
@@ -245,22 +265,27 @@ function EnginePage({
   selectedEngineId: EngineId
   onSelect: (engineId: EngineId) => void
 }): React.JSX.Element {
+  const codexAvailable = useSessionStore((state) =>
+    state.availableModels.some((model) => model.engineId === 'codex')
+  )
   return (
     <div>
-      {Object.values(ENGINE_META).map((meta) => (
-        <OptionButton
-          key={meta.id}
-          testId="MobileConfigSheet.engineOption"
-          dataValue={meta.id}
-          active={meta.id === selectedEngineId}
-          onClick={() => onSelect(meta.id)}
-        >
-          <span className="flex items-center gap-2 min-w-0">
-            <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
-            <span className="text-[13px] truncate">{meta.label}</span>
-          </span>
-        </OptionButton>
-      ))}
+      {Object.values(ENGINE_META)
+        .filter((meta) => meta.id !== 'codex' || codexAvailable)
+        .map((meta) => (
+          <OptionButton
+            key={meta.id}
+            testId="MobileConfigSheet.engineOption"
+            dataValue={meta.id}
+            active={meta.id === selectedEngineId}
+            onClick={() => onSelect(meta.id)}
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
+              <span className="text-[13px] truncate">{meta.label}</span>
+            </span>
+          </OptionButton>
+        ))}
     </div>
   )
 }
@@ -275,6 +300,9 @@ function ModelPage({
   onSelect: (value: string) => void
 }): React.JSX.Element {
   const [freeOnly, setFreeOnly] = useState(false)
+  // Same source and same rule as the desktop ModelPicker (ADR-068 §3, Slice 6).
+  const providerAuth = useSessionStore((state) => state.providerAuth)
+  const openSignIn = useSessionStore((state) => state.openSignIn)
   const groups = useMemo(() => deriveModelGroups(models), [models])
   const isGrouped = groups.length > 1
   const hasFreeModels = useMemo(() => models.some((m) => m.free), [models])
@@ -304,43 +332,61 @@ function ModelPage({
           </button>
         </div>
       )}
-      {displayedGroups.map((group) => (
-        <div key={group.key}>
-          {isGrouped && (
-            <div className="px-4 pt-3 pb-1 text-[10px] text-text-muted font-medium uppercase tracking-wider">
-              {group.label}
-            </div>
-          )}
-          {group.items.map((m) => (
-            <OptionButton
-              key={m.value}
-              testId="MobileConfigSheet.modelOption"
-              dataValue={m.value}
-              active={m.value === selectedModel.value}
-              onClick={() => onSelect(m.value)}
-            >
-              <div className="min-w-0 flex flex-col gap-0.5">
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-[13px] truncate">{m.shortName}</span>
-                  {m.free && (
-                    <span
-                      data-testid="MobileConfigSheet.modelFreeBadge"
-                      className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
-                    >
-                      Free
+      {displayedGroups.map((group) => {
+        const signIn = groupSignIn(group, providerAuth)
+        return (
+          <div key={group.key}>
+            {isGrouped && (
+              <div className="px-4 pt-3 pb-1 text-[10px] text-text-muted font-medium uppercase tracking-wider">
+                {group.label}
+              </div>
+            )}
+            {signIn && (
+              // The DESKTOP testid on purpose: the two surfaces never co-render
+              // (isMobile picks one), and one selector keeps a drive from having
+              // to know which composer it is looking at.
+              <button
+                type="button"
+                data-testid="ModelPicker.signIn"
+                data-id={signIn.providerId}
+                onClick={() => openSignIn({ providerId: signIn.providerId, mode: 'reauth' })}
+                className="w-full flex items-center px-4 min-h-[44px] text-[13px] text-accent text-left border-b border-border/50 cursor-pointer"
+              >
+                Sign in to {signIn.label}
+              </button>
+            )}
+            {group.items.map((m) => (
+              <OptionButton
+                key={m.value}
+                testId="MobileConfigSheet.modelOption"
+                dataValue={m.value}
+                active={m.value === selectedModel.value}
+                dimmed={!!signIn}
+                onClick={() => onSelect(m.value)}
+              >
+                <div className="min-w-0 flex flex-col gap-0.5">
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[13px] truncate">{m.shortName}</span>
+                    {m.free && (
+                      <span
+                        data-testid="MobileConfigSheet.modelFreeBadge"
+                        className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
+                  {m.description && (
+                    <span className="text-[11px] text-text-muted truncate">
+                      {m.description.split('·')[1]?.trim()}
                     </span>
                   )}
-                </span>
-                {m.description && (
-                  <span className="text-[11px] text-text-muted truncate">
-                    {m.description.split('·')[1]?.trim()}
-                  </span>
-                )}
-              </div>
-            </OptionButton>
-          ))}
-        </div>
-      ))}
+                </div>
+              </OptionButton>
+            ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -408,31 +454,103 @@ function VariantPage({
 function EffortPage({
   effort,
   allowedEffortLevels,
+  nativeOptions,
   onSelect
 }: {
   effort: string
   allowedEffortLevels: readonly EffortLevel[]
-  onSelect: (level: EffortLevel) => void
+  nativeOptions?: ReadonlyArray<{ value: string; description: string }>
+  onSelect: (level: string) => void
 }): React.JSX.Element {
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
+  // Same substitution rule as the desktop EffortPicker: native tiers replace
+  // the Claude ladder, they do not join it.
+  const options: Array<{ value: string; detail?: string; enabled: boolean }> = nativeOptions?.length
+    ? nativeOptions.map((option) => ({
+        value: option.value,
+        detail: option.description,
+        enabled: true
+      }))
+    : EFFORT_LEVELS.map((level) => ({ value: level, enabled: allowed.has(level) }))
   return (
     <div>
-      {EFFORT_LEVELS.map((level) => {
-        const enabled = allowed.has(level)
-        return (
-          <OptionButton
-            key={level}
-            testId="MobileConfigSheet.effortOption"
-            dataValue={level}
-            active={level === effort}
-            disabled={!enabled}
-            title={enabled ? undefined : unsupportedTooltip(level)}
-            onClick={() => enabled && onSelect(level)}
-          >
-            <span className="text-[13px] capitalize truncate">{level}</span>
-          </OptionButton>
-        )
-      })}
+      {options.map(({ value, detail, enabled }) => (
+        <OptionButton
+          key={value}
+          testId="MobileConfigSheet.effortOption"
+          dataValue={value}
+          active={value === effort}
+          disabled={!enabled}
+          title={enabled ? detail : unsupportedTooltip(value as EffortLevel)}
+          onClick={() => enabled && onSelect(value)}
+        >
+          <span className="text-[13px] capitalize truncate">{value}</span>
+        </OptionButton>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * The same list the desktop `AccountPicker` offers (ADR-068 §2): follow-active
+ * first (described by the account it currently resolves to), then every stored
+ * account, then the escape hatch into Settings.
+ */
+function AccountPage({
+  accounts,
+  activeAccountId,
+  pinnedAccountId,
+  onSelect,
+  onAdd
+}: {
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinnedAccountId: string | null
+  onSelect: (accountId: string | null) => void
+  onAdd: () => void
+}): React.JSX.Element {
+  const active = accounts.find((account) => account.id === activeAccountId)
+  return (
+    <div>
+      <OptionButton
+        testId="MobileConfigSheet.accountOption"
+        dataValue="__active__"
+        active={pinnedAccountId === null}
+        onClick={() => onSelect(null)}
+      >
+        <div className="min-w-0 flex flex-col gap-0.5">
+          <span className="text-[13px] truncate">Follow active account</span>
+          {active && (
+            <span className="text-[11px] text-text-muted truncate">
+              {accountDisplayName(active.email)}
+            </span>
+          )}
+        </div>
+      </OptionButton>
+      {accounts.map((account) => (
+        <OptionButton
+          key={account.id}
+          testId="MobileConfigSheet.accountOption"
+          dataValue={account.id}
+          active={pinnedAccountId === account.id}
+          onClick={() => onSelect(account.id)}
+        >
+          <div className="min-w-0 flex flex-col gap-0.5">
+            <span className="text-[13px] truncate">{accountDisplayName(account.email)}</span>
+            {account.planType && (
+              <span className="text-[11px] text-text-muted truncate">{account.planType}</span>
+            )}
+          </div>
+        </OptionButton>
+      ))}
+      <OptionButton
+        testId="MobileConfigSheet.accountAdd"
+        dataValue="__add__"
+        active={false}
+        onClick={onAdd}
+      >
+        <span className="text-[13px] truncate">Add account…</span>
+      </OptionButton>
     </div>
   )
 }
@@ -461,6 +579,14 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effort,
     effortSupported,
     allowedEffortLevels,
+    nativeEffortOptions,
+    showAccountPicker,
+    accounts,
+    activeAccountId,
+    pinnedAccountId,
+    onSelectAccount,
+    onAddAccount,
+    onAccountMenuOpen,
     onSelectMode,
     onSelectEngine,
     onSelectModel,
@@ -479,7 +605,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker ||
     showThinkingPicker ||
     showVariantRow ||
-    effortSupported
+    effortSupported ||
+    showAccountPicker
 
   // Reset to root whenever the sheet closes, and fail safe if an external
   // prop change (e.g. a model/engine switch) makes the current submenu
@@ -496,6 +623,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     else if (page === 'thinking' && !showThinkingPicker) setPage('root')
     else if (page === 'variant' && !showVariantRow) setPage('root')
     else if (page === 'effort' && !effortSupported) setPage('root')
+    else if (page === 'account' && !showAccountPicker) setPage('root')
   }, [
     open,
     page,
@@ -504,7 +632,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker,
     showThinkingPicker,
     showVariantRow,
-    effortSupported
+    effortSupported,
+    showAccountPicker
   ])
 
   // The OPEN sheet is an Escape layer (use-escape-layer): the key closes the
@@ -686,6 +815,25 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                       onClick={() => setPage('effort')}
                     />
                   )}
+                  {showAccountPicker && (
+                    <RootRow
+                      testId="MobileConfigSheet.account"
+                      label="ChatGPT account"
+                      value={
+                        pinnedAccountId === null
+                          ? `Active · ${accountDisplayName(
+                              accounts.find((account) => account.id === activeAccountId)?.email
+                            )}`
+                          : accountDisplayName(
+                              accounts.find((account) => account.id === pinnedAccountId)?.email
+                            )
+                      }
+                      onClick={() => {
+                        onAccountMenuOpen?.()
+                        setPage('account')
+                      }}
+                    />
+                  )}
                 </div>
               )}
 
@@ -748,8 +896,25 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                 <EffortPage
                   effort={effort}
                   allowedEffortLevels={allowedEffortLevels}
+                  nativeOptions={nativeEffortOptions}
                   onSelect={(level) => {
                     onSelectEffort(level)
+                    goRoot()
+                  }}
+                />
+              )}
+
+              {page === 'account' && (
+                <AccountPage
+                  accounts={accounts}
+                  activeAccountId={activeAccountId}
+                  pinnedAccountId={pinnedAccountId}
+                  onSelect={(accountId) => {
+                    onSelectAccount(accountId)
+                    goRoot()
+                  }}
+                  onAdd={() => {
+                    onAddAccount()
                     goRoot()
                   }}
                 />

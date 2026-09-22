@@ -75,4 +75,27 @@ describe('FloatingError', () => {
     const { container } = render(<FloatingError />)
     expect(container.textContent).toContain('model fallback warning')
   })
+
+  /**
+   * ADR-070 §1: this list has NO actionable member any more.
+   *
+   * The refused-ChatGPT Codex banner used to be matched here by its exact string
+   * and given a Sign in button — a third card for a fact the auth event already
+   * carries, and a renderer rule coupled to text an engine authored. Discovery
+   * now raises the auth fact itself, so no error in this list ever offers a
+   * sign-in and the testid does not exist.
+   */
+  it('offers no sign-in action for any error, whatever it says', () => {
+    useSessionStore
+      .getState()
+      .addError(
+        ROUTE,
+        'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
+      )
+    useSessionStore.setState({ signInDialog: null })
+
+    const { queryByTestId } = render(<FloatingError />)
+    expect(queryByTestId('FloatingError.signIn')).toBeNull()
+    expect(useSessionStore.getState().signInDialog).toBeNull()
+  })
 })

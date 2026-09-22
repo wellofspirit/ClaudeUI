@@ -28,6 +28,17 @@ vi.mock('os', async () => {
   }
 })
 
+// The status line prices history under the vendor's billing type. Mocked so a
+// developer's own ~/.pi/agent/auth.json never decides what these assert (the
+// homedir redirect above already points the real reader at the fixture tree).
+const { mockProbe, mockBuildPiAccountRef } = vi.hoisted(() => ({
+  mockProbe: vi.fn(),
+  mockBuildPiAccountRef: vi.fn()
+}))
+vi.mock('../../../core/auth/PiAuthProvider', () => ({
+  piAuthProvider: { probe: mockProbe, buildPiAccountRef: mockBuildPiAccountRef }
+}))
+
 import {
   listPiSessionsGlobal,
   loadPiSessionHistory,
@@ -55,6 +66,8 @@ function writeSessionFile(projectDirName: string, fileName: string, lines: unkno
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'pi-session-list-test-'))
   homedirHolder.current = testHome
+  mockProbe.mockReset().mockResolvedValue({})
+  mockBuildPiAccountRef.mockReset().mockReturnValue(null)
 })
 
 afterEach(() => {
@@ -296,7 +309,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       assistantEntry('e5', 'e4', 'active branch reply')
     ])
 
-    const messages = await loadPiSessionHistory('sess-fork-2')
+    const { messages } = await loadPiSessionHistory('sess-fork-2')
     expect(messages.map((m) => m.id)).toEqual(['e1', 'e2', 'e4', 'e5'])
     const allText = JSON.stringify(messages)
     expect(allText).not.toContain('ABANDONED')
@@ -352,7 +365,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       }
     ])
 
-    const messages = await loadPiSessionHistory('sess-tool')
+    const { messages } = await loadPiSessionHistory('sess-tool')
     // toolResult is folded into the assistant message — NOT its own ChatMessage.
     expect(messages.map((m) => m.id)).toEqual(['u1', 'a1'])
     const assistantMsg = messages.find((m) => m.id === 'a1')!
@@ -418,7 +431,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       }
     ])
 
-    const messages = await loadPiSessionHistory('sess-toolimg')
+    const { messages } = await loadPiSessionHistory('sess-toolimg')
     const result = messages
       .find((m) => m.id === 'a1')!
       .content.find((b) => b.type === 'tool_result')
@@ -452,16 +465,77 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
         tokensBefore: 500
       }
     ])
-    const messages = await loadPiSessionHistory('sess-compact')
+    const { messages } = await loadPiSessionHistory('sess-compact')
     const compactMsg = messages.find((m) => m.id === 'c1')
     expect(compactMsg).toMatchObject({
       role: 'system',
-      content: [{ type: 'compact_separator', text: 'Summary line one.' }]
+      // The WHOLE summary, not its first line (F20) — the amber card reveals
+      // the body only when the user opens it.
+      content: [{ type: 'compact_separator', text: 'Summary line one.\nMore detail.' }]
     })
   })
 
-  it('returns [] for an unknown sessionId', async () => {
-    expect(await loadPiSessionHistory('does-not-exist')).toEqual([])
+  it('returns no messages and no status line for an unknown sessionId', async () => {
+    expect(await loadPiSessionHistory('does-not-exist')).toEqual({
+      messages: [],
+      statusLine: null
+    })
+  })
+
+  // S1d — the line the reopened session paints before pi is ever spawned.
+  it('builds the status line AFTER the auth probe, so the bill is resolved', async () => {
+    // The probe is what turns `unknown` into `subscription`; building the line
+    // before it lands would report a null bill for a covered session.
+    mockProbe.mockImplementation(async () => {
+      mockBuildPiAccountRef.mockReturnValue({ billingType: 'subscription' })
+      return {}
+    })
+    writeSessionFile('--proj-status--', 'x_sess-status.jsonl', [
+      { ...HEADER, id: 'sess-status' },
+      userEntry('e1', null, 'prompt'),
+      {
+        type: 'message',
+        id: 'e2',
+        parentId: 'e1',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'reply' }],
+          api: 'anthropic-messages',
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-6',
+          usage: {
+            input: 1_000_000,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
+          stopReason: 'stop',
+          timestamp: 2
+        }
+      }
+    ])
+
+    const { statusLine } = await loadPiSessionHistory('sess-status')
+    expect(mockProbe).toHaveBeenCalled()
+    expect(statusLine?.billedCostUsd).toBe(0)
+    // $3/MTok input, and pi's own zero is not what a subscription is worth.
+    expect(statusLine?.totalCostUsd).toBeCloseTo(3, 10)
+    expect(statusLine?.totalInputTokens).toBe(1_000_000)
+  })
+
+  it('still returns the transcript and a line when the probe rejects', async () => {
+    mockProbe.mockRejectedValue(new Error('auth.json is unreadable'))
+    writeSessionFile('--proj-probefail--', 'x_sess-probefail.jsonl', [
+      { ...HEADER, id: 'sess-probefail' },
+      userEntry('e1', null, 'prompt'),
+      assistantEntry('e2', 'e1', 'reply')
+    ])
+
+    const { messages, statusLine } = await loadPiSessionHistory('sess-probefail')
+    expect(messages.map((m) => m.id)).toEqual(['e1', 'e2'])
+    expect(statusLine).not.toBeNull()
   })
 
   it('a cyclic parentId chain resolves without hanging — the `seen` guard breaks the loop (best-effort branch)', async () => {
@@ -480,7 +554,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       userEntry('e2', 'e1', 'second')
     ])
 
-    const messages = await loadPiSessionHistory('sess-cycle')
+    const { messages } = await loadPiSessionHistory('sess-cycle')
     expect(messages.length).toBeGreaterThan(0)
     expect(messages.length).toBeLessThanOrEqual(2)
   })
@@ -501,7 +575,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     const goodEntry2 = JSON.stringify(userEntry('e2', 'e1', 'after the corrupt line'))
     writeFileSync(file, [header, goodEntry1, corruptLine, goodEntry2].join('\n') + '\n', 'utf-8')
 
-    const messages = await loadPiSessionHistory('sess-corrupt')
+    const { messages } = await loadPiSessionHistory('sess-corrupt')
     expect(messages.map((m) => m.id)).toEqual(['e1', 'e2'])
   })
 })
@@ -679,5 +753,189 @@ describe('deletePiSession', () => {
 
   it('resolves without throwing when the session does not exist (best-effort)', async () => {
     await expect(deletePiSession('never-existed')).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * F20 — a pi `custom_message` entry is context an extension injected into the
+ * model's prompt. It was dropped entirely, so the transcript disagreed with
+ * what the model actually saw.
+ */
+describe('loadPiSessionHistory — custom_message entries', () => {
+  const userEntry = (id: string, parentId: string | null, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: { role: 'user', content: text, timestamp: 1 }
+  })
+
+  it('renders a displayed custom_message as a context_note titled by its extension', async () => {
+    writeSessionFile('--proj-custom--', 'x_sess-custom.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'cm1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'my-extension',
+        content: 'Injected context the model saw.',
+        display: true
+      }
+    ])
+    const { messages } = await loadPiSessionHistory('sess-custom')
+    expect(messages.find((m) => m.id === 'cm1')).toMatchObject({
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'my-extension',
+          fragments: [{ text: 'Injected context the model saw.' }]
+        }
+      ]
+    })
+  })
+
+  it('joins the text parts of an array-shaped content and skips image parts', async () => {
+    writeSessionFile('--proj-custom2--', 'x_sess-custom2.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom2'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'cm2',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'ext',
+        content: [
+          { type: 'text', text: 'line one' },
+          { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+          { type: 'text', text: 'line two' }
+        ],
+        display: true
+      }
+    ])
+    const { messages } = await loadPiSessionHistory('sess-custom2')
+    expect(messages.find((m) => m.id === 'cm2')).toMatchObject({
+      content: [{ type: 'context_note', fragments: [{ text: 'line one\nline two' }] }]
+    })
+  })
+
+  it('skips a hidden custom_message and one with no text at all', async () => {
+    writeSessionFile('--proj-custom3--', 'x_sess-custom3.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom3',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom3'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'hidden',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'ext',
+        content: 'not for the user',
+        display: false
+      },
+      {
+        type: 'custom_message',
+        id: 'blank',
+        parentId: 'hidden',
+        timestamp: '2024-01-01T00:00:03.000Z',
+        customType: 'ext',
+        content: '',
+        display: true
+      }
+    ])
+    const { messages } = await loadPiSessionHistory('sess-custom3')
+    expect(messages.find((m) => m.id === 'hidden')).toBeUndefined()
+    expect(messages.find((m) => m.id === 'blank')).toBeUndefined()
+  })
+})
+
+/**
+ * R1b — a pi session this app never ran has no model persisted on our side, so
+ * the transcript's own last assistant message is where the reopened session's
+ * model comes from.
+ */
+describe('loadPiSessionHistory — lastModel', () => {
+  const userEntry = (id: string, parentId: string | null, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: { role: 'user', content: text, timestamp: 1 }
+  })
+  const assistantEntry = (id: string, parentId: string, provider: string, model: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:01.000Z',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      api: 'a',
+      provider,
+      model,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: 'stop',
+      timestamp: 2
+    }
+  })
+
+  it('names the model the LAST assistant message answered on', async () => {
+    writeSessionFile('--proj-lm--', 'x_sess-lm.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-lm',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/lm'
+      },
+      userEntry('u1', null, 'hi'),
+      assistantEntry('a1', 'u1', 'openai', 'gpt-old'),
+      userEntry('u2', 'a1', 'again'),
+      assistantEntry('a2', 'u2', 'alicloud', 'qwen-x')
+    ])
+
+    const { lastModel } = await loadPiSessionHistory('sess-lm')
+    expect(lastModel).toEqual({ engineId: 'pi', vendorId: 'alicloud', modelId: 'qwen-x' })
+  })
+
+  it('names none when no assistant message does', async () => {
+    writeSessionFile('--proj-lm2--', 'x_sess-lm2.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-lm2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/lm2'
+      },
+      userEntry('u1', null, 'hi')
+    ])
+
+    const { lastModel } = await loadPiSessionHistory('sess-lm2')
+    expect(lastModel).toBeNull()
   })
 })

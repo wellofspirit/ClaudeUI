@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {
+  CHATGPT_ROUTE_PROVIDER_IDS,
   type SharedProviderDefinition,
   type SharedProviderModel,
   validateSharedProviderId
@@ -26,8 +27,8 @@ export function chatgptProvider(): SharedProviderDefinition {
     models: [],
     managed: true,
     routes: {
-      pi: { enabled: true, providerId: 'openai-codex' },
-      opencode: { enabled: true, providerId: 'openai' }
+      pi: { enabled: true, providerId: CHATGPT_ROUTE_PROVIDER_IDS.pi },
+      opencode: { enabled: true, providerId: CHATGPT_ROUTE_PROVIDER_IDS.opencode }
     }
   }
 }
@@ -117,9 +118,12 @@ function normalizeChatgpt(value: SharedProviderDefinition): SharedProviderDefini
     name: typeof value.name === 'string' && value.name ? value.name : defaults.name,
     models: value.models,
     routes: {
-      pi: { ...value.routes.pi, providerId: 'openai-codex' },
-      opencode: { ...value.routes.opencode, providerId: 'openai' }
-    }
+      pi: { ...value.routes.pi, providerId: CHATGPT_ROUTE_PROVIDER_IDS.pi },
+      opencode: { ...value.routes.opencode, providerId: CHATGPT_ROUTE_PROVIDER_IDS.opencode }
+    },
+    // The account policy is the user's (ADR-068 §2); the native route mapping
+    // above is not. Absent stays absent — the flag exists once it is turned on.
+    ...(value.accounts ? { accounts: { perSession: value.accounts.perSession === true } } : {})
   }
 }
 
@@ -148,6 +152,8 @@ function validateDefinition(provider: SharedProviderDefinition): void {
     throw new Error('Invalid shared provider routes')
   if (provider.protocol !== undefined && !PROTOCOLS.has(provider.protocol))
     throw new Error('Invalid shared provider protocol')
+  if (provider.accounts !== undefined && !isAccountsPolicy(provider.accounts))
+    throw new Error('Invalid shared provider accounts policy')
   if (
     provider.kind === 'custom' &&
     (!PROTOCOLS.has(provider.protocol ?? '') ||
@@ -155,6 +161,15 @@ function validateDefinition(provider: SharedProviderDefinition): void {
       !provider.baseUrl)
   )
     throw new Error('Custom providers require protocol and baseUrl')
+}
+
+/** `{ perSession: boolean }` and nothing else — ADR-068 §2. */
+function isAccountsPolicy(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as { perSession?: unknown }).perSession === 'boolean'
+  )
 }
 
 function isRoute(value: unknown): boolean {

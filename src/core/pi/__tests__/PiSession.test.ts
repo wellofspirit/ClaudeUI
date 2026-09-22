@@ -11,7 +11,7 @@ import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
-import type { ChatMessage, QueuedItem } from '../../../shared/types'
+import type { ChatMessage, QueuedItem, StatusLineData } from '../../../shared/types'
 
 /**
  * A stub window that is also a CLIENT (SyncCore phase 4c).
@@ -69,6 +69,7 @@ const {
   mockHomedir,
   mockPiAuthProbe,
   mockBuildPiAccountRef,
+  mockPiAccountIdentity,
   mockCreateMermaidServer,
   mockMermaidHandler,
   mockCreateMockupServer,
@@ -297,7 +298,7 @@ const {
     mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
     mockDiscoverPiModels: vi.fn().mockResolvedValue([]),
-    mockLoadPiSessionHistory: vi.fn().mockResolvedValue([]),
+    mockLoadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
     mockFindPiSessionFile: vi.fn().mockReturnValue(null),
     mockRecordUsageEvent: vi.fn(),
     mockBridgeHostStart,
@@ -329,6 +330,10 @@ const {
     // ~/.pi/agent/auth.json from a unit test regardless.
     mockPiAuthProbe: vi.fn().mockResolvedValue({}),
     mockBuildPiAccountRef: vi.fn().mockReturnValue(null),
+    mockPiAccountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `pi:${vendorId}:native`,
+      accountLabel: vendorId
+    })),
     mockCreateMermaidServer,
     mockMermaidHandler,
     mockCreateMockupServer,
@@ -390,7 +395,11 @@ vi.mock('../PiBridgeHost', () => ({
   writeSubagentExtension: mockWriteSubagentExtension
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
-  piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
+  piAuthProvider: {
+    probe: mockPiAuthProbe,
+    buildPiAccountRef: mockBuildPiAccountRef,
+    accountIdentity: mockPiAccountIdentity
+  }
 }))
 vi.mock('node:fs', () => ({ existsSync: mockExistsSync }))
 // `tmpdir` is part of the mock because ground-truth.ts's redirect scope reads
@@ -514,7 +523,7 @@ beforeEach(() => {
   MockPiRpcClient.mockClear()
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
-  mockLoadPiSessionHistory.mockReset().mockResolvedValue([])
+  mockLoadPiSessionHistory.mockReset().mockResolvedValue({ messages: [], statusLine: null })
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
   mockRecordUsageEvent.mockClear()
   mockBridgeHostStart
@@ -539,6 +548,7 @@ beforeEach(() => {
   mockHomedir.mockClear().mockReturnValue('/fake/home')
   mockPiAuthProbe.mockReset().mockResolvedValue({})
   mockBuildPiAccountRef.mockReset().mockReturnValue(null)
+  mockPiAccountIdentity.mockClear()
   mockCreateMermaidServer.mockClear()
   mockMermaidHandler
     .mockReset()
@@ -725,7 +735,7 @@ describe('PiSession.run — sends a prompt', () => {
 })
 
 describe('PiSession — event dispatch (real mapper, mocked client)', () => {
-  it('routes message_start/message_update/message_end through to session:stream and session:message', async () => {
+  it('routes message_start/message_update/message_end through item lifecycle channels', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-5', win as never, '/cwd', {})
     await session.run('hi')
@@ -765,9 +775,14 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Hi' }
     })
 
-    expect(sentChannels(win)).toContain('session:stream')
-    const [streamPayload] = sentPayloads(win, 'session:stream')
-    expect(streamPayload).toEqual({ type: 'text', text: 'Hi' })
+    expect(sentChannels(win)).toContain('session:item-open')
+    const [deltaPayload] = sentPayloads(win, 'session:item-delta')
+    expect(deltaPayload).toMatchObject({
+      target: { blockIndex: 0, kind: 'text' },
+      chunk: 'Hi'
+    })
+    expect(session.getMessages().filter((message) => message.role === 'assistant')).toHaveLength(1)
+    expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'text', text: 'Hi' }])
 
     const finalAssistant = {
       role: 'assistant' as const,
@@ -787,12 +802,16 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     }
     handler({ type: 'message_end', message: finalAssistant })
 
-    expect(sentChannels(win)).toContain('session:message')
-    const [msgPayload] = sentPayloads(win, 'session:message').slice(-1) as [{ content: unknown }]
+    expect(sentChannels(win)).toContain('session:item-seal')
+    const [{ message: msgPayload }] = sentPayloads(win, 'session:item-seal').slice(-1) as [
+      { message: { content: unknown } }
+    ]
     expect(msgPayload).toMatchObject({
       role: 'assistant',
       content: [{ type: 'text', text: 'Hi there' }]
     })
+    expect(session.getMessages().filter((message) => message.role === 'assistant')).toHaveLength(1)
+    expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'text', text: 'Hi there' }])
 
     // usage → recordUsageEvent, engineId 'pi'
     expect(mockRecordUsageEvent).toHaveBeenCalledWith(
@@ -827,11 +846,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
-  // SyncCore phase 4b, invariant 5: the elapsed thinking span rides the sealing
-  // message so a snapshot-fed client renders "Thought for Xs". The timing lives on
-  // BaseSession.send (one implementation for all three engines); this pins that
-  // pi's own thinking deltas actually reach it, through the real event mapper.
-  it('stamps thinkingDurationMs on the message that seals a thinking span', async () => {
+  it('stamps durationMs on the addressed thinking block', async () => {
     vi.useFakeTimers()
     try {
       const win = new MockWindow()
@@ -860,21 +875,27 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         type: 'message_update',
         assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'weighing' }
       } as never)
-      expect(sentPayloads(win, 'session:stream').slice(-1)[0]).toEqual({
-        type: 'thinking',
-        text: 'weighing'
-      })
-
       vi.setSystemTime(11_800)
       handler({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex: 0,
+          content: 'weighing'
+        }
+      } as never)
+      handler({
         type: 'message_end',
-        message: message([{ type: 'text', text: 'answer' }])
+        message: message([
+          { type: 'thinking', thinking: 'weighing' },
+          { type: 'text', text: 'answer' }
+        ])
       } as never)
 
-      const [sealed] = sentPayloads(win, 'session:message').slice(-1) as [
-        { thinkingDurationMs?: number }
+      const [sealed] = sentPayloads(win, 'session:item-seal').slice(-1) as [
+        { message: { content: Array<{ type: string; durationMs?: number }> } }
       ]
-      expect(sealed.thinkingDurationMs).toBe(1800)
+      expect(sealed.message.content[0].durationMs).toBe(1800)
     } finally {
       vi.useRealTimers()
     }
@@ -1711,18 +1732,21 @@ describe('PiSession — spawn-time effort (EngineSpawnOptions.effort, M2b)', () 
 
 describe('PiSession resume', () => {
   it('replays stored history (session:message + session:tool-result) and seeds costBaseUsd from get_session_stats', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 },
-      {
-        id: 'm2',
-        role: 'assistant',
-        content: [
-          { type: 'tool_use', toolUseId: 'c1', toolName: 'bash', toolInput: { command: 'ls' } },
-          { type: 'tool_result', toolUseId: 'c1', toolResult: 'file.txt', isError: false }
-        ],
-        timestamp: 2
-      }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', toolUseId: 'c1', toolName: 'bash', toolInput: { command: 'ls' } },
+            { type: 'tool_result', toolUseId: 'c1', toolResult: 'file.txt', isError: false }
+          ],
+          timestamp: 2
+        }
+      ],
+      statusLine: null
+    })
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'get_session_stats') {
         return Promise.resolve({
@@ -1757,9 +1781,12 @@ describe('PiSession resume', () => {
   })
 
   it('a second replayStoredHistory call (run-once gate) never double-sends messages', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
     const win = new MockWindow()
     const session = new PiSession('resume-sess-2', win as never, '/cwd', {
       resumeSessionId: 'resume-sess-2'
@@ -1980,7 +2007,7 @@ describe('PiSession fork (M5c)', () => {
   })
 
   it('a non-fork resume (forkSession false) never sends clone/fork — regression guard', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([])
+    mockLoadPiSessionHistory.mockResolvedValue({ messages: [], statusLine: null })
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-plain.jsonl')
 
     const win = new MockWindow()
@@ -2021,9 +2048,12 @@ describe('PiSession fork (M5c)', () => {
       return defaultRequestImpl(cmd)
     })
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
 
     const win = new MockWindow()
     const session = new PiSession('rid-fork-8', win as never, '/cwd', {
@@ -2543,6 +2573,70 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     })
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
+  })
+
+  /**
+   * F18 — the verdict rides the card of the call it judged. pi's gate is keyed
+   * by `toolCallId`, which is exactly the id the transcript's `tool_use` block
+   * carries (`piToolCallBlock`), so the reducer binds it without a hold: the
+   * assistant `message_end` that mints the block precedes `tool_execution_*`,
+   * and the judge round-trip sits on top of that.
+   */
+  describe('the verdict reaches the card it judged', () => {
+    const reviews = (win: MockWindow) =>
+      sentPayloads(win, 'session:tool-review') as {
+        toolUseId: string
+        review: Record<string, unknown>
+      }[]
+
+    it('an ALLOW emits one auto-mode verdict bound to the tool call id', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-allow', win)
+      await gate('call_r1', 'bash', { command: 'npm test' })
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'call_r1',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'call_r1',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved'
+          }
+        }
+      ])
+      session.dispose()
+    })
+
+    it('a BLOCK names the corpus rule and carries the reason verbatim', async () => {
+      enableAutoMode()
+      judgeScript.replies = [
+        '<block>yes</block><reason>ships uncommitted secrets</reason><category>credential_leakage</category>'
+      ]
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-block', win)
+      await gate('call_r2', 'bash', { command: 'git push origin main' })
+      expect(reviews(win)).toHaveLength(1)
+      expect(reviews(win)[0].review).toMatchObject({
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        rule: expect.any(String),
+        rationale: 'ships uncommitted secrets'
+      })
+      session.dispose()
+    })
+
+    it('a fast-path allow never reaches the judge and emits NO verdict', async () => {
+      enableAutoMode()
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-fast', win)
+      expect(await gate('call_r3', 'read', { path: '/cwd/a.txt' })).toEqual({ behavior: 'allow' })
+      expect(judgeInstances).toHaveLength(0)
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
   })
 
   it("a BLOCK records `automode-blocked`, which reaches the judge as the retry's outcome annotation", async () => {
@@ -4557,7 +4651,16 @@ describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
       engineCostUsd: 0.0123,
       sessionId: 'pi-sess-1',
       messageId: 'subagent-outer-call-usage-1-echoer-0',
-      source: 'live'
+      source: 'live',
+      // ADR-071 §1: a subagent row names the account it ran under and the
+      // session that spawned it.
+      accountKey: 'pi:anthropic:native',
+      accountLabel: 'anthropic',
+      billingType: 'apiKey',
+      origin: 'child',
+      parentRoutingId: 'rid-subagent-usage-1',
+      // pi reports a list price, not a charge (S1b).
+      engineCostIsEquivalent: true
     })
   })
 
@@ -4929,5 +5032,221 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     expect(context).not.toContain('turn-4')
     expect(context).toContain('turn-5')
     expect(context).toContain('turn-24')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-071 §2 — pi prices every turn from its OWN catalog's list rates, whatever
+// the credential, so its figure is the list-price equivalent under every
+// billing type and the headline says which is which. Our table only stands in
+// where pi reported nothing.
+//
+// 'anthropic/claude-fable-5-1' is in the built-in pricing table at $10/MTok
+// input, so 1M input tokens is a $10 table figure — deliberately unlike the
+// $0.42 pi reports below, so which source won is never ambiguous.
+// ---------------------------------------------------------------------------
+
+describe('PiSession — the headline follows the cost rule (ADR-071 §2)', () => {
+  function lastStatusLine(win: MockWindow): StatusLineData {
+    const lines = sentPayloads(win, 'session:status-line')
+    expect(lines.length).toBeGreaterThan(0)
+    return lines[lines.length - 1] as StatusLineData
+  }
+
+  async function runPricedTurn(
+    routingId: string,
+    model: string,
+    provider: string,
+    modelId: string,
+    piCostUsd: number,
+    inputTokens: number
+  ): Promise<MockWindow> {
+    const win = new MockWindow()
+    const session = new PiSession(routingId, win as never, '/cwd', { model })
+    await session.run('hi')
+    const handler = lastEventHandler()
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        api: 'a',
+        provider,
+        model: modelId,
+        usage: {
+          input: inputTokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: piCostUsd, output: 0, cacheRead: 0, cacheWrite: 0, total: piCostUsd }
+        },
+        stopReason: 'stop',
+        timestamp: 2
+      }
+    } as never)
+    return win
+  }
+
+  it("a subscription turn shows PI's figure, and nothing billed", async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const win = await runPricedTurn(
+      'rid-cost-sub',
+      'anthropic/claude-fable-5-1',
+      'anthropic',
+      'claude-fable-5-1',
+      0.42,
+      1_000_000
+    )
+
+    const statusLine = lastStatusLine(win)
+    // pi's catalog beats ours even where ours has an entry ($10 for these
+    // tokens): pi knows this turn's real rates, long-context tiers included.
+    expect(statusLine.totalCostUsd).toBeCloseTo(0.42, 6)
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+  })
+
+  it('a subscription turn on a model nobody prices still shows what pi reported', async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'mystery',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const win = await runPricedTurn(
+      'rid-cost-sub-unpriced',
+      'mystery/no-such-model-anywhere',
+      'mystery',
+      'no-such-model-anywhere',
+      0.42,
+      1_000
+    )
+
+    const statusLine = lastStatusLine(win)
+    expect(statusLine.totalCostUsd).toBeCloseTo(0.42, 6)
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+  })
+
+  it('a turn pi reports as 0 is priced from our table when we know the rates', async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const win = await runPricedTurn(
+      'rid-cost-zero-priced',
+      'anthropic/claude-fable-5-1',
+      'anthropic',
+      'claude-fable-5-1',
+      0,
+      1_000_000
+    )
+
+    const statusLine = lastStatusLine(win)
+    expect(statusLine.totalCostUsd).toBeCloseTo(10, 6)
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+  })
+
+  it('a turn neither pi nor our table prices is a known zero, not an unknown', async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'mystery',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const win = await runPricedTurn(
+      'rid-cost-zero-unpriced',
+      'mystery/no-such-model-anywhere',
+      'mystery',
+      'no-such-model-anywhere',
+      0,
+      1_000
+    )
+
+    const statusLine = lastStatusLine(win)
+    // pi reported a real 0 — that is a figure, not an absence.
+    expect(statusLine.totalCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+  })
+
+  it("an API-key turn shows pi's figure as what was billed", async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'apiKey',
+      authState: 'authenticated'
+    })
+    const win = await runPricedTurn(
+      'rid-cost-api',
+      'anthropic/claude-fable-5-1',
+      'anthropic',
+      'claude-fable-5-1',
+      0.42,
+      1_000_000
+    )
+
+    const statusLine = lastStatusLine(win)
+    expect(statusLine.totalCostUsd).toBeCloseTo(0.42, 6)
+    expect(statusLine.billedCostUsd).toBeCloseTo(0.42, 6)
+  })
+
+  it('a history seeded before the auth probe lands re-prices once it does', async () => {
+    // The probe is asynchronous: a resumed session reads its whole history
+    // before any account ref exists. Freezing the billing type there would
+    // leave this session reporting `Billed unknown` for its lifetime.
+    mockBuildPiAccountRef.mockReturnValue(null)
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'get_session_stats') {
+        return Promise.resolve({
+          type: 'response',
+          command: 'get_session_stats',
+          success: true,
+          data: {
+            cost: 1.25,
+            tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }
+          }
+        })
+      }
+      return defaultRequestImpl(cmd)
+    })
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-cost-late-probe', win as never, '/cwd', {
+      resumeSessionId: 'rid-cost-late-probe'
+    })
+    await session.run(null)
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    // Under `unknown` the engine figure IS the bill, so the pre-probe line
+    // charges it — the figure this test is about is what happens next.
+    expect(lastStatusLine(win).billedCostUsd).toBeCloseTo(1.25, 6)
+
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    lastEventHandler()({ type: 'agent_settled' } as never)
+
+    const after = lastStatusLine(win)
+    expect(after.billedCostUsd).toBe(0)
+    expect(after.totalCostUsd).toBeCloseTo(1.25, 6)
+    expect(after.unknownCostMessages).toBeUndefined()
   })
 })

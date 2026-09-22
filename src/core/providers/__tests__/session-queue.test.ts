@@ -43,6 +43,18 @@ describe('SessionQueue', () => {
     expect(queue.consumeByText('again')).toBeUndefined()
   })
 
+  it('consumeById takes THAT item, so duplicate texts never collide', () => {
+    const { queue } = makeQueue()
+    const first = queue.add('again')
+    const second = queue.add('again')
+
+    expect(queue.consumeById(second.itemId)?.itemId).toBe(second.itemId)
+    expect(queue.pending().map((i) => i.itemId)).toEqual([first.itemId])
+    // Already terminal, and an unknown id — both are no-ops, not throws.
+    expect(queue.consumeById(second.itemId)).toBeUndefined()
+    expect(queue.consumeById('never-queued')).toBeUndefined()
+  })
+
   it('emit broadcasts the FULL list once, then prunes terminal items', () => {
     const { queue, broadcasts } = makeQueue()
     queue.add('consumed one')

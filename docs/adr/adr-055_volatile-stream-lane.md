@@ -39,6 +39,8 @@ ruling — recorded so nobody re-derives it.
 - **`text-stream`** (`session:stream`, `session:subagent-stream`): offset-carrying
   frames over a canonical accumulation, folded by ONE shared interpretation
   (`applyStreamFrame`) on core and every replica.
+  _Retired 2026-09-17 (`7837f7e7`) — the flavor, both channels and `applyStreamFrame`
+  are deleted; the `item-stream` flavor of the amendment below replaced them._
 - **`pass-through`** (the three tails): the emission verbatim, `{channel, args}`,
   dispatched client-side into the same per-channel listeners the event lane
   used — zero listener rewiring. **Tails are honest-lossy** (owner-ratified with
@@ -131,3 +133,66 @@ in does not silently delete their token deltas.
   unhandled-error throw on a reset voice socket (a live desktop bug).
 - Real-device voice verification (phone mic, permission flow) remains
   owner-verifiable only.
+
+## Amendment 2026-09-17: per-item streams
+
+Daniel approved the [per-item streaming design](../per-item-streaming-design.md).
+It extends decisions 2 and 3's accumulating stream family and recovery with `item-stream` frames;
+existing session streams and pass-through tails retain their contracts.
+
+Reliable `session:item-open` establishes a transcript block and generation;
+volatile `session:item-delta` appends only the new text; reliable
+`session:item-seal` commits resolved final content and retires the named field
+atomically (a targetless seal explicitly retires all fields of that message/owner). An unwatched client therefore receives the complete final item.
+The snapshot carries the active map. Session watch replays an explicit atomic
+replacement, including empty, gated by reliable-event watermark and generation.
+The shared pure fold runs in core and every replica. Desktop/web ship together.
+
+The first producers are Codex root and direct-child text, reasoning and plans.
+Other engines migrate separately. Dropped item traffic schedules one coalesced
+retry per connection using fresh canonical state after the existing buffered-amount
+high-water gate allows a send; no next token is required. A replay is not truncated
+at that watermark (the gate measures queued bytes, not individual frame size).
+Plugin observer compatibility is synthesized in process, outside the event ring.
+See the design's as-built and verification sections for implementation and limits.
+
+### Review decisions, 2026-09-17
+
+Daniel confirmed the following refinements before F21's commit:
+
+1. **A watermark reads the event cursor; it never advances it.** `atSeq` states
+   the reliable events required before applying a frame. Only applied reliable
+   events advance `lastSeq`. Early item frames are discarded while synchronization
+   and rewatch restore a valid basis. New transports must preserve ordering or
+   implement the same synchronization/replay recovery. This extends the original
+   lane's independence without letting volatile traffic acknowledge unseen events.
+2. **Recovery must work without another token or a final seal.** An item can pause
+   while the model waits for a tool, leaving a dropped preview stale for minutes.
+   The server keeps only watched session ids needing a fresh replacement, never
+   missed chunks. Retain the coalesced retry, with a capped backoff under sustained
+   congestion and cleanup on unwatch/disconnect, rather than an indefinite 100 ms
+   poll. The existing high-water gate applies to each attempt.
+3. **Message commit semantics are shared.** Item seals and ordinary message events
+   use the same content merge, duration stamping and appropriate derived-field
+   updates. Legacy session-buffer clearing stays separate, and child commits stay
+   in the child's transcript. Duplicating only part of the commit logic is an
+   implementation defect, not a second accepted message contract. A targeted
+   seal commits its addressed field while preserving other committed blocks; a
+   targetless seal commits the full message and retires all its active fields.
+4. **Coexistence ends after explicit migrations.** Follow Codex with separate
+   Claude, opencode and pi native identity/lifecycle investigations and migrations.
+   Audit plugin and dispatch consumers for each. Then remove the old text-stream
+   frame family, session accumulation fields and their client plumbing once the
+   last producer/consumer has migrated, retaining independent pass-through tails.
+   These remain unfinished steps of roadmap item 2 before moving to metering.
+
+   **Closed 2026-09-17.** Claude, opencode, pi and every cross-engine dispatch
+   target migrated in `83106588`; the legacy lane was retired in `7837f7e7` —
+   `StreamFrame`, the `text-stream` flavor, `session:stream`,
+   `session:subagent-stream`, the four `streaming*` canonical fields and their
+   client plumbing are deleted, and `legacy-producer-guard.unit.test.ts` pins that
+   no producer emits the retired channels. Plugin compatibility is synthesized in
+   process. Pass-through tails are untouched. Roadmap item 2 is closed; metering
+   attribution follows. Per-engine as-built detail:
+   [per-item streaming](../per-item-streaming-design.md) §"As built, remaining
+   engines and retirement".

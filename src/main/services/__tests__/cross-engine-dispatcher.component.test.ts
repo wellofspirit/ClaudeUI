@@ -9,7 +9,12 @@
  * The singleton's default deps pull in OpencodeServerManager (which imports
  * electron at runtime), so electron is shimmed.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+import {
+  DEFAULT_MAX_CONCURRENT_DISPATCHES,
+  resolveDispatchMaxConcurrent
+} from '../../../shared/dispatch-concurrency'
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 vi.mock('../../../core/services/logger', () => ({
@@ -26,15 +31,31 @@ vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiBinary: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
+// Same reasoning as pi-locate above: a plain function export, mocked so
+// crossEngineDispatchAvailable's codex disjunct is controllable per-test.
+// Every codex-target TEST injects a fake spawnCodexTarget (bypassing
+// defaultSpawnCodexTarget, which is the only thing that would ever locate a
+// real binary), so this mock cannot affect them either way.
+vi.mock('../../../core/codex/codex-locate', () => ({
+  codexBinaryAvailable: vi.fn(() => false),
+  locateCodexBinary: vi.fn(() => null),
+  locateCodexCodeModeHost: vi.fn(() => null)
+}))
 
 import {
   CrossEngineDispatcher,
+  DISPATCH_WATCHDOG_INTERVAL_MS,
   XENG_REQUEST_PREFIX,
   crossEngineDispatchAvailable,
   buildPiTargetChildEnv
 } from '../../../core/services/cross-engine-dispatcher'
 import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
+import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
+import { piAuthProvider } from '../../../core/auth/PiAuthProvider'
+import { usageFetcher } from '../../../core/services/usage-fetcher'
+import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
 import { piBinaryAvailable } from '../../../core/pi/pi-locate'
+import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
@@ -43,14 +64,18 @@ import type {
   DispatchTargetClient,
   PiTargetSpawnOpts,
   PiTargetPrimitives,
+  CodexTargetAttachOpts,
   SpawnClaudeQueryFn,
-  SpawnPiTargetFn
+  SpawnPiTargetFn,
+  AttachCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
+import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { EngineId } from '../../../shared/types'
+import type { BillingType, EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
+import { SyncCore } from '../../../core/sync/sync-core'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -227,12 +252,15 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     serverManager,
     makeClient: () => client,
     loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
-    dispatchTimeoutMs: 2000,
     heartbeatMs: 50,
     // ADR-033 M4c: keep pi's stop/timeout/abort grace-period wait (see
     // PiTargetEntry.settled's "RACE NOTE") fast in tests by default — tests
     // that specifically exercise the grace period's own timing override this.
     piAbortSettleGraceMs: 20,
+    // Hermetic: the production default resolver reads the USER's settings.json
+    // (`AppSettings.dispatchMaxConcurrent`), which no test may depend on. Every
+    // concurrency test overrides this with the cap it is actually about.
+    resolveMaxConcurrent: () => DEFAULT_MAX_CONCURRENT_DISPATCHES,
     ...overrides
   }
   return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
@@ -291,8 +319,38 @@ const advance = async (ms: number): Promise<void> => {
   await vi.advanceTimersByTimeAsync(ms)
 }
 
+/**
+ * The fake-timer analogue of `tick()`: drain the multi-`await` promise chains a
+ * dispatch target's creation goes through (spawn → get_state → set_model for
+ * pi; config/read → model/list → thread/start for Codex). One `advance(0)`
+ * flushes a single microtask round, which is not enough to get from `dispatch()`
+ * to the point where the turn — and its watchdog — is actually running.
+ */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0)
+}
+
+/**
+ * The identity a target's account resolves to unless a test says otherwise —
+ * the `<engine>:<vendor>:native` shape ADR-071 §3 gives credentials we cannot
+ * name.
+ *
+ * These two spies are NOT a convenience. Both real methods read the engine's
+ * own `auth.json` off the host's data dir, so without them this suite would
+ * consult the developer's sign-in state (the gotcha that was found in three
+ * other suites when `accountIdentity` first shipped). No test here may touch a
+ * real credential file.
+ */
+const NATIVE_OPENCODE_IDENTITY = { accountKey: 'opencode:openai:native', accountLabel: 'openai' }
+const NATIVE_PI_IDENTITY = {
+  accountKey: 'pi:openai-codex:native',
+  accountLabel: 'openai-codex'
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.spyOn(opencodeAuthProvider, 'accountIdentity').mockReturnValue(NATIVE_OPENCODE_IDENTITY)
+  vi.spyOn(piAuthProvider, 'accountIdentity').mockReturnValue(NATIVE_PI_IDENTITY)
 })
 
 // ---------------------------------------------------------------------------
@@ -313,8 +371,11 @@ describe('CrossEngineDispatcher — guards', () => {
 
   it('rejects dispatch into a genuinely unsupported engine (defensive guard — EngineId is closed, but this crosses an IPC boundary at runtime)', async () => {
     const { dispatcher } = makeHarness()
+    // A string no EngineId has ever been. 'codex' USED to stand in here; slice
+    // H made it a real target, so the defensive guard needs a genuinely
+    // unknown engine to be defensive about.
     const result = await dispatcher.dispatch(
-      { engine: 'codex' as unknown as EngineId, prompt: 'x' },
+      { engine: 'gemini' as unknown as EngineId, prompt: 'x' },
       makeCtx({ fromEngine: 'opencode' })
     )
     expect(result.isError).toBe(true)
@@ -322,7 +383,7 @@ describe('CrossEngineDispatcher — guards', () => {
   })
 
   it('enforces the global concurrency cap', async () => {
-    const { dispatcher, client, stream } = makeHarness({ maxConcurrent: 2 })
+    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => 2 })
     // Hold both turns open so the dispatches stay in flight.
     holdTurn(client)
 
@@ -343,8 +404,72 @@ describe('CrossEngineDispatcher — guards', () => {
     expect(dispatcher.inFlightCount).toBe(0)
   })
 
+  // The cap became a user setting (ADR-033, 2026-09-18): "the slot can be a
+  // configuration as well … in certain cases we will need more dispatches". The
+  // three tests below pin the three things that ruling asks of the gate.
+
+  it('refuses with the EFFECTIVE cap and where to raise it', async () => {
+    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
+    holdTurn(client)
+
+    void dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    await tick()
+
+    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
+    expect(refused.isError).toBe(true)
+    // The number the caller actually hit, not the built-in default — a model
+    // told "max 3" by an app configured to 1 would retry into the same wall.
+    expect(refused.text).toContain('max 1')
+    expect(refused.text).toContain('Settings')
+    expect(refused.text).toContain('0 means no limit')
+  })
+
+  it('admits past the old built-in cap when the resolver says "no limit"', async () => {
+    // `0` in Settings resolves to Infinity — five at once, where the constant
+    // this replaced allowed three.
+    const { dispatcher, client, stream } = makeHarness({
+      resolveMaxConcurrent: () => resolveDispatchMaxConcurrent(0)
+    })
+    holdTurn(client)
+
+    const runs = [1, 2, 3, 4, 5].map((n) =>
+      dispatcher.dispatch({ engine: 'opencode', prompt: `p${n}` }, makeCtx())
+    )
+    await tick()
+    expect(dispatcher.inFlightCount).toBe(5)
+
+    for (let n = 1; n <= 5; n++) completeTurn(stream, `oc-sess-${n}`)
+    const results = await Promise.all(runs)
+    expect(results.every((r) => r.isError === undefined)).toBe(true)
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it('reads the cap per call, so a Settings change binds the very next dispatch', async () => {
+    let cap = 1
+    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => cap })
+    holdTurn(client)
+
+    const d1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    await tick()
+    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
+    expect(refused.isError).toBe(true)
+
+    // The user raises it while the first dispatch is still running. No restart,
+    // no new dispatcher — the constructor never read this value.
+    cap = 2
+    const d2 = dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
+    await tick()
+    expect(dispatcher.inFlightCount).toBe(2)
+
+    completeTurn(stream, 'oc-sess-1')
+    completeTurn(stream, 'oc-sess-2')
+    const [r1, r2] = await Promise.all([d1, d2])
+    expect(r1.isError).toBeUndefined()
+    expect(r2.isError).toBeUndefined()
+  })
+
   it('same-tick dispatches cannot race past the cap (slot reserved before first await)', async () => {
-    const { dispatcher, client } = makeHarness({ maxConcurrent: 1 })
+    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
     // Gate target creation so the first dispatch is parked INSIDE resolution
     // when the second one starts — the exact window the old check-then-await
     // ordering left open.
@@ -620,8 +745,8 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     // costUsd/tokens as null and never folded the spend — a target whose turns
     // keep erroring spent real money that escaped the cap AND the dispatching
     // session's breakdown. Must capture it (parity with Claude failed-subtype).
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: '',
@@ -635,12 +760,13 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        toolUseId: 'toolu_err_cost',
-        targetEngine: 'opencode',
-        totalTokens: 300, // 200 + 80 + 20
-        costUsd: 0.05
+        messageId: expect.stringContaining('toolu_err_cost'),
+        engineId: 'opencode',
+        // Disjoint, reasoning folded into output: 200 in, 80 + 20 out.
+        tokens: { input: 200, output: 100, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: 0.05
       })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.05)
@@ -761,8 +887,8 @@ describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
 
 describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE)', () => {
   it('completes on session.idle, taking text + usage from the LAST assistant message in stored history', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     // A multi-turn target's history holds every earlier turn too — only the
     // trailing assistant message belongs to the turn that just ended.
@@ -794,15 +920,18 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
       totalTokens: 11,
       toolUses: 0
     })
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 11, costUsd: 0.02 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 7, output: 4 }),
+        engineCostUsd: 0.02
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.02)
   })
 
   it('a turn that idles with NO assistant message returns the empty-text fallback with zero usage', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     client.listMessages.mockResolvedValueOnce([])
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
@@ -812,8 +941,11 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
 
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('(the dispatched agent returned no text)')
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 0, costUsd: 0 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: null
+      })
     )
   })
 
@@ -832,8 +964,8 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
   })
 
   it('session.error settles the turn as isError with the vendor message + a "failed" notification', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     // A turn that dies mid-flight can still have burned tokens — recovered
     // best-effort from stored history and folded into the cap/breakdown.
@@ -855,8 +987,11 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
     expect(result.sessionId).toBe('oc-sess-1')
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ status: 'failed' })
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 50, costUsd: 0.004 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 40, output: 10 }),
+        engineCostUsd: 0.004
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.004)
   })
@@ -932,9 +1067,9 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
   it('the INACTIVITY watchdog aborts a silent turn (reason-specific text, "failed" notification)', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const { dispatcher, client } = makeHarness({
-        recordDispatchedUsage,
+        recordUsageEvent,
         loadEngineConfig: vi.fn(() => ({
           dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
         })),
@@ -953,8 +1088,13 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
       expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
       const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
       expect(notif?.[1]).toMatchObject({ status: 'failed' })
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
-        expect.objectContaining({ totalTokens: null, costUsd: null })
+      // A turn that never returned reports no split and no cost — zeros here
+      // are "nothing was reported", which is why the row's costs are null.
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
+        })
       )
     } finally {
       vi.useRealTimers()
@@ -1170,6 +1310,45 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
       command: 'rm -rf node_modules',
       patterns: ['rm -rf node_modules']
     })
+  })
+
+  it("carries the target tool call's id so the card can bind to the nested tool block", async () => {
+    const { stream, ctx, sessionId } = await makeTarget()
+
+    stream.push('permission.asked', {
+      id: 'perm-tool',
+      sessionID: sessionId,
+      permission: 'bash',
+      // The wire shape the own-session mapper already reads (event-mapper.ts):
+      // the calling tool part's id. Without it the forwarded card can only
+      // float — it never binds to the tool block inside the dispatch card.
+      tool: { messageID: 'msg-1', callID: 'call-42' },
+      metadata: { command: 'ls' }
+    })
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    const approval = call![1] as { requestId: string; toolUseId?: string }
+    expect(approval.toolUseId).toBe('call-42')
+    // Both surfaces still key off the SAME requestId — the inline binding is
+    // additive, the floating card stays.
+    expect(approval.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-tool`)
+  })
+
+  it('omits toolUseId when the wire event carries no callID (never invents one)', async () => {
+    const { stream, ctx, sessionId } = await makeTarget()
+
+    stream.push('permission.asked', {
+      id: 'perm-bare',
+      sessionID: sessionId,
+      permission: 'bash'
+    })
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    const approval = call![1] as { toolUseId?: string }
+    expect(approval.toolUseId).toBeUndefined()
+    expect('toolUseId' in approval).toBe(false)
   })
 
   it('permission.asked for a foreign session is ignored (unfiltered stream)', async () => {
@@ -1388,7 +1567,6 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
       },
       makeClient: () => client,
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
-      dispatchTimeoutMs: 2000,
       heartbeatMs: 50,
       piAbortSettleGraceMs: 20,
       sseReconnectDelayMs: 5
@@ -1766,6 +1944,15 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     )
     await tick()
     target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+
+    target.push({
+      type: 'stream_event',
+      event: { type: 'message_start', message: { id: 'm1', content: [] } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }
+    } as unknown as SDKMessage)
     target.push({ type: 'assistant' } as SDKMessage)
     target.push(resultMsg({ result: 'the review text', session_id: 'claude-sess-1' }))
 
@@ -1970,30 +2157,39 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('timeout / abort', () => {
-    it('per-dispatch timeout aborts the target and removes the entry (no continuation possible)', async () => {
-      const target = makeFakeClaudeTarget()
-      const { dispatcher } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-        dispatchTimeoutMs: 30,
-        spawnClaudeQuery: target.spawnClaudeQuery
-      })
-      const ctx = makeCtx({ fromEngine: 'opencode' })
-      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-      await tick()
-      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-      // Never push a result — the turn hangs until the timeout fires.
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('timed out')
-      expect(result.sessionId).toBe('claude-sess-1')
-      expect(target.lastAbortController()?.signal.aborted).toBe(true)
+    it('the configured absolute cap aborts the target and removes the entry (no continuation possible)', async () => {
+      vi.useFakeTimers()
+      try {
+        const target = makeFakeClaudeTarget()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({
+            dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+          })),
+          heartbeatMs: 30_000,
+          spawnClaudeQuery: target.spawnClaudeQuery
+        })
+        const ctx = makeCtx({ fromEngine: 'opencode' })
+        const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+        await settle()
+        target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+        // Never push a result — the turn hangs until the configured cap fires.
+        await advance(70_000)
+        const result = await pending
+        expect(result.isError).toBe(true)
+        expect(result.text).toContain('timed out')
+        expect(result.text).toContain('1 minutes')
+        expect(result.sessionId).toBe('claude-sess-1')
+        expect(target.lastAbortController()?.signal.aborted).toBe(true)
 
-      // The entry was removed — continuation now fails.
-      const cont = await dispatcher.dispatch(
-        { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
-        ctx
-      )
-      expect(cont.isError).toBe(true)
+        // The entry was removed — continuation now fails.
+        const cont = await dispatcher.dispatch(
+          { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
+          ctx
+        )
+        expect(cont.isError).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('extra.signal abort cancels the dispatch and aborts the target', async () => {
@@ -2017,39 +2213,50 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     })
 
     it('timeout dismisses forwarded canUseTool approvals still pending for that target', async () => {
-      const target = makeFakeClaudeTarget()
-      const { dispatcher } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-        dispatchTimeoutMs: 60,
-        spawnClaudeQuery: target.spawnClaudeQuery
-      })
-      const ctx = makeCtx({ fromEngine: 'opencode' })
-      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-      await tick()
-      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-      await tick()
+      vi.useFakeTimers()
+      try {
+        // The ABSOLUTE cap, deliberately (mirrors the opencode twin): a pending
+        // forwarded approval keeps the INACTIVITY clock rolling, so a turn
+        // parked on a human is never an inactive turn.
+        const target = makeFakeClaudeTarget()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({
+            dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+          })),
+          heartbeatMs: 30_000,
+          spawnClaudeQuery: target.spawnClaudeQuery
+        })
+        const ctx = makeCtx({ fromEngine: 'opencode' })
+        const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+        await settle()
+        target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+        await settle()
 
-      // The target calls a tool mid-turn — never resolved by the test.
-      const canUseTool = target.lastCanUseTool()!
-      const approvalPromise = canUseTool(
-        'Bash',
-        { command: 'x' },
-        {
-          signal: new AbortController().signal,
-          toolUseId: 'toolu_1'
-        }
-      )
-      await tick()
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+        // The target calls a tool mid-turn — never resolved by the test.
+        const canUseTool = target.lastCanUseTool()!
+        const approvalPromise = canUseTool(
+          'Bash',
+          { command: 'x' },
+          {
+            signal: new AbortController().signal,
+            toolUseId: 'toolu_1'
+          }
+        )
+        await settle()
+        expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
 
-      const result = await pending
-      expect(result.isError).toBe(true)
-      const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-      expect(dismiss).toBeTruthy()
+        await advance(70_000)
+        const result = await pending
+        expect(result.isError).toBe(true)
+        const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
+        expect(dismiss).toBeTruthy()
 
-      // The hanging canUseTool promise must resolve (deny) — never left hanging.
-      const approval = await approvalPromise
-      expect(approval.behavior).toBe('deny')
+        // The hanging canUseTool promise must resolve (deny) — never left hanging.
+        const approval = await approvalPromise
+        expect(approval.behavior).toBe('deny')
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 
@@ -2233,6 +2440,99 @@ const RELEVANT_SUBAGENT_CHANNELS = [
 ]
 
 describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/notification/stop)', () => {
+  it('keeps root and native-child streams isolated while remapping both to the outer owner', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-interleave' } as SDKMessage)
+    const frame = (parent: string | undefined, event: Record<string, unknown>): SDKMessage =>
+      ({ type: 'stream_event', parent_tool_use_id: parent, event }) as unknown as SDKMessage
+    target.push(frame(undefined, { type: 'message_start', message: { id: 'root-message' } }))
+    target.push(
+      frame(undefined, {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(frame('native-child', { type: 'message_start', message: { id: 'child-message' } }))
+    target.push(
+      frame('native-child', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(
+      frame(undefined, {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'root' }
+      })
+    )
+    target.push(
+      frame('native-child', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'child' }
+      })
+    )
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const deltas = ctx.emit.mock.calls
+      .filter((call) => call[0] === 'session:item-delta')
+      .map(
+        (call) =>
+          call[1] as { target: { messageId: string; ownerToolUseId: string }; chunk: string }
+      )
+    expect(deltas).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: expect.objectContaining({
+            messageId: 'root-message',
+            ownerToolUseId: 'outer-owner'
+          }),
+          chunk: 'root'
+        }),
+        expect.objectContaining({
+          target: expect.objectContaining({
+            messageId: 'child-message',
+            ownerToolUseId: 'outer-owner'
+          }),
+          chunk: 'child'
+        })
+      ])
+    )
+
+    const core = new SyncCore({ capacity: 20 })
+    core.emit('session:created', ['dispatch', { cwd: '/fixture', engineId: 'claude' }])
+    const before = core.getSnapshot().seq
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      if (channel === 'session:item-open') core.emit(channel, ['dispatch', payload])
+      if (channel === 'session:item-delta') core.emit(channel, ['dispatch', payload])
+      if (channel === 'session:item-seal') core.emit(channel, ['dispatch', payload])
+    }
+    const session = core.getCanonicalState().sessions.dispatch
+    expect(Object.keys(session.itemStreams)).toHaveLength(0)
+    expect(session.subagentMessages['outer-owner'].map((message) => message.content[0])).toEqual(
+      expect.arrayContaining([
+        { type: 'text', text: 'root' },
+        { type: 'text', text: 'child' }
+      ])
+    )
+    const reliableItemEvents = ctx.emit.mock.calls.filter(
+      ([channel]) => channel === 'session:item-open' || channel === 'session:item-seal'
+    ).length
+    expect(core.getSnapshot().seq - before).toBe(reliableItemEvents)
+  })
+
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
@@ -2247,7 +2547,15 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 
     target.push({
       type: 'stream_event',
-      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } }
+      event: { type: 'message_start', message: { id: 'm1', content: [] } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }
     } as unknown as SDKMessage)
     await tick()
     target.push({
@@ -2263,17 +2571,10 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_disp_1',
-      type: 'text',
-      text: 'Hello'
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_disp_1', kind: 'text' }),
+      chunk: 'Hello'
     })
-
-    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1' })
-    const forwarded = msgCall![1] as { message: { content: unknown[] } }
-    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'Hello' }])
 
     const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
     expect(progressCall?.[1]).toMatchObject({
@@ -2434,21 +2735,29 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
   })
 
   it('a timeout notification uses status "failed" (distinct from an explicit user stop)', async () => {
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      dispatchTimeoutMs: 30,
-      spawnClaudeQuery: target.spawnClaudeQuery
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_timeout_1' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
 
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -2466,10 +2775,13 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1' })
-    const forwarded = msgCall![1] as { message: { content: unknown[] } }
-    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'partial output' }])
+    expect(ctx.emit).toHaveBeenCalledWith(
+      'session:item-open',
+      expect.objectContaining({
+        target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_1', kind: 'text' }),
+        message: expect.objectContaining({ content: [{ type: 'text', text: 'partial output' }] })
+      })
+    )
 
     await new Promise((r) => setTimeout(r, 30))
     const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
@@ -2487,7 +2799,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
   })
 
-  it('forwards message.part.delta as a subagent-stream text delta', async () => {
+  it('forwards message.part.delta as an addressed text delta', async () => {
     const { dispatcher, client, stream } = makeHarness()
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_2' })
@@ -2509,11 +2821,9 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_oc_2',
-      type: 'text',
-      text: 'streaming chunk'
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_2', kind: 'text' }),
+      chunk: 'streaming chunk'
     })
 
     completeTurn(stream)
@@ -2656,7 +2966,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
       part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'assistant text' }
     })
     await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(true)
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:item-open')).toBe(true)
 
     completeTurn(stream)
     await pending
@@ -2759,11 +3069,11 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const msg = ctx2.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msg?.[1]).toMatchObject({ toolUseId: 'toolu_gate_2' })
-    expect((msg![1] as { message: { content: unknown[] } }).message.content).toEqual([
-      { type: 'text', text: 'turn two' }
-    ])
+    const open = ctx2.emit.mock.calls.find((c) => c[0] === 'session:item-open')
+    expect(open?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_gate_2' },
+      message: { content: [{ type: 'text', text: 'turn two' }] }
+    })
 
     completeTurn(stream)
     await turn2
@@ -2985,13 +3295,29 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('opencode')).toBe(true)
   })
 
-  it("'claude' mirrors opencodeServerManager.isBinaryAvailable()", () => {
+  it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
     const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable')
+    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(false)
+
     spy.mockReturnValue(true)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
     spy.mockReturnValue(false)
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
+
+    // pi alone is enough — M4c made pi a Claude target but left this branch
+    // asking only about opencode, so a pi-only machine hid the tool.
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+    expect(crossEngineDispatchAvailable('claude')).toBe(true)
+    vi.mocked(piBinaryAvailable).mockReturnValue(false)
+
+    // codex alone is enough (slice H).
+    vi.mocked(codexBinaryAvailable).mockReturnValue(true)
+    expect(crossEngineDispatchAvailable('claude')).toBe(true)
+
     spy.mockRestore()
+    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
   it("'pi' mirrors piBinaryAvailable() (ADR-033 M4c)", () => {
@@ -2999,6 +3325,80 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('pi')).toBe(true)
     vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
     expect(crossEngineDispatchAvailable('pi')).toBe(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+  })
+
+  it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
+    // Neither of the two OPTIONAL target binaries being present may change the
+    // answer: the claude target needs nothing installed, so a Codex session
+    // always has somewhere to dispatch to.
+    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable').mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    expect(crossEngineDispatchAvailable('codex')).toBe(true)
+    spy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Codex as a dispatch SOURCE (slice E) — the engine guard, not the transport.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
+  it('runs a codex→opencode dispatch instead of refusing it as unimplemented', async () => {
+    const { dispatcher } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
+    )
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('runs codex→codex — ADR-069 §7 lifted the same-engine guard for this engine alone', async () => {
+    // It was never a policy: a same-engine dispatch used to mean a SECOND
+    // app-server per dispatch. A target is one more `thread/start` on the
+    // caller's own host now, so the refusal has nothing left to protect — and
+    // it still stands for every other engine, which pays a whole server or CLI
+    // and has a native subagent of its own.
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
+    )
+    await tick()
+    target.completeTurn({ text: 'target answer' })
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it.each(['claude', 'opencode', 'pi'] as const)(
+    'still refuses %s→%s as same-engine work',
+    async (engine) => {
+      const { dispatcher } = makeHarness()
+      const result = await dispatcher.dispatch(
+        { engine, prompt: 'x' },
+        makeCtx({ fromEngine: engine })
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('targets a different engine')
+      expect(result.text).toContain(`"${engine}"`)
+    }
+  )
+
+  it('no longer refuses a dispatch INTO codex as unimplemented — slice H gave it a target factory', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    await tick()
+    target.completeTurn({ text: 'target answer' })
+    const result = await pending
+    expect(result.text).not.toBe('Dispatching into engine "codex" is not supported yet.')
+    expect(result.isError).toBeUndefined()
   })
 })
 
@@ -3008,8 +3408,8 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
 
 describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', () => {
   it("captures tokens/cost from the final assistant message's info on success — populates notification.usage and records a row", async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: 'ok',
@@ -3030,23 +3430,23 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     expect(usage!.toolUses).toBe(0)
     expect(usage!.durationMs).toEqual(expect.any(Number))
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'claude',
-        targetEngine: 'opencode',
-        targetModel: 'openai/gpt-5',
-        targetSessionId: 'oc-sess-1',
-        toolUseId: 'toolu_usage_1',
-        totalTokens: 160,
-        costUsd: 0.02
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'opencode',
+        vendorId: 'openai',
+        modelId: 'gpt-5',
+        sessionId: 'oc-sess-1',
+        messageId: expect.stringContaining('toolu_usage_1'),
+        engineCostUsd: 0.02
       })
     )
   })
 
   it('counts DISTINCT tool_use ids as toolUses — repeated part updates for the same call do not double-count', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_usage_tools' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
@@ -3077,16 +3477,16 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     const usage = (notif![1] as { usage?: { toolUses: number } }).usage
     expect(usage!.toolUses).toBe(1)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_usage_tools' })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: expect.stringContaining('toolu_usage_tools') })
     )
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch — the successful text still returns', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch — the successful text still returns', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('SQLITE_BUSY: database is locked')
     })
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: 'the successful answer',
@@ -3096,7 +3496,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     const ctx = makeCtx({ toolUseId: 'toolu_throwing_recorder' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
 
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the successful answer')
     // The completion notification is unaffected too.
@@ -3105,8 +3505,8 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
   })
 
   it('a turn stopped by the user is NOT recorded (no usage numbers for a turn that never returned)', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_stopped_norecord' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
@@ -3114,15 +3514,15 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     expect(dispatcher.stopDispatch('toolu_stopped_norecord')).toBe(true)
     const result = await pending
     expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
   })
 
   it('a timed-out turn IS recorded (status "failed") with null usage numbers', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const { dispatcher, client } = makeHarness({
-        recordDispatchedUsage,
+        recordUsageEvent,
         loadEngineConfig: vi.fn(() => ({
           dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
         })),
@@ -3135,11 +3535,11 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
       await advance(70_000)
       const result = await pending
       expect(result.isError).toBe(true)
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect(recordUsageEvent).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolUseId: 'toolu_timeout_record',
-          totalTokens: null,
-          costUsd: null
+          messageId: expect.stringContaining('toolu_timeout_record'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
         })
       )
     } finally {
@@ -3147,7 +3547,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     }
   })
 
-  it('the real default (no recordDispatchedUsage injected) does not throw', async () => {
+  it('the real default (no recordUsageEvent injected) does not throw', async () => {
     const { dispatcher } = makeHarness()
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
@@ -3217,12 +3617,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
 
 describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () => {
   it('captures usage/total_cost_usd/duration_ms from the result on success', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_usage_1' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3246,17 +3646,18 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(usage!.totalTokens).toBe(280)
     expect(usage!.durationMs).toBe(4200)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'opencode',
-        targetEngine: 'claude',
-        targetModel: 'haiku',
-        targetSessionId: 'claude-sess-1',
-        toolUseId: 'toolu_claude_usage_1',
-        totalTokens: 280,
-        costUsd: 0.03,
-        durationMs: 4200
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        modelId: 'haiku',
+        sessionId: 'claude-sess-1',
+        messageId: expect.stringContaining('toolu_claude_usage_1'),
+        engineCostUsd: 0.03,
+        // cli.js reports an API-equivalent whatever the plan (ADR-034).
+        engineCostIsEquivalent: true
       })
     )
     // Slice C — the dispatching session's own cost breakdown gets the fold-in.
@@ -3264,23 +3665,31 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   })
 
   it('does NOT call ctx.addDispatchedCost for a timed-out Claude-direction turn', async () => {
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      spawnClaudeQuery: target.spawnClaudeQuery,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({
-      type: 'system',
-      subtype: 'init',
-      session_id: 'claude-sess-timeout'
-    } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-timeout'
+      } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('turn 2+ converts the CUMULATIVE total_cost_usd into a per-turn delta (record, fold-in, cap)', async () => {
@@ -3288,7 +3697,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     // cli.js process. Two turns reporting 0.02 then 0.05 (a running total)
     // spent 0.02 and 0.03 respectively — the pre-fix code recorded/folded/
     // capped 0.02 and 0.05 (over-counting turn 2 by the whole turn-1 spend).
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       // maxCostUsd 0.06 discriminates: true per-turn accumulation is
@@ -3296,7 +3705,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
       // `+=` reaches 0.02 + 0.05 = 0.07 ≥ 0.06 (turn 3 cap-rejected).
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.06 } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode' })
 
@@ -3315,13 +3724,13 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect((await second).isError).toBeUndefined()
 
     // DB rows: per-turn deltas, never the running total.
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ costUsd: 0.02 })
+      expect.objectContaining({ engineCostUsd: 0.02 })
     )
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.03, 10) })
     )
 
     // Live fold-in: same deltas.
@@ -3346,20 +3755,20 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     // An UNCHANGED cumulative total (turn 3 cost the same process nothing
     // new) is a zero delta — the row records costUsd 0 and there is no
     // fold-in (the >0 guard).
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       3,
-      expect.objectContaining({ costUsd: 0 })
+      expect.objectContaining({ engineCostUsd: 0 })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledTimes(2)
   })
 
   it('a failed-subtype turn with real cost folds in too — parity with its DB record (seed-on-reload includes it)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3371,7 +3780,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.04 }))
+    expect(recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ engineCostUsd: 0.04 }))
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('claude', 'haiku', 0.04)
   })
 
@@ -3404,12 +3813,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   })
 
   it('counts DISTINCT tool_use ids — the same assistant message re-forwarded as partial updates does not double-count', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_tools' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3441,15 +3850,15 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(usage!.toolUses).toBe(1)
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch (Claude direction)', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch (Claude direction)', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('disk I/O error')
     })
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_throw' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3458,34 +3867,42 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     target.push(resultMsg({ result: 'the successful answer', total_cost_usd: 0.01 }))
     const result = await pending
 
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the successful answer')
   })
 
   it('a stopped turn is NOT recorded; a timed-out turn IS recorded with null usage', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
-
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        toolUseId: 'toolu_claude_timeout',
-        totalTokens: null,
-        costUsd: null
+    vi.useFakeTimers()
+    try {
+      const recordUsageEvent = vi.fn()
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        recordUsageEvent
       })
-    )
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_claude_timeout'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -3540,6 +3957,263 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the answer')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-071 §2 — the cap counts what a turn was WORTH, not what opencode billed.
+// opencode prices from a catalog that is zeroed for a provider signed in with
+// OAuth, so a subscription-authenticated target used to report `info.cost: 0`
+// on every turn and the cap never tripped at all.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode direction)', () => {
+  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
+  const PRICED = 'openai/gpt-5.6-luna'
+  /** `openai` is a KNOWN vendor, so an unknown model under it is a genuine
+   *  pricing miss rather than the cross-vendor fallback findPricing applies to
+   *  unrecognized gateway vendors. */
+  const UNPRICED = 'openai/model-with-no-price'
+  /** Exactly $0.20 of list-price spend on PRICED. */
+  const ONE_MTOK_IN = { input: 1_000_000, output: 0 }
+
+  let billingSpy: ReturnType<typeof vi.spyOn> | undefined
+
+  function billAs(billingType: BillingType): void {
+    billingSpy = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType,
+      authState: 'authenticated'
+    })
+  }
+
+  afterEach(() => {
+    billingSpy?.mockRestore()
+    billingSpy = undefined
+  })
+
+  it('a subscription target reporting info.cost 0 still trips the cap, on the turn its equivalent crosses it', async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.isError).toBeUndefined()
+    // $0.20 of $0.30 — under the cap, so no note yet.
+    expect(first.text).toBe('ok')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
+
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    // $0.40 cumulative — the crossing turn carries the note.
+    expect(second.text).toContain('[dispatch cost cap reached')
+
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('cost cap')
+    expect(client.promptAsync).toHaveBeenCalledTimes(2)
+  })
+
+  it('an apiKey target counts the BILLED figure, not our equivalent (a gateway margin is real spend)', async () => {
+    billAs('apiKey')
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
+    })
+    // Our equivalent for these tokens is $0.20; the gateway charged $0.31.
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0.31 } })
+    ])
+
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.31)
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0.31, engineCostIsEquivalent: false })
+    )
+  })
+
+  it("a failed turn's tokens count toward the cap at the equivalent rate", async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.15 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: '',
+        info: {
+          tokens: ONE_MTOK_IN,
+          cost: 0,
+          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
+        }
+      })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.isError).toBe(true)
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
+
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+  })
+
+  it('an unpriced model appends the cannot-count line once per turn and never trips the cap', async () => {
+    billAs('subscription')
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.01 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toBe(
+      `ok\n\n[dispatch cost cap cannot count this turn: ${UNPRICED} has no known price]`
+    )
+    expect(first.text).not.toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    // The tokens are on the row and opencode's own figure is its zeroed
+    // subscription one; what makes the turn UNCOUNTABLE is that nothing can
+    // price the model, which the recorder resolves to a null cost — never a 0.
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 1_000_000 }),
+        engineCostUsd: 0,
+        billingType: 'subscription'
+      })
+    )
+
+    // Turn 2 runs — an uncountable turn can never trip a cap — and says so
+    // again, once.
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    expect(second.isError).toBeUndefined()
+    expect(second.text.match(/cannot count this turn/g)).toHaveLength(1)
+  })
+
+  it('the rejection message reports the turns the spent figure could not count', async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
+    })
+    // One unpriced turn, then one the fallback DOES price (a real engine
+    // charge under `unknown`-free billing is still a figure).
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'unpriceable', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toContain('cannot count this turn')
+
+    // Force the cap over by billing the next turn as apiKey with a real charge.
+    billingSpy?.mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'apiKey',
+      authState: 'authenticated'
+    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'billed', info: { cost: 0.2 } })
+    ])
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('1 turn(s) on this session could not be counted')
+  })
+
+  it('a turn that moved no tokens is a known zero, not an uncountable turn, even on an unpriced model', async () => {
+    billAs('subscription')
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
+    })
+    // Zero tokens cost zero at any rate — the price table is irrelevant.
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'nothing to do', info: { tokens: { input: 0, output: 0 } } })
+    ])
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toBe('nothing to do')
+    expect(first.text).not.toContain('cannot count this turn')
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: null
+      })
+    )
+
+    // …and the entry counted no uncountable turn: drive the cap over with a
+    // real charge and the rejection has nothing to disclaim.
+    billingSpy?.mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'apiKey',
+      authState: 'authenticated'
+    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'billed', info: { tokens: { input: 10 }, cost: 0.2 } })
+    ])
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('cost cap')
+    expect(third.text).not.toContain('could not be counted')
+  })
+
+  it('a free vendor spends nothing: the cap never trips and the breakdown gets nothing', async () => {
+    billAs('free')
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.01 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.text).toBe('ok')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0, billingType: 'free' })
+    )
   })
 })
 
@@ -3736,6 +4410,8 @@ function piAssistantMessageEnd(opts: {
   input?: number
   output?: number
   reasoning?: number
+  cacheRead?: number
+  cacheWrite?: number
 }): Record<string, unknown> {
   const content: Record<string, unknown>[] = []
   if (opts.text !== undefined) content.push({ type: 'text', text: opts.text })
@@ -3758,8 +4434,8 @@ function piAssistantMessageEnd(opts: {
       usage: {
         input: opts.input ?? 10,
         output: opts.output ?? 5,
-        cacheRead: 0,
-        cacheWrite: 0,
+        cacheRead: opts.cacheRead ?? 0,
+        cacheWrite: opts.cacheWrite ?? 0,
         ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.cost ?? 0 }
       },
@@ -4382,27 +5058,43 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect((await cont).isError).toBeUndefined()
   })
 
-  it('per-dispatch timeout interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      dispatchTimeoutMs: 30,
-      spawnPiTarget: target.spawnPiTarget
-    })
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
-    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+  it('the configured absolute cap interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      await advance(70_000)
+      // The give-up path's own bounded grace wait (piAbortSettleGraceMs) runs
+      // AFTER the cap fires, so the clock has to keep moving past it.
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('1 minutes')
 
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
 
-    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
-    target.pushEvent(PI_AGENT_SETTLED)
-    expect((await cont).isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1)
+      const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+      await settle()
+      target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      expect((await cont).isError).toBeUndefined()
+      expect(target.spawnCalls).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('extra.signal abort → "cancelled" text', async () => {
@@ -4573,7 +5265,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notification', () => {
-  it('forwards subagent-stream/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
+  it('forwards item lifecycle/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
@@ -4611,18 +5303,24 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_disp_1',
-      type: 'text',
-      text: 'Hello'
+    const openCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:item-open')
+    expect(openCall?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_disp_1', blockIndex: 0, kind: 'text' }
+    })
+    const deltaCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:item-delta')
+    expect(deltaCall?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_disp_1', blockIndex: 0, kind: 'text' },
+      chunk: 'Hello'
     })
 
-    const msgCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')
-    expect(msgCalls.length).toBeGreaterThan(0)
-    const lastMsg = msgCalls.at(-1)![1] as { toolUseId: string; message: { content: unknown[] } }
-    expect(lastMsg.toolUseId).toBe('toolu_disp_1')
-    expect(lastMsg.message.content).toEqual([
+    const sealCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:item-seal')
+    expect(sealCalls.length).toBeGreaterThan(0)
+    const lastSeal = sealCalls.at(-1)![1] as {
+      ownerToolUseId: string
+      message: { content: unknown[] }
+    }
+    expect(lastSeal.ownerToolUseId).toBe('toolu_disp_1')
+    expect(lastSeal.message.content).toEqual([
       { type: 'text', text: 'Hello' },
       { type: 'tool_use', toolUseId: 'pi-call-1', toolName: 'bash', toolInput: { command: 'ls' } }
     ])
@@ -4676,12 +5374,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
   })
 
   it('captures cost/tokens and records a dispatched-usage row on success; folds cost into ctx.addDispatchedCost', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_usage_1' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -4691,16 +5389,16 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'claude',
-        targetEngine: 'pi',
-        targetModel: 'openai-codex/gpt-5.6-luna',
-        targetSessionId: 'pi-target-1',
-        toolUseId: 'toolu_usage_1',
-        totalTokens: 150,
-        costUsd: 0.02
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'pi',
+        vendorId: 'openai-codex',
+        modelId: 'gpt-5.6-luna',
+        sessionId: 'pi-target-1',
+        messageId: expect.stringContaining('toolu_usage_1'),
+        engineCostUsd: 0.02
       })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.02)
@@ -4715,19 +5413,21 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const ctx = makeCtx({ fromEngine: 'claude' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0 }))
+    // No cost AND no tokens: our table stands in for a turn pi priced at 0
+    // (`piCostInputs`), so a turn that is to cost nothing has to spend nothing.
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0, input: 0, output: 0 }))
     target.pushEvent(PI_AGENT_SETTLED)
     await pending
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
   })
 
   it('turn 2+ converts the CUMULATIVE mapper totalCostUsd into a per-turn delta (result.totalCostUsd is cumulative — same hazard as Claude)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude' })
 
@@ -4748,13 +5448,13 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(PI_AGENT_SETTLED)
     await second
 
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ costUsd: 0.02 })
+      expect.objectContaining({ engineCostUsd: 0.02 })
     )
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.03, 10) })
     )
     expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
       1,
@@ -4770,15 +5470,15 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     )
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('SQLITE_BUSY: database is locked')
     })
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const pending = dispatcher.dispatch(
       { engine: 'pi', prompt: 'x' },
@@ -4788,60 +5488,81 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(piAssistantMessageEnd({ text: 'the successful answer' }))
     target.pushEvent(PI_AGENT_SETTLED)
     const result = await pending
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
   })
 
-  it('a timed-out turn IS recorded (status "failed") with null usage numbers; a stopped turn is NOT recorded', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const result = await dispatcher.dispatch(
-      { engine: 'pi', prompt: 'x' },
-      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_record' })
-    )
-    expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        toolUseId: 'toolu_timeout_record',
-        totalTokens: null,
-        costUsd: null
+  it('a timed-out turn IS recorded (status "failed") with unknown tokens and a known-zero cost; a stopped turn is NOT recorded', async () => {
+    vi.useFakeTimers()
+    try {
+      const recordUsageEvent = vi.fn()
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget,
+        recordUsageEvent
       })
-    )
+      const pending = dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_record' })
+      )
+      await settle()
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      // Tokens are unknown (nothing streamed back), but the cost is a KNOWN
+      // zero: pi prices from its own catalog and its cumulative total — after
+      // the get_session_stats reconcile — did not move, so the turn spent
+      // nothing (ADR-071 §2; `null` in this column means unknown, not free).
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_timeout_record'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: 0
+        })
+      )
 
-    recordDispatchedUsage.mockClear()
-    const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
-    const { dispatcher: dispatcher2 } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target2.spawnPiTarget,
-      recordDispatchedUsage
-    })
-    const pending2 = dispatcher2.dispatch(
-      { engine: 'pi', prompt: 'x' },
-      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stopped_norecord' })
-    )
-    await tick()
-    expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
-    await pending2
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+      recordUsageEvent.mockClear()
+      const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
+      const { dispatcher: dispatcher2 } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target2.spawnPiTarget,
+        recordUsageEvent
+      })
+      const pending2 = dispatcher2.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stopped_norecord' })
+      )
+      await settle()
+      expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
+      await advance(30)
+      await pending2
+      expect(recordUsageEvent).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost accounting (B1)', () => {
   it('an errored turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row; a later successful turn does NOT double-count it', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -4858,8 +5579,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_cost', costUsd: 0.04, totalTokens: 140 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_cost'),
+        engineCostUsd: 0.04,
+        tokens: expect.objectContaining({ input: 100, output: 40 })
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
 
@@ -4878,8 +5603,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     const contResult = await cont
     expect(contResult.isError).toBeUndefined()
     expect(contResult.text).toContain('[dispatch cost cap reached')
-    expect(recordDispatchedUsage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ costUsd: expect.closeTo(0.02, 10) })
+    expect(recordUsageEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.02, 10) })
     )
     expect(ctx.addDispatchedCost).toHaveBeenLastCalledWith(
       'pi',
@@ -4889,38 +5614,54 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   })
 
   it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
-    // Never push agent_settled — the turn hangs until the timeout fires.
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+    vi.useFakeTimers()
+    try {
+      const recordUsageEvent = vi.fn()
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget,
+        recordUsageEvent
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      target.pushEvent(
+        piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 })
+      )
+      // Never push agent_settled — the turn hangs until the cap fires.
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_timeout_cost', costUsd: 0.03, totalTokens: 30 })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_timeout_cost'),
+          engineCostUsd: 0.03,
+          tokens: expect.objectContaining({ input: 20, output: 10 })
+        })
+      )
+      expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a stopped turn that streamed cost advances cumulativeCostUsd/addDispatchedCost but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned) — cap accounting still applies', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -4933,7 +5674,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
 
     // No usage ROW for the stopped turn (row ≠ spend accounting — see the
     // resolveAndRunPi comment)...
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
     // ...but the fold-in and cap accounting still ran: proven directly via
     // addDispatchedCost, and via a fresh continuation now being rejected
     // outright (cumulativeCostUsd already meets the 0.05 cap).
@@ -4949,7 +5690,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
 
 describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconciliation via get_session_stats (audit-residual C)', () => {
   it('an errored turn whose fake get_session_stats reports MORE cost than any streamed usage event → the recovered (higher) cost is what is counted toward the cap + usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -4969,7 +5710,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -4987,14 +5728,17 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_reconcile', costUsd: 0.1 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_reconcile'),
+        engineCostUsd: 0.1
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.1)
   })
 
   it('a get_session_stats read that FAILS during error-path reconciliation falls back to the mapperState delta (no throw, error result still returned)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') throw new Error('target wedged')
@@ -5004,7 +5748,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile_fail' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5019,14 +5763,22 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_reconcile_fail', costUsd: 0.04 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_reconcile_fail'),
+        engineCostUsd: 0.04
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
   })
 
   it('a timed-out turn whose fake get_session_stats reports MORE cost than any streamed usage event is reconciled too', async () => {
-    const recordDispatchedUsage = vi.fn()
+    // FAKE TIMERS FIRST, before the dispatcher is constructed: its `now` dep
+    // defaults to a captured reference to `Date.now`, so installing the fake
+    // clock afterwards would leave the watchdog reading real wall time and the
+    // configured cap would never fire.
+    vi.useFakeTimers()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -5044,28 +5796,42 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
       }
     })
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+      })),
+      heartbeatMs: 30_000,
+      piAbortSettleGraceMs: 20,
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_reconcile' })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
-    // Never push agent_settled — the turn hangs until the timeout fires.
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+    try {
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      target.pushEvent(
+        piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 })
+      )
+      // Never push agent_settled — the turn hangs until the cap fires.
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_timeout_reconcile', costUsd: 0.08 })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_timeout_reconcile'),
+          engineCostUsd: 0.08
+        })
+      )
+      expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('when get_session_stats reports the SAME cost as the mapper already streamed, the recorded spend is unchanged (no double count)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -5085,7 +5851,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_same_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5100,19 +5866,22 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_same_cost', costUsd: 0.04 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_same_cost'),
+        engineCostUsd: 0.04
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
   })
 
   it('a STOPPED turn never calls get_session_stats (reconciliation is err/timeout-only — stop stays unreconciled by design, ADR-033 M4-B) and still records no usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_no_reconcile' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5122,7 +5891,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
     expect(
       target.client.request.mock.calls.some(
         (c: unknown[]) => (c[0] as { type?: string }).type === 'get_session_stats'
@@ -5198,6 +5967,190 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
     const result = await pending
     expect(result.isError).toBeUndefined()
     expect(result.text).not.toContain('cost cap reached')
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction: the cap follows the same cost rule (ADR-071 §2)', () => {
+  const MODEL = 'openai-codex/gpt-5.6-luna'
+  let billingSpy: ReturnType<typeof vi.spyOn> | undefined
+
+  afterEach(() => {
+    billingSpy?.mockRestore()
+    billingSpy = undefined
+  })
+
+  it('a free vendor spends nothing, whatever pi reports', async () => {
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'free',
+      authState: 'authenticated'
+    })
+    const recordUsageEvent = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.5 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('cost cap')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    // pi's own figure rides along raw; what makes the turn free is the
+    // BILLING TYPE, which is the whole point of recording it per row.
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0.5, billingType: 'free' })
+    )
+  })
+
+  it('a NON-FINITE figure from pi on an UNPRICED model says the cap cannot count it', async () => {
+    // pi's own catalog prices every turn whatever the credential, so its
+    // figure is a list-price equivalent under every billing type and a
+    // reported `0` is a known zero, not an unpriced turn. What is left is a
+    // malformed `usage.cost.total`, which the mapper's `+=` turns into NaN —
+    // and with no price of our own for the model either, there is nothing left
+    // to count: resolveCosts refuses rather than adding a garbage number.
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai/model-with-no-price', maxCostUsd: 0.01 }
+      })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: Number.NaN }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).toContain('[dispatch cost cap cannot count this turn')
+    expect(result.text).not.toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('a NON-FINITE figure on a model WE price falls back to our table rather than going uncountable', async () => {
+    // The turn's tokens reach the cost rule now (they always did for a pi
+    // SESSION's own messages), so pi failing to price a turn is no longer the
+    // end of it: `piCostInputs` reaches for our table whenever pi reported no
+    // real charge, and here it has one.
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // 1M input tokens at $0.20/MTok — over the $0.01 cap on its own.
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'the answer', cost: Number.NaN, input: 1_000_000, output: 0 })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('[dispatch cost cap cannot count this turn')
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, expect.closeTo(0.2, 6))
+  })
+
+  it('a turn pi reports as 0 is a known zero under `unknown` billing, not an unpriced turn', async () => {
+    // No credential for the vendor → billing type `unknown`. pi priced the
+    // turn; it just cost nothing (a stop before any spend, say).
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue(null)
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // Zero tokens with it, so the table cannot price the turn ABOVE pi's zero
+    // and what is under test stays pi's figure (`piCostInputs`).
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0, input: 0, output: 0 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('cost cap')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it("a subscription turn counts pi's own figure — it is already a list-price equivalent", async () => {
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.05 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.06 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, 0.06)
+  })
+
+  it('a dispatch with NO caller tool_use still accounts its tokens — on the row and against the cap', async () => {
+    // Accounting rides the same forwarding path that streams a target's
+    // output back to a caller's TaskCard, and streaming needs a tool_use id
+    // to key its chunks. Tokens do not: an id-less dispatch must still price
+    // its turn, or the cap would read it as a free one and the ledger row
+    // would record a zero split.
+
+    // The billing type is pinned so the turn's WORTH is what the cap reads: under a subscription
+    // a reported `0` cannot be mistaken for a zero charge (`resolveCosts`),
+    // which leaves the accumulated tokens as the only thing that can cross it.
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const recordUsageEvent = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    expect(ctx.toolUseId).toBeUndefined()
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // Two assistant messages, so the row proves the ACCUMULATION and not just
+    // the last message's numbers. 1M input tokens at $0.20/MTok is over the
+    // $0.01 cap on its own (the 100 output tokens add $0.00012); pi prices the
+    // turn at 0, so the cap only crosses if our own table priced the tokens it
+    // was handed.
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'part one', cost: 0, input: 600_000, output: 30 })
+    )
+    // A fresh `message_start` is what lets the mapper see a SECOND assistant
+    // message in the same turn (a tool call splits one turn into several).
+    target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'part two', cost: 0, input: 400_000, output: 70 })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, expect.closeTo(0.20012, 6))
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 1_000_000, output: 100 })
+      })
+    )
   })
 })
 
@@ -5291,5 +6244,2492 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     }
     expect(merged.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(merged.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// codex direction (ADR-033 slice H — claude/opencode/pi → codex)
+// ---------------------------------------------------------------------------
+
+/**
+ * Loose shape covering exactly what the dispatcher calls on a Codex target's
+ * HOST CONNECTION (ADR-069 §7 — a target is a thread, not a process).
+ */
+interface FakeCodexClient {
+  request: ReturnType<typeof vi.fn>
+  abortServerRequests: ReturnType<typeof vi.fn>
+  claim: ReturnType<typeof vi.fn>
+  detach: ReturnType<typeof vi.fn>
+}
+
+type CodexRequestHandler = (
+  method: string,
+  params: Record<string, unknown>
+) => unknown | Promise<unknown>
+
+const CODEX_THREAD_ID = 'codex-thread-1'
+const CODEX_TURN_ID = 'codex-turn-1'
+
+/** One `agentMessage` ThreadItem — a turn's result text. */
+function codexAgentMessage(text: string, id = 'item-msg-1'): Record<string, unknown> {
+  return {
+    type: 'agentMessage',
+    id,
+    text,
+    phase: null,
+    memoryCitation: null,
+    delivery: null,
+    questions: null
+  }
+}
+
+/** One `commandExecution` ThreadItem. */
+function codexCommandItem(
+  command: string,
+  opts: { id?: string; status?: string; output?: string; exitCode?: number | null } = {}
+): Record<string, unknown> {
+  return {
+    type: 'commandExecution',
+    id: opts.id ?? 'item-cmd-1',
+    pluginId: null,
+    scriptPath: null,
+    command,
+    cwd: '/tmp/xeng-project',
+    processId: null,
+    source: 'shell',
+    status: opts.status ?? 'inProgress',
+    commandActions: [],
+    aggregatedOutput: opts.output ?? null,
+    exitCode: opts.exitCode ?? null,
+    durationMs: null
+  }
+}
+
+/** One `fileChange` ThreadItem. */
+function codexFileChangeItem(
+  path: string,
+  opts: { id?: string; kind?: Record<string, unknown>; status?: string } = {}
+): Record<string, unknown> {
+  return {
+    type: 'fileChange',
+    id: opts.id ?? 'item-patch-1',
+    changes: [{ path, kind: opts.kind ?? { type: 'add' }, diff: 'hello\n' }],
+    status: opts.status ?? 'inProgress'
+  }
+}
+
+function codexUsage(over: Partial<Record<string, number>> = {}): Record<string, number> {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    ...over
+  }
+}
+
+/**
+ * Fake Codex dispatch target: a fake host CONNECTION (request/
+ * abortServerRequests/claim/detach) whose canned responses cover the fixed
+ * `config/read` → `model/list` → `thread/start` → `turn/start` sequence
+ * `createCodexTarget`/`driveCodexTurn` issue.
+ *
+ * `notify()` feeds the SAME onNotification callback the dispatcher installs, so
+ * `mapCodexItem`/`mapCodexDelta` and the whole item/dedupe/settle pipeline run
+ * FOR REAL — only the host and its wire are faked (mirrors the pi fake's "real
+ * event-mapper logic, fake transport" precedent). `serverRequest()` drives the
+ * approval gate the same way the real app-server would; unlike the real host it
+ * does NOT demultiplex, so what the gate itself refuses stays visible here.
+ */
+function makeFakeCodexTarget(
+  overrides: {
+    threadId?: string
+    turnId?: string
+    configModel?: string
+    catalog?: Array<Record<string, unknown>>
+    requestHandler?: CodexRequestHandler
+  } = {}
+): {
+  spawnCodexTarget: AttachCodexTargetFn
+  spawnCalls: CodexTargetAttachOpts[]
+  client: FakeCodexClient
+  requests: Array<{ method: string; params: Record<string, unknown> }>
+  notify: (method: string, params: Record<string, unknown>) => void
+  serverRequest: (
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal
+  ) => Promise<unknown>
+  disconnect: (code?: string) => void
+  currentTurnId: () => string
+  completeTurn: (opts?: {
+    text?: string
+    status?: string
+    error?: { message: string }
+    turnId?: string
+    items?: Array<Record<string, unknown>>
+    durationMs?: number
+  }) => void
+  threadStartParams: () => Record<string, unknown>
+} {
+  const threadId = overrides.threadId ?? CODEX_THREAD_ID
+  const turnId = overrides.turnId ?? CODEX_TURN_ID
+  // Real, PRICED catalog ids (shared/pricing.ts's openai table) so the cost
+  // arithmetic under test is the arithmetic that runs in production.
+  const catalog = overrides.catalog ?? [
+    {
+      model: 'gpt-5.6-luna',
+      isDefault: true,
+      supportedReasoningEfforts: [],
+      inputModalities: ['text']
+    },
+    { model: 'gpt-5.6-terra', isDefault: false, supportedReasoningEfforts: [], inputModalities: [] }
+  ]
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = []
+  let onNotification: ((method: string, params: unknown) => void) | undefined
+  let onServerRequest: CodexTargetAttachOpts['onServerRequest'] | undefined
+  let onDisconnect: ((error: { code: string }) => void) | undefined
+  let serverRequestSeq = 0
+  let turnSeq = 0
+  let currentTurnId = turnId
+
+  const defaultHandler: CodexRequestHandler = (method, params) => {
+    switch (method) {
+      case 'config/read':
+        return {
+          config: { model: overrides.configModel ?? 'gpt-5.6-luna', model_provider: 'openai' }
+        }
+      case 'model/list':
+        return { data: catalog, nextCursor: null }
+      case 'thread/start':
+        return {
+          thread: { id: threadId, parentThreadId: null, forkedFromId: null },
+          model: params.model,
+          modelProvider: 'openai',
+          reasoningEffort: null
+        }
+      case 'turn/start':
+        // A FRESH id per turn, as the real app-server mints (UUIDv7) — the
+        // dispatcher retires a turn by id, so a fake that reused one would be
+        // testing a state the binary cannot produce.
+        turnSeq += 1
+        currentTurnId = turnSeq === 1 ? turnId : `${turnId}-${turnSeq}`
+        return {
+          turn: {
+            id: currentTurnId,
+            items: [],
+            itemsView: 'complete',
+            status: 'inProgress',
+            error: null,
+            startedAt: null,
+            completedAt: null,
+            durationMs: null
+          }
+        }
+      case 'turn/interrupt':
+        return {}
+      default:
+        return {}
+    }
+  }
+  const handler = overrides.requestHandler ?? defaultHandler
+
+  const client: FakeCodexClient = {
+    request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+      requests.push({ method, params })
+      return await handler(method, params ?? {})
+    }),
+    abortServerRequests: vi.fn(),
+    claim: vi.fn(),
+    // Detaching does NOT kill anything: the host lives on for the other
+    // sessions and reads using it (ADR-069 §2).
+    detach: vi.fn()
+  }
+
+  const spawnCalls: CodexTargetAttachOpts[] = []
+  const spawnCodexTarget = vi.fn<AttachCodexTargetFn>(async (opts) => {
+    spawnCalls.push(opts)
+    onNotification = opts.onNotification
+    onServerRequest = opts.onServerRequest
+    onDisconnect = opts.onDisconnect as unknown as (error: { code: string }) => void
+    return client as unknown as Awaited<ReturnType<AttachCodexTargetFn>>
+  })
+
+  const notify = (method: string, params: Record<string, unknown>): void => {
+    onNotification?.(method, params)
+  }
+
+  return {
+    spawnCodexTarget,
+    spawnCalls,
+    client,
+    requests,
+    notify,
+    serverRequest: (method, params, signal) =>
+      onServerRequest!(method, params, {
+        id: `srv-${++serverRequestSeq}`,
+        signal: signal ?? new AbortController().signal
+      }) as Promise<unknown>,
+    disconnect: (code = 'process-exited') => onDisconnect?.({ code }),
+    currentTurnId: () => currentTurnId,
+    completeTurn: (opts = {}) => {
+      const items = opts.items ?? [codexAgentMessage(opts.text ?? 'target answer')]
+      notify('turn/completed', {
+        threadId,
+        turn: {
+          id: opts.turnId ?? currentTurnId,
+          items,
+          itemsView: 'complete',
+          status: opts.status ?? 'completed',
+          error: opts.error ?? null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: opts.durationMs ?? 1234
+        }
+      })
+    },
+    threadStartParams: () => requests.find((entry) => entry.method === 'thread/start')?.params ?? {}
+  }
+}
+
+/**
+ * A codex-flavoured harness. The shared `makeHarness` default config carries an
+ * OPENCODE model id (`openai/gpt-5`), which a Codex target would take as its
+ * requested model and correctly refuse as absent from the native catalog — so
+ * every codex test names its own dispatch config rather than inheriting that.
+ * Empty by default: `selectCodexModel` then falls back to the target's own
+ * `config/read` model, which is the ordinary no-config-needed path.
+ */
+function makeCodexHarness(
+  overrides: Partial<DispatcherDeps> & { dispatch?: Record<string, unknown> } = {}
+): { dispatcher: CrossEngineDispatcher } {
+  const { dispatch, ...rest } = overrides
+  return makeHarness({
+    loadEngineConfig: vi.fn(() => ({ dispatch: dispatch ?? {} }) as EngineConfig),
+    ...rest
+  })
+}
+
+describe('CrossEngineDispatcher — codex direction (slice H): the policy envelope', () => {
+  it.each([
+    ['plan', 'untrusted', 'read-only', 'user'],
+    ['default', 'untrusted', 'workspace-write', 'user'],
+    ['acceptEdits', 'untrusted', 'workspace-write', 'user'],
+    ['auto', 'on-request', 'workspace-write', 'auto_review']
+  ])(
+    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — all three on thread/start, none per turn",
+    async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', autonomyMode: mode })
+      )
+      await tick()
+      target.completeTurn()
+      await pending
+
+      expect(target.threadStartParams()).toMatchObject({
+        cwd: '/tmp/xeng-project',
+        approvalPolicy,
+        sandbox,
+        approvalsReviewer,
+        allowProviderModelFallback: false,
+        historyMode: 'paginated'
+      })
+      // The per-turn request carries NO policy at all — the thread baseline is
+      // the single place the envelope lives.
+      const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
+      expect(turnStart.params.approvalPolicy).toBeUndefined()
+      expect(turnStart.params.sandboxPolicy).toBeUndefined()
+      expect(turnStart.params.approvalsReviewer).toBeUndefined()
+    }
+  )
+
+  it('inherits NO MCP servers — a headless target gets no config override (ADR-068 §5)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+
+    // Same reasoning as the dynamic tools below: a dispatched agent is a
+    // scrubbed, single-purpose thread. Slice 4 gave INTERACTIVE Codex sessions
+    // the user's Claude MCP list; this pins that the target path was left out of
+    // it, so no dispatch quietly spawns the user's MCP servers headlessly.
+    expect(target.threadStartParams()).not.toHaveProperty('config')
+  })
+
+  it('offers NO dynamicTools and no item/tool/call server method — a target can neither dispatch nor run a hosted tool', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+
+    expect(target.threadStartParams()).not.toHaveProperty('dynamicTools')
+    // The transport used to refuse `item/tool/call` for the target, because the
+    // target owned the process and registered four methods on it. A target is a
+    // thread on a SHARED host now (ADR-069 §7), whose registered list is the
+    // union its owners need — so the scrub is the GATE's, with the same
+    // `-32601` an unregistered method earns.
+    await expect(
+      target.serverRequest('item/tool/call', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        callId: 'c1',
+        tool: 'render_mermaid'
+      })
+    ).rejects.toBeInstanceOf(CodexMethodNotFound)
+    await expect(
+      target.serverRequest('mcpServer/elicitation/request', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID
+      })
+    ).rejects.toBeInstanceOf(CodexMethodNotFound)
+  })
+
+  it('labels its host acquire as a dispatch target and claims exactly its own thread', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+    // The `clientInfo` that used to identify this target is the HOST's now: the
+    // target does not start a process, so what identifies it is the acquire
+    // label and the one thread it takes delivery of.
+    expect(target.spawnCalls[0]!.label).toBe('dispatch-target')
+    expect(target.client.claim.mock.calls).toEqual([[CODEX_THREAD_ID]])
+  })
+
+  it('the envelope is fixed at creation — a continuation with a DIFFERENT autonomyMode neither re-policies the thread nor moves the gate', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const first = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    )
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'plan' })
+    )
+    await tick()
+    // Still the 'auto' envelope on the wire, and still the 'auto' gate.
+    expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    const decision = await target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      itemId: 'item-cmd-1',
+      command: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+    expect(decision).toEqual({ decision: 'accept' })
+    target.completeTurn()
+    await second
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => {
+  async function startTarget(
+    mode: string,
+    overrides: Partial<DispatcherDeps> = {}
+  ): Promise<{
+    dispatcher: CrossEngineDispatcher
+    target: ReturnType<typeof makeFakeCodexTarget>
+    ctx: ReturnType<typeof makeCtx>
+    pending: Promise<DispatchResult>
+  }> {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      ...overrides
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode, toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    return { dispatcher, target, ctx, pending }
+  }
+
+  const commandRequest = (command: string): Record<string, unknown> => ({
+    threadId: CODEX_THREAD_ID,
+    turnId: CODEX_TURN_ID,
+    itemId: 'item-cmd-1',
+    startedAtMs: 0,
+    kind: 'command',
+    environmentId: null,
+    command,
+    cwd: '/tmp/xeng-project'
+  })
+
+  it('plan mode DENIES a write outright — no approval is forwarded, nothing waits for a human the target does not have', async () => {
+    const { target, ctx, pending } = await startTarget('plan')
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('notes.md')
+    })
+    const decision = await target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-1',
+      startedAtMs: 0
+    })
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    // The denial is visible to the watching human — neither native response
+    // type carries a reason.
+    const denial = ctx.emit.mock.calls.find(
+      (c) =>
+        c[0] === 'session:subagent-message' &&
+        JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
+    )
+    expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
+      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    )
+    target.completeTurn()
+    await pending
+  })
+
+  it('plan mode DENIES a non-plan-safe command outright too', async () => {
+    const { target, ctx, pending } = await startTarget('plan')
+    const decision = await target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf /tmp/x"')
+    )
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("default mode forwards an ASK to the CALLER's client bound to the target item's own id, and resolveApproval answers the native request", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const decisionPromise = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf x"')
+    )
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call).toBeTruthy()
+    const approval = call![1] as {
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: Record<string, unknown>
+    }
+    expect(approval.requestId.startsWith(XENG_REQUEST_PREFIX)).toBe(true)
+    expect(approval.toolName).toBe('commandExecution')
+    // The TARGET ITEM's composite id — NOT ctx.toolUseId ('toolu_dispatch_1').
+    expect(approval.toolUseId).toBe(
+      `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-cmd-1'])}`
+    )
+    // The login-shell wrapper is unwrapped for gating, with the raw string kept.
+    expect(approval.input).toEqual({
+      command: 'rm -rf x',
+      rawCommand: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+
+    const sentinel = Symbol('pending')
+    expect(await Promise.race([decisionPromise, Promise.resolve(sentinel)])).toBe(sentinel)
+
+    expect(dispatcher.resolveApproval(approval.requestId, 'allow')).toBe(true)
+    expect(await decisionPromise).toEqual({ decision: 'accept' })
+    target.completeTurn()
+    await pending
+  })
+
+  it("resolveApproval('deny') declines the native request", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const decisionPromise = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('ls')
+    )
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(approval.requestId, 'deny', { feedback: 'no' })
+    expect(await decisionPromise).toEqual({ decision: 'decline' })
+    target.completeTurn()
+    await pending
+  })
+
+  it("'allowForSession' is a one-off allow — a second identical command still asks", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const first = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('ls')
+    )
+    await tick()
+    const a1 = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(a1.requestId, 'allowForSession')
+    expect(await first).toEqual({ decision: 'accept' })
+
+    const second = target.serverRequest('item/commandExecution/requestApproval', {
+      ...commandRequest('ls'),
+      itemId: 'item-cmd-2'
+    })
+    await tick()
+    const a2 = ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .at(-1)![1] as { requestId: string }
+    expect(a2.requestId).not.toBe(a1.requestId)
+    dispatcher.resolveApproval(a2.requestId, 'allow')
+    await second
+    target.completeTurn()
+    await pending
+  })
+
+  it("auto mode ACCEPTS what the native reviewer escalated without asking — 'auto_review' already decided", async () => {
+    const { target, ctx, pending } = await startTarget('auto')
+    const decision = await target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf x"')
+    )
+    expect(decision).toEqual({ decision: 'accept' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("acceptEdits allows a patch INSIDE the workspace but asks for one outside it (Codex's workspaceWrite line, not the mode base's)", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('acceptEdits')
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('notes.md')
+    })
+    expect(
+      await target.serverRequest('item/fileChange/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-patch-1',
+        startedAtMs: 0
+      })
+    ).toEqual({ decision: 'accept' })
+
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('/etc/hosts', { id: 'item-patch-2' })
+    })
+    const outside = target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-2',
+      startedAtMs: 0
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+      input: { files: Array<{ path: string }> }
+    }
+    expect(approval.input.files[0]!.path).toBe('/etc/hosts')
+    dispatcher.resolveApproval(approval.requestId, 'allow')
+    await outside
+    target.completeTurn()
+    await pending
+  })
+
+  it('a fileChange request with NO known changes ASKS — never allows on no evidence', async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('auto')
+    const decisionPromise = target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-unknown',
+      startedAtMs: 0
+    })
+    await tick()
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call, 'a request with nothing to gate must ask even under auto').toBeTruthy()
+    dispatcher.resolveApproval((call![1] as { requestId: string }).requestId, 'allow')
+    await decisionPromise
+    target.completeTurn()
+    await pending
+  })
+
+  it('never grants a native permission profile, and never answers a user question', async () => {
+    const { target, ctx, pending } = await startTarget('default')
+    expect(
+      await target.serverRequest('item/permissions/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-perm-1'
+      })
+    ).toEqual({ permissions: {}, scope: 'turn' })
+    expect(
+      await target.serverRequest('item/tool/requestUserInput', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-q-1',
+        questions: [{ id: 'q', question: 'which?', header: null, isSecret: false, isOther: false }]
+      })
+    ).toEqual({ answers: {} })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it('refuses a request raised by a native CHILD thread the target spawned', async () => {
+    const { target, pending } = await startTarget('default')
+    await expect(
+      target.serverRequest('item/commandExecution/requestApproval', {
+        ...commandRequest('ls'),
+        threadId: 'some-child-thread'
+      })
+    ).rejects.toThrow('no live owning dispatch turn')
+    target.completeTurn()
+    await pending
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): streaming, result, usage', () => {
+  it('folds plan and thinking items, seals interrupted thinking, and rejects late completed deltas across owners', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000)
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+      const ctx1 = makeCtx({ fromEngine: 'claude', toolUseId: 'codex-owner-1' })
+      const first = dispatcher.dispatch({ engine: 'codex', prompt: 'first' }, ctx1)
+      await vi.advanceTimersByTimeAsync(0)
+      const turn1 = target.currentTurnId()
+
+      target.notify('item/reasoning/summaryTextDelta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'reason-1',
+        delta: 'considering'
+      })
+      vi.setSystemTime(1_250)
+      target.notify('item/completed', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        item: { type: 'reasoning', id: 'reason-1', summary: ['considering'], content: [] }
+      })
+      target.notify('item/plan/delta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'plan-1',
+        delta: 'step one'
+      })
+      target.notify('item/completed', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        item: { type: 'plan', id: 'plan-1', text: 'step one' }
+      })
+      const beforeLate = ctx1.emit.mock.calls.filter(
+        ([channel]) => channel === 'session:item-open'
+      ).length
+      target.notify('item/plan/delta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'plan-1',
+        delta: ' late'
+      })
+      expect(
+        ctx1.emit.mock.calls.filter(([channel]) => channel === 'session:item-open').length
+      ).toBe(beforeLate)
+      target.completeTurn({ turnId: turn1, text: 'first done' })
+      await first
+
+      const ctx2 = makeCtx({ fromEngine: 'claude', toolUseId: 'codex-owner-2' })
+      const second = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'second', sessionId: CODEX_THREAD_ID },
+        ctx2
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      const turn2 = target.currentTurnId()
+      vi.setSystemTime(2_000)
+      target.notify('item/reasoning/textDelta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn2,
+        itemId: 'reason-2',
+        delta: 'interrupted thought'
+      })
+      vi.setSystemTime(2_400)
+      dispatcher.disposeFor(ctx2.fromRoutingId)
+      await second
+
+      const core = new SyncCore({ capacity: 40 })
+      core.emit('session:created', ['codex-dispatch', { cwd: '/fixture', engineId: 'claude' }])
+      for (const ctx of [ctx1, ctx2]) {
+        for (const [channel, payload] of ctx.emit.mock.calls) {
+          if (channel === 'session:item-open') core.emit(channel, ['codex-dispatch', payload])
+          if (channel === 'session:item-delta') core.emit(channel, ['codex-dispatch', payload])
+          if (channel === 'session:item-seal') core.emit(channel, ['codex-dispatch', payload])
+        }
+      }
+      const session = core.getCanonicalState().sessions['codex-dispatch']
+      expect(Object.keys(session.itemStreams)).toHaveLength(0)
+      const owner1 = session.subagentMessages['codex-owner-1']
+      expect(owner1.flatMap((message) => message.content)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'thinking', text: 'considering', durationMs: 250 }),
+          expect.objectContaining({
+            type: 'tool_use',
+            toolName: 'plan',
+            toolInput: { plan: 'step one' }
+          })
+        ])
+      )
+      expect(session.subagentMessages['codex-owner-2'][0].content[0]).toEqual({
+        type: 'thinking',
+        text: 'interrupted thought',
+        durationMs: 400
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("streams items, deltas and tool results to the caller's subagent channels under ctx.toolUseId", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    target.notify('item/agentMessage/delta', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-msg-1',
+      delta: 'Hel'
+    })
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexCommandItem('ls')
+    })
+    target.notify('item/completed', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexCommandItem('ls', { status: 'completed', output: 'a.txt', exitCode: 0 })
+    })
+    // The raw command output is NOT streamed — same as every other direction.
+    target.notify('item/commandExecution/outputDelta', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      delta: 'a.txt'
+    })
+    target.completeTurn({ text: 'all done' })
+    const result = await pending
+
+    const itemId = `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-cmd-1'])}`
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_dispatch_1', kind: 'text' }),
+      chunk: 'Hel'
+    })
+    expect(ctx.emit).toHaveBeenCalledWith('session:subagent-tool-result', {
+      toolUseId: 'toolu_dispatch_1',
+      toolResultToolUseId: itemId,
+      result: 'a.txt',
+      isError: false
+    })
+    const toolUse = ctx.emit.mock.calls.find(
+      (c) =>
+        c[0] === 'session:subagent-message' &&
+        (c[1] as { message: { content: Array<{ type: string }> } }).message.content.some(
+          (b) => b.type === 'tool_use'
+        )
+    )
+    expect(toolUse).toBeTruthy()
+    // One command stream, and only ONE — the outputDelta above is skipped.
+    const deltas = ctx.emit.mock.calls.filter((c) => c[0] === 'session:item-delta')
+    expect(deltas).toHaveLength(1)
+    expect(result.text).toBe('all done')
+    expect(result.sessionId).toBe(CODEX_THREAD_ID)
+  })
+
+  it('drops notifications for a native CHILD thread — one dispatch is one card, and a grandchild has no home in it', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.notify('item/completed', {
+      threadId: 'some-child-thread',
+      turnId: 'child-turn',
+      item: codexAgentMessage('child chatter')
+    })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("records ONE usage row per turn: the thread's cumulative total minus the previous turn's baseline", async () => {
+    const recordUsageEvent = vi.fn()
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      recordUsageEvent
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 120, inputTokens: 100, outputTokens: 20 }),
+        last: codexUsage({ totalTokens: 120 }),
+        modelContextWindow: 400000
+      }
+    })
+    target.completeTurn({ durationMs: 4242 })
+    const firstResult = await first
+
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+      parentRoutingId: 'routing-1',
+      origin: 'dispatch',
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      sessionId: CODEX_THREAD_ID,
+      messageId: expect.stringContaining('toolu_dispatch_1'),
+      tokens: { input: 100, output: 20, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
+
+    // A SECOND turn on the same thread reports the CUMULATIVE total; the row
+    // must carry the delta, not the running total.
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 200, inputTokens: 160, outputTokens: 40 }),
+        last: codexUsage({ totalTokens: 200 }),
+        modelContextWindow: 400000
+      }
+    })
+    target.completeTurn()
+    await second
+    expect(recordUsageEvent.mock.calls[1]![0]).toMatchObject({
+      tokens: { input: 60, output: 20, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
+  })
+
+  it('an unpriced model is never counted as free — nothing is folded into the session', async () => {
+    const recordUsageEvent = vi.fn()
+    const target = makeFakeCodexTarget({
+      configModel: 'gpt-nonexistent-preview',
+      catalog: [
+        {
+          model: 'gpt-nonexistent-preview',
+          isDefault: true,
+          supportedReasoningEfforts: [],
+          inputModalities: []
+        }
+      ]
+    })
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      recordUsageEvent
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 10, inputTokens: 8, outputTokens: 2 }),
+        last: codexUsage({ totalTokens: 10 }),
+        modelContextWindow: null
+      }
+    })
+    target.completeTurn()
+    await pending
+    // The row carries the SPLIT and no engine figure; the recorder prices it,
+    // and a model with no price leaves both cost columns null (never 0).
+    expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+      engineCostIsEquivalent: true,
+      tokens: expect.objectContaining({ input: 8, output: 2 })
+    })
+    expect(recordUsageEvent.mock.calls[0]![0].engineCostUsd ?? null).toBeNull()
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('a turn/completed carrying an error is an isError result plus a "failed" notification', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.completeTurn({ status: 'failed', error: { message: 'model overloaded' }, items: [] })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('model overloaded')
+    const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
+    expect((notification[1] as { status: string }).status).toBe('failed')
+  })
+
+  it('a turn that produced no agent message returns the placeholder rather than empty text', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn({ items: [] })
+    const result = await pending
+    expect(result.text).toBe('(the dispatched agent returned no text)')
+  })
+
+  it('an app-server disconnect mid-turn settles the turn as an error instead of hanging it', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.disconnect('process-exited')
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('process-exited')
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): continuation, model, stop, dispose', () => {
+  it('continuation: session_id reuses the live entry — no second thread/start, no second spawn', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.completeTurn({ text: 'first' })
+    const firstResult = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    target.completeTurn({ text: 'second' })
+    const secondResult = await second
+
+    expect(secondResult.text).toBe('second')
+    expect(target.spawnCodexTarget).toHaveBeenCalledTimes(1)
+    expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    expect(target.requests.filter((entry) => entry.method === 'turn/start')).toHaveLength(2)
+  })
+
+  it('continuation with an unknown sessionId is an isError — NEVER a thread/resume of a caller-named thread', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', sessionId: 'someone-elses-thread' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Unknown dispatch session')
+    expect(target.spawnCodexTarget).not.toHaveBeenCalled()
+  })
+
+  it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const first = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
+    )
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-b' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Unknown dispatch session')
+  })
+
+  it('a busy target rejects a concurrent same-session_id dispatch without disturbing the running turn', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const running = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    const rejected = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'three', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(rejected.isError).toBe(true)
+    expect(rejected.text).toContain('already running a turn')
+
+    target.completeTurn({ text: 'second' })
+    expect((await running).text).toBe('second')
+  })
+
+  it('refuses an explicitly requested model outside the allowlist BEFORE spawning anything', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      dispatch: { allowedModels: ['gpt-5.6-luna'] }
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', model: 'gpt-5.6-terra' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe(
+      'Model "gpt-5.6-terra" is not in the user-configured allowlist for codex dispatch. ' +
+        'Allowed models: gpt-5.6-luna'
+    )
+    expect(target.spawnCodexTarget).not.toHaveBeenCalled()
+  })
+
+  it('refuses the CONFIG-resolved default too when it falls outside the allowlist, and never opens a thread', async () => {
+    const target = makeFakeCodexTarget({ configModel: 'gpt-5.6-terra' })
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      dispatch: { allowedModels: ['gpt-5.6-luna'] }
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('not in the user-configured allowlist for codex dispatch')
+    expect(target.requests.some((entry) => entry.method === 'thread/start')).toBe(false)
+    expect(target.client.detach).toHaveBeenCalled()
+  })
+
+  it('a model the native catalog does not carry is refused by selectCodexModel', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', model: 'gpt-9-imaginary' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('unavailable in the native catalog')
+  })
+
+  it('a non-openai provider is refused before a thread exists', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: makeFakeCodexTarget({
+        requestHandler: (method) =>
+          method === 'config/read'
+            ? { config: { model: 'x', model_provider: 'azure' } }
+            : { data: [], nextCursor: null }
+      }).spawnCodexTarget
+    })
+    void target
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('only the native OpenAI provider')
+  })
+
+  it('stopDispatch interrupts the native turn, settles as stopped, and KEEPS the thread alive for continuation', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_stop_1', 'routing-1')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe('Dispatch stopped by user.')
+    expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+    expect(target.requests.find((e) => e.method === 'turn/interrupt')!.params).toEqual({
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID
+    })
+    expect(target.client.abortServerRequests).toHaveBeenCalledWith(CODEX_THREAD_ID, CODEX_TURN_ID)
+    // Turn-scoped: the thread (and the host under it) survive for a continuation.
+    expect(target.client.detach).not.toHaveBeenCalled()
+    const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
+    expect((notification[1] as { status: string }).status).toBe('stopped')
+
+    // The entry survives: a continuation runs a fresh turn on the same thread.
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: result.sessionId },
+      ctx
+    )
+    await tick()
+    target.completeTurn({ text: 'second' })
+    expect((await second).text).toBe('second')
+  })
+
+  it("a stopped turn's own late turn/completed cannot settle the NEXT turn (retired by id)", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_2' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    dispatcher.stopDispatch('toolu_stop_2', 'routing-1')
+    const stopped = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: stopped.sessionId },
+      ctx
+    )
+    await tick()
+    // The ABANDONED turn's terminal event, arriving late.
+    target.completeTurn({ text: 'stale', turnId: CODEX_TURN_ID })
+    const sentinel = Symbol('still running')
+    expect(await Promise.race([second, Promise.resolve(sentinel)])).toBe(sentinel)
+    target.completeTurn({ text: 'fresh' })
+    expect((await second).text).toBe('fresh')
+  })
+
+  it('a late approval request from an already stopped turn is refused, never forwarded', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_3' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    dispatcher.stopDispatch('toolu_stop_3', 'routing-1')
+    await pending
+
+    const decision = await target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-late',
+      startedAtMs: 0,
+      command: 'ls',
+      cwd: '/tmp/xeng-project'
+    })
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+  })
+
+  it('a stop dismisses a forwarded approval still pending for that target', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_4' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    const decisionPromise = target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      startedAtMs: 0,
+      command: 'ls',
+      cwd: '/tmp/xeng-project'
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.stopDispatch('toolu_stop_4', 'routing-1')
+    await pending
+    expect(ctx.emit).toHaveBeenCalledWith('session:approval-dismiss', {
+      requestId: approval.requestId
+    })
+    expect(await decisionPromise).toEqual({ decision: 'decline' })
+  })
+
+  it('disposeFor detaches the thread, unregisters the target and settles a turn in flight', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-dispose' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    dispatcher.disposeFor('routing-dispose')
+    const result = await pending
+    // ADR-069 §7: the target leaves the host, it does not kill it — and because
+    // no process dies, the in-flight turn is settled explicitly (it used to ride
+    // out on the client's own `onDisconnect`) and interrupted on the wire.
+    expect(target.client.detach).toHaveBeenCalledTimes(1)
+    expect(target.requests.some((entry) => entry.method === 'turn/interrupt')).toBe(true)
+    expect(result.isError).toBe(true)
+
+    const dead = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    expect(dead.isError).toBe(true)
+    expect(dead.text).toContain('Unknown dispatch session')
+  })
+
+  it('disposeFor leaves ANOTHER session’s codex target alone', async () => {
+    const a = makeFakeCodexTarget({ threadId: 'codex-thread-a' })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: a.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
+    )
+    await tick()
+    a.completeTurn()
+    await pending
+    dispatcher.disposeFor('routing-other')
+    expect(a.client.detach).not.toHaveBeenCalled()
+  })
+
+  it('the cumulative cost cap rejects a continuation once it is reached', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      dispatch: { maxCostUsd: 0.0000001 }
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 1000, inputTokens: 900, outputTokens: 100 }),
+        last: codexUsage({ totalTokens: 1000 }),
+        modelContextWindow: null
+      }
+    })
+    target.completeTurn()
+    const firstResult = await first
+    expect(firstResult.text).toContain('dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('codex', 'gpt-5.6-luna', expect.any(Number))
+
+    const second = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('Dispatch cost cap')
+  })
+
+  it('the configured absolute cap interrupts the turn and records a failed row', async () => {
+    vi.useFakeTimers()
+    try {
+      const recordUsageEvent = vi.fn()
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 60_000 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10,
+        recordUsageEvent
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+      await advance(70_000)
+      // The give-up path's bounded grace waits (codexAbortSettleGraceMs) run
+      // AFTER the cap fires, so the clock has to keep moving past them.
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('Dispatch timed out')
+      expect(result.text).toContain('1 minutes')
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+      expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+      expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+        engineId: 'codex',
+        origin: 'dispatch',
+        sessionId: CODEX_THREAD_ID
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+/**
+ * Slice 2b guard 5 (target half) — a dispatch target bills the CALLER's
+ * subscription (ADR-068 §2).
+ *
+ * `createCodexTarget` builds one hook per target from the injected factory; what
+ * this pins is the ACCOUNT that factory is asked for, straight off
+ * `DispatchContext.chatgptAccountId`.
+ *
+ * FINDING, recorded rather than worked around: today nothing can drive this end
+ * to end. Only `CodexSession` sets `chatgptAccountId` (its own pin), and
+ * `dispatchInner` refuses `req.engine === ctx.fromEngine`, so a Codex caller can
+ * never reach a Codex target. The two halves are therefore pinned separately —
+ * the caller half in `core/codex/__tests__/codex-session.test.ts` ("hands a
+ * dispatch target the caller pin"), the target half here against a context that
+ * carries the field. The wiring is what makes the pair correct the moment either
+ * of those two facts changes; without it, a pinned session's delegated work
+ * would silently bill the active account (ADR-059's rule, applied to accounts).
+ */
+describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068 §2)', () => {
+  it.each([
+    ['a caller pin', 'acct-b', 'acct-b'],
+    ['an explicit follow-active', null, null],
+    ['a caller that carries no account at all', undefined, null]
+  ])('asks for the host of %s', async (_label, chatgptAccountId, expected) => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexVaultAccounts: true
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({
+        fromEngine: 'claude',
+        ...(chatgptAccountId !== undefined ? { chatgptAccountId } : {})
+      })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+
+    // One identity per PROCESS (ADR-068 §1), so the account the caller bills is
+    // which HOST this thread lands on — asked for on the acquire itself.
+    expect(target.spawnCalls[0]!.identity).toEqual({ accountId: expected })
+  })
+
+  it('asks for no identity at all when the vault is not wired — the hermetic default', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', chatgptAccountId: 'acct-b' })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+
+    expect(target.spawnCalls[0]!.identity).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// One liveness model for every dispatch direction (ADR-033's 2026-09-18
+// amendment). A dispatched agent runs until the USER's limit: undefined or 0
+// for `turnTimeoutMs`/`idleTimeoutMs` in the TARGET engine's DispatchConfig
+// means unlimited, in EVERY direction — there is no built-in cap left. The
+// opencode direction's own suite (above) already covers it; these cover the
+// three directions that used to run on the fixed `DISPATCH_TIMEOUT_MS`.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 2026-09-18)', () => {
+  /** Record the delay of every `setInterval` armed while a test runs, for the
+   *  "no watchdog was ever armed" assertions — the progress heartbeat is an
+   *  interval too, so a bare `vi.getTimerCount()` cannot tell them apart. */
+  function recordIntervals(): { delays: () => number[]; restore: () => void } {
+    const spy = vi.spyOn(globalThis, 'setInterval')
+    return {
+      delays: () => spy.mock.calls.map((call) => call[1] as number),
+      restore: () => spy.mockRestore()
+    }
+  }
+
+  // ── opencode direction ───────────────────────────────────────────────────
+  //
+  // Its own suite above already covers both caps set and both at 0; what was
+  // missing is the UNSET case, which used to mean 60/15 minutes rather than
+  // "no limit".
+
+  it('opencode: with no configured caps a turn that keeps producing events runs past 15 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await settle()
+
+      // 90 minutes of a working target — past the old 15-minute inactivity
+      // default (events keep coming) and past the old 60-minute absolute one.
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        stream.push('message.part.updated', {
+          sessionID: 'oc-sess-1',
+          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
+        })
+        await settle()
+      }
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('target answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('opencode: with no configured caps a SILENT turn is never aborted either — an unset inactivity cap is no cap', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await settle()
+      await advance(6 * 60 * 60_000) // six silent hours
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // ── Claude direction ─────────────────────────────────────────────────────
+
+  it('claude: with no configured caps a turn that keeps producing messages runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-unlimited'
+      } as SDKMessage)
+      await settle()
+
+      // 90 minutes of a working target — past the old fixed 10-minute
+      // DISPATCH_TIMEOUT_MS and past the old 60-minute opencode default.
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+
+      target.push(resultMsg({ result: 'finished after 90 minutes' }))
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('finished after 90 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 120_000 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-absolute'
+      } as SDKMessage)
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.lastAbortController()?.signal.aborted).toBe(true)
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: idleTimeoutMs fires only after SILENCE — a message resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_idle' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-idle' } as SDKMessage)
+      await settle()
+
+      // Four 90 s stretches (6 minutes, triple the 2-minute cap), each broken
+      // by one message — the clock keeps resetting.
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+
+      // Parked on a human: canUseTool forwards an approval nobody answers.
+      const canUseTool = target.lastCanUseTool()!
+      void canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal
+      } as unknown as Parameters<typeof canUseTool>[2])
+      await settle()
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+      await advance(600_000) // ten silent minutes, five times the cap
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(false)
+
+      // Answered — ordinary silence now times the turn out, naming the cap.
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+        requestId: string
+      }
+      dispatcher.resolveApproval(approval.requestId, 'allow')
+      await advance(130_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 0, idleTimeoutMs: 0 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode' })
+      )
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-nowd' } as SDKMessage)
+      await advance(6 * 60 * 60_000) // six silent hours
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+      // The heartbeat is armed; the 10 s watchdog poll is not.
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.push(resultMsg({ result: 'still here' }))
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  // ── pi direction ─────────────────────────────────────────────────────────
+
+  it('pi: with no configured caps a turn that keeps producing events runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      target.pushEvent(piAssistantMessageEnd({ text: 'finished after 90 minutes' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 120_000 }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.client.request).toHaveBeenCalledWith({ type: 'abort' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: idleTimeoutMs fires only after SILENCE — an event resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: {
+            defaultModel: 'openai-codex/gpt-5.6-luna',
+            idleTimeoutMs: 120_000,
+            turnTimeoutMs: 0
+          }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_idle' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      void target.gateHandler()({
+        toolCallId: 'pi-call-parked',
+        toolName: 'bash',
+        input: { command: 'ls' }
+      })
+      await settle()
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
+        { requestId: string } | undefined
+      expect(approval).toBeTruthy()
+      await advance(600_000)
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      dispatcher.resolveApproval(approval!.requestId, 'allow')
+      await advance(130_000)
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: {
+            defaultModel: 'openai-codex/gpt-5.6-luna',
+            turnTimeoutMs: 0,
+            idleTimeoutMs: 0
+          }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude' })
+      )
+      await settle()
+      await advance(6 * 60 * 60_000)
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.pushEvent(piAssistantMessageEnd({ text: 'still here' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  // ── Codex direction ──────────────────────────────────────────────────────
+
+  /** One notification addressed to the target thread — the codex liveness feed. */
+  const codexPing = (target: ReturnType<typeof makeFakeCodexTarget>, total: number): void => {
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      tokenUsage: {
+        total: codexUsage({ totalTokens: total, inputTokens: total, outputTokens: 0 }),
+        last: codexUsage({ totalTokens: total }),
+        modelContextWindow: null
+      }
+    })
+  }
+
+  it('codex: with no configured caps a turn that keeps producing notifications runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      target.completeTurn({ text: 'finished after 90 minutes' })
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('finished after 90 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 120_000 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: idleTimeoutMs fires only after SILENCE — a notification resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { idleTimeoutMs: 120_000, turnTimeoutMs: 0 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_idle' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      void target.serverRequest('item/commandExecution/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: target.currentTurnId(),
+        itemId: 'item-cmd-parked',
+        startedAtMs: 0,
+        kind: 'command',
+        environmentId: null,
+        command: '/bin/zsh -lc "rm -rf x"',
+        cwd: '/tmp/xeng-project'
+      })
+      await settle()
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
+        { requestId: string } | undefined
+      expect(approval).toBeTruthy()
+      await advance(600_000)
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      dispatcher.resolveApproval(approval!.requestId, 'allow')
+      await advance(130_000)
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 0, idleTimeoutMs: 0 },
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude' })
+      )
+      await settle()
+      await advance(6 * 60 * 60_000)
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.completeTurn({ text: 'still here' })
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-071 §1 — a dispatched turn is a usage LEDGER row, and the only record of
+// it. `dispatched_usage` was a second, poorer copy of the same turn; migration
+// v20 dropped it, and every assertion in this file that used to read it now
+// reads the ledger event the same call produces.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071 §1)', () => {
+  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
+  const PRICED = 'openai/gpt-5.6-luna'
+
+  /** Frozen dispatcher clock, so a row's `message_id` is a literal to assert. */
+  const LEDGER_TS = 1_700_000_000_000
+
+  /** `dispatch:<who>:<ts>:<seq>` — the id these tests expect to see. */
+  function ledgerId(who: string, seq: number, ts: number = LEDGER_TS): string {
+    return `dispatch:${who}:${ts}:${seq}`
+  }
+
+  function ledgerHarness(overrides: Partial<DispatcherDeps> = {}): ReturnType<
+    typeof makeHarness
+  > & {
+    recordUsageEvent: ReturnType<typeof vi.fn>
+  } {
+    const recordUsageEvent = vi.fn()
+    const harness = makeHarness({
+      now: () => LEDGER_TS,
+      recordUsageEvent,
+      ...overrides
+    })
+    return { ...harness, recordUsageEvent }
+  }
+
+  /** The one ledger event a call recorded. */
+  function ledgerRow(recordUsageEvent: ReturnType<typeof vi.fn>): UsageTurnEvent {
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    return recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent
+  }
+
+  it('an opencode turn is one ledger row carrying the whole turn', async () => {
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: 'ok',
+        info: {
+          tokens: { input: 1_000, output: 200, reasoning: 50, cache: { read: 400, write: 100 } },
+          cost: 0.0123
+        }
+      })
+    ])
+
+    const ctx = makeCtx({ toolUseId: 'toolu_ledger_1' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      sessionId: 'oc-sess-1',
+      origin: 'dispatch',
+      parentRoutingId: 'routing-1',
+      messageId: ledgerId('toolu_ledger_1', 1),
+      source: 'live',
+      // opencode reports a CHARGE, so the ledger's cost rule must not read
+      // `info.cost` as an equivalent.
+      engineCostUsd: 0.0123,
+      engineCostIsEquivalent: false,
+      // Disjoint, with reasoning folded into output — the same mapping the
+      // equivalent is priced from.
+      tokens: { input: 1_000, output: 250, cacheWrite: 100, cacheWrite1h: 0, cacheRead: 400 }
+    })
+  })
+
+  it('a THROWING ledger write never reaches the dispatch flow — the turn still succeeds', async () => {
+    const recordUsageEvent = vi.fn(() => {
+      throw new Error('usage_event is locked')
+    })
+    const { dispatcher } = makeHarness({ recordUsageEvent })
+
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('the row is stamped with the dispatcher clock at the turn end, not the write', async () => {
+    const clock = 1_700_000_123_456
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      now: () => clock
+    })
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_ts' })
+    )
+    expect(ledgerRow(recordUsageEvent).ts).toBe(clock)
+  })
+
+  it('one turn is exactly one row', async () => {
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
+
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_once' })
+    )
+
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(ledgerRow(recordUsageEvent).messageId).toBe(ledgerId('toolu_once', 1))
+  })
+
+  it('TWO turns under ONE tool_use id are TWO rows — a continuation spends too', async () => {
+    // The tool_use id alone looked like the natural dedup key, but a single
+    // dispatch call can drive several turns against the same target (this is
+    // the continuation path: same ctx, same tool_use id, `sessionId` passed
+    // back in). Keying on it would hand every turn after the first to the
+    // ledger's UNIQUE(message_id) to drop — silently, while the cap counted
+    // the spend.
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
+    const ctx = makeCtx({ toolUseId: 'toolu_retry' })
+
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x', sessionId: first.sessionId }, ctx)
+
+    expect(recordUsageEvent).toHaveBeenCalledTimes(2)
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(ids).toEqual([ledgerId('toolu_retry', 1), ledgerId('toolu_retry', 2)])
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('an id-less dispatch keys the row on the target session instead', async () => {
+    let clock = LEDGER_TS
+    const { dispatcher, recordUsageEvent } = ledgerHarness({ now: () => clock })
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    clock += 5_000
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y' }, makeCtx())
+
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(ids).toEqual([ledgerId('oc-sess-1', 1), ledgerId('oc-sess-2', 2, LEDGER_TS + 5_000)])
+  })
+
+  it('two turns in the SAME millisecond are still two rows — the sequence breaks the tie', async () => {
+    // The frozen clock is the point: nothing but the counter separates these.
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
+    const ctx = makeCtx({ toolUseId: 'toolu_same_ms' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y', sessionId: first.sessionId }, ctx)
+
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('an opencode target names its account and its billing type', async () => {
+    vi.spyOn(opencodeAuthProvider, 'accountIdentity').mockReturnValue({
+      accountKey: 'chatgpt:acct_123:user_456',
+      accountLabel: 'someone@example.test (plus)'
+    })
+    const billing = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    try {
+      const { dispatcher, recordUsageEvent } = ledgerHarness()
+      await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'chatgpt:acct_123:user_456',
+        accountLabel: 'someone@example.test (plus)',
+        billingType: 'subscription'
+      })
+    } finally {
+      billing.mockRestore()
+    }
+  })
+
+  it('a FAILED opencode turn is a ledger row too — the ledger records spend, not success', async () => {
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: '',
+        info: {
+          tokens: { input: 300, output: 60 },
+          cost: 0.004,
+          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
+        }
+      })
+    ])
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_failed' })
+    )
+    expect(result.isError).toBe(true)
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_failed', 1),
+      tokens: { input: 300, output: 60, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+      engineCostUsd: 0.004
+    })
+  })
+
+  it('a turn whose numbers were never read still records a row, with zeros and no engine figure', async () => {
+    const { dispatcher, client, stream, recordUsageEvent } = ledgerHarness()
+    holdTurn(client)
+    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
+    const pending = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_blind' })
+    )
+    await tick()
+    completeTurn(stream)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    // Zeros, because `usage_event` has no way to say "unknown tokens" — which
+    // is why S2c2's readers must take `api_cost_usd`, not the split, as the
+    // statement of what a turn was worth.
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_blind', 1),
+      tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+      engineCostUsd: null
+    })
+  })
+
+  it("a pi target accumulates the split across the turn's several assistant messages", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi' })
+    )
+    await tick()
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'one', input: 100, output: 20, cacheRead: 5, cacheWrite: 2 })
+    )
+    // A fresh `message_start` is what lets the mapper see a SECOND assistant
+    // message in the same turn (a tool call splits one turn into several).
+    target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    target.pushEvent(
+      piAssistantMessageEnd({
+        text: 'two',
+        cost: 0.04,
+        input: 40,
+        output: 10,
+        cacheRead: 1,
+        cacheWrite: 3
+      })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna',
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_pi', 1),
+      accountKey: 'pi:openai-codex:native',
+      tokens: { input: 140, output: 30, cacheWrite: 5, cacheWrite1h: 0, cacheRead: 6 },
+      // pi prices from its own catalog whatever the credential, so its figure
+      // is a list price and never a bill.
+      engineCostUsd: 0.04,
+      engineCostIsEquivalent: true
+    })
+  })
+
+  it('a slash-less configured model is canonicalised before anything keys on it', async () => {
+    // opencode decodes a bare id to its default vendor, so `gpt-5-codex` and
+    // `opencode/gpt-5-codex` are the same model spelled two ways. The ledger
+    // stores the decoded halves and its reader re-encodes them, so unless the
+    // WRITE side picks one spelling, a reloaded session's breakdown carries
+    // the target twice: once under the raw string the live fold-in used, once
+    // under the reader's re-encode.
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'gpt-5-codex' } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0.01 } })
+    ])
+
+    const ctx = makeCtx({ toolUseId: 'toolu_canon' })
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'opencode',
+      vendorId: 'opencode',
+      modelId: 'gpt-5-codex'
+    })
+    // The live breakdown keys on the SAME string the reader will rebuild.
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
+      'opencode',
+      'opencode/gpt-5-codex',
+      expect.closeTo(0.01, 6)
+    )
+  })
+
+  it('a pi turn pi itself prices at 0 is still counted by the cap, from its tokens', async () => {
+    // The cap and the ledger read the same turn, so they must read it the same
+    // way: pricing the ledger row off the tokens while the cap counted pi's
+    // `0` would be one turn with two answers. `piCostInputs` only reaches for
+    // the tokens when pi reported no positive charge, so a real figure still
+    // wins.
+    const target = makeFakePiTarget()
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_zero' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // One million input tokens at $0.20/MTok, and pi reporting nothing for it.
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0, input: 1_000_000, output: 0 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
+      'pi',
+      'openai-codex/gpt-5.6-luna',
+      expect.closeTo(0.2, 6)
+    )
+    // And the ledger row keeps pi's raw figure, unchanged, beside the tokens.
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineCostUsd: 0,
+      tokens: { input: 1_000_000, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
+  })
+
+  it("a Claude target passes the result's usage split and the app's active account", async () => {
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'someone@example.test',
+      organizationUuid: 'org-uuid-1',
+      organizationName: 'Example Org',
+      billingType: 'subscription'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(
+        resultMsg({
+          result: 'the answer',
+          total_cost_usd: 0.03,
+          duration_ms: 4200,
+          usage: {
+            input_tokens: 200,
+            output_tokens: 80,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 90,
+            // The 1h-TTL SUBSET of the 30 written above, billed at 2× input.
+            cache_creation: { ephemeral_5m_input_tokens: 18, ephemeral_1h_input_tokens: 12 }
+          }
+        })
+      )
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        modelId: 'haiku',
+        sessionId: 'claude-sess-1',
+        origin: 'dispatch',
+        parentRoutingId: 'routing-1',
+        messageId: ledgerId('toolu_claude', 1),
+        accountKey: 'anthropic:org-uuid-1:acct-uuid-1',
+        accountLabel: 'someone@example.test (Example Org)',
+        billingType: 'subscription',
+        tokens: { input: 200, output: 80, cacheWrite: 30, cacheWrite1h: 12, cacheRead: 90 },
+        // cli.js reports an API-equivalent whatever the plan (ADR-034).
+        engineCostUsd: 0.03,
+        engineCostIsEquivalent: true
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude turn on a usage_based account is BILLED — the row must not call it covered', async () => {
+    // `oauthAccount.billingType` is the only signal that separates an OAuth
+    // account billed per token from one on a plan, and `UsageFetcher` is the
+    // only reader of it. Taking the billing type from the auth probe instead
+    // would answer `subscription` here and write `billed_cost_usd: 0` over
+    // money that really left a wallet.
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'someone@example.test',
+      organizationUuid: 'org-uuid-1',
+      billingType: 'apiKey'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_usage_based' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'the answer', total_cost_usd: 0.03 }))
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'anthropic:org-uuid-1:acct-uuid-1',
+        billingType: 'apiKey'
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude target resolves its account ONCE, at creation, not per turn', async () => {
+    // The spawned cli.js holds the credential it was given at spawn, so a
+    // sign-in change mid-target cannot move which account its turns billed —
+    // and a second read would record the wrong one.
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'first@example.test',
+      organizationUuid: 'org-uuid-1',
+      billingType: 'subscription'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_pinned' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'one', total_cost_usd: 0.01 }))
+      await first
+
+      // The user switches accounts between the two turns.
+      activeAccount.mockReturnValue({
+        uuid: 'acct-uuid-2',
+        email: 'second@example.test',
+        organizationUuid: 'org-uuid-2',
+        billingType: 'apiKey'
+      })
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg({ result: 'two', total_cost_usd: 0.02 }))
+      await second
+
+      const keys = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).accountKey)
+      expect(keys).toEqual(['anthropic:org-uuid-1:acct-uuid-1', 'anthropic:org-uuid-1:acct-uuid-1'])
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude target with no known active account records the unknown one, not half a key', async () => {
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue(null)
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'the answer', total_cost_usd: 0.01 }))
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'unknown',
+        accountLabel: null,
+        billingType: 'unknown'
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Codex target passes its turn DELTA as a disjoint split, under the native account', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      loadEngineConfig: vi.fn(() => ({ dispatch: {} }) as EngineConfig)
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex' })
+    )
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({
+          totalTokens: 1_000,
+          inputTokens: 800,
+          cachedInputTokens: 500,
+          cacheWriteInputTokens: 100,
+          outputTokens: 200,
+          reasoningOutputTokens: 40
+        }),
+        last: codexUsage({ totalTokens: 1_000 }),
+        modelContextWindow: 400_000
+      }
+    })
+    target.completeTurn()
+    await pending
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_codex', 1),
+      // No vault accounts on this dispatcher, so the vault is never read and
+      // the honest answer is Codex signed in on its own.
+      accountKey: 'codex:openai:native',
+      billingType: 'unknown',
+      // 800 total prompt minus 500 cached minus 100 cache-written.
+      tokens: { input: 200, output: 200, cacheWrite: 100, cacheWrite1h: 0, cacheRead: 500 },
+      // codexTurnCostUsd is our own table's equivalent, not a charge Codex
+      // reported, so the row carries no engine figure at all.
+      engineCostUsd: null,
+      engineCostIsEquivalent: true
+    })
   })
 })

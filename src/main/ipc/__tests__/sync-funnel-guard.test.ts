@@ -22,13 +22,8 @@ import {
   deliveryDeltas,
   volatileStreamChannels
 } from '../../../core/shared/sync/channels'
-import { applyEvent, emptyAux } from '../../../core/shared/sync/reducer'
-import {
-  sessionIdOfStream,
-  streamEventScopeOf,
-  streamFrameFrom,
-  streamFrameToEmission
-} from '../../../core/shared/sync/stream'
+import { applyEvent } from '../../../core/shared/sync/reducer'
+import { streamEventScopeOf } from '../../../core/shared/sync/stream'
 import {
   emptyCanonicalState,
   emptySession,
@@ -237,9 +232,7 @@ describe('emission funnel (item 2)', () => {
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
     // 4c: a session emission names no window at all — every channel it emits is
     // replicated or volatile, so the per-session `win` is not a delivery target.
-    expect(src).toMatch(
-      /emitEvent\(channel, \[this\.routingId, this\.trackThinkingSpan\(channel, data\)\]\)/
-    )
+    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, data\]\)/)
   })
 })
 
@@ -459,21 +452,17 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   // reads `volatileFlavor`. If the table and the dispatch could disagree, these
   // assertions are where it shows.
   const volatile = volatileStreamChannels()
-  const textStreams = volatileStreamChannels('text-stream')
   const passThrough = volatileStreamChannels('pass-through')
 
-  it('is the two delta channels plus the three tails, split by flavor', () => {
-    expect(textStreams).toEqual(['session:stream', 'session:subagent-stream'])
+  it('partitions item deltas and the three tails by flavor', () => {
+    const itemStreams = volatileStreamChannels('item-stream')
+    expect(itemStreams).toEqual(['session:item-delta'])
     expect(passThrough).toEqual([
       'automation:stream-event',
       'session:background-output',
       'session:bash-output'
     ])
-    // Every member has a flavor, and the two flavors partition the lane. A
-    // volatile channel with no flavor would be routed by `SyncCore.process`'s
-    // else-branch into `streamFrameFrom`, which returns null for it — a silent
-    // drop of the whole channel.
-    expect([...textStreams, ...passThrough].sort()).toEqual(volatile)
+    expect([...itemStreams, ...passThrough].sort()).toEqual(volatile)
   })
 
   it('the interim `volatile-pending-phase-5` class is GONE, not merely empty', () => {
@@ -494,21 +483,9 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     }
   })
 
-  it('text-stream ⇒ canonical-backed, and has a streamId', () => {
-    for (const channel of textStreams) {
-      const spec = channelSpec(channel)!
-      // Canonical-backed: the accumulation is a snapshot field, which is what
-      // makes an unwatched session still converge at message boundaries.
-      expect(spec.canonical, `${channel} lost its canonical backing`).toBe(true)
-      // And the streamId helper covers it — a channel on the lane with no frame
-      // translation would be silently dropped by `SyncCore.process`.
-      const frame = streamFrameFrom(stateWithSession('rid'), emptyAux(), channel, [
-        'rid',
-        { type: 'text', text: 'hi', toolUseId: 'tu-1' }
-      ])
-      expect(frame, `${channel} has no streamId translation`).not.toBeNull()
-      expect(sessionIdOfStream(frame!.streamId)).toBe('rid')
-    }
+  it('obsolete transcript transport producers are explicitly rejected', () => {
+    expect(channelSpec('session:stream')).toBeUndefined()
+    expect(channelSpec('session:subagent-stream')).toBeUndefined()
   })
 
   it('pass-through ⇒ NOT canonical, and every one has a delivery scope', () => {
@@ -547,7 +524,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
 
   it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
     // Both halves matter. The SOURCE half: a `case 'session:stream':` growing
-    // back would be a second accumulator racing `applyStreamFrame`.
+    // back would be a second transcript accumulator racing the item lifecycle.
     const reducerSrc = readCode('src/core/shared/sync/reducer.ts')
     for (const channel of volatile) {
       expect(reducerSrc).not.toContain(`case '${channel}':`)
@@ -556,11 +533,11 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // is identity-stable rather than a duplicate append.
     const before = stateWithSession('rid')
     for (const channel of volatile) {
-      const after = applyEvent(
-        before,
-        { channel, args: ['rid', { type: 'text', text: 'hi', toolUseId: 't' }], seq: 1 },
-        emptyAux()
-      )
+      const after = applyEvent(before, {
+        channel,
+        args: ['rid', { type: 'text', text: 'hi', toolUseId: 't' }],
+        seq: 1
+      })
       expect(after, `applyEvent still folds ${channel}`).toBe(before)
     }
   })
@@ -574,7 +551,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     expect(broken).toEqual([])
   })
 
-  it('text-stream channels have left SyncEventMap; the TAILS deliberately stay', () => {
+  it('obsolete transcript channels stay outside SyncEventMap; the tails remain', () => {
     // The typed map IS the subscription contract. For a text stream, leaving an
     // entry would advertise a listener that can never fire — the replica folds
     // those frames instead. For a TAIL it is the opposite: the pass-through
@@ -584,7 +561,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
       (m) => m[1]
     )
     expect(declared.length).toBeGreaterThan(30)
-    for (const channel of textStreams) {
+    for (const channel of ['session:stream', 'session:subagent-stream']) {
       expect(declared, `${channel} is still declared as a subscribable event`).not.toContain(
         channel
       )
@@ -594,62 +571,15 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     }
   })
 
-  it('in-process consumers keep their pre-split payload through ONE shared inverse', () => {
-    // The plugin bridge (ADR-005) and the engine tests' stub window both consumed
-    // these channels before the split. They still do — through an OBSERVER on the
-    // lane, not a connection — and both go through the same `streamFrameToEmission`,
-    // so there is one answer to "what did the emitter send".
-    expect(
-      streamFrameToEmission({
-        type: 'stream',
-        streamId: 'rid/thinking',
-        turnId: 0,
-        offset: 0,
-        chunk: 'weighing'
-      })
-    ).toEqual({
-      channel: 'session:stream',
-      routingId: 'rid',
-      data: { type: 'thinking', text: 'weighing' }
-    })
-    expect(
-      streamFrameToEmission({
-        type: 'stream',
-        streamId: 'rid/sub/tu-1/text',
-        turnId: 0,
-        offset: 0,
-        chunk: 'out'
-      })
-    ).toEqual({
-      channel: 'session:subagent-stream',
-      routingId: 'rid',
-      data: { type: 'text', toolUseId: 'tu-1', text: 'out' }
-    })
-    expect(
-      streamFrameToEmission({
-        type: 'stream',
-        streamId: 'bogus',
-        turnId: 0,
-        offset: 0,
-        chunk: 'x'
-      })
-    ).toBeNull()
-
-    // Both consumers import it rather than hand-rolling the reconstruction.
-    for (const rel of [
-      'src/main/services/plugin-manager.ts',
-      'src/test/helpers/sync-subscriber-window.ts'
-    ]) {
-      expect(readCode(rel), `${rel} does not use the shared inverse`).toMatch(
-        /streamFrameToEmission/
-      )
-    }
-    // And the plugin bridge observes the lane instead of pretending to be a client.
+  it('the plugin bridge synthesizes compatibility events directly from item identity', () => {
+    const plugin = readCode('src/main/services/plugin-manager.ts')
     expect(readCode('src/main/services/plugin-manager.ts')).toMatch(/addStreamObserver\(/)
+    expect(plugin).toMatch(/frame\.type === 'item-stream'/)
+    expect(plugin).not.toContain('streamFrameToEmission')
     // A PASS-THROUGH frame needs no inverse — it never stopped being the emission
     // — but the bridge must still forward it, or every plugin silently loses the
     // three tails it has always received.
-    expect(readCode('src/main/services/plugin-manager.ts')).toMatch(/frame\.type === 'stream-ev'/)
+    expect(plugin).toMatch(/frame\.type === 'stream-ev'/)
   })
 
   it('the volatile lane never reaches the audit log or the event fan-out', () => {

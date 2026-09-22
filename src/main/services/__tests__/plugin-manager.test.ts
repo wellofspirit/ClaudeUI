@@ -157,7 +157,10 @@ interface Scaffold {
   remoteDispatcher: RemoteDispatcher
 }
 
-function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }): Scaffold {
+function scaffold(opts?: {
+  sessionIdFor?: (routingId: string) => string | null
+  engineId?: 'claude' | 'opencode' | 'pi' | 'codex'
+}): Scaffold {
   const bridge = new TestIpcBridge()
   setIpcBridge(bridge)
   const win = bridge.createBrowserWindow()
@@ -165,7 +168,10 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
   const sessionManager = {
     getSessionId: vi.fn((routingId: string) =>
       opts?.sessionIdFor ? opts.sessionIdFor(routingId) : null
-    )
+    ),
+    forEach: vi.fn((fn: (session: { routingId: string; engineId: string }) => void) => {
+      if (opts?.engineId) fn({ routingId: 'R-1', engineId: opts.engineId })
+    })
   }
   const automationManager = {}
   const remoteDispatcher = new RemoteDispatcher()
@@ -208,6 +214,24 @@ function fireSessionEventViaBridge(
   // `prepareAndCreateSession` emits at spawn; this seed is that, minus the spawn.
   if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
   emitEvent(channel, [routingId, data])
+}
+
+function fireItemDelta(routingId: string, chunk: string): void {
+  if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
+  const target = { messageId: `fixture-${routingId}`, blockIndex: 0, kind: 'text' as const }
+  emitEvent('session:item-open', [
+    routingId,
+    {
+      target,
+      message: {
+        id: target.messageId,
+        role: 'assistant',
+        timestamp: 1,
+        content: [{ type: 'text', text: '' }]
+      }
+    }
+  ])
+  emitEvent('session:item-delta', [routingId, { target, chunk }])
 }
 
 // ---------------------------------------------------------------------------
@@ -480,12 +504,9 @@ describe('PluginManager', () => {
       delete (global as any).__sessionEvents
     })
 
-    it('forwards VOLATILE-lane deltas with the pre-phase-5 payload shape (parity guard)', async () => {
-      // `session:stream` / `session:subagent-stream` stopped being events in
-      // phase 5 S1. A plugin's contract predates that split and must not change
-      // because of it, so the bridge observes the stream lane in-process and
-      // re-materializes the emission through the SHARED inverse. This test is the
-      // guard: it fails if the observer, the gate or the inverse regresses.
+    it('synthesizes legacy plugin delta names from item appends (parity guard)', async () => {
+      // These names remain an in-process plugin contract. The bridge derives
+      // them only from the real item lane, including the target owner identity.
       s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
 
       writePlugin({
@@ -502,15 +523,40 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', {
-        type: 'thinking',
-        text: 'weighing'
-      })
-      fireSessionEventViaBridge(s.manager, 'session:subagent-stream', 'R-1', {
-        toolUseId: 'tu-1',
-        type: 'text',
-        text: 'sub output'
-      })
+      syncCore.seedSession('R-1', { selectedEngineId: 'claude' })
+      const rootTarget = { messageId: 'root', blockIndex: 0, kind: 'thinking' as const }
+      const childTarget = {
+        messageId: 'child',
+        blockIndex: 0,
+        kind: 'text' as const,
+        ownerToolUseId: 'tu-1'
+      }
+      emitEvent('session:item-open', [
+        'R-1',
+        {
+          target: rootTarget,
+          message: {
+            id: 'root',
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'thinking', text: '' }]
+          }
+        }
+      ])
+      emitEvent('session:item-open', [
+        'R-1',
+        {
+          target: childTarget,
+          message: {
+            id: 'child',
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'text', text: '' }]
+          }
+        }
+      ])
+      emitEvent('session:item-delta', ['R-1', { target: rootTarget, chunk: 'weighing' }])
+      emitEvent('session:item-delta', ['R-1', { target: childTarget, chunk: 'sub output' }])
 
       const deltas = (global as any).__deltas as any[]
       expect(deltas).toHaveLength(2)
@@ -530,6 +576,252 @@ describe('PluginManager', () => {
       ])
       delete (global as any).__deltas
     })
+
+    it('preserves message observers across the Codex item lane without ringing prefixes', async () => {
+      s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
+      writePlugin({
+        id: 'item-listener',
+        entryJs: `module.exports = { activate(ctx) {
+        global.__itemMessages = []
+        global.__codexLegacyStreams = []
+        ctx.on('session:message', evt => global.__itemMessages.push(evt))
+        ctx.on('session:stream', evt => global.__codexLegacyStreams.push(evt))
+      } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-codex-item', { selectedEngineId: 'codex' })
+      const target = { messageId: 'item', blockIndex: 0, kind: 'text' }
+      const message = {
+        id: 'item',
+        role: 'assistant',
+        timestamp: 1,
+        content: [{ type: 'text', text: '' }]
+      }
+      emitEvent('session:item-open', ['R-codex-item', { target, message }])
+      const seq = syncCore.currentSeq()
+      emitEvent('session:item-delta', ['R-codex-item', { target, chunk: 'one' }])
+      emitEvent('session:item-delta', ['R-codex-item', { target, chunk: ' two' }])
+      expect(syncCore.currentSeq()).toBe(seq)
+      emitEvent('session:item-seal', [
+        'R-codex-item',
+        { message: { ...message, content: [{ type: 'text', text: 'final' }] } }
+      ])
+      expect((global as any).__itemMessages.map((m: any) => m.content[0].text)).toEqual([
+        'one',
+        'one two',
+        'final'
+      ])
+      expect((global as any).__codexLegacyStreams).toEqual([])
+      delete (global as any).__itemMessages
+      delete (global as any).__codexLegacyStreams
+    })
+
+    it.each(['claude', 'opencode', 'pi'] as const)(
+      'preserves legacy root stream observers for %s item appends',
+      async (engineId) => {
+        // The canonical engine is authoritative even if the legacy manager view is stale.
+        s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
+        writePlugin({
+          id: 'pi-stream-listener',
+          entryJs: `module.exports = { activate(ctx) {
+        global.__piStreams = []
+        ctx.on('session:stream', evt => global.__piStreams.push(evt))
+      } }`
+        })
+        await s.manager.loadAll()
+        syncCore.seedSession('R-1', { selectedEngineId: engineId })
+        const target = { messageId: 'pi-item', blockIndex: 0, kind: 'text' }
+        emitEvent('session:item-open', [
+          'R-1',
+          {
+            target,
+            message: {
+              id: 'pi-item',
+              role: 'assistant',
+              timestamp: 1,
+              content: [{ type: 'text', text: '' }]
+            }
+          }
+        ])
+        emitEvent('session:item-delta', ['R-1', { target, chunk: 'one' }])
+        expect((global as any).__piStreams).toEqual([
+          { routingId: 'R-1', sessionId: 'SID-1', type: 'text', text: 'one' }
+        ])
+        delete (global as any).__piStreams
+      }
+    )
+
+    it('does not expose Codex item appends through a lone legacy stream listener', async () => {
+      s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
+      writePlugin({
+        id: 'codex-stream-listener',
+        entryJs: `module.exports = { activate(ctx) {
+          global.__codexOnlyStreams = []
+          ctx.on('session:stream', evt => global.__codexOnlyStreams.push(evt))
+        } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-codex-stream', { selectedEngineId: 'codex' })
+      const target = { messageId: 'codex-stream-item', blockIndex: 0, kind: 'text' }
+      emitEvent('session:item-open', [
+        'R-codex-stream',
+        {
+          target,
+          message: {
+            id: 'codex-stream-item',
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'text', text: '' }]
+          }
+        }
+      ])
+      emitEvent('session:item-delta', ['R-codex-stream', { target, chunk: 'private prefix' }])
+      expect((global as any).__codexOnlyStreams).toEqual([])
+      delete (global as any).__codexOnlyStreams
+    })
+
+    it('resolves targeted multi-block seals from canonical state without regressing siblings', async () => {
+      s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'opencode' })
+      writePlugin({
+        id: 'targeted-final-listener',
+        entryJs: `module.exports = { activate(ctx) {
+          global.__targetedFinals = []
+          global.__explicitSeals = []
+          ctx.on('session:message', evt => global.__targetedFinals.push(evt))
+          ctx.on('session:item-seal', evt => global.__explicitSeals.push(evt))
+        } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-targeted', { selectedEngineId: 'opencode' })
+      const text = { messageId: 'multi', blockIndex: 0, kind: 'text' }
+      const thinking = { messageId: 'multi', blockIndex: 1, kind: 'thinking' }
+      const messageScaffold = {
+        id: 'multi',
+        role: 'assistant',
+        timestamp: 1,
+        content: [
+          { type: 'text', text: '' },
+          { type: 'thinking', text: '' }
+        ]
+      }
+      emitEvent('session:item-open', ['R-targeted', { target: text, message: messageScaffold }])
+      emitEvent('session:item-delta', ['R-targeted', { target: text, chunk: 'answer' }])
+      emitEvent('session:item-open', ['R-targeted', { target: thinking, message: messageScaffold }])
+      emitEvent('session:item-delta', ['R-targeted', { target: thinking, chunk: 'reasoning' }])
+      emitEvent('session:item-seal', [
+        'R-targeted',
+        {
+          target: text,
+          message: {
+            ...messageScaffold,
+            content: [
+              { type: 'text', text: 'answer final' },
+              { type: 'thinking', text: '' }
+            ]
+          }
+        }
+      ])
+      emitEvent('session:item-seal', [
+        'R-targeted',
+        {
+          target: thinking,
+          message: {
+            ...messageScaffold,
+            content: [
+              { type: 'text', text: 'stale answer' },
+              { type: 'thinking', text: 'reasoning final' }
+            ]
+          }
+        }
+      ])
+
+      expect((global as any).__explicitSeals).toHaveLength(2)
+      expect((global as any).__targetedFinals.map((event: any) => event.content)).toEqual([
+        [
+          { type: 'text', text: 'answer final' },
+          { type: 'thinking', text: 'reasoning' }
+        ],
+        [
+          { type: 'text', text: 'answer final' },
+          { type: 'thinking', text: 'reasoning final' }
+        ]
+      ])
+      delete (global as any).__targetedFinals
+      delete (global as any).__explicitSeals
+    })
+
+    it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+      'keeps %s child item compatibility owner-scoped and engine-independent',
+      async (engineId) => {
+        s = scaffold({ sessionIdFor: () => 'SID-1', engineId })
+        writePlugin({
+          id: 'child-item-listener',
+          entryJs: `module.exports = { activate(ctx) {
+            global.__childStreams = []
+            global.__childFinals = []
+            global.__childSeals = []
+            ctx.on('session:subagent-stream', evt => global.__childStreams.push(evt))
+            ctx.on('session:subagent-message', evt => global.__childFinals.push(evt))
+            ctx.on('session:item-seal', evt => global.__childSeals.push(evt))
+          } }`
+        })
+        await s.manager.loadAll()
+        syncCore.seedSession('R-child', { selectedEngineId: engineId })
+        const target = {
+          messageId: 'child-message',
+          blockIndex: 0,
+          kind: 'text',
+          ownerToolUseId: 'task-call'
+        }
+        const message = {
+          id: 'child-message',
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'text', text: '' }]
+        }
+        emitEvent('session:item-open', [
+          'R-child',
+          { target, ownerToolUseId: 'task-call', message }
+        ])
+        emitEvent('session:item-delta', ['R-child', { target, chunk: 'child output' }])
+        emitEvent('session:item-seal', [
+          'R-child',
+          {
+            target,
+            ownerToolUseId: 'task-call',
+            message: { ...message, content: [{ type: 'text', text: 'child final' }] }
+          }
+        ])
+
+        expect((global as any).__childStreams).toEqual([
+          {
+            routingId: 'R-child',
+            sessionId: 'SID-1',
+            toolUseId: 'task-call',
+            type: 'text',
+            text: 'child output'
+          }
+        ])
+        expect((global as any).__childFinals).toEqual([
+          {
+            routingId: 'R-child',
+            sessionId: 'SID-1',
+            toolUseId: 'task-call',
+            message: { ...message, content: [{ type: 'text', text: 'child final' }] }
+          }
+        ])
+        expect((global as any).__childSeals).toEqual([
+          expect.objectContaining({
+            routingId: 'R-child',
+            ownerToolUseId: 'task-call',
+            target: expect.objectContaining({ ownerToolUseId: 'task-call' })
+          })
+        ])
+        delete (global as any).__childStreams
+        delete (global as any).__childFinals
+        delete (global as any).__childSeals
+      }
+    )
 
     it('forwards the VOLATILE TAILS with their pre-phase-5 payload shape (parity guard)', async () => {
       // The S2 half of the same promise: `session:bash-output`,
@@ -616,7 +908,7 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { type: 'text', text: 'hi' })
+      fireItemDelta('R-temp', 'hi')
 
       const events = (global as any).__early as any[]
       expect(events).toHaveLength(1)
@@ -642,12 +934,52 @@ describe('PluginManager', () => {
       await s.manager.loadAll()
 
       fireSessionEventViaBridge(s.manager, 'session:result', 'R-1', { cost: 1 })
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { type: 'text', text: 'x' })
+      fireItemDelta('R-1', 'x')
 
       expect((global as any).__streamHits).toBe(1)
       expect((global as any).__resultHits).toBe(0)
       delete (global as any).__streamHits
       delete (global as any).__resultHits
+    })
+
+    it('does zero fan-out work for an item append when nobody listens', async () => {
+      // The item lane is the token firehose. With no plugin subscribed to the
+      // synthesized channels, an append must not even reach the fan-out helper
+      // — including the child (`session:subagent-stream`) branch and the
+      // explicit `session:item-delta` one, which used to fire ungated.
+      s = scaffold({ sessionIdFor: () => 'SID-1' })
+      writePlugin({
+        id: 'unrelated-listener',
+        entryJs: `module.exports = { activate(ctx) { ctx.on('session:result', () => {}) } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-quiet', { selectedEngineId: 'claude' })
+      const root = { messageId: 'quiet', blockIndex: 0, kind: 'text' as const }
+      const child = { ...root, ownerToolUseId: 'tu-quiet' }
+      for (const target of [root, child]) {
+        emitEvent('session:item-open', [
+          'R-quiet',
+          {
+            target,
+            message: {
+              id: 'quiet',
+              role: 'assistant',
+              timestamp: 1,
+              content: [{ type: 'text', text: '' }]
+            }
+          }
+        ])
+      }
+      // Opens are RELIABLE events and are forwarded unconditionally; only the
+      // volatile appends after this point are under test.
+      const spy = vi.spyOn(
+        s.manager as unknown as { fireSessionScoped: (channel: string, args: unknown[]) => void },
+        'fireSessionScoped'
+      )
+      emitEvent('session:item-delta', ['R-quiet', { target: root, chunk: 'root tokens' }])
+      emitEvent('session:item-delta', ['R-quiet', { target: child, chunk: 'child tokens' }])
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
     })
 
     it('drops events silently when no listener is registered for the channel', async () => {

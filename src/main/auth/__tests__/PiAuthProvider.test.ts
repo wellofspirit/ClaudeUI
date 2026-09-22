@@ -40,16 +40,20 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-const { mockBeginLogin, mockCompleteLogin, mockCancelLogin } = vi.hoisted(() => ({
-  mockBeginLogin: vi.fn(),
-  mockCompleteLogin: vi.fn(),
-  mockCancelLogin: vi.fn()
-}))
+const { mockBeginLogin, mockCompleteLogin, mockCancelLogin, mockBeginDeviceCodeLogin } = vi.hoisted(
+  () => ({
+    mockBeginLogin: vi.fn(),
+    mockCompleteLogin: vi.fn(),
+    mockCancelLogin: vi.fn(),
+    mockBeginDeviceCodeLogin: vi.fn()
+  })
+)
 vi.mock('../../../core/auth/vault/CredentialSync', () => ({
   credentialSync: {
     beginLogin: mockBeginLogin,
     completeLogin: mockCompleteLogin,
-    cancelLogin: mockCancelLogin
+    cancelLogin: mockCancelLogin,
+    beginDeviceCodeLogin: mockBeginDeviceCodeLogin
   },
   PI_CODEX_VENDOR_ID: 'openai-codex'
 }))
@@ -79,6 +83,7 @@ beforeEach(() => {
   mockBeginLogin.mockReset()
   mockCompleteLogin.mockReset()
   mockCancelLogin.mockReset()
+  mockBeginDeviceCodeLogin.mockReset()
 })
 
 afterEach(() => {
@@ -497,6 +502,130 @@ describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
     const provider = new PiAuthProvider()
     await provider.cancelVendorOauth()
     expect(mockCancelLogin).toHaveBeenCalledTimes(1)
+  })
+
+  // ADR-068 §3, Slice 7.
+  it('deviceCodeStart("openai-codex") returns the vault device code and starts no loopback', async () => {
+    mockBeginDeviceCodeLogin.mockResolvedValue({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 1_700_000_000_000
+    })
+    // The wait runs in the BACKGROUND — a pending promise is what a live one is.
+    mockCompleteLogin.mockReturnValue(new Promise(() => {}))
+    const provider = new PiAuthProvider()
+    await expect(provider.deviceCodeStart('openai-codex')).resolves.toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 1_700_000_000_000
+    })
+    expect(mockBeginDeviceCodeLogin).toHaveBeenCalledTimes(1)
+    expect(mockBeginLogin).not.toHaveBeenCalled()
+  })
+
+  it('deviceCodeStart rejects any vendor OTHER than openai-codex — the same gate as oauthAuthorize', async () => {
+    const provider = new PiAuthProvider()
+    await expect(provider.deviceCodeStart('anthropic')).rejects.toThrow(/openai-codex/)
+    expect(mockBeginDeviceCodeLogin).not.toHaveBeenCalled()
+  })
+
+  // The WAIT is host-owned: a device code lives fifteen minutes and the web
+  // transport rejects any invoke past thirty seconds, so `deviceCodeStart` kicks
+  // `completeLogin()` off WITHOUT awaiting it and the client polls the holder.
+  it('deviceCodeStart starts the wait in the background and returns without awaiting it', async () => {
+    mockBeginDeviceCodeLogin.mockResolvedValue({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 1_700_000_000_000
+    })
+    let finish!: (cred: unknown) => void
+    mockCompleteLogin.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve
+      })
+    )
+    const provider = new PiAuthProvider()
+
+    // Resolves at once even though the wait has not settled — that is the point.
+    await expect(provider.deviceCodeStart('openai-codex')).resolves.toMatchObject({
+      userCode: 'ABCD-1234'
+    })
+    expect(mockCompleteLogin).toHaveBeenCalledTimes(1)
+    await expect(provider.deviceCodeStatus()).resolves.toEqual({ state: 'pending' })
+
+    finish({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    await Promise.resolve()
+    await Promise.resolve()
+    await expect(provider.deviceCodeStatus()).resolves.toEqual({ state: 'done' })
+  })
+
+  it('a failed wait records the host message; a cancelled one records no message', async () => {
+    mockBeginDeviceCodeLogin.mockResolvedValue({
+      verificationUrl: 'u',
+      userCode: 'AB-12',
+      expiresAt: 1
+    })
+    mockCompleteLogin.mockRejectedValue(new Error('device auth timed out after 15 minutes'))
+    const failed = new PiAuthProvider()
+    await failed.deviceCodeStart('openai-codex')
+    await Promise.resolve()
+    await Promise.resolve()
+    await expect(failed.deviceCodeStatus()).resolves.toEqual({
+      state: 'error',
+      error: 'device auth timed out after 15 minutes'
+    })
+
+    mockCompleteLogin.mockRejectedValue(new Error('Login cancelled'))
+    const cancelled = new PiAuthProvider()
+    await cancelled.deviceCodeStart('openai-codex')
+    await Promise.resolve()
+    await Promise.resolve()
+    await expect(cancelled.deviceCodeStatus()).resolves.toEqual({ state: 'cancelled' })
+  })
+
+  it('cancelVendorOauth marks the holder cancelled straight away', async () => {
+    mockBeginDeviceCodeLogin.mockResolvedValue({
+      verificationUrl: 'u',
+      userCode: 'AB-12',
+      expiresAt: 1
+    })
+    mockCompleteLogin.mockReturnValue(new Promise(() => {}))
+    const provider = new PiAuthProvider()
+    await provider.deviceCodeStart('openai-codex')
+    await provider.cancelVendorOauth()
+    expect(mockCancelLogin).toHaveBeenCalled()
+    // Not "after the background rejection eventually arrives" — the client's very
+    // next poll has to see it, and a flow already settled may never reject.
+    await expect(provider.deviceCodeStatus()).resolves.toEqual({ state: 'cancelled' })
+  })
+
+  it('a SECOND start supersedes the first: the stale wait can no longer write the holder', async () => {
+    mockBeginDeviceCodeLogin.mockResolvedValue({
+      verificationUrl: 'u',
+      userCode: 'AB-12',
+      expiresAt: 1
+    })
+    let failFirst!: (err: Error) => void
+    mockCompleteLogin
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          failFirst = reject
+        })
+      )
+      .mockReturnValueOnce(new Promise(() => {}))
+    const provider = new PiAuthProvider()
+    await provider.deviceCodeStart('openai-codex')
+    await provider.deviceCodeStart('openai-codex')
+
+    failFirst(new Error('device auth failed with status 500'))
+    await Promise.resolve()
+    await Promise.resolve()
+    // The second wait owns the holder, so the first one's failure is dropped.
+    await expect(provider.deviceCodeStatus()).resolves.toEqual({ state: 'pending' })
+  })
+
+  it('deviceCodeStatus with no flow ever started answers cancelled, so a client stops polling', async () => {
+    await expect(new PiAuthProvider().deviceCodeStatus()).resolves.toEqual({ state: 'cancelled' })
   })
 })
 

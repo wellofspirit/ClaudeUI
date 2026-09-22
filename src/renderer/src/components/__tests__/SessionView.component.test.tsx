@@ -26,6 +26,7 @@ import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { resolveCodexCapabilities } from '../../../../shared/model-capabilities'
 
 // ---------------------------------------------------------------------------
 // Mobile flag — mutated per-test, read lazily by the mocked hook
@@ -165,6 +166,37 @@ describe('SessionView — mobile task takeover', () => {
     })
   }
 
+  it('Shift+Tab cycles the permission mode of a codex session like any other engine', async () => {
+    const modes: unknown[][] = []
+    app.bridge.ipcMain.handle('session:set-permission-mode', (_e: unknown, ...args: unknown[]) => {
+      modes.push(args)
+      return null
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          selectedEngineId: 'codex',
+          permissionMode: 'default',
+          status: {
+            ...state.sessions[ROUTE].status,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+
+    await renderSessionView()
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true }))
+    })
+
+    expect(modes).toEqual([[ROUTE, 'acceptEdits']])
+  })
+
   it('mobile + rightPanel=task: renders MobileTaskView full-screen, not ChatPanel', async () => {
     mockIsMobile = true
     useSessionStore.getState().openTaskPanel(ROUTE, 'tu-1')
@@ -255,12 +287,14 @@ describe('SessionView — mobile task takeover', () => {
     expect(screen.queryByTestId('MobileGitView')).not.toBeInTheDocument()
   })
 
-  // ── mobile settings host ──────────────────────────────────────────────────
+  // ── the settings host ─────────────────────────────────────────────────────
   //
-  // `open-settings` is the app-wide deep-link channel. On desktop SettingsPanel
-  // (inside the sidebar) answers it; on mobile the sidebar drawer is UNMOUNTED
-  // when it closes, so SessionView answers instead and dismisses the drawer with
-  // it. Both halves must not answer at once.
+  // `open-settings` is the app-wide deep-link channel, and exactly one host must
+  // answer it. `SettingsPanel` answers from INSIDE the sidebar, so it can only
+  // do so while the sidebar is mounted; SessionView answers for the complement —
+  // mobile, and a desktop window whose sidebar is collapsed. That second case
+  // used to be nobody's, which made every deep link in the app inert once the
+  // sidebar was collapsed (S5c round 3).
 
   it('mobile: an open-settings event mounts the settings dialog outside the drawer', async () => {
     mockIsMobile = true
@@ -282,8 +316,9 @@ describe('SessionView — mobile task takeover', () => {
     })
   })
 
-  it('desktop: SessionView ignores open-settings (SettingsPanel still owns it)', async () => {
+  it('desktop with the sidebar open: SessionView ignores open-settings', async () => {
     mockIsMobile = false
+    localStorage.setItem('sidebarCollapsed', 'false')
     await renderSessionView()
 
     await act(async () => {
@@ -292,10 +327,40 @@ describe('SessionView — mobile task takeover', () => {
       )
     })
 
+    // SettingsPanel, inside the sidebar, owns it here.
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
   })
 
-  it('widening past the breakpoint drops the mobile dialog instead of parking it', async () => {
+  it('desktop with the sidebar COLLAPSED: SessionView answers the deep link', async () => {
+    // The sidebar is unmounted in this state, and with it the only listener
+    // there used to be — so the sandbox pill, the remote modal and the usage
+    // dashboard's `Hub settings →` all fired into nothing.
+    mockIsMobile = false
+    localStorage.setItem('sidebarCollapsed', 'true')
+    settingsProps = undefined
+    await renderSessionView()
+
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('open-settings', { detail: { page: 'remote', group: 'usage-hub' } })
+      )
+    })
+
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
+    expect(settingsProps).toMatchObject({
+      initialTarget: { page: 'remote', group: 'usage-hub' }
+    })
+  })
+
+  it('widening past the breakpoint keeps the dialog while the sidebar stays collapsed', async () => {
+    // WHAT CHANGED IN ROUND 3, and why this case reads the other way now.
+    // Ownership is `isMobile || sidebarCollapsed`, not `isMobile`. Rotating an
+    // iPad to landscape leaves the sidebar collapsed, so the sidebar's own host
+    // is still not mounted — dropping the dialog here would close Settings under
+    // the user AND leave the channel unowned, which is the defect this round
+    // fixed rather than a state to preserve.
     mockIsMobile = true
     const { SessionView } = await import('../SessionView')
     let view!: ReturnType<typeof render>
@@ -308,19 +373,19 @@ describe('SessionView — mobile task takeover', () => {
     })
     expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
 
-    // Rotate the iPad to landscape / widen the window. Ownership goes back to
-    // SettingsPanel, so this host must FORGET its dialog — parked state would
-    // make Settings reappear unbidden the next time the viewport narrows.
     mockIsMobile = false
     await act(async () => {
       view.rerender(React.createElement(SessionView))
     })
-    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
 
-    // Narrowing again must NOT resurrect it.
-    mockIsMobile = true
+    // What must still never happen: a dialog PARKED across a hand-off and
+    // resurrected later. A fresh desktop mount with the sidebar open shows
+    // nothing, whatever a previous viewport was doing.
+    view.unmount()
+    localStorage.setItem('sidebarCollapsed', 'false')
     await act(async () => {
-      view.rerender(React.createElement(SessionView))
+      render(React.createElement(SessionView))
     })
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
   })

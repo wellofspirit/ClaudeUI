@@ -78,8 +78,9 @@ import {
 import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { usePiInstalled } from './use-engine-installed'
+import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
-import type { EngineConfig, ModelInfo, RawConfigPatch } from '../../../../shared/types'
+import type { ModelInfo, RawConfigPatch } from '../../../../shared/types'
 
 /** Testid namespace for every control these panes render (ADR-027 tier 2). */
 const PANE = 'PiConfigPane'
@@ -658,20 +659,23 @@ export function PiRetrySection(): React.JSX.Element {
  * use the themed picker, with an explicit custom-ID escape hatch for a model pi
  * supports locally that ClaudeUI has not discovered yet.
  *
+ * The config object comes from the SHARED engine-config store
+ * (`use-engine-config.ts`), not from a `useState` copy of its own:
+ * `saveEngineConfig` replaces the whole `engines/pi.json`, and a settings SEARCH
+ * mounts this pane alongside the pi Dispatch panes, which write `dispatch` into
+ * the same file. With two copies, whichever saved second erased the other's
+ * block.
+ *
  * Its testids are unchanged across the ADR-065 restyle so the deep links and
  * tests that name them keep working. The install gate lives in `PaneShell`.
  */
 function PiSessionDefaultModel(): React.JSX.Element {
-  const [cfg, setCfg] = useState<EngineConfig | null>(null)
+  const { engineCfg: cfg, update: saveConfig, updateAsync } = useEngineConfigObject('pi')
   const [models, setModels] = useState<ModelInfo[]>([])
   const [customMode, setCustomMode] = useState(false)
   const [managingModels, setManagingModels] = useState(false)
 
   useEffect(() => {
-    window.api
-      .loadEngineConfig('pi')
-      .then(setCfg)
-      .catch(() => setCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
@@ -703,25 +707,18 @@ function PiSessionDefaultModel(): React.JSX.Element {
   const allowlist = cfg.piConfig?.modelAllowlist
   const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
 
+  // No re-read before the write: the store object IS the latest config — every
+  // pane over `engines/pi.json` edits it in place, and an `update` lands in it
+  // before its save is even in flight. `updateAsync` rather than `saveConfig`
+  // because the allowlist dialog reports a failed save itself.
   const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
-    const latest = await window.api.loadEngineConfig('pi')
-    const next: EngineConfig = {
-      ...latest,
-      piConfig: { ...latest.piConfig, modelAllowlist }
-    }
-    await window.api.saveEngineConfig('pi', next)
-    setCfg(next)
+    await updateAsync({ piConfig: { ...cfg.piConfig, modelAllowlist } })
     useSessionStore.getState().reloadModels()
     refreshModels()
   }
 
   const update = (value: string): void => {
-    const next: EngineConfig = {
-      ...cfg,
-      piConfig: { ...cfg.piConfig, defaultModel: value || undefined }
-    }
-    setCfg(next)
-    window.api.saveEngineConfig('pi', next).catch(() => {})
+    saveConfig({ piConfig: { ...cfg.piConfig, defaultModel: value || undefined } })
     // Mirror the default-model choice into the store so new/reopened pi
     // sessions pick it up immediately, and refresh the picker model list.
     // The RAW value (not the constant): an empty string is what tells the store

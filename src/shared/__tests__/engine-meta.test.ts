@@ -10,7 +10,7 @@ import {
 } from '../model-capabilities'
 import type { EngineId, ModelInfo } from '../types'
 
-const ALL_ENGINE_IDS: EngineId[] = ['claude', 'opencode', 'pi']
+const ALL_ENGINE_IDS: EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 describe('ENGINE_META table completeness', () => {
   it('has an entry for every EngineId, keyed by its own id', () => {

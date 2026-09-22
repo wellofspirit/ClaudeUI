@@ -33,7 +33,22 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    - `/patch-readme` — regenerate or update the patch's README
    - `/patch-test-harness` — re-run behavioral tests to validate the patch works
 
-3. **Re-verify the inbound message type set**
+3. **Re-verify the assistant-snapshot ordering contract**
+
+   ```bash
+   CLAUDE_INTEGRATION_TESTS=1 bun run test:integration src/integration/sdk-contract
+   ```
+
+   No credentials and no network — it plays a canned SSE stream from a localhost
+   server against an isolated `HOME`. It pins the invariant
+   `src/core/services/claude-item-stream.ts` depends on: one single-block
+   `assistant` line per content block, sharing `message.id`, emitted after the
+   block's last delta and before its `content_block_stop`
+   (`docs/protocol-cc/05-stream-events.md` §5.9). If this fails, the lifecycle's
+   block placement is wrong for the new version — fix it and update §5.9 and
+   `03-inbound-messages.md` §3.3 together.
+
+4. **Re-verify the inbound message type set**
 
    Run a real session with DEBUG_SDK=1 and wireLogCapacity=5000:
 
@@ -44,11 +59,11 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    Dump `queryHandle.wireLog()` after the turn. Grep for `type` values that aren't in `docs/protocol-cc/03-inbound-messages.md`. Any new type → document it.
 
-4. **Re-verify the inbound control_request subtype set**
+5. **Re-verify the inbound control_request subtype set**
 
    Same wire log dump. Filter for `type === 'control_request'` (inbound). Grep for subtypes. Any new subtype → document in `docs/protocol-cc/08-control-inbound.md`. Also add a handler in `src/core/sdk/query.ts::handleControlRequest()` if it needs a real response (don't leave it on the unknown-subtype fallback).
 
-5. **Re-verify CLI flags**
+6. **Re-verify CLI flags**
 
    Spawn cli.js with `--help` to dump the flag catalog:
 
@@ -58,7 +73,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    Diff against `docs/protocol-cc/02-cli-flags.md`. New flags → document.
 
-6. **Re-run the protocol test harnesses**
+7. **Re-run the protocol test harnesses**
 
    ```bash
    bun run test:unit
@@ -69,7 +84,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    The integration project is the one that catches real-world wire drift.
 
-7. **Re-verify the context-window mirror**
+8. **Re-verify the context-window mirror**
 
    New model generations and alias remaps land in cli.js's context-window
    resolver before anywhere else. Follow the drift check in
@@ -77,9 +92,29 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    `src/core/services/context-window.ts` if the implicit-1M model list or
    the `fable`/`opus` alias targets changed.
 
-8. **Re-issue the session on the master protocol document**
+9. **Re-issue the session on the master protocol document**
 
    Update `docs/protocol-cc/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
+
+10. **Re-verify the OAuth token endpoint, client id and refresh body**
+
+    `src/core/services/claude-usage-api.ts`'s `CLI_OAUTH` block mirrors cli.js's
+    own refresh exchange, and a wrong value there is silent: the refresh just
+    returns 400 and the account reads as needing sign-in.
+
+    ```bash
+    grep -a -o 'TOKEN_URL:"[^"]*"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    grep -a -o 'CLIENT_ID:"[^"]*"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    grep -a -b -o 'grant_type:"refresh_token"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    ```
+
+    Several client ids appear. Read the bytes around each hit (`dd bs=1 skip=…`)
+    and take the one in the PRODUCTION config object — the object whose
+    `BASE_API_URL` is `https://api.anthropic.com`; the others belong to a
+    localhost object and to a second scope family (`DESIGN_CLIENT_ID`). Read
+    around the `grant_type` hit too: the body's fields, its `Content-Type` and
+    the default scope list are all part of the request, and cli.js's own refresh
+    posts JSON (the form-encoded one nearby is the unrelated gateway refresh).
 
 ---
 

@@ -27,7 +27,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { getReplicaState, hydrateReplica } from '@renderer/stores/replica'
-import { syncCore, emitEvent, addSyncSubscriber } from '../../core/services/sync-host'
+import {
+  syncCore,
+  emitEvent,
+  addSyncSubscriber,
+  addStreamObserver
+} from '../../core/services/sync-host'
+import type { ItemStreamTarget } from '../../core/shared/sync/item-stream'
 import { rekeyShim } from '../../core/ipc/handlers-core'
 import { toSnapshot, type CanonicalState } from '../../core/shared/sync/state'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
@@ -37,6 +43,43 @@ import { mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 let app: TestApp
 /** Unsubscribes the renderer replica from the funnel's fan-out. */
 let unsubscribeSync: (() => void) | null = null
+let unsubscribeStream: (() => void) | null = null
+
+function openCoreItem(
+  routingId: string,
+  target: ItemStreamTarget,
+  chunk: string
+): ItemStreamTarget {
+  emitEvent('session:item-open', [
+    routingId,
+    {
+      target,
+      message: {
+        id: target.messageId,
+        role: 'assistant',
+        timestamp: 1,
+        content: Array.from({ length: target.blockIndex + 1 }, (_, index) =>
+          index === target.blockIndex
+            ? { type: target.kind, text: '' }
+            : { type: 'text' as const, text: '' }
+        )
+      }
+    }
+  ])
+  emitEvent('session:item-delta', [routingId, { target, chunk }])
+  return target
+}
+
+function sealCoreItem(routingId: string, target: ItemStreamTarget, message: ChatMessage): void {
+  emitEvent('session:item-seal', [
+    routingId,
+    { target, ownerToolUseId: target.ownerToolUseId, message }
+  ])
+}
+
+function sealCoreMessage(routingId: string, message: ChatMessage): void {
+  emitEvent('session:item-seal', [routingId, { message }])
+}
 
 /**
  * App-level fields the replica legitimately holds a different value for.
@@ -157,11 +200,16 @@ beforeEach(async () => {
   unsubscribeSync = addSyncSubscriber((seq, channel, args) => {
     app.syncClient.receiveEvent({ seq, channel, args })
   })
+  unsubscribeStream = addStreamObserver((frame) => {
+    if (frame.type === 'item-stream') app.syncClient.receiveItemStreamFrame(frame)
+  })
 })
 
 afterEach(() => {
   unsubscribeSync?.()
   unsubscribeSync = null
+  unsubscribeStream?.()
+  unsubscribeStream = null
   app.teardown()
 })
 
@@ -170,30 +218,26 @@ describe('E2E: SyncCore hydration parity', () => {
     emitEvent('session:created', ['rid-1', { cwd: '/project' }])
     emitEvent('session:status', ['rid-1', makeStatus({ sessionId: 'rid-1' })])
     emitEvent('session:user-message', ['rid-1', { prompt: 'plan the work' }])
-    emitEvent('session:stream', ['rid-1', { type: 'thinking', text: 'thinking...' }])
-    emitEvent('session:stream', ['rid-1', { type: 'text', text: 'On it. ' }])
-    emitEvent('session:message', [
-      'rid-1',
-      {
-        id: 'a1',
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'On it.' },
-          {
-            type: 'tool_use',
-            toolUseId: 't-todo',
-            toolName: 'TodoWrite',
-            toolInput: {
-              todos: [
-                { content: 'step one', status: 'in_progress', activeForm: 'Doing one' },
-                { content: 'step two', status: 'pending', activeForm: 'Doing two' }
-              ]
-            }
+    openCoreItem('rid-1', { messageId: 'a1', blockIndex: 0, kind: 'text' }, 'On it. ')
+    sealCoreMessage('rid-1', {
+      id: 'a1',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'On it.' },
+        {
+          type: 'tool_use',
+          toolUseId: 't-todo',
+          toolName: 'TodoWrite',
+          toolInput: {
+            todos: [
+              { content: 'step one', status: 'in_progress', activeForm: 'Doing one' },
+              { content: 'step two', status: 'pending', activeForm: 'Doing two' }
+            ]
           }
-        ],
-        timestamp: 0
-      } satisfies ChatMessage
-    ])
+        }
+      ],
+      timestamp: 0
+    } satisfies ChatMessage)
     emitEvent('session:tool-result', [
       'rid-1',
       { toolUseId: 't-todo', result: 'ok', isError: false }
@@ -215,8 +259,15 @@ describe('E2E: SyncCore hydration parity', () => {
 
     // Sanity: the stream really did land on both sides (a parity check between
     // two empty states would pass vacuously).
-    expect(syncCore.getSnapshot().sessions['rid-1'].todos).toHaveLength(2)
+    const canonical = syncCore.getSnapshot().sessions['rid-1']
+    const committedTodo = canonical.messages
+      .flatMap((message) => message.content)
+      .find((block) => block.type === 'tool_use' && block.toolUseId === 't-todo')
+    expect(committedTodo).toMatchObject({ type: 'tool_use', toolName: 'TodoWrite' })
+    expect(canonical.todos).toHaveLength(2)
     expect(useSessionStore.getState().sessions['rid-1'].todos).toHaveLength(2)
+    expect(canonical.itemStreams).toEqual({})
+    expect(useSessionStore.getState().sessions['rid-1'].itemStreams).toEqual({})
     expectParity()
   })
 
@@ -249,7 +300,11 @@ describe('E2E: SyncCore hydration parity', () => {
     const shimResults: Array<{ ok: true; applied: boolean }> = []
 
     emitEvent('session:created', ['temp-1', { cwd: '/project' }])
-    emitEvent('session:stream', ['temp-1', { type: 'text', text: 'Partial ' }])
+    const rekeyTarget = openCoreItem(
+      'temp-1',
+      { messageId: 'rekey-answer', blockIndex: 0, kind: 'text' },
+      'Partial '
+    )
 
     emitEvent('session:status', ['temp-1', makeStatus({ sessionId: 'sdk-9' })])
     // The CLIENT no longer invokes `session:rekey` at all (4c) - core owns the
@@ -263,16 +318,13 @@ describe('E2E: SyncCore hydration parity', () => {
       { ok: true, applied: false }
     ])
 
-    emitEvent('session:stream', ['sdk-9', { type: 'text', text: 'and done.' }])
-    emitEvent('session:message', [
-      'sdk-9',
-      {
-        id: 'a1',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'Partial and done.' }],
-        timestamp: 0
-      } satisfies ChatMessage
-    ])
+    emitEvent('session:item-delta', ['sdk-9', { target: rekeyTarget, chunk: 'and done.' }])
+    sealCoreItem('sdk-9', rekeyTarget, {
+      id: 'rekey-answer',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Partial and done.' }],
+      timestamp: 0
+    } satisfies ChatMessage)
     emitEvent('session:status', ['sdk-9', makeStatus({ state: 'idle', sessionId: 'sdk-9' })])
 
     expect(Object.keys(syncCore.getSnapshot().sessions)).toEqual(['sdk-9'])
@@ -374,34 +426,35 @@ describe('E2E: SyncCore hydration parity', () => {
       // own until 4c, which is why the comparator masks user ids.
       ['rid-1', { id: 'msg-e2e-1', timestamp: 1_700_000_000_000, prompt: 'ship it' }]
     )
-    emitEvent('session:stream', ['rid-1', { type: 'thinking', text: 'planning' }])
-    emitEvent('session:stream', ['rid-1', { type: 'text', text: 'On it. ' }])
-    emitEvent('session:message', [
+    openCoreItem('rid-1', { messageId: 'a1', blockIndex: 0, kind: 'thinking' }, 'planning')
+    openCoreItem('rid-1', { messageId: 'a1', blockIndex: 1, kind: 'text' }, 'On it. ')
+    emitEvent('session:item-seal', [
       'rid-1',
       {
-        id: 'a1',
-        role: 'assistant',
-        content: [
-          { type: 'thinking', text: 'planning' },
-          { type: 'text', text: 'On it.' },
-          {
-            type: 'tool_use',
-            toolUseId: 't-todo',
-            toolName: 'TodoWrite',
-            toolInput: {
-              todos: [{ content: 'step one', status: 'in_progress', activeForm: 'Doing one' }]
+        message: {
+          id: 'a1',
+          role: 'assistant',
+          content: [
+            { type: 'thinking', text: 'planning' },
+            { type: 'text', text: 'On it.' },
+            {
+              type: 'tool_use',
+              toolUseId: 't-todo',
+              toolName: 'TodoWrite',
+              toolInput: {
+                todos: [{ content: 'step one', status: 'in_progress', activeForm: 'Doing one' }]
+              }
+            },
+            {
+              type: 'tool_use',
+              toolUseId: 't-file',
+              toolName: 'SendUserFile',
+              toolInput: { files: ['out/report.md'], caption: 'the report', display: 'attach' }
             }
-          },
-          {
-            type: 'tool_use',
-            toolUseId: 't-file',
-            toolName: 'SendUserFile',
-            toolInput: { files: ['out/report.md'], caption: 'the report', display: 'attach' }
-          }
-        ],
-        timestamp: 0,
-        // The emitter's thinking-span timing (phase 4b A2).
-        thinkingDurationMs: 1234
+          ],
+          timestamp: 0,
+          thinkingDurationMs: 1234
+        }
       }
     ])
     emitEvent('session:tool-result', [
@@ -436,6 +489,12 @@ describe('E2E: SyncCore hydration parity', () => {
     emitEvent('config:sessions-changed', [
       { recentSessions: ['rid-1'], pinnedSessions: [], customTitles: { 'rid-1': 'Shipping' } }
     ])
+    emitEvent('session:status', ['rid-1', makeStatus({ state: 'running', sessionId: 'rid-1' })])
+    openCoreItem(
+      'rid-1',
+      { messageId: 'active-next', blockIndex: 0, kind: 'text' },
+      'Still working'
+    )
     expectParity()
 
     const live = toSnapshot(getReplicaState(), syncCore.currentSeq())
@@ -474,7 +533,10 @@ describe('E2E: SyncCore hydration parity', () => {
 
     // Non-vacuity: every field a resync used to silently drop is populated.
     const session = hydrated.sessions['rid-1']
-    expect(session.messages.map((m) => m.id)).toEqual(['msg-e2e-1', 'a1'])
+    expect(session.messages.map((m) => m.id)).toEqual(['msg-e2e-1', 'a1', 'active-next'])
+    expect(Object.values(session.itemStreams ?? {}).map((stream) => stream.value)).toEqual([
+      'Still working'
+    ])
     expect(session.queue).toEqual([{ itemId: 'q1', text: 'and then deploy', state: 'queued' }])
     expect(session.metering?.equivalentCostUsd).toBe(0.31)
     expect(session.todos).toHaveLength(1)
@@ -493,7 +555,9 @@ describe('E2E: SyncCore hydration parity', () => {
     expect(useSessionStore.getState().activeSessionId).toBe('rid-1')
     // And the emitter-timed duration survived into the client's transcript, which
     // the pre-4b clock-free reducer could not have produced.
-    const thinking = session.messages[1].content.find((b) => b.type === 'thinking')
+    const thinking = session.messages
+      .find((message) => message.id === 'a1')!
+      .content.find((b) => b.type === 'thinking')
     expect(thinking?.type === 'thinking' ? thinking.durationMs : null).toBe(1234)
   })
 

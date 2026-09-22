@@ -14,13 +14,14 @@ import { useClaudeEvents } from '../../renderer/src/hooks/useClaudeEvents'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeChatMessage,
-  makeAssistantMessage,
   makeToolUseBlock,
   makeSessionStatus,
   makePendingApproval,
   resetFactoryCounter
 } from '@test/factories/messages'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
+import { itemStreamKey } from '../../core/shared/sync/item-stream'
 
 let app: TestApp
 
@@ -72,15 +73,16 @@ describe('E2E: basic conversation flow', () => {
     app.emit('session:user-message', routingId, { prompt: 'Hello Claude', queued: false })
 
     // Simulate: SDK processes and emits streaming text
-    app.emit('session:stream', routingId, { type: 'text', text: 'The answer ' })
-    app.emit('session:stream', routingId, { type: 'text', text: 'is 42.' })
+    const target = emitItemDelta(app, routingId, 'The answer ', { open: true })
+    emitItemDelta(app, routingId, 'is 42.', { open: false })
 
     // Verify streaming text accumulated
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('The answer is 42.')
+    expect(
+      useSessionStore.getState().sessions[routingId].itemStreams[itemStreamKey(target)].value
+    ).toBe('The answer is 42.')
 
     // Simulate: final assistant message arrives
-    const assistantMsg = makeAssistantMessage('The answer is 42.')
-    app.emit('session:message', routingId, assistantMsg)
+    sealItem(app, routingId, target, 'The answer is 42.')
 
     // Verify messages in store
     const session = useSessionStore.getState().sessions[routingId]
@@ -106,8 +108,8 @@ describe('E2E: basic conversation flow', () => {
     app.emit('session:user-message', routingId, { prompt: 'Hello', queued: false })
 
     // Assistant responds
-    app.emit('session:stream', routingId, { type: 'text', text: 'Hi there!' })
-    app.emit('session:message', routingId, makeAssistantMessage('Hi there!'))
+    const target = emitItemDelta(app, routingId, 'Hi there!', { open: true })
+    sealItem(app, routingId, target, 'Hi there!')
 
     // Turn ends
     app.emit('session:result', routingId)
@@ -199,11 +201,14 @@ describe('E2E: session rekey flow', () => {
     expect(state.sessions[sdkId].status.state).toBe('running')
 
     // Further events on old ID should not crash (they just won't find a session)
-    app.emit('session:stream', tempId, { type: 'text', text: 'late event' })
+    emitItemDelta(app, tempId, 'late event', { open: true })
     // And events on new ID work
-    app.emit('session:stream', sdkId, { type: 'text', text: 'correct event' })
+    emitItemDelta(app, sdkId, 'correct event', { open: true })
     // Re-read state (previous reference is stale after rekey)
-    expect(useSessionStore.getState().sessions[sdkId].streamingText).toBe('correct event')
+    const session = useSessionStore.getState().sessions[sdkId]
+    expect(Object.values(session.itemStreams).map((stream) => stream.value)).toContain(
+      'correct event'
+    )
   })
 })
 
@@ -213,10 +218,12 @@ describe('E2E: streaming with thinking', () => {
     useSessionStore.getState().createNewSession(routingId, '/test')
 
     // Text streaming through the bridge
-    app.emit('session:stream', routingId, { type: 'text', text: 'Hello ' })
-    app.emit('session:stream', routingId, { type: 'text', text: 'world' })
+    const target = emitItemDelta(app, routingId, 'Hello ', { open: true })
+    emitItemDelta(app, routingId, 'world', { open: false })
 
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('Hello world')
+    expect(
+      useSessionStore.getState().sessions[routingId].itemStreams[itemStreamKey(target)].value
+    ).toBe('Hello world')
   })
 
   it('thinking streaming accumulates via store actions', () => {
@@ -226,16 +233,21 @@ describe('E2E: streaming with thinking', () => {
     // Verify session exists
     const s1 = useSessionStore.getState().sessions[routingId]
     expect(s1).toBeDefined()
-    expect(s1.streamingThinking).toBe('')
+    expect(s1.itemStreams).toEqual({})
 
     // Test text streaming first (this works in other tests)
     seed.streamText(routingId, 'text works')
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('text works')
+    expect(Object.values(useSessionStore.getState().sessions[routingId].itemStreams)[0].value).toBe(
+      'text works'
+    )
 
     // Now test thinking — which uses the same updateSession pattern
     seed.streamThinking(routingId, 'think')
     const s2 = useSessionStore.getState().sessions[routingId]
-    expect(s2.streamingThinking).toBe('think')
+    expect(Object.values(s2.itemStreams).map((stream) => stream.value)).toEqual([
+      'text works',
+      'think'
+    ])
   })
 })
 
@@ -257,12 +269,14 @@ describe('E2E: multi-session', () => {
     useSessionStore.getState().createNewSession('s1', '/project-a')
     useSessionStore.getState().createNewSession('s2', '/project-b')
 
-    app.emit('session:stream', 's1', { type: 'text', text: 'response for s1' })
+    emitItemDelta(app, 's1', 'response for s1', { open: true })
     app.emit('session:error', 's2', 'error for s2')
 
-    expect(useSessionStore.getState().sessions['s1'].streamingText).toBe('response for s1')
+    expect(Object.values(useSessionStore.getState().sessions['s1'].itemStreams)[0].value).toBe(
+      'response for s1'
+    )
     expect(useSessionStore.getState().sessions['s1'].errors).toHaveLength(0)
-    expect(useSessionStore.getState().sessions['s2'].streamingText).toBe('')
+    expect(useSessionStore.getState().sessions['s2'].itemStreams).toEqual({})
     expect(useSessionStore.getState().sessions['s2'].errors).toHaveLength(1)
   })
 })

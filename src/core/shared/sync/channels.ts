@@ -15,7 +15,7 @@
  * | Class | Ring | Canonical | Delivery |
  * | --- | --- | --- | --- |
  * | `replicated` | yes | where the snapshot carries the field | every subscriber |
- * | `volatile` | **no** | text-stream flavor only | WATCHING connections only |
+ * | `volatile` | **no** | item lifecycle only | WATCHING connections only |
  * | `host-local` | no | no | owning desktop window only |
  *
  * ## Delivery is a function of CLASS as of 4c
@@ -43,24 +43,9 @@
  *    remote clients live, which is what a reconnecting client already replayed
  *    from the ring. That was 4a's "catchup leak" wrinkle; it dies here.
  *
- * ## Rule 1 is RETIRED (phase 5 S1 + S2)
- *
- * 4a's surviving rule was **never reduce ring membership** — "a channel that
- * rings today still rings, even where that is clearly wrong (`session:stream`);
- * removing entries is phase-5 work with its own migration". This IS that
- * migration. S1 moved the two canonical-backed delta channels; S2 moved the three
- * TAILS (`session:bash-output`, `session:background-output`,
- * `automation:stream-event`), and with them the last member of the interim
- * `volatile-pending-phase-5` class — which is therefore DELETED, not left as an
- * empty option. The owner waived backward compatibility for cached client
- * bundles, so there is no dual-emission lane — desktop and web ship with the
- * server.
- *
  * ## Two flavors of `volatile` ({@link ChannelSpec.volatileFlavor})
  *
- *  - `text-stream` — a `{streamId, turnId, offset, chunk}` frame folded into
- *    canonical by `applyStreamFrame`. Accumulating, offset-guarded, self-healing
- *    (a mismatch is cured by re-watching, which replays the coalesced value).
+ *  - `item-stream` — item-addressed append/recovery frames folded into canonical.
  *  - `pass-through` — the emission `(channel, args)` verbatim in a
  *    `{type:'stream-ev'}` frame, dispatched client-side into the ordinary
  *    per-channel listener registry. NOT canonical, NOT accumulating, and
@@ -69,7 +54,7 @@
  *
  * Both ride the same watch-filtered lane and neither ever rings, which is the
  * property the phase-5 exit criterion is about; the flavor decides only what a
- * frame MEANS. `shared/sync/stream.ts` owns both interpretations.
+ * frame MEANS.
  *
  * {@link ChannelSpec.deliveryDelta} still records the 4a-sanctioned visibility
  * additions, and the funnel guard still pins that set exactly.
@@ -79,7 +64,7 @@
 export type ChannelClass = 'replicated' | 'volatile' | 'host-local'
 
 /** Which interpretation a `volatile` channel's frames carry (phase 5). */
-export type VolatileFlavor = 'text-stream' | 'pass-through'
+export type VolatileFlavor = 'pass-through' | 'item-stream'
 
 export interface ChannelSpec {
   cls: ChannelClass
@@ -151,6 +136,25 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'The single source of truth for a non-queued user turn entering the transcript.'
   },
+  'session:item-open': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Establishes a stream target and transcript position once, before volatile appends.'
+  },
+  'session:item-seal': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Commits final content and retires only that item atomically.'
+  },
+  'session:item-delta': {
+    cls: 'volatile',
+    ring: false,
+    canonical: true,
+    volatileFlavor: 'item-stream',
+    why: 'Item-addressed appends; canonical accumulation, no event ring entry.'
+  },
   'session:message': {
     cls: 'replicated',
     ring: true,
@@ -168,6 +172,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: true,
     why: 'Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.'
+  },
+  'session:tool-review': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: "Attaches a permission judge's verdict (tool_review) to its tool_use, idempotent by reviewId."
   },
   'session:queue-changed': {
     cls: 'replicated',
@@ -306,11 +316,11 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
-  'session:vendor-auth-required': {
+  'session:auth-required': {
     cls: 'replicated',
     ring: true,
-    canonical: false,
-    why: 'Rings and fans out; no snapshot field (the card is re-derived from the next turn).'
+    canonical: true,
+    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3. ADR-070 §1 put the engine’s verbatim `message` ON this event and FORBADE the companion `session:error` every engine used to send beside it — one rejected credential produced two separately-dismissable cards.'
   },
   'session:auth-source': {
     cls: 'replicated',
@@ -335,20 +345,6 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   // Session domain — the volatile lane. Nothing here rings (phase 5 S1 + S2);
   // the flavor is what decides how a frame is interpreted.
   // -------------------------------------------------------------------------
-  'session:stream': {
-    cls: 'volatile',
-    volatileFlavor: 'text-stream',
-    ring: false,
-    canonical: true,
-    why: 'Text/thinking deltas. Phase 5 S1 took them off the ring entirely: they ride the stream lane (`{streamId, turnId, offset, chunk}`) to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields.'
-  },
-  'session:subagent-stream': {
-    cls: 'volatile',
-    volatileFlavor: 'text-stream',
-    ring: false,
-    canonical: true,
-    why: 'Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.'
-  },
   'session:bash-output': {
     cls: 'volatile',
     volatileFlavor: 'pass-through',
@@ -402,6 +398,36 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: false,
     why: 'Block analytics. Fans out today; no snapshot field.'
+  },
+  'usage:chatgpt-limits-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
+  },
+  'usage:limits-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-071 §6: an account limits reading moved, for ANY vendor — the same bare nudge as `usage:chatgpt-limits-changed` beside it, and for the same reason: the readings are read through `usage:limits`, which takes a `refresh` flag a fan-out payload could not carry. No snapshot field.'
+  },
+  'usage-hub:changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: "ADR-072 §7: the usage hub client's state moved — the same bare nudge as the two usage channels above it. Replicated because a phone looking at the dashboard has to learn that another machine's rows arrived, and PAYLOAD-FREE because `usage-hub:status` is the one shape and it must never carry the device credential a fan-out would copy. No snapshot field."
+  },
+  'provider:auth-resolved': {
+    cls: 'replicated',
+    ring: true,
+    // `canonical: true` because this flag means exactly "does `applyEvent` change
+    // canonical state?" (see ChannelSpec.canonical) and this one does: the fold
+    // marks every matching session's `authRequired.resolved`. It needs NO snapshot
+    // field OF ITS OWN — the effect lands in `authRequired`, which PerSessionSnapshot
+    // already carries — which is what ADR-070's Consequences meant by calling it
+    // non-canonical. Recorded here because the two readings differ.
+    canonical: true,
+    why: 'ADR-070 §2: the ONE resolution signal — a credential for this provider was successfully stored. Folded into `authRequired.resolved` on every session that was blaming that provider, so nothing needs a snapshot field of its own (`authRequired` is already snapshot-carried and the fold survives a resync). The optional `accountId` is the VAULT account id the credential landed on, in the same id-space `session:auth-required` reports, and it narrows the fan-out: a provider can hold several accounts, so adding ChatGPT account B must not mark the sessions broken on account A resolved. Absent on either side still matches (Anthropic names no account). Replicated, NOT host-local like `auth:state` (channels.ts §auth:state, the CSRF reason): this payload is a provider id and an opaque local account handle — no token, no URL, no flow state — so fanning it out gives nobody a flow to hijack, and it MUST fan out, because a sign-in taken on the desktop has to clear the owed sign-in on the phone.'
   },
 
   // -------------------------------------------------------------------------

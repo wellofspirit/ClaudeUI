@@ -101,7 +101,7 @@ Anthropic-shaped assistant message. Fires on every assistant response, including
 
 ### Field notes
 
-- **`message.id`** is stable across partial updates. A single assistant reply emits multiple `assistant` lines, all sharing `message.id`, each with a progressively fuller `content`. Consumer should upsert by id (replace in place).
+- **`message.id`** is stable across partial updates. A single assistant reply emits ONE `assistant` line per content block: each carries a single-block `content`, all share `message.id`, and each arrives after that block's last `content_block_delta` but BEFORE its `content_block_stop`. The `tool_use` line already carries the fully parsed `input`. Consumer should upsert by id (replace in place) and place each line's block by index/type — see `05-stream-events.md` §5.9. Verified on 2.1.268, 2026-09-18, localhost SSE fixture.
 - **`content` blocks** may include `text`, `thinking`, `tool_use`, `citations`. Thinking blocks only present when thinking is enabled.
 - **`stop_reason`**:
   - `end_turn` — model ended the turn normally.

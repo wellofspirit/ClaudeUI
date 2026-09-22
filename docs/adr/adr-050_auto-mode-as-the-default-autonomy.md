@@ -1,6 +1,7 @@
 # ADR-050 — Auto mode as the default autonomy, owned by ClaudeUI
 
 **Status:** Accepted (2026-08-13)
+**Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex from this shared default; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex sessions follow the same default, and `auto` on Codex maps to the binary's own `auto_review` reviewer under `on-request`. This ADR is unchanged for Claude, opencode, and pi.
 **Relates to:** ADR-022 (opencode permission mapping — "one config applies to all
 harnesses"), ADR-023 (auto-mode classifier), ADR-037 (opencode fork: judge
 endpoint + session sealing), ADR-035 (pi engine backend)

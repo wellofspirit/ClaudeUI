@@ -30,11 +30,17 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import { SyncCore, type Delivery } from '../sync-core'
-import { applyEvent, auxFromCanonical, checkDerivedFields } from '../../shared/sync/reducer'
+import { applyEvent, checkDerivedFields } from '../../shared/sync/reducer'
 import { isVolatileStream } from '../../shared/sync/channels'
-import { applyStreamFrame } from '../../shared/sync/stream'
+import {
+  applyItemStreamFrame,
+  itemStreamKey,
+  type ItemStreamFrame,
+  type ItemStreamTarget
+} from '../../shared/sync/item-stream'
 import { fromSnapshot, type CanonicalState } from '../../shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
+import type { SessionStatus } from '../../../shared/types'
 
 /** Delivery no longer selects targets (4c) — the class does. */
 const ALL: Delivery = {}
@@ -140,8 +146,6 @@ const EXTRA_EVENTS: PoolEvent[] = [
       }
     }
   ],
-  ['session:subagent-stream', 'rid', { toolUseId: 'tu-task', type: 'thinking', text: 'hmm' }],
-  ['session:subagent-stream', 'rid', { toolUseId: 'tu-task', type: 'text', text: 'ok' }],
   ['session:slash-commands', 'rid', [{ name: '/compact' }, { name: '/review' }]],
   ['session:skills', 'rid', ['dataviz', 'patch-readme']],
   // The 4b payload additions: an event-carried user identity and an
@@ -152,7 +156,6 @@ const EXTRA_EVENTS: PoolEvent[] = [
     'rid',
     { id: 'msg-fixed-1', timestamp: 1_700_000_000_000, prompt: 'with identity' }
   ],
-  ['session:stream', 'rid', { type: 'thinking', text: 'weighing options' }],
   [
     'session:message',
     'rid',
@@ -197,6 +200,20 @@ function bootstrap(core: SyncCore): void {
   for (const id of POOL_ROUTING_IDS) {
     core.emit('session:created', [id, { cwd: '/repo' }], ALL)
   }
+}
+
+function runningStatus(overrides: Partial<SessionStatus> = {}): SessionStatus {
+  return {
+    state: 'running',
+    sessionId: null,
+    model: null,
+    cwd: null,
+    totalCostUsd: 0,
+    engineId: 'claude',
+    capabilities: undefined as never,
+    account: null,
+    ...overrides
+  } as SessionStatus
 }
 
 // ---------------------------------------------------------------------------
@@ -252,15 +269,6 @@ function comparable(state: CanonicalState): string {
   return stableJson({ ...state, sessions })
 }
 
-/** The client's restore path: snapshot → canonical + the aux it must resume from. */
-function restore(snapshot: FullStateSnapshot): {
-  state: CanonicalState
-  aux: ReturnType<typeof auxFromCanonical>
-} {
-  const state = fromSnapshot(snapshot)
-  return { state, aux: auxFromCanonical(state) }
-}
-
 /**
  * The invariant itself. Folds the ring's tail onto a restored snapshot and
  * compares with live canonical at head.
@@ -269,10 +277,9 @@ function expectFoldsToHead(core: SyncCore, snapshot: FullStateSnapshot, seed: nu
   const tail = core.getAfter(snapshot.seq)
   expect(tail, `seed ${seed}: catchup from seq ${snapshot.seq} fell out of the ring`).not.toBeNull()
 
-  const { state, aux } = restore(snapshot)
-  let folded = state
+  let folded = fromSnapshot(snapshot)
   for (const entry of tail!) {
-    folded = applyEvent(folded, { channel: entry.channel, args: entry.args, seq: entry.seq }, aux)
+    folded = applyEvent(folded, { channel: entry.channel, args: entry.args, seq: entry.seq })
   }
 
   const live = core.getCanonicalState()
@@ -347,93 +354,79 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     expect(checked).toBeGreaterThan(200)
   })
 
-  it('holds for a stream that ends mid-turn (snapshot with open streaming buffers)', () => {
+  it('hydrates an active item, folds reliable rekey suffixes, and heals a volatile gap by replay', () => {
     const core = new SyncCore()
-    core.emit('session:created', ['rid', { cwd: '/repo' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'thinking', text: 'still going' }], ALL)
-    const snapshot = core.getSnapshot()
-    // The seal arrives AFTER the snapshot: the restored state must recognise the
-    // open span from `streamingThinking` alone (auxFromCanonical), or the fold
-    // leaves stale thinking text behind and diverges.
-    core.emit('session:stream', ['rid', { type: 'text', text: 'answer' }], ALL)
+    const frames: ItemStreamFrame[] = []
+    core.setStreamDelivery((frame) => {
+      if (frame.type === 'item-stream') frames.push(frame)
+    })
+    core.emit('session:created', ['temp-item', { cwd: '/repo' }], ALL)
+
+    const target: ItemStreamTarget = {
+      messageId: 'answer-1',
+      blockIndex: 0,
+      kind: 'text'
+    }
     core.emit(
-      'session:message',
+      'session:item-open',
       [
-        'rid',
+        'temp-item',
         {
-          id: 'm1',
-          role: 'assistant',
-          content: [
-            { type: 'thinking', text: 'still going' },
-            { type: 'text', text: 'answer' }
-          ],
-          timestamp: 0,
-          thinkingDurationMs: 900
+          target,
+          message: {
+            id: target.messageId,
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'text', text: '' }]
+          }
         }
       ],
       ALL
     )
-    expectFoldsToHead(core, snapshot, 0)
-    // Non-vacuity: the fold really did clear the buffer and stamp the duration.
-    const live = core.getCanonicalState().sessions['rid']
-    expect(live.streamingThinking).toBe('')
-    const block = live.messages[0].content.find((b) => b.type === 'thinking')
-    expect(block?.type === 'thinking' ? block.durationMs : null).toBe(900)
-  })
-
-  it('the STREAM lane heals by replay, not by catchup (phase 5 S1)', () => {
-    // The volatile lane's version of the same invariant, and the reason the pool
-    // excludes those channels: a snapshot plus the ring's tail cannot reproduce
-    // deltas that never entered the ring. `stream:watch`'s replay is what closes
-    // the gap, and it must close it EXACTLY — the replica ends holding canonical's
-    // accumulation, not an approximation of it.
-    const core = new SyncCore()
-    core.emit('session:created', ['rid', { cwd: '/repo' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'thinking', text: 'weighing ' }], ALL)
+    core.emit('session:item-delta', ['temp-item', { target, chunk: 'first' }], ALL)
     const snapshot = core.getSnapshot()
 
-    // Everything after the snapshot rides the stream lane and therefore reaches a
-    // reconnecting client through NOTHING the ring carries.
-    core.emit('session:stream', ['rid', { type: 'thinking', text: 'the options' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'text', text: 'here you go' }], ALL)
-    core.emit(
-      'session:subagent-stream',
-      ['rid', { toolUseId: 'tu-1', type: 'text', text: 'sub' }],
-      ALL
+    // Hydration carries the reliable scaffold and the volatile value current at
+    // its exact watermark.
+    let replica = fromSnapshot(snapshot)
+    expect(replica.sessions['temp-item'].itemStreams[itemStreamKey(target)]?.value).toBe('first')
+
+    core.emit('session:item-delta', ['temp-item', { target, chunk: ' second' }], ALL)
+    core.emit('session:permission-mode', ['temp-item', 'plan'], ALL)
+    core.emit('session:item-delta', ['temp-item', { target, chunk: ' third' }], ALL)
+    core.emit('session:status', ['temp-item', runningStatus({ sessionId: 'stable-item' })], ALL)
+    core.emit('session:item-delta', ['stable-item', { target, chunk: ' fourth' }], ALL)
+    core.emit('session:item-delta', ['stable-item', { target, chunk: ' fifth' }], ALL)
+
+    // Catchup folds only the reliable suffix. The status moves the open stream
+    // with the session, while volatile text remains at the hydrated prefix.
+    const suffix = core.getAfter(snapshot.seq)
+    expect(suffix).not.toBeNull()
+    for (const entry of suffix!) {
+      replica = applyEvent(replica, { channel: entry.channel, args: entry.args, seq: entry.seq })
+    }
+    expect(replica.sessions['temp-item']).toBeUndefined()
+    expect(replica.sessions['stable-item'].permissionMode).toBe('plan')
+    expect(replica.sessions['stable-item'].itemStreams[itemStreamKey(target)]?.value).toBe('first')
+
+    // Simulate a dropped append by offering the later frame first. Offset
+    // validation refuses the suffix instead of corrupting the hydrated prefix.
+    const later = frames.find((frame) => frame.op === 'append' && frame.chunk === ' fifth')
+    expect(later).toBeDefined()
+    const gap = applyItemStreamFrame(replica, later!)
+    expect(gap.result).toBe('mismatch')
+    expect(gap.state).toBe(replica)
+
+    // Re-watch answers atomically at the reliable watermark and closes both the
+    // dropped suffix and the routing-id move.
+    const replay = core.itemStreamReplay('stable-item')
+    expect(replay.op).toBe('replace')
+    const healed = applyItemStreamFrame(replica, replay)
+    expect(healed.result).toBe('applied')
+    expect(comparable(healed.state)).toBe(comparable(core.getCanonicalState()))
+    expect(healed.state.sessions['stable-item'].itemStreams[itemStreamKey(target)]?.value).toBe(
+      'first second third fourth fifth'
     )
-
-    const { state: restored, aux } = restore(snapshot)
-    // Catchup alone leaves it at the snapshot's value — stated, not assumed.
-    expect(restored.sessions['rid'].streamingThinking).toBe('weighing ')
-    expect(restored.sessions['rid'].streamingText).toBe('')
-
-    // Give the replica text of its own before healing. Without this the thinking
-    // buffer is cleared by the SEAL that the text frame's append path performs,
-    // so the test would pass whether or not the replay can state an EMPTY stream
-    // — which is exactly the hole the empty-frame rule closes.
-    const diverged: CanonicalState = {
-      ...restored,
-      sessions: {
-        ...restored.sessions,
-        rid: { ...restored.sessions['rid'], streamingText: 'stale partial' }
-      }
-    }
-
-    let healed = diverged
-    for (const frame of core.streamReplay('rid')) {
-      const outcome = applyStreamFrame(healed, aux, frame)
-      expect(outcome.result, `replay frame ${frame.streamId} was refused`).toBe('applied')
-      healed = outcome.state
-    }
-
-    const live = core.getCanonicalState().sessions['rid']
-    const after = healed.sessions['rid']
-    expect(after.streamingThinking).toBe(live.streamingThinking)
-    expect(after.streamingText).toBe(live.streamingText)
-    expect(after.subagentStreamingText).toEqual(live.subagentStreamingText)
-    // Non-vacuity: the live state really is mid-turn with both buffers occupied.
-    expect(live.streamingText).toBe('here you go')
-    expect(live.streamingThinking).toBe('')
   })
 
   it('holds for a snapshot taken mid-reentrancy-drain (snapshots land between applies)', () => {

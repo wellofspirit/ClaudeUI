@@ -7,6 +7,17 @@ import { homedir } from 'os'
 // real user log dir; resolved once here at module load.
 const LOG_DIR = process.env.CLAUDE_UI_LOG_DIR || join(homedir(), '.claude', 'ui', 'logs')
 
+/**
+ * The directory the daily log files live in, for the rare caller that needs to
+ * write a sidecar file beside them (today: `CodexAppServerClient`'s opt-in
+ * stderr capture). Resolved at module load like `LOG_DIR` itself, so a later
+ * change to `CLAUDE_UI_LOG_DIR` does not split a process's output across two
+ * directories.
+ */
+export function getLogDir(): string {
+  return LOG_DIR
+}
+
 // ---------------------------------------------------------------------------
 // File-write policy (M-LG1)
 //

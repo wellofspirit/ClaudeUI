@@ -25,9 +25,24 @@ import {
   clearRemotePassword,
   setLastServeRecord,
   clearLastServeRecord,
+  insertUsageEvent,
+  usageEventsForCodexThread,
   MIGRATIONS,
   type Migration,
+  type UsageEventInsert,
   type Db
+} from '../../../core/services/db'
+import {
+  getCodexSessionOverrides,
+  setCodexSessionOverrides,
+  ensureCodexSessionOverrides,
+  hasCodexSessionOverrides,
+  deleteCodexSessionOverrides,
+  registerCodexFork,
+  recordCodexLineage,
+  listCodexForks,
+  listCodexLineage,
+  deleteCodexFork
 } from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
@@ -43,6 +58,44 @@ afterEach(() => {
 function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
+
+describe('Codex session overrides', () => {
+  it('preserves accepted choices independently of projected metadata and validates stored fields', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(getCodexSessionOverrides('native', db)).toBeUndefined()
+      ensureCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(true)
+      expect(getCodexSessionOverrides('native', db)).toEqual({})
+      setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' }, db)
+      ensureCodexSessionOverrides('native', db)
+      db.exec(
+        "INSERT INTO session_meta (session_id, engine_id, updated_at) VALUES ('native', 'codex', 0); DELETE FROM session_meta WHERE session_id = 'native'"
+      )
+      expect(getCodexSessionOverrides('native', db)).toEqual({
+        model: 'gpt-native',
+        effort: 'ultra'
+      })
+      // Native policy keys are no longer a storable setting — the session's
+      // shared PermissionMode owns approval/sandbox/reviewer (ADR-066).
+      expect(() =>
+        setCodexSessionOverrides('native', { approvalPolicy: 'never' } as never, db)
+      ).toThrow('Unsupported')
+      // `reset` is no longer a settings verb at all (no channel ever sent one).
+      expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
+        'Unsupported'
+      )
+      expect(() =>
+        setCodexSessionOverrides('native', { credential: 'synthetic' } as never, db)
+      ).toThrow('Unsupported')
+      deleteCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+})
 
 /** Read user_version off a db. */
 function userVersion(db: Db): number {
@@ -134,7 +187,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v14)', () => {
+  it('applies the real production migration set (v1–v25)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -147,7 +200,35 @@ describe('migration framework — user_version guard', () => {
       // v12: step-up tier columns + audit detail/retention (ADR-054),
       // v13: LAN channel key + the `legacy` policy retirement (ADR-056),
       // v14: remote-IDE posture columns (ADR-064)
-      expect(userVersion(db)).toBe(14)
+      // v15: accepted native Codex session overrides and verified identity marker
+      // v16: codex_forks — the fork registry the sidebar reads instead of
+      //      re-probing every session_meta id the native list omits
+      // v17: codex_forks becomes a LINEAGE CACHE (roots too), so the delete
+      //      plan is a cache read instead of a sweep
+      // v18: usage_event gains ADR-071's account, billing-type, origin and
+      //      two derived cost columns
+      // v19: the dispatched turns already on disk become usage_event rows
+      //      (origin 'dispatch'), so the ledger holds delegated work too
+      // v20: usage_bucket (hourly, UTC, kept forever) replaces daily_usage, and
+      //      dispatched_usage is dropped — the ledger is the only store
+      // v21: an account remembers the identity it was active under, and a window
+      //      sample names its account key and its window kind
+      // v22: usage_window — one row per limit window, with what the ledger saw
+      //      spent inside it
+      // v23: the identity columns are cleared (they came from the SHARED
+      //      ~/.claude.json), and `meta` arms the one-shot re-key
+      // v24: session_meta remembers a Codex thread's last context reading, the
+      //      one figure a cold status line cannot recompute
+      // v25: a limit window's LENGTH becomes a column, and the ChatGPT rows
+      //      that were kinded by position are dropped so they re-seed
+      // v26: the usage hub's client state, and the cached rows of the other
+      //      machines it syncs with (ADR-072)
+      // v27: remote_account — the hub's names for the account keys — and the
+      //      one-time cursor reset that re-reads the ledger under the
+      //      attribution rule (ADR-072 §2, amended)
+      expect(userVersion(db)).toBe(27)
+      expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -160,12 +241,20 @@ describe('migration framework — user_version guard', () => {
       // usage_window_sample must exist (Phase 7 v4 migration).
       const wsRows = db.prepare('SELECT * FROM usage_window_sample').all()
       expect(wsRows).toEqual([])
-      // daily_usage must exist (Phase 7 v5 migration — Full SQL).
-      const duRows = db.prepare('SELECT * FROM daily_usage').all()
-      expect(duRows).toEqual([])
-      // dispatched_usage must exist (ADR-033 M4-B v6 migration).
-      const dispatchedRows = db.prepare('SELECT * FROM dispatched_usage').all()
-      expect(dispatchedRows).toEqual([])
+      // usage_bucket must exist and be empty (ADR-071 v20 migration), with the
+      // revision counter beside it.
+      const bucketRows = db.prepare('SELECT * FROM usage_bucket').all()
+      expect(bucketRows).toEqual([])
+      expect(db.prepare('SELECT next_rev FROM usage_bucket_rev WHERE id = 1').get()).toEqual({
+        next_rev: 2
+      })
+      // The two tables v20 retired are gone — v5's daily_usage and v6's
+      // dispatched_usage (ADR-071 §1: the ledger is the only store).
+      for (const table of ['daily_usage', 'dispatched_usage']) {
+        expect(
+          db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+        ).toBeUndefined()
+      }
       // remote_config must exist (Phase 1 remote-auth v7 migration).
       const remoteRows = db.prepare('SELECT * FROM remote_config').all()
       expect(remoteRows).toEqual([])
@@ -226,7 +315,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(27)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -370,7 +459,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(27)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -437,6 +526,129 @@ describe('migration framework — user_version guard', () => {
 // ---------------------------------------------------------------------------
 // Migration framework — transactional application (each up + version bump atomic)
 // ---------------------------------------------------------------------------
+
+describe('Codex lineage cache', () => {
+  it('registers a fork once, unverified, and lists only real branches', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(listCodexForks(db)).toEqual([])
+      registerCodexFork('fork-a', 'source', db)
+      registerCodexFork('fork-b', 'source', db)
+      // A re-registration (a resume of the same branch) must not duplicate the
+      // row or rewrite its lineage.
+      registerCodexFork('fork-a', 'somewhere-else', db)
+      expect(listCodexForks(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source' },
+        { threadId: 'fork-b', forkedFromId: 'source' }
+      ])
+      // A fork registered at mint time has NOT been read, so the scan still owes
+      // it one metadata read — which is exactly what a null `verifiedAt` says.
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source', verifiedAt: null },
+        { threadId: 'fork-b', forkedFromId: 'source', verifiedAt: null }
+      ])
+      deleteCodexFork('fork-a', db)
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork-b', forkedFromId: 'source' }])
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * THE POINT OF v17: a ROOT earns a row. Under v16 it never did, so every
+   * delete plan re-read every codex `session_meta` id the registry did not name
+   * and the candidate set never shrank.
+   */
+  it('caches a root as a verified row that is not a branch', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      recordCodexLineage('root', null, 1710, db)
+      recordCodexLineage('fork', 'root', 1711, db)
+      // A root is cached — the scan can now tell "asked, it is a root" from
+      // "never asked" — but it is not a branch of anything, so no plan and no
+      // sidebar read may pick it up.
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork', forkedFromId: 'root' }])
+      // Sorted, because two rows written in the same millisecond fall back to
+      // the thread id for their order and this test is not about that.
+      expect(
+        [...listCodexLineage(db)].sort((a, b) => a.threadId.localeCompare(b.threadId))
+      ).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 1711 },
+        { threadId: 'root', forkedFromId: null, verifiedAt: 1710 }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('lets a read REPLACE what a mint-time registration guessed, and tombstone it', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      registerCodexFork('fork', 'root', db)
+      // The scan read the thread: same lineage, now verified against the native
+      // `updatedAt`, so the next scan skips it.
+      recordCodexLineage('fork', 'root', 900, db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 900 }
+      ])
+      // Twice-refused: the row stays (so the id is never re-read) but it is no
+      // longer a branch — it is not in any plan and not in any sidebar row.
+      recordCodexLineage('fork', null, null, db)
+      expect(listCodexForks(db)).toEqual([])
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: null, verifiedAt: null }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('never treats a thread that claims itself as its own branch', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      recordCodexLineage('self', 'self', 5, db)
+      expect(listCodexForks(db)).toEqual([])
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'self', forkedFromId: 'self', verifiedAt: 5 }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * The v16 rows every existing user carries: branches with no `verified_at`,
+   * and the one-time adoption MARKER (`thread_id = ''`, generation in
+   * `forked_from_id`) that the cache replaces. The marker must not survive as a
+   * thread id, and a real row must survive as an unverified branch — so the
+   * first scan verifies it exactly once instead of re-adopting anything.
+   */
+  it('migrates v16 rows into the cache and drops the adoption marker', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((migration) => migration.version <= 16)
+      )
+      const insert = db.prepare(
+        'INSERT INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+      )
+      insert.run('fork', 'root', 1)
+      insert.run('', 'adopted-v3', 2)
+      runMigrations(db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: null }
+      ])
+      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
+    } finally {
+      db.close()
+    }
+  })
+})
 
 describe('migration framework — transactional application', () => {
   it('rolls back partial DDL + the version bump when a migration throws mid-way', () => {
@@ -618,6 +830,36 @@ describe('session_meta CRUD', () => {
     expect(() => deleteSessionMeta('never-existed')).not.toThrow()
   })
 
+  // v24 — the two context columns are MERGED, not replaced: only the metering
+  // path writes them, and every other writer (the sidebar's adoption pass, the
+  // renderer's config round-trip) must leave a session's reading alone.
+  it('a model-only write keeps the persisted Codex context reading', () => {
+    setSessionMeta('codex-thread', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+      contextUsed: 4000,
+      contextWindow: 272_000
+    })
+    setSessionMeta('codex-thread', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' }
+    })
+    expect(getSessionMeta('codex-thread')).toEqual({
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' },
+      contextUsed: 4000,
+      contextWindow: 272_000
+    })
+  })
+
+  it('a session that never metered carries neither context key', () => {
+    setSessionMeta('plain', { engineId: 'claude' })
+    const meta = getSessionMeta('plain')
+    expect(meta).toEqual({ engineId: 'claude' })
+    expect('contextUsed' in meta!).toBe(false)
+    expect('contextWindow' in meta!).toBe(false)
+  })
+
   it('allSessionMeta returns all entries', () => {
     setSessionMeta('s1', { engineId: 'claude' })
     setSessionMeta('s2', {
@@ -629,6 +871,72 @@ describe('session_meta CRUD', () => {
     expect(all['s1'].engineId).toBe('claude')
     expect(all['s2'].engineId).toBe('opencode')
     expect(all['s2'].model?.modelId).toBe('gpt-4o')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// usageEventsForCodexThread — the cold status line's ledger read (S1e)
+// ---------------------------------------------------------------------------
+
+describe('usageEventsForCodexThread', () => {
+  function codexRow(overrides: Partial<UsageEventInsert>): UsageEventInsert {
+    return {
+      id: 'evt_' + Math.random().toString(36).slice(2),
+      ts: 1,
+      engineId: 'codex',
+      vendorId: 'openai',
+      accountId: null,
+      accountUuid: null,
+      modelId: 'gpt-5.6-luna',
+      inputTokens: 10,
+      outputTokens: 1,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0,
+      equivCostUsd: null,
+      engineCostUsd: null,
+      sessionId: 'root',
+      messageId: 'msg_' + Math.random().toString(36).slice(2),
+      source: 'live',
+      origin: 'session',
+      ...overrides
+    }
+  }
+
+  it('joins a root to its children by parent_routing_id and excludes strangers', () => {
+    // A child files its row under its OWN thread id, so only the parent link
+    // can find it from the root.
+    insertUsageEvent(codexRow({ ts: 2, messageId: 'own' }))
+    insertUsageEvent(
+      codexRow({
+        ts: 1,
+        messageId: 'child',
+        sessionId: 'kid',
+        origin: 'child',
+        parentRoutingId: 'root'
+      })
+    )
+    // Another root's child, another root's own turn, and a non-Codex row.
+    insertUsageEvent(
+      codexRow({
+        messageId: 'other-child',
+        sessionId: 'kid2',
+        origin: 'child',
+        parentRoutingId: 'other'
+      })
+    )
+    insertUsageEvent(codexRow({ messageId: 'other-own', sessionId: 'other' }))
+    insertUsageEvent(codexRow({ messageId: 'not-codex', engineId: 'opencode' }))
+
+    // Ascending by ts, so a caller walking the rows sees the session's order.
+    expect(usageEventsForCodexThread('root').map((row) => row.messageId)).toEqual(['child', 'own'])
+  })
+
+  it('returns a dispatch row filed under this thread — the caller decides', () => {
+    insertUsageEvent(
+      codexRow({ messageId: 'target', origin: 'dispatch', parentRoutingId: 'some-claude-session' })
+    )
+    expect(usageEventsForCodexThread('root').map((row) => row.origin)).toEqual(['dispatch'])
   })
 })
 
@@ -672,6 +980,20 @@ describe('renameSessionMeta', () => {
     expect(meta?.model?.modelId).toBe('claude-opus-4-8')
   })
 
+  it('carries the context reading across a rekey', () => {
+    setSessionMeta('tmp-codex', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+      contextUsed: 1234,
+      contextWindow: 272_000
+    })
+    renameSessionMeta('tmp-codex', 'thread-id')
+    expect(getSessionMeta('thread-id')).toMatchObject({
+      contextUsed: 1234,
+      contextWindow: 272_000
+    })
+  })
+
   it('falls back to default claude entry when oldId has no entry', () => {
     renameSessionMeta('missing-old', 'new-id')
     const meta = getSessionMeta('new-id')
@@ -709,11 +1031,11 @@ describe('importSessionEnginesOnce', () => {
     expect(getSessionMeta('s2')?.model).toBeUndefined()
   })
 
-  it('clamps unknown/codex engineId to claude', () => {
+  it('preserves codex engineId during legacy import', () => {
     importSessionEnginesOnce({
       'legacy-codex': { engineId: 'codex' }
     })
-    expect(getSessionMeta('legacy-codex')?.engineId).toBe('claude')
+    expect(getSessionMeta('legacy-codex')?.engineId).toBe('codex')
   })
 
   it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {

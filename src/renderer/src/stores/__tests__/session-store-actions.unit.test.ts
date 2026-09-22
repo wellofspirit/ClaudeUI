@@ -24,6 +24,7 @@ import {
 import { claudeModel, type GitStatusData } from '../../../../shared/types'
 import { renderHook } from '@testing-library/react'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { getReplicaState } from '../replica'
 
 const store = () => useSessionStore.getState()
 
@@ -127,14 +128,6 @@ describe('addMessage', () => {
     expect((texts[0] as { text: string }).text).toBe('thinking through the problem')
   })
 
-  it('clears streamingText on the target session when message is committed', () => {
-    store().createNewSession('r1', '/p')
-    seed.streamText('r1', 'streaming tokens...')
-    expect(store().sessions['r1'].streamingText).toBe('streaming tokens...')
-    seed.message('r1', makeAssistantMessage('final'))
-    expect(store().sessions['r1'].streamingText).toBe('')
-  })
-
   it('is a no-op when routingId is unknown — no ghost session (F7)', () => {
     // This used to BOOTSTRAP a placeholder ("a cross-client event must not be
     // dropped"). Nothing can outrun `session:created` through one FIFO funnel and
@@ -143,46 +136,6 @@ describe('addMessage', () => {
     // a permanent `cwd: ''` row in every snapshot.
     seed.message('ghost-session', makeAssistantMessage('hello'))
     expect(store().sessions['ghost-session']).toBeUndefined()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 4–6. Streaming accumulation (text + thinking)
-// ---------------------------------------------------------------------------
-
-describe('appendStreamingText', () => {
-  it('initializes streamingText from empty when first chunk arrives', () => {
-    store().createNewSession('r1', '/p')
-    expect(store().sessions['r1'].streamingText).toBe('')
-    seed.streamText('r1', 'first chunk')
-    expect(store().sessions['r1'].streamingText).toBe('first chunk')
-  })
-
-  it('appends subsequent chunks to the accumulator', () => {
-    store().createNewSession('r1', '/p')
-    seed.streamText('r1', 'hello ')
-    seed.streamText('r1', 'world')
-    expect(store().sessions['r1'].streamingText).toBe('hello world')
-  })
-
-  // The thinking-span CLOCK moved to the emitter in 4b and the renderer's copy was
-  // deleted in 4c: durations arrive on the block (BaseSession.send stamps
-  // ChatMessage.thinkingDurationMs, the reducer moves it onto the block), so the
-  // behavior is pinned by main/providers/__tests__/base-session-thinking-span.test.ts
-  // and shared/sync/__tests__/reducer.unit.test.ts instead.
-})
-
-describe('appendStreamingThinking', () => {
-  it('accumulates thinking text and stamps thinkingStartedAt on first chunk', () => {
-    store().createNewSession('r1', '/p')
-    const before = Date.now()
-    seed.streamThinking('r1', 'step 1 ')
-    const startedAt = store().sessions['r1'].thinkingStartedAt!
-    expect(startedAt).toBeGreaterThanOrEqual(before)
-    seed.streamThinking('r1', 'step 2')
-    expect(store().sessions['r1'].streamingThinking).toBe('step 1 step 2')
-    // Does not overwrite startedAt on subsequent chunks
-    expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
   })
 })
 
@@ -483,13 +436,13 @@ describe('multi-session isolation', () => {
     expect(store().sessions['B'].messages).toHaveLength(0)
   })
 
-  it('appendStreamingText on A does not leak into B', () => {
+  it('item streams on A do not leak into B', () => {
     store().createNewSession('A', '/a')
     store().createNewSession('B', '/b', false)
     seed.streamText('A', 'a tokens')
     seed.streamText('B', 'b tokens')
-    expect(store().sessions['A'].streamingText).toBe('a tokens')
-    expect(store().sessions['B'].streamingText).toBe('b tokens')
+    expect(Object.values(store().sessions['A'].itemStreams)[0]?.value).toBe('a tokens')
+    expect(Object.values(store().sessions['B'].itemStreams)[0]?.value).toBe('b tokens')
   })
 
   it('addError on A does not populate B.errors', () => {
@@ -623,7 +576,7 @@ describe('retractMessages', () => {
   const msg = (id: string) =>
     makeChatMessage({ id, content: [{ type: 'text', text: `body of ${id}` }] })
 
-  it('removes exactly the listed messages and clears streaming state', () => {
+  it('removes exactly the listed messages and preserves an unrelated active item', () => {
     store().createNewSession('r1', '/p')
     seed.message('r1', msg('m1'))
     seed.message('r1', msg('m2'))
@@ -632,12 +585,11 @@ describe('retractMessages', () => {
     seed.retract('r1', ['m1'])
 
     const s = store().sessions['r1']
-    expect(s.messages.map((m) => m.id)).toEqual(['m2'])
-    expect(s.streamingText).toBe('')
-    expect(s.streamingThinking).toBe('')
+    expect(s.messages.map((m) => m.id)).toEqual(['m2', 'fixture-r1-assistant-text'])
+    expect(Object.values(s.itemStreams)[0]?.value).toBe('refused partial text')
   })
 
-  it('unknown ids are a no-op for messages but still clear streaming', () => {
+  it('an empty retraction is a no-op for messages and item streams', () => {
     store().createNewSession('r1', '/p')
     seed.message('r1', msg('m1'))
     seed.streamText('r1', 'stale partial')
@@ -645,8 +597,8 @@ describe('retractMessages', () => {
     seed.retract('r1', [])
 
     const s = store().sessions['r1']
-    expect(s.messages.map((m) => m.id)).toEqual(['m1'])
-    expect(s.streamingText).toBe('')
+    expect(s.messages.map((m) => m.id)).toEqual(['m1', 'fixture-r1-assistant-text'])
+    expect(Object.values(s.itemStreams)[0]?.value).toBe('stale partial')
   })
 })
 
@@ -693,19 +645,19 @@ describe('derived selector safety', () => {
   it('useActiveSession returns EMPTY_SESSION_STATE slice when activeSessionId points at a deleted session', () => {
     useSessionStore.setState({ activeSessionId: 'ghost', sessions: {} })
     mirrorStoreIntoReplica()
-    const { result } = renderHook(() => useActiveSession((s: PerSessionState) => s.streamingText))
-    expect(result.current).toBe('')
+    const { result } = renderHook(() => useActiveSession((s: PerSessionState) => s.itemStreams))
+    expect(result.current).toEqual({})
   })
 
   it('useActiveSession reflects live updates when the active session exists', () => {
     store().createNewSession('r1', '/p')
     const { result, rerender } = renderHook(() =>
-      useActiveSession((s: PerSessionState) => s.streamingText)
+      useActiveSession((s: PerSessionState) => s.itemStreams)
     )
-    expect(result.current).toBe('')
+    expect(result.current).toEqual({})
     seed.streamText('r1', 'stream')
     rerender()
-    expect(result.current).toBe('stream')
+    expect(Object.values(result.current)[0]?.value).toBe('stream')
   })
 })
 
@@ -724,8 +676,7 @@ describe('createNewSession defaults', () => {
     expect(s.isHistorical).toBe(false)
     expect(s.pendingApprovals).toEqual([])
     expect(s.errors).toEqual([])
-    expect(s.streamingText).toBe('')
-    expect(s.streamingThinking).toBe('')
+    expect(s.itemStreams).toEqual({})
     expect(s.rightPanel).toBe('none')
     expect(s.permissionMode).toBe('default')
   })
@@ -778,15 +729,33 @@ describe('clearConversation', () => {
 // ---------------------------------------------------------------------------
 
 describe('changePermissionMode', () => {
-  // SyncCore phase 4c deleted BOTH halves of the optimism: the pre-spawn "update
-  // the store directly" and the `.catch` revert. They existed because the mode the
-  // pill showed was this client's guess — skipped for the one case a live session
-  // could reject (`auto`), un-guessed when the invoke failed. `permissionMode` is
-  // SEALED now and every path emits `session:permission-mode`: the live session's
-  // own setter (including the reverted mode the engine chose) and, pre-spawn where
-  // there is no session object, `handlers-core.setPermissionMode`'s echo.
-  it('is invoke-only: the pill does not move until the event says so', () => {
+  // Two owners, split by whether an engine process is attached. LIVE: the
+  // session's own setter emits `session:permission-mode` (including the reverted
+  // mode when the engine refuses `auto`), so this client writes nothing and has
+  // nothing to undo. PRE-SPAWN / disconnected: no session object exists in main,
+  // so the IPC setter reaches nothing and emits nothing — the originating
+  // client's own local write is the only thing that moves the pill, and it is
+  // also what the spawn reads (InputBox hands `session.permissionMode` to
+  // `window.api.createSession`).
+  it('applies the pick locally pre-spawn — and still invokes', () => {
     store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].sdkActive).toBe(false)
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+
+    store().changePermissionMode('r1', 'plan')
+
+    // Visible immediately, because nothing else will ever say it.
+    expect(store().sessions['r1'].permissionMode).toBe('plan')
+    // ...and through the replica, so the next projection does not revert it.
+    expect(getReplicaState().sessions['r1'].permissionMode).toBe('plan')
+    // The invoke still goes out: a harmless no-op with no session object in
+    // main, and one code shape for both halves.
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'plan')
+  })
+
+  it('is invoke-only for a LIVE session: the pill does not move until the event says so', () => {
+    store().createNewSession('r1', '/p')
+    store().markSdkActive('r1')
     expect(store().sessions['r1'].permissionMode).toBe('default')
 
     store().changePermissionMode('r1', 'acceptEdits')
@@ -799,8 +768,9 @@ describe('changePermissionMode', () => {
     expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
   })
 
-  it('a rejected invoke leaves the mode exactly where the engine last put it', async () => {
+  it('a rejected invoke on a LIVE session leaves the mode where the engine last put it', async () => {
     store().createNewSession('r1', '/p')
+    store().markSdkActive('r1')
     seed.permissionMode('r1', 'plan')
     ;(window.api.setPermissionMode as any).mockRejectedValueOnce(new Error('rejected by SDK'))
 
@@ -809,6 +779,12 @@ describe('changePermissionMode', () => {
 
     // No local revert to undo, because there was no local apply to begin with.
     expect(store().sessions['r1'].permissionMode).toBe('plan')
+  })
+
+  it('leaves the store alone for an unknown id, but still invokes', () => {
+    store().changePermissionMode('ghost', 'plan')
+    expect(store().sessions['ghost']).toBeUndefined()
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('ghost', 'plan')
   })
 })
 

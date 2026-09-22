@@ -1,5 +1,10 @@
-import { memo, useState } from 'react'
-import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
+import { createContext, memo, useContext, useState } from 'react'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  ToolReviewBlock
+} from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -7,11 +12,17 @@ import { ExitPlanModeCard } from './ExitPlanModeCard'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
+import { SleepRow } from './SleepRow'
+import { ToolNoteRow } from './ToolNoteRow'
+import { ContextNoteBlock } from './ContextNoteBlock'
+import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { useImageGallery } from '../shared/ImageViewer'
+import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
+import { openProviderSettings } from '../SettingsDialog/settings-target'
 
 // ---------------------------------------------------------------------------
 // Unified tool-block dispatch
@@ -39,17 +50,33 @@ function renderToolBlock(
   block: ToolUseBlockForDispatch,
   result: ToolResultBlockForDispatch | undefined,
   approval: PendingApproval | undefined,
-  key: number | string
+  key: number | string,
+  // A permission judge's verdict on this call (F18). Only the passive card shows
+  // it: the lifted kinds below are interactions (a plan, a question, a todo
+  // list), and none of them is an action a judge gates.
+  review?: ToolReviewBlock,
+  // Whether this block is on the LAST assistant message — read only by the plan
+  // card, whose no-approval action set (Codex, F20) belongs to the latest plan
+  // and to no earlier one.
+  isLastAssistant = false
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
   // Compute the engine-neutral ToolView once and pass it to lifted components.
   // Passive kinds (command/fileEdit/…) still compute their view inside ToolCallBlock.
-  const view = toolMap.normalize(kind, block.toolInput, result)
+  const view = toolMap.normalize(kind, block.toolInput, result, block.toolName)
 
   // Lifted interaction components — consume the neutral view, not block.toolInput.
   if (kind === 'plan' && view.kind === 'plan') {
-    return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
+    return (
+      <ExitPlanModeCard
+        key={key}
+        block={block}
+        view={view}
+        approval={approval}
+        isLatest={isLastAssistant}
+      />
+    )
   }
   if (kind === 'question' && view.kind === 'question') {
     return (
@@ -65,27 +92,75 @@ function renderToolBlock(
   if (kind === 'todo' && view.kind === 'todo') {
     return <TodoToolBlock key={key} block={block} result={result} view={view} />
   }
+  if (kind === 'sleep' && view.kind === 'sleep') {
+    return <SleepRow key={key} block={block} result={result} view={view} />
+  }
+  if (kind === 'note' && view.kind === 'note') {
+    return (
+      <ToolNoteRow
+        key={key}
+        block={block}
+        result={result}
+        view={view}
+        displayName={toolMap.displayName(block.toolName)}
+      />
+    )
+  }
   if (kind === 'task' && view.kind === 'task') {
     return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />
   }
 
   // Passive kinds → ToolCallBlock host → ToolCard + kind body
   // (command/fileEdit/fileWrite/fileRead/search/web/diagram/mockup/mcp/unknown).
-  return <ToolCallBlock key={key} block={block} result={result} approval={approval} />
+  return (
+    <ToolCallBlock key={key} block={block} result={result} approval={approval} review={review} />
+  )
 }
+
+/**
+ * WHICH session's transcript these bubbles belong to — the chat message list
+ * provides its own routing id; every other host leaves it `null`.
+ *
+ * `MessageBubble` is not the chat's alone: automation-run history replays a
+ * recorded run through it. Anything inside a bubble that needs a session was
+ * therefore reading `activeSessionId`, which for a replayed run is an unrelated
+ * chat — so its auth row showed that session's lifetime and its Retry re-sent
+ * the prompt into a session the user was not looking at.
+ *
+ * `null` is a real answer, not a missing one: a transcript that belongs to no
+ * open session has no live fact to read and nothing it could correctly act on.
+ * Consumers render history.
+ */
+const TranscriptSessionContext = createContext<string | null>(null)
+
+/** Mounted by a message list that IS a session's transcript. */
+export const TranscriptSessionProvider = TranscriptSessionContext.Provider
+
+/** The routing id of the transcript this bubble is in, or `null`. */
+export function useTranscriptSessionId(): string | null {
+  return useContext(TranscriptSessionContext)
+}
+
+/** Stable identity so the default never re-renders a memoised bubble. */
+const EMPTY_ACTIVE_THINKING: ReadonlyArray<{ index: number; startedAt?: number }> = []
 
 interface MessageBubbleProps {
   message: ChatMessage
   pendingApprovals: PendingApproval[]
   isLastAssistant: boolean
-  thinkingStartedAt: number | null
+  /**
+   * The message's currently-streaming thinking slots, each with the item's own
+   * start clock when the engine measured one (`ActiveItemStream.startedAt`).
+   * `undefined` — not `[]` — for a message with none, so `memo` keeps holding.
+   */
+  activeThinking?: ReadonlyArray<{ index: number; startedAt?: number }>
 }
 
 export const MessageBubble = memo(function MessageBubble({
   message,
   pendingApprovals,
   isLastAssistant,
-  thinkingStartedAt
+  activeThinking = EMPTY_ACTIVE_THINKING
 }: MessageBubbleProps): React.JSX.Element {
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -124,9 +199,35 @@ export const MessageBubble = memo(function MessageBubble({
           }
           if (block.type === 'api_error') {
             return block.errorType === 'authentication' ? (
-              <AuthErrorBlock key={i} block={block} />
+              <AuthTranscriptRow key={i} block={block} />
             ) : (
               <ApiErrorBlock key={i} block={block} />
+            )
+          }
+          // Context an ENGINE injected into the model's prompt — Codex hook
+          // fragments today. Verbatim, never markdown (the fragments are
+          // third-party text).
+          if (block.type === 'context_note') {
+            return <ContextNoteBlock key={i} block={block} />
+          }
+          // A code review's findings. The one untrusted-text block that DOES go
+          // through markdown, by decision (F20) — see ReviewResultCard.
+          if (block.type === 'review_result') {
+            return <ReviewResultCard key={i} block={block} />
+          }
+          // A bare notice the engine wants in the transcript — Codex's `auto`
+          // guardian decisions are the current producer. Rendered VERBATIM and
+          // never through the markdown pipeline: the text can quote a
+          // model-authored rationale from a reviewer thread the user never saw.
+          if (block.type === 'text') {
+            return (
+              <div
+                key={i}
+                data-testid="MessageBubble.systemNotice"
+                className="text-[12px] text-text-muted leading-[1.6] whitespace-pre-wrap break-words border-l-2 border-border pl-3 py-0.5"
+              >
+                {block.text}
+              </div>
             )
           }
           return null
@@ -238,9 +339,14 @@ export const MessageBubble = memo(function MessageBubble({
 
   // Pair tool_use blocks with their tool_result
   const resultMap = new Map<string, ToolResultBlock>()
+  // …and with a permission judge's verdict on them (F18). LAST one wins: a
+  // re-review after "approve anyway" is a new decision, not a second opinion.
+  const reviewMap = new Map<string, ToolReviewBlock>()
   for (const block of message.content) {
     if (block.type === 'tool_result') {
       resultMap.set(block.toolUseId, block)
+    } else if (block.type === 'tool_review') {
+      reviewMap.set(block.toolUseId, block)
     }
   }
 
@@ -289,6 +395,9 @@ export const MessageBubble = memo(function MessageBubble({
   const visible = message.content.filter(
     (b) =>
       b.type !== 'tool_result' &&
+      // A verdict renders ON its card, never as a row of its own — and never as
+      // a gap that would split a run of tool calls into two groups.
+      b.type !== 'tool_review' &&
       !(b.type === 'tool_use' && b.toolName && toolMap.hidden.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
@@ -301,14 +410,12 @@ export const MessageBubble = memo(function MessageBubble({
         items.push({ kind: 'tool_group', blocks: [{ block, index: i }] })
       }
     } else if (block.type === 'thinking') {
+      if (!block.text && !activeThinking.some((slot) => slot.index === i)) continue
       items.push({ kind: 'thinking', block, index: i })
     } else {
       items.push({ kind: 'other', block, index: i })
     }
   }
-
-  // Find the last thinking item so only it can be "active"
-  const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
 
   return (
     <div
@@ -318,21 +425,15 @@ export const MessageBubble = memo(function MessageBubble({
     >
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
-          const isLast = gi === lastThinkingGi
-          // Only hide if this message was updated during the current thinking session
-          // (meaning the SDK sent a partial with this thinking block for the active turn)
-          const isActive =
-            isLast &&
-            isLastAssistant &&
-            !!thinkingStartedAt &&
-            message.timestamp >= thinkingStartedAt
-          // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
-          if (isActive) return null
+          const active = activeThinking.find((slot) => slot.index === item.index)
           return (
             <ThinkingBlock
               key={item.index}
               text={item.block.text || ''}
-              isActive={false}
+              isActive={!!active}
+              // The item's own clock when the engine measured one; the message
+              // timestamp is only right for a thought that opened the message.
+              startedAt={active ? (active.startedAt ?? message.timestamp) : undefined}
               durationMs={item.block.durationMs}
             />
           )
@@ -345,7 +446,8 @@ export const MessageBubble = memo(function MessageBubble({
           const { block, index } = item.blocks[0]
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index)
+          const review = reviewMap.get(block.toolUseId)
+          return renderToolBlock(toolMap, block, result, approval, index, review, isLastAssistant)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -356,7 +458,16 @@ export const MessageBubble = memo(function MessageBubble({
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              return renderToolBlock(toolMap, block, result, approval, index)
+              const review = block.toolUseId ? reviewMap.get(block.toolUseId) : undefined
+              return renderToolBlock(
+                toolMap,
+                block,
+                result,
+                approval,
+                index,
+                review,
+                isLastAssistant
+              )
             })}
           </div>
         )
@@ -572,203 +683,189 @@ function ApiErrorBlock({
   )
 }
 
-// Small button helpers — match FloatingApproval styling.
-function PrimaryBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
-  return (
-    <button
-      {...props}
-      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer disabled:opacity-50"
-    />
-  )
-}
-function GhostBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
-  return (
-    <button
-      {...props}
-      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 border border-border-bright text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
-    />
-  )
-}
-
 /**
- * Authentication-error variant of the API error card (ADR-014). Renders the
- * 401/expired-session message with an inline Login action, then walks the OAuth
- * flow states (authorizing → success) driven by the global `authState`.
+ * The transcript's engine-neutral "a credential was rejected" row (ADR-070 §4),
+ * replacing `AuthErrorBlock`.
+ *
+ * Every engine emits this block now (`api_error` / `errorType:
+ * 'authentication'`), so the failure is anchored where it happened on all four
+ * instead of Claude having history and the rest a floating card that vanished.
+ *
+ * THREE LIFETIMES, read off the session's `authRequired` (ADR-070 §2), because
+ * the block itself is transcript DATA and outlives the problem:
+ *
+ *  · `broken`   — a rejection nobody has fixed: Sign in + the disclosure;
+ *  · `resolved` — `provider:auth-resolved` landed and the prompt is still
+ *                 un-sent: the retry, which is the only work left;
+ *  · `settled`  — no owed sign-in, which is what a RELOADED transcript always
+ *                 restores to. It has **no action at all**. That is the specific
+ *                 bug this rewrite fixes: the old row kept a live "Sign in" for
+ *                 a credential fixed three days ago, and a component-local
+ *                 `dismissed` was its only answer — so the row came back on the
+ *                 next reload, permanently. A settled row is history; history
+ *                 has nothing to dismiss and nothing to act on.
+ *
+ * EXACTLY TWO hit areas in `broken` — the Sign in link and the disclosure
+ * toggle. The sentence is inert, selectable text and there is no whole-row
+ * onClick: a whole-row target beside two real actions is how a user gets an
+ * accidental dialog while trying to copy an error out of permanent history.
+ *
+ * The retry prompt comes from `authRequired.retryPrompt`, captured by the
+ * reducer at failure time. There is deliberately no message walk here — this
+ * component and the deleted `AuthRequiredRow` each grew their own, and they
+ * disagreed.
  */
-function AuthErrorBlock({
+function AuthTranscriptRow({
   block
 }: {
   block: Extract<ContentBlock, { type: 'api_error' }>
-}): React.JSX.Element | null {
-  const authState = useSessionStore((s) => s.authState)
-  const signIn = useSessionStore((s) => s.signIn)
-  const submitOAuthCode = useSessionStore((s) => s.submitOAuthCode)
-  const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
+}): React.JSX.Element {
+  // The session whose TRANSCRIPT this is — never the active one. See
+  // {@link TranscriptSessionContext}: `null` (automation-run history, or any
+  // other host) has no live fact and gets the settled row.
+  const routingId = useTranscriptSessionId()
+  const sessionFact = useSessionStore((s) =>
+    routingId ? (s.sessions[routingId]?.authRequired ?? null) : null
+  )
+  const providerAccounts = useSessionStore((s) => s.providerAccounts)
+  const openSignIn = useSessionStore((s) => s.openSignIn)
   const retrySend = useSessionStore((s) => s.retrySend)
-  const [dismissed, setDismissed] = useState(false)
-  const [manual, setManual] = useState(false)
-  const [code, setCode] = useState('')
-  // Only the card the user clicked "Log in" on follows the global flow state.
-  // Other (and newly-arrived) error cards stay in the error state, so a retry
-  // that re-fails doesn't inherit a stale "success" and loop. See ADR-014.
-  const [initiated, setInitiated] = useState(false)
+  const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
+  const [expanded, setExpanded] = useState(false)
 
-  if (dismissed) return null
-  const status = initiated ? (authState?.status ?? 'idle') : 'idle'
+  // The session's fact is THIS row's lifetime only while the two are about the
+  // same credential. ADR-070 §4 matches per session rather than per block and
+  // accepts the resulting duplication — but only between rows that name the
+  // SAME provider. A session that failed on Anthropic and later on ChatGPT
+  // otherwise rendered its Anthropic row saying "Claude rejected the
+  // credential" above a Sign in that opened ChatGPT: named one, acted on
+  // another. A block that names nobody predates the field and still defers.
+  const authRequired =
+    sessionFact && (block.providerId === undefined || block.providerId === sessionFact.providerId)
+      ? sessionFact
+      : null
 
-  const startLogin = (): void => {
-    setInitiated(true)
-    void signIn()
+  const lifetime = !authRequired
+    ? 'settled'
+    : authRequired.resolved === true
+      ? 'resolved'
+      : 'broken'
+  // WHOSE credential was refused is a property of the BLOCK, not of the
+  // session: `authRequired` is nulled the moment the failure settles, and
+  // settled is what a reloaded session always restores to — so reading the name
+  // from the session alone made a Claude failure read "the credential was
+  // rejected", provider unknown, for the rest of that transcript's life. The
+  // session's live fact is the fallback, for blocks written before the field
+  // existed (it is optional exactly so those stay valid).
+  const named = block.providerId ?? authRequired?.providerId
+  const providerId = authRequired?.providerId
+  const drivable = providerId !== undefined && isDrivableProvider(providerId)
+  // Verbatim, and THIS block's words win: they are per-block correct, while the
+  // event's message describes whatever the session failed on last. The message
+  // is the fallback for a block that carried no text of its own.
+  const detail = block.errorMessage || authRequired?.message
+  const sentence = named
+    ? `Turn stopped — ${providerDisplayName(named)} rejected the credential.`
+    : 'Turn stopped — the credential was rejected.'
+
+  const rule =
+    lifetime === 'broken'
+      ? 'border-danger/50'
+      : lifetime === 'resolved'
+        ? 'border-success/50'
+        : 'border-border'
+
+  const signIn = (): void => {
+    if (!providerId) return
+    if (!drivable) {
+      // No ClaudeUI flow owns an engine-native credential, so offering a dialog
+      // would be a dead affordance (ADR-030).
+      openProviderSettings()
+      return
+    }
+    openSignIn({
+      providerId,
+      mode: 'reauth',
+      ...(authRequired?.accountId ? { accountId: authRequired.accountId } : {}),
+      ...(authRequired?.retryPrompt && routingId
+        ? { retry: { routingId, prompt: authRequired.retryPrompt } }
+        : {})
+    })
   }
 
-  const retryLastPrompt = (): void => {
-    const st = useSessionStore.getState()
-    const sid = st.activeSessionId
-    if (!sid) return setDismissed(true)
-    const msgs = st.sessions[sid]?.messages ?? []
-    const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
-    const text = (lastUser?.content ?? [])
-      .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    // retrySend respawns cli.js so it re-reads the new credential, then resends.
-    // The user bubble comes back via the main-process echo (single source of
-    // truth) — don't add it here.
-    if (text) void retrySend(sid, text)
-    setDismissed(true)
+  const retry = (): void => {
+    if (!routingId || !authRequired?.retryPrompt) return
+    void retrySend(routingId, authRequired.retryPrompt)
+    // Performing the retry IS lifetime 3 (ADR-070 §2) — don't wait for the
+    // respawned turn to start running before the row stops offering it.
+    clearAuthRequired(routingId)
   }
 
-  // --- Signed in -----------------------------------------------------------
-  if (status === 'success') {
-    const email = authState?.account?.email
-    const tier = authState?.account?.subscriptionType
-    return (
-      <div className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden animate-fade-in">
-        <div className="px-3 py-2.5 flex items-start gap-2.5">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className="text-success shrink-0 mt-0.5"
-          >
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
-          <div className="flex-1 min-w-0">
-            <div className="text-[13px] font-medium text-success">
-              {email ? `Signed in as ${email}` : 'Signed in'}
-            </div>
-            {tier && (
-              <div className="text-[12px] text-text-secondary mt-0.5">{tier} subscription</div>
-            )}
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
-          <GhostBtn onClick={() => setDismissed(true)}>Dismiss</GhostBtn>
-          <PrimaryBtn onClick={retryLastPrompt}>Retry message</PrimaryBtn>
-        </div>
-      </div>
-    )
-  }
+  /** The account a resolution signed in as, when the vault's list names one. */
+  const signedInAs =
+    providerId === 'chatgpt' && authRequired?.accountId
+      ? providerAccounts?.accounts.find((account) => account.id === authRequired.accountId)?.email
+      : undefined
 
-  // --- Authorizing (loopback wait, or manual paste) ------------------------
-  if (status === 'authorizing') {
-    return (
-      <div className="rounded-lg border border-accent/35 bg-bg-secondary overflow-hidden animate-fade-in">
-        <div className="px-3 py-2.5 flex items-start gap-2.5">
-          {!manual && (
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="text-accent shrink-0 mt-0.5 animate-spin"
-            >
-              <path d="M21 12a9 9 0 1 1-6.22-8.56" />
-            </svg>
-          )}
-          <div className="flex-1 min-w-0">
-            {manual ? (
-              <>
-                <div className="text-[13px] font-medium text-accent">Paste authorization code</div>
-                <div className="text-[11px] text-text-muted mt-0.5">
-                  state is recovered from the login URL — just paste the code
-                </div>
-                <input
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="authorization code"
-                  className="font-mono w-full mt-2 text-[12px] rounded-md px-2.5 py-1.5 bg-bg-input border border-border-bright text-text-primary outline-none focus:border-accent"
-                />
-              </>
-            ) : (
-              <>
-                <div className="text-[13px] font-medium text-accent">
-                  Waiting for browser authorization…
-                </div>
-                <div className="text-[12px] text-text-secondary mt-0.5">
-                  Approve in the browser tab we opened — it completes automatically.
-                </div>
-                <button
-                  onClick={() => setManual(true)}
-                  className="text-[11px] mt-1.5 underline text-text-muted hover:text-text-secondary cursor-pointer"
-                >
-                  Browser didn&apos;t open? Paste code manually
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
-          {manual ? (
-            <>
-              <GhostBtn onClick={() => setManual(false)}>Back</GhostBtn>
-              <PrimaryBtn onClick={() => void submitOAuthCode(code)} disabled={!code.trim()}>
-                Submit
-              </PrimaryBtn>
-            </>
-          ) : (
-            <GhostBtn onClick={() => void cancelSignIn()}>Cancel</GhostBtn>
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  // --- Error / idle: the initial auth-required prompt ----------------------
-  const detail = status === 'error' && authState?.error ? authState.error : block.errorMessage
   return (
-    <div className="rounded-lg border border-danger/30 bg-bg-secondary overflow-hidden animate-fade-in">
-      <div className="px-3 py-2.5 flex items-start gap-2.5">
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className="text-danger shrink-0 mt-0.5"
+    <div
+      data-testid="AuthTranscriptRow"
+      data-lifetime={lifetime}
+      {...(named ? { 'data-id': named } : {})}
+      className={`border-l-2 ${rule} pl-3 py-0.5 animate-fade-in`}
+    >
+      <div
+        className={`text-[12px] ${lifetime === 'settled' ? 'text-text-muted' : 'text-text-primary'}`}
+      >
+        {sentence}
+      </div>
+      <div className="mt-1.5 flex items-center gap-3 flex-wrap">
+        {lifetime === 'resolved' && (
+          <span data-testid="AuthTranscriptRow.signedIn" className="text-[11px] text-success">
+            ✓ signed in{signedInAs ? ` as ${signedInAs}` : ''}
+          </span>
+        )}
+        {lifetime === 'resolved' && authRequired?.retryPrompt && (
+          <button
+            type="button"
+            data-testid="AuthTranscriptRow.retry"
+            onClick={retry}
+            className="text-[12px] font-medium rounded-md px-2.5 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer"
+          >
+            Retry this prompt
+          </button>
+        )}
+        {lifetime === 'broken' && (
+          <button
+            type="button"
+            data-testid={drivable ? 'AuthTranscriptRow.signIn' : 'AuthTranscriptRow.settings'}
+            data-id={providerId}
+            onClick={signIn}
+            className="text-[12px] text-accent underline decoration-dotted cursor-pointer"
+          >
+            {drivable ? 'Sign in' : 'Open provider settings'}
+          </button>
+        )}
+        {detail && (
+          <button
+            type="button"
+            data-testid="AuthTranscriptRow.disclose"
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+            className="text-[11px] text-text-muted hover:text-text-secondary transition-colors cursor-pointer"
+          >
+            {expanded ? '▴' : '▾'} what the engine said
+          </button>
+        )}
+      </div>
+      {expanded && detail && (
+        <pre
+          data-testid="AuthTranscriptRow.message"
+          className="mt-2 text-[11px] font-mono text-danger/80 whitespace-pre-wrap break-words bg-bg-secondary rounded-md p-2.5 border border-border max-h-64 overflow-y-auto"
         >
-          <circle cx="12" cy="12" r="10" />
-          <line x1="12" y1="8" x2="12" y2="12" />
-          <line x1="12" y1="16" x2="12.01" y2="16" />
-        </svg>
-        <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-danger">Authentication failed</div>
-          <div className="text-[12px] text-text-secondary mt-0.5 break-words">
-            {detail} — your Claude subscription session has expired.
-          </div>
-        </div>
-      </div>
-      <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
-        <GhostBtn onClick={() => setDismissed(true)}>Dismiss</GhostBtn>
-        <PrimaryBtn onClick={startLogin}>Log in with Claude</PrimaryBtn>
-      </div>
+          {detail}
+        </pre>
+      )}
     </div>
   )
 }

@@ -17,11 +17,25 @@
  *    service-session.ts precedent) kept alive across turns via a pushable
  *    streaming-input channel, driven by a manual iterator loop (see the
  *    `.return()`-kills-the-process hazard noted on `driveClaudeTurn`).
+ *  - claude/opencode → pi (M4c): one headless `pi --mode rpc` child per
+ *    target plus its own loopback PiBridgeHost approval gate.
+ *  - anything → CODEX (slice H, re-shaped by ADR-069 §7): one
+ *    `thread/start`-created thread on the CALLER's host — no child of its own —
+ *    with ClaudeUI's own permission engine answering the native approval
+ *    requests that thread raises. Codex is a target AND (slice E) a source, and
+ *    codex → codex is now allowed: it is one more thread on the process the
+ *    caller already runs on, so the same-engine guard it used to hit has
+ *    nothing left to protect. The guard stands for the other three.
  *
  * All failures come back as `isError` tool text — nothing throws across the
  * MCP boundary.
  */
-import { resolve as resolvePath } from 'node:path'
+import { createHash } from 'node:crypto'
+import {
+  isAbsolute as isAbsolutePath,
+  relative as relativePath,
+  resolve as resolvePath
+} from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
@@ -34,16 +48,19 @@ import { buildRuleset } from '../opencode/permission-ruleset'
 import type { PermissionRule } from '../opencode/permission-ruleset'
 import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
-import { loadEngineConfig } from './ui-config'
+import { loadEngineConfig, loadSettings } from './ui-config'
+import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
+import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 // event-mapper.ts is a leaf module (no cycle risk — it does not import
 // OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
 // message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
 // for its own turns, instead of a second hand-rolled implementation.
-import { mapEvent, extractToolResult } from '../opencode/event-mapper'
-import type { MessageAccumulator } from '../opencode/event-mapper'
+import { mapEvent, extractToolResult, buildChatMessage } from '../opencode/event-mapper'
+import type { MessageAccumulator, OpencodeStreamItem } from '../opencode/event-mapper'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
@@ -53,7 +70,7 @@ import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
-import { mapPiEvent, createPiMapperState } from '../pi/event-mapper'
+import { mapPiEvent, createPiMapperState, finishPiMessage } from '../pi/event-mapper'
 import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
 import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
 import type {
@@ -61,7 +78,44 @@ import type {
   PiGetLastAssistantTextData,
   PiGetSessionStatsData
 } from '../pi/pi-protocol'
-import { engineMeta } from '../../shared/engine-meta'
+// Codex target primitives (ADR-033 slice H — Codex as a dispatch TARGET). Same
+// one-way-edge reasoning as the opencode/pi imports above: none of these leaf
+// modules import THIS file. CodexSession.ts DOES (it is a dispatch SOURCE,
+// slice E), which is exactly why the mode->policy table and the turn-input
+// mapping live in `codex-turn-policy.ts` rather than being exported from
+// CodexSession.ts — importing that module here would be a require-cycle.
+import { CodexMethodNotFound, type CodexTransportError } from '../codex/CodexAppServerClient'
+import {
+  codexHostRegistry,
+  type CodexHostIdentity,
+  type CodexHostSource,
+  type CodexThreadConnection,
+  type CodexThreadOwner
+} from '../codex/CodexHost'
+import { codexBinaryAvailable } from '../codex/codex-locate'
+import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
+import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
+import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
+import { codexDisjointTokens } from '../codex/usage-ledger'
+import type { CodexMappedEvent } from '../codex/event-mapper'
+import { unwrapShellCommand } from '../codex/command-text'
+import {
+  decideWithSource,
+  EMPTY_RULES as EMPTY_CODEX_RULES,
+  PLAN_MODE_DENY_REASON
+} from '../pi/permission-engine'
+import type { PermissionDecision } from '../pi/permission-engine'
+import type { Model } from '../codex/protocol/v2/Model'
+import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
+import type { Turn } from '../codex/protocol/v2/Turn'
+import type { TokenUsageBreakdown } from '../codex/protocol/v2/TokenUsageBreakdown'
+import type { ThreadTokenUsage } from '../codex/protocol/v2/ThreadTokenUsage'
+import type { CommandExecutionRequestApprovalParams } from '../codex/protocol/v2/CommandExecutionRequestApprovalParams'
+import { equivalentCostUsd } from '../../shared/pricing'
+import type { ResolvedCosts } from '../../shared/cost-rule'
+import { opencodeMessageCosts } from '../opencode/message-cost'
+import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
+import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
   CanUseTool,
@@ -74,13 +128,31 @@ import type {
   SdkToolExtra
 } from '../sdk'
 import { logger } from './logger'
-import { insertDispatchedUsage } from './db'
-import type { DispatchedUsageRow } from './db'
+// The ADR-071 §1 ledger half of a dispatched turn. Every one of these modules
+// is ALREADY in this file's transitive import graph (`assistant-message` ->
+// `session-history` -> `block-usage` -> `usage-fetcher` -> `claude-session`,
+// which imports this module back), so naming them directly adds no import
+// edge that was not there — and nothing below is touched at module-init time,
+// only from a turn's own code path.
+import { recordUsageEvent } from './usage-recorder'
+import type { UsageTurnEvent, UsageTurnTokens } from './usage-recorder'
+import { usageFetcher } from './usage-fetcher'
+import { activeClaudeAttribution } from './usage-windows'
+import { buildClaudeAccountRef } from '../host'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
+import { piAuthProvider } from '../auth/PiAuthProvider'
+import { credentialSync } from '../auth/vault/CredentialSync'
+import { codexNativeIdentity } from '../auth/account-identity'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 import type {
   ApprovalDecision,
+  BillingType,
   ChatMessage,
+  DispatchConfig,
   EngineConfig,
   EngineId,
+  FileDiff,
   PendingApproval,
   PermissionSuggestion
 } from '../../shared/types'
@@ -103,9 +175,25 @@ import type {
  *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
  *    dispatches into pi — gates on the vendored pi binary actually being
  *    present, mirroring the 'claude' branch's opencode-binary check.
+ *  - 'codex' (slice E) hosts the tool for Codex-originated dispatches into
+ *    claude/opencode/pi. Claude is one of those three and is ClaudeUI's
+ *    bundled default engine, so — same reasoning as the 'opencode' branch —
+ *    a Codex session always has somewhere to dispatch to; the other two
+ *    binaries being absent only narrows the useful target list, which the
+ *    dispatcher's own per-request guards report.
+ *
+ * Slice H makes CODEX a target as well, so the 'claude' branch is no longer a
+ * one-engine question: a Claude session can dispatch into opencode, pi OR
+ * codex, and ANY of the three being installed makes the tool honest. (The pi
+ * disjunct also closes a gap left when M4c made pi a target without widening
+ * this branch — a machine with the pi binary but no opencode one hid
+ * dispatch_agent from Claude sessions that could in fact use it.)
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
-  if (engineId === 'claude') return opencodeServerManager.isBinaryAvailable()
+  if (engineId === 'claude')
+    return (
+      opencodeServerManager.isBinaryAvailable() || piBinaryAvailable() || codexBinaryAvailable()
+    )
   if (engineId === 'pi') return piBinaryAvailable()
   return true
 }
@@ -155,6 +243,16 @@ export interface DispatchContext {
    * gated on this being set; never fail a dispatch over it).
    */
   toolUseId?: string
+  /**
+   * The VAULT ChatGPT account the DISPATCHING session runs as (ADR-068 §2), when
+   * it is a Codex session with a per-session pin. A headless target must bill the
+   * same subscription the human's session bills — otherwise a pinned session's
+   * delegated work quietly lands on the active account instead.
+   *
+   * Absent (or null) on every other caller and on an unpinned Codex session:
+   * the target then runs as the ACTIVE account, exactly as slice 2a left it.
+   */
+  chatgptAccountId?: string | null
   extra?: SdkToolExtra
 }
 
@@ -272,6 +370,74 @@ export interface PiTargetPrimitives {
  */
 export type SpawnPiTargetFn = (opts: PiTargetSpawnOpts) => Promise<PiTargetPrimitives>
 
+/**
+ * The four native server-request methods a Codex dispatch TARGET answers
+ * (ADR-033 slice H) — the same approval surface `CodexSession` handles, MINUS
+ * `item/tool/call`.
+ *
+ * That omission is half the recursion scrub. Until ADR-069 the TRANSPORT
+ * enforced it — the target owned its own process and registered only these four
+ * methods, so `item/tool/call` was answered `-32601` before any handler ran. A
+ * target is a thread on a SHARED host now, and the host's registered list is the
+ * union its owners need, so this list is enforced by
+ * `gateCodexTargetRequest` instead, which answers anything outside it with the
+ * very same `-32601`. The other half is `thread/start` being sent with NO
+ * `dynamicTools`, so the target has neither `dispatch_agent` nor a hosted tool
+ * to call in the first place — belt (no tool offered) and braces (no route to
+ * run one if it somehow were).
+ */
+const CODEX_TARGET_SERVER_METHODS = [
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/tool/requestUserInput',
+  'item/permissions/requestApproval'
+] as const
+
+/**
+ * What `defaultAttachCodexTarget` is handed: where the thread lives, who it
+ * belongs to, and which ChatGPT identity its host runs as.
+ *
+ * No `env` and no `serverMethods`. The host owns both — it inherits
+ * `process.env` like every other Codex process, and the TRANSPORT then pins an
+ * explicit `CODEX_HOME` onto whatever it inherited
+ * (`CodexAppServerClient.childEnv`), so the child can never resolve a different
+ * home than the one ClaudeUI computed. NEVER set `CODEX_HOME` here: an env on
+ * these opts REPLACES inheritance wholesale, and the integration test already
+ * points a real binary at an isolated home through its own injected attach
+ * function. The registered server-method list is the union of what its owners
+ * answer.
+ */
+export type CodexTargetAttachOpts = {
+  cwd: string
+  label: string
+  /** Absent = never read the vault (the hermetic default). */
+  identity?: CodexHostIdentity
+} & CodexThreadOwner
+
+/**
+ * Puts a dispatch target's thread on a host (ADR-069 §7). Injectable so the
+ * unit suite drives a target without the real binary (mirrors
+ * `SpawnClaudeQueryFn`/`SpawnPiTargetFn`) and so the integration test can point
+ * it at an isolated home.
+ */
+export type AttachCodexTargetFn = (opts: CodexTargetAttachOpts) => Promise<CodexThreadConnection>
+
+/**
+ * The real one: the caller's host (its pin, else the active account), one more
+ * thread on it. The read lease is dropped immediately — `attach` is what holds
+ * the host for as long as the target lives.
+ */
+const defaultAttachCodexTarget =
+  (registry: CodexHostSource): AttachCodexTargetFn =>
+  async ({ cwd, label, identity, ...owner }) => {
+    const handle = await registry.acquire({ cwd, label, ...(identity ? { identity } : {}) })
+    try {
+      return handle.host.attach(owner)
+    } finally {
+      handle.release()
+    }
+  }
+
 export interface DispatcherDeps {
   serverManager: {
     acquire(cwd: string): Promise<{ baseUrl: string; authHeader: string }>
@@ -283,15 +449,27 @@ export interface DispatcherDeps {
   spawnClaudeQuery?: SpawnClaudeQueryFn
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
-  maxConcurrent?: number
+  /** Defaults to a thread on the caller's host (ADR-033 slice H, ADR-069 §7). */
+  attachCodexTarget?: AttachCodexTargetFn
   /**
-   * Absolute per-turn cap for the CLAUDE and PI directions. The opencode
-   * direction deliberately does NOT read this — it runs on the configurable
-   * inactivity + absolute watchdog (`DispatchConfig.idleTimeoutMs` /
-   * `turnTimeoutMs`, defaults `DISPATCH_IDLE_TIMEOUT_MS`/
-   * `DISPATCH_TURN_TIMEOUT_MS`) instead.
+   * Do Codex dispatch targets run under a VAULT ChatGPT account (ADR-068 §1/§2)?
+   *
+   * False by default — a dispatcher built without it asks its hosts for NO
+   * identity and never reads the vault, which is what keeps the real-binary
+   * target integration hermetic. The singleton below turns it on, and the
+   * account asked for is then the caller's pin, else the active one.
    */
-  dispatchTimeoutMs?: number
+  codexVaultAccounts?: boolean
+  /**
+   * The app-wide concurrent-dispatch cap, as a THUNK: it is called at the gate
+   * on every dispatch, not read once in the constructor, because the setting
+   * behind it is user-editable while the app runs (ADR-033, 2026-09-18).
+   * `Infinity` means no limit. Defaults to
+   * {@link defaultResolveMaxConcurrent}, which reads
+   * `AppSettings.dispatchMaxConcurrent` through
+   * {@link resolveDispatchMaxConcurrent}.
+   */
+  resolveMaxConcurrent?: () => number
   heartbeatMs?: number
   /**
    * ADR-033 M4c: how long `resolveAndRunPi`'s give-up path (timeout/abort/
@@ -305,6 +483,17 @@ export interface DispatcherDeps {
    * case never actually waits the full duration.
    */
   piAbortSettleGraceMs?: number
+  /**
+   * ADR-033 slice H: the bound on the two short waits `resolveAndRunCodex`'s
+   * give-up path (timeout/abort/stop) makes — first for an in-flight
+   * `turn/start` to hand back the turn id (without it the turn CANNOT be
+   * interrupted and would keep running headless, and the next continuation's
+   * `turn/start` would STEER that zombie rather than open a new turn — the
+   * app-server routes both through `start_or_steer_turn`), then for the
+   * `turn/interrupt` it sends to be acknowledged. Bounded so a wedged target
+   * can never hold the stop path open. Injectable for tests.
+   */
+  codexAbortSettleGraceMs?: number
   /** Delay between opencode SSE reconnect attempts after a dropped subscription
    *  (see runSseLoop). Small enough to recover approval forwarding quickly, big
    *  enough that a dead server can't hot-spin the loop. Injectable for tests. */
@@ -312,16 +501,59 @@ export interface DispatcherDeps {
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
   /**
-   * Persist one dispatched-agent-turn usage row (ADR-033 M4-B). Defaults to
-   * the real `insertDispatchedUsage` (db.ts) — tests inject a spy instead of
-   * exercising the (in-memory-under-vitest, but still real) operational DB.
-   * Called for 'completed'/'failed' outcomes only, never for a turn stopped
-   * before it produced any usage (see the call sites).
+   * Persist the ledger row for one dispatched-agent turn (ADR-071 §1).
+   * Defaults to the real `recordUsageEvent` (usage-recorder.ts) — tests inject
+   * a spy, both to stay off the (in-memory-under-vitest, but still real)
+   * operational DB and to prove that a throwing ledger write cannot reach the
+   * dispatch flow. Called for 'completed'/'failed' outcomes only, never for a
+   * turn stopped before it produced any usage (see the call sites).
    */
-  recordDispatchedUsage?: (row: Omit<DispatchedUsageRow, 'id'>) => void
+  recordUsageEvent?: (event: UsageTurnEvent) => void
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
+
+/** The account a dispatched turn ran under, as a ledger row records it. */
+interface DispatchTurnAccount {
+  accountKey: string
+  accountLabel: string | null
+  billingType: BillingType
+}
+
+/**
+ * What a target hands {@link CrossEngineDispatcher.safeRecordUsage}: one
+ * dispatched turn, as the ledger records it (ADR-071 §1).
+ *
+ * This used to be `dispatched_usage`'s row plus the ledger's extras. ADR-071
+ * §1 retired that table, and with it the four fields only its columns wanted — a
+ * duration, a turn total beside the split, the dispatching engine, and a cost
+ * the dispatcher resolved for itself. The ledger derives a turn's costs from
+ * the raw inputs below, by the same rule every other row follows.
+ *
+ * The last four are optional: a give-up path that knows nothing about the turn
+ * still records it, and a missing split records zeros rather than an invented
+ * figure.
+ */
+interface DispatchedTurnRecord {
+  /** When the turn ended — the dispatcher's clock, not the target's. */
+  ts: number
+  /** The DISPATCHING session, the ledger's `parent_routing_id`. */
+  fromRoutingId: string
+  targetEngine: string
+  /** The target model as the engine ENCODES it (`<vendor>/<model>` or bare). */
+  targetModel: string
+  targetSessionId: string | null
+  /** The dispatching tool_use id, part of the ledger's dedup key. */
+  toolUseId: string | null
+  /** The turn's tokens. Absent means UNKNOWN, not zero — see safeRecordUsage. */
+  tokens?: UsageTurnTokens
+  /** Absent means the target could not name its account (`UNKNOWN_ACCOUNT_KEY`). */
+  account?: DispatchTurnAccount
+  /** The engine's OWN cost figure for the turn, raw. Null when it reported none. */
+  engineCostUsd?: number | null
+  /** See `CostInputsForRow.engineCostIsEquivalent`. Defaults to false. */
+  engineCostIsEquivalent?: boolean
+}
 
 /** Reserved requestId prefix routing approvals to the dispatcher (ADR-033). */
 export const XENG_REQUEST_PREFIX = 'xeng:'
@@ -338,39 +570,103 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
  */
 const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
-const MAX_CONCURRENT = 3
-/** Absolute per-turn cap for the CLAUDE and PI directions only — the opencode
- *  direction is governed by `DISPATCH_TURN_TIMEOUT_MS`/`DISPATCH_IDLE_TIMEOUT_MS`
- *  below (ADR-033's 2026-09-01 amendment). */
-const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
+/**
+ * The Codex analogue of `EMPTY_PI_SESSION_ALLOWS` — a dispatch target's gate
+ * has no per-session "always allow" escalation set, so 'allowForSession' is
+ * handled identically to a one-off 'allow' and every request is decided fresh.
+ * One shared, frozen, never-mutated Set.
+ */
+const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
+
+/**
+ * The default app-wide dispatch cap, read fresh on EVERY dispatch call so a
+ * Settings change binds the next one without an app restart — the same
+ * re-read-per-call contract `loadEngineConfig(engine).dispatch` already has for
+ * the per-target cost/timeout gates. `loadSettings` is a small JSON read and a
+ * dispatch is a rare, expensive event, so there is nothing to cache.
+ */
+const defaultResolveMaxConcurrent = (): number =>
+  resolveDispatchMaxConcurrent(loadSettings().dispatchMaxConcurrent)
+
 const HEARTBEAT_MS = 15 * 1000
 /**
- * Default absolute cap on ONE opencode dispatch turn (`DispatchConfig.
- * turnTimeoutMs` overrides; `0` disables). Deliberately an order of magnitude
- * above the claude/pi directions' fixed 10 minutes: a dispatched local model
- * (the reason this rework exists) can legitimately grind for the better part of
- * an hour, and a slow-but-ALIVE turn should be allowed to finish — liveness is
- * policed by the inactivity watchdog below, this is only the backstop against a
- * turn that never ends at all.
- */
-const DISPATCH_TURN_TIMEOUT_MS = 60 * 60_000
-/**
- * Default inactivity cap for an opencode dispatch turn (`DispatchConfig.
- * idleTimeoutMs` overrides; `0` disables): how long the target may go without
- * producing ANY SSE event for its session before the turn is aborted. This —
- * not the absolute cap — is the real liveness signal, because a working target
- * emits message/part events continuously.
- */
-const DISPATCH_IDLE_TIMEOUT_MS = 15 * 60_000
-/**
- * How often the opencode turn watchdog re-checks the two caps above. A polling
+ * How often the turn watchdog re-checks the two configured caps. A polling
  * interval rather than two `setTimeout`s because the inactivity deadline MOVES
- * (every SSE event for a busy target bumps `lastActivityAt`) — re-arming a
+ * (every sign of life from a busy target bumps `lastActivityAt`) — re-arming a
  * timer on every event would be far more churn for no extra precision at this
  * granularity. All the arithmetic goes through `this.now()` so fake-timer tests
- * control it.
+ * control it. Never armed at all when both caps are unlimited — see
+ * `startTurnWatchdog`.
  */
-const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
+export const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
+
+/** Which of the two liveness caps ended a turn. */
+type TurnTimeoutReason = 'absolute' | 'inactivity'
+
+/** The watchdog's only outcome — shaped to drop straight into each direction's
+ *  `Raced` union. */
+type TurnTimeout = { kind: 'timeout'; reason: TurnTimeoutReason }
+
+/**
+ * The two per-turn liveness caps, in ms, resolved for ONE dispatch turn.
+ * `0` is the canonical "unlimited" here: `resolveTurnLiveness` folds the
+ * undefined case into it, so every consumer has exactly one comparison to make.
+ */
+interface TurnLivenessCaps {
+  turnTimeoutMs: number
+  idleTimeoutMs: number
+}
+
+/**
+ * Resolve one dispatch turn's liveness caps from the TARGET engine's
+ * `DispatchConfig` (ADR-033's 2026-09-18 amendment — Daniel's ruling).
+ *
+ * THERE IS NO BUILT-IN DEFAULT, in any direction. An unset field and an
+ * explicit `0` both mean UNLIMITED: the only things that end a dispatched turn
+ * early are the user stopping it, the caller aborting it, one of these
+ * user-configured caps, or `dispatch.maxCostUsd`. The previous behaviour — a
+ * fixed 10 minutes for claude/pi/codex and 60/15-minute defaults for opencode —
+ * silently killed legitimately long agent runs, which is the bug this closes.
+ */
+function resolveTurnLiveness(cfg: DispatchConfig | undefined): TurnLivenessCaps {
+  return {
+    // A negative value is impossible from the Settings editor (it drops the key
+    // rather than persisting one) but a hand-edited config could carry one;
+    // clamped to 0 = unlimited so the watchdog's `> 0` gates read uniformly.
+    turnTimeoutMs: Math.max(0, cfg?.turnTimeoutMs ?? 0),
+    idleTimeoutMs: Math.max(0, cfg?.idleTimeoutMs ?? 0)
+  }
+}
+
+/**
+ * The give-up text for a fired cap: WHICH cap it was and the minutes the user
+ * configured for it, plus the direction's own aftermath clause (whether the
+ * target survives for a continuation turn). Every direction's timeout message
+ * is built here so the two reasons are never conflated in one of them.
+ */
+function turnTimeoutText(
+  reason: TurnTimeoutReason,
+  caps: TurnLivenessCaps,
+  aftermath: string
+): string {
+  const minutes = Math.round(
+    (reason === 'absolute' ? caps.turnTimeoutMs : caps.idleTimeoutMs) / 60000
+  )
+  const head =
+    reason === 'absolute'
+      ? `Dispatch timed out after ${minutes} minutes (absolute limit)`
+      : `Dispatch timed out after ${minutes} minutes with no activity from the target agent`
+  return `${head} — ${aftermath}`
+}
+
+/** Aftermath clauses for `turnTimeoutText`, per direction. Claude targets die
+ *  with their process; opencode/pi/codex targets survive for a continuation. */
+const CLAUDE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
+const OPENCODE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
+const PI_TIMEOUT_AFTERMATH =
+  'the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).'
+const CODEX_TIMEOUT_AFTERMATH =
+  'the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).'
 /**
  * Slack allowed when `reconcileBusyTargets` compares a stored message's
  * server-written `info.time.created` against the dispatcher's own
@@ -408,6 +704,12 @@ const CLOCK_SKEW_ALLOWANCE_MS = 0
 const PENDING_STOP_TTL_MS = 60 * 1000
 /** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
+/** Default for `DispatcherDeps.codexAbortSettleGraceMs` — see that field's doc comment. */
+const CODEX_ABORT_SETTLE_GRACE_MS = 3_000
+/** Hard stop on `model/list` paging while building a Codex target's catalog
+ *  (mirrors `CodexSession.start`'s identical guard against a server that pages
+ *  forever). A real catalog is one page. */
+const CODEX_CATALOG_PAGE_LIMIT = 100
 
 /** Default for `DispatcherDeps.sseReconnectDelayMs` — see runSseLoop. */
 const SSE_RECONNECT_DELAY_MS = 1_000
@@ -483,7 +785,7 @@ interface OpencodeTargetEntry {
   turnStartedAt: number
   /**
    * `this.now()` at the last sign of life from this session while busy — the
-   * inactivity watchdog's clock (see `DISPATCH_IDLE_TIMEOUT_MS`). Two feeds:
+   * inactivity watchdog's clock (see `startTurnWatchdog`). Two feeds:
    *  - `handleSseEvent` bumps it for EVERY event type carrying this sessionID,
    *    not just streamed content — a tool part updating or a cost snapshot is
    *    proof of life just as much as a text delta;
@@ -535,10 +837,21 @@ interface OpencodeTargetEntry {
    * message ids never collide with a previous turn's.
    */
   accumulators: Map<string, MessageAccumulator>
+  activeStreamItems: Map<
+    string,
+    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
+  >
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C —
    *  the per-dispatch cost cap). Never decreases; reset only by creating a
    *  fresh target (a new session_id). */
   cumulativeCostUsd: number
+  /** Turns whose cost the rule could not resolve, and which
+   *  `cumulativeCostUsd` therefore does NOT include. Two causes: a model with
+   *  no known price, and a failed turn whose stored message could not be read
+   *  back at all. Reported on the turn itself (the first cause only — the
+   *  second returns an error text already) and again when the cap rejects a
+   *  continuation, so the spent figure is never read as complete (ADR-030). */
+  unpricedTurns: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B). A fresh Set at every turn start, populated by the streaming tap
    *  (`collectToolUseIds` — a Set, not a counter, because the tap re-emits the
@@ -594,6 +907,14 @@ interface ClaudeTargetEntry {
   busy: boolean
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
+  /**
+   * The Claude account this target's turns are billed to (ADR-071 §3),
+   * resolved ONCE at creation. A dispatched cli.js process reads the app's
+   * credentials when it is spawned and holds them for its whole life, so
+   * re-reading the app's active account per turn could only misattribute a
+   * turn the target was already running when the user switched accounts.
+   */
+  account: DispatchTurnAccount
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
   /**
@@ -610,11 +931,21 @@ interface ClaudeTargetEntry {
    * the cumulative counter can never restart under a live entry.
    */
   lastReportedTotalCostUsd: number
+  /**
+   * `this.now()` at the last SDK message read off this target's iterator while
+   * busy — the inactivity watchdog's clock. Fed by `driveClaudeTurn` for EVERY
+   * message (`stream_event` deltas included, which is what makes a streaming
+   * target provably alive) and refreshed by the watchdog itself while a
+   * forwarded approval for this target is still unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B) — same Set-not-counter rationale as OpencodeTargetEntry (Claude
    *  targets run includePartialMessages, so the same assistant message is
    *  forwarded repeatedly under the same betaMessage id). */
   turnToolUseIds: Set<string>
+  itemStreams: ClaudeItemStreamLifecycle
 }
 
 /**
@@ -680,6 +1011,10 @@ interface PiTargetEntry {
   busy: boolean
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
+  /** Turns whose cost the rule could not resolve — see the opencode target's
+   *  field of the same name. On this target only a non-finite figure from pi
+   *  gets here; there is no message-read-back path to fail. */
+  unpricedTurns: number
   /**
    * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
    * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
@@ -690,6 +1025,15 @@ interface PiTargetEntry {
    * pattern as the Claude target (same wire-cumulative-total hazard).
    */
   lastReportedTotalCostUsd: number
+  /**
+   * `this.now()` at the last pi RPC event received for this target while busy
+   * — the inactivity watchdog's clock. Fed by the ambient `onEvent` callback
+   * installed in `createPiTarget`, BEFORE the mapper runs, so an event the
+   * mapper drops as `ignore` still counts as proof of life; refreshed by the
+   * watchdog itself while a forwarded approval is unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B) — same Set-not-counter rationale as the other two target kinds. */
   turnToolUseIds: Set<string>
@@ -698,6 +1042,17 @@ interface PiTargetEntry {
    *  MESSAGE (a multi-tool-call turn can have several), so this accumulates
    *  across them; reset to 0 at the start of every turn. */
   turnTotalTokens: number
+  /** The same accumulation as `turnTotalTokens`, kept SPLIT for the ledger row
+   *  (ADR-071 §1) — pi's `usage` output carries the breakdown the total throws
+   *  away, and `usage_event` has a column per part. Reset with it. */
+  turnTokens: UsageTurnTokens
+  /** The turn's reasoning tokens, kept beside `turnTokens` because the ledger
+   *  has no column for them (they are billed as output) but `piCostInputs`
+   *  prices them — the same fold `PiSession` makes for its own turns. */
+  turnReasoningTokens: number
+  /** pi's OWN figure for the turn in flight (the delta `applyPiTurnCost` was
+   *  handed), for the ledger row. Null until that runs. Reset per turn. */
+  turnEngineCostUsd: number | null
   /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
    *  turns (its `totalCostUsd` is the cumulative baseline `lastReportedTotalCostUsd`
    *  is diffed against; `currentMessageId` is message-scoped bookkeeping that
@@ -753,7 +1108,154 @@ type PiTurnOutcome =
   | { kind: 'ok'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
 
-type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry
+/**
+ * A live Codex dispatch target (ADR-033 slice H).
+ *
+ * Shaped like pi (alive across turns, a single ambient notification callback
+ * rather than an iterable), so there is no `driveClaudeTurn`-style pull loop and
+ * no `.return()`-kills-the-process hazard — but since ADR-069 §7 it owns no
+ * process at all: it is one more thread on the CALLER's host. Three things make
+ * it NOT pi:
+ *
+ *  - EVENTS CARRY THEIR TURN ID. pi's wire has no per-event turn correlation,
+ *    which is why `PiTargetEntry` needs `settled`'s RACE NOTE and a grace
+ *    period on every give-up. Codex stamps `turnId` on every notification, so
+ *    an abandoned turn's trailing events are recognised by id
+ *    (`endedTurns`) and simply dropped — no timing window to lose.
+ *  - THE APPROVAL GATE IS THE TRANSPORT'S OWN SERVER-REQUEST CHANNEL. There is
+ *    no loopback bridge to own and dispose: `onServerRequest` IS the gate.
+ *  - INTERRUPT NEEDS THE TURN ID. `turn/interrupt` is `{threadId, turnId}`,
+ *    so a stop that lands before `turn/start` has answered must first learn
+ *    the id — see `DispatcherDeps.codexAbortSettleGraceMs`.
+ *
+ * Like pi (and unlike Claude), an interrupt is TURN-scoped: the process and
+ * thread survive, so the entry is kept alive for continuation.
+ */
+interface CodexTargetEntry {
+  kind: 'codex'
+  /**
+   * The native thread id, from `thread/start`. Null only inside
+   * `createCodexTarget` before that call returns — a successfully-created
+   * entry always has it (creation throws instead of returning one without),
+   * and the entry is registered in `this.targets` under it. Typed nullable for
+   * structural parity with the other two process-backed entries.
+   */
+  sessionId: string | null
+  fromRoutingId: string
+  cwd: string
+  /** This target's view of the host it is a thread on (ADR-069 §2). */
+  connection: CodexThreadConnection
+  /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
+  ctx: DispatchContext
+  /**
+   * Fixed at target creation from `ctx.autonomyMode`; a continuation call's
+   * (possibly different) mode is IGNORED, mirroring `PiTargetEntry
+   * .autonomyMode` and the Claude target's spawn-baked `permissionMode`. It
+   * has to be fixed here for a second reason the other engines do not have:
+   * the NATIVE half of the envelope (`approvalPolicy`/`sandbox`/
+   * `approvalsReviewer`) is written into the thread by `thread/start` and the
+   * target never re-policies it, so a gate that drifted from it would leave
+   * ClaudeUI's decision and Codex's containment disagreeing.
+   *
+   * Passed DIRECTLY (no translation) as `decideWithSource`'s `mode` — the
+   * shared engine natively speaks this vocabulary.
+   */
+  autonomyMode: string
+  /** Resolved native model id (`thread/start`'s echo), fixed for the target's life. */
+  model: string
+  /**
+   * The subscription this target's turns are billed to (ADR-071 §3), resolved
+   * ONCE at creation. Unlike opencode and pi — whose credential is read per
+   * turn off a file — a Codex target's account is decided when its thread is
+   * opened: the host it lands on IS one identity (ADR-069 §2), and a later
+   * vault change cannot move a thread that is already running.
+   */
+  account: DispatchTurnAccount
+  /** True while a turn is being driven — same busy-reject rationale as pi. */
+  busy: boolean
+  /** The turn CURRENTLY in flight, once its id is known; null when idle. */
+  turnId: string | null
+  /** Resolves with the in-flight turn's id (or null) as soon as `turn/start`
+   *  answers — the stop path's only way to interrupt a turn whose id has not
+   *  landed on `entry.turnId` yet. */
+  turnStarted: Promise<string | null>
+  /** Turn ids already settled or abandoned. A `turn/completed` for one of these
+   *  is dropped rather than allowed to settle whatever turn is in flight now. */
+  endedTurns: Set<string>
+  /**
+   * Resolver for the turn CURRENTLY in flight; null when idle. Installed by
+   * `driveCodexTurn` BEFORE `turn/start` is sent (synchronously, so no
+   * notification can arrive first), invoked EXACTLY ONCE by the `turn/completed`
+   * branch of `handleCodexTargetNotification`, by the `turn/start` rejection
+   * path, or by `onDisconnect` if the process dies mid-turn.
+   */
+  settled: ((outcome: CodexTurnOutcome) => void) | null
+  /**
+   * A late approval request from an already stopped/timed-out/aborted turn must
+   * never register a fresh pending approval on the caller. Set as the FIRST
+   * action of the give-up branch, cleared at the start of the next turn — same
+   * contract as `PiTargetEntry.draining`, and belt-and-braces next to
+   * `endedTurns` (a request whose turn id we never learned still has this).
+   */
+  draining: boolean
+  /**
+   * `this.now()` at the last app-server notification addressed to this target's
+   * thread while busy — the inactivity watchdog's clock. Fed by
+   * `handleCodexTargetNotification` for every notification that passes its
+   * threadId guard (item events, deltas, usage snapshots), and refreshed by the
+   * watchdog itself while a forwarded approval is unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
+  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033 M4-B). */
+  turnToolUseIds: Set<string>
+  /** Latest CUMULATIVE thread usage (`thread/tokenUsage/updated`'s `total`) —
+   *  `last` is the last REQUEST's context, not a per-turn figure, so a turn's
+   *  own numbers are this minus `usageBaseline`. */
+  usageTotal: TokenUsageBreakdown | null
+  /** `usageTotal` as of the END of the previous turn — the baseline this turn's
+   *  delta is taken against. */
+  usageBaseline: TokenUsageBreakdown | null
+  /** Cumulative API-rate-EQUIVALENT spend across every turn this target has run
+   *  (ADR-033 M4-C's cap). Equivalent, not a charge: a ChatGPT-subscription
+   *  turn's true cost is unknowable from here (ADR-066). */
+  cumulativeCostUsd: number
+  /** `sha256(item)` per completed item id — the same replay dedupe
+   *  `CodexSession.item` keeps, so `turn/completed`'s authoritative `turn.items`
+   *  replay re-emits only what actually changed. */
+  completedItems: Map<string, string>
+  /** First-seen timestamp per item id, so a replayed item keeps its original
+   *  one instead of jumping to now. */
+  itemTimestamps: Map<string, number>
+  activeStreamItems: Map<
+    string,
+    {
+      target: ItemStreamTarget
+      text: string
+      timestamp: number
+      ownerToolUseId: string
+      startedAt?: number
+    }
+  >
+  /**
+   * The changed-file list of each mapped `fileChange` item, by item id.
+   * `FileChangeRequestApprovalParams` carries NO changes of its own
+   * (threadId/turnId/itemId/startedAtMs/reason/grantRoot only), so this is the
+   * gate's ONLY source of the paths it must decide about — exactly the lookup
+   * `CodexSession.requestApproval` does against its own transcript.
+   */
+  fileChanges: Map<string, FileDiff[]>
+  /** Text of the most recent completed `agentMessage` — the turn's result. */
+  lastAgentText: string
+  /** Wall clock at `turn/start`, the fallback when the turn reports no duration. */
+  turnStartedAtMs: number
+}
+
+/** What a Codex dispatch turn settles with — see `CodexTargetEntry.settled`. */
+type CodexTurnOutcome =
+  { kind: 'ok'; text: string; durationMs: number } | { kind: 'error'; message: string }
+
+type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry | CodexTargetEntry
 
 /** One shared opencode server connection (+ SSE loop) per cwd with live targets. */
 interface ConnRecord {
@@ -799,10 +1301,118 @@ interface PiPendingApproval {
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
-type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval
+/** Same shape/handling as `PiPendingApproval` — a Codex target's gate also
+ *  resolves a local Promise (the parked `onServerRequest`) rather than replying
+ *  to a remote permission id. Its own variant, not a rename, so the other three
+ *  branches stay byte-identical. */
+interface CodexPendingApproval {
+  kind: 'codex'
+  targetSessionId: string | null
+  emit: (channel: string, data: unknown) => void
+  resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
+}
+
+type PendingForwardedApproval =
+  OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
+}
+
+/** Narrow an unknown wire value to a plain object (mirrors CodexSession's own). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * The refusal shape for `method`, used when a Codex target is DRAINING (its
+ * turn was already stopped/timed out/abandoned): every native request is
+ * answered, never left hanging, and none of them is answered with consent.
+ */
+function codexRefusal(method: string): unknown {
+  if (method === 'item/permissions/requestApproval') return { permissions: {}, scope: 'turn' }
+  if (method === 'item/tool/requestUserInput') return { answers: {} }
+  return { decision: 'decline' }
+}
+
+/** Is `target` inside `cwd`? Same containment test `CodexSession.insideWorkspace`
+ *  makes — duplicated rather than lifted because CodexSession.ts is not this
+ *  slice's to refactor beyond the policy table it already exports. */
+function insideCodexWorkspace(cwd: string, target: string): boolean {
+  const rel = relativePath(cwd, resolvePath(cwd, target))
+  return rel !== '' && !rel.startsWith('..') && !isAbsolutePath(rel)
+}
+
+/**
+ * `model` measured against a user-configured dispatch allowlist, or null when
+ * it passes (or when there is no allowlist / nothing to measure). Same sentence
+ * the claude/opencode/pi branches produce, so one refusal reads identically
+ * whichever engine the caller aimed at.
+ */
+function codexModelAllowlistDenial(
+  model: string | undefined,
+  allowedModels: string[] | undefined
+): string | null {
+  if (model === undefined || !allowedModels || allowedModels.length === 0) return null
+  if (allowedModels.includes(model)) return null
+  return (
+    `Model "${model}" is not in the user-configured allowlist for codex dispatch. ` +
+    `Allowed models: ${allowedModels.join(', ')}`
+  )
+}
+
+/** Zero usage — the implicit baseline before a target's first turn. */
+const CODEX_ZERO_USAGE: TokenUsageBreakdown = {
+  totalTokens: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0
+}
+
+/** One turn's own tokens: the thread's cumulative `total` minus the baseline
+ *  the previous turn left. Clamped at zero per field — a thread whose usage is
+ *  re-reported lower (a compaction) must never produce a negative row. */
+function codexUsageDelta(
+  total: TokenUsageBreakdown | null,
+  baseline: TokenUsageBreakdown | null
+): TokenUsageBreakdown | null {
+  if (!total) return null
+  const base = baseline ?? CODEX_ZERO_USAGE
+  return {
+    totalTokens: Math.max(0, total.totalTokens - base.totalTokens),
+    inputTokens: Math.max(0, total.inputTokens - base.inputTokens),
+    cachedInputTokens: Math.max(0, total.cachedInputTokens - base.cachedInputTokens),
+    cacheWriteInputTokens: Math.max(0, total.cacheWriteInputTokens - base.cacheWriteInputTokens),
+    outputTokens: Math.max(0, total.outputTokens - base.outputTokens),
+    reasoningOutputTokens: Math.max(0, total.reasoningOutputTokens - base.reasoningOutputTokens)
+  }
+}
+
+/**
+ * The API-rate equivalent of one turn's tokens, or null when the model has no
+ * published price. The token mapping is Codex's, and it differs from
+ * Anthropic's in a way that matters: `inputTokens` is the TOTAL prompt with
+ * `cachedInputTokens`/`cacheWriteInputTokens` as SUBSETS of it (the OpenAI
+ * Responses API's `input_tokens` / `input_tokens_details`), so the billable
+ * base rate is what is left after both — and `reasoningOutputTokens` is a
+ * subset of `outputTokens`, already counted once. Identical arithmetic to
+ * `CodexSession.equivalentCost`; kept here rather than shared because that
+ * method is bound to the session's own account/provider state.
+ */
+function codexTurnCostUsd(model: string, delta: TokenUsageBreakdown): number | null {
+  return equivalentCostUsd('openai', model, {
+    inputTokens: Math.max(
+      0,
+      delta.inputTokens - delta.cachedInputTokens - delta.cacheWriteInputTokens
+    ),
+    outputTokens: delta.outputTokens,
+    cacheWriteTokens: delta.cacheWriteInputTokens,
+    // OpenAI publishes ONE cache-write rate; the 5m/1h split is Anthropic's.
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: delta.cachedInputTokens
+  })
 }
 
 /**
@@ -834,6 +1444,305 @@ function storedMessageTotalTokens(info: StoredMessage['info'] | undefined): numb
   const tokens = info?.tokens
   if (!tokens) return 0
   return (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.reasoning ?? 0)
+}
+
+/**
+ * An opencode dispatch turn's costs, from the stored assistant message the turn
+ * ended on — the same rule, from the same module, that an opencode session's
+ * own headline follows (ADR-071 §2). `dispatch.maxCostUsd` and the dispatching
+ * session's breakdown both count `displayCostUsd`: the list-price equivalent
+ * under a subscription, the billed figure under an API key (a gateway's margin
+ * is real spend), zero for a free vendor, and `null` when the model has no
+ * known price — which the cap cannot count at all (ADR-030: never pretend it
+ * is armed). `opencodeCostInputs` owns the disjoint-token mapping, the
+ * zero-token short circuit and the billing lookup; the only thing left here is
+ * which model the turn ran on.
+ *
+ * The vendor/model pair is the one the turn was DISPATCHED with, which is also
+ * the pair `promptAsync` sent and the one the usage row records as
+ * `targetModel`.
+ *
+ * The CLAUDE and CODEX targets deliberately do not route through the rule,
+ * because both already hand the cap exactly what it would return.
+ * `codexTurnCostUsd` derives a list-price equivalent from the turn's own tokens
+ * for every billing type (ADR-066: a ChatGPT-subscription charge is unknowable
+ * from here) and yields `null` for an unpriced model; cli.js's
+ * `total_cost_usd` is likewise an API-equivalent whatever plan is behind it
+ * (ADR-034). Feeding either through a billing type we would have to infer could
+ * only make those two figures worse.
+ */
+function opencodeTurnCost(model: string, info: StoredMessage['info'] | undefined): ResolvedCosts {
+  const { providerID, modelID } = parseModelString(model)
+  return opencodeMessageCosts(providerID, modelID, info?.tokens, info?.cost ?? null)
+}
+
+/**
+ * A pi dispatch turn's costs from the per-turn delta of pi's own cumulative
+ * figure — again the rule an ordinary pi turn follows, from the same module.
+ * pi prices from its own catalog whatever credential is behind it, so that
+ * figure IS the list-price equivalent, and `piCostInputs` takes it as one.
+ *
+ * The turn's tokens go in with it. pi reporting `0` on a turn that really
+ * moved tokens (an unpriced model in pi's own catalog) would otherwise be a
+ * known zero the cap counts as free while the ledger prices the same tokens
+ * off our table — one turn, two answers. `piCostInputs` only reaches for the
+ * tokens when pi reported no positive charge, so a real figure still wins.
+ * `reasoning` is folded in there, as output, exactly as it is for a pi
+ * session's own messages.
+ *
+ * A turn whose tokens were never observed passes `undefined` and pi's figure
+ * stands alone: a reported `0` stays a known zero, and the one way a pi turn
+ * ends up unpriced is a non-finite figure (`usage.cost.total` arriving as
+ * something the mapper's `+=` turns into NaN), which `resolveCosts` refuses to
+ * count — the right answer.
+ */
+function piTurnCost(
+  model: string,
+  tokens: PiCostTokens | undefined,
+  engineCostUsd: number
+): ResolvedCosts {
+  const { vendorId, modelId } = engineMeta('pi').decodeModelValue(model)
+  return piMessageCosts(vendorId, modelId, tokens, engineCostUsd)
+}
+
+// ── Who a dispatched turn is billed to (ADR-071 §1 / §3) ────────────────────
+// One helper per target, each reading the SAME source that engine's own
+// sessions read, so a turn's row names the same account whether the work was
+// dispatched or typed by a human.
+//
+// WHEN each is read follows what can actually change under the target. The
+// opencode and pi helpers run PER TURN, off a credential file a sign-in can
+// rewrite between turns while the target process keeps serving. The Codex and
+// Claude helpers run ONCE at target creation (`CodexTargetEntry.account`,
+// `ClaudeTargetEntry.account`), because those targets hold their credential
+// from the moment they start: a Codex thread is pinned to the host it landed
+// on (ADR-069 §2), and a dispatched cli.js process reads the app's
+// credentials at spawn and never again.
+
+/** The `unknown` account — a target that cannot name the account it ran under. */
+const UNKNOWN_DISPATCH_ACCOUNT: DispatchTurnAccount = {
+  accountKey: UNKNOWN_ACCOUNT_KEY,
+  accountLabel: null,
+  billingType: 'unknown'
+}
+
+/** An opencode target's account, off opencode's own `auth.json` and auth probe. */
+function opencodeDispatchAccount(model: string): DispatchTurnAccount {
+  const { providerID } = parseModelString(model)
+  return {
+    ...opencodeAuthProvider.accountIdentity(providerID),
+    billingType: opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown'
+  }
+}
+
+/** A pi target's account, off pi's own `auth.json` and auth probe. */
+function piDispatchAccount(model: string): DispatchTurnAccount {
+  const { vendorId } = engineMeta('pi').decodeModelValue(model)
+  return {
+    ...piAuthProvider.accountIdentity(vendorId),
+    billingType: piAuthProvider.buildPiAccountRef(vendorId)?.billingType ?? 'unknown'
+  }
+}
+
+/**
+ * A Claude target's account: the one ClaudeUI itself is signed in as, since a
+ * dispatched cli.js process inherits the app's active credential.
+ *
+ * The key and the label come from `activeClaudeAttribution`, the same rule
+ * ADR-011's time-based attribution puts a TRANSCRIPT row through — run here
+ * over the live active account instead of a log lookup, because the turn is
+ * happening now and the log only records changes. Both halves of
+ * `anthropic:<org>:<account>` or neither: that guard lives in the rule.
+ *
+ * The billing type is the ACTIVE ACCOUNT's, which `UsageFetcher` resolves
+ * from `oauthAccount.billingType` — the only signal that tells a `usage_based`
+ * OAuth account (billed per token, so its turns really do cost money) apart
+ * from a plan. `ClaudeAuthProvider`'s probe-cached ref through the host seam
+ * stays as the fallback for the window before the profile has been read at
+ * all: for an OAuth account it can only ever answer `subscription` or
+ * `unknown`, so reading it first would record a `usage_based` account's spend
+ * as covered.
+ */
+function claudeDispatchAccount(): DispatchTurnAccount {
+  // The same helper the usage fetcher and the limits provider attribute the
+  // live account with, so a dispatched turn, a session's own turn and a limits
+  // reading cannot disagree about the key, the label or the billing type.
+  const attribution = activeClaudeAttribution(
+    usageFetcher.getActiveAccount(),
+    buildClaudeAccountRef()?.billingType
+  )
+  return {
+    accountKey: attribution.accountKey,
+    accountLabel: attribution.accountLabel,
+    billingType: attribution.billingType
+  }
+}
+
+// ── A dispatched turn's tokens, in the ledger's disjoint shape ──────────────
+
+/** A fresh per-turn accumulator (the pi target sums its `usage` outputs). */
+function zeroDispatchTokens(): UsageTurnTokens {
+  return { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+}
+
+/**
+ * An opencode turn's split from the stored assistant message. opencode's
+ * `info.tokens` is ALREADY disjoint (its `session.ts` subtracts cache reads
+ * and writes from input) and `reasoning` sits beside `output` rather than
+ * inside it — the same mapping `opencodeCostInputs` makes, so the ledger's
+ * `api_cost_usd` matches what the cap counted.
+ */
+function opencodeDispatchTokens(info: StoredMessage['info'] | undefined): UsageTurnTokens {
+  const tokens = info?.tokens
+  return {
+    input: tokens?.input ?? 0,
+    output: (tokens?.output ?? 0) + (tokens?.reasoning ?? 0),
+    cacheWrite: tokens?.cache?.write ?? 0,
+    // opencode publishes one cache-write rate; the 5m/1h TTL split is
+    // Anthropic's, and nothing in `info.tokens` carries it.
+    cacheWrite1h: 0,
+    cacheRead: tokens?.cache?.read ?? 0
+  }
+}
+
+// ── A dispatched turn as a ledger row (ADR-071 §1) ─────────────────────────
+
+/**
+ * The vendor/model split of a recorded row's `targetModel`, parsed the way the
+ * TARGET engine encodes it (`engineMeta(...).decodeModelValue`): a bare model
+ * id under a fixed vendor on Claude and Codex, `<vendor>/<model>` split on the
+ * first slash on opencode and pi. An engine id this build does not know —
+ * impossible from the call sites, which all pass a literal or an `EngineId` —
+ * yields an `unknown` vendor rather than throwing inside a usage write.
+ */
+/**
+ * The CANONICAL spelling of a target model value, for the one engine that
+ * accepts more than one spelling of the same model.
+ *
+ * opencode and pi encode a model as `<vendor>/<model>` but decode a bare id by
+ * supplying their default vendor, so `gpt-5-codex` and `opencode/gpt-5-codex`
+ * name the same model while being different strings. That string is a KEY in
+ * four places — the per-target cap, `ctx.addDispatchedCost`'s live breakdown
+ * (`<engine>:<model>`), the notification text, and the ledger row, which
+ * stores the decoded halves and whose reader re-encodes them. Canonicalising
+ * once, here, is what makes the round trip exact: without it a session that
+ * dispatched under a bare id shows the target twice after a reload, once per
+ * spelling.
+ *
+ * It is wire-neutral. Every engine-facing call decodes the value again
+ * (`parseModelString` for opencode, `decodeModelValue` before pi's
+ * `set_model`), and decode is what both spellings already agreed on. Claude
+ * and Codex encode a bare id, so for them this is the identity.
+ *
+ * `ENGINE_META` rather than `engineMeta()`: an unregistered engine must read
+ * back verbatim, not throw inside a dispatch.
+ */
+function canonicalDispatchModel(engine: string, model: string): string {
+  const meta = ENGINE_META[engine as keyof typeof ENGINE_META]
+  if (!meta) return model
+  return meta.encodeModelValue(meta.decodeModelValue(model))
+}
+
+function dispatchModelRef(
+  targetEngine: string,
+  targetModel: string
+): { vendorId: string; modelId: string } {
+  const meta = ENGINE_META[targetEngine as EngineId]
+  if (!meta) return { vendorId: 'unknown', modelId: targetModel }
+  const ref = meta.decodeModelValue(targetModel)
+  return { vendorId: ref.vendorId, modelId: ref.modelId }
+}
+
+/**
+ * The ledger's dedup key for a dispatched turn: `dispatch:<who>:<ts>:<seq>`.
+ *
+ * ONE ROW PER TURN, not per dispatch call. The tool_use id alone looked like
+ * the natural key — it is minted by the caller model for this `dispatch_agent`
+ * call — but a single call can run SEVERAL turns against the same target (a
+ * continuation passes the same `sessionId`, and the model can reissue the same
+ * tool call), and every one of them spends. Collapsing them onto one
+ * `message_id` would hand the UNIQUE constraint every turn after the first to
+ * drop, silently, while the cap counted them.
+ *
+ * So the id names the turn, not the call: whoever we can identify (the
+ * tool_use id, else the target session, else nothing), the turn's timestamp,
+ * and a per-dispatcher sequence number that separates two turns landing in the
+ * same millisecond. It is deliberately NOT stable across app restarts — the
+ * ledger's dedup exists to stop ONE write being replayed, and a dispatched
+ * turn is written exactly once, live, by the process that ran it.
+ */
+function dispatchMessageId(row: DispatchedTurnRecord, seq: number): string {
+  const who = row.toolUseId ?? row.targetSessionId ?? 'unknown'
+  return `dispatch:${who}:${row.ts}:${seq}`
+}
+
+/**
+ * One dispatched turn as the ledger records it.
+ *
+ * `origin: 'dispatch'` and `parentRoutingId` are what make the row findable as
+ * delegated work — they are how the Delegated section and a session's own
+ * dispatched-cost breakdown find it. The costs are derived by `rowCosts`
+ * inside the recorder, from the same inputs every other writer hands it, so a
+ * dispatched row is priced by exactly the rule a session's own row is.
+ *
+ * A MISSING TOKEN SPLIT RECORDS ZEROS. Several give-up paths know a turn
+ * happened and nothing else (a refused prompt, a history read that failed),
+ * and there is no "unknown" the token columns can hold. A reader must
+ * therefore not treat a zero split as a free turn: `api_cost_usd` is where a
+ * turn's worth lives, and it is null — not zero — when nothing could price it.
+ */
+function dispatchLedgerEvent(row: DispatchedTurnRecord, seq: number): UsageTurnEvent {
+  const { vendorId, modelId } = dispatchModelRef(row.targetEngine, row.targetModel)
+  const account = row.account ?? UNKNOWN_DISPATCH_ACCOUNT
+  return {
+    // The dispatcher's clock at the turn's end, not the write's — see
+    // UsageTurnEvent.ts.
+    ts: row.ts,
+    engineId: row.targetEngine,
+    vendorId,
+    // A dispatch target is not one of the app's own sessions, so neither
+    // local-account column applies; `accountKey` is the identity (ADR-071 §3).
+    accountId: null,
+    accountUuid: null,
+    modelId,
+    tokens: {
+      input: row.tokens?.input ?? 0,
+      output: row.tokens?.output ?? 0,
+      cacheWrite: row.tokens?.cacheWrite ?? 0,
+      // Only the Claude target reports the 1h-TTL cache-write SUBSET (cli.js's
+      // `usage.cache_creation.ephemeral_1h_input_tokens`, billed at 2× input);
+      // opencode, pi and Codex publish one cache-write rate and report none.
+      cacheWrite1h: row.tokens?.cacheWrite1h ?? 0,
+      cacheRead: row.tokens?.cacheRead ?? 0
+    },
+    engineCostUsd: row.engineCostUsd ?? null,
+    sessionId: row.targetSessionId,
+    messageId: dispatchMessageId(row, seq),
+    source: 'live',
+    accountKey: account.accountKey,
+    accountLabel: account.accountLabel,
+    billingType: account.billingType,
+    origin: 'dispatch',
+    parentRoutingId: row.fromRoutingId,
+    engineCostIsEquivalent: row.engineCostIsEquivalent ?? false
+  }
+}
+
+/**
+ * The line a turn's tool result carries when the cap is configured but this
+ * turn's cost could not be resolved (ADR-030 / ADR-071 §2): the dispatching
+ * model is told the limit is not counting, instead of being left to assume a
+ * silent zero was a real one.
+ */
+function cannotCountNote(model: string): string {
+  return `\n\n[dispatch cost cap cannot count this turn: ${model} has no known price]`
+}
+
+/** Appended to a cap rejection whose spent figure is missing `n` turns. */
+function unpricedSuffix(n: number): string {
+  return n > 0
+    ? ` ${n} turn(s) on this session could not be counted and are not in that figure.`
+    : ''
 }
 
 /**
@@ -999,7 +1908,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
-      // forward them as session:subagent-stream for the dispatch TaskCard.
+      // forward them as item open/delta/seal events under the dispatch TaskCard.
       includePartialMessages: true
     }
   })
@@ -1099,14 +2008,23 @@ async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPr
 
 export class CrossEngineDispatcher {
   private readonly deps: DispatcherDeps
-  private readonly maxConcurrent: number
-  private readonly dispatchTimeoutMs: number
+  private readonly resolveMaxConcurrent: () => number
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
+  private readonly codexAbortSettleGraceMs: number
   private readonly sseReconnectDelayMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
   private readonly spawnPiTarget: SpawnPiTargetFn
-  private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
+  private readonly attachCodexTarget: AttachCodexTargetFn
+  private readonly codexVaultAccounts: boolean
+  private readonly recordLedgerEvent: (event: UsageTurnEvent) => void
+
+  /**
+   * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
+   * in {@link dispatchMessageId}, so two turns that land in the same
+   * millisecond are still two rows.
+   */
+  private ledgerSeq = 0
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
@@ -1142,15 +2060,17 @@ export class CrossEngineDispatcher {
 
   constructor(deps: DispatcherDeps) {
     this.deps = deps
-    this.maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT
-    this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
+    this.resolveMaxConcurrent = deps.resolveMaxConcurrent ?? defaultResolveMaxConcurrent
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
+    this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
     this.sseReconnectDelayMs = deps.sseReconnectDelayMs ?? SSE_RECONNECT_DELAY_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
+    this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
+    this.codexVaultAccounts = deps.codexVaultAccounts ?? false
     this.now = deps.now ?? Date.now
-    this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
+    this.recordLedgerEvent = deps.recordUsageEvent ?? recordUsageEvent
   }
 
   /** For tests: current in-flight dispatch count. */
@@ -1159,20 +2079,25 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Record one dispatched-usage row, ISOLATING failures (ADR-033 M4-B): the
-   * default `recordDispatchedUsage` is a real better-sqlite3 insert — if it
-   * throws (locked DB, disk error), the exception must never propagate into
-   * the dispatch flow, where `dispatch()`'s catch would report a COMPLETED
-   * turn back to the caller model as `Dispatch failed: …`. Usage accounting
-   * is best-effort by design; the turn result is not.
+   * Record one dispatched turn in the ledger (ADR-071 §1) — the only record of
+   * it there now is. `dispatched_usage` was a second, poorer copy: no token
+   * split, no account, no billing type, one cost the dispatcher resolved on
+   * its own. Its readers moved to `origin = 'dispatch'` and migration v20
+   * dropped the table.
+   *
+   * FAILURES ARE ISOLATED (ADR-033 M4-B). The default is a real DB write — if
+   * it throws (locked DB, disk error), the exception must never propagate into
+   * the dispatch flow, where `dispatch()`'s catch would report a COMPLETED turn
+   * back to the caller model as `Dispatch failed: …`. Usage accounting is
+   * best-effort by design; the turn result is not.
    */
-  private safeRecordUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
+  private safeRecordUsage(row: DispatchedTurnRecord): void {
     try {
-      this.recordDispatchedUsage(row)
+      this.recordLedgerEvent(dispatchLedgerEvent(row, ++this.ledgerSeq))
     } catch (err) {
       logger.warn(
         'CrossEngineDispatcher',
-        `recordDispatchedUsage failed (usage row dropped): ${err instanceof Error ? err.message : String(err)}`
+        `dispatched usage_event failed (ledger row dropped): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   }
@@ -1247,18 +2172,35 @@ export class CrossEngineDispatcher {
 
   private async dispatchInner(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
     // ── Guards ────────────────────────────────────────────────────────────
-    if (req.engine === ctx.fromEngine) {
+    // ADR-069 §7 lifts this for CODEX alone: a codex → codex dispatch is one more
+    // `thread/start` on the process the caller is already running on, which is
+    // what the guard existed to prevent when it meant a second app-server per
+    // dispatch. Every other engine still pays a whole server or CLI for a
+    // same-engine target and still has a native subagent of its own.
+    if (req.engine === ctx.fromEngine && req.engine !== 'codex') {
       return errorResult(
         `dispatch_agent targets a different engine — this session already runs on "${ctx.fromEngine}". ` +
           'Use your own tools (or a native subagent) for same-engine work.'
       )
     }
-    if (req.engine !== 'opencode' && req.engine !== 'claude' && req.engine !== 'pi') {
+    if (
+      req.engine !== 'opencode' &&
+      req.engine !== 'claude' &&
+      req.engine !== 'pi' &&
+      req.engine !== 'codex'
+    ) {
       return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
     }
-    if (this.activeDispatches >= this.maxConcurrent) {
+    // Read the cap HERE, not in the constructor: the user can raise it in
+    // Settings mid-run and the next dispatch has to honour the new number.
+    // `Infinity` (the "no limit" pick) can never satisfy the comparison, so the
+    // refusal text below never has to render it.
+    const maxConcurrent = this.resolveMaxConcurrent()
+    if (this.activeDispatches >= maxConcurrent) {
       return errorResult(
-        `Too many concurrent dispatches (max ${this.maxConcurrent}). Wait for one to finish and retry.`
+        `Too many concurrent dispatches (max ${maxConcurrent}). Wait for one to finish and retry, ` +
+          'or raise "Max concurrent dispatches" in Settings › Cross-engine dispatch ' +
+          '(0 means no limit).'
       )
     }
 
@@ -1309,6 +2251,7 @@ export class CrossEngineDispatcher {
     try {
       if (req.engine === 'claude') return await this.resolveAndRunClaude(req, ctx, stopController)
       if (req.engine === 'pi') return await this.resolveAndRunPi(req, ctx, stopController)
+      if (req.engine === 'codex') return await this.resolveAndRunCodex(req, ctx, stopController)
       return await this.resolveAndRunOpencode(req, ctx, stopController)
     } finally {
       this.activeDispatches--
@@ -1334,7 +2277,7 @@ export class CrossEngineDispatcher {
     if (!pending) return true
     this.pendingApprovals.delete(requestId)
 
-    if (pending.kind === 'claude' || pending.kind === 'pi') {
+    if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
       pending.resolve(decision, answers)
       return true
     }
@@ -1363,6 +2306,7 @@ export class CrossEngineDispatcher {
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
       if (entry.kind === 'opencode') {
+        if (entry.ctx.toolUseId) this.sealOpencodeTargetItems(entry, entry.ctx.toolUseId)
         // Settle a turn still in flight (ADR-033's 2026-09-01 amendment). The
         // entry has just left `this.targets` and its session is about to be
         // deleted, so NOTHING can settle it afterwards — the SSE branches look
@@ -1376,10 +2320,13 @@ export class CrossEngineDispatcher {
         entry.client.deleteSession(sessionId).catch(() => {})
         this.releaseConnection(entry)
       } else if (entry.kind === 'claude') {
+        entry.itemStreams.sealAll()
         // Killing the process is the only teardown a Claude target needs —
         // no server ref, no remote session to delete.
         entry.abortController.abort()
-      } else {
+      } else if (entry.kind === 'pi') {
+        for (const output of finishPiMessage(entry.mapperState))
+          this.forwardPiTargetMessage(entry, output)
         // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
         // (mirrors PiSession.cancel()'s identical teardown order). Both calls
         // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
@@ -1387,6 +2334,27 @@ export class CrossEngineDispatcher {
         // exited on its own (onExit already disposed the bridge host).
         entry.client.dispose()
         entry.bridgeHost.dispose()
+      } else {
+        if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
+        // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
+        // host, so teardown is an interrupt and a detach — never a kill, which
+        // would take every other session on that account down with it. The
+        // native thread is left on disk (a dispatch target's thread is an
+        // ordinary Codex thread; deleting it is the user's call, not a disposal
+        // side effect) and unsubscribed, which is what lets the binary unload it
+        // and release its writer lock.
+        //
+        // A turn still in flight has to be settled HERE: the process no longer
+        // dies, so no `onDisconnect` will do it, and the dispatch would hold its
+        // `activeDispatches` slot until the watchdog fired.
+        if (entry.sessionId && entry.turnId)
+          void entry.connection
+            .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
+            .catch(() => {})
+        entry.connection.detach()
+        const settle = entry.settled
+        entry.settled = null
+        settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
       }
     }
   }
@@ -1408,8 +2376,8 @@ export class CrossEngineDispatcher {
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
-    const model = req.model ?? dispatchCfg?.defaultModel
-    if (!model) {
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into opencode. Ask the user to set ' +
           'Engines › opencode › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
@@ -1417,12 +2385,15 @@ export class CrossEngineDispatcher {
       )
     }
     const allowed = dispatchCfg?.allowedModels
-    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+    if (allowed && allowed.length > 0 && !allowed.includes(requestedModel)) {
       return errorResult(
-        `Model "${model}" is not in the user-configured allowlist for opencode dispatch. ` +
+        `Model "${requestedModel}" is not in the user-configured allowlist for opencode dispatch. ` +
           `Allowed models: ${allowed.join(', ')}`
       )
     }
+    // Everything below keys on the CANONICAL spelling — the allowlist is
+    // checked against what the user actually wrote, and nothing else is.
+    const model = canonicalDispatchModel(req.engine, requestedModel)
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: OpencodeTargetEntry
@@ -1466,7 +2437,8 @@ export class CrossEngineDispatcher {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.',
+            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.' +
+            unpricedSuffix(existing.unpricedTurns),
           existing.sessionId
         )
       }
@@ -1490,7 +2462,6 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let watchdogTimer: ReturnType<typeof setInterval> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
@@ -1556,38 +2527,17 @@ export class CrossEngineDispatcher {
         (err): Raced => ({ kind: 'err', err })
       )
     /*
-     * Turn liveness (ADR-033's 2026-09-01 amendment) — the fixed absolute
-     * `dispatchTimeoutMs` of the claude/pi directions is the WRONG shape here:
-     * a slow-but-alive local model should be allowed to finish, and a wedged
-     * one should not have to burn a whole hour first. Two caps, both
-     * configurable per engine (`0` disables either):
-     *   - inactivity: no sign of life from this session for `idleTimeoutMs`;
-     *   - absolute:   the turn has simply run for `turnTimeoutMs`.
-     * Polled (rather than two timers) because the inactivity deadline moves on
-     * every event — see `DISPATCH_WATCHDOG_INTERVAL_MS`.
+     * Turn liveness — the two caps the user configured for the TARGET engine,
+     * both unlimited unless set (ADR-033's 2026-09-01 amendment for the shape,
+     * its 2026-09-18 amendment for "no built-in default", and
+     * `startTurnWatchdog` for the one implementation all four directions now
+     * share).
      */
-    const turnTimeoutMs = dispatchCfg?.turnTimeoutMs ?? DISPATCH_TURN_TIMEOUT_MS
-    const idleTimeoutMs = dispatchCfg?.idleTimeoutMs ?? DISPATCH_IDLE_TIMEOUT_MS
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      watchdogTimer = setInterval(() => {
-        const now = this.now()
-        // A target BLOCKED on a forwarded approval is alive but SILENT: opencode
-        // publishes `permission.asked` once and then nothing at all for that
-        // session until the human answers (its keepalives carry no sessionID),
-        // so the inactivity clock would otherwise run out on a turn whose only
-        // fault is that its user is slow — aborting the turn and dismissing the
-        // very card they were reading. Keep the clock rolling while the ask is
-        // outstanding; answering it therefore also starts a FRESH inactivity
-        // window for the resumed turn. The ABSOLUTE cap deliberately keeps
-        // running: an approval nobody ever answers still ends the turn.
-        if (this.hasPendingApprovalFor(entry.sessionId)) entry.lastActivityAt = now
-        if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
-          resolve({ kind: 'timeout', reason: 'absolute' })
-        } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
-          resolve({ kind: 'timeout', reason: 'inactivity' })
-        }
-      }, DISPATCH_WATCHDOG_INTERVAL_MS)
-    })
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -1635,9 +2585,7 @@ export class CrossEngineDispatcher {
         const text =
           winner.kind === 'abort'
             ? 'Dispatch cancelled.'
-            : winner.reason === 'absolute'
-              ? `Dispatch timed out after ${Math.round(turnTimeoutMs / 60000)} minutes — the target agent was aborted.`
-              : `Dispatch aborted after ${Math.round(idleTimeoutMs / 60000)} minutes with no activity from the target agent.`
+            : turnTimeoutText(winner.reason, caps, OPENCODE_TIMEOUT_AFTERMATH)
         const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
         emitDispatchNotification(ctx, entry.sessionId, status, text)
         // Recorded for 'failed' (timeout) only — 'stopped' (abort/cancel) is
@@ -1647,14 +2595,12 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: req.engine,
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: null,
-            costUsd: null,
-            durationMs: this.now() - turnStartedAt
+            account: opencodeDispatchAccount(model),
+            engineCostIsEquivalent: false
           })
         }
         return errorResult(text, entry.sessionId)
@@ -1680,14 +2626,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: this.now() - turnStartedAt
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
@@ -1704,12 +2648,20 @@ export class CrossEngineDispatcher {
         // the dispatching session's breakdown exactly like the `info.error`
         // path's does. Purely additive: a failed read leaves the row's numbers
         // null rather than failing an already-failed turn twice.
-        let errTotalTokens = 0
-        let errTurnCostUsd = 0
+        //
+        // Null until a message is actually read back: a failed read is not a
+        // free turn, and neither is a turn on a model we cannot price.
+        let errTurnCostUsd: number | null = null
+        // The LEDGER half of the same recovery (ADR-071 §1) — the turn's token
+        // split and opencode's own charge, both left unset when the read fails
+        // so the row says "unknown" rather than "nothing".
+        let errTokens: UsageTurnTokens | undefined
+        let errEngineCostUsd: number | null = null
         try {
           const info = lastAssistantMessage(await entry.client.listMessages(entry.sessionId))?.info
-          errTotalTokens = storedMessageTotalTokens(info)
-          errTurnCostUsd = info?.cost ?? 0
+          errTurnCostUsd = opencodeTurnCost(model, info).displayCostUsd
+          errTokens = opencodeDispatchTokens(info)
+          errEngineCostUsd = info?.cost ?? null
         } catch (err) {
           logger.debug(
             'CrossEngineDispatcher',
@@ -1725,18 +2677,19 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
-          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
-          durationMs: this.now() - turnStartedAt
+          ...(errTokens ? { tokens: errTokens } : {}),
+          engineCostUsd: errEngineCostUsd,
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
-        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
-          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+        if (errTurnCostUsd === null) entry.unpricedTurns++
+        else {
           entry.cumulativeCostUsd += errTurnCostUsd
+          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
         }
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId)
       }
@@ -1755,14 +2708,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: this.now() - turnStartedAt
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
@@ -1793,23 +2744,23 @@ export class CrossEngineDispatcher {
         // it into the cap + Slice-C breakdown. Mirrors the Claude failed-subtype
         // path; without it a target whose turns keep erroring spends real tokens
         // that never count toward maxCostUsd or the dispatching session's cost.
-        const errTotalTokens = storedMessageTotalTokens(finalMessage?.info)
-        const errTurnCostUsd = finalMessage?.info.cost ?? 0
+        const errTurnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
-          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
-          durationMs: this.now() - turnStartedAt
+          tokens: opencodeDispatchTokens(finalMessage?.info),
+          engineCostUsd: finalMessage?.info.cost ?? null,
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
-        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
-          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+        if (errTurnCostUsd === null) entry.unpricedTurns++
+        else {
           entry.cumulativeCostUsd += errTurnCostUsd
+          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
         }
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
@@ -1827,21 +2778,28 @@ export class CrossEngineDispatcher {
       // — each turn creates a new message id) cumulative snapshot, same shape
       // event-mapper.ts reads for OpencodeSession's own metering.
       const totalTokens = storedMessageTotalTokens(finalMessage?.info)
-      const turnCostUsd = finalMessage?.info.cost ?? 0
+      // `info.cost` alone is what let a subscription-authenticated target spend
+      // past the cap forever (ADR-071 §2) — see opencodeTurnCost.
+      const turnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
       const durationMs = this.now() - turnStartedAt
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
       const maxCostUsd = dispatchCfg?.maxCostUsd
       const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd
+      entry.cumulativeCostUsd += turnCostUsd ?? 0
       let outText = finalText
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+      if (turnCostUsd === null) {
+        // An unpriced turn can never trip the cap, so say so on the turn
+        // itself rather than let a silent zero read as a counted turn.
+        entry.unpricedTurns++
+        if (maxCostUsd !== undefined) outText += cannotCountNote(model)
+      } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
       // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+      if (turnCostUsd !== null && turnCostUsd > 0) {
         ctx.addDispatchedCost?.(req.engine, model, turnCostUsd)
       }
 
@@ -1853,24 +2811,27 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: req.engine,
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens,
-        costUsd: turnCostUsd,
-        durationMs
+        tokens: opencodeDispatchTokens(finalMessage?.info),
+        // opencode reports what it CHARGED, not an equivalent — the ledger's
+        // cost rule treats it as a bill (ADR-071 §1).
+        engineCostUsd: finalMessage?.info.cost ?? null,
+        account: opencodeDispatchAccount(model),
+        engineCostIsEquivalent: false
       })
       return { text: outText, sessionId: entry.sessionId }
     } finally {
+      if (ctx.toolUseId) this.sealOpencodeTargetItems(entry, ctx.toolUseId)
       entry.busy = false
       // Belt-and-suspenders settle-once (the winner branches already null it on
       // the give-up paths, and the settlers null it before invoking): whatever
       // happened, no LATER SSE event may resolve a turn that has returned.
       entry.settled = null
       clearInterval(heartbeat)
-      if (watchdogTimer) clearInterval(watchdogTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -1893,7 +2854,14 @@ export class CrossEngineDispatcher {
     rec.targetCount++
 
     try {
-      const session = await rec.client.createSession({ title: 'xeng-dispatch' })
+      // The title is load-bearing, not cosmetic: this is a real top-level
+      // opencode session, so `usage-reconciler.ts` would otherwise import every
+      // assistant message under it a SECOND time, as an ordinary `origin:
+      // 'session'` row beside the `dispatch` row this dispatcher writes. It
+      // skips sessions carrying this exact title — see the constant's doc.
+      const session = await rec.client.createSession({
+        title: OPENCODE_DISPATCH_SESSION_TITLE
+      })
       // Inherit the dispatcher's autonomy mode, plus a structural recursion
       // guard: the target can never call the dispatch tool back (ADR-033 §4).
       const ruleset: PermissionRule[] = [
@@ -1917,7 +2885,9 @@ export class CrossEngineDispatcher {
         emittedToolResults: new Set(),
         priorMessageIds: new Set(),
         accumulators: new Map(),
+        activeStreamItems: new Map(),
         cumulativeCostUsd: 0,
+        unpricedTurns: 0,
         turnToolUseIds: new Set()
       }
       this.targets.set(session.id, entry)
@@ -2228,8 +3198,17 @@ export class CrossEngineDispatcher {
       const permission = (props.permission as string | undefined) ?? 'tool'
       const metadata = (props.metadata as Record<string, unknown> | undefined) ?? {}
       const patterns = props.patterns as string[] | undefined
+      // The TARGET-side tool call this ask belongs to. The target's stream is
+      // replayed on the dispatching client under the dispatch tool card, so
+      // this id is the one the nested tool block there carries — binding it
+      // lets the approval render INLINE on that block instead of only floating
+      // (both surfaces share `requestId`). Absent on the wire for a
+      // non-tool-scoped ask; never invent one — a wrong id binds the card to
+      // the wrong block, which is worse than no inline card at all.
+      const tool = props.tool as { messageID?: string; callID?: string } | undefined
       const approval: PendingApproval = {
         requestId,
+        ...(tool?.callID ? { toolUseId: tool.callID } : {}),
         toolName: `dispatch:${permission}`,
         input: { ...metadata, ...(patterns ? { patterns } : {}) }
       }
@@ -2294,11 +3273,7 @@ export class CrossEngineDispatcher {
       case 'stream':
         // A delta against a prior turn's message is that turn's, not ours.
         if (output.messageId !== undefined && entry.priorMessageIds.has(output.messageId)) break
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: output.streamType,
-          text: output.delta
-        })
+        this.appendOpencodeTargetItem(entry, output.item, output.delta, toolUseId)
         break
       case 'message': {
         // A message this target streamed in an EARLIER turn is not this turn's
@@ -2309,7 +3284,9 @@ export class CrossEngineDispatcher {
         // tool_use ids in `turnToolUseIds`.
         if (entry.priorMessageIds.has(output.message.id)) break
         collectToolUseIds(output.message, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
+        if (output.item)
+          this.updateOpencodeTargetItem(entry, output.item, output.message, toolUseId)
+        else entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
         // Tool RESULTS are a separate channel from the message's `tool_use`
         // blocks — an opencode ChatMessage never carries them, so without this
         // the dispatch TaskCard's tool chips spin forever (the Claude tap has
@@ -2343,6 +3320,107 @@ export class CrossEngineDispatcher {
         // this tap owns neither completion nor metering (see the DUMMY note
         // above), and approvals ride handleSseEvent's own branches.
         break
+    }
+  }
+
+  private opencodeTargetItemKey(ownerToolUseId: string, partId: string): string {
+    return JSON.stringify([ownerToolUseId, partId])
+  }
+
+  private opencodeTargetItemTarget(
+    item: OpencodeStreamItem,
+    ownerToolUseId: string
+  ): ItemStreamTarget {
+    return {
+      messageId: item.messageId,
+      blockIndex: item.blockIndex,
+      kind: item.kind,
+      ownerToolUseId
+    }
+  }
+
+  private appendOpencodeTargetItem(
+    entry: OpencodeTargetEntry,
+    item: OpencodeStreamItem,
+    chunk: string,
+    ownerToolUseId: string
+  ): void {
+    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
+    let active = entry.activeStreamItems.get(key)
+    const acc = entry.accumulators.get(item.messageId)
+    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
+      const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
+      const message = buildChatMessage(item.messageId, acc)
+      const content = [...message.content]
+      content[item.blockIndex] =
+        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
+      entry.ctx.emit('session:item-open', {
+        target,
+        message: { ...message, content },
+        ...(item.kind === 'thinking'
+          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
+          : {})
+      })
+      active = { target, ownerSessionId: ownerToolUseId, partId: item.partId }
+      entry.activeStreamItems.set(key, active)
+    }
+    if (active) entry.ctx.emit('session:item-delta', { target: active.target, chunk })
+  }
+
+  private updateOpencodeTargetItem(
+    entry: OpencodeTargetEntry,
+    item: OpencodeStreamItem,
+    message: ChatMessage,
+    ownerToolUseId: string
+  ): void {
+    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
+    const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
+    const snap = entry.accumulators.get(item.messageId)?.parts.get(item.partId)
+    if (snap?.sealed) {
+      if (item.completed) entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
+      return
+    }
+    if (!entry.activeStreamItems.has(key)) {
+      const block = message.content[item.blockIndex]
+      if (item.kind === 'thinking' && block?.type === 'thinking' && !block.text) return
+      entry.ctx.emit('session:item-open', {
+        target,
+        message,
+        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
+      })
+      entry.activeStreamItems.set(key, {
+        target,
+        ownerSessionId: ownerToolUseId,
+        partId: item.partId
+      })
+    }
+    if (item.completed) {
+      entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
+      entry.activeStreamItems.delete(key)
+      if (snap) snap.sealed = true
+    }
+  }
+
+  private sealOpencodeTargetItems(entry: OpencodeTargetEntry, ownerToolUseId: string): void {
+    for (const [key, active] of entry.activeStreamItems) {
+      if (active.ownerSessionId !== ownerToolUseId) continue
+      const acc = entry.accumulators.get(active.target.messageId)
+      if (acc) {
+        const snap = acc.parts.get(active.partId)
+        if (snap) {
+          snap.sealed = true
+          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
+            const end = Date.now()
+            snap.time = { start: snap.time?.start ?? end, end }
+          }
+        }
+        entry.ctx.emit('session:item-seal', {
+          target: active.target,
+          ownerToolUseId,
+          message: buildChatMessage(active.target.messageId, acc)
+        })
+      }
+      entry.activeStreamItems.delete(key)
     }
   }
 
@@ -2442,6 +3520,8 @@ export class CrossEngineDispatcher {
     // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
     // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
     entry.turnToolUseIds = new Set()
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
     entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
 
     // ── Run the turn ──────────────────────────────────────────────────────
@@ -2455,14 +3535,13 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
       | { kind: 'ok'; msg: ResultMessage }
       | { kind: 'err'; err: unknown }
-      | { kind: 'timeout' }
+      | TurnTimeout
       | { kind: 'abort' }
       | { kind: 'stop' }
 
@@ -2470,9 +3549,15 @@ export class CrossEngineDispatcher {
       (msg): Raced => ({ kind: 'ok', msg }),
       (err): Raced => ({ kind: 'err', err })
     )
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
-    })
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment) — the same watchdog
+    // the opencode direction runs, which is why `driveClaudeTurn` bumps
+    // `entry.lastActivityAt` on every message it reads off the iterator.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -2503,7 +3588,7 @@ export class CrossEngineDispatcher {
         }
         const text =
           winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
+            ? turnTimeoutText(winner.reason, caps, CLAUDE_TIMEOUT_AFTERMATH)
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
@@ -2516,14 +3601,12 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: 'claude',
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: null,
-            costUsd: null,
-            durationMs: null
+            account: entry.account,
+            engineCostIsEquivalent: true
           })
         }
         return errorResult(text, entry.sessionId ?? '')
@@ -2544,14 +3627,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'claude',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: null
+          account: entry.account,
+          engineCostIsEquivalent: true
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
       }
@@ -2569,10 +3650,35 @@ export class CrossEngineDispatcher {
       // DB record, and Slice C fold-in below all consume the same delta.
       // Math.max(0, …) guards against a pathological backwards total.
       const usageFields = result.usage as
-        { input_tokens?: number; output_tokens?: number } | undefined
+        | {
+            input_tokens?: number
+            output_tokens?: number
+            cache_creation_input_tokens?: number
+            cache_read_input_tokens?: number
+            cache_creation?: { ephemeral_1h_input_tokens?: number }
+          }
+        | undefined
       const totalTokens = usageFields
         ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
         : 0
+      // The LEDGER's split (ADR-071 §1). Anthropic's `usage` is disjoint —
+      // `input_tokens` already excludes both cache figures — so the fields map
+      // straight onto the ledger's shape. `totalTokens` above deliberately
+      // stays input+output: it is what the task notification shows.
+      //
+      // `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL SUBSET of
+      // `cache_creation_input_tokens`, billed at 2× input rather than 1.25×;
+      // block-usage reads it off the transcripts for exactly this reason, and
+      // dropping it here would underprice every dispatched Claude turn that
+      // used the 1h cache. An older cli.js omits the breakdown, which the
+      // recorder reads as all-5m — the same fallback block-usage makes.
+      const turnTokens: UsageTurnTokens = {
+        input: usageFields?.input_tokens ?? 0,
+        output: usageFields?.output_tokens ?? 0,
+        cacheWrite: usageFields?.cache_creation_input_tokens ?? 0,
+        cacheWrite1h: usageFields?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+        cacheRead: usageFields?.cache_read_input_tokens ?? 0
+      }
       const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
       const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
       entry.lastReportedTotalCostUsd = reportedTotalCostUsd
@@ -2598,14 +3704,16 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'claude',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens,
-          costUsd: turnCostUsd,
-          durationMs
+          tokens: turnTokens,
+          engineCostUsd: turnCostUsd,
+          account: entry.account,
+          // cli.js's `total_cost_usd` is an API-EQUIVALENT whatever plan is
+          // behind it (ADR-034), so the ledger must not read it as a bill.
+          engineCostIsEquivalent: true
         })
         // Slice C — fold-in parity with the DB record above: this row IS
         // included by seedDispatchedCosts() on reload, so the live breakdown
@@ -2647,23 +3755,24 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: 'claude',
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens,
-        costUsd: turnCostUsd,
-        durationMs
+        tokens: turnTokens,
+        engineCostUsd: turnCostUsd,
+        account: entry.account,
+        engineCostIsEquivalent: true
       })
       return {
         text: outText,
         sessionId: entry.sessionId ?? ''
       }
     } finally {
+      entry.itemStreams.sealAll()
       entry.busy = false
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -2681,6 +3790,9 @@ export class CrossEngineDispatcher {
         throw new Error('Claude target process ended unexpectedly')
       }
       const msg = value as SDKMessage
+      // Proof of life for the inactivity watchdog — EVERY message counts,
+      // `stream_event` deltas included (see ClaudeTargetEntry.lastActivityAt).
+      entry.lastActivityAt = this.now()
       if (msg.session_id && !entry.sessionId) {
         entry.sessionId = msg.session_id
         this.targets.set(msg.session_id, entry)
@@ -2709,18 +3821,12 @@ export class CrossEngineDispatcher {
     if (!toolUseId) return
 
     if (msg.type === 'stream_event') {
-      const event = (msg as { event?: { type?: string; delta?: Record<string, unknown> } }).event
-      if (!event || event.type !== 'content_block_delta' || !event.delta) return
-      const delta = event.delta
-      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-        entry.ctx.emit('session:subagent-stream', { toolUseId, type: 'text', text: delta.text })
-      } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: 'thinking',
-          text: delta.thinking
-        })
+      const envelope = msg as {
+        parent_tool_use_id?: string | null
+        event?: Parameters<ClaudeItemStreamLifecycle['handleEvent']>[0]
       }
+      if (envelope.event)
+        entry.itemStreams.handleEvent(envelope.event, envelope.parent_tool_use_id ?? undefined)
       return
     }
 
@@ -2728,7 +3834,10 @@ export class CrossEngineDispatcher {
       const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
       if (chatMsg) {
         collectToolUseIds(chatMsg, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
+        const nativeOwner =
+          (msg as unknown as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined
+        if (entry.itemStreams.handleSnapshot(chatMsg, nativeOwner) === 'none')
+          entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
       }
       return
     }
@@ -2781,10 +3890,50 @@ export class CrossEngineDispatcher {
       abortController,
       busy: false,
       ctx,
+      account: claudeDispatchAccount(),
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
-      turnToolUseIds: new Set()
+      lastActivityAt: 0,
+      turnToolUseIds: new Set(),
+      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
     }
+    entry.itemStreams = new ClaudeItemStreamLifecycle({
+      open: (target, message, startedAt) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-open', {
+            target: { ...target, ownerToolUseId },
+            message,
+            ...(startedAt === undefined ? {} : { startedAt })
+          })
+      },
+      delta: (target, chunk) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-delta', {
+            target: { ...target, ownerToolUseId },
+            chunk
+          })
+      },
+      seal: (target, message) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-seal', {
+            ...(target ? { target: { ...target, ownerToolUseId } } : {}),
+            ownerToolUseId,
+            message
+          })
+      },
+      updateLocal: () => {},
+      // The dispatched target's transcript reaches the caller's card through the
+      // subagent channel; a tool_use block has to arrive there before its result
+      // does, for the same reason it does on the root session.
+      publish: (message) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:subagent-message', { toolUseId: ownerToolUseId, message })
+      }
+    })
     const canUseTool: CanUseTool = async (
       toolName: string,
       input: Record<string, unknown>,
@@ -2844,29 +3993,91 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Is an opencode dispatch target's forwarded approval still awaiting a human?
-   * Read by the turn watchdog to keep an approval-PARKED turn's inactivity clock
-   * rolling (see the watchdog's own comment). Scoped to `kind: 'opencode'`
-   * because only that direction's turns are policed by this watchdog — the
-   * claude/pi directions run on the fixed `dispatchTimeoutMs`. A plain scan: the
-   * map holds at most a handful of live approvals.
+   * Is a forwarded approval for this dispatch target still awaiting a human?
+   * Read by the turn watchdog to keep an approval-PARKED turn's inactivity
+   * clock rolling (see `startTurnWatchdog`). NOT scoped to any target kind: as
+   * of ADR-033's 2026-09-18 amendment all four directions run on that
+   * watchdog, and a Claude/pi/codex target blocked on its gate is exactly as
+   * silent as an opencode one blocked on `ctx.ask`. A plain scan: the map holds
+   * at most a handful of live approvals. A null session id (a Claude target
+   * whose `system/init` has not landed yet) can own no approval by definition.
    */
-  private hasPendingApprovalFor(targetSessionId: string): boolean {
+  private hasPendingApprovalFor(targetSessionId: string | null): boolean {
+    if (targetSessionId === null) return false
     for (const pending of this.pendingApprovals.values()) {
-      if (pending.kind === 'opencode' && pending.targetSessionId === targetSessionId) return true
+      if (pending.targetSessionId === targetSessionId) return true
     }
     return false
   }
 
+  /**
+   * Arm one dispatch turn's liveness watchdog — the SINGLE implementation
+   * shared by all four directions (ADR-033's 2026-09-18 amendment; before it
+   * only the opencode direction had one, and claude/pi/codex raced a fixed
+   * 10-minute `setTimeout` no user could change).
+   *
+   * Returns a promise that resolves ONLY when one of the two configured caps
+   * fires, plus a `dispose` the caller MUST run in its `finally`. With both
+   * caps unlimited — which is the default, since `resolveTurnLiveness` has no
+   * built-in fallback — NO interval is armed at all and the promise never
+   * resolves: the turn then ends only on its own completion, the caller's
+   * abort, the user's stop, or `dispatch.maxCostUsd`.
+   *
+   * `entry` is taken BY REFERENCE, not snapshotted: the inactivity deadline
+   * MOVES as the target streams (each direction bumps `lastActivityAt` from its
+   * own event feed), and the parked-on-an-approval refresh below WRITES it.
+   */
+  private startTurnWatchdog(
+    entry: { lastActivityAt: number },
+    caps: TurnLivenessCaps,
+    turnStartedAt: number,
+    isApprovalParked: () => boolean
+  ): { promise: Promise<TurnTimeout>; dispose: () => void } {
+    const { turnTimeoutMs, idleTimeoutMs } = caps
+    if (turnTimeoutMs <= 0 && idleTimeoutMs <= 0) {
+      // Unlimited in both dimensions — nothing to poll for.
+      return { promise: new Promise<TurnTimeout>(() => {}), dispose: (): void => {} }
+    }
+    let timer: ReturnType<typeof setInterval> | undefined
+    const promise = new Promise<TurnTimeout>((resolve) => {
+      timer = setInterval(() => {
+        const now = this.now()
+        // A target BLOCKED on a forwarded approval is alive but SILENT — an
+        // opencode target parked on `ctx.ask` emits no session events at all
+        // (the server's keepalives carry no sessionID), and a Claude/pi/codex
+        // target parked on its gate is just as quiet. The inactivity clock
+        // would otherwise run out on a turn whose only fault is that its human
+        // is slow, aborting it and dismissing the very card they were reading.
+        // Keep the clock rolling while the ask is outstanding; answering it
+        // therefore also starts a FRESH inactivity window for the resumed
+        // turn. The ABSOLUTE cap deliberately keeps running: an approval nobody
+        // ever answers still ends the turn.
+        if (isApprovalParked()) entry.lastActivityAt = now
+        if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'absolute' })
+        } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'inactivity' })
+        }
+      }, DISPATCH_WATCHDOG_INTERVAL_MS)
+    })
+    return {
+      promise,
+      dispose: (): void => {
+        if (timer) clearInterval(timer)
+      }
+    }
+  }
+
   /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
-   *  Claude/pi-kind resolvers are ALSO resolved with deny — never leave a
-   *  hanging canUseTool/gate promise (ADR-033 M2 item 7, extended to pi in M4c). */
+   *  Claude/pi/codex-kind resolvers are ALSO resolved with deny — never leave a
+   *  hanging canUseTool/gate/server-request promise (ADR-033 M2 item 7,
+   *  extended to pi in M4c and to codex in slice H). */
   private dismissPendingForTarget(targetSessionId: string): void {
     for (const [key, pending] of [...this.pendingApprovals]) {
       if (pending.targetSessionId !== targetSessionId) continue
       this.pendingApprovals.delete(key)
       pending.emit('session:approval-dismiss', { requestId: key })
-      if (pending.kind === 'claude' || pending.kind === 'pi') {
+      if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
         pending.resolve('deny')
       }
     }
@@ -2886,15 +4097,50 @@ export class CrossEngineDispatcher {
    * it or how that turn ended (see event-mapper.ts's `PiMapperState.
    * totalCostUsd` doc) — so it already reflects whatever the abandoned turn
    * actually spent by the time the caller reads it. Returns the turn's own
-   * delta (>= 0) for the caller to fold into a usage row.
+   * resolved cost for the caller to fold into a usage row, or null when the
+   * rule could not price it.
    */
   private accountPiNonSuccessCost(
     entry: PiTargetEntry,
     ctx: DispatchContext,
     model: string
-  ): number {
-    const turnCostUsd = Math.max(0, entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd)
+  ): number | null {
+    const rawTurnCostUsd = Math.max(
+      0,
+      entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd
+    )
     entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
+    return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
+  }
+
+  /**
+   * Put one pi turn's raw delta through the cost rule (`piTurnCost`) and fold
+   * the result into the cap + the dispatching session's breakdown. The single
+   * place the pi target counts spend, so the rule is stated once for all four
+   * of its outcomes. Returns what was counted, or null when the turn was
+   * unpriced — which is recorded on the entry instead and never added as a
+   * silent zero.
+   */
+  private applyPiTurnCost(
+    entry: PiTargetEntry,
+    ctx: DispatchContext,
+    model: string,
+    rawTurnCostUsd: number
+  ): number | null {
+    // Keep pi's RAW figure for the ledger row: it is a list-price equivalent
+    // (pi prices from its own catalog whatever the credential — S1b), and it
+    // knows long-context tiers our table does not, so a row that dropped it
+    // would price the turn worse than pi already did.
+    entry.turnEngineCostUsd = rawTurnCostUsd
+    const turnCostUsd = piTurnCost(
+      model,
+      { ...entry.turnTokens, reasoning: entry.turnReasoningTokens },
+      rawTurnCostUsd
+    ).displayCostUsd
+    if (turnCostUsd === null) {
+      entry.unpricedTurns++
+      return null
+    }
     entry.cumulativeCostUsd += turnCostUsd
     if (turnCostUsd > 0) {
       ctx.addDispatchedCost?.('pi', model, turnCostUsd)
@@ -2928,7 +4174,7 @@ export class CrossEngineDispatcher {
     entry: PiTargetEntry,
     ctx: DispatchContext,
     model: string
-  ): Promise<number> {
+  ): Promise<number | null> {
     let totalCostUsd = entry.mapperState.totalCostUsd
     try {
       const statsResp = await entry.client.request<PiGetSessionStatsData>(
@@ -2944,13 +4190,9 @@ export class CrossEngineDispatcher {
         `pi get_session_stats cost reconciliation failed (falling back to streamed cost): ${err instanceof Error ? err.message : String(err)}`
       )
     }
-    const turnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
+    const rawTurnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
     entry.lastReportedTotalCostUsd = totalCostUsd
-    entry.cumulativeCostUsd += turnCostUsd
-    if (turnCostUsd > 0) {
-      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
-    }
-    return turnCostUsd
+    return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
   }
 
   // ── pi direction (M4c) ────────────────────────────────────────────────────
@@ -2976,8 +4218,8 @@ export class CrossEngineDispatcher {
     // allowlist UNENFORCEABLE (we'd never know the actual model until AFTER
     // spawn). Requiring a model keeps the allowlist honest, matching Claude.
     const dispatchCfg = this.deps.loadEngineConfig('pi').dispatch
-    const model = req.model ?? dispatchCfg?.defaultModel
-    if (!model) {
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into pi. Ask the user to set ' +
           'Engines › pi › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
@@ -2985,12 +4227,14 @@ export class CrossEngineDispatcher {
       )
     }
     const allowed = dispatchCfg?.allowedModels
-    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+    if (allowed && allowed.length > 0 && !allowed.includes(requestedModel)) {
       return errorResult(
-        `Model "${model}" is not in the user-configured allowlist for pi dispatch. ` +
+        `Model "${requestedModel}" is not in the user-configured allowlist for pi dispatch. ` +
           `Allowed models: ${allowed.join(', ')}`
       )
     }
+    // Canonical from here on — see canonicalDispatchModel.
+    const model = canonicalDispatchModel('pi', requestedModel)
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: PiTargetEntry
@@ -3018,7 +4262,8 @@ export class CrossEngineDispatcher {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.',
+            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.' +
+            unpricedSuffix(existing.unpricedTurns),
           req.sessionId
         )
       }
@@ -3037,6 +4282,11 @@ export class CrossEngineDispatcher {
     entry.busy = true
     entry.turnToolUseIds = new Set()
     entry.turnTotalTokens = 0
+    entry.turnTokens = zeroDispatchTokens()
+    entry.turnReasoningTokens = 0
+    entry.turnEngineCostUsd = null
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
 
     // ── Run the turn ──────────────────────────────────────────────────────
     let beats = 0
@@ -3049,14 +4299,13 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
       | { kind: 'ok'; outcome: Extract<PiTurnOutcome, { kind: 'ok' }> }
       | { kind: 'err'; message: string }
-      | { kind: 'timeout' }
+      | TurnTimeout
       | { kind: 'abort' }
       | { kind: 'stop' }
 
@@ -3064,9 +4313,15 @@ export class CrossEngineDispatcher {
       (outcome): Raced =>
         outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
     )
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
-    })
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment). The ambient `onEvent`
+    // callback installed in `createPiTarget` is what bumps
+    // `entry.lastActivityAt`.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -3123,14 +4378,18 @@ export class CrossEngineDispatcher {
         // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
         // usage row for either, and a follow-up RPC to a target the user just
         // asked to stop would be pure latency for no observable benefit.
-        const turnCostUsd =
-          winner.kind === 'timeout'
-            ? await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
-            : this.accountPiNonSuccessCost(entry, ctx, model)
+        // Called for the ACCOUNTING, not for a figure: both fold the turn's
+        // spend into the cap and the dispatching session's breakdown, and the
+        // ledger row prices the split itself.
+        if (winner.kind === 'timeout') {
+          await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+        } else {
+          this.accountPiNonSuccessCost(entry, ctx, model)
+        }
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).`
+            ? turnTimeoutText(winner.reason, caps, PI_TIMEOUT_AFTERMATH)
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
@@ -3147,14 +4406,14 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: 'pi',
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
-            costUsd: turnCostUsd > 0 ? turnCostUsd : null,
-            durationMs: null
+            tokens: entry.turnTokens,
+            engineCostUsd: entry.turnEngineCostUsd,
+            account: piDispatchAccount(model),
+            engineCostIsEquivalent: true
           })
         }
         return errorResult(text, entry.sessionId ?? '')
@@ -3173,7 +4432,7 @@ export class CrossEngineDispatcher {
         // message_end streamed back, in which case entry.mapperState.
         // totalCostUsd is still the pre-turn value even though pi's backend
         // may have genuinely spent something.
-        const turnCostUsd = await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+        await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
         emitDispatchNotification(
           ctx,
           entry.sessionId ?? '',
@@ -3183,21 +4442,21 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'pi',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
-          costUsd: turnCostUsd > 0 ? turnCostUsd : null,
-          durationMs: null
+          tokens: entry.turnTokens,
+          engineCostUsd: entry.turnEngineCostUsd,
+          account: piDispatchAccount(model),
+          engineCostIsEquivalent: true
         })
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
       }
 
       // ── Success ────────────────────────────────────────────────────────
       const { outcome } = winner
-      const turnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
+      const rawTurnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
       entry.lastReportedTotalCostUsd = outcome.totalCostUsd
 
       // get_last_assistant_text — simpler + more reliable than accumulating
@@ -3219,18 +4478,17 @@ export class CrossEngineDispatcher {
       }
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      // applyPiTurnCost does the fold into the cap AND the dispatching
+      // session's breakdown (Slice C), so the cap state is read before it.
       const maxCostUsd = dispatchCfg?.maxCostUsd
       const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd
+      const turnCostUsd = this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
       let outText = finalText
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+      if (turnCostUsd === null) {
+        if (maxCostUsd !== undefined) outText += cannotCountNote(model)
+      } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-      }
-
-      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
-        ctx.addDispatchedCost?.('pi', model, turnCostUsd)
       }
 
       emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
@@ -3241,20 +4499,24 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: 'pi',
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens: entry.turnTotalTokens,
-        costUsd: turnCostUsd,
-        durationMs: outcome.durationMs
+        tokens: entry.turnTokens,
+        // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
+        // read it as money that left a wallet.
+        engineCostUsd: entry.turnEngineCostUsd,
+        account: piDispatchAccount(model),
+        engineCostIsEquivalent: true
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
+      for (const output of finishPiMessage(entry.mapperState))
+        this.forwardPiTargetMessage(entry, output)
       entry.busy = false
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -3282,9 +4544,14 @@ export class CrossEngineDispatcher {
       autonomyMode: ctx.autonomyMode,
       busy: false,
       cumulativeCostUsd: 0,
+      unpricedTurns: 0,
       lastReportedTotalCostUsd: 0,
+      lastActivityAt: 0,
       turnToolUseIds: new Set(),
       turnTotalTokens: 0,
+      turnTokens: zeroDispatchTokens(),
+      turnReasoningTokens: 0,
+      turnEngineCostUsd: null,
       mapperState: createPiMapperState(),
       model,
       settled: null,
@@ -3303,6 +4570,10 @@ export class CrossEngineDispatcher {
     entry.bridgeHost = primitives.bridgeHost
 
     entry.client.onEvent((ev) => {
+      // Proof of life for the inactivity watchdog, taken BEFORE the mapper so
+      // an event it drops as `ignore` still counts (see
+      // PiTargetEntry.lastActivityAt).
+      entry.lastActivityAt = this.now()
       const outputs = mapPiEvent(ev, entry.mapperState)
       for (const output of outputs) this.forwardPiTargetMessage(entry, output)
     })
@@ -3312,6 +4583,8 @@ export class CrossEngineDispatcher {
       // the bridge host here (not just on disposeFor) — an unexpected process
       // death must not leak the loopback HTTP server's port (mirrors
       // PiSession's own onExit teardown of its bridgeHost).
+      for (const output of finishPiMessage(entry.mapperState))
+        this.forwardPiTargetMessage(entry, output)
       const settle = entry.settled
       entry.settled = null
       settle?.({ kind: 'error', message: 'pi target process exited unexpectedly' })
@@ -3374,6 +4647,7 @@ export class CrossEngineDispatcher {
    */
   private drivePiTurn(entry: PiTargetEntry, prompt: string): Promise<PiTurnOutcome> {
     entry.mapperState.startTimeMs = Date.now()
+    entry.mapperState.messageEnded = false
     // A fresh turn (first turn, or a continuation after a prior stop/timeout/
     // abort) is never draining — see PiTargetEntry.draining's doc comment.
     entry.draining = false
@@ -3403,8 +4677,8 @@ export class CrossEngineDispatcher {
   /**
    * Forward a pi dispatch target's live turn output as engine-neutral
    * subagent events — byte-matches `forwardClaudeTargetMessage`'s /
-   * `handleOpencodeTargetStream`'s payload shapes exactly (subagent-stream /
-   * subagent-message / subagent-tool-result). ALSO owns turn-completion:
+   * `handleOpencodeTargetStream`'s payload shapes exactly (item-open / item-delta /
+   * item-seal, subagent-message, subagent-tool-result). ALSO owns turn-completion:
    * `result`/`error` MapperOutputs settle `entry.settled` (see `drivePiTurn`'s
    * doc comment) and `usage` outputs accumulate this turn's token total.
    * `bash_output`/`ignore` are skipped — the caller's TaskCard doesn't stream
@@ -3429,17 +4703,57 @@ export class CrossEngineDispatcher {
       // not just the eventual "Dispatched turn failed" summary.
     }
 
+    // ACCOUNTING IS NOT STREAMING, so it runs ABOVE the tool_use gate below:
+    // the cap and the ledger row need this turn's tokens even for a dispatch
+    // with no caller tool_use to stream chunks to, and a gated accumulator
+    // would report such a turn as a zero split and a countable zero cost.
+    // `usage` is still never a visible chunk — the return here is what keeps
+    // it out of the stream, exactly as the switch's own `case` did.
+    if (out.kind === 'usage') {
+      entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
+      // The split the ledger row needs, accumulated beside the total across
+      // the turn's several assistant messages. The four fields pi reports
+      // are the four `PiSession` records for its OWN turns — `reasoning` is
+      // deliberately not folded into `output` here, for parity with it, and
+      // is carried separately for the price lookup, which does fold it.
+      entry.turnTokens.input += out.tokens.input
+      entry.turnTokens.output += out.tokens.output
+      entry.turnTokens.cacheWrite += out.tokens.cacheWrite
+      entry.turnTokens.cacheRead += out.tokens.cacheRead
+      entry.turnReasoningTokens += out.tokens.reasoning ?? 0
+      return
+    }
+
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
     switch (out.kind) {
-      case 'stream':
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: out.streamType,
-          text: out.delta
+      case 'item_open': {
+        const target = { ...out.target, ownerToolUseId: toolUseId }
+        // The mapper already measured the thought's start; forwarding it
+        // unchanged is what makes the child's live timer match the parent's.
+        entry.ctx.emit('session:item-open', {
+          target,
+          message: out.message,
+          ...(out.startedAt === undefined ? {} : { startedAt: out.startedAt })
         })
         break
+      }
+      case 'item_delta': {
+        const target = { ...out.target, ownerToolUseId: toolUseId }
+        entry.ctx.emit('session:item-delta', { target, chunk: out.chunk })
+        break
+      }
+      case 'item_seal': {
+        const target = out.target ? { ...out.target, ownerToolUseId: toolUseId } : undefined
+        collectToolUseIds(out.message, entry.turnToolUseIds)
+        entry.ctx.emit('session:item-seal', {
+          message: out.message,
+          ownerToolUseId: toolUseId,
+          ...(target ? { target } : {})
+        })
+        break
+      }
       case 'message':
         collectToolUseIds(out.message, entry.turnToolUseIds)
         entry.ctx.emit('session:subagent-message', { toolUseId, message: out.message })
@@ -3452,14 +4766,15 @@ export class CrossEngineDispatcher {
           isError: out.isError
         })
         break
-      case 'usage':
-        entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
-        break
       case 'error':
-        entry.ctx.emit('session:subagent-stream', {
+        entry.ctx.emit('session:subagent-message', {
           toolUseId,
-          type: 'text',
-          text: `\n[error: ${out.message}]`
+          message: {
+            id: uuidv4(),
+            role: 'assistant',
+            content: [{ type: 'text', text: `[error: ${out.message}]` }],
+            timestamp: Date.now()
+          }
         })
         break
       case 'bash_output':
@@ -3554,10 +4869,1111 @@ export class CrossEngineDispatcher {
       entry.ctx.emit('session:approval-request', approval)
     })
   }
+
+  // ── codex direction (slice H) ─────────────────────────────────────────────
+
+  /**
+   * Everything past the guards for engine:'codex' — runs with an
+   * activeDispatches slot held and the Stop handle already registered (same
+   * preamble as the other three directions).
+   */
+  private async resolveAndRunCodex(
+    req: DispatchRequest,
+    ctx: DispatchContext,
+    stopController: AbortController
+  ): Promise<DispatchResult> {
+    // ── Model resolution ──────────────────────────────────────────────────
+    // DELIBERATELY UNLIKE the claude and pi branches, a model is NOT required
+    // here. Those two must demand one because a spawned target's actual model
+    // is unknowable until after the process is up, which would make a
+    // configured `allowedModels` unenforceable. Codex has no such problem: the
+    // catalog (`model/list`) and the user's own configured default
+    // (`config/read`) both arrive on the target's connection BEFORE any thread
+    // exists, so `createCodexTarget` resolves the model first and checks the
+    // allowlist against the RESOLVED id — the allowlist stays exactly as
+    // honest, and a user who has not configured `engines/codex.json` can still
+    // be dispatched into.
+    const dispatchCfg = this.deps.loadEngineConfig('codex').dispatch
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    const allowed = dispatchCfg?.allowedModels
+    // Checked HERE as well as post-resolution so an explicitly-requested model
+    // outside the allowlist is refused with the SAME bare sentence the other
+    // targets use, before a process is even spawned. The post-resolution check
+    // inside `createCodexTarget` is what covers the fall-back-to-the-catalog
+    // -default path, where there is nothing to check until the catalog lands.
+    const earlyDenial = codexModelAllowlistDenial(requestedModel, allowed)
+    if (earlyDenial) return errorResult(earlyDenial)
+
+    // ── Target resolution ─────────────────────────────────────────────────
+    let entry: CodexTargetEntry
+    if (req.sessionId) {
+      const existing = this.targets.get(req.sessionId)
+      if (!existing || existing.kind !== 'codex' || existing.fromRoutingId !== ctx.fromRoutingId) {
+        // NOT a `thread/resume` of the named thread. `req.sessionId` is
+        // model-authored text: resuming whatever it names would let a
+        // dispatched-from agent reopen ANY Codex thread on disk — including
+        // the user's own interactive sessions — under a dispatch target's
+        // policy envelope, with no ownership check available to refuse it.
+        // Only a live entry this caller owns continues (ADR-066's caller-bound
+        // identity), exactly as every other target direction does.
+        return errorResult(
+          `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
+            'Start a fresh dispatch without session_id.'
+        )
+      }
+      if (existing.busy) {
+        return errorResult(
+          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
+          req.sessionId
+        )
+      }
+      if (
+        dispatchCfg?.maxCostUsd !== undefined &&
+        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
+      ) {
+        return errorResult(
+          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
+            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
+            'Raise dispatch.maxCostUsd in engines/codex.json, or start a fresh dispatch.',
+          req.sessionId
+        )
+      }
+      existing.ctx = ctx
+      entry = existing
+    } else {
+      try {
+        entry = await this.createCodexTarget(ctx, requestedModel, allowed)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return errorResult(`Failed to start dispatched codex agent: ${msg}`)
+      }
+    }
+
+    const model = entry.model
+    entry.busy = true
+    entry.turnToolUseIds = new Set()
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
+
+    // ── Run the turn ──────────────────────────────────────────────────────
+    let beats = 0
+    const heartbeat = setInterval(() => {
+      beats++
+      void sendProgress(ctx.extra, {
+        progress: beats,
+        message: 'Dispatched agent is still working…'
+      }).catch(() => {})
+      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
+    }, this.heartbeatMs)
+
+    const signal = ctx.extra?.signal
+    let abortListener: (() => void) | undefined
+
+    type Raced =
+      | { kind: 'ok'; outcome: Extract<CodexTurnOutcome, { kind: 'ok' }> }
+      | { kind: 'err'; message: string }
+      | TurnTimeout
+      | { kind: 'abort' }
+      | { kind: 'stop' }
+
+    const turnPromise: Promise<Raced> = this.driveCodexTurn(entry, req.prompt).then(
+      (outcome): Raced =>
+        outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
+    )
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment).
+    // `handleCodexTargetNotification` is what bumps `entry.lastActivityAt`.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
+    const abortPromise: Promise<Raced> = signal
+      ? signal.aborted
+        ? Promise.resolve({ kind: 'abort' })
+        : new Promise((resolve) => {
+            abortListener = (): void => resolve({ kind: 'abort' })
+            signal.addEventListener('abort', abortListener, { once: true })
+          })
+      : new Promise(() => {})
+    const stopPromise: Promise<Raced> = stopController.signal.aborted
+      ? Promise.resolve({ kind: 'stop' })
+      : new Promise((resolve) => {
+          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+            once: true
+          })
+        })
+
+    try {
+      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
+
+      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+        // FIRST and synchronously, before any RPC leaves: no approval request
+        // from this turn can then race ahead of the flag.
+        entry.draining = true
+        await this.interruptCodexTurn(entry)
+        const usage = this.accountCodexTurn(entry, ctx)
+        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        const text =
+          winner.kind === 'timeout'
+            ? turnTimeoutText(winner.reason, caps, CODEX_TIMEOUT_AFTERMATH)
+            : winner.kind === 'stop'
+              ? 'Dispatch stopped by user.'
+              : 'Dispatch cancelled.'
+        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+        // Same row-vs-spend split as the pi direction: a 'stopped' turn gets no
+        // usage ROW (ADR-033 M4-B), but whatever it spent before the stop is
+        // still folded into the cap and the caller's breakdown above.
+        if (status === 'failed') {
+          this.safeRecordUsage({
+            ts: this.now(),
+            fromRoutingId: ctx.fromRoutingId,
+            targetEngine: 'codex',
+            targetModel: model,
+            targetSessionId: entry.sessionId,
+            toolUseId: ctx.toolUseId ?? null,
+            ...(usage.tokens ? { tokens: usage.tokens } : {}),
+            account: entry.account,
+            // codexTurnCostUsd is OUR table's equivalent, not a charge
+            // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+            // so the ledger derives the API cost from the split above.
+            engineCostIsEquivalent: true
+          })
+        }
+        return errorResult(text, entry.sessionId ?? '')
+      }
+
+      if (winner.kind === 'err') {
+        // The thread is NOT torn down: a failed turn (a refused `turn/start`, a
+        // `turn/completed` carrying an error) leaves the app-server and the
+        // thread alive, and a genuinely dead process self-diagnoses on the next
+        // continuation (`CodexAppServerClient.request` rejects `not-ready`).
+        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        const usage = this.accountCodexTurn(entry, ctx)
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId ?? '',
+          'failed',
+          `Dispatched turn failed: ${winner.message}`
+        )
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          targetEngine: 'codex',
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          ...(usage.tokens ? { tokens: usage.tokens } : {}),
+          account: entry.account,
+          // codexTurnCostUsd is OUR table's equivalent, not a charge
+          // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+          // so the ledger derives the API cost from the split above.
+          engineCostIsEquivalent: true
+        })
+        return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
+      }
+
+      // ── Success ────────────────────────────────────────────────────────
+      const { outcome } = winner
+      const maxCostUsd = dispatchCfg?.maxCostUsd
+      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+      const usage = this.accountCodexTurn(entry, ctx)
+      let outText = outcome.text
+      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+        outText +=
+          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+      }
+
+      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', outcome.text, {
+        totalTokens: usage.totalTokens ?? 0,
+        toolUses: entry.turnToolUseIds.size,
+        durationMs: outcome.durationMs
+      })
+      this.safeRecordUsage({
+        ts: this.now(),
+        fromRoutingId: ctx.fromRoutingId,
+        targetEngine: 'codex',
+        targetModel: model,
+        targetSessionId: entry.sessionId,
+        toolUseId: ctx.toolUseId ?? null,
+        ...(usage.tokens ? { tokens: usage.tokens } : {}),
+        account: entry.account,
+        // codexTurnCostUsd is OUR table's equivalent, not a charge
+        // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+        // so the ledger derives the API cost from the split above.
+        engineCostIsEquivalent: true
+      })
+      return { text: outText, sessionId: entry.sessionId ?? '' }
+    } finally {
+      if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
+      entry.busy = false
+      clearInterval(heartbeat)
+      watchdog.dispose()
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
+    }
+  }
+
+  /** Bounded wait — `promise`, or `undefined` once the grace period elapses. */
+  private async withinCodexGrace<T>(promise: Promise<T>): Promise<T | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), this.codexAbortSettleGraceMs)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * End the turn currently in flight on a give-up path (timeout/abort/stop) and
+   * retire it so nothing it still emits can settle a LATER turn.
+   *
+   * The turn id is the whole problem. `turn/interrupt` is `{threadId, turnId}`,
+   * and a stop can land while `turn/start` is still in flight — at which point
+   * `entry.turnId` is null and the turn cannot be named. Leaving it at that
+   * would be worse than a leaked promise: the turn keeps running headless, and
+   * the next continuation's `turn/start` would STEER that zombie instead of
+   * opening a fresh turn (the app-server routes both through
+   * `start_or_steer_turn`). So the id is waited for, BOUNDED, and so is the
+   * interrupt's own acknowledgement — `turn/interrupt` only answers once the
+   * native `TurnAborted` has landed, which is the signal that a continuation is
+   * safe; a wedged target must not hold the user's Stop open for it.
+   */
+  private async interruptCodexTurn(entry: CodexTargetEntry): Promise<void> {
+    const turnId = entry.turnId ?? (await this.withinCodexGrace(entry.turnStarted)) ?? null
+    if (turnId && entry.sessionId) {
+      entry.endedTurns.add(turnId)
+      entry.connection.abortServerRequests(entry.sessionId, turnId)
+      await this.withinCodexGrace(
+        entry.connection
+          .request('turn/interrupt', { threadId: entry.sessionId, turnId })
+          .then(() => undefined)
+          .catch(() => undefined)
+      )
+    }
+    // Belt-and-braces if the id never arrived: `draining` (already set by the
+    // caller) still refuses late approval requests, and nulling the resolver
+    // here means a stale `turn/completed` cannot settle anything.
+    entry.settled = null
+    entry.turnId = null
+  }
+
+  /**
+   * Close this turn's token/cost accounting and return what the turn spent.
+   * Shared by EVERY outcome (success, error, timeout, stop) — a
+   * turn that spent real tokens before dying still counts toward the cap and
+   * the dispatching session's own breakdown, exactly like a successful one.
+   *
+   * `thread/tokenUsage/updated` reports the thread's CUMULATIVE `total` (its
+   * `last` is the last REQUEST's context window, not a per-turn figure — see
+   * `CodexSession.emitMetering`, which uses it for exactly that), so a turn's
+   * own numbers are the delta against the baseline left by the previous turn.
+   *
+   * The USD figure is the API-rate EQUIVALENT, never a charge: a
+   * ChatGPT-subscription turn's true cost is unknowable from here (ADR-066), so
+   * this is the same number Codex's own status line shows. A model with no
+   * published price yields `null`, which means UNKNOWN and is deliberately not
+   * coerced to 0: the cap must not count a guess, and a 0 reads as a free
+   * turn. The ledger row prices the SPLIT rather than taking this figure, by
+   * the same rule as every other row. `ctx.addDispatchedCost` does take
+   * `?? 0`, because its signature is a plain number with no "unknown" and a
+   * guessed price would be worse than a missing one.
+   */
+  private accountCodexTurn(
+    entry: CodexTargetEntry,
+    ctx: DispatchContext
+  ): { totalTokens: number | null; tokens?: UsageTurnTokens } {
+    const delta = codexUsageDelta(entry.usageTotal, entry.usageBaseline)
+    entry.usageBaseline = entry.usageTotal
+    // No frame has been seen for this thread at all — the turn's tokens are
+    // UNKNOWN, which is why the split is left off the ledger row entirely
+    // rather than recorded as four zeros.
+    if (!delta) return { totalTokens: null }
+    const costUsd = codexTurnCostUsd(entry.model, delta)
+    if (costUsd !== null && costUsd > 0) {
+      entry.cumulativeCostUsd += costUsd
+      ctx.addDispatchedCost?.('codex', entry.model, costUsd)
+    }
+    return {
+      totalTokens: delta.totalTokens > 0 ? delta.totalTokens : null,
+      // A Codex turn's split is `CodexSession`'s own mapping, imported rather
+      // than restated: the row's priced API cost then cannot drift from the
+      // figure `codexTurnCostUsd` just put through the cap.
+      tokens: codexDisjointTokens(delta)
+    }
+  }
+
+  /**
+   * Which ChatGPT subscription a Codex target's turns are billed to (ADR-071
+   * §3) — the SAME account the thread is attached under, so the ledger agrees
+   * with who actually pays: the caller's pin when it has one, the vault's
+   * active account otherwise (ADR-068 §2).
+   *
+   * Without vault accounts (`codexVaultAccounts` false — every unit test, and
+   * any build that does not own Codex's credentials) the vault is not read at
+   * all and the answer is `codex:openai:native`: Codex signed in on its own,
+   * which is exactly what ADR-071 §3's native key means.
+   *
+   * The billing type is `subscription` only when the identity really is a
+   * ChatGPT one. A native sign-in is NOT assumed to be an API key: Codex's own
+   * login is usually a ChatGPT plan too, and calling it `apiKey` would put an
+   * API-equivalent figure into `billed_cost_usd` as though money had moved
+   * (ADR-030 — unknown is never dressed up as a fact).
+   */
+  private async codexDispatchAccount(ctx: DispatchContext): Promise<DispatchTurnAccount> {
+    if (!this.codexVaultAccounts) return { ...codexNativeIdentity(), billingType: 'unknown' }
+    try {
+      const identity = await credentialSync.accountIdentity(ctx.chatgptAccountId ?? null)
+      return {
+        ...identity,
+        billingType: identity.accountKey.startsWith('chatgpt:') ? 'subscription' : 'unknown'
+      }
+    } catch (err) {
+      // Never fail a dispatch over an attribution read (and never log what it
+      // was reading) — an unattributed row is the honest fallback.
+      logger.debug(
+        'CrossEngineDispatcher',
+        `codex account identity unavailable: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return UNKNOWN_DISPATCH_ACCOUNT
+    }
+  }
+
+  /**
+   * Spawn the target's app-server, resolve its model against the native
+   * catalog, and open the thread its policy envelope is written into. Any
+   * failure disposes whatever was created and re-throws — `resolveAndRunCodex`
+   * turns that into a friendly isError.
+   *
+   * THE POLICY ENVELOPE (ADR-066, slice H). All three native knobs are set
+   * HERE, on `thread/start`, not per turn: Codex applies `approvalPolicy` per
+   * turn but takes `approvalsReviewer` and the sandbox from the thread
+   * baseline, and a target's mode is fixed at creation anyway, so the thread
+   * baseline is the one place they cannot drift apart. The rows come from the
+   * SAME table `CodexSession` uses (`codex-turn-policy.ts`), so a dispatched
+   * agent is policed exactly like an interactive one:
+   *
+   *   plan        -> untrusted + read-only        + reviewer 'user'
+   *   default     -> untrusted + workspace-write  + reviewer 'user'
+   *   acceptEdits -> untrusted + workspace-write  + reviewer 'user'
+   *   auto        -> on-request + workspace-write + reviewer 'auto_review'
+   *
+   * `untrusted` is what makes the three non-auto rows work for a target with no
+   * human of its own: it is the one policy the pinned binary asks before
+   * running ANYTHING, so every command and patch arrives as a server request
+   * for `gateCodexTargetRequest` to answer — under `plan` the shared engine
+   * denies every write/command outright (nothing is forwarded, nothing waits),
+   * and under `default`/`acceptEdits` an `ask` is forwarded to the CALLER's
+   * client, where a human is already watching the dispatching session. `auto`
+   * is the one row that does NOT route to us: `auto_review` answers natively
+   * and only escalations reach the gate. NEVER `never`/bypass — an autonomous
+   * mode must still be reviewed by someone, which is precisely what
+   * `auto_review` is.
+   *
+   * NO `dynamicTools`: the target has no `dispatch_agent` (no recursion) and no
+   * hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the transport-level
+   * half of the same scrub.
+   */
+  private async createCodexTarget(
+    ctx: DispatchContext,
+    requestedModel: string | undefined,
+    allowedModels: string[] | undefined
+  ): Promise<CodexTargetEntry> {
+    const entry: CodexTargetEntry = {
+      kind: 'codex',
+      sessionId: null,
+      fromRoutingId: ctx.fromRoutingId,
+      cwd: ctx.cwd,
+      // Filled in below, once the attach resolves. The notification and gate
+      // closures capture `entry` BY REFERENCE (mirrors createPiTarget), so
+      // building them first is safe: nothing is routed to this owner before it
+      // claims a thread anyway.
+      connection: undefined as unknown as CodexThreadConnection,
+      ctx,
+      autonomyMode: ctx.autonomyMode,
+      model: '',
+      // Replaced below, once the account behind the host is known.
+      account: UNKNOWN_DISPATCH_ACCOUNT,
+      busy: false,
+      turnId: null,
+      turnStarted: Promise.resolve(null),
+      endedTurns: new Set(),
+      settled: null,
+      draining: false,
+      lastActivityAt: 0,
+      turnToolUseIds: new Set(),
+      usageTotal: null,
+      usageBaseline: null,
+      cumulativeCostUsd: 0,
+      completedItems: new Map(),
+      itemTimestamps: new Map(),
+      activeStreamItems: new Map(),
+      fileChanges: new Map(),
+      lastAgentText: '',
+      turnStartedAtMs: 0
+    }
+
+    // A dispatch target bills the same subscription the caller runs on: the
+    // caller's PIN when it has one, the ACTIVE account otherwise (ADR-068 §2).
+    // Which is also which HOST it lands on, since a host IS one identity.
+    entry.account = await this.codexDispatchAccount(ctx)
+    entry.connection = await this.attachCodexTarget({
+      cwd: ctx.cwd,
+      label: 'dispatch-target',
+      ...(this.codexVaultAccounts ? { identity: { accountId: ctx.chatgptAccountId ?? null } } : {}),
+      onNotification: (method, params) => this.handleCodexTargetNotification(entry, method, params),
+      onServerRequest: (method, params, context) =>
+        this.gateCodexTargetRequest(entry, method, params, context),
+      onDisconnect: (error: CodexTransportError) => {
+        // If a turn is in flight, nothing else will ever settle it — mirrors
+        // the pi target's onExit.
+        const settle = entry.settled
+        entry.settled = null
+        settle?.({ kind: 'error', message: `codex target disconnected (${error.code})` })
+      }
+    })
+
+    try {
+      const { config } = await entry.connection.request('config/read', {
+        cwd: ctx.cwd,
+        includeLayers: false
+      })
+      assertCodexProvider(config.model_provider)
+      const catalog: Model[] = []
+      const cursors = new Set<string>()
+      let cursor: string | null = null
+      for (let page = 0; ; page++) {
+        if (page === CODEX_CATALOG_PAGE_LIMIT) throw new Error('Codex catalog page limit')
+        const result = await entry.connection.request('model/list', {
+          cursor,
+          limit: 100,
+          includeHidden: false
+        })
+        catalog.push(...result.data)
+        if (!result.nextCursor) break
+        if (cursors.has(result.nextCursor)) throw new Error('Codex repeated catalog cursor')
+        cursors.add(result.nextCursor)
+        cursor = result.nextCursor
+      }
+      const model = selectCodexModel(catalog, config.model, requestedModel)
+      if (model === undefined) {
+        throw new Error(
+          'Codex reported no usable model for a dispatch target. Ask the user to set ' +
+            'Engines › codex › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+            '~/.claude/ui/engines/codex.json), or pass `model` explicitly.'
+        )
+      }
+      // The catalog-default path: `requestedModel` was undefined, so nothing
+      // was checkable until now. An explicitly requested model was already
+      // refused by `resolveAndRunCodex` before this process was spawned.
+      const denial = codexModelAllowlistDenial(model, allowedModels)
+      if (denial) throw new Error(denial)
+
+      const policy = codexModePolicy(entry.autonomyMode)
+      const response = await entry.connection.request('thread/start', {
+        cwd: ctx.cwd,
+        model,
+        approvalPolicy: policy.approvalPolicy,
+        sandbox: policy.sandbox,
+        approvalsReviewer: policy.approvalsReviewer,
+        allowProviderModelFallback: false,
+        historyMode: 'paginated'
+      })
+      assertCodexProvider(response.modelProvider)
+      if (response.model !== model) throw new Error('Codex silently changed the requested model')
+      if (response.thread.parentThreadId)
+        throw new Error('Codex opened a dispatch target as a native child thread')
+      entry.model = response.model
+      entry.sessionId = response.thread.id
+      // Everything stamped with this thread id is this target's from here on,
+      // and nothing else is (ADR-069 §2).
+      entry.connection.claim(entry.sessionId)
+      this.targets.set(entry.sessionId, entry)
+    } catch (err) {
+      if (entry.sessionId) this.targets.delete(entry.sessionId)
+      entry.connection.detach()
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+
+    return entry
+  }
+
+  /**
+   * Send `turn/start` and await turn completion.
+   *
+   * Shaped like `drivePiTurn`, not `driveClaudeTurn`: notifications arrive on a
+   * single ambient callback registered once for the target's lifetime, so there
+   * is nothing to pull and no `.return()` hazard. Install `entry.settled` as
+   * this promise's resolver BEFORE the request leaves (synchronously, so no
+   * notification can beat it), then let the already-running
+   * `handleCodexTargetNotification` pipeline settle it on `turn/completed`.
+   *
+   * The response's own `turn.status` is checked too: a turn that is already
+   * terminal when `turn/start` answers has had its `turn/completed` either
+   * delivered (in which case `entry.settled` is already null and the check is a
+   * no-op) or folded into the response, and settling from here is the only
+   * thing that would ever settle it.
+   *
+   * NO per-turn policy override is sent. The envelope lives on the thread
+   * baseline (see `createCodexTarget`), and a target's mode cannot change, so
+   * re-sending it every turn would only create a second place for it to drift.
+   */
+  private driveCodexTurn(entry: CodexTargetEntry, prompt: string): Promise<CodexTurnOutcome> {
+    entry.draining = false
+    entry.turnStartedAtMs = Date.now()
+    entry.lastAgentText = ''
+    return new Promise<CodexTurnOutcome>((resolve) => {
+      entry.settled = resolve
+      let announceTurnId: (id: string | null) => void = () => {}
+      entry.turnStarted = new Promise<string | null>((r) => {
+        announceTurnId = r
+      })
+      entry.connection
+        .request('turn/start', {
+          threadId: entry.sessionId!,
+          clientUserMessageId: uuidv4(),
+          input: codexTurnInput(prompt)
+        })
+        .then(
+          (result) => {
+            announceTurnId(result.turn.id)
+            if (!entry.endedTurns.has(result.turn.id)) entry.turnId = result.turn.id
+            if (result.turn.status !== 'inProgress') this.settleCodexTurn(entry, result.turn)
+          },
+          (err) => {
+            announceTurnId(null)
+            if (entry.settled === resolve) {
+              entry.settled = null
+              resolve({
+                kind: 'error',
+                message: err instanceof Error ? err.message : String(err)
+              })
+            }
+          }
+        )
+    })
+  }
+
+  /** Retire `turn` and settle the dispatch waiting on it (exactly once). */
+  private settleCodexTurn(entry: CodexTargetEntry, turn: Turn): void {
+    if (entry.endedTurns.has(turn.id)) return
+    entry.endedTurns.add(turn.id)
+    // The authoritative replay: `turn.items` is the turn's final item list, and
+    // re-running it through the fingerprint dedupe is what fills in anything
+    // that only ever arrived as an `item/started` (mirrors
+    // `CodexSession.finishTurn`).
+    for (const item of turn.items ?? [])
+      this.handleCodexTargetItem(entry, turn.id, item, true, true)
+    if (entry.turnId === turn.id) entry.turnId = null
+    const settle = entry.settled
+    entry.settled = null
+    if (!settle) return
+    if (turn.status === 'failed') {
+      settle({ kind: 'error', message: turn.error?.message ?? 'the dispatched turn failed' })
+      return
+    }
+    settle({
+      kind: 'ok',
+      text: entry.lastAgentText || '(the dispatched agent returned no text)',
+      durationMs: turn.durationMs ?? Math.max(0, Date.now() - entry.turnStartedAtMs)
+    })
+  }
+
+  /**
+   * The target's single ambient notification callback.
+   *
+   * Notifications for ANY other thread id are dropped. A dispatch target is
+   * offered no `dispatch_agent` and no hosted tools, but Codex's collaboration
+   * tools are NATIVE, so a target can still spawn a child thread of its own;
+   * its items would arrive here stamped with the CHILD's `threadId`. Rendering
+   * a grandchild's transcript inside the caller's TaskCard has no home in the
+   * renderer's subagent model (one dispatch = one card), so the child runs
+   * natively and unwatched rather than half-shown. Its approval requests are
+   * refused for the same reason — see `gateCodexTargetRequest`.
+   */
+  private handleCodexTargetNotification(
+    entry: CodexTargetEntry,
+    method: string,
+    value: unknown
+  ): void {
+    if (!isRecord(value) || !entry.sessionId || value.threadId !== entry.sessionId) return
+    // Proof of life for the inactivity watchdog: ANY notification addressed to
+    // this thread counts (see CodexTargetEntry.lastActivityAt).
+    entry.lastActivityAt = this.now()
+    if (method === 'turn/started' && isRecord(value.turn) && typeof value.turn.id === 'string') {
+      if (!entry.endedTurns.has(value.turn.id)) entry.turnId = value.turn.id
+      return
+    }
+    if (method === 'thread/tokenUsage/updated' && isRecord(value.tokenUsage)) {
+      entry.usageTotal = (value.tokenUsage as ThreadTokenUsage).total
+      return
+    }
+    if (method === 'turn/completed' && isRecord(value.turn)) {
+      this.settleCodexTurn(entry, value.turn as Turn)
+      return
+    }
+    if (typeof value.turnId !== 'string') return
+    const turnId = value.turnId
+    if (entry.endedTurns.has(turnId)) return
+    if (method === 'item/started' || method === 'item/completed') {
+      if (!isRecord(value.item) || typeof value.item.id !== 'string') return
+      this.handleCodexTargetItem(
+        entry,
+        turnId,
+        value.item as ThreadItem,
+        method === 'item/completed'
+      )
+      return
+    }
+    if (typeof value.itemId === 'string' && typeof value.delta === 'string') {
+      for (const event of mapCodexDelta(method, {
+        threadId: entry.sessionId,
+        turnId,
+        itemId: value.itemId,
+        delta: value.delta
+      }))
+        this.forwardCodexTargetEvent(
+          entry,
+          event,
+          codexItemId(entry.sessionId, turnId, value.itemId)
+        )
+    }
+  }
+
+  /**
+   * Map one thread item and forward what it produces, with the same
+   * fingerprint dedupe `CodexSession.item` keeps so the authoritative
+   * `turn/completed` replay re-emits only what actually changed.
+   */
+  private handleCodexTargetItem(
+    entry: CodexTargetEntry,
+    turnId: string,
+    item: ThreadItem,
+    completed: boolean,
+    authoritative = false
+  ): void {
+    if (!entry.sessionId) return
+    const id = codexItemId(entry.sessionId, turnId, item.id)
+    const fingerprint = completed
+      ? createHash('sha256').update(JSON.stringify(item)).digest('hex')
+      : undefined
+    if (
+      entry.completedItems.has(id) &&
+      (!authoritative || entry.completedItems.get(id) === fingerprint)
+    )
+      return
+    if (fingerprint !== undefined) entry.completedItems.set(id, fingerprint)
+    // The turn's result text is the LAST completed `agentMessage`.
+    if (item.type === 'agentMessage' && completed) entry.lastAgentText = item.text
+    const timestamp = entry.itemTimestamps.get(id) ?? Date.now()
+    entry.itemTimestamps.set(id, timestamp)
+    const streamable =
+      item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
+    if (item.type === 'plan' && !completed && item.text && entry.ctx.toolUseId) {
+      this.appendCodexTargetItem(entry, id, { type: 'plan', text: item.text }, entry.ctx.toolUseId)
+      return
+    }
+    for (const event of mapCodexItem(entry.sessionId, turnId, item, completed, timestamp)) {
+      // Taken from the MAPPED block rather than re-deriving it from
+      // `item.changes`, so the gate decides about exactly the paths the caller
+      // was shown. `FileChangeRequestApprovalParams` carries no changes at all,
+      // which makes this the gate's only source for them.
+      if (event.kind === 'message') {
+        for (const block of event.message.content) {
+          if (
+            block.type === 'tool_use' &&
+            block.toolName === 'fileChange' &&
+            Array.isArray(block.toolInput?.files)
+          )
+            entry.fileChanges.set(block.toolUseId, block.toolInput.files as FileDiff[])
+        }
+      }
+      this.forwardCodexTargetEvent(entry, event, undefined, streamable && completed)
+    }
+  }
+
+  /**
+   * Forward a Codex target's live turn output as engine-neutral subagent
+   * events — byte-matches `forwardPiTargetMessage`'s payload shapes, which are
+   * themselves the Claude/opencode ones. `commandDelta` is skipped: the
+   * caller's TaskCard does not stream a dispatch target's raw bash output, same
+   * as every other direction.
+   */
+  private forwardCodexTargetEvent(
+    entry: CodexTargetEntry,
+    event: CodexMappedEvent,
+    nativeMessageId?: string,
+    forceItemSeal = false
+  ): void {
+    const toolUseId = entry.ctx.toolUseId
+    if (!toolUseId) return
+    switch (event.kind) {
+      case 'message':
+        collectToolUseIds(event.message, entry.turnToolUseIds)
+        if (!this.sealCodexTargetItem(entry, event.message, toolUseId, forceItemSeal))
+          entry.ctx.emit('session:subagent-message', { toolUseId, message: event.message })
+        break
+      case 'stream':
+        if (nativeMessageId)
+          this.appendCodexTargetItem(entry, nativeMessageId, event.delta, toolUseId)
+        break
+      case 'planDelta':
+        if (nativeMessageId)
+          this.appendCodexTargetItem(
+            entry,
+            nativeMessageId,
+            { type: 'plan', text: event.delta },
+            toolUseId
+          )
+        break
+      case 'toolResult':
+        entry.ctx.emit('session:subagent-tool-result', {
+          toolUseId,
+          toolResultToolUseId: event.toolUseId,
+          result: event.result,
+          isError: event.isError,
+          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+        })
+        break
+      case 'commandDelta':
+        break
+    }
+  }
+
+  private appendCodexTargetItem(
+    entry: CodexTargetEntry,
+    messageId: string,
+    delta: { type: 'text' | 'thinking' | 'plan'; text: string },
+    ownerToolUseId: string
+  ): void {
+    if (!delta.text || entry.completedItems.has(messageId)) return
+    const key = JSON.stringify([ownerToolUseId, messageId, delta.type])
+    let active = entry.activeStreamItems.get(key)
+    if (!active) {
+      const target: ItemStreamTarget = {
+        messageId,
+        blockIndex: 0,
+        kind: delta.type,
+        ownerToolUseId
+      }
+      active = {
+        target,
+        text: '',
+        timestamp: entry.itemTimestamps.get(messageId) ?? Date.now(),
+        ownerToolUseId,
+        ...(delta.type === 'thinking' ? { startedAt: Date.now() } : {})
+      }
+      entry.activeStreamItems.set(key, active)
+      entry.ctx.emit('session:item-open', {
+        target,
+        ...(active.startedAt === undefined ? {} : { startedAt: active.startedAt }),
+        message: {
+          id: messageId,
+          role: 'assistant',
+          content: [
+            delta.type === 'plan'
+              ? {
+                  type: 'tool_use',
+                  toolUseId: messageId,
+                  toolName: 'plan',
+                  toolInput: { plan: '' }
+                }
+              : delta.type === 'thinking'
+                ? { type: 'thinking', text: '' }
+                : { type: 'text', text: '' }
+          ],
+          timestamp: active.timestamp
+        }
+      })
+    }
+    active.text += delta.text
+    entry.ctx.emit('session:item-delta', { target: active.target, chunk: delta.text })
+  }
+
+  private sealCodexTargetItem(
+    entry: CodexTargetEntry,
+    message: ChatMessage,
+    ownerToolUseId: string,
+    forceItemSeal = false
+  ): boolean {
+    const matches = [...entry.activeStreamItems].filter(
+      ([, active]) =>
+        active.ownerToolUseId === ownerToolUseId && active.target.messageId === message.id
+    )
+    if (!matches.length) {
+      if (forceItemSeal) {
+        entry.ctx.emit('session:item-seal', { ownerToolUseId, message })
+        return true
+      }
+      return false
+    }
+    for (const [key, active] of matches) {
+      let sealed = message
+      if (active.target.kind === 'thinking' && active.startedAt !== undefined) {
+        sealed = {
+          ...message,
+          content: message.content.map((block, index) =>
+            index === active.target.blockIndex && block.type === 'thinking'
+              ? { ...block, durationMs: Math.max(0, Date.now() - active.startedAt!) }
+              : block
+          )
+        }
+      }
+      entry.ctx.emit('session:item-seal', {
+        ownerToolUseId,
+        target: active.target,
+        message: sealed
+      })
+      entry.activeStreamItems.delete(key)
+    }
+    return true
+  }
+
+  private sealCodexTargetItems(entry: CodexTargetEntry, ownerToolUseId: string): void {
+    for (const [key, active] of entry.activeStreamItems) {
+      if (active.ownerToolUseId !== ownerToolUseId) continue
+      entry.ctx.emit('session:item-seal', {
+        ownerToolUseId,
+        message: {
+          id: active.target.messageId,
+          role: 'assistant',
+          content: [
+            active.target.kind === 'plan'
+              ? {
+                  type: 'tool_use',
+                  toolUseId: active.target.messageId,
+                  toolName: 'plan',
+                  toolInput: { plan: active.text }
+                }
+              : active.target.kind === 'thinking'
+                ? {
+                    type: 'thinking',
+                    text: active.text,
+                    ...(active.startedAt !== undefined
+                      ? { durationMs: Math.max(0, Date.now() - active.startedAt) }
+                      : {})
+                  }
+                : { type: 'text', text: active.text }
+          ],
+          timestamp: active.timestamp
+        }
+      })
+      entry.activeStreamItems.delete(key)
+    }
+  }
+
+  /**
+   * Answer one native approval request on behalf of a target that has no human
+   * of its own — the Codex equivalent of `gatePiTargetToolCall`, and a
+   * deliberately narrowed copy of `CodexSession.requestApproval`'s gating half.
+   *
+   * The shared permission engine runs FIRST, against the target's FIXED
+   * `autonomyMode`, with EMPTY rules and an empty session-allow set: a
+   * dispatched target does not inherit the user's own interactive rules or
+   * their "allow for this session" clicks (same reasoning as the pi target's
+   * gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
+   * client, bound to the target ITEM's own id — `FloatingApproval
+   * .useUnmatchedApprovals` matches a `PendingApproval.toolUseId` against
+   * TOP-LEVEL message tool_use ids only, and a target's inner ids live in the
+   * subagent bucket, so an inner id is what makes the card render (floating).
+   *
+   * Per mode, with EMPTY rules:
+   *  - plan: `planModeBaseDecision` DENIES every write and every command that
+   *    is not plan-safe. Nothing is forwarded and nothing waits — which is the
+   *    whole point for a target with no human: a read-only dispatch cannot
+   *    park forever on a question.
+   *  - default / acceptEdits: reads and searches allow; the rest asks, and the
+   *    ask is forwarded to the caller.
+   *  - auto: allow-all HERE, because the decision was already made natively —
+   *    the thread runs `approvalsReviewer: 'auto_review'`, so the only requests
+   *    that reach this gate at all are the ones that subagent escalated. This
+   *    is the one place the target is laxer than `CodexSession.gate`, which
+   *    re-gates `auto` as `default` because an interactive session HAS a human
+   *    to escalate to. It is also why `auto` never maps to `never`/bypass: the
+   *    native reviewer, not nobody, is the decider.
+   *
+   * `suggestions` ("always allow" checkboxes) are deliberately omitted, same as
+   * the pi target: they would write to the shared permission files this gate
+   * deliberately does not read.
+   */
+  private gateCodexTargetRequest(
+    entry: CodexTargetEntry,
+    method: string,
+    value: unknown,
+    context: { id: unknown; signal: AbortSignal }
+  ): Promise<unknown> {
+    if (
+      !CODEX_TARGET_SERVER_METHODS.includes(method as (typeof CODEX_TARGET_SERVER_METHODS)[number])
+    )
+      // The transport used to refuse this for us (the target's own process
+      // registered these four methods and nothing else). On a shared host the
+      // registered list is the union its owners need, so the scrub is made here
+      // — with the SAME `-32601` an unregistered method earns, which is what
+      // `item/tool/call` must keep getting: a dispatch target has no hosted
+      // tools and no `dispatch_agent`.
+      return Promise.reject(new CodexMethodNotFound())
+    if (entry.draining) return Promise.resolve(codexRefusal(method))
+    if (
+      !entry.sessionId ||
+      context.signal.aborted ||
+      !isRecord(value) ||
+      // A native CHILD thread this target spawned raised it. Its transcript is
+      // not shown (see handleCodexTargetNotification), so there is no card for
+      // a card-bound approval to attach to and no honest way to describe what
+      // is being asked about — refuse rather than forward something blind.
+      value.threadId !== entry.sessionId ||
+      typeof value.turnId !== 'string' ||
+      typeof value.itemId !== 'string' ||
+      entry.endedTurns.has(value.turnId)
+    )
+      return Promise.reject(new Error('Codex request has no live owning dispatch turn'))
+
+    if (method === 'item/permissions/requestApproval') {
+      // Native permission-profile GRANTS are never made on a dispatch target's
+      // behalf: they widen what the sandbox allows for the rest of the thread,
+      // which is not something a caller's one-off approval can meaningfully
+      // consent to. Answered with an empty grant (the same refusal
+      // CodexSession makes), not an error, so the turn continues.
+      return Promise.resolve({ permissions: {}, scope: 'turn' })
+    }
+    if (method === 'item/tool/requestUserInput') {
+      // There is no question UI across a dispatch: the caller's approval card
+      // carries a decision, not free-text answers, and no other target
+      // direction forwards questions either. Answered empty so the tool can
+      // proceed (or give up) rather than left hanging.
+      return Promise.resolve({ answers: {} })
+    }
+
+    const itemId = codexItemId(entry.sessionId, value.turnId, value.itemId)
+    let toolName: string
+    let input: Record<string, unknown>
+    let gated: Array<{ tool: string; input: Record<string, unknown>; path?: string }>
+    if (method === 'item/commandExecution/requestApproval') {
+      const params = value as unknown as CommandExecutionRequestApprovalParams
+      const rawCommand = params.command ?? ''
+      // Codex wraps every model command in the user's login shell, so the wire
+      // string is `/bin/zsh -lc <script>`. Gating that verbatim would make a
+      // `Bash(rm -rf:*)` deny rule dead on this engine.
+      const command = unwrapShellCommand(rawCommand)
+      toolName = 'commandExecution'
+      input = {
+        command,
+        ...(command === rawCommand ? {} : { rawCommand }),
+        cwd: params.cwd ?? ''
+      }
+      gated = [{ tool: 'bash', input: { command } }]
+    } else if (method === 'item/fileChange/requestApproval') {
+      toolName = 'fileChange'
+      const files = entry.fileChanges.get(itemId) ?? []
+      input = { files }
+      gated = files.map((file) => ({
+        // `add` is a Write; update/move/delete edit a file that already exists
+        // — the same split Claude's own Write/Edit tools make.
+        tool: file.changeType === 'add' ? 'write' : 'edit',
+        input: { path: file.path },
+        path: file.path
+      }))
+    } else return Promise.reject(new Error('Unsupported Codex server request'))
+
+    const verdict = this.decideCodexTargetRequest(entry, gated)
+    if (verdict.decision === 'allow') return Promise.resolve({ decision: 'accept' })
+    if (verdict.decision === 'deny') {
+      // Neither native response type has a reason field, so a denial would be
+      // invisible to the caller's human without this line — the same
+      // visibility choice `forwardPiTargetMessage` makes for a target error.
+      if (entry.ctx.toolUseId) {
+        entry.ctx.emit('session:subagent-message', {
+          toolUseId: entry.ctx.toolUseId,
+          message: {
+            id: uuidv4(),
+            role: 'assistant',
+            content: [{ type: 'text', text: `[denied: ${verdict.reason}]` }],
+            timestamp: Date.now()
+          }
+        })
+      }
+      // `decline` is honoured on both request kinds even though it never
+      // appears in `availableDecisions` (docs/codex-spike.md, "Other
+      // observations"), so that list is deliberately not consulted.
+      return Promise.resolve({ decision: 'decline' })
+    }
+
+    return new Promise((resolve) => {
+      const requestId = XENG_REQUEST_PREFIX + uuidv4()
+      const approval: PendingApproval = { requestId, toolUseId: itemId, toolName, input }
+      this.pendingApprovals.set(requestId, {
+        kind: 'codex',
+        targetSessionId: entry.sessionId,
+        emit: entry.ctx.emit,
+        resolve: (decision) => {
+          const allow = decision === 'allow' || decision === 'allowForSession'
+          // 'allowForSession' is treated as a one-off 'allow': a dispatch
+          // target never persists an escalation, matching every other
+          // direction's gate (and why `sessionAllows` above is empty).
+          resolve({ decision: allow ? 'accept' : 'decline' })
+        }
+      })
+      entry.ctx.emit('session:approval-request', approval)
+    })
+  }
+
+  /**
+   * Collapse the shared engine's verdicts over every action ONE native request
+   * covers (a command, or every file in one patch): any deny denies, else any
+   * ask asks, else allow. A request with nothing resolvable to gate ASKS —
+   * never allows.
+   */
+  private decideCodexTargetRequest(
+    entry: CodexTargetEntry,
+    gated: Array<{ tool: string; input: Record<string, unknown>; path?: string }>
+  ): { decision: PermissionDecision; reason?: string } {
+    if (gated.length === 0) return { decision: 'ask' }
+    const engineCtx = {
+      mode: entry.autonomyMode,
+      rules: EMPTY_CODEX_RULES,
+      sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
+      cwd: entry.cwd
+    }
+    let decision: PermissionDecision = 'allow'
+    for (const item of gated) {
+      const verdict = decideWithSource(item.tool, item.input, engineCtx)
+      let step = verdict.decision
+      // The same composition-seam narrowing `CodexSession.gate` makes, for the
+      // same reason: `acceptEdits`' mode base allows fileEdit/fileWrite
+      // unconditionally, which on this engine would silently apply a patch
+      // ANYWHERE on disk, while Codex's own workspaceWrite sandbox draws the
+      // line at the workspace. A mode-base allow outside cwd is downgraded to a
+      // human ask. (Only mode-base verdicts — but the rules are empty on a
+      // target, so mode-base is the only rung that can allow here at all.)
+      if (
+        step === 'allow' &&
+        verdict.source === 'mode-base' &&
+        item.path !== undefined &&
+        !insideCodexWorkspace(entry.cwd, item.path)
+      )
+        step = 'ask'
+      if (step === 'deny')
+        return {
+          decision: 'deny',
+          reason:
+            entry.autonomyMode === 'plan'
+              ? PLAN_MODE_DENY_REASON
+              : 'Denied by dispatch autonomy mode'
+        }
+      if (step === 'ask') decision = 'ask'
+    }
+    return { decision }
+  }
 }
 
 export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
-  loadEngineConfig
+  loadEngineConfig,
+  codexVaultAccounts: true
 })

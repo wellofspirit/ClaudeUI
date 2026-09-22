@@ -20,7 +20,11 @@ vi.mock('../../../core/services/logger', () => ({
 // used by createCollabServer itself to resolve the dispatch_agent model hint
 // (ADR-033 follow-up) — see the describe block below.
 vi.mock('../../../core/services/ui-config', () => ({
-  loadEngineConfig: vi.fn(() => ({}))
+  loadEngineConfig: vi.fn(() => ({})),
+  // The REAL dispatcher singleton resolves its concurrency cap from the app
+  // settings on every dispatch (ADR-033, 2026-09-18). Empty settings = the
+  // default cap, and no read of the developer's own settings.json.
+  loadSettings: vi.fn(() => ({}))
 }))
 // The model-hint's cached-known-models source (ADR-033 follow-up). Mocked to
 // a controllable, synchronous stub — createCollabServer must NEVER trigger
@@ -226,16 +230,23 @@ describe('createCollabServer', () => {
 
   // -------------------------------------------------------------------------
   // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
+  // ADR-033 slice H — codex as a third
   // -------------------------------------------------------------------------
 
-  it("the engine param's schema accepts 'pi' and rejects an unlisted engine value", () => {
+  it("the engine param's schema accepts every OTHER engine and rejects both 'claude' (same-engine) and an unlisted value", () => {
     const server = createCollabServer(makeCtx())
     const engineSchema = server.tools[0].inputSchema.engine as unknown as {
       safeParse: (v: unknown) => { success: boolean }
     }
     expect(engineSchema.safeParse('pi').success).toBe(true)
     expect(engineSchema.safeParse('opencode').success).toBe(true)
-    expect(engineSchema.safeParse('codex').success).toBe(false)
+    // 'codex' became a real target in slice H; this assertion used to pin the
+    // opposite, which is what made this test fail first.
+    expect(engineSchema.safeParse('codex').success).toBe(true)
+    // Still absent: a Claude session dispatching to claude is same-engine and
+    // guard-rejected, so listing it would be misleading.
+    expect(engineSchema.safeParse('claude').success).toBe(false)
+    expect(engineSchema.safeParse('gemini').success).toBe(false)
   })
 
   it("accepts engine: 'pi' and delegates to the dispatcher with the full context (ADR-033 M4c)", async () => {

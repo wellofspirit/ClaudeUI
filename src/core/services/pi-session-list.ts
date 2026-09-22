@@ -19,7 +19,13 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { ChatMessage, ContentBlock, ForkAnchorResult, SessionInfo } from '../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  EngineHistoryLoad,
+  ForkAnchorResult,
+  SessionInfo
+} from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import type {
   PiAgentMessage,
@@ -32,6 +38,9 @@ import type {
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
+import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
+import { piAuthProvider } from '../auth/PiAuthProvider'
+import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
 
@@ -365,8 +374,8 @@ function convertPiTextOrImageContent(
 /**
  * Convert a whole active-branch entry list to ChatMessage[], in order.
  * Two passes: (1) index every toolResult message by toolCallId, (2) convert
- * `message`/`compaction` entries (everything else — model_change,
- * thinking_level_change, branch_summary, label, custom, custom_message — is
+ * `message`/`compaction`/`custom_message` entries (everything else —
+ * model_change, thinking_level_change, branch_summary, label, custom — is
  * skipped, matching convertStoredMessage's "silently skip unknown/irrelevant
  * types" precedent).
  */
@@ -388,34 +397,70 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
       messages.push({
         id: e.id,
         role: 'system',
-        content: [{ type: 'compact_separator', text: firstLine(e.summary) }],
+        // The WHOLE summary, not its first line (F20). `CompactSeparator`
+        // renders a non-empty `text` as the expandable amber card and shows the
+        // body only when the user opens it, so there was never a reason to
+        // throw away the rest — and pi is the one harness that has one.
+        content: [{ type: 'compact_separator', text: e.summary }],
         timestamp: Number.isFinite(ts) ? ts : Date.now()
       })
+    } else if (e.type === 'custom_message' && e.display) {
+      // An extension injected this into the model's context. It was dropped
+      // entirely, so the transcript disagreed with what the model saw. Same row
+      // Codex's hook fragments take, titled by the extension that wrote it, and
+      // rendered VERBATIM — an extension's text is third-party text.
+      const ts = Date.parse(e.timestamp)
+      const text =
+        typeof e.content === 'string'
+          ? e.content
+          : e.content
+              .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
+              .join('\n')
+      if (text)
+        messages.push({
+          id: e.id,
+          role: 'system',
+          content: [{ type: 'context_note', title: e.customType, fragments: [{ text }] }],
+          timestamp: Number.isFinite(ts) ? ts : Date.now()
+        })
     }
   }
   return messages
 }
 
 /**
- * Load a persisted pi session's transcript as ChatMessage[], so the chat view
- * can paint the prior conversation immediately on sidebar click (parity with
- * Claude's JSONL load) and PiSession's resume replay can reuse the exact same
- * pipeline. Best-effort: returns [] on any error (file not found, corrupt, unreadable).
+ * Load a persisted pi session's transcript, so the chat view can paint the
+ * prior conversation immediately on sidebar click (parity with Claude's JSONL
+ * load) and PiSession's resume replay can reuse the exact same pipeline, AND
+ * the status line that goes with it: the same entries carry the per-message
+ * `usage` the top bar's cost and token figures are made of (S1d).
+ *
+ * Best-effort: returns no messages and a null status line on any error (file
+ * not found, corrupt, unreadable).
  */
-export async function loadPiSessionHistory(sessionId: string): Promise<ChatMessage[]> {
+export async function loadPiSessionHistory(sessionId: string): Promise<EngineHistoryLoad> {
   try {
     const filePath = findPiSessionFile(sessionId)
-    if (!filePath) return []
+    if (!filePath) return { messages: [], statusLine: null }
     const parsed = readPiSessionFile(filePath)
-    if (!parsed) return []
+    if (!parsed) return { messages: [], statusLine: null }
     const active = activeBranchEntries(parsed.entries)
-    return convertPiSessionEntries(active)
+    const messages = convertPiSessionEntries(active)
+    // The billing type decides what this history was WORTH (ADR-071 §2) and it
+    // comes from the probe snapshot, which is empty in a process that has not
+    // touched pi auth yet. Warm it FIRST (one small local file read), and never
+    // let a probe failure cost the user their transcript — an unprobed vendor
+    // reads as `unknown`, which prices the history at its list equivalent.
+    await piAuthProvider.probe().catch(() => {})
+    const statusLine =
+      active.length > 0 ? piHistoryStatusLine(active, dispatchedCostEntriesFor(sessionId)) : null
+    return { messages, statusLine, lastModel: piLastModelRef(active) }
   } catch (err) {
     logger.debug(
       'PiSessionList',
       `loadPiSessionHistory(${sessionId}) failed: ${err instanceof Error ? err.message : String(err)}`
     )
-    return []
+    return { messages: [], statusLine: null }
   }
 }
 

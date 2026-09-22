@@ -140,8 +140,8 @@ export default defineConfig(
   // A SEALED field is one the replica fold owns: its only writer is
   // `renderer/src/stores/replica.ts`, projecting `applyEvent`'s output. The list
   // below is the snapshot-carried state — per-session `PerSessionSnapshot` fields
-  // plus the app-level `FullStateSnapshot` ones, plus the two derived mirrors the
-  // projection also owns (`worktreeInfo`, `thinkingStartedAt`). Its prose twin,
+  // plus the app-level `FullStateSnapshot` ones, plus the derived mirror the
+  // projection also owns (`worktreeInfo`). Its prose twin,
   // with the reason each `canonical: false` channel is deliberately NOT here, is
   // `renderer/src/stores/sealed-fields.ts`; `sealed-fields.unit.test.ts` pins this
   // pattern against that module so the two cannot drift.
@@ -157,7 +157,7 @@ export default defineConfig(
   //   3. any `set(…)` / `setState(…)` naming an APP-LEVEL sealed field.
   //
   // Per-session names are gated on (1)/(2) rather than on a bare `set(` because
-  // several of them (`status`, `settings`, `streamingText`) are ordinary words that
+  // several of them (`status`, `messages`, `selectedModel`) are ordinary words that
   // also name unrelated fields — `AuthFlowState.status`, the automation store's own
   // run buffers. A rule that fired on those would be turned off within a week.
   //
@@ -176,7 +176,7 @@ export default defineConfig(
         'error',
         {
           selector:
-            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|streamingText|streamingThinking|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|subagentStreamingText|subagentStreamingThinking|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|worktreeInfo|thinkingStartedAt)$/]",
+            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
           message:
             'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
             'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
@@ -185,7 +185,7 @@ export default defineConfig(
         },
         {
           selector:
-            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|streamingText|streamingThinking|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|subagentStreamingText|subagentStreamingThinking|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|worktreeInfo|thinkingStartedAt)$/]",
+            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
           message:
             'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
             'only writer. Route the change through stores/replica.ts — the reducer branch for ' +

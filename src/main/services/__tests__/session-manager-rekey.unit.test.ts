@@ -14,7 +14,7 @@ import type { BrowserWindow } from 'electron'
 import type { SessionStatus } from '../../../shared/types'
 
 vi.mock('../../../core/services/db', () => ({
-  renameDispatchedUsage: vi.fn(),
+  renameUsageEventParent: vi.fn(),
   dispatchedCostsByRouting: vi.fn(() => []),
   appendAuditLog: vi.fn()
 }))

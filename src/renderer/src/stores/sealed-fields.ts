@@ -16,7 +16,7 @@
  *
  * The complement is just as deliberate. Channels classified `canonical: false`
  * (usage, git summaries, error/warning/sandbox toasts, MCP status, auth banners,
- * vendor-auth cards, automation, mockup reloads) have **no snapshot field to fold
+ * automation, mockup reloads) have **no snapshot field to fold
  * into**: they are transient client state that a resync legitimately drops — the
  * as-built behavior, recorded in sync-channels.md rather than invented here. They
  * keep their per-channel listeners and their store writers, and
@@ -53,8 +53,8 @@ import type { PerSessionSnapshot, FullStateSnapshot } from '../../../shared/remo
 export const SEALED_SESSION_FIELDS = [
   'cwd',
   'messages',
-  'streamingText',
-  'streamingThinking',
+  'itemStreams',
+  'itemStreamRevision',
   'status',
   'pendingApprovals',
   'todos',
@@ -64,8 +64,6 @@ export const SEALED_SESSION_FIELDS = [
   'activeTasks',
   'taskProgressMap',
   'subagentMessages',
-  'subagentStreamingText',
-  'subagentStreamingThinking',
   'permissionMode',
   'effort',
   'thinkingMode',
@@ -75,19 +73,14 @@ export const SEALED_SESSION_FIELDS = [
   'sdkActive',
   'selectedEngineId',
   'selectedModel',
+  'authRequired',
   /**
    * Not a snapshot field of its own: the per-session mirror of the app-level
    * `worktreeInfoMap`, projected from it. Sealed with the map so the two cannot
    * disagree — which they did, since `setWorktreeInfo` wrote both and
    * `session:status`'s worktree-exit rule only cleared one path.
    */
-  'worktreeInfo',
-  /**
-   * Also not a snapshot field: a PRESENTATION clock derived from
-   * `streamingThinking` (stamped when the buffer fills, cleared when the reducer
-   * seals the span). Sealed because the projection is its only writer.
-   */
-  'thinkingStartedAt'
+  'worktreeInfo'
 ] as const
 
 /** Wire field each sealed per-session store field projects from. */
@@ -96,8 +89,8 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
 > = {
   cwd: 'cwd',
   messages: 'messages',
-  streamingText: 'streamingText',
-  streamingThinking: 'streamingThinking',
+  itemStreams: 'itemStreams',
+  itemStreamRevision: 'itemStreamRevision',
   status: 'status',
   pendingApprovals: 'pendingApprovals',
   todos: 'todos',
@@ -107,8 +100,6 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   activeTasks: 'activeTasks',
   taskProgressMap: 'taskProgressMap',
   subagentMessages: 'subagentMessages',
-  subagentStreamingText: 'subagentStreamingText',
-  subagentStreamingThinking: 'subagentStreamingThinking',
   permissionMode: 'permissionMode',
   effort: 'effort',
   thinkingMode: 'thinkingMode',
@@ -118,8 +109,8 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   sdkActive: 'sdkActive',
   selectedEngineId: 'selectedEngineId',
   selectedModel: 'selectedModel',
-  worktreeInfo: 'worktreeInfoMap',
-  thinkingStartedAt: 'streamingThinking'
+  authRequired: 'authRequired',
+  worktreeInfo: 'worktreeInfoMap'
 }
 
 /**
@@ -173,7 +164,6 @@ export const TRANSIENT_SESSION_FIELDS = [
   'warnings', // session:warning
   'sandboxViolations', // session:sandbox-violation
   'gitStatus', // git:status-update
-  'vendorAuthRequired', // session:vendor-auth-required
   'bashOutputs', // session:bash-output   (volatile lane, no snapshot field)
   'backgroundOutputs', // session:background-output
   'voiceState', // voice:state   (host-local)
@@ -183,6 +173,8 @@ export const TRANSIENT_SESSION_FIELDS = [
 /** App-level equivalents of {@link TRANSIENT_SESSION_FIELDS}. */
 export const TRANSIENT_APP_FIELDS = [
   'accountUsage', // usage:data
+  'providerAccounts', // provider-account:list   (host-local read)
+  'chatgptLimits', // usage:chatgpt-limits    (host-local read, nudged by usage:chatgpt-limits-changed)
   'blockUsage', // usage:block-data
   'authState', // auth:state       (host-local)
   'authSource', // session:auth-source

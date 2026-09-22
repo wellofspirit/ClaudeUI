@@ -1,6 +1,11 @@
 import { memo, useMemo, useState } from 'react'
-import type { ChatMessage, ContentBlock } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  ToolReviewBlock
+} from '../../../../shared/types'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { DiagramGalleryProvider } from './DiagramGallery'
@@ -71,6 +76,49 @@ export const SubagentMessages = memo(function SubagentMessages({
     return map
   }, [messages])
 
+  // A permission judge's verdict on a nested call (F18), paired exactly as the
+  // result is. LAST one wins — a re-review is a new decision, not a second one.
+  const reviewMap = useMemo(() => {
+    const map = new Map<string, ToolReviewBlock>()
+    for (const msg of messages) {
+      for (const b of msg.content) {
+        if (b.type === 'tool_review') map.set(b.toolUseId, b)
+      }
+    }
+    return map
+  }, [messages])
+
+  // Bind the session's pending approvals to the NESTED tool calls, by
+  // toolUseId, exactly as MessageBubble does for the top-level transcript.
+  //
+  // An approval raised inside a nested agent carries that agent's OWN inner
+  // tool-call id — a Codex child item id (`CodexSession.requestApproval`), a
+  // dispatched Claude target's `opts.toolUseId`, a pi target's
+  // `payload.toolCallId` (`CrossEngineDispatcher.gatePiTargetToolCall`), an
+  // opencode child's `tool.callID` — which is the same id the nested `tool_use`
+  // block carries. So the match is the id and nothing else: MessageBubble's
+  // legacy (toolName + input) fallback is deliberately NOT mirrored here, since
+  // an id-less approval cannot be attributed to a nested transcript at all
+  // (both surfaces would show it, on every subagent card at once). Those still
+  // float, which is where they have always been answered.
+  //
+  // The approvals come from the store rather than a prop because this
+  // component's callers (TaskCard, TaskEntry) render subagent output for the
+  // ACTIVE session and thread no approval state of their own.
+  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
+  const approvalMap = useMemo(() => {
+    const map = new Map<string, PendingApproval>()
+    if (pendingApprovals.length === 0) return map
+    for (const msg of messages) {
+      for (const b of msg.content) {
+        if (b.type !== 'tool_use' || !b.toolUseId) continue
+        const match = pendingApprovals.find((a) => a.toolUseId && a.toolUseId === b.toolUseId)
+        if (match) map.set(b.toolUseId, match)
+      }
+    }
+    return map
+  }, [messages, pendingApprovals])
+
   return (
     <div
       data-testid="SubagentMessages"
@@ -96,13 +144,15 @@ export const SubagentMessages = memo(function SubagentMessages({
               className="flex flex-col gap-1.5"
             >
               {msg.content.map((block, i) => {
-                if (block.type === 'tool_result') return null
+                if (block.type === 'tool_result' || block.type === 'tool_review') return null
                 if (block.type === 'tool_use') {
                   return (
                     <ToolCallBlock
                       key={`${msg.id}-${i}`}
                       block={block}
                       result={resultMap.get(block.toolUseId)}
+                      approval={approvalMap.get(block.toolUseId)}
+                      review={reviewMap.get(block.toolUseId)}
                     />
                   )
                 }

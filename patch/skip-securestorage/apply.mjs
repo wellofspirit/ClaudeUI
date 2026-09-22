@@ -75,9 +75,17 @@ if (src.includes(MARKER)) {
 }
 
 // --- 1. Find the facade composer name via its template-literal signature -----
-//   function ev9(H,_){let q={name:`${H.name}-with-${_.name}-fallback`,...
+//   2.1.261:  function O(e,t){let r={name:`${e.name}-with-${t.name}-fallback`,...
+//   2.1.268:  function F(e,r){let n=r.osGuarded===!0?(o)=>o:ne,
+//                             a={name:`${e.name}-with-${r.name}-fallback`,...
+// The object literal is no longer guaranteed to be the FIRST declarator of the
+// `let` — 2.1.268 hoisted an osGuarded-dependent read wrapper ahead of it. So
+// skip any number of leading declarators (lazily, and never across a `;`, so the
+// match can't leave the composer's first statement) and pin the template to the
+// composer's own two parameters via backreferences — that backref pair is what
+// makes the anchor unique, not the declarator position.
 const composerRe = new RegExp(
-  `function (${V})\\(${V},${V}\\)\\{let ${V}=\\{name:\`\\$\\{${V}\\.name\\}-with-\\$\\{${V}\\.name\\}-fallback\``
+  `function (${V})\\((${V}),(${V})\\)\\{let [^;]{0,400}?\\{name:\`\\$\\{\\2\\.name\\}-with-\\$\\{\\3\\.name\\}-fallback\``
 )
 const composerMatch = src.match(composerRe)
 if (!composerMatch) {

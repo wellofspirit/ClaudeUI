@@ -21,7 +21,7 @@
  *    undone by the very next projection.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
 import {
   getReplicaState,
@@ -31,10 +31,13 @@ import {
   seedWatchedSession,
   evictLocalSessions,
   dropLocalSessions,
-  onReplicaApplied
+  onReplicaApplied,
+  resolveRekeyed,
+  isLocallyCreated
 } from '../replica'
-import { seed, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
+import { seed, seedSession, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
 import { toSnapshot } from '../../../../core/shared/sync/state'
+import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { makeAssistantMessage, makeSessionStatus } from '@test/factories/messages'
 
 const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
@@ -66,21 +69,45 @@ describe('the fold projects into the store', () => {
     expect(store().sessions['r1'].sdkActive).toBe(true)
   })
 
-  it('accumulates a stream delta and seals it on the committed message', () => {
+  it('projects item deltas in place and seals the committed message', () => {
     seed.created('r1', { cwd: '/p' })
     seed.streamThinking('r1', 'hmm ')
-    expect(store().sessions['r1'].streamingThinking).toBe('hmm ')
-    // The presentation clock is DERIVED from the buffer, not measured by a handler.
-    expect(store().sessions['r1'].thinkingStartedAt).not.toBeNull()
+    let session = store().sessions['r1']
+    expect(overlayItemStreams(session.messages, session.itemStreams)[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'hmm '
+    })
 
-    seed.streamText('r1', 'answer')
-    expect(store().sessions['r1'].streamingThinking).toBe('')
-    expect(store().sessions['r1'].thinkingStartedAt).toBeNull()
-    expect(store().sessions['r1'].streamingText).toBe('answer')
-
-    seed.message('r1', makeAssistantMessage('answer'))
-    expect(store().sessions['r1'].streamingText).toBe('')
-    expect(store().sessions['r1'].messages).toHaveLength(1)
+    seed.streamThinking('r1', 'more')
+    session = store().sessions['r1']
+    expect(overlayItemStreams(session.messages, session.itemStreams)[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'hmm more'
+    })
+    const target = {
+      messageId: 'fixture-r1-assistant-thinking',
+      blockIndex: 0,
+      kind: 'thinking' as const
+    }
+    emitSync('session:item-seal', [
+      'r1',
+      {
+        target,
+        message: {
+          id: target.messageId,
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'thinking', text: 'Final thought', durationMs: 1250 }]
+        }
+      }
+    ])
+    session = store().sessions['r1']
+    expect(session.itemStreams).toEqual({})
+    expect(session.messages[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'Final thought',
+      durationMs: 1250
+    })
   })
 
   it('leaves per-client VIEW state untouched', () => {
@@ -106,6 +133,16 @@ describe('the fold projects into the store', () => {
     expect(session.needsAttention).toBe(true)
     expect(session.errors).toEqual(['a transient toast'])
     expect(session.messages).toHaveLength(1)
+  })
+
+  it('keeps a background owner item active when the parent session becomes idle', () => {
+    seed.created('r1', { cwd: '/p' })
+    seed.subagentStreamText('r1', 'background-tool', 'still working')
+    seed.status('r1', makeSessionStatus({ state: 'idle' }))
+
+    const stream = Object.values(store().sessions['r1'].itemStreams)[0]
+    expect(stream.target.ownerToolUseId).toBe('background-tool')
+    expect(stream.value).toBe('still working')
   })
 
   it('does not re-write slices the event did not touch (identity-diffed)', () => {
@@ -185,6 +222,24 @@ describe('post-apply observers', () => {
   })
 })
 
+/**
+ * Fake a `window.api` whose registry write fails, and hand back its log relay.
+ * The rekey tap's last line reaches disk through `saveSessionConfig`, so this is
+ * the only seam a renderer test has for "the persist threw".
+ */
+function failingPersist(): ReturnType<typeof vi.fn> {
+  const logRelay = vi.fn()
+  ;(globalThis as unknown as { window: { api: unknown } }).window = {
+    api: {
+      logRelay,
+      saveSessionConfig: () => {
+        throw new Error('disk full')
+      }
+    }
+  } as never
+  return logRelay
+}
+
 describe('rekey', () => {
   it('carries the view state to the new id and leaves no ghost', () => {
     seed.created('old', { cwd: '/p' })
@@ -200,6 +255,81 @@ describe('rekey', () => {
     expect(store().sessions['sdk-1'].draftText).toBe('keep me')
     expect(store().sessions['sdk-1'].messages).toHaveLength(1)
     expect(store().activeSessionId).toBe('sdk-1')
+  })
+
+  it('remembers where a retired id went', () => {
+    // The move is the only record that the old id ever named this session, and it
+    // is erased in the same tick. A caller holding the pre-rekey id across an
+    // await (InputBox's send) has nothing else to ask.
+    seed.created('old', { cwd: '/p' })
+    seed.rekey('old', 'sdk-1')
+    expect(resolveRekeyed('old')).toBe('sdk-1')
+  })
+
+  it('resolves an id it has no rekey for to itself', () => {
+    expect(resolveRekeyed('never-moved')).toBe('never-moved')
+  })
+
+  it('carries the local-creation marker even when persisting the registry throws', () => {
+    // The persistence reaches disk through `window.api.saveSessionConfig` and can
+    // fail; the in-memory bookkeeping must not be a casualty. A still-private
+    // session that loses its marker stops being droppable by the empty-session
+    // cleanup, so an abandoned scratch session is stranded in the sidebar. The
+    // failed write is absorbed in the tap, so the fold itself does not throw —
+    // which is what leaves the observers below it reachable (see the next case).
+    failingPersist()
+    seedSession('local-only', { cwd: '/p' })
+    expect(isLocallyCreated('local-only')).toBe(true)
+
+    expect(() => seed.rekey('local-only', 'sdk-1')).not.toThrow()
+
+    expect(isLocallyCreated('sdk-1')).toBe(true)
+    expect(isLocallyCreated('local-only')).toBe(false)
+    expect(resolveRekeyed('local-only')).toBe('sdk-1')
+  })
+
+  it('still runs the post-apply observers when persisting the registry throws', () => {
+    // The persist is deliberately LAST in the tap, after every in-memory line —
+    // but a throw there used to take the observer loop with it, because
+    // `SyncClient` fences the whole tap. The observers are the side-effect halves
+    // of the old handlers: notification sounds, attention marks, the historical
+    // transcript load, the F4 projection audit. A `sessions.json` write that fails
+    // must cost the write, not the turn's side effects.
+    failingPersist()
+    const seen: Array<[string, unknown[]]> = []
+    onReplicaApplied((channel, args) => seen.push([channel, args]))
+    seedSession('local-only', { cwd: '/p' })
+
+    seed.rekey('local-only', 'sdk-1')
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0][0]).toBe('session:status')
+    expect(seen[0][1][0]).toBe('local-only')
+  })
+
+  it('relays one warn line when the rekey persist throws', () => {
+    // Swallowing the failure silently would trade a skipped observer for an
+    // invisible one; the line names the new id and the underlying error so a log
+    // reader can tell a full disk from a missing bridge.
+    const logRelay = failingPersist()
+    seedSession('local-only', { cwd: '/p' })
+
+    seed.rekey('local-only', 'sdk-1')
+
+    expect(logRelay).toHaveBeenCalledTimes(1)
+    const [level, source, message] = logRelay.mock.calls[0] as [string, string, string]
+    expect(level).toBe('warn')
+    expect(source).toBe('Replica')
+    expect(message).toContain('sdk-1')
+    expect(message).toContain('disk full')
+  })
+
+  it('follows a chain of rekeys to the current id', () => {
+    seed.created('a', { cwd: '/p' })
+    seed.rekey('a', 'b')
+    seed.rekey('b', 'c')
+    expect(resolveRekeyed('a')).toBe('c')
+    expect(resolveRekeyed('b')).toBe('c')
   })
 })
 
@@ -266,12 +396,13 @@ describe('sanctioned local writes', () => {
 
     const session = store().sessions['r1']
     expect(session.messages).toEqual([])
-    expect(session.subagentStreamingText).toEqual({})
+    expect(session.itemStreams).toEqual({})
     // The lightweight entry stays resident — draft, engine, mode all survive.
     expect(session.cwd).toBe('/p')
-    // And a later event does not resurrect the transcript.
+    // A later lifecycle starts from a fresh scaffold; it does not resurrect the transcript.
     seed.streamText('r1', 'x')
-    expect(store().sessions['r1'].messages).toEqual([])
+    expect(store().sessions['r1'].messages).toHaveLength(1)
+    expect(store().sessions['r1'].messages[0].content[0]).toEqual({ type: 'text', text: '' })
   })
 
   it('dropLocalSessions removes the entry from canonical', () => {

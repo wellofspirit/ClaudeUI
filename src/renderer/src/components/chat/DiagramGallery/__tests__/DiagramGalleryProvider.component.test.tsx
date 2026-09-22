@@ -68,13 +68,7 @@ function renderChat(messages: ChatMessage[]): ReturnType<typeof render> {
     <DiagramGalleryProvider messages={messages}>
       <Probe />
       {messages.map((m) => (
-        <MessageBubble
-          key={m.id}
-          message={m}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
+        <MessageBubble key={m.id} message={m} pendingApprovals={[]} isLastAssistant={false} />
       ))}
     </DiagramGalleryProvider>
   )

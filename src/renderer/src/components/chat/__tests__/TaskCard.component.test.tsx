@@ -23,9 +23,6 @@ import type { ContentBlock } from '../../../../../shared/types'
 vi.mock('../MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
-vi.mock('../SubagentMessages', () => ({
-  SubagentMessages: () => <div data-testid="subagent-msgs" />
-}))
 
 import { TaskCard } from '../TaskCard'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
@@ -312,9 +309,8 @@ describe('TaskCard — inline task approval', () => {
 // (see ClaudeEngineToolMap.test.ts / OpencodeEngineToolMap.test.ts), and its
 // ToolView normalizes to description:'Dispatch: <engine>' + subagent:'<engine> · <model>'
 // (the badge slot — no ToolView extension). This exercises TaskCard's rendering
-// of that view directly with live-streamed subagent output, mirroring how the
-// dispatcher's session:subagent-stream/session:subagent-message events land in
-// the store while a dispatch is in flight.
+// of that view directly with item-streamed subagent output, mirroring how the
+// dispatcher's item lifecycle lands in the store while a dispatch is in flight.
 
 describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   let app: TestApp
@@ -369,7 +365,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     render(<TaskCard block={dispatchBlock} view={dispatchView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
-    expect(screen.getByTestId('subagent-msgs')).toBeInTheDocument()
+    expect(screen.getByTestId('SubagentMessages')).toBeInTheDocument()
   })
 
   it('shows Stop while the dispatch has no result yet (no background/notification gating)', () => {
@@ -501,53 +497,6 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
     mirrorStoreIntoReplica()
   })
 
-  it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
-    seed.subagentMessage(ROUTE, 'call_task_1', {
-      id: 'm1',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'partial result' }],
-      timestamp: Date.now()
-    })
-    // Set both live buffers directly (bypassing the append* actions): in real
-    // usage appendSubagentStreamingText clears the thinking buffer for the
-    // same toolUseId (thinking ends before text starts), so calling both
-    // actions in sequence can never produce a state with both non-empty.
-    // This test only needs the render-time DOM order for that combined
-    // state, not a realistic action sequence.
-    useSessionStore.setState((state) => {
-      const session = state.sessions[ROUTE]
-      return {
-        sessions: {
-          ...state.sessions,
-          [ROUTE]: {
-            ...session,
-            subagentStreamingThinking: {
-              ...session.subagentStreamingThinking,
-              call_task_1: 'pondering'
-            },
-            subagentStreamingText: { ...session.subagentStreamingText, call_task_1: 'final answer' }
-          }
-        }
-      }
-    })
-    mirrorStoreIntoReplica()
-
-    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
-    fireEvent.click(screen.getByTestId('TaskCard.expand'))
-
-    const msgsEl = screen.getByTestId('subagent-msgs')
-    const thinkingEl = screen.getByTestId('SubagentOutputBody.liveThinking')
-    const textEl = screen.getByTestId('md')
-
-    // Pre-fix, thinkingEl preceded msgsEl in the DOM.
-    expect(
-      msgsEl.compareDocumentPosition(thinkingEl) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(
-      thinkingEl.compareDocumentPosition(textEl) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-  })
-
   it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
@@ -558,7 +507,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
 
     // The full buffer (with the far-back 'x' run) should NOT be visible collapsed.
     expect(screen.queryByText(longText, { exact: false })).not.toBeInTheDocument()
-    expect(screen.getByTestId('SubagentOutputBody.liveThinking')).toBeInTheDocument()
+    expect(screen.getByTestId('SubagentMessages.thinkingToggle')).toBeInTheDocument()
   })
 
   it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
@@ -568,7 +517,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
-    fireEvent.click(screen.getByTestId('SubagentOutputBody.liveThinking.toggle'))
+    fireEvent.click(screen.getByTestId('SubagentMessages.thinkingToggle'))
 
     expect(screen.getByText(longText)).toBeInTheDocument()
   })

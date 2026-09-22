@@ -9,6 +9,8 @@ import type {
 } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
+  SharedProviderAccountList,
+  SharedProviderAccountStatus,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -85,8 +87,38 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
   return typeof mediaType === 'string' && IMAGE_MEDIA_TYPES.has(mediaType)
 }
 
+/**
+ * A permission JUDGE's verdict on the tool call it judged, carried on the card
+ * of that call rather than as prose beside it (ADR-067, F18).
+ *
+ * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
+ * whose `riskLevel` is the reviewer's own) and ClaudeUI's Auto-mode classifier
+ * for opencode and pi (`auto-mode`, whose `rule` names the corpus rule it
+ * matched). Claude's Auto mode is cli.js-native and emits no verdict on the
+ * wire, so it produces none.
+ *
+ * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
+ * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
+ * every client renders them verbatim as plain text, never through markdown.
+ */
+export type ToolReviewBlock = {
+  type: 'tool_review'
+  /** The `tool_use` block this verdict is about. */
+  toolUseId: string
+  /** The reviewer's own stable id for this verdict — the block's identity. */
+  reviewId: string
+  reviewer: 'codex-auto-review' | 'auto-mode'
+  decision: 'approved' | 'denied' | 'timedOut' | 'aborted' | 'inProgress'
+  /** Codex's auto-review only — ClaudeUI's judge scores no risk level. */
+  riskLevel?: 'low' | 'medium' | 'high' | 'critical'
+  /** ClaudeUI's judge only — the corpus rule name behind a block. */
+  rule?: string
+  rationale?: string
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
+  | ToolReviewBlock
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
   | {
       type: 'tool_result'
@@ -98,8 +130,33 @@ export type ContentBlock =
     }
   | { type: 'thinking'; text: string; durationMs?: number }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
-  | { type: 'api_error'; errorType: string; errorMessage: string }
+  /**
+   * `providerId` is the credential that was refused (ADR-070 §4) — carried on
+   * the BLOCK so history is self-describing. The row used to name the provider
+   * from the session's live `authRequired`, which is nulled the moment the
+   * failure settles, so a Claude rejection read "the credential was rejected"
+   * with no provider from then on — forever, and on every reload. OPTIONAL, so
+   * every block written before this (and every reconstructed Claude transcript)
+   * stays valid and simply falls back to the generic sentence.
+   */
+  | { type: 'api_error'; errorType: string; errorMessage: string; providerId?: string }
   | { type: 'compact_separator'; text?: string }
+  /**
+   * Context an engine injected into the model's prompt that the USER never
+   * typed — Codex's `hookPrompt` fragments today, pi's `custom_message`
+   * entries, and (later) Claude's `attachment` family. Collapsed to a count by
+   * default; every fragment is UNTRUSTED third-party text and is rendered
+   * verbatim, never through the markdown pipeline.
+   */
+  | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
+  /**
+   * The rendered output of a code review the engine ran (Codex's
+   * `exitedReviewMode`). The one untrusted-text block that DOES go through
+   * markdown, by decision (F20): it is the model's own structured review — a
+   * numbered list with file:line citations — and reading it as a wall of plain
+   * text loses the structure that makes it usable.
+   */
+  | { type: 'review_result'; text: string }
   | {
       type: 'image'
       mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
@@ -118,6 +175,8 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
+  /** Native acknowledgement replaces a host-minted pending user row by identity. */
+  replacesMessageId?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
@@ -125,7 +184,13 @@ export interface ChatMessage {
   planContent?: string
   /**
    * Elapsed wall-clock ms of the thinking span this message SEALS, stamped by
-   * the emitter (`BaseSession.send`) — SyncCore phase 4b.
+   * the emitter — SyncCore phase 4b.
+   *
+   * No producer stamps it since 2026-09-17: `BaseSession.send`'s thinking clock
+   * went with the legacy stream lane, and every adapter now puts `durationMs`
+   * on the thinking block it seals. The field and the reducer's move stay so an
+   * old-shape payload (a committed fixture, a ring caught up across the
+   * upgrade) still lands its duration on the block.
    *
    * A transient wire hint, not stored state: the shared reducer moves it onto
    * the sealed thinking block's `durationMs` and drops the field, so canonical
@@ -138,7 +203,7 @@ export interface ChatMessage {
   thinkingDurationMs?: number
 }
 
-export type EngineId = 'claude' | 'opencode' | 'pi'
+export type EngineId = 'claude' | 'opencode' | 'pi' | 'codex'
 
 /** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
 export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
@@ -171,6 +236,13 @@ export function piModel(vendorId: VendorId, modelId: string): ModelRef {
 // ---------------------------------------------------------------------------
 
 export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
+
+/**
+ * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
+ * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
+ * counts in dashboard totals but not in the dispatching session's headline.
+ */
+export type UsageOrigin = 'session' | 'child' | 'dispatch'
 
 /**
  * Resolved tri-state auth status for a single (engine, vendor) pair.
@@ -216,6 +288,10 @@ export interface PiAuthStatus {
   accountId?: string
   expiresAt?: number
   needsReauth: boolean
+  /** Every stored ChatGPT account (ADR-068 §2) — ids, emails, plans, expiries. */
+  accounts: SharedProviderAccountStatus[]
+  /** Which of them the engines are vended, or null when there is none. */
+  activeId: string | null
 }
 
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
@@ -229,12 +305,20 @@ export interface AccountRef {
 }
 
 export interface SessionStatus {
+  /** Native Codex policy is authoritative; shared PermissionMode does not apply. */
+  codex?: import('./codex-types').CodexSessionState
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   /** Vendor-qualified model identity. Null until the engine reports a model. */
   model: ModelRef | null
   cwd: string | null
-  totalCostUsd: number
+  /**
+   * Session cost in USD, or null when the engine cannot price the turn (no
+   * published price for the model). Null means UNKNOWN — 0 means known to be
+   * zero (a free model, or nothing metered yet on an engine that does price
+   * its models). Renderers show a placeholder for null, never "$0.00".
+   */
+  totalCostUsd: number | null
   engineId: EngineId
   capabilities: ResolvedCapabilities
   /** Resolved account descriptor from the engine auth provider. Null until probed. */
@@ -251,6 +335,7 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
+  codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
    * cli.js-assigned tool_use id for the invocation being prompted. The
@@ -275,7 +360,9 @@ export interface PendingApproval {
 }
 
 export interface SessionResult {
-  totalCostUsd: number
+  /** The session's headline cost at turn end — same contract (and same null
+   *  meaning "unknown, not free") as {@link SessionStatus.totalCostUsd}. */
+  totalCostUsd: number | null
   durationMs: number
   result: string
   sessionId?: string | null
@@ -637,6 +724,30 @@ export interface EngineConfig {
   dispatch?: DispatchConfig
   /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
   piConfig?: PiConfig
+  /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
+  codexConfig?: CodexEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN per-engine defaults for Codex — NOT `config.toml`.
+ *
+ * Codex's native file already carries a `model`, and the Engines › Codex page
+ * edits it through the app-server. This block is the ClaudeUI-side answer to a
+ * different question: what a session STARTED FROM CLAUDEUI runs on, which is
+ * carried on `turn/start` and therefore overrides whatever the working
+ * directory's layers resolve to. Blank means "say nothing", which is what makes
+ * the native value win — today's behaviour, and the reason neither key has a
+ * fallback constant the way `piConfig.defaultModel` has `PI_DEFAULT_MODEL`.
+ *
+ * A value here IS an explicit choice (ADR-059): a session seeded from it carries
+ * `codexModelExplicit`, so a model the catalog no longer lists banners rather
+ * than silently resolving to something else.
+ */
+export interface CodexEngineConfig {
+  /** Native Codex model id (`gpt-5.6-codex`), from `model/list`. */
+  defaultModel?: string
+  /** Native reasoning tier, from the selected model's `supportedReasoningEfforts`. */
+  defaultEffort?: string
 }
 
 /**
@@ -658,8 +769,9 @@ export interface PiConfig {
 
 /**
  * Governs `dispatch_agent` calls targeting an engine (ADR-033). Lives in
- * `engines/<engineId>.json` (plane ③). Edited in Settings › opencode ›
- * Cross-engine dispatch (the Claude-side twin ships with M2).
+ * `engines/<engineId>.json` (plane ③). Edited per engine in Settings ›
+ * <engine> › Cross-engine dispatch — every field below is honoured in every
+ * dispatch direction.
  */
 export interface DispatchConfig {
   /** When non-empty, only these models may be requested for dispatched agents. */
@@ -674,19 +786,27 @@ export interface DispatchConfig {
    */
   maxCostUsd?: number
   /**
-   * Absolute cap on ONE dispatched turn, in MILLISECONDS (ADR-033's 2026-09-01
-   * amendment). `0` disables it; undefined = 60 min. Consumed by the OPENCODE
-   * dispatch direction only — the Claude/pi directions keep their fixed
-   * 10-minute cap. The turn is aborted server-side when it trips.
+   * Absolute cap on ONE dispatched turn, in MILLISECONDS — the user's own
+   * limit, applied in EVERY dispatch direction (Claude, opencode, pi, Codex).
+   *
+   * THERE IS NO BUILT-IN DEFAULT (ADR-033's 2026-09-18 amendment): undefined
+   * and `0` both mean NO LIMIT. A dispatched agent then runs until it finishes,
+   * the user stops it, the caller aborts it, `idleTimeoutMs` trips, or
+   * `maxCostUsd` is reached. When set, the turn is interrupted on the target
+   * (the target survives for a continuation in every direction except Claude,
+   * whose process dies with the turn).
    */
   turnTimeoutMs?: number
   /**
    * Inactivity cap for one dispatched turn, in MILLISECONDS: how long the
-   * target may produce NO events at all before the turn is aborted. `0`
-   * disables it; undefined = 15 min. Opencode direction only, same as
-   * `turnTimeoutMs`. This is the real liveness guard — a slow-but-working
-   * target streams continuously, so it should normally be the cap that fires
-   * on a genuinely wedged turn.
+   * target may show NO sign of life before the turn is interrupted. Applies in
+   * EVERY dispatch direction, and like `turnTimeoutMs` has NO built-in default
+   * — undefined and `0` both mean NO LIMIT (ADR-033's 2026-09-18 amendment).
+   *
+   * This is the liveness guard rather than the runaway guard: a working target
+   * streams continuously (SSE events, SDK messages, pi RPC events, app-server
+   * notifications), so this is the cap that should fire on a genuinely wedged
+   * turn. A turn parked on an approval forwarded to the human counts as ALIVE.
    */
   idleTimeoutMs?: number
 }
@@ -792,20 +912,6 @@ export interface AskUserQuestionInput {
   questions: AskUserQuestion[]
 }
 
-/**
- * The payload `BaseSession.send('session:stream', …)` carries.
- *
- * NOT a `SyncEventMap` entry any more (phase 5 S1): this channel left the event
- * lane, so nothing subscribes to it — the deltas arrive as `StreamFrame`s and
- * fold through `shared/sync/stream.ts`. The type survives because the EMITTERS
- * still speak it and `streamFrameFrom` still parses it; it is the wire shape of
- * an emission, not of a subscription.
- */
-export interface StreamDelta {
-  type: 'text' | 'thinking'
-  text: string
-}
-
 export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface TodoItem {
@@ -885,13 +991,6 @@ export interface TaskNotification {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
 }
 
-/** The subagent twin of {@link StreamDelta} — same phase-5 note applies. */
-export interface SubagentStreamDelta {
-  toolUseId: string
-  type: 'text' | 'thinking'
-  text: string
-}
-
 export interface SubagentMessageData {
   toolUseId: string
   message: ChatMessage
@@ -968,7 +1067,14 @@ export interface WatchUpdate {
 }
 
 export interface ModelInfo {
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+  nativeDefaultEffort?: string
   value: string
+  /** Concrete model id an alias resolves to, straight off cli.js's
+   *  `supportedModels()` (e.g. `default` → `claude-opus-5[1m]`). Present on
+   *  Claude rows only; absent on every other engine's catalog. Aliases are
+   *  opaque to `resolveContextWindow`, so this is what sizes their window. */
+  resolvedModel?: string
   displayName: string
   description: string
   /** Capability flags surfaced by the SDK's `supportedModels()`. Authoritative. */
@@ -1061,6 +1167,13 @@ export interface ForkAnchorResult {
 
 interface SessionAPI {
   platform: string
+  /**
+   * True only when this launch opted into the verifier hooks
+   * (`CLAUDEUI_VERIFIER_HOOKS=1` / `--claudeui-verifier-hooks`), which is what
+   * makes the renderer publish `window.__claudeuiVerifier`. False on the web
+   * client, always. See `src/shared/verifier-hooks.ts`.
+   */
+  verifierHooks: boolean
   pickFolder(): Promise<string | null>
   createSession(
     routingId: string,
@@ -1121,15 +1234,17 @@ interface SessionAPI {
   listDirectories(): Promise<DirectoryGroup[]>
   /** Fetch the global opencode session list (all cwds). Best-effort: returns [] on error. */
   listOpencodeSessionsGlobal(): Promise<SessionInfo[]>
-  /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
-   *  for painting history on sidebar click). Best-effort: returns [] on error. */
-  loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Load a persisted opencode session's transcript and status line (read-only,
+   *  for painting history on sidebar click). Best-effort: returns no messages
+   *  and a null status line on error. */
+  loadOpencodeHistory(sessionId: string): Promise<EngineHistoryLoad>
   /** Fetch the global pi session list (all cwds, read from ~/.pi/agent/sessions).
    *  Best-effort: returns [] on error. */
   listPiSessionsGlobal(): Promise<SessionInfo[]>
-  /** Load a persisted pi session's transcript as ChatMessage[] (read-only,
-   *  for painting history on sidebar click). Best-effort: returns [] on error. */
-  loadPiHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Load a persisted pi session's transcript and status line (read-only,
+   *  for painting history on sidebar click). Best-effort: returns no messages
+   *  and a null status line on error. */
+  loadPiHistory(sessionId: string): Promise<EngineHistoryLoad>
   loadSessionHistory(
     sessionId: string,
     projectKey: string,
@@ -1146,6 +1261,13 @@ interface SessionAPI {
     statusLine: StatusLineData | null
     taskPrompts: Record<string, string>
     warnings: string[]
+    /**
+     * Subagent transcripts the reader already resolved, by PARENT tool_use id.
+     * Codex's native children are threads on the same connection, so its reader
+     * returns them inline; Claude's live in per-agent JSONL files and are
+     * fetched separately through {@link loadSubagentHistory}.
+     */
+    subagentMessages?: Record<string, ChatMessage[]>
   }>
   loadSubagentHistory(
     sessionId: string,
@@ -1218,6 +1340,12 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
+  /**
+   * Pin a session to one stored vendor account, or `null` to follow the active
+   * one (ADR-068 §2). Only Codex answers it today
+   * (`capabilities.auth.perSessionAccount`); every other engine rejects.
+   */
+  setSessionAccount(routingId: string, accountId: string | null): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
@@ -1327,6 +1455,18 @@ interface SharedProviderAPI {
    * read: every row action is one of the write channels below or beside it.
    */
   listProviderRegistry(): Promise<ProviderRegistrySnapshot>
+  /**
+   * The subscription ACCOUNTS of one shared provider (ADR-068 §2) — the same
+   * list the registry row carries, plus each account's expiry and reauth state.
+   * Never token material.
+   */
+  listProviderAccounts(providerId: string): Promise<SharedProviderAccountList>
+  /** Make one stored account the active one: both engine stores are re-vended. */
+  switchProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Forget one stored account. Removing the active one promotes the newest remaining. */
+  removeProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Turn per-session account pinning on or off for a subscription provider. */
+  setProviderAccountsPerSession(providerId: string, enabled: boolean): Promise<void>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
@@ -1626,6 +1766,39 @@ interface FileAPI {
   listWorktrees(cwd: string): Promise<WorktreeEntry[]>
 }
 
+/**
+ * What a device-code sign-in tells the CLIENT (ADR-068 §3, Slice 7). Everything
+ * here is display material: the page to open, the code to type, and when the
+ * host stops polling. The `device_auth_id` the host polls with never crosses the
+ * wire. Structurally mirrored by `DeviceCodeStart` in
+ * `core/auth/vault/codex-device-code.ts`, which owns the flow.
+ */
+export interface VendorDeviceCodeStart {
+  verificationUrl: string
+  userCode: string
+  /** Wall-clock ms (host clock) at which the flow expires — 15 minutes after it started. */
+  expiresAt: number
+}
+
+/**
+ * Where a started device-code sign-in has got to (ADR-068 §3, Slice 7).
+ *
+ * The WAIT is host-owned: `vendor-auth:device-code-start` kicks the poll off in
+ * the background and the client asks this question every few seconds, rather
+ * than holding one long invoke open. It has to work that way on the web —
+ * `web/connection.ts` caps every invoke at 30 s (`INVOKE_TIMEOUT_MS`) and a
+ * device code lives for fifteen minutes — and it also survives a reconnect,
+ * because the host, not the socket, is holding the outcome.
+ *
+ * `error` carries the host's own message; the other three carry nothing.
+ * `cancelled` is also the answer when NO flow is live, so a client that missed
+ * the cancellation stops polling instead of waiting forever.
+ */
+export interface VendorDeviceCodeStatus {
+  state: 'pending' | 'done' | 'error' | 'cancelled'
+  error?: string
+}
+
 /** Engine-routed per-vendor auth API (opencode's multi-vendor auth model). */
 interface VendorAuthAPI {
   /** Probe all vendors for a given engine. */
@@ -1646,6 +1819,18 @@ interface VendorAuthAPI {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+  /**
+   * Start a DEVICE-CODE sign-in for a vendor (ADR-068 §3, Slice 7 — ChatGPT via
+   * pi's `openai-codex` today). This ALSO starts the host-side wait; the caller
+   * follows it with {@link vendorAuthDeviceCodeStatus}, never with a long
+   * `vendorAuthOauthCallback` invoke.
+   */
+  vendorAuthDeviceCodeStart(engineId: EngineId, vendorId: string): Promise<VendorDeviceCodeStart>
+  /**
+   * How the started device-code sign-in is going. Polled; never carries a token.
+   * See {@link VendorDeviceCodeStatus} for why the wait is not one long invoke.
+   */
+  vendorAuthDeviceCodeStatus(engineId: EngineId): Promise<VendorDeviceCodeStatus>
   /** Submit the OAuth code (paste-code flow). Omit code for auto/loopback flow. */
   vendorAuthOauthCallback(
     engineId: EngineId,
@@ -1665,6 +1850,11 @@ interface VendorAuthAPI {
 
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
+  /**
+   * Per-account ChatGPT rate limits (ADR-068 §2). `refresh` asks the host to
+   * read them from Codex first; without it the last known map comes back.
+   */
+  fetchChatgptLimits(refresh?: boolean): Promise<ChatgptRateLimits>
   fetchBlockUsage(): Promise<BlockUsageData>
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
@@ -1701,10 +1891,44 @@ interface AccountAPI {
    */
   refreshPrices(): Promise<{ count: number; refreshedAt: number }>
   /**
-   * Aggregate cross-engine dispatched usage (ADR-033 M4-B) by (targetEngine,
-   * targetModel), all-time. Backs UsageView's "Delegated" section.
+   * Every account's limits, across vendors (ADR-071 §6).
+   *
+   * `refresh: true` is the ONLY thing that reads an inactive Claude account's
+   * credentials, and it spends a refresh grant doing it — the owner's rule is
+   * that a person pressing Refresh is the only reason to. Without it the answer
+   * comes from the last persisted reading and costs nothing.
    */
-  fetchDispatchedUsage(): Promise<DispatchedUsageSummary[]>
+  fetchAccountLimits(refresh?: boolean): Promise<AccountLimits[]>
+  /**
+   * The window-value ledger (ADR-071 §7): one row per limit window with its
+   * peak percent, what the ledger saw inside it, and the two derived figures.
+   * Closed windows are included and are most of the answer.
+   */
+  fetchUsageWindows(query?: UsageWindowQuery): Promise<UsageWindowSummaryRow[]>
+  /**
+   * The dashboard's one read over the ledger's hourly buckets (ADR-071 §8),
+   * grouped provider → account → model for the given range.
+   *
+   * `scope` defaults to `local`, this machine's own ledger. `all` folds the
+   * cached rows of every other machine the hub knows about into the same totals
+   * (ADR-072 §3); a machine with no hub answers `local` and says so.
+   */
+  fetchUsageDashboard(range: DashboardRange, scope?: DashboardScope): Promise<UsageDashboardData>
+  /** The usage hub's client state (ADR-072 §7). Never carries the device secret. */
+  usageHubStatus(): Promise<UsageHubStatus>
+  /** Write the hub's URL, this device's name, the service-token id, and the on/off switch. */
+  configureUsageHub(input: UsageHubConfigureInput): Promise<UsageHubStatus>
+  /**
+   * Store the device secret. WRITE-ONLY: nothing reads it back, and the answer
+   * is the status, whose `hasSecret` is all a surface is told.
+   */
+  setUsageHubSecret(secret: string): Promise<UsageHubStatus>
+  /** Push then pull, now. Ignores the non-essential-traffic gate — the user asked. */
+  syncUsageHubNow(): Promise<UsageHubStatus>
+  /** ADR-072 §2's repair: have the hub drop this device's recent rows and re-push them. */
+  resyncUsageHub(): Promise<UsageHubStatus>
+  /** Forget the hub: the config, the secret and every cached remote row. */
+  forgetUsageHub(): Promise<UsageHubStatus>
 }
 
 export interface NetworkInterfaceInfo {
@@ -2511,6 +2735,30 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
+  codexApproval(
+    routingId: string,
+    requestId: string,
+    decision: import('./codex-types').CodexApprovalDecision
+  ): Promise<void>
+  codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
+  /**
+   * Codex's own `config.toml` plus the compiled Bash-rule status (ADR-068 §6).
+   * Read through the app-server — ClaudeUI never parses TOML.
+   */
+  readCodexConfig(): Promise<import('./codex-types').CodexConfigRead>
+  /**
+   * Apply edits to `config.toml` in ONE `config/batchWrite`. `value: null`
+   * REMOVES a key (that is what a row's Reset does). `expectedVersion` is the
+   * version the caller last read; a mismatch is reported, never clobbered.
+   */
+  writeCodexConfig(
+    edits: import('./codex-types').CodexConfigEdit[],
+    expectedVersion: string
+  ): Promise<import('./codex-types').CodexConfigWriteResult>
+  /** Recompile `$CODEX_HOME/rules/claudeui.rules` and answer its fresh status. */
+  recompileCodexRules(): Promise<import('./codex-types').CodexRulesStatus>
+  /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
+  codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
@@ -2532,7 +2780,53 @@ export interface ClaudeAPI
 export interface RateWindow {
   usedPercent: number // 0-100
   resetsAt: string | null // ISO8601 timestamp
+  /**
+   * How long the window lasts, when the vendor says (ADR-071 §6, S3c).
+   *
+   * ChatGPT states it (`limit_window_seconds` → Codex's `window_minutes` →
+   * `windowDurationMins`) and it is what the window's KIND is derived from, so
+   * a plan with only a weekly limit is no longer filed as a five-hour one.
+   * Claude never states it: its windows are named by the API itself
+   * (`five_hour`, `seven_day`), so the name carries the length and this stays
+   * absent. Absent and null mean the same thing — no stated length.
+   */
+  windowMinutes?: number | null
 }
+
+/**
+ * ChatGPT subscription usage for ONE stored vault account (ADR-068 §2).
+ *
+ * Codex's `RateLimitSnapshot` maps onto {@link RateWindow} one to one —
+ * `usedPercent` is already 0-100 and `resetsAt` is a unix timestamp in SECONDS
+ * (`protocol/src/protocol.rs`: "Unix timestamp (seconds since epoch) when the
+ * window resets"), converted to ISO 8601 on the way in so the panel's existing
+ * `formatResetTime` works unchanged.
+ *
+ * `primary` and `secondary` are SLOTS, not lengths (corrected 2026-09-21, S3c):
+ * the backend fills whichever ones the plan has, and a plan with one weekly
+ * limit delivers it as `primary`. How long each window lasts is
+ * {@link RateWindow.windowMinutes}, and `windowKindForMinutes` is what turns
+ * that into a kind and a label. Either slot is null when the backend did not
+ * report it, which the panel shows as unavailable rather than as zero usage.
+ */
+export interface ChatgptAccountLimits {
+  email?: string
+  planType?: string
+  primary: RateWindow | null
+  secondary: RateWindow | null
+  /**
+   * A CREDITS-based plan (a business workspace, seen live 2026-09-14) reports no
+   * windows at all — both are null in `rateLimits` and in
+   * `rateLimitsByLimitId.codex` — and answers with a credit balance instead.
+   * Percentage bars are not the shape that plan has, so the balance is what the
+   * panel shows for it. Absent when the backend says the account has no credits.
+   */
+  credits?: { unlimited: boolean; balance: string | null }
+  fetchedAt: number
+}
+
+/** Every account's limits, keyed by VAULT account id (never the workspace id). */
+export type ChatgptRateLimits = Record<string, ChatgptAccountLimits>
 
 export interface ExtraUsage {
   isEnabled: boolean
@@ -2541,8 +2835,488 @@ export interface ExtraUsage {
   utilization: number // percentage 0-100
 }
 
+/** One limit window of an account's reading (ADR-071 §6). */
+export interface AccountLimitWindow {
+  /**
+   * The canonical window id: `5h`, `7d`, or `7d:<model>` for a per-model weekly
+   * bucket. It is a GROUPING key — what makes two readings of the same window,
+   * on this machine and on another, the same series (ADR-072 §4) — never an
+   * identity of spend.
+   */
+  kind: '5h' | '7d' | string
+  /** The display name — `5-hour`, `7-day`, `7-day Fable`, `limit`. */
+  label: string
+  usedPercent: number
+  resetsAt: string | null
+  /** The window's length when the vendor stated it — see {@link RateWindow.windowMinutes}. */
+  windowMinutes?: number | null
+}
+
+/**
+ * What one vendor account's limits provider observed (ADR-071 §6).
+ *
+ * One shape for every vendor, so the dashboard and ADR-072's hub read Claude's
+ * 5-hour window and a ChatGPT workspace's weekly one through the same fields.
+ * `state` carries WHY a reading is thin instead of leaving the caller to infer
+ * it from an empty `windows` array:
+ *
+ *  - `ok` — read just now;
+ *  - `stale` — the last PERSISTED reading, no token spent (an inactive Claude
+ *    account with `refresh: false`, the owner's refresh-grant rule);
+ *  - `needs-sign-in` — the stored credential no longer authenticates;
+ *  - `unavailable` — nothing was readable and nothing is stored.
+ */
+export interface AccountLimits {
+  /** ADR-071 §3's key, or `unknown` when the account's identity is not yet captured. */
+  accountKey: string
+  label: string
+  vendorId: string
+  plan: string | null
+  windows: AccountLimitWindow[]
+  credits?: { unlimited: boolean; balance: string | null }
+  observedAt: number
+  /**
+   * Where the reading came from — ADR-072 relays readings from other machines.
+   *
+   * The NAME travels with the reading, not only the id. A relayed reading is
+   * shown under both scopes (ADR-072 §4: a limit is a fact about the account,
+   * and the dashboard scope decides whose spend is summed), so it cannot borrow
+   * the machine list from a combined payload that may not exist — a `via` tag
+   * reading `via 3f2a1b9c` is not an answer to "who read this". The id is the
+   * fallback for a device the hub has since dropped from its list.
+   */
+  source: 'local' | { deviceId: string; deviceName: string }
+  /**
+   * True when {@link label} is the hub's MASKED form (`d•••@e•••.com`) rather
+   * than a name this machine read itself (S5c).
+   *
+   * A surface has to be able to say so: the masked label is not what the account
+   * is called, it is as much of it as a device caller is given (ADR-072 §6), and
+   * a reader who sees it without that qualification reads it as a corrupted
+   * address. Only a relayed reading for a key this machine has no ledger row for
+   * can carry it.
+   */
+  labelMasked?: boolean
+  state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
+  error?: string
+}
+
+// ---------------------------------------------------------------------------
+// The usage hub (ADR-072)
+//
+// What the `usage-hub:*` channels carry. The SECRET is not here and is not in
+// any shape below: the device credential lives in the operational database and
+// no query returns it — `hasSecret` is the whole answer a surface gets.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the client is doing, or why it is not.
+ *
+ *  - `off` — no hub configured, or sync disabled;
+ *  - `idle` — configured and up to date;
+ *  - `syncing` — a pass is in flight;
+ *  - `backoff` — a 5xx, a network failure or a 429; a retry is scheduled;
+ *  - `needs-credentials` — the hub refused the service token (a 401, or the 302
+ *    to the Access login page that a bad token actually gets). Only a person can
+ *    fix it, so nothing is retried;
+ *  - `update-hub` — the hub speaks an older schema (`426`). The cursor is
+ *    untouched, so nothing is lost;
+ *  - `error` — a request the hub refused for some other reason.
+ */
+export type UsageHubState =
+  'off' | 'idle' | 'syncing' | 'backoff' | 'needs-credentials' | 'update-hub' | 'error'
+
+/**
+ * One other machine, as `GET /v1/devices` describes it (ADR-072 §6).
+ *
+ * A device caller may read this: a name the user chose, an OS family, a build
+ * and an instant are not sensitive, and without them the machine list can only
+ * show opaque uuids and guess "behind" from the newest hour it holds — so a
+ * machine that synced but spent nothing would read as stale.
+ */
+export interface UsageHubDevice {
+  deviceId: string
+  deviceName: string
+  os: string
+  appVersion: string
+  /** When the hub last accepted a write from that machine. */
+  lastPushAt: number
+  /** The owner marked it retired, so the machine list stops flagging it. */
+  retired: boolean
+}
+
+/** Everything `usage-hub:status` answers. Carries no credential. */
+export interface UsageHubStatus {
+  enabled: boolean
+  url: string
+  /** Null until sync has been enabled once — reading the status never creates one. */
+  deviceId: string | null
+  deviceName: string
+  /** The Access service token's client id. Public by design, so the form can show it. */
+  clientId: string
+  /** Whether a device secret is stored. Never the secret. */
+  hasSecret: boolean
+  state: UsageHubState
+  lastPushAt: number | null
+  lastPullAt: number | null
+  lastError: string | null
+  /** Attributed ledger rows waiting past the cursor. `unknown` rows are not counted. */
+  pendingEvents: number
+  remote: {
+    devices: UsageHubDevice[]
+    /** The hub's bucket-rebuild generation, or null before the first pull. */
+    epoch: number | null
+  }
+}
+
+/** What `usage-hub:configure` takes. The secret has its own write-only channel. */
+export interface UsageHubConfigureInput {
+  /** `https:` only, except `http://localhost` / `http://127.0.0.1`. No path, no credentials. */
+  url: string
+  deviceName: string
+  /** The Access service token's client id. Not a secret — the id is public by design. */
+  clientId: string
+  enabled: boolean
+}
+
+// ---------------------------------------------------------------------------
+// The window-value ledger (ADR-071 §7)
+//
+// `usage_window`'s row shape and the two figures a reader derives from it. They
+// live here rather than beside the SQL because the dashboard reads them over
+// IPC (`usage:windows`) and the renderer may not import `core/`.
+// ---------------------------------------------------------------------------
+
+/** One window's value row, as ADR-071 §7 defines it. */
+export interface UsageWindowRow {
+  accountKey: string
+  /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
+  windowKind: string
+  canonicalEnd: number
+  /** `canonicalEnd - windowDurationMs(windowKind, windowMinutes)`, stored so a reader need not restate the rule. */
+  windowStart: number
+  /**
+   * The length the vendor stated, when it did (S3c). It is what
+   * {@link windowStart} was computed from; a row without one had its length
+   * read off its kind, which is Claude's case and every row written before the
+   * duration was kept.
+   */
+  windowMinutes: number | null
+  /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
+  peakPercent: number
+  /**
+   * `Σ usage_event.api_cost_usd` over the window's rows — API-EQUIVALENT dollars,
+   * what the tokens were worth at list price, whatever they were actually
+   * charged. That is the numerator ADR-071 §7's implied window value divides,
+   * and it is a different question from what the turns COST, which is the
+   * dashboard's own total and is not stored here.
+   */
+  apiCostUsd: number
+  /** The known part of what those turns were actually charged (`Σ` finite `billed_cost_usd`). */
+  billedCostUsd: number
+  /**
+   * Turns inside the window with no known API-equivalent — never added as zeros
+   * (ADR-030). It qualifies {@link apiCostUsd} and nothing else: this many of
+   * the window's turns are MISSING from that sum.
+   */
+  unknownCostCount: number
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  sampleCount: number
+  /** The end passed more than the grace period ago and a recompute summed it since. Final. */
+  closed: boolean
+  updatedAt: number
+}
+
+/** One window row with what a reader derives from it. */
+export interface UsageWindowSummaryRow extends UsageWindowRow {
+  /** Dollars the ledger saw per 1% of the window, or null under the noise floor. */
+  usdPerPercent: number | null
+  /** What a FULL window would have been worth at that rate, or null under the noise floor. */
+  impliedFullWindowUsd: number | null
+  /**
+   * Always true, and always shown: the numerator is this machine's ledger while
+   * the denominator is the account's global utilization, so every derived figure
+   * here reads LOW by however much the account was used elsewhere (ADR-071 §7).
+   */
+  biased: true
+}
+
+/** What `usageWindowSummary` takes, and what the `usage:windows` channel accepts. */
+export interface UsageWindowQuery {
+  accountKey?: string
+  kind?: string
+  sinceTs?: number
+  /**
+   * `all` prefers the hub's row for a window it holds (ADR-072 §4): its
+   * numerator is summed over every machine, which is the half of ADR-071 §7's
+   * bias this arc exists to close. Defaults to `local`.
+   */
+  scope?: DashboardScope
+}
+
+// ---------------------------------------------------------------------------
+// The usage dashboard (ADR-071 §8)
+//
+// One read of `usage_bucket` over a range, grouped provider → account → model,
+// with both costs, the unknown counts and a per-local-day series. Every figure
+// here is already resolved by the cost rule; nothing downstream re-derives one.
+// ---------------------------------------------------------------------------
+
+/** The ranges the dashboard offers. `today` is the viewer's local calendar day. */
+export type DashboardRange = 'today' | '7d' | '30d' | '90d'
+
+/**
+ * Whose spend the dashboard is about (ADR-072 §3, slice S5c).
+ *
+ * `local` is this machine's ledger and is what every range meant before the
+ * usage hub existed; `all` folds the cached `remote_usage_bucket` rows in
+ * through the same arithmetic, so a combined figure is the same kind of number
+ * as a local one rather than a second, differently-derived total. `local` is the
+ * wire's default, and the answer says which scope it actually used — a hub that
+ * is off has no remote rows to fold and answers `local` whatever was asked.
+ */
+export type DashboardScope = 'local' | 'all'
+
+/**
+ * What one grouping of buckets cost, in the three currencies ADR-071 §2 defines
+ * plus the honesty counts.
+ *
+ * `displayCostUsd` is Σ of the per-bucket display rule, which is what the
+ * headline shows; `apiCostUsd` and `billedCostUsd` are the raw halves, kept so
+ * the summary can split a total into what a plan absorbed and what was charged.
+ * The two counts say how many turns are MISSING from those sums — an unpriced
+ * turn is never added as a zero (ADR-030).
+ */
+export interface CostTotals {
+  apiCostUsd: number
+  billedCostUsd: number
+  displayCostUsd: number
+  unknownApiCostCount: number
+  unknownBilledCostCount: number
+  requestCount: number
+  /** `cacheWrite` excludes nothing and overlaps nothing: the 1h tier is a SUBSET of it and is not carried. */
+  tokens: { input: number; output: number; cacheWrite: number; cacheRead: number }
+}
+
+/** One (engine, vendor, model) row under an account. */
+export interface DashboardModel {
+  engineId: string
+  vendorId: string
+  modelId: string
+  totals: CostTotals
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
+  dispatched: CostTotals | null
+}
+
+/**
+ * One account's spend over the range.
+ *
+ * `billingType` is the type that covered the LARGEST part of the account's
+ * display cost. An account has one plan at a time, so it is the account's plan
+ * in every real case; the exceptions are `unknown` — the bucket every
+ * unattributable row shares, which can mix — and an account whose plan changed
+ * inside the range.
+ */
+export interface DashboardAccount {
+  accountKey: string
+  label: string
+  providerId: string
+  billingType: BillingType
+  totals: CostTotals
+  models: DashboardModel[]
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
+  dispatched: CostTotals | null
+  /**
+   * The machines this account's spend came from, this one as its own device id
+   * (S5c). Emitted under the `all` scope only — under `local` there is one
+   * machine and naming it would be noise.
+   */
+  machines?: string[]
+  /** True when no bucket of this account's spend was written on THIS machine (S5c). */
+  remoteOnly?: boolean
+  /**
+   * True when {@link label} is the hub's MASKED form of the name rather than one
+   * this machine read (S5c round 3) — the same flag {@link AccountLimits} carries,
+   * for the same reason.
+   *
+   * The masked label IS the account's name when nothing else knows one: showing
+   * the key's fallback (`ws-9`) instead made the same account read differently
+   * under the two scopes, because under `local` it is a credential row that shows
+   * the mask and under `all` it is a ledger row that showed the fallback. A
+   * ledger label always wins over the mask, and then this is never set.
+   */
+  labelMasked?: boolean
+}
+
+/** One provider's spend over the range, and the accounts under it. */
+export interface DashboardProvider {
+  providerId: string
+  label: string
+  totals: CostTotals
+  accounts: DashboardAccount[]
+}
+
+/** One LOCAL calendar day of the range. Present even when nothing was spent. */
+export interface DashboardDay {
+  /** `YYYY-MM-DD` in the reader's timezone. */
+  date: string
+  /** Only the providers that spent something that day; a missing one is zero. */
+  byProvider: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  /**
+   * The OTHER machines' part of {@link byProvider}, under the `all` scope only
+   * (S5c) — a subset of it, never an addition, so a column's total is still
+   * `byProvider` alone and a chart hatches this much of each segment.
+   */
+  byProviderRemote?: DashboardDay['byProvider']
+  /**
+   * The same cell split by DEVICE instead of by provider, under the `all` scope
+   * only (S5c). A second split rather than a nesting: the two answer different
+   * questions and neither derives the other — `byProviderRemote` loses which
+   * machine, this loses which provider — and a `provider × machine` cell would
+   * be the product of both for a chart that draws one at a time.
+   */
+  byMachine?: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  totals: CostTotals
+}
+
+/**
+ * One hour of the `today` range — the same cell as a {@link DashboardDay}, keyed
+ * by the UTC hour `usage_bucket` already stores rather than by a date string.
+ *
+ * A day is a local calendar fact and has to be derived; an hour is the ledger's
+ * own grain, so the bucket's key IS the column and no timezone arithmetic sits
+ * between the two.
+ */
+export interface DashboardHour {
+  /** Epoch ms floored to the UTC hour, exactly as `usage_bucket` keys it. */
+  hourUtc: number
+  /** Only the providers that spent something that hour; a missing one is zero. */
+  byProvider: DashboardDay['byProvider']
+  /** The other machines' part of {@link byProvider} — see {@link DashboardDay.byProviderRemote}. */
+  byProviderRemote?: DashboardDay['byProvider']
+  /** The hour split by device — see {@link DashboardDay.byMachine}. */
+  byMachine?: DashboardDay['byMachine']
+  totals: CostTotals
+}
+
+/**
+ * One (provider, account) slice of ONE machine's spend (S5c).
+ *
+ * The provider tree carries no device, and the buckets carry no engine or model
+ * per machine that a `machine → provider → account` tree would need to invent, so
+ * the machine group-by reads this list instead of re-folding the tree. Labels are
+ * not repeated here: every key in it also appears in `providers`, which is where
+ * a reader resolves both.
+ */
+export interface DashboardMachineAccount {
+  providerId: string
+  accountKey: string
+  totals: CostTotals
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
+  dispatched: CostTotals | null
+}
+
+/**
+ * One machine that spent something in the range, or that the hub knows about
+ * (ADR-072 §7, slice S5c).
+ *
+ * THIS MACHINE IS ALWAYS FIRST and is the only row with `self: true`; the rest
+ * come from `remote_device`, which never holds this device. A machine the hub
+ * lists that spent nothing in the range is still a row, with zero totals — "it
+ * synced and spent nothing" and "it has not synced" are different facts and
+ * dropping the row would spell them the same way.
+ *
+ * `lastPushAt` is null when no push instant is known: for THIS machine before
+ * its first announce, and for a machine that has cached buckets but no
+ * `remote_device` row — a peer the hub has dropped since the last pull, whose
+ * hours are still in the combined total and so still need a row. Nothing
+ * derives "behind" from a null: an unknown last push is not a late one.
+ */
+export interface DashboardMachine {
+  deviceId: string
+  deviceName: string
+  /** `process.platform`'s family — `win32`, `darwin`, `linux`, or `unknown`. */
+  os: string
+  appVersion: string
+  lastPushAt: number | null
+  /** The owner marked it retired on the hub, so nothing flags it as behind. */
+  retired: boolean
+  /** The machine the reader is looking at. Exactly one row carries it. */
+  self: boolean
+  totals: CostTotals
+  /** Its display cost as a FRACTION of the range's, `0` when the range cost nothing. */
+  share: number
+  /** Its spend split by provider and account — the machine group-by's leaves. */
+  accounts: DashboardMachineAccount[]
+}
+
+/**
+ * The whole dashboard, from one bounded read of `usage_bucket`.
+ *
+ * DISPATCHED WORK IS INSIDE EVERY TOTAL (owner ruling, ADR-071 §8) and is
+ * reported again as a sub-total on the account and on each model row, so a
+ * surface can mark it without having to add it.
+ */
+export interface UsageDashboardData {
+  range: DashboardRange
+  /**
+   * The scope this answer was actually built at (S5c). `all` only ever comes
+   * back from a machine with a hub enabled and a device id of its own; anything
+   * else answers `local`, because there is nothing to combine and no way to say
+   * which rows are this machine's.
+   */
+  scope: DashboardScope
+  /**
+   * Where the range begins: the local midnight `range` days before {@link toTs}
+   * (today's own midnight for `today`), floored to the UTC hour `usage_bucket`
+   * is keyed by. Every bucket at or after it is in the answer, and `days[0]` is
+   * the local day containing it.
+   */
+  fromTs: number
+  /** The instant the range was taken to end at (the `now` the query was built for). */
+  toTs: number
+  generatedAt: number
+  totals: CostTotals
+  /** Σ display over the `subscription` buckets — what the plans absorbed. */
+  coveredUsd: number
+  providers: DashboardProvider[]
+  days: DashboardDay[]
+  /**
+   * The `today` range's hourly series — midnight through the hour in progress —
+   * and undefined for every other range, which has no per-hour split to show.
+   * `days` is emitted alongside it, so a widget that only knows about days
+   * keeps working on `today`.
+   */
+  hours?: DashboardHour[]
+  /** Σ display over the `unknown` account — history from before attribution. */
+  unattributedUsd: number
+  /**
+   * The part of `totals.displayCostUsd` this machine's own ledger produced, and
+   * the part relayed from the others (S5c). They always add up to the hero: under
+   * `local` the first IS the hero and the second is zero.
+   */
+  localUsd: number
+  remoteUsd: number
+  /**
+   * Every machine in the combined view, this one first — empty under `local`,
+   * where there is one machine and the question does not arise.
+   */
+  machines: DashboardMachine[]
+}
+
 export interface AccountUsage {
-  fiveHour: RateWindow
+  /**
+   * Null when the API reported no five-hour window at all (S3c).
+   *
+   * It used to default to `{ usedPercent: 0, resetsAt: null }`, which drew a
+   * 0 % meter and wrote samples under a window the account does not have — the
+   * case an API-key, Bedrock or Vertex session hits, where `rate_limits` is
+   * unavailable. An absent window is now absent (ADR-030).
+   */
+  fiveHour: RateWindow | null
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
@@ -2553,6 +3327,12 @@ export interface AccountUsage {
   planName: string | null // e.g. "claude_max_5x"
   fetchedAt: number // Date.now()
   error: string | null
+  /**
+   * Whose meters these are — the active account's email, with its organization
+   * beside it when one is known (S2f). Null when no account is resolved: the
+   * popup omits the heading rather than showing an unnamed one.
+   */
+  accountLabel: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -2577,6 +3357,28 @@ export interface AccountInfo {
   subscriptionType: string | null
   organization: string | null
   createdAt: number
+  /**
+   * The identity the account was last seen with WHILE ACTIVE (ADR-071 §6).
+   *
+   * `~/.claude.json` describes the active account only, so an account that is
+   * not active has nothing left to read its key off — these four are how the
+   * limits provider can still name a stored account it is only reading
+   * credentials for. Absent on an account that has not been active since this
+   * shipped; such an account's readings land under `unknown`.
+   */
+  accountUuid?: string | null
+  organizationUuid?: string | null
+  organizationName?: string | null
+  billingType?: BillingType | null
+  /**
+   * When those four were last read out of THIS account's own credential (S2e).
+   *
+   * Null means never. A credentials file whose mtime is newer says the account
+   * was signed in again since, so the identity is re-read on the next refresh
+   * the user asks for — the four columns are otherwise trusted as they stand,
+   * because re-reading them spends a refresh grant (ADR-071 §6).
+   */
+  identityCheckedAt?: number | null
 }
 
 export interface AccountsState {
@@ -2636,14 +3438,40 @@ export interface AuthFlowState {
  *   totalDurationMs + (turnStartedAtMs ? Date.now() - turnStartedAtMs : 0)
  */
 export interface StatusLineData {
-  totalCostUsd: number
+  /** Cumulative session cost in USD; null when unpriced/unknown (see
+   *  {@link SessionStatus.totalCostUsd} — 0 still means known-zero).
+   *
+   *  ADR-071 §2: the figure a headline shows for this session's billing type —
+   *  the list-price equivalent of the tokens under a subscription, the engine's
+   *  billed figure under an API key. Messages with no known price are NOT
+   *  counted as zero; they are counted in {@link unknownCostMessages}. */
+  totalCostUsd: number | null
+  /** What actually left a wallet, by the same rule: `0` under a subscription or
+   *  a free vendor, the engine's figure under an API key, null when unknown.
+   *  Optional because only the engines that follow ADR-071 §2 report it — a
+   *  Claude or Codex status line leaves it (and `unknownCostMessages`) unset,
+   *  and the tooltip shows the extra rows only when they are present. */
+  billedCostUsd?: number | null
+  /** How many of this session's messages had no known cost. Omitted when none:
+   *  a total that hides unknowns is a total that understates itself (ADR-030). */
+  unknownCostMessages?: number
   totalDurationMs: number
   totalApiDurationMs: number
   totalInputTokens: number
   totalOutputTokens: number
   cachedTokens: number
   totalTokens: number
-  contextWindowSize: number
+  /** Context consumed and the model's window, both in tokens — the same
+   *  vocabulary as {@link MeteringSnapshot.contextWindow}, deliberately, so one
+   *  reading serves both payloads. `size: 0` means the window is unknown for
+   *  this engine/model, in which case the engine also sends
+   *  `usedPercentage: null`; it never means a zero-sized window.
+   *
+   *  Replaced a flat `contextWindowSize` that three engines filled with the
+   *  window and Claude filled with the consumption — the name said window, so
+   *  Claude was the one lying, and the field was one careless read away from a
+   *  context meter that sat near 100%. */
+  contextWindow: { used: number; size: number }
   usedPercentage: number | null
   remainingPercentage: number | null
   /** Epoch ms when the currently in-flight turn started; null/undefined when idle. */
@@ -2668,6 +3496,32 @@ export interface ModelCostEntry {
   costUsd: number
   /** true when this spend happened in a cross-engine dispatched call (Slice C). */
   dispatched?: boolean
+}
+
+/**
+ * What a cold history read returns for the engines whose transcript lives
+ * outside our own store (opencode, pi).
+ *
+ * The status line rides along because everything it reports — cost, tokens,
+ * active duration, context used — is reconstructed from the very messages
+ * this read already has; without it a reopened session showed no cost and no
+ * tokens until its first new prompt (S1d). `null` means the read failed or
+ * found nothing, which is not the same as a session that has cost zero.
+ *
+ * It deliberately carries no `ok` field: preload/web `unwrap` reads any object
+ * with one as the transport envelope and would hand the renderer `undefined`.
+ */
+export interface EngineHistoryLoad {
+  messages: ChatMessage[]
+  statusLine: StatusLineData | null
+  /**
+   * The model the transcript's LAST assistant message names, or null when it
+   * names none. A session created outside this app has no persisted model
+   * entry, so without this it reopens on the configured default — a model it
+   * never ran and will not resume on. Null/absent leaves the existing
+   * fallback in place.
+   */
+  lastModel?: ModelRef | null
 }
 
 /**
@@ -2817,19 +3671,6 @@ export interface EngineUsageSummary {
   models: ModelTokenBreakdown[]
 }
 
-/**
- * One (targetEngine, targetModel) aggregate of cross-engine dispatched usage
- * (ADR-033 M4-B) — the operational DB's `dispatched_usage` table grouped by
- * target. Backs UsageView's "Delegated" section.
- */
-export interface DispatchedUsageSummary {
-  targetEngine: string
-  targetModel: string
-  dispatches: number
-  totalTokens: number
-  costUsd: number
-}
-
 // ---------------------------------------------------------------------------
 // Automation types (scheduled cron-job system)
 // ---------------------------------------------------------------------------
@@ -2863,7 +3704,8 @@ export interface AutomationRun {
   startedAt: number
   finishedAt: number | null
   status: 'running' | 'success' | 'error'
-  totalCostUsd: number
+  /** Run cost in USD; null when the engine could not price the run. */
+  totalCostUsd: number | null
   error?: string
   resultSummary?: string
   /** SDK session ID — used to locate the project JSONL for message history */
@@ -3025,7 +3867,13 @@ export interface PlanComment {
 
 export interface PlanReviewData {
   planContent: string
-  approvalRequestId: string
+  /**
+   * The approval this review answers, or NULL when the plan came from an engine
+   * that has no approval gate on its plan item (Codex's native plan mode, F20).
+   * A null id means the comments are SENT AS A PROMPT instead of denied with
+   * feedback — there is nothing to deny.
+   */
+  approvalRequestId: string | null
   comments: PlanComment[]
 }
 

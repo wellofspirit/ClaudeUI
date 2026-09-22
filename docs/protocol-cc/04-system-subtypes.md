@@ -46,6 +46,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
 | `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
+| `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -53,13 +54,21 @@ Subtypes that exist in the SDK schema union but are **not** emitted on the SDK s
 
 ## 4.2 `init`
 
-Session-start snapshot. Exactly one per session, immediately after initialize's control_response.
+Session-start snapshot. **Re-emitted at the head of every turn**, not once per session — and each
+copy carries the model actually in force, so it is the live source for the resolved model id, not
+just a start-of-session fact. Probed on 2.1.268: spawn with `--model haiku` → turn 1 init
+`model: "claude-haiku-4-5-20251001"`; a `set_model` control request to `default` (which emits no
+init of its own) → turn 2 init `model: "claude-opus-5[1m]"`. A consumer that resolves an opaque
+alias (`default`) to its concrete id must therefore re-read `model` on **every** init, or a
+mid-session model switch leaves it stale.
 
 **Anchor:** builder `e86` at char `11322500`; yield at `12800961`.
 
 **Gate:** Always.
 
-**Ordering:** First `system` message. Consumer uses this to resolve temp routingId → real session UUID.
+**Ordering:** First `system` message _of a session start_, but **not** the first message with a
+`session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
+Consumer uses this to resolve temp routingId → real session UUID.
 
 ### Shape
 
@@ -361,9 +370,27 @@ API error triggered automatic retry inside the streaming layer.
 
 ## 4.10 `queued_command_consumed` (PATCHED)
 
-Mid-turn queued steer consumed as an attachment.
+A queued command was taken off cli.js's queue and is now running.
 
-**Anchor:** `12805826` (patched by `patch/queue-control`).
+**Two emit sites**, because cli.js has two ways of taking an item off the queue —
+`patch/queue-control` hooks both (Parts A2 and A3), and they emit the same shape:
+
+| Site                                                         | When                                                                                 | Patch part |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------- |
+| Outbound normalizer, `case"attachment"`                      | A turn is RUNNING: the command is absorbed mid-turn as a `queued_command` attachment | A2         |
+| Headless `drainCommandQueue` loop, at the user-message stamp | cli.js is BETWEEN TURNS: the command is dequeued and run as the next turn's PROMPT   | A3         |
+
+The drain path builds **no attachment at all** (its turn-start attachment builder
+is called with an empty queued-command list), so before A3 existed a message
+picked up between turns produced no notification — the UI's queue card only
+cleared on the turn-end flush, after the whole answer. That state is reachable
+whenever the host still considers the session busy while cli.js is idle — most
+visibly while a background subagent streams.
+
+Because the drain is also how an ordinary never-queued prompt reaches its turn,
+A3 fires for those too. Consumers must correlate against their own queue and
+treat an uncorrelated notification as a no-op (ClaudeUI: `consumeByText` only
+matches items still in state `queued`).
 
 **Gate:** Requires `queue-control` patch.
 
@@ -379,9 +406,11 @@ Mid-turn queued steer consumed as an attachment.
 }
 ```
 
-**`prompt` is NOT always a string.** The patch yields `prompt: <attachment>.prompt`
-verbatim, and `attachment.prompt` is whatever was pushed into the queue — which is the
-pushed message's `message.content`. That is a plain string for a text-only prompt and a
+**`prompt` is NOT always a string.** A2 yields `prompt: <attachment>.prompt` verbatim
+and A3 yields `prompt: <command>.value` — the same value, since cli.js builds the
+attachment from the command (`{prompt: <command>.value, source_uuid: <command>.uuid}`).
+Either way it is whatever was pushed into the queue — the pushed message's
+`message.content`. That is a plain string for a text-only prompt and a
 **content-block array** (`[{type:'image',…}, {type:'text',text}]`) whenever the prompt
 carried an image or a PDF. cli.js branches on this at every read site rather than
 normalizing at the emit site:
@@ -401,7 +430,32 @@ is why taking an image-carrying queued message BACK always worked while noticing
 been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
 `src/core/sdk/queued-command-text.ts`.
 
-**Ordering:** Followed by a `user` message with `isReplay: true` when `replayUserMessages=true`. UI uses this to dismiss the "queued" card and show the text as a normal user message.
+**Ordering:** From the attachment site (A2), followed by a `user` message with
+`isReplay: true` when `replayUserMessages=true`. From the drain site (A3), it is
+emitted before the turn it starts — i.e. before that turn's first `assistant` /
+`stream_event`. UI uses this to dismiss the "queued" card and show the text as a
+normal user message.
+
+**It carries `session_id`, and it lands before `system/init`.** Verified on 2.1.268, deterministic
+across repeated probes, on the first turn of a fresh session:
+
+```
+#1 control_response                                    (the initialize reply)
+#2 type=system subtype=queued_command_consumed  session_id=YES
+#3 type=system subtype=init                     session_id=YES  model=claude-opus-5[1m]
+#4 type=assistant …
+```
+
+Because A3 is the path an ordinary never-queued prompt takes to its turn, this is the normal
+ordering, not an edge case.
+
+**Consumer hazard.** A bootstrap latch keyed on "the first message carrying a `session_id`" will be
+tripped by this notification and never see `system/init`. ClaudeUI's `captureSessionBootstrap` had
+exactly that shape: the init capture was nested inside `if (msg.session_id && !this.sessionId)`, so
+`resolvedModelId`, `slash_commands`, `skills`, `mcp_servers` and the init permission-mode
+reconciliation were all silently dropped — most visibly, a `default` session sized its context
+window at 200K instead of the resolved model's 1M and rendered a 614K-token transcript as 307%.
+Latch the session id and read `system/init` **independently**.
 
 ---
 
@@ -644,6 +698,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
 - **`permission_denied`** — render the auto-denial on the tool call instead of only showing an `is_error` tool_result.
 - **`mirror_error`** — log; surfaces transcript-mirror data loss.
+- **`dev_intent`** — advisory only; safe to ignore. ClaudeUI does not handle it (unknown subtypes fall through `handleSystemMessage`'s if-chain). See §4.28.
 
 Unknown subtypes: log and pass through. Don't silently drop.
 
@@ -856,3 +911,43 @@ The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subt
 | `files_persisted`      | Attachment-file persistence results                                                        |
 
 If one of these is observed on stdout in a future CLI version, promote it to a numbered section.
+
+---
+
+## 4.28 `dev_intent`
+
+**Added in 2.1.268.** A one-shot advisory that cli.js has inferred what kind of
+project the session is working on. Only one kind exists today.
+
+```json
+{ "type": "system", "subtype": "dev_intent", "kind": "ios_app" }
+```
+
+| Field  | Type   | Notes                                                      |
+| ------ | ------ | ---------------------------------------------------------- |
+| `kind` | string | From the kind list `["ios_app"]` — the only one in 2.1.268 |
+
+**Detection.** A per-session fold (chunk `chunk-gm00f911.js`) walks messages
+looking for two independent signals and emits only when BOTH have been seen:
+
+1. `swiftFileEdited` — a Write/Edit-family tool call whose `file_path` ends in
+   `.swift`.
+2. `iosEvidence` — any of: `import UIKit` / `.iOS(` in written content;
+   `SDKROOT = iphoneos|iphonesimulator`, `IPHONEOS_DEPLOYMENT_TARGET` or
+   `TARGETED_DEVICE_FAMILY` in written content or in a tool_result;
+   `simctl`, `-sdk iphonesimulator|iphoneos` or `platform=iOS Simulator` in a
+   Bash command.
+
+It fires **at most once per kind per session**, and a detector that throws is
+swallowed (telemetry `dev_intent_detect/fold_threw`) — never fatal.
+
+**Gate.** Ungated: no env var, no feature flag. But in the headless stream-json
+path the fold only absorbs `initialMessages` at session construction — the TUI
+is the only caller that feeds it live turn messages (it uses the result to pick
+spinner tips). So on our wire `dev_intent` can only appear **at session start,
+on a resume whose transcript already carries both signals**, never mid-turn.
+
+**Consumer note.** Advisory only; nothing downstream depends on it. ClaudeUI
+ignores it — `handleSystemMessage` is an if-chain over known subtypes and
+`SystemMessage['subtype']` admits `string`, so an unhandled subtype is a no-op
+rather than an error.

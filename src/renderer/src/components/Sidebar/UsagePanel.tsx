@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import type { AccountUsage, ExtraUsage, RateWindow } from '../../../../shared/types'
+import type {
+  AccountUsage,
+  ChatgptAccountLimits,
+  ExtraUsage,
+  RateWindow
+} from '../../../../shared/types'
 import { formatTokenCount } from '../usage/usage-utils'
+import { windowKindLabel, windowKindsForReading } from '../../../../shared/window-kind'
 
 export function getUsageColor(pct: number): string {
   if (pct >= 80) return '#ef4444' // red
@@ -97,6 +103,92 @@ export function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Eleme
   )
 }
 
+/**
+ * A ChatGPT window's kind as THIS panel spells it: `7-Day`, `5-Hour`,
+ * `1-Hour`, `Limit` when the backend stated no duration (S3c).
+ *
+ * Title case, unlike every other surface: the Claude bars beside it are
+ * `5-Hour Session` and `7-Day (all models)`, and a lower-case `7-day` in that
+ * column reads as a different kind of thing. The accounts panel and the Plan
+ * value tab keep the shared lower-case label, which matches their own Claude
+ * rows (orchestrator ruling, round 2).
+ */
+function chatgptWindowLabel(kind: string): string {
+  return windowKindLabel(kind).replace(
+    /(^|[\s-])([a-z])/g,
+    (_, before, first) => `${before}${first.toUpperCase()}`
+  )
+}
+
+/**
+ * ChatGPT subscription usage, one block per stored vault account (ADR-068 §2).
+ *
+ * Beside Claude's rather than instead of it: a ClaudeUI user can be paying for
+ * both, and the Codex sessions in the sidebar spend the ChatGPT one. Each block
+ * names the account, because the whole point of several accounts is knowing
+ * which one is close to its limit.
+ *
+ * A window the backend did not report says so rather than drawing a 0% bar —
+ * "unavailable" and "unused" are not the same claim (ADR-030).
+ *
+ * A CREDITS-based plan (a business workspace) reports no windows at all and a
+ * balance instead, so the balance is what it gets: "this plan is not metered in
+ * percentages" and "we could not read this account" are different statements,
+ * and only the second deserves an apology. An account with both shows the bars
+ * and the balance under them.
+ */
+export function ChatgptUsageBlock({
+  label,
+  limits
+}: {
+  label: string
+  limits: ChatgptAccountLimits
+}): React.JSX.Element {
+  const kinds = windowKindsForReading(limits)
+  return (
+    <div data-testid="UsagePanel.chatgptAccount" data-id={label} className="mb-2 last:mb-0">
+      <div className="flex items-baseline justify-between gap-2 mb-1">
+        <span className="text-[10px] text-text-secondary font-medium truncate">{label}</span>
+        {limits.planType && (
+          <span className="text-[9px] text-text-muted shrink-0">{limits.planType}</span>
+        )}
+      </div>
+      {limits.primary || limits.secondary ? (
+        <>
+          {/* The label is the window's LENGTH, from the duration the backend
+              stated (S3c) — not its slot. A plan whose only limit is weekly
+              delivers it as `primary`, and calling that "5-Hour" is how a
+              seven-day meter came to say it resets in 28 hours. Both slots go
+              through the one helper that keeps their kinds distinct when they
+              state the same length. */}
+          {limits.primary && (
+            <UsageProgressBar label={chatgptWindowLabel(kinds.primary)} window={limits.primary} />
+          )}
+          {limits.secondary && (
+            <UsageProgressBar
+              label={chatgptWindowLabel(kinds.secondary)}
+              window={limits.secondary}
+            />
+          )}
+        </>
+      ) : (
+        !limits.credits && (
+          <div className="text-[9px] text-text-muted">No usage data for this account</div>
+        )
+      )}
+      {limits.credits && (
+        <div data-testid="UsagePanel.chatgptCredits" className="text-[9px] text-text-muted">
+          {limits.credits.unlimited
+            ? 'Unlimited credits'
+            : limits.credits.balance
+              ? `Credits: ${limits.credits.balance}`
+              : 'Credits available'}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function UsagePanel({
   usage,
   onRefresh
@@ -113,8 +205,25 @@ export function UsagePanel({
     : null
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const setActiveView = useSessionStore((s) => s.setActiveView)
+  // ADR-068 §2: read when the panel OPENS, and again on Refresh — no polling
+  // timer, because a subscription's limits are only interesting while somebody
+  // is looking at them, and live Codex sessions push updates for free.
+  const chatgptLimits = useSessionStore((s) => s.chatgptLimits)
+  const loadChatgptLimits = useSessionStore((s) => s.loadChatgptLimits)
+  useEffect(() => {
+    void loadChatgptLimits(true)
+  }, [loadChatgptLimits])
+  const chatgptAccounts = Object.entries(chatgptLimits ?? {})
 
   const currentBlock = blockUsage?.currentBlock
+
+  const hasClaudeWindow = !!(
+    usage?.fiveHour ||
+    usage?.sevenDay ||
+    usage?.sevenDayOpus ||
+    usage?.sevenDaySonnet ||
+    usage?.sevenDayModels?.length
+  )
 
   // Format block summary
   let blockSummary: string | null = null
@@ -141,7 +250,21 @@ export function UsagePanel({
         <div className="text-[10px] text-red-400">{usage.error}</div>
       ) : usage ? (
         <>
-          <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />
+          {/* Whose meters these are. Omitted rather than blank when the fetcher
+              has not resolved an account — the ChatGPT blocks below name theirs,
+              and an unnamed heading would read as a third, empty account. */}
+          {usage.accountLabel && (
+            <div
+              data-testid="UsagePanel.claudeAccount"
+              data-id={usage.accountLabel}
+              className="text-[10px] text-text-secondary font-medium truncate mb-1"
+            >
+              {usage.accountLabel}
+            </div>
+          )}
+          {/* Absent on an account the API reports no five-hour window for
+              (S3c) — an API-key or Bedrock session. It used to draw 0 %. */}
+          {usage.fiveHour && <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />}
           {usage.sevenDay && (
             <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />
           )}
@@ -160,9 +283,31 @@ export function UsagePanel({
             return <UsageProgressBar key={label} label={`7-Day ${label}`} window={w} />
           })}
           {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
+          {/* An account with no windows at all — an API key, Bedrock, Vertex —
+              says so rather than leaving the block blank (ADR-030). */}
+          {!hasClaudeWindow && !usage.extraUsage && (
+            <div data-testid="UsagePanel.noWindows" className="text-[10px] text-text-muted">
+              No window limits for this account
+            </div>
+          )}
         </>
       ) : (
         <div className="text-[10px] text-text-muted">No live API data</div>
+      )}
+      {chatgptAccounts.length > 0 && (
+        <div data-testid="UsagePanel.chatgpt" className="mt-2 pt-1.5 border-t border-border/30">
+          <div className="text-[9px] text-text-muted mb-1">ChatGPT</div>
+          {chatgptAccounts.map(([accountId, limits]) => (
+            // The account id is the deliberate fallback — two accounts have to stay
+            // distinguishable — but reach it with `||`, not `??` (ADR-070 Slice J):
+            // an empty email is absent, and `??` handed this heading a blank string.
+            <ChatgptUsageBlock
+              key={accountId}
+              label={limits.email?.trim() || accountId}
+              limits={limits}
+            />
+          ))}
+        </div>
       )}
       {/* Block usage summary */}
       {blockSummary && (
@@ -198,6 +343,7 @@ export function UsagePanel({
               onClick={(e) => {
                 e.stopPropagation()
                 onRefresh()
+                void loadChatgptLimits(true)
               }}
               className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
               title="Refresh usage"
@@ -262,10 +408,13 @@ export function UsageRing(): React.JSX.Element {
   const strokeWidth = 2.5
   const radius = (size - strokeWidth) / 2
   const circumference = 2 * Math.PI * radius
-  const pct = usage?.error ? 0 : (usage?.fiveHour.usedPercent ?? 0)
+  // The ring IS the five-hour window. An account that has none (S3c) reads as
+  // no data rather than as 0 % used — the same treatment as an error.
+  const fiveHour = usage && !usage.error ? usage.fiveHour : null
+  const pct = fiveHour?.usedPercent ?? 0
   const dashOffset = circumference - (circumference * Math.min(100, pct)) / 100
-  const color = usage && !usage.error ? getUsageColor(pct) : '#6b7280' // grey when no data
-  const displayText = usage && !usage.error ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
+  const color = fiveHour ? getUsageColor(pct) : '#6b7280' // grey when no data
+  const displayText = fiveHour ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
 
   return (
     <div data-testid="UsageRing" ref={ringRef} className="relative flex items-center gap-2">
@@ -273,7 +422,10 @@ export function UsageRing(): React.JSX.Element {
         data-testid="UsageRing.toggle"
         onClick={() => setShowPanel(!showPanel)}
         className="relative flex items-center justify-center cursor-default hover:opacity-80 transition-opacity"
-        title={usage?.error || `5hr usage: ${Math.round(pct)}%`}
+        title={
+          usage?.error ||
+          (fiveHour ? `5hr usage: ${Math.round(pct)}%` : 'No 5-hour window for this account')
+        }
       >
         <svg width={size} height={size} className={isRefreshing ? 'animate-spin' : ''}>
           {/* Background track */}
@@ -321,7 +473,7 @@ export function UsageRing(): React.JSX.Element {
         </svg>
       </button>
       <span className="text-[10px] text-text-muted select-none">
-        {usage && !usage.error ? formatResetTime(usage.fiveHour.resetsAt) : 'Usage'}
+        {fiveHour ? formatResetTime(fiveHour.resetsAt) : 'Usage'}
       </span>
       {showPanel && <UsagePanel usage={usage} onRefresh={handleRefresh} />}
     </div>

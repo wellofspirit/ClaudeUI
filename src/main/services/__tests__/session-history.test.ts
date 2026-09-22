@@ -591,7 +591,7 @@ describe('computeTokenMetrics — subagent transcripts fold into modelCosts', ()
     expect(m.totalInputTokens).toBe(500_000)
     expect(m.totalOutputTokens).toBe(0)
     expect(m.cachedTokens).toBe(0)
-    expect(m.contextWindowSize).toBe(500_000)
+    expect(m.contextWindow.used).toBe(500_000)
     expect(m.totalDurationMs).toBe(5000)
   })
 

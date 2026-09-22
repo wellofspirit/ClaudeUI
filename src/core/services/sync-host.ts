@@ -51,7 +51,8 @@
 
 import type { HostWindowHandle } from '../host'
 import { SyncCore, type Delivery } from '../sync/sync-core'
-import { sessionIdOfStream, streamEventScopeOf, type LaneFrame } from '../shared/sync/stream'
+import { streamEventScopeOf, type StreamLaneFrame } from '../shared/sync/stream'
+import { isItemTarget, itemStreamKey } from '../shared/sync/item-stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
@@ -106,10 +107,13 @@ export function clearSyncSubscribersForTests(): void {
 // — which is what preserves ADR-054's promise that a 4010 max-age cut ends every
 // authority the socket held, this one included.
 
-/** One connection's stream sink. Carries BOTH lane flavors (phase 5 S2). */
-export type StreamSink = (frame: LaneFrame) => void
+/** One connection's stream sink. Carries every stream-lane flavor. */
+export type StreamSink = (frame: StreamLaneFrame) => void | boolean
 
 interface StreamSubscriber {
+  pendingItems: Set<string>
+  retry?: ReturnType<typeof setTimeout>
+  retryDelayMs: number
   sink: StreamSink
   /** Routing ids this connection is watching — a REPLACE set, never additive. */
   watch: Set<string>
@@ -124,6 +128,8 @@ interface StreamSubscriber {
 }
 
 const streamSubscribers = new Map<string, StreamSubscriber>()
+const ITEM_RETRY_INITIAL_MS = 100
+const ITEM_RETRY_MAX_MS = 2_000
 
 /**
  * Register a connection's stream sink. Returns the unregister, which the
@@ -133,9 +139,18 @@ const streamSubscribers = new Map<string, StreamSubscriber>()
  * nothing and must send `stream:watch`.
  */
 export function addStreamSubscriber(connectionId: string, sink: StreamSink): () => void {
-  streamSubscribers.set(connectionId, { sink, watch: new Set(), automationWatch: new Set() })
+  clearTimeout(streamSubscribers.get(connectionId)?.retry)
+  const entry: StreamSubscriber = {
+    sink,
+    watch: new Set(),
+    automationWatch: new Set(),
+    pendingItems: new Set(),
+    retryDelayMs: ITEM_RETRY_INITIAL_MS
+  }
+  streamSubscribers.set(connectionId, entry)
   return () => {
-    streamSubscribers.delete(connectionId)
+    clearTimeout(entry.retry)
+    if (streamSubscribers.get(connectionId) === entry) streamSubscribers.delete(connectionId)
   }
 }
 
@@ -144,8 +159,9 @@ export function addStreamSubscriber(connectionId: string, sink: StreamSink): () 
  * client never has to track what it previously asked for.
  *
  * Pushes the replay for every newly-watched session immediately (the
- * terminal-attach symmetry): one `offset: 0` frame per non-empty accumulation,
- * which is a REPLACE by construction and is therefore the lane's self-heal. The
+ * terminal-attach symmetry): ONE `replace` frame per watched session carrying its
+ * whole active item set, the empty set included, at the ring watermark it was
+ * read at — an atomic set replacement, and therefore the lane's self-heal. The
  * replay goes out for the WHOLE new set, not just the added ids: re-sending the
  * same set is exactly how a client cures a mismatch.
  *
@@ -166,6 +182,12 @@ export function setStreamWatch(
   const entry = streamSubscribers.get(connectionId)
   if (!entry) return 0
   entry.watch = new Set(sessionIds)
+  for (const id of entry.pendingItems) if (!entry.watch.has(id)) entry.pendingItems.delete(id)
+  if (!entry.pendingItems.size) {
+    clearTimeout(entry.retry)
+    entry.retry = undefined
+    entry.retryDelayMs = ITEM_RETRY_INITIAL_MS
+  }
   if (options.automationRuns) entry.automationWatch = new Set(options.automationRuns)
   // `replay: false` exists for ONE caller — the engine-test stub window, which
   // re-watches after every emission and would otherwise re-deliver every
@@ -175,17 +197,15 @@ export function setStreamWatch(
   if (options.replay === false) return 0
   let pushed = 0
   for (const routingId of entry.watch) {
-    for (const frame of syncCore.streamReplay(routingId)) {
-      try {
-        entry.sink(frame)
-        pushed++
-      } catch (err) {
-        logger.error(
-          LOG_SOURCE,
-          `stream sink threw during replay of ${routingId}: ` +
-            `${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+    try {
+      deliverStreamTo(entry, syncCore.itemStreamReplay(routingId))
+      pushed++
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `stream sink threw during replay of ${routingId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
   return pushed
@@ -212,7 +232,7 @@ export function setStreamWatch(
  *
  * Same lane, same guarantees: never ringed, never logged, no seq, no replay.
  */
-export function sendToStreamConnection(connectionId: string, frame: LaneFrame): boolean {
+export function sendToStreamConnection(connectionId: string, frame: StreamLaneFrame): boolean {
   const entry = streamSubscribers.get(connectionId)
   if (!entry) return false
   try {
@@ -240,6 +260,7 @@ export function streamSubscriberCount(): number {
 
 /** Drop every stream sink. Test seam only. */
 export function clearStreamSubscribersForTests(): void {
+  for (const entry of streamSubscribers.values()) clearTimeout(entry.retry)
   streamSubscribers.clear()
 }
 
@@ -253,12 +274,8 @@ export function clearStreamSubscribersForTests(): void {
  * inventing a connection id for something that is not a connection, and every
  * `stream:watch` bound would then have to reason about entries no client owns.
  *
- * The one production consumer is the ADR-005 plugin bridge, which was a
- * subscriber of `session:stream` before phase 5 S1 moved those channels off the
- * event lane — and of the three TAILS before S2 moved those. Restoring it here
- * keeps a plugin's contract unchanged by a lane change it has no part in — the
- * alternative was silently deleting token deltas and bash output from every
- * plugin.
+ * Production consumers include the plugin bridge, which synthesizes its legacy
+ * in-process callbacks from item frames, and tail observers.
  */
 const streamObservers = new Set<StreamSink>()
 
@@ -276,18 +293,57 @@ export function clearStreamObserversForTests(): void {
 }
 
 /**
+ * Retain only ids of dropped item traffic, then send fresh state after drain.
+ * One capped-backoff timer per connection also heals an idle item with no next
+ * token, without polling a persistently congested socket at a fixed rate.
+ */
+function deliverStreamTo(entry: StreamSubscriber, frame: StreamLaneFrame): void {
+  const sent = entry.sink(frame)
+  if (frame.type !== 'item-stream') return
+  if (sent === false) entry.pendingItems.add(frame.routingId)
+  else if (frame.op === 'replace') {
+    entry.pendingItems.delete(frame.routingId)
+    if (!entry.pendingItems.size) {
+      clearTimeout(entry.retry)
+      entry.retry = undefined
+      entry.retryDelayMs = ITEM_RETRY_INITIAL_MS
+    }
+  }
+  if (!entry.pendingItems.size || entry.retry) return
+  const delay = entry.retryDelayMs
+  entry.retryDelayMs = Math.min(delay * 2, ITEM_RETRY_MAX_MS)
+  entry.retry = setTimeout(() => {
+    entry.retry = undefined
+    for (const id of [...entry.pendingItems]) {
+      if (!entry.watch.has(id)) {
+        entry.pendingItems.delete(id)
+        continue
+      }
+      try {
+        deliverStreamTo(entry, syncCore.itemStreamReplay(id))
+      } catch {
+        entry.pendingItems.delete(id)
+      }
+    }
+  }, delay)
+  entry.retry.unref?.()
+}
+
+/**
  * The stream fan-out: every connection whose watch set names the frame's session,
  * and nobody else. Fenced per sink for the same reason the event lane is — one
  * dead socket must not stop the others.
  */
-function streamDelivery(frame: LaneFrame): void {
-  // One predicate for both flavors: a text frame names its session in the
-  // streamId, a pass-through frame names its scope in the payload. Derived from
-  // the ONE shared parser in each case — a second answer here about "who is this
-  // for" is exactly the drift `shared/sync/stream.ts` exists to prevent.
+
+function streamDelivery(frame: StreamLaneFrame): void {
+  // Item frames carry routingId directly; tails derive their session or
+  // automation scope from the shared parser.
   let wants: (entry: StreamSubscriber) => boolean
   let label: string
-  if (frame.type === 'stream-ev') {
+  if (frame.type === 'item-stream') {
+    wants = (entry) => entry.watch.has(frame.routingId)
+    label = frame.routingId
+  } else {
     const scope = streamEventScopeOf(frame)
     if (!scope) return
     wants =
@@ -295,17 +351,12 @@ function streamDelivery(frame: LaneFrame): void {
         ? (entry) => entry.automationWatch.has(scope.id)
         : (entry) => entry.watch.has(scope.id)
     label = `${frame.channel} (${scope.kind} ${scope.id})`
-  } else {
-    const routingId = sessionIdOfStream(frame.streamId)
-    if (!routingId) return
-    wants = (entry) => entry.watch.has(routingId)
-    label = frame.streamId
   }
 
   for (const entry of [...streamSubscribers.values()]) {
     if (!wants(entry)) continue
     try {
-      entry.sink(frame)
+      deliverStreamTo(entry, frame)
     } catch (err) {
       logger.error(
         LOG_SOURCE,
@@ -398,6 +449,16 @@ export const syncCore = new SyncCore({
       LOG_SOURCE,
       `applyEvent("${channel}") threw; canonical state skipped this event but ` +
         `delivery continued: ${err instanceof Error ? err.message : String(err)}`
+    ),
+  // DEBUG, not error: every reason here is survivable on a lossy lane (a delta
+  // racing its own seal is routine). What it buys is a named diagnosis instead
+  // of silence when an adapter streams into a target it never opened. The chunk
+  // TEXT is deliberately absent — this line must stay safe to leave on.
+  onItemDropped: (routingId, reason, target) =>
+    logger.debug(
+      LOG_SOURCE,
+      `dropped item delta for "${routingId}" (${reason}), target ` +
+        `${isItemTarget(target) ? itemStreamKey(target) : '<invalid>'}`
     )
 })
 
@@ -413,6 +474,7 @@ syncCore.onRekey((oldId, newId) => {
   for (const entry of streamSubscribers.values()) {
     if (!entry.watch.delete(oldId)) continue
     entry.watch.add(newId)
+    if (entry.pendingItems.delete(oldId)) entry.pendingItems.add(newId)
   }
 })
 

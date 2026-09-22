@@ -91,7 +91,7 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../../../core/services/claude-session'
-import { insertDispatchedUsage } from '../../../core/services/db'
+import { insertUsageEvent } from '../../../core/services/db'
 import type { BrowserWindow } from 'electron'
 import type { StatusLineData } from '../../../shared/types'
 
@@ -162,6 +162,47 @@ afterEach(() => {
 // 1. Double-count guard
 // ---------------------------------------------------------------------------
 
+/**
+ * One dispatched turn in the ledger (ADR-071 §1), as `safeRecordUsage` writes
+ * it — `origin 'dispatch'` with the dispatching session in `parentRoutingId`,
+ * which is what `dispatchedCostsByRouting` reads back when a session seeds its
+ * breakdown.
+ */
+function insertDispatchedTurn(row: {
+  fromRoutingId: string
+  targetEngine: string
+  vendorId: string
+  modelId: string
+  costUsd: number
+}): void {
+  insertUsageEvent({
+    id: `ue_${row.fromRoutingId}`,
+    ts: 1000,
+    engineId: row.targetEngine,
+    vendorId: row.vendorId,
+    accountId: null,
+    accountUuid: null,
+    modelId: row.modelId,
+    inputTokens: 400,
+    outputTokens: 100,
+    cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: 0,
+    equivCostUsd: row.costUsd,
+    engineCostUsd: null,
+    sessionId: 'target-sess-1',
+    messageId: `dispatch:toolu_1:1000:1:${row.fromRoutingId}`,
+    source: 'live',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'subscription',
+    origin: 'dispatch',
+    parentRoutingId: row.fromRoutingId,
+    apiCostUsd: row.costUsd,
+    billedCostUsd: 0
+  })
+}
+
 describe('ClaudeSession — cost double-count guard', () => {
   it('a second cumulative result (0.048, following 0.044) reports 0.048, not 0.092', async () => {
     mockQuery.mockImplementation(() =>
@@ -196,6 +237,12 @@ describe('ClaudeSession — cost double-count guard', () => {
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.048 }
     ])
+    // ADR-071 §2 gave StatusLineData a second cost and an unpriced count, for
+    // the engines that can tell the two apart (opencode, pi). A Claude status
+    // line carries neither — cli.js reports one figure — and the tooltip
+    // reads their ABSENCE as "this engine makes no such distinction".
+    expect(statusLine).not.toHaveProperty('billedCostUsd')
+    expect(statusLine).not.toHaveProperty('unknownCostMessages')
   })
 })
 
@@ -245,6 +292,59 @@ describe('ClaudeSession — modelUsage parsing', () => {
     const statusLine = lastStatusLine(sent)
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'claude', modelId: 'claude-opus-4-8', costUsd: 0.02 }
+    ])
+  })
+
+  it('keys that fallback on the id init resolved, not on the `default` alias', async () => {
+    // `default` is an alias cli.js resolves server-side; it is not a model id.
+    // Keyed on it, the fallback row renders as "default" in the breakdown, and
+    // prices as the $3/$15 unknown-model guess against any pricing table it
+    // reaches (block-usage's getPricing matches no row for it). cli.js reports
+    // what `default` actually resolved to on every turn's system/init — use it.
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle([
+        {
+          type: 'system',
+          subtype: 'init',
+          session_id: 's-alias-1',
+          model: 'claude-opus-5[1m]',
+          slash_commands: [],
+          skills: [],
+          mcp_servers: []
+        },
+        { type: 'result', total_cost_usd: 0.02 }
+      ])
+    )
+
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-fallback-alias', win, '/tmp/proj', {
+      model: 'default'
+    })
+    liveSessions.push(session)
+    await session.run('hello')
+
+    const statusLine = lastStatusLine(sent)
+    expect(statusLine.modelCosts).toEqual([
+      { engineId: 'claude', modelId: 'claude-opus-5[1m]', costUsd: 0.02 }
+    ])
+  })
+
+  it('falls back to the configured model when no init has resolved one yet', async () => {
+    // No system/init on this stream, so there is nothing to prefer — the
+    // configured id is still the best label available, and it is a concrete one.
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle([{ type: 'result', total_cost_usd: 0.03 }])
+    )
+
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-fallback-no-init', win, '/tmp/proj', {
+      model: 'claude-sonnet-4-6'
+    })
+    liveSessions.push(session)
+    await session.run('hello')
+
+    expect(lastStatusLine(sent).modelCosts).toEqual([
+      { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.03 }
     ])
   })
 })
@@ -341,17 +441,12 @@ describe('ClaudeSession — dispatched cost (Slice C)', () => {
   })
 
   it('seeds dispatched cost from durable storage at construction (rehydration across reloads)', () => {
-    insertDispatchedUsage({
-      ts: 1000,
+    insertDispatchedTurn({
       fromRoutingId: 'routing-dispatched-seed',
-      fromEngine: 'claude',
       targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: 'oc-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 500,
-      costUsd: 0.31,
-      durationMs: 2000
+      vendorId: 'openai',
+      modelId: 'gpt-5',
+      costUsd: 0.31
     })
 
     const { win, sent } = makeWin()

@@ -18,6 +18,8 @@ export type ToolKind =
   | 'fileRead' //  read a file    — Claude Read · opencode read
   | 'search' //    glob/grep/list — Claude Glob/Grep · opencode glob/grep/list
   | 'web' //       fetch/search   — Claude WebFetch/WebSearch · opencode webfetch
+  | 'image' //     picture made   — Codex imageGeneration
+  | 'sleep' //     timed wait     — Codex sleep  (lifted — routes to SleepRow)
   | 'todo' //      checklist      — Claude TodoWrite  (lifted — routes to TodoToolBlock)
   | 'task' //      subagent       — Claude Task/Agent · opencode task
   | 'plan' //      plan approval  — Claude ExitPlanMode (lifted — routes to ExitPlanModeCard)
@@ -25,6 +27,9 @@ export type ToolKind =
   | 'diagram' //   hosted MCP     — mcp__claude-ui__render_mermaid
   | 'mockup' //    hosted MCP     — mcp__claude-ui-mockup__*
   | 'mcp' //       other MCP      — generic render
+  | 'detail' //    a field list   — Claude Skill/Cron*/worktree/… (see claude-tool-specs)
+  | 'findings' //  review rows    — Claude ReportFindings
+  | 'note' //      one-line row   — Claude ToolSearch/TaskStop/… (lifted — routes to ToolNoteRow)
   | 'unknown' //   fallback       — anything not mapped
 
 // ---------------------------------------------------------------------------
@@ -54,7 +59,16 @@ export type ToolView =
   // result). The semantic fields (query/target) are kept for future coverage
   // polish (§9) but unused by the current generic renderer.
   | { kind: 'search'; query: string }
-  | { kind: 'web'; target: string }
+  // `action` and `results` are present only when the engine's wire carries them
+  // (Codex `webSearch.action`/`results`, Claude's `Links:` trailer). The body
+  // falls back to the result text when they are absent, so an engine that
+  // reports neither renders exactly as it did before.
+  | {
+      kind: 'web'
+      target: string
+      action?: 'search' | 'fetch' | 'find' | 'other'
+      results?: { title: string; url: string; snippet?: string }[]
+    }
   | {
       kind: 'task'
       description: string
@@ -68,7 +82,47 @@ export type ToolView =
   | { kind: 'question'; questions: AskUserQuestion[] }
   | { kind: 'diagram'; source: string; title?: string }
   | { kind: 'mockup'; directory?: string; title?: string }
-  | { kind: 'mcp'; input: unknown }
+  // `server`/`tool` are the two halves of `mcp__<server>__<tool>`; `readOnly`
+  // is the server's own `readOnlyHint`. All three are optional: an engine whose
+  // MCP names are not splittable (opencode's `server_tool`) supplies none.
+  | { kind: 'mcp'; input: unknown; server?: string; tool?: string; readOnly?: boolean }
+  | { kind: 'image'; prompt?: string; savedPath?: string }
+  /**
+   * A tool whose call is a handful of named facts — a schedule, a worktree, a
+   * wake-up, a message and its recipient. `fields` is what the call SAID (its
+   * input, named and ordered by the engine's spec); `text` is what came back,
+   * rendered as output rather than as another field.
+   */
+  | {
+      kind: 'detail'
+      fields: { label: string; value: string }[]
+      /** Rendered through the output view when the result is worth showing whole. */
+      text?: string
+    }
+  /**
+   * Structured review findings — Claude's `ReportFindings`, and any engine that
+   * later reports a review the same way. `verdict` and `severity` are optional
+   * because a harness may report neither.
+   */
+  | {
+      kind: 'findings'
+      findings: {
+        file?: string
+        line?: number
+        summary: string
+        detail?: string
+        category?: string
+        verdict?: string
+        outcome?: string
+      }[]
+      level?: string
+    }
+  /**
+   * A call whose whole meaning is one sentence. Rendered as a row, not a card:
+   * a header, a chevron and an empty body would be chrome around nothing.
+   */
+  | { kind: 'note'; icon?: string; text: string }
+  | { kind: 'sleep'; durationMs: number }
   | { kind: 'unknown'; input: unknown }
 
 // ---------------------------------------------------------------------------
@@ -88,10 +142,17 @@ export type ToolView =
  */
 export interface EngineToolMap {
   kindOf(toolName: string): ToolKind
+  /**
+   * `toolName` is OPTIONAL and every engine but Codex ignores it: the MCP body
+   * needs the server and tool, and `mcp__<server>__<tool>` is the only place
+   * they exist. Callers that do not have the name (a synthetic view) may omit
+   * it and get today's answer.
+   */
   normalize(
     kind: ToolKind,
     input: Record<string, unknown> | undefined,
-    result?: ToolResultBlock
+    result?: ToolResultBlock,
+    toolName?: string
   ): ToolView
   displayName(toolName: string): string
   hidden: ReadonlySet<string>

@@ -2,7 +2,7 @@
  * The client replica — SyncCore phase 4c (ADR-051 §"Replication model").
  *
  * One module owns every replicated slice of the renderer store. It holds a real
- * {@link CanonicalState} (plus the reducer's {@link ReducerAux}), folds
+ * {@link CanonicalState}, folds
  * `applyEvent` over the raw event tap, and projects the result into Zustand in a
  * single `set()`. Both clients use it: the desktop over the MessagePort, the web
  * client over the WebSocket — same reducer, same projection, same bugs or none.
@@ -20,7 +20,7 @@
  * ## Projection is identity-diffed, and that is load-bearing
  *
  * `applyEvent` is persistent: it returns the SAME object for slices it did not
- * touch. The projection exploits that — a `session:stream` delta rebuilds one
+ * touch. The projection exploits that — an item delta rebuilds one
  * session entry and writes nothing app-level. Without the diff, every event would
  * re-write `settings`, `recentSessionIds`, and every session, so any in-flight
  * local write (a pick whose `config:*` echo has not landed yet) would be reverted
@@ -31,9 +31,9 @@
  *
  * 1. **The fold** — `onSyncAnyEvent` → `applyEvent` → project. The default, and
  *    the only path for anything an event carries. Since phase 5 S1 there is a
- *    SECOND feed on the same path: `onSyncStreamFrame` → `applyStreamFrame` →
- *    project, carrying the streaming deltas that left the event lane.
- * 2. **Hydration** — `sync-full` → `fromSnapshot` + `auxFromCanonical` → project
+ *    SECOND feed on the same path: `onSyncItemStreamFrame` →
+ *    `applyItemStreamFrame` → project, carrying item-addressed text deltas.
+ * 2. **Hydration** — `sync-full` → `fromSnapshot` → project
  *    everything. Carries ADR-041's local selection resolution (see
  *    {@link resolveActiveSessionId}).
  * 3. **Sanctioned local writes** — a small, named set for state that is genuinely
@@ -52,20 +52,13 @@
  * the `canonical: false` channels are NOT in it.
  */
 
-import { onSyncAnyEvent, onSyncStreamFrame } from '../../../core/shared/sync/client-registry'
+import { applyItemStreamFrame } from '../../../core/shared/sync/item-stream'
+import { onSyncAnyEvent, onSyncItemStreamFrame } from '../../../core/shared/sync/client-registry'
 import { channelSpec } from '../../../core/shared/sync/channels'
-import {
-  applyStreamFrame,
-  dropStreamTurns,
-  type StreamFrame
-} from '../../../core/shared/sync/stream'
 import {
   applyEvent,
   applyWatchedContent,
-  auxFromCanonical,
-  emptyAux,
   rekeyTargetFor,
-  type ReducerAux,
   type WatchedContent
 } from '../../../core/shared/sync/reducer'
 import {
@@ -93,11 +86,10 @@ import {
 // ---------------------------------------------------------------------------
 
 let canonical: CanonicalState = emptyCanonicalState()
-let aux: ReducerAux = emptyAux()
 /** The installed raw-event tap's unsubscribe, or null — see {@link startReplica}. */
 let tapOff: (() => void) | null = null
-/** The volatile lane's tap (phase 5 S1). */
-let streamTapOff: (() => void) | null = null
+/** The item-addressed volatile lane's tap. */
+let itemStreamTapOff: (() => void) | null = null
 
 /** Post-apply observers — see {@link onReplicaApplied}. */
 type PostApplyObserver = (channel: string, args: unknown[]) => void
@@ -109,14 +101,6 @@ const observers = new Set<PostApplyObserver>()
  */
 export function getReplicaState(): CanonicalState {
   return canonical
-}
-
-/**
- * The replica's reducer aux (thinking spans + stream generations). Diagnostics +
- * tests only — in production the only reader is the fold itself.
- */
-export function getReplicaAux(): ReducerAux {
-  return aux
 }
 
 /**
@@ -156,14 +140,36 @@ export function startReplica(): () => void {
       // afterwards the old id is gone from the map.
       const rekey = pendingRekeyFor(event)
       const removed = removedIdOf(event)
-      commit(applyEvent(canonical, event, aux), { rekey, removed })
-      if (rekey) persistRekeyedRegistry(rekey.newId)
+      commit(applyEvent(canonical, event), { rekey, removed })
+      if (rekey) rekeyed.set(rekey.oldId, rekey.newId)
       // The host now owns this id (or has dropped it) — either way it stops being
       // this client's private invention. A rekey carries the marker across, since
       // the pre-rekey id named the same still-private session.
       if (event.channel === 'session:created') locallyCreated.delete(routingIdOf(event))
       if (removed) locallyCreated.delete(removed)
       if (rekey && locallyCreated.delete(rekey.oldId)) locallyCreated.add(rekey.newId)
+      // LAST, after every in-memory line above: this one reaches out to disk
+      // (`window.api.saveSessionConfig`) and can throw. The forwarding record is
+      // what an in-flight send needs, and the marker is what lets the cleanup drop
+      // a still-private session — losing either because `sessions.json` could not
+      // be written is the worse failure. It stays ahead of the observers (an
+      // observer may read the persisted registry on a later event, so the write
+      // should have been ATTEMPTED first) but inside its own fence: `SyncClient`
+      // fences the whole tap, so before this a failed write skipped every observer
+      // for that event — notification sounds, attention marks, the historical
+      // transcript load, the projection audit.
+      if (rekey) {
+        try {
+          persistRekeyedRegistry(rekey.newId)
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          window.api?.logRelay?.(
+            'warn',
+            'Replica',
+            `rekey to ${rekey.newId}: persisting the session registry failed: ${reason}`
+          )
+        }
+      }
     }
     for (const observer of observers) {
       try {
@@ -173,10 +179,11 @@ export function startReplica(): () => void {
       }
     }
   })
-  // The volatile lane's fold (phase 5 S1). A second feed, not a second writer:
-  // `applyStreamFrame` writes the same sealed streaming fields the reducer used
-  // to, through the same `commit` + identity-diffed projection.
-  streamTapOff = onSyncStreamFrame(foldStreamFrame)
+  itemStreamTapOff = onSyncItemStreamFrame((frame) => {
+    const outcome = applyItemStreamFrame(canonical, frame)
+    if (outcome.result === 'mismatch') scheduleRewatch()
+    else if (outcome.result === 'applied') commit(outcome.state)
+  })
   return stopReplica
 }
 
@@ -184,8 +191,8 @@ export function startReplica(): () => void {
 function stopReplica(): void {
   tapOff?.()
   tapOff = null
-  streamTapOff?.()
-  streamTapOff = null
+  itemStreamTapOff?.()
+  itemStreamTapOff = null
 }
 
 // ---------------------------------------------------------------------------
@@ -225,18 +232,6 @@ function scheduleRewatch(): void {
 }
 
 const STREAM_REWATCH_DEBOUNCE_MS = 50
-
-function foldStreamFrame(frame: StreamFrame): void {
-  const outcome = applyStreamFrame(canonical, aux, frame)
-  if (outcome.result === 'mismatch') {
-    scheduleRewatch()
-    return
-  }
-  // `unknown` is an honest no-op: a frame for a session this client has never
-  // heard of (a delete it already folded, a watch that outlived a selection).
-  if (outcome.result === 'unknown') return
-  commit(outcome.state)
-}
 
 /**
  * Does this event imply a rekey (the engine reported a stable session id that
@@ -288,6 +283,46 @@ const locallyCreated = new Set<string>()
  */
 export function isLocallyCreated(routingId: string): boolean {
   return locallyCreated.has(routingId)
+}
+
+/**
+ * Where a retired routing id went — old id ⇒ the id that replaced it.
+ *
+ * Kept for the same reason {@link locallyCreated} is: after a rekey the old id is
+ * gone from canonical AND from the store in the same tick, so nothing left in the
+ * renderer can answer "what happened to it?". A caller that captured the id
+ * BEFORE an await needs exactly that answer — `InputBox.handleSend` holds one
+ * across `sendPrompt`, and Codex reports its stable session id (`thread/start`)
+ * while that await is still pending, so the guard "is the user still on this
+ * session?" would otherwise compare the new active id against an id that no
+ * longer exists and leave the sent prompt sitting in the textarea.
+ *
+ * Never pruned. An entry is two short strings, one per session that ever rekeyed
+ * — and answering for ids that no longer exist is the entire point, so there is
+ * no moment at which forgetting one is safe.
+ */
+const rekeyed = new Map<string, string>()
+
+/** Hop bound for {@link resolveRekeyed} — a cycle must not hang the send path. */
+const MAX_REKEY_HOPS = 16
+
+/**
+ * Follow a routing id through the rekeys this client has folded.
+ *
+ * Returns the input unchanged when no rekey is known for it — the common case,
+ * and the honest answer for an id that was never moved. A chain (`a → b → c`) is
+ * unlikely, since an engine reports its stable id once, but it is walked anyway
+ * and the walk is bounded: a cycle would be a reducer bug, and spinning on the
+ * send path is a worse way to report one than returning the last id seen.
+ */
+export function resolveRekeyed(routingId: string): string {
+  let id = routingId
+  for (let hop = 0; hop < MAX_REKEY_HOPS; hop++) {
+    const next = rekeyed.get(id)
+    if (next === undefined || next === id) break
+    id = next
+  }
+  return id
 }
 
 /**
@@ -360,7 +395,6 @@ export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): v
     sdkSkillNames:
       restored.sdkSkillNames.length > 0 ? restored.sdkSkillNames : canonical.sdkSkillNames
   }
-  aux = auxFromCanonical(next)
   const activeSessionId = resolveActiveSessionId(snapshot, next, isResync)
   commit(next, { force: true, activeSessionId })
 }
@@ -508,8 +542,6 @@ export function dropLocalSessions(routingIds: readonly string[]): void {
     if (!sessions[id]) continue
     if (sessions === canonical.sessions) sessions = { ...sessions }
     delete sessions[id]
-    delete aux.thinkingOpen[id]
-    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -533,18 +565,11 @@ export function evictLocalSessions(routingIds: readonly string[]): void {
     sessions[id] = {
       ...session,
       messages: [],
-      streamingText: '',
-      streamingThinking: '',
+      itemStreams: {},
+      itemStreamRevision: 0,
       subagentMessages: {},
-      subagentStreamingText: {},
-      subagentStreamingThinking: {},
       seeded: false
     }
-    delete aux.thinkingOpen[id]
-    // The stripped buffers are back to length 0, so their generations restart —
-    // otherwise the next live delta would arrive at an offset this entry no
-    // longer has and cost a re-watch round trip.
-    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -581,8 +606,8 @@ export function patchLocalApp(patch: Partial<Omit<CanonicalState, 'sessions'>>):
 /** Test seam — production hydrates exactly once per page. */
 export function resetReplicaForTests(): void {
   canonical = emptyCanonicalState()
-  aux = emptyAux()
   locallyCreated.clear()
+  rekeyed.clear()
   observers.clear()
   rewatch = null
   if (rewatchTimer !== null) {
@@ -745,8 +770,8 @@ function projectSession(
     ...base,
     cwd: c.cwd,
     messages: c.messages,
-    streamingText: c.streamingText,
-    streamingThinking: c.streamingThinking,
+    itemStreams: c.itemStreams,
+    itemStreamRevision: c.itemStreamRevision,
     status: c.status,
     pendingApprovals: c.pendingApprovals,
     todos: c.todos,
@@ -756,8 +781,6 @@ function projectSession(
     activeTasks: c.activeTasks,
     taskProgressMap: c.taskProgressMap,
     subagentMessages: c.subagentMessages,
-    subagentStreamingText: c.subagentStreamingText,
-    subagentStreamingThinking: c.subagentStreamingThinking,
     permissionMode: c.permissionMode as PermissionMode,
     effort: c.effort as PerSessionState['effort'],
     thinkingMode: c.thinkingMode as PerSessionState['thinkingMode'],
@@ -767,16 +790,11 @@ function projectSession(
     sdkActive: c.sdkActive,
     selectedEngineId: c.selectedEngineId,
     selectedModel: c.selectedModel,
+    authRequired: c.authRequired,
+    ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
     // The per-session mirror of the app-level map, so `session:status`'s
     // worktree-exit rule (the reducer drops the entry when cwd returns to
     // `originalCwd`) clears the card without a second code path.
-    worktreeInfo: worktreeInfo ?? null,
-    // Presentation clock for ThinkingBlock's live ticker, derived from the sealed
-    // buffer rather than measured by a handler: stamped when thinking output
-    // starts, cleared the moment the reducer seals the span. The four writers this
-    // replaces each had to re-implement that rule, and `setStatus`'s copy was the
-    // "safety net" for the paths the other three missed.
-    thinkingStartedAt:
-      c.streamingThinking === '' ? null : (resident?.thinkingStartedAt ?? Date.now())
+    worktreeInfo: worktreeInfo ?? null
   }
 }

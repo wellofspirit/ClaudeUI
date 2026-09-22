@@ -20,11 +20,13 @@ import { render, screen, fireEvent, cleanup, act, within } from '@testing-librar
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
+import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
 } from '../../../../../shared/provider-registry'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
+import type { SettingsTarget } from '../settings-target'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -33,7 +35,12 @@ const chatgpt: ProviderEntry = {
   name: 'ChatGPT',
   origin: 'shared',
   credential: 'connected',
-  engines: { opencode: { enabled: true, native: true }, pi: { enabled: true, native: true } },
+  engines: {
+    opencode: { enabled: true, native: true },
+    pi: { enabled: true, native: true },
+    // Fed by vault injection, not by a route (ADR-068 §1) — F14 projects it.
+    codex: { enabled: true }
+  },
   detail: 'ChatGPT subscription · shared with pi and opencode',
   // Its ENABLED pi route lands on a vendor pi ships, so the row can override it.
   piBuiltinId: 'openai-codex'
@@ -138,8 +145,15 @@ const api = {
 
 const called = (method: keyof typeof api): unknown[][] => api[method].mock.calls
 
+/** The render context's navigator — the Accounts link row's destination. */
+let navigate: ReturnType<typeof vi.fn<(target: SettingsTarget) => void>>
+
 beforeEach(async () => {
   app = await bootTestApp()
+  navigate = vi.fn()
+  // The registry snapshot lives in the store (F12), which is a module singleton
+  // outliving `teardown()` — a case must not open on the previous case's rows.
+  useSessionStore.setState({ providerRegistry: null })
   calls = []
   registryReads = 0
   definitions = [chatgptDefinition, customDefinition]
@@ -182,6 +196,9 @@ beforeEach(async () => {
   stub('shared-provider:sync')
   stub('shared-provider:set-key')
   stub('shared-provider:disconnect')
+  stub('provider-account:switch')
+  stub('provider-account:remove')
+  stub('provider-account:set-per-session')
   stub('shared-provider:remove')
   stub('session:set-opencode-provider-disabled')
   stub('session:remove-opencode-provider')
@@ -199,7 +216,7 @@ afterEach(() => {
 
 /** Render the list and open one provider's sheet. */
 async function openSheet(id: string): Promise<HTMLElement> {
-  render(<ProviderList navigate={vi.fn()} />)
+  render(<ProviderList navigate={navigate} />)
   await screen.findAllByTestId('ProviderList.row')
   await act(async () => {
     fireEvent.click(
@@ -235,6 +252,24 @@ describe('ENABLED FOR', () => {
     expect(engineRow('claude')).toHaveTextContent('Claude only talks to Anthropic')
     expect(engineToggle('claude')).toBeDisabled()
     expect(engineToggle('claude')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('carries a read-only Codex row saying the account is not chosen per engine', async () => {
+    // Codex is injection, not a route (ADR-068 §1): there is nothing to toggle,
+    // and a row that offered one would promise a switch the vault does not have.
+    await openSheet('chatgpt')
+    expect(engineRow('codex')).toHaveTextContent('Codex always uses the active ChatGPT account.')
+    expect(engineRow('codex')).toHaveTextContent('Pin a different one per session')
+    expect(
+      screen.queryAllByTestId('ProviderSheet.engineToggle').map((el) => el.dataset.id)
+    ).not.toContain('codex')
+  })
+
+  it('shows no Codex row on a provider the vault does not inject into Codex', async () => {
+    await openSheet('ollama-local')
+    expect(screen.getAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).not.toContain(
+      'codex'
+    )
   })
 
   it('a shared route toggles through set-route, per harness, with no confirm', async () => {
@@ -346,6 +381,77 @@ describe('CREDENTIAL', () => {
     expect(sent('shared-provider:disconnect')).toEqual([])
     await click(screen.getByTestId('ProviderSheet.disconnect'))
     expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
+  })
+})
+
+// ── Accounts (ADR-068 §2, re-homed by F14) ───────────────────────────
+
+/**
+ * Accounts are no longer MANAGED here. Every provider's stored accounts live on
+ * Models & providers › Accounts (F14), so the sheet keeps exactly two things:
+ * one link row that says how many accounts there are and where they are, and
+ * the provider-wide "Disconnect all accounts" in the footer. The row-level
+ * cases moved verbatim to `ChatgptAccountsSetting.component.test.tsx`.
+ */
+describe('ACCOUNTS', () => {
+  const twoAccounts = {
+    activeId: 'acc-1',
+    perSession: false,
+    list: [
+      { id: 'acc-1', email: 'daniel@example.com', accountId: 'ws-11112222', planType: 'pro' },
+      { id: 'acc-2', email: 'work@example.com', accountId: 'ws-33334444', planType: 'business' }
+    ]
+  }
+
+  /** Put `accounts` on the ChatGPT row before the sheet is opened. */
+  function withAccounts(accounts: ProviderEntry['accounts']): void {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) => (e.id === 'chatgpt' ? { ...e, accounts } : e))
+    }
+  }
+
+  it('replaces the account rows with ONE link row naming the count', async () => {
+    withAccounts(twoAccounts)
+    const sheet = await openSheet('chatgpt')
+    const link = screen.getByTestId('ProviderSheet.accountsLink')
+    expect(link).toHaveTextContent('2 accounts')
+    expect(link).toHaveTextContent('managed on Accounts')
+    // Two homes for one list is exactly what F14 removed.
+    expect(screen.queryAllByTestId('ProviderSheet.account')).toEqual([])
+    expect(screen.queryByTestId('ProviderSheet.accountRemove')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.perSession')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.addAccount')).not.toBeInTheDocument()
+    expect(sheet).toHaveTextContent('Accounts')
+  })
+
+  it('the link navigates to Models & providers › Accounts', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.manageAccounts'))
+    expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
+    // The sheet closes with the jump: a page that changed BEHIND an open sheet
+    // is what the live drive showed, and it reads as a link that did nothing.
+    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+  })
+
+  it('disconnects EVERY account from the footer, on the second press', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    const disconnect = screen.getByTestId('ProviderSheet.disconnect')
+    expect(disconnect).toHaveTextContent('Disconnect all accounts')
+    await click(disconnect)
+    expect(sent('shared-provider:disconnect')).toEqual([])
+    await click(screen.getByTestId('ProviderSheet.disconnect'))
+    expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
+  })
+
+  it('falls back to the single-credential row when the registry reports no accounts', async () => {
+    // A row from a build (or a boot) with no account list must not render an
+    // empty Accounts card that looks like "you have no subscription".
+    await openSheet('chatgpt')
+    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent('Connected')
   })
 })
 
@@ -671,8 +777,8 @@ describe('the re-homed vault flows', () => {
     expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()
   })
 
-  it('hands a disconnected subscription to the ADD sheet rather than signing in here', async () => {
-    // One sign-in surface, and it is the one that ACQUIRES providers.
+  it('a disconnected subscription opens the sign-in dialog, not the Add sheet', async () => {
+    // One sign-in surface, and since ADR-068 §3 it is the dialog.
     snapshot = {
       ...snapshot,
       entries: snapshot.entries.map((e) =>
@@ -682,11 +788,12 @@ describe('the re-homed vault flows', () => {
     await openSheet('chatgpt')
     await click(screen.getByTestId('ProviderSheet.signIn'))
 
-    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
-    const add = screen.getByTestId('ProviderAddSheet')
-    expect(add).toBeInTheDocument()
-    // Opened ON that row: the search is seeded with the provider handed over.
-    expect(screen.getByTestId('ProviderAddSheet.search')).toHaveValue('chatgpt')
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth'
+    })
+    expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
   })
 })
 

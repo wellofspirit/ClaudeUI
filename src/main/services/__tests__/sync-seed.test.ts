@@ -23,7 +23,8 @@ const {
   loadClaudePermissions,
   listDirectories,
   listOpencodeSessionsGlobal,
-  listPiSessionsGlobal
+  listPiSessionsGlobal,
+  listCodexSessions
 } = vi.hoisted(() => ({
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
@@ -31,7 +32,8 @@ const {
   loadClaudePermissions: vi.fn(),
   listDirectories: vi.fn(),
   listOpencodeSessionsGlobal: vi.fn(),
-  listPiSessionsGlobal: vi.fn()
+  listPiSessionsGlobal: vi.fn(),
+  listCodexSessions: vi.fn()
 }))
 
 vi.mock('../../../core/services/ui-config', () => ({
@@ -46,6 +48,7 @@ vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // ~/.pi and the developer's own opencode server.
 vi.mock('../../../core/services/opencode-session-list', () => ({ listOpencodeSessionsGlobal }))
 vi.mock('../../../core/services/pi-session-list', () => ({ listPiSessionsGlobal }))
+vi.mock('../../../core/codex/history', () => ({ listCodexSessions }))
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
@@ -111,6 +114,7 @@ beforeEach(() => {
   startSeq = syncCore.currentSeq()
   listOpencodeSessionsGlobal.mockResolvedValue([])
   listPiSessionsGlobal.mockResolvedValue([])
+  listCodexSessions.mockResolvedValue([])
   loadSettings.mockReturnValue({ theme: 'monokai', uiFontScale: 1.2 })
   loadSessionConfig.mockReturnValue({
     recentSessions: ['rid-a', 'rid-b'],
@@ -397,5 +401,19 @@ describe('listAllDirectories', () => {
   it('propagates a CLAUDE failure so the caller keeps the previous listing', async () => {
     listDirectories.mockRejectedValue(new Error('EPERM'))
     await expect(listAllDirectories()).rejects.toThrow('EPERM')
+  })
+
+  /**
+   * `mergeEngineIntoDirectories` PRUNES groups that end up with no sessions, so
+   * running it for an engine that returned nothing is not a no-op: it deletes
+   * every session-less group the Claude walk produced (a project whose rows are
+   * all hidden, or the windowless-boot seed). opencode and pi only merge when
+   * their listing is non-empty; codex must too.
+   */
+  it('keeps a session-less Claude group when an engine has nothing to merge', async () => {
+    const EMPTY_GROUP = [{ cwd: '/proj', projectKey: '-proj', folderName: 'proj', sessions: [] }]
+    listDirectories.mockResolvedValue(EMPTY_GROUP)
+    listCodexSessions.mockResolvedValue([])
+    expect(await listAllDirectories()).toEqual(EMPTY_GROUP)
   })
 })

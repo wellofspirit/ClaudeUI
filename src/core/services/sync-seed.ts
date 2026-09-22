@@ -35,8 +35,8 @@
 import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
-import { listOpencodeSessionsGlobal } from './opencode-session-list'
-import { listPiSessionsGlobal } from './pi-session-list'
+import { historyFor } from './engine-history'
+import { mergeEngineIntoDirectories } from '../../shared/directory-merge'
 import { mergeOpencodeIntoDirectories, mergePiIntoDirectories } from '../../shared/directory-merge'
 import { emitEvent } from './sync-host'
 import { syncCore } from './sync-host'
@@ -65,16 +65,24 @@ export async function listAllDirectories(): Promise<DirectoryGroup[]> {
   const claude = await listDirectories()
   let merged = claude
   try {
-    const opencodeInfos = await listOpencodeSessionsGlobal()
+    const opencodeInfos = await historyFor('opencode').list()
     if (opencodeInfos.length > 0) merged = mergeOpencodeIntoDirectories(merged, opencodeInfos)
   } catch (err) {
     logger.debug(LOG_SOURCE, `opencode session list unavailable: ${String(err)}`)
   }
   try {
-    const piInfos = await listPiSessionsGlobal()
+    const piInfos = await historyFor('pi').list()
     if (piInfos.length > 0) merged = mergePiIntoDirectories(merged, piInfos)
   } catch (err) {
     logger.debug(LOG_SOURCE, `pi session list unavailable: ${String(err)}`)
+  }
+  try {
+    const codexInfos = await historyFor('codex').list()
+    // Guarded like opencode and pi above: the merge PRUNES session-less groups,
+    // so running it with an empty listing deletes them instead of doing nothing.
+    if (codexInfos.length > 0) merged = mergeEngineIntoDirectories(merged, codexInfos, 'codex')
+  } catch {
+    logger.debug(LOG_SOURCE, 'Native Codex session list unavailable')
   }
   return merged
 }

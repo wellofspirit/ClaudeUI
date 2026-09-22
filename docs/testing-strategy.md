@@ -30,6 +30,7 @@ Tests are organized into four layers that target different concerns:
 | **Component**   | Business logic (events → state)          | Electron IPC transport, SDK           | Yes        |
 | **E2E**         | Full pipeline (action → state → outcome) | Electron IPC transport, SDK           | Yes        |
 | **Integration** | SDK event contracts                      | Nothing (real SDK)                    | No (gated) |
+| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | No (gated) |
 
 ## Layer 1: Unit Tests
 
@@ -169,6 +170,7 @@ it('rekeys session when status has different sessionId', () => {
 // File: src/e2e/flows/my-flow.e2e.test.ts
 
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { appendItem, emitItemDelta, sealItem } from '@test/helpers/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 
 let app: TestApp
@@ -176,7 +178,6 @@ let app: TestApp
 beforeEach(async () => {
   app = await bootTestApp()
   useSessionStore.setState({ activeSessionId: null, sessions: {} })
-  wireEventHandlers(app) // same pattern as component tests
 })
 
 afterEach(() => {
@@ -186,8 +187,13 @@ afterEach(() => {
 it('full conversation flow', () => {
   useSessionStore.getState().createNewSession('r1', '/test')
   app.emit('session:user-message', 'r1', { prompt: 'Hello', queued: false })
-  app.emit('session:stream', 'r1', { type: 'text', text: 'Hi there' })
-  app.emit('session:message', 'r1', makeAssistantMessage('Hi there'))
+
+  // Assistant output is a per-item lifecycle: reliable open, volatile chunks,
+  // reliable seal carrying the resolved final content.
+  const target = emitItemDelta(app, 'r1', 'Hi ', { open: true })
+  appendItem(app, 'r1', target, 'there')
+  sealItem(app, 'r1', target, 'Hi there')
+
   app.emit('session:result', 'r1')
 
   const session = useSessionStore.getState().sessions['r1']
@@ -195,6 +201,13 @@ it('full conversation flow', () => {
   expect(session.status.state).toBe('idle')
 })
 ```
+
+`@test/helpers/item-stream` wraps the three channels with a deterministic transcript
+identity so a flow test does not have to hand-build `ItemStreamTarget`s:
+`emitItemDelta(app, routingId, chunk, { open: true, kind?, messageId?, ownerToolUseId? })`
+returns the target, `appendItem` adds a chunk to it, and `sealItem` commits the final
+text. There is no separate handler-wiring step — `bootTestApp()` installs the real
+replica, so `app.emit` folds through the shared reducer and projects into the store.
 
 **`bootTestApp()`** creates a `TestIpcBridge`, registers stub IPC handlers for internal store calls (`config:save-sessions`, etc.), builds `window.api` backed by the bridge, and returns `{ bridge, api, emit, teardown }`.
 
@@ -252,6 +265,8 @@ describe('factory validation', () => {
 **File location:** `src/integration/`
 
 **Running:** `CLAUDE_INTEGRATION_TESTS=1 bun run test:integration`
+
+**The Codex fixture provider.** The real-binary Codex suites (`src/integration/codex/*.integration.test.ts`, gated by `CODEX_INTEGRATION=1`) never talk to a paid provider: they run against one shared localhost Responses server, `src/integration/codex/fixture-provider.ts`, which also writes the isolated `CODEX_HOME` (`config.toml`, `auth.json`) the child reads. `scripts/codex-fixture-provider.mjs` is a thin CLI wrapper around the same module, so a real-app drive and the integration suites exercise the identical fixture — there is deliberately no second copy. Its `chatgpt` mode serves a drive under an INJECTED ChatGPT identity (ADR-068 §1): `chatgpt_base_url` is pointed at the fixture, the binary's own backend calls are answered 404 and recorded, any bearer is accepted, and `writeFabricatedVault()` mints the scratch vault it comes from (it refuses `os.homedir()`). On the CLI: `--chatgpt --vault-home <home> --accounts <n>`, or `scripts/codex-render-stress.mjs --accounts <n>`. The module's own guards are `src/integration/codex/__tests__/fixture-provider.test.ts`, which runs everywhere — the suites it serves do not.
 
 ## Test Infrastructure
 
@@ -339,6 +354,7 @@ Or use `bootTestApp()` which registers stub IPC handlers for these channels auto
 - **New store action or event handler** → Component test
 - **New React component** → Unit test
 - **Bug that spans multiple subsystems** → E2E test
+- **A claim about geometry** (fits, overlaps, truncates, collapses at width N, paints above) → Layout test; jsdom cannot evaluate it
 - **SDK upgrade** → Run integration tests, update factories if event shapes changed
 - **New patch** → Integration test verifying the patched behavior
 

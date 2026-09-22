@@ -28,6 +28,18 @@
  * to populate the engine-auth registry, so wiring `credentialSync.configure()`
  * there adds zero new import edges on the provider side.
  *
+ * ACCOUNTS (ADR-068 §2). The vault holds N ChatGPT accounts with one ACTIVE.
+ * This service refreshes EVERY stored account on its own timer (a background
+ * account's refresh token dies on its own clock), but vends only the ACTIVE one
+ * to pi and opencode, whose auth stores hold a single Codex entry each. Switching
+ * re-vends both and rings `onActiveAccountChanged` so the boot seam can move the
+ * sessions that follow the active account off the Codex host they were on
+ * (ADR-069 §4) without this module importing a session. Reconcile-on-start and the
+ * fs-watch adoption still operate on the ACTIVE account alone: an engine store
+ * holds the credential WE vended, so a rotation found there belongs to that
+ * account and to no other. A `VaultLike` with no account methods is driven
+ * exactly as before — one credential, one timer.
+ *
  * HARD SAFETY NOTE (same as AuthVault.ts / codex-oauth.ts): no test may let
  * `refreshAccessToken` reach the real auth.openai.com — every scheduler test
  * injects a fake `refreshAccessToken`; every watcher test uses fake
@@ -37,13 +49,16 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { logger } from '../../services/logger'
-import { authVault } from './AuthVault'
+import { authVault, CHATGPT_PROVIDER_ID, type VaultAccount } from './AuthVault'
 import {
   buildVaultCredential,
   refreshAccessToken as defaultRefreshAccessToken,
   type TokenResponse,
   type VaultCredential
 } from './codex-oauth'
+import type { DeviceCodeStart } from './codex-device-code'
+import { chatgptAccountIdentity, codexNativeIdentity } from '../account-identity'
+import type { AccountIdentity } from '../../../shared/account-key'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -63,6 +78,8 @@ export const OPENCODE_CODEX_VENDOR_ID = 'openai'
  * (and rotating the refresh token) themselves.
  */
 export const REFRESH_MARGIN_MS = 15 * 60 * 1000
+/** The longest delay `setTimeout` honours; anything above fires after 1 ms. */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
 /** Debounce window for the fs.watch resync — matches automation-manager.ts's own 500ms precedent. */
 export const DEFAULT_WATCH_DEBOUNCE_MS = 500
@@ -82,16 +99,36 @@ export const GIVE_UP_BACKOFF_MAX_MS = 60 * 60 * 1000
 // see the module header's "DEPENDENCY DIRECTION" note).
 // ---------------------------------------------------------------------------
 
-/** The slice of AuthVault this service needs. The real `authVault` singleton satisfies this structurally. */
+/**
+ * The slice of AuthVault this service needs. The real `authVault` singleton
+ * satisfies this structurally.
+ *
+ * The ACCOUNT half (ADR-068 §2) is optional so a fake can stay a single
+ * credential: a vault without it is driven exactly as before — one credential,
+ * one timer — and every plural path below degrades to that one account.
+ * `load()`/`save()` keep meaning "the ACTIVE account", which is what the
+ * single-slot pi and opencode stores are fed.
+ */
 export interface VaultLike {
   load(): Promise<VaultCredential | null>
   save(cred: VaultCredential): Promise<void>
+  listAccounts?(providerId: string): Promise<VaultAccount[]>
+  getActiveAccountId?(providerId: string): Promise<string | null>
+  setActiveAccount?(providerId: string, id: string): Promise<void>
+  removeAccount?(providerId: string, id: string): Promise<void>
+  saveAccountCredential?(providerId: string, id: string, cred: VaultCredential): Promise<void>
   removeCredential?(providerId: string): Promise<void>
   hasUnreadableLegacyVault?(): boolean
   beginLogin(): Promise<{ authorizeUrl: string }>
   completeLogin(): Promise<VaultCredential>
   /** ADR-057 remote paste-back completion. Optional so fakes stay minimal. */
   completeLoginFromPastedInput?(input: string): Promise<VaultCredential>
+  /**
+   * ADR-068 §3 / Slice 7 device-code start. Optional so fakes stay minimal.
+   * `completeLogin()` then awaits whichever flow the vault has live, which is
+   * why there is no `completeDeviceCodeLogin` twin.
+   */
+  beginDeviceCodeLogin?(): Promise<DeviceCodeStart>
   cancelLogin(): void
 }
 
@@ -137,6 +174,81 @@ export interface CredentialSyncDeps {
   refreshAccessToken?: (refreshToken: string) => Promise<TokenResponse>
   watchDebounceMs?: number
   getEnabledRoutes?: () => CodexEnabledRoutes
+  /**
+   * Rung AFTER the active account changed and both engine stores were re-fed.
+   * The boot seam wires it (`core/boot/core-services.ts`) without this module
+   * importing a session or an engine; the default is a no-op. Codex's hosts are
+   * the one consumer today (ADR-069 §4) — opencode recycles from its own auth
+   * provider's mutation points instead (ADR-047).
+   */
+  onActiveAccountChanged?: () => void | Promise<void>
+  /**
+   * Rung once AFTER a ChatGPT login has been applied — the one post-completion
+   * tail every login path runs ({@link CredentialSync.applyCompletedLogin}), so
+   * the desktop loopback, the ADR-057 paste-back and the Slice-7 device code all
+   * ring it exactly once and none of them owns a copy.
+   *
+   * INJECTED rather than an `emitEvent` import (ADR-070 §2): this class is
+   * unit-tested with almost nothing mocked, and importing `sync-host` would drag
+   * the service graph into those tests. Same posture, same boot seam and same
+   * no-op default as {@link CredentialSyncDeps.onActiveAccountChanged} above.
+   *
+   * A throw is caught and logged, never propagated: by the time this rings, the
+   * credential is stored and vended, so failing the login would be a lie.
+   *
+   * `accountId` is the VAULT account key the credential landed on — the same
+   * id-space {@link CodexInjectionToken.vaultAccountId} reports, so the two
+   * halves of ADR-070 §2 compare on one id. It matters because a provider holds
+   * several accounts: adding account B must not announce that the sessions
+   * broken on account A are fixed. `undefined` for a vault with no named
+   * account: {@link LEGACY_ACCOUNT_KEY} is this class's own slot key, not an
+   * account, and the listener's event is replicated — with nothing to tell
+   * apart there is nothing to name.
+   */
+  onCredentialStored?: (accountId: string | undefined) => void
+}
+
+/**
+ * The scheduler key for a vault with no account support — one credential, one
+ * timer, the pre-ADR-068 shape. Never collides with a vault account id (those
+ * are hex).
+ */
+const LEGACY_ACCOUNT_KEY = '__active__'
+
+/** Everything the refresher tracks for ONE account. */
+interface AccountRuntime {
+  refreshTimer?: ReturnType<typeof setTimeout>
+  retryTimer?: ReturnType<typeof setTimeout>
+  retryCount: number
+  /** Consecutive give-up cycles — drives the escalating give-up backoff. */
+  giveUpCount: number
+  refreshInFlight: Promise<void> | null
+  needsReauth: boolean
+}
+
+/** One account as `getStatus()` reports it — never any token material. */
+export interface CredentialAccountStatus {
+  id: string
+  email?: string
+  accountId?: string
+  planType?: string
+  expiresAt: number
+  needsReauth: boolean
+}
+
+/**
+ * What ONE Codex process is injected with (ADR-068 §1). The ONLY shape in this
+ * module that carries token material across its boundary — see
+ * {@link CredentialSync.injectionTokenFor}.
+ */
+export interface CodexInjectionToken {
+  /** The ChatGPT access token (a JWT). Never logged, never persisted by Codex. */
+  accessToken: string
+  /** The workspace id Codex keys the account on (`chatgpt_account_id`). */
+  chatgptAccountId: string
+  chatgptPlanType: string | null
+  /** The VAULT account id this token came from — not the workspace id. */
+  vaultAccountId: string
 }
 
 type EngineKey = 'pi' | 'opencode'
@@ -185,14 +297,16 @@ export class CredentialSync {
   private piTarget: CodexFeedTarget | undefined
   private opencodeTarget: CodexFeedTarget | undefined
 
-  // -- scheduler state --
-  private refreshTimer: ReturnType<typeof setTimeout> | undefined
-  private retryTimer: ReturnType<typeof setTimeout> | undefined
-  private retryCount = 0
-  /** Consecutive give-up cycles (each = a full transient-retry chain exhausting). Drives the escalating give-up backoff; reset to 0 by scheduleRefresh() on any healthy re-arm. */
-  private giveUpCount = 0
-  private refreshInFlight: Promise<void> | null = null
-  private _needsReauth = false
+  // -- scheduler state, PER ACCOUNT (ADR-068 §2) --
+  private readonly runtimes = new Map<string, AccountRuntime>()
+  /**
+   * The key whose runtime the public `needsReauth` getter reports. Cached
+   * because that getter is synchronous while the active id is a vault read;
+   * every path that learns the active id refreshes it.
+   */
+  private activeKey: string = LEGACY_ACCOUNT_KEY
+  private onActiveAccountChanged: () => void | Promise<void>
+  private onCredentialStored: (accountId: string | undefined) => void
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
@@ -213,25 +327,86 @@ export class CredentialSync {
     this.watchDebounceMs = deps.watchDebounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS
     this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
+    this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
+    this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
   }
 
-  /** Wire the two engine feed targets in from the composition root (register-auth-providers.ts). Safe to call more than once (e.g. hot-reload). */
+  /**
+   * Wire the engine feed targets and the account-switch hook in from the
+   * composition roots. Safe to call more than once (e.g. hot-reload), and
+   * ADDITIVE: every field is optional and an absent one leaves what is already
+   * wired alone, because the wiring comes from two places — the desktop's
+   * provider registrar supplies the two feed targets (`register-auth-providers
+   * .ts`, which is the only module that may import both those providers and
+   * this one), while the Electron-free boot seam supplies the switch hook,
+   * which needs the session graph.
+   */
   configure(targets: {
-    pi: CodexFeedTarget
-    opencode: CodexFeedTarget
+    pi?: CodexFeedTarget
+    opencode?: CodexFeedTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
+    onActiveAccountChanged?: () => void | Promise<void>
+    onCredentialStored?: (accountId: string | undefined) => void
   }): void {
-    this.piTarget = targets.pi
-    this.opencodeTarget = targets.opencode
+    if (targets.pi) this.piTarget = targets.pi
+    if (targets.opencode) this.opencodeTarget = targets.opencode
     if (targets.getEnabledRoutes) {
       this.getEnabledRoutes = targets.getEnabledRoutes
       this.hasConfiguredRoutePolicy = true
     }
+    if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
+    if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
   }
 
-  /** True after a refresh attempt hits a revoked/invalid refresh token — surfaced to M6c's UI. Cleared by any subsequent successful refresh, adopt, or completeLogin(). */
+  /**
+   * True after the ACTIVE account's refresh hit a revoked/invalid token —
+   * surfaced to the UI. Cleared by any subsequent successful refresh, adopt or
+   * completeLogin() ON THAT ACCOUNT: a dead BACKGROUND account must not make the
+   * account in use look broken (its own flag is in `getStatus().accounts`).
+   */
   get needsReauth(): boolean {
-    return this._needsReauth
+    return this.runtime(this.activeKey).needsReauth
+  }
+
+  /** This account's scheduler state, created on first use. */
+  private runtime(key: string): AccountRuntime {
+    const existing = this.runtimes.get(key)
+    if (existing) return existing
+    const created: AccountRuntime = {
+      retryCount: 0,
+      giveUpCount: 0,
+      refreshInFlight: null,
+      needsReauth: false
+    }
+    this.runtimes.set(key, created)
+    return created
+  }
+
+  /** True when the vault stores N accounts rather than one credential. */
+  private supportsAccounts(): boolean {
+    return typeof this.vault.listAccounts === 'function'
+  }
+
+  private async accounts(): Promise<VaultAccount[]> {
+    if (!this.vault.listAccounts) return []
+    try {
+      return await this.vault.listAccounts(CHATGPT_PROVIDER_ID)
+    } catch (err) {
+      logger.warn('CredentialSync', `listAccounts failed: ${errMessage(err)}`)
+      return []
+    }
+  }
+
+  /** The active account's id, refreshing {@link activeKey} on the way through. */
+  private async readActiveKey(): Promise<string> {
+    if (!this.vault.getActiveAccountId) return LEGACY_ACCOUNT_KEY
+    try {
+      const id = await this.vault.getActiveAccountId(CHATGPT_PROVIDER_ID)
+      this.activeKey = id ?? LEGACY_ACCOUNT_KEY
+    } catch (err) {
+      logger.warn('CredentialSync', `getActiveAccountId failed: ${errMessage(err)}`)
+    }
+    return this.activeKey
   }
 
   // -------------------------------------------------------------------------
@@ -266,8 +441,33 @@ export class CredentialSync {
       )
     }
     if (!cred || !this.isCurrent(generation)) return // empty vault + no engine credential — clean no-op
-    this.scheduleRefresh(cred)
+    await this.scheduleAll(cred)
+    if (!this.isCurrent(generation)) return
     this.startWatchers()
+  }
+
+  /**
+   * Arm one refresh timer PER stored account (ADR-068 §2). A background account
+   * expires on its own clock, and a single timer aimed at the active credential
+   * would leave every other account to rot until it was switched to — by which
+   * time its refresh token may be long dead.
+   *
+   * `activeCred` is what reconcile-on-start settled on; with no account support
+   * it is the only thing there is to schedule.
+   */
+  private async scheduleAll(activeCred: VaultCredential): Promise<void> {
+    if (!this.supportsAccounts()) {
+      this.scheduleRefresh(LEGACY_ACCOUNT_KEY, activeCred)
+      return
+    }
+    const [accounts, activeKey] = await Promise.all([this.accounts(), this.readActiveKey()])
+    if (accounts.length === 0) {
+      this.scheduleRefresh(LEGACY_ACCOUNT_KEY, activeCred)
+      return
+    }
+    for (const account of accounts) {
+      this.scheduleRefresh(account.id, account.id === activeKey ? activeCred : account.credential)
+    }
   }
 
   /**
@@ -343,10 +543,12 @@ export class CredentialSync {
     }
   }
 
-  /** Call at app teardown (before-quit). Clears every timer and closes every watcher. Idempotent. */
+  /** Call at app teardown (before-quit). Clears every account's timers and closes every watcher. Idempotent. */
   stop(): void {
-    this.clearRefreshTimer()
-    this.clearRetryTimer()
+    for (const key of [...this.runtimes.keys()]) {
+      this.clearRefreshTimer(key)
+      this.clearRetryTimer(key)
+    }
     this.stopWatchers()
   }
 
@@ -359,14 +561,28 @@ export class CredentialSync {
   }
 
   /**
+   * Start the DEVICE-CODE flow (ADR-068 §3, Slice 7) instead of the loopback
+   * one. There is no `completeDeviceCodeLogin` twin on purpose: the vault holds
+   * ONE login slot, so `completeLogin()` below already awaits whichever flow was
+   * started last, and `cancelLogin()` already cancels either.
+   */
+  async beginDeviceCodeLogin(): Promise<DeviceCodeStart> {
+    if (!this.vault.beginDeviceCodeLogin) {
+      throw new Error('CredentialSync: vault does not support device-code login')
+    }
+    return this.vault.beginDeviceCodeLogin()
+  }
+
+  /**
    * On success: feed both engine stores, arm the refresh scheduler, and start
    * the fs-watch resync.
    *
    * `pastedInput` (ADR-057) drives the remote paste-back completion instead of
    * the desktop loopback wait — the host still performs the exchange. Absent,
-   * the loopback path is awaited exactly as before. Everything AFTER the vault
-   * completion (feed / schedule / watch / needsReauth reset) is identical, so
-   * the two paths share this one body.
+   * the vault completes whichever flow is LIVE: the desktop loopback, or the
+   * Slice 7 device-code poll. Everything AFTER the vault completion is identical
+   * for all three, so it lives in {@link applyCompletedLogin} and no path owns a
+   * copy of it.
    */
   async completeLogin(pastedInput?: string): Promise<VaultCredential> {
     const generation = this.lifecycleGeneration
@@ -374,16 +590,131 @@ export class CredentialSync {
       pastedInput !== undefined
         ? await this.completeVaultLoginFromPaste(pastedInput)
         : await this.vault.completeLogin()
+    return this.applyCompletedLogin(cred, generation)
+  }
+
+  /**
+   * The one post-completion tail every login path runs: honour a cancellation
+   * that raced the exchange, clear the account's `needsReauth`, vend it when it
+   * is the active one, arm its refresh timer and start the watchers.
+   */
+  private async applyCompletedLogin(
+    cred: VaultCredential,
+    generation: number
+  ): Promise<VaultCredential> {
     if (!this.isCurrent(generation)) {
       await this.removeChatgptCredential()
       throw new Error('ChatGPT login was cancelled')
     }
-    this._needsReauth = false
-    this.retryCount = 0
-    await this.feedAll(cred)
-    this.scheduleRefresh(cred)
+    // The vault UPSERTED this credential onto an account (a re-login updates the
+    // one it belongs to, a new workspace appends one). Only the ACTIVE account is
+    // vended: adding a second subscription must not silently re-point pi and
+    // opencode at it.
+    const key = await this.keyForCredential(cred)
+    const runtime = this.runtime(key)
+    runtime.needsReauth = false
+    runtime.retryCount = 0
+    if (key === (await this.readActiveKey()) || key === LEGACY_ACCOUNT_KEY) {
+      await this.feedAll(cred)
+    }
+    this.scheduleRefresh(key, cred)
     this.startWatchers()
+    // ADR-070 §2: a stored credential is the one thing that means "this provider
+    // works now". Rung AFTER the cancellation check above, so a login the user
+    // cancelled mid-exchange (which throws and removes the credential) never
+    // reports a resolution.
+    //
+    // The try/catch is what MAKES the listener non-fatal, rather than a contract
+    // asserted of callers: `cred` is already stored and vended by the time we get
+    // here, so a listener that threw would turn a login that genuinely succeeded
+    // into a rejected promise the caller reports as a failed sign-in — telling the
+    // user their working credential is broken, which is the exact failure mode
+    // this whole ADR exists to remove.
+    try {
+      this.onCredentialStored(key === LEGACY_ACCOUNT_KEY ? undefined : key)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `onCredentialStored listener threw (login already succeeded): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
     return cred
+  }
+
+  /** Which account key a just-stored credential landed on (its refresh token is unique). */
+  private async keyForCredential(cred: VaultCredential): Promise<string> {
+    if (!this.supportsAccounts()) return LEGACY_ACCOUNT_KEY
+    const accounts = await this.accounts()
+    const match =
+      accounts.find((account) => account.credential.refresh === cred.refresh) ??
+      (cred.accountId
+        ? accounts.find((account) => account.accountId === cred.accountId)
+        : undefined)
+    return match?.id ?? (await this.readActiveKey())
+  }
+
+  /**
+   * Make `id` the active account: vend it to both engines, then ring the hook so
+   * the boot seam can act on the switch (ADR-069 §4 — every Codex session that
+   * FOLLOWS the active account leaves the host it was on and continues on the
+   * new account's at its next prompt; a pinned session is untouched).
+   */
+  async switchActiveAccount(id: string): Promise<void> {
+    if (!this.vault.setActiveAccount || !this.vault.listAccounts) {
+      throw new Error('CredentialSync: this vault does not support accounts')
+    }
+    await this.vault.setActiveAccount(CHATGPT_PROVIDER_ID, id)
+    this.activeKey = id
+    const account = (await this.accounts()).find((candidate) => candidate.id === id)
+    if (account) {
+      await this.feedAll(account.credential)
+      this.scheduleRefresh(id, account.credential)
+    }
+    await this.onActiveAccountChanged()
+  }
+
+  /**
+   * Drop one account. Its timer goes with it; removing the ACTIVE one vends the
+   * promoted account instead, and removing the LAST one cleans both engine
+   * copies out the way `disconnectChatgpt` does — an engine left holding a
+   * credential the vault no longer owns is the one state nothing would ever fix.
+   */
+  async removeAccount(id: string): Promise<void> {
+    if (!this.vault.removeAccount || !this.vault.listAccounts) {
+      throw new Error('CredentialSync: this vault does not support accounts')
+    }
+    const wasActive = (await this.readActiveKey()) === id
+    this.clearRefreshTimer(id)
+    this.clearRetryTimer(id)
+    this.runtimes.delete(id)
+    await this.vault.removeAccount(CHATGPT_PROVIDER_ID, id)
+    const promotedKey = await this.readActiveKey()
+    if (!wasActive) return
+    const promoted = (await this.accounts()).find((account) => account.id === promotedKey)
+    if (promoted) {
+      await this.feedAll(promoted.credential)
+      this.scheduleRefresh(promoted.id, promoted.credential)
+      // What the engines are vended just changed, exactly as it does on a
+      // switch, so opencode has to drop the credential it is still holding in
+      // process for the account that is gone (ADR-047).
+      await this.onActiveAccountChanged()
+      return
+    }
+    await Promise.all([
+      this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID).catch((err: unknown) =>
+        logger.warn('CredentialSync', `removeAccount: pi cleanup failed: ${errMessage(err)}`)
+      ),
+      this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID).catch(
+        (err: unknown) =>
+          logger.warn(
+            'CredentialSync',
+            `removeAccount: opencode cleanup failed: ${errMessage(err)}`
+          )
+      )
+    ])
+    // Same reason on the empty path, and more sharply: the engine files are gone
+    // but a running opencode server would keep serving the deleted credential.
+    await this.onActiveAccountChanged()
   }
 
   cancelLogin(): void {
@@ -403,9 +734,8 @@ export class CredentialSync {
     this.lifecycleGeneration += 1
     this.cancelLogin()
     this.stop()
-    this._needsReauth = false
-    this.retryCount = 0
-    this.giveUpCount = 0
+    this.runtimes.clear()
+    this.activeKey = LEGACY_ACCOUNT_KEY
     const failures: unknown[] = []
     await Promise.all([
       this.removeChatgptCredential().catch((err) => failures.push(err)),
@@ -418,9 +748,12 @@ export class CredentialSync {
       throw new AggregateError(failures, 'Failed to disconnect ChatGPT credentials')
   }
 
-  /** Force an out-of-band refresh check right now (e.g. a future "sync now" UI action). Goes through the same single-flight dedupe as the scheduled path. */
+  /** Force an out-of-band refresh check right now, for EVERY stored account. Goes through the same per-account single-flight dedupe as the scheduled path. */
   async refreshNow(): Promise<void> {
-    return this.runRefresh()
+    if (!this.supportsAccounts()) return this.runRefresh(LEGACY_ACCOUNT_KEY)
+    const accounts = await this.accounts()
+    if (accounts.length === 0) return this.runRefresh(LEGACY_ACCOUNT_KEY)
+    await Promise.all(accounts.map((account) => this.runRefresh(account.id)))
   }
 
   /**
@@ -435,10 +768,22 @@ export class CredentialSync {
     accountId?: string
     expiresAt?: number
     needsReauth: boolean
+    accounts: CredentialAccountStatus[]
+    activeId: string | null
   }> {
-    const cred = await this.vault.load()
+    const [cred, accounts] = await Promise.all([this.vault.load(), this.accounts()])
+    const activeKey = await this.readActiveKey()
+    const activeId = activeKey === LEGACY_ACCOUNT_KEY ? null : activeKey
+    const list: CredentialAccountStatus[] = accounts.map((account) => ({
+      id: account.id,
+      ...(account.email ? { email: account.email } : {}),
+      ...(account.accountId ? { accountId: account.accountId } : {}),
+      ...(account.planType ? { planType: account.planType } : {}),
+      expiresAt: account.credential.expires,
+      needsReauth: this.runtime(account.id).needsReauth
+    }))
     if (!cred) {
-      return { connected: false, needsReauth: this._needsReauth }
+      return { connected: false, needsReauth: this.needsReauth, accounts: list, activeId }
     }
     const status: {
       connected: boolean
@@ -446,14 +791,98 @@ export class CredentialSync {
       accountId?: string
       expiresAt?: number
       needsReauth: boolean
+      accounts: CredentialAccountStatus[]
+      activeId: string | null
     } = {
       connected: true,
-      needsReauth: this._needsReauth,
-      expiresAt: cred.expires
+      needsReauth: this.needsReauth,
+      expiresAt: cred.expires,
+      accounts: list,
+      activeId
     }
     if (cred.email) status.email = cred.email
     if (cred.accountId) status.accountId = cred.accountId
     return status
+  }
+
+  /**
+   * The ADR-071 §3 account key and label for one vault account — what a usage
+   * row stores so spend through Codex lands on the same subscription as spend
+   * through opencode or pi.
+   *
+   * `null` means the active account. An account whose credential is gone, or
+   * whose credential never learned a workspace id, is Codex signed in on its
+   * own as far as metering is concerned: the native key, not a half key.
+   *
+   * CREDENTIAL BOUNDARY: this is a member of the token-free half of the class,
+   * beside `getStatus()`. It reads the credential to name the account and
+   * returns only `{ accountKey, accountLabel }` — an identity, never token
+   * material. The claim reading is
+   * {@link import('../account-identity').chatgptAccountIdentity}, the same
+   * function an engine's `auth.json` goes through, so one token cannot resolve
+   * to two keys.
+   */
+  async accountIdentity(vaultAccountId: string | null): Promise<AccountIdentity> {
+    const key = vaultAccountId ?? (await this.readActiveKey())
+    const cred = await this.loadForKey(key)
+    if (!cred?.accountId) return codexNativeIdentity()
+    return chatgptAccountIdentity({
+      accountId: cred.accountId,
+      accessToken: cred.access,
+      // A credential stored before S2a2 has no `userId`; the access token it
+      // holds carries the same claim, and the next refresh persists it.
+      stored: { userId: cred.userId, email: cred.email, planType: cred.planType }
+    })
+  }
+
+  /**
+   * **The one method on this class that returns TOKEN MATERIAL.** Everything
+   * else here is deliberately token-free (`getStatus`, and the
+   * `provider-account:*` commands built on it); this exists because Codex is fed
+   * by INJECTION rather than by file (ADR-068 §1) and the host has to hand the
+   * app-server an access token over the wire.
+   *
+   * Nothing in it logs, and its result must never reach a log line, an IPC
+   * result or a snapshot. The two callers are the inject and refresh halves of
+   * `codex-auth-hook.ts`.
+   *
+   * `accountId` null means the ACTIVE account. Returns null when the vault holds
+   * no credential for that account, or when the credential carries no workspace
+   * id: `account/login/start {type:'chatgptAuthTokens'}` REQUIRES
+   * `chatgptAccountId`, so a workspace-less credential cannot be injected at all
+   * and the process is left on whatever Codex's own store holds.
+   *
+   * `refreshMarginMs` decides how eagerly it refreshes first:
+   *
+   *  - at INJECT time the default {@link REFRESH_MARGIN_MS} applies, so a
+   *    process never starts on a token that is about to die mid-turn;
+   *  - the REFRESH server request passes 0, because Codex gives the host 10
+   *    seconds to answer and a cached-but-still-valid token is the answer it
+   *    wants (ADR-068 §1). Only a genuinely expired credential is worth a
+   *    network round trip there.
+   *
+   * The refresh goes through the same per-account single-flight as every
+   * scheduled one, so two processes starting at once cause ONE token request.
+   */
+  async injectionTokenFor(
+    accountId: string | null,
+    refreshMarginMs: number = REFRESH_MARGIN_MS
+  ): Promise<CodexInjectionToken | null> {
+    const key = accountId ?? (await this.readActiveKey())
+    let cred = await this.loadForKey(key)
+    if (!cred) return null
+    if (cred.expires - refreshMarginMs <= this.now()) {
+      await this.runRefresh(key)
+      cred = await this.loadForKey(key)
+      if (!cred) return null
+    }
+    if (!cred.accountId) return null
+    return {
+      accessToken: cred.access,
+      chatgptAccountId: cred.accountId,
+      chatgptPlanType: cred.planType ?? null,
+      vaultAccountId: key
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -567,57 +996,99 @@ export class CredentialSync {
   // 2. Sole-refresher scheduler
   // -------------------------------------------------------------------------
 
-  private scheduleRefresh(cred: VaultCredential): void {
+  private scheduleRefresh(key: string, cred: VaultCredential): void {
     // A normal (non-give-up) schedule means we are healthy again — reset the
     // escalating give-up backoff. Every recovery path (doRefresh success,
     // adoption, completeLogin, start) routes through here, so this is the single
     // reset point; the give-up path deliberately re-arms via armRefreshTimer()
     // to keep escalating.
-    this.giveUpCount = 0
-    this.armRefreshTimer(Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now()))
+    this.runtime(key).giveUpCount = 0
+    const delay = Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now())
+    // Node clamps a setTimeout delay above 2^31-1 ms (~24.8 days) to 1 ms, so a
+    // credential that far from expiry would be refreshed IMMEDIATELY — rotating
+    // a perfectly good token for nothing, or marking a long-lived one revoked
+    // when the authority refuses. Beyond the cap the timer only re-arms.
+    if (delay > MAX_TIMER_DELAY_MS) {
+      this.clearRefreshTimer(key)
+      this.clearRetryTimer(key)
+      this.runtime(key).refreshTimer = setTimeout(
+        () => this.scheduleRefresh(key, cred),
+        MAX_TIMER_DELAY_MS
+      )
+      return
+    }
+    this.armRefreshTimer(key, delay)
   }
 
-  /** Arm the refresh timer at an explicit delay, clearing any prior refresh/retry timer. */
-  private armRefreshTimer(delayMs: number): void {
-    this.clearRefreshTimer()
-    this.clearRetryTimer()
-    this.refreshTimer = setTimeout(() => {
-      void this.runRefresh()
+  /** Arm one account's refresh timer at an explicit delay, clearing its prior refresh/retry timer. */
+  private armRefreshTimer(key: string, delayMs: number): void {
+    this.clearRefreshTimer(key)
+    this.clearRetryTimer(key)
+    this.runtime(key).refreshTimer = setTimeout(() => {
+      void this.runRefresh(key)
     }, delayMs)
   }
 
-  private clearRefreshTimer(): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer)
-      this.refreshTimer = undefined
+  private clearRefreshTimer(key: string): void {
+    const runtime = this.runtimes.get(key)
+    if (runtime?.refreshTimer) {
+      clearTimeout(runtime.refreshTimer)
+      runtime.refreshTimer = undefined
     }
   }
 
-  private clearRetryTimer(): void {
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer)
-      this.retryTimer = undefined
+  private clearRetryTimer(key: string): void {
+    const runtime = this.runtimes.get(key)
+    if (runtime?.retryTimer) {
+      clearTimeout(runtime.retryTimer)
+      runtime.retryTimer = undefined
     }
   }
 
-  /** Single-flight wrapper: a refresh already in progress is awaited, not duplicated. */
-  private async runRefresh(): Promise<void> {
-    if (this.refreshInFlight) {
-      await this.refreshInFlight
+  /** Single-flight wrapper, PER ACCOUNT: a refresh already in progress for this account is awaited, not duplicated. */
+  private async runRefresh(key: string): Promise<void> {
+    const runtime = this.runtime(key)
+    if (runtime.refreshInFlight) {
+      await runtime.refreshInFlight
       return
     }
-    const promise = this.doRefresh()
-    this.refreshInFlight = promise
+    const promise = this.doRefresh(key)
+    runtime.refreshInFlight = promise
     try {
       await promise
     } finally {
-      this.refreshInFlight = null
+      runtime.refreshInFlight = null
     }
   }
 
-  private async doRefresh(): Promise<void> {
+  /**
+   * The credential this account key currently holds — the ACTIVE one for the
+   * legacy key.
+   *
+   * Deliberately NOT `async`: the legacy branch hands back `vault.load()`'s own
+   * promise, so the refresh path keeps the exact microtask depth it had before
+   * accounts existed (two disconnect/identity-guard tests observe the in-flight
+   * call after a single tick).
+   */
+  private loadForKey(key: string): Promise<VaultCredential | null> {
+    if (key === LEGACY_ACCOUNT_KEY) return this.vault.load()
+    return this.accounts().then(
+      (list) => list.find((candidate) => candidate.id === key)?.credential ?? null
+    )
+  }
+
+  /** Persist a rotated credential back onto the account it belongs to. */
+  private async persistForKey(key: string, cred: VaultCredential): Promise<void> {
+    if (key === LEGACY_ACCOUNT_KEY || !this.vault.saveAccountCredential) {
+      await this.vault.save(cred)
+      return
+    }
+    await this.vault.saveAccountCredential(CHATGPT_PROVIDER_ID, key, cred)
+  }
+
+  private async doRefresh(key: string): Promise<void> {
     const generation = this.lifecycleGeneration
-    const cred = await this.vault.load()
+    const cred = await this.loadForKey(key)
     if (!this.isCurrent(generation)) return
     if (!cred) {
       logger.debug('CredentialSync', 'doRefresh: no vault credential — nothing to refresh')
@@ -638,30 +1109,38 @@ export class CredentialSync {
     } catch (err) {
       if (
         this.isCurrent(generation) &&
-        (await this.isStillCurrentCredential(generation, refreshedIdentity))
+        (await this.isStillCurrentCredential(generation, key, refreshedIdentity))
       )
-        this.handleRefreshError(err)
+        this.handleRefreshError(key, err)
       return
     }
     if (!this.isCurrent(generation)) return
     // A concurrent adoption/refresh replaced the vault credential while our
     // network call was in flight — our (now-stale) result must not overwrite it.
-    if (!(await this.isStillCurrentCredential(generation, refreshedIdentity))) return
+    if (!(await this.isStillCurrentCredential(generation, key, refreshedIdentity))) return
 
-    this.retryCount = 0
-    this._needsReauth = false
+    const runtime = this.runtime(key)
+    runtime.retryCount = 0
+    runtime.needsReauth = false
     // Shared with the login path via buildVaultCredential — identical expires
-    // math + carry-forward of the prior accountId/email when a refresh
-    // response's JWTs omit the profile claims.
+    // math + carry-forward of the prior accountId/email/planType/userId when a
+    // refresh response's JWTs omit the profile claims.
     const next = buildVaultCredential(tokens, this.now, {
       accountId: cred.accountId,
-      email: cred.email
+      email: cred.email,
+      planType: cred.planType,
+      userId: cred.userId
     })
     if (!this.isCurrent(generation)) return
-    await this.vault.save(next)
+    await this.persistForKey(key, next)
     if (!this.isCurrent(generation)) return
-    await this.feedAll(next)
-    if (this.isCurrent(generation)) this.scheduleRefresh(next)
+    // Only the ACTIVE account reaches pi and opencode: their stores hold one
+    // Codex entry each, so feeding a background rotation would silently switch
+    // the engines to another subscription.
+    if (key === LEGACY_ACCOUNT_KEY || key === (await this.readActiveKey())) {
+      await this.feedAll(next)
+    }
+    if (this.isCurrent(generation)) this.scheduleRefresh(key, next)
   }
 
   /**
@@ -669,18 +1148,23 @@ export class CredentialSync {
    * by refresh token) AND this lifecycle generation is still current. Re-reads
    * the vault; used as the post-await identity guard in doRefresh (M-AT2).
    */
-  private async isStillCurrentCredential(generation: number, refresh: string): Promise<boolean> {
-    const current = await this.vault.load()
+  private async isStillCurrentCredential(
+    generation: number,
+    key: string,
+    refresh: string
+  ): Promise<boolean> {
+    const current = await this.loadForKey(key)
     if (!this.isCurrent(generation)) return false
     return current?.refresh === refresh
   }
 
-  private handleRefreshError(err: unknown): void {
+  private handleRefreshError(key: string, err: unknown): void {
+    const runtime = this.runtime(key)
     if (isRefreshRevoked(err)) {
-      this._needsReauth = true
-      this.clearRefreshTimer()
-      this.clearRetryTimer()
-      this.retryCount = 0
+      runtime.needsReauth = true
+      this.clearRefreshTimer(key)
+      this.clearRetryTimer(key)
+      runtime.retryCount = 0
       logger.error(
         'CredentialSync',
         `refresh rejected (refresh token revoked) — needsReauth: ${errMessage(err)}`
@@ -688,31 +1172,34 @@ export class CredentialSync {
       return
     }
 
-    this.retryCount += 1
-    if (this.retryCount > MAX_TRANSIENT_RETRIES) {
-      this.retryCount = 0
-      this.giveUpCount += 1
+    runtime.retryCount += 1
+    if (runtime.retryCount > MAX_TRANSIENT_RETRIES) {
+      runtime.retryCount = 0
+      runtime.giveUpCount += 1
       // Escalating backoff instead of scheduleRefresh() (which would fire
       // ~immediately, since the refresh margin has already passed, and hammer
       // the endpoint). Reset back to the normal schedule on the next success/
       // adoption via scheduleRefresh().
-      const backoff = Math.min(GIVE_UP_BACKOFF_BASE_MS * this.giveUpCount, GIVE_UP_BACKOFF_MAX_MS)
+      const backoff = Math.min(
+        GIVE_UP_BACKOFF_BASE_MS * runtime.giveUpCount,
+        GIVE_UP_BACKOFF_MAX_MS
+      )
       logger.error(
         'CredentialSync',
-        `refresh failed ${MAX_TRANSIENT_RETRIES} time(s) transiently — backing off ${backoff}ms before retry (give-up cycle ${this.giveUpCount}): ${errMessage(err)}`
+        `refresh failed ${MAX_TRANSIENT_RETRIES} time(s) transiently — backing off ${backoff}ms before retry (give-up cycle ${runtime.giveUpCount}): ${errMessage(err)}`
       )
-      this.armRefreshTimer(backoff)
+      this.armRefreshTimer(key, backoff)
       return
     }
 
-    const backoff = RETRY_BASE_MS * this.retryCount
+    const backoff = RETRY_BASE_MS * runtime.retryCount
     logger.warn(
       'CredentialSync',
-      `refresh failed transiently (attempt ${this.retryCount}/${MAX_TRANSIENT_RETRIES}), retrying in ${backoff}ms: ${errMessage(err)}`
+      `refresh failed transiently (attempt ${runtime.retryCount}/${MAX_TRANSIENT_RETRIES}), retrying in ${backoff}ms: ${errMessage(err)}`
     )
-    this.clearRetryTimer()
-    this.retryTimer = setTimeout(() => {
-      void this.runRefresh()
+    this.clearRetryTimer(key)
+    runtime.retryTimer = setTimeout(() => {
+      void this.runRefresh(key)
     }, backoff)
   }
 
@@ -854,7 +1341,9 @@ export class CredentialSync {
       `handleExternalChange(${engine}): adopting externally-rotated credential`
     )
     const adopted = await this.persistAdopted(entry, vaultCred, generation)
-    if (adopted && this.isCurrent(generation)) this.scheduleRefresh(adopted)
+    if (adopted && this.isCurrent(generation)) {
+      this.scheduleRefresh(await this.readActiveKey(), adopted)
+    }
   }
 
   /**
@@ -882,12 +1371,20 @@ export class CredentialSync {
     const accountId = snapshot.accountId ?? prior?.accountId
     if (accountId) adopted.accountId = accountId
     if (prior?.email) adopted.email = prior.email
+    if (prior?.planType) adopted.planType = prior.planType
 
     if (!this.isCurrent(generation)) return null
-    await this.vault.save(adopted)
+    // The ACTIVE account, explicitly: an engine store holds the credential WE
+    // vended, so a rotation found there belongs to the account in use and to no
+    // other (ADR-068 §2). An empty vault has no active account yet, and save()
+    // is then the bootstrap that creates the first one.
+    const activeKey = await this.readActiveKey()
     if (!this.isCurrent(generation)) return null
-    this._needsReauth = false
-    this.retryCount = 0
+    await this.persistForKey(activeKey, adopted)
+    if (!this.isCurrent(generation)) return null
+    const runtime = this.runtime(activeKey)
+    runtime.needsReauth = false
+    runtime.retryCount = 0
     await this.feedAll(adopted)
     return this.isCurrent(generation) ? adopted : null
   }

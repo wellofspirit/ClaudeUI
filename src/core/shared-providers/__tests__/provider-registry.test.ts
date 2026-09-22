@@ -145,7 +145,9 @@ describe('dedupe — a shared definition owns the native row it routes to', () =
     expect(snapshot.entries.map((entry) => entry.id)).toEqual(['anthropic', 'chatgpt'])
     expect(byId(snapshot, 'chatgpt').engines).toEqual({
       pi: { enabled: true, modelCount: 4, native: true },
-      opencode: { enabled: true, modelCount: 300, native: true }
+      opencode: { enabled: true, modelCount: 300, native: true },
+      // Injection, not a route — and no account is stored here.
+      codex: { enabled: false }
     })
   })
 
@@ -210,7 +212,11 @@ describe('dedupe — a shared definition owns the native row it routes to', () =
     // …and the shared row must not claim a native entry it no longer owns.
     expect(byId(snapshot, 'chatgpt').engines).toEqual({
       pi: { enabled: false },
-      opencode: { enabled: false }
+      opencode: { enabled: false },
+      // Codex does not ride the routes, so turning both off says nothing about
+      // it; it is disabled here because no account is stored, not because a
+      // route is off.
+      codex: { enabled: false }
     })
   })
 
@@ -698,5 +704,140 @@ describe('ordering', () => {
       'groq',
       'OpenRouter'
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-068 §2 — the ChatGPT row's ACCOUNTS projection
+// ---------------------------------------------------------------------------
+
+describe('subscription accounts', () => {
+  const list = [
+    { id: 'acc-1', email: 'daniel@example.com', accountId: 'ws-1', planType: 'pro' },
+    { id: 'acc-2', email: 'work@example.com', accountId: 'ws-2' }
+  ]
+
+  it('carries the accounts, the active id and the per-session flag onto the shared row', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-1', perSession: true, list }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').accounts).toEqual({
+      activeId: 'acc-1',
+      perSession: true,
+      list
+    })
+    // Nothing else grows one: an account list belongs to the provider that has
+    // accounts, not to every row on the page.
+    expect(byId(snapshot, 'anthropic').accounts).toBeUndefined()
+  })
+
+  it('names the count and the active account once there is more than one', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-2', perSession: false, list }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').detail).toBe('2 accounts · work@example.com active')
+  })
+
+  it('keeps the ordinary subscription line with a single account', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-1', perSession: false, list: [list[0]] }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').detail).toBe(
+      'ChatGPT subscription · shared with pi and opencode'
+    )
+  })
+
+  it('stays CONNECTED while an account exists, even if the status read said otherwise', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status({ connected: false })],
+        chatgptAccounts: { activeId: 'acc-1', perSession: false, list }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').credential).toBe('connected')
+  })
+
+  it('carries no token material (guard: the projection is ids, emails and plans)', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-1', perSession: false, list }
+      })
+    )
+    const serialized = JSON.stringify(snapshot)
+    expect(serialized).not.toContain('access')
+    expect(serialized).not.toContain('refresh')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F14 — the Codex route on the ChatGPT row
+// ---------------------------------------------------------------------------
+
+/**
+ * Codex is fed by vault INJECTION (ADR-068 §1), not by a shared-provider route,
+ * so no `HARNESSES` entry ever names it and the row used to chip `opencode · pi`
+ * only — reading as "the ChatGPT subscription is not available to Codex". The
+ * projection now says what is true: Codex uses the ACTIVE ChatGPT account, so
+ * the chip is enabled exactly when there is one.
+ */
+describe('the Codex chip on the ChatGPT row (F14)', () => {
+  const list = [{ id: 'acc-1', email: 'daniel@example.com', accountId: 'ws-1', planType: 'pro' }]
+
+  it('chips codex ENABLED once the vault has an active account', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-1', perSession: false, list }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').engines.codex).toEqual({ enabled: true })
+  })
+
+  it('chips codex DISABLED when no account is active — the row still says Codex exists', () => {
+    const noActive = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        chatgptAccounts: { activeId: null, perSession: false, list }
+      })
+    )
+    expect(byId(noActive, 'chatgpt').engines.codex).toEqual({ enabled: false })
+
+    const noAccounts = buildProviderRegistry(
+      sources({ definitions: [chatgpt], statuses: [status()] })
+    )
+    expect(byId(noAccounts, 'chatgpt').engines.codex).toEqual({ enabled: false })
+  })
+
+  it('gives no other row a codex route', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt, localCustom],
+        statuses: [status()],
+        chatgptAccounts: { activeId: 'acc-1', perSession: false, list },
+        opencodeCatalog: [catalogEntry({ id: 'openrouter', name: 'OpenRouter' })],
+        piVendors: { groq: { authState: 'authenticated', billingType: 'apiKey' } }
+      })
+    )
+    for (const entry of snapshot.entries) {
+      if (entry.id === 'chatgpt') continue
+      expect(entry.engines.codex).toBeUndefined()
+    }
   })
 })

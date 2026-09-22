@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
+import { syncCore } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 
 // The fetch stub in setupMocks must never leak into other files sharing this
@@ -201,6 +202,22 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 const mockDiscoverOpencodeSkills = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: mockDiscoverOpencodeSkills
+}))
+
+// recordTurnUsage asks this provider which account a row belongs to
+// (ADR-071 §3). Mocked, because the real one reads opencode's own auth.json
+// out of the HOST's data dir: a suite that consults the dev machine's sign-in
+// state is not hermetic, and must never touch a real credential file.
+vi.mock('../../auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: {
+    probe: vi.fn().mockResolvedValue({}),
+    warmCache: vi.fn().mockResolvedValue(undefined),
+    buildAccountRef: vi.fn().mockReturnValue(null),
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `opencode:${vendorId}:native`,
+      accountLabel: vendorId
+    }))
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1401,83 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       )
     )
     session.dispose()
+  })
+
+  /**
+   * F18 — the judge's verdict rides the card of the call it judged, so a user in
+   * Auto mode can see WHY an action ran (or did not) without reading a log.
+   */
+  describe('the verdict reaches the card it judged', () => {
+    const reviews = (win: MockWindow) =>
+      win.webContents.send.mock.calls
+        .filter((call) => call[0] === 'session:tool-review')
+        .map((call) => call[2])
+
+    async function judged(reply: string, id: string): Promise<MockWindow> {
+      enableAutoMode()
+      mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: reply }] })
+      feedPermissionAsked('bash', id, 'call-1')
+      const win = new MockWindow()
+      const session = new OpencodeSession(
+        'routing_id_1',
+        win as unknown as HostWindowHandle,
+        '/tmp/test-cwd',
+        { permissionMode: 'full' }
+      )
+      await session.run('go')
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalled())
+      session.dispose()
+      return win
+    }
+
+    it('an ALLOW emits one auto-mode verdict bound to the call id', async () => {
+      const win = await judged('<block>no</block>', 'per_review_allow')
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'call-1',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'call-1',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved'
+          }
+        }
+      ])
+    })
+
+    it('a BLOCK names the corpus rule and carries the reason verbatim', async () => {
+      const win = await judged(
+        '<block>yes</block><reason>touches prod secrets</reason><category>credential_leakage</category>',
+        'per_review_block'
+      )
+      expect(reviews(win)).toHaveLength(1)
+      expect(reviews(win)[0].review).toMatchObject({
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        rule: expect.any(String),
+        rationale: 'touches prod secrets'
+      })
+    })
+
+    it('a fast-path allow never reaches the judge and emits NO verdict', async () => {
+      enableAutoMode()
+      feedPermissionAsked('read', 'per_review_fast', 'call-fast')
+      const win = new MockWindow()
+      const session = new OpencodeSession(
+        'routing_id_1',
+        win as unknown as HostWindowHandle,
+        '/tmp/test-cwd',
+        { permissionMode: 'full' }
+      )
+      await session.run('go')
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_review_fast', 'once')
+      )
+      expect(mockPrompt).not.toHaveBeenCalled()
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
   })
 
   it('classifier BLOCK without reason → reject with the fallback feedback text', async () => {
@@ -3119,6 +3213,160 @@ describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => 
 //   (vii) unknown foreign session → no subagent-* emitted
 // ---------------------------------------------------------------------------
 
+describe('OpencodeSession — per-item canonical streaming', () => {
+  beforeEach(setupMocks)
+
+  it('folds 1000 native chunks into one stable item without per-token ring growth', async () => {
+    const PARENT_SES = 'ses_item_stress'
+    const routingId = `r_item_stress_${Date.now()}`
+    const messageId = 'msg_item_stress'
+    const partId = 'part_item_stress'
+    const chunks = Array.from({ length: 1000 }, (_, index) => String(index % 10))
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'role',
+          type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: messageId, role: 'assistant', time: { created: 1234 } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'open',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: { id: partId, messageID: messageId, type: 'text', text: '', time: { start: 10 } }
+          }
+        } as OpencodeEvent,
+        ...chunks.map(
+          (delta, index) =>
+            ({
+              id: `delta-${index}`,
+              type: 'message.part.delta',
+              properties: {
+                sessionID: PARENT_SES,
+                messageID: messageId,
+                partID: partId,
+                field: 'text',
+                delta
+              }
+            }) as OpencodeEvent
+        ),
+        {
+          id: 'seal',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'text',
+              text: chunks.join(''),
+              time: { start: 10, end: 20 }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'seal-duplicate',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'text',
+              text: chunks.join(''),
+              time: { start: 10, end: 20 }
+            }
+          }
+        } as OpencodeEvent,
+        { id: 'idle', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    const before = syncCore.currentSeq()
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession(routingId, win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+
+    // Opencode publishes its native session id in status, which rekeys canonical state.
+    const canonical = syncCore.getCanonicalState().sessions[PARENT_SES]
+    expect(canonical.messages).toContainEqual(
+      expect.objectContaining({ id: messageId, content: [{ type: 'text', text: chunks.join('') }] })
+    )
+    expect(Object.keys(canonical.itemStreams)).toHaveLength(0)
+    expect(syncCore.currentSeq() - before).toBeLessThan(20)
+    const reliable = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(reliable.filter((call) => call[0] === 'session:item-open')).toHaveLength(1)
+    expect(session.getMessages().find((message) => message.id === messageId)?.timestamp).toBe(1234)
+    session.dispose()
+  })
+
+  // No existing OpencodeSession test covered a REASONING item open, so this is
+  // the one new case: the thinking item must carry opencode's own part start so
+  // the live "Thinking for Ns" counts the thought, not the message.
+  it('rides the reasoning part start on the thinking item open', async () => {
+    const PARENT_SES = 'ses_item_thinking'
+    const routingId = `r_item_thinking_${Date.now()}`
+    const messageId = 'msg_item_thinking'
+    const partId = 'part_item_thinking'
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'role',
+          type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: messageId, role: 'assistant', time: { created: 1234 } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'open',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'reasoning',
+              text: 'weighing',
+              time: { start: 4242 }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'delta',
+          type: 'message.part.delta',
+          properties: {
+            sessionID: PARENT_SES,
+            messageID: messageId,
+            partID: partId,
+            field: 'text',
+            delta: ' it'
+          }
+        } as OpencodeEvent,
+        { id: 'idle', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession(routingId, win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+
+    const opens = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
+      (call) => call[0] === 'session:item-open'
+    )
+    expect(opens).toHaveLength(1)
+    expect(opens[0][2].target.kind).toBe('thinking')
+    expect(opens[0][2].startedAt).toBe(4242)
+    session.dispose()
+  })
+})
+
 describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
   const PARENT_SES = 'ses_parent_8d'
   const CHILD_SES = 'ses_child_8d'
@@ -3223,7 +3471,13 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
           type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
-            part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'done' }
+            part: {
+              id: 'cp_a',
+              messageID: 'child_msg_a',
+              type: 'text',
+              text: 'done',
+              time: { start: 1, end: 2 }
+            }
           }
         } as OpencodeEvent,
         // End parent turn
@@ -3243,16 +3497,16 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    const subagentMsgCall = calls.find((c) => c[0] === 'session:subagent-message')
-    expect(subagentMsgCall).toBeDefined()
-    expect(subagentMsgCall![2].toolUseId).toBe(TASK_CALL_ID)
-    expect(subagentMsgCall![2].message.id).toBe('child_msg_a')
-    expect(subagentMsgCall![2].message.content[0]).toMatchObject({ type: 'text', text: 'done' })
+    const itemSeal = calls.find((c) => c[0] === 'session:item-seal')
+    expect(itemSeal).toBeDefined()
+    expect(itemSeal![2].target.ownerToolUseId).toBe(TASK_CALL_ID)
+    expect(itemSeal![2].message.id).toBe('child_msg_a')
+    expect(itemSeal![2].message.content[0]).toMatchObject({ type: 'text', text: 'done' })
 
     session.dispose()
   })
 
-  it('(iv) child delta → session:subagent-stream with correct toolUseId and type', async () => {
+  it('(iv) child delta stays on the item stream and seals under the parent tool owner', async () => {
     mockCreateSession.mockResolvedValue({ id: PARENT_SES })
     mockSubscribeEvents.mockImplementation(
       streamOf([
@@ -3272,9 +3526,28 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
             }
           }
         } as OpencodeEvent,
-        // Child delta
         {
           id: 'e2',
+          type: 'message.updated',
+          properties: { sessionID: CHILD_SES, info: { id: 'child_msg_delta', role: 'assistant' } }
+        } as OpencodeEvent,
+        {
+          id: 'e3',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: {
+              id: 'cp_delta',
+              messageID: 'child_msg_delta',
+              type: 'text',
+              text: '',
+              time: { start: 1 }
+            }
+          }
+        } as OpencodeEvent,
+        // Child delta
+        {
+          id: 'e4',
           type: 'message.part.delta',
           properties: {
             sessionID: CHILD_SES,
@@ -3284,8 +3557,8 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
             delta: 'streaming child'
           }
         } as OpencodeEvent,
-        { id: 'e3', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
-        { id: 'e4', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
       ])
     )
 
@@ -3300,11 +3573,28 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    const streamCall = calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall).toBeDefined()
-    expect(streamCall![2].toolUseId).toBe(TASK_CALL_ID)
-    expect(streamCall![2].type).toBe('text')
-    expect(streamCall![2].text).toBe('streaming child')
+    expect(calls.some((c) => c[0] === 'session:subagent-stream')).toBe(false)
+    await vi.waitFor(() =>
+      expect(
+        (session as unknown as { activeStreamItems: Map<string, unknown> }).activeStreamItems.size
+      ).toBe(0)
+    )
+    const settledCalls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const seal = settledCalls.find(
+      (call) => call[0] === 'session:item-seal' && call[2]?.message?.id === 'child_msg_delta'
+    )
+    expect(seal).toBeDefined()
+    expect(seal![2]).toMatchObject({
+      ownerToolUseId: TASK_CALL_ID,
+      target: { ownerToolUseId: TASK_CALL_ID, messageId: 'child_msg_delta', kind: 'text' }
+    })
+    expect(
+      syncCore
+        .getCanonicalState()
+        .sessions[PARENT_SES].subagentMessages[TASK_CALL_ID]?.find(
+          (message) => message.id === 'child_msg_delta'
+        )?.content
+    ).toEqual([{ type: 'text', text: 'streaming child' }])
 
     session.dispose()
   })
@@ -3926,12 +4216,23 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     expect(childRow!.sessionId).toBe(CHILD_SES)
     expect(childRow!.inputTokens).toBe(200)
     expect(childRow!.outputTokens).toBe(100)
+    // ADR-071 §1: a subagent's row says it is a child and names the session
+    // that spawned it, so its spend can be traced back to what caused it.
+    expect(childRow!.origin).toBe('child')
+    expect(childRow!.parentRoutingId).toBe('routing_id_1')
+    // ...and it is attributed to the CHILD vendor's account, not the parent's.
+    expect(childRow!.accountKey).toBe('opencode:anthropic:native')
+    expect(childRow!.accountLabel).toBe('anthropic')
 
     // Parent row must be attributed to parent model (openai/gpt-4o)
     const parentRow = getUsageEventByMessageId('msg_par_9a_cost')!
     expect(parentRow.vendorId).toBe('openai')
     expect(parentRow.modelId).toBe('gpt-4o')
     expect(parentRow.sessionId).toBe(PARENT_SES)
+    // The session's own turn is not a child and names no parent.
+    expect(parentRow.origin).toBe('session')
+    expect(parentRow.parentRoutingId).toBeNull()
+    expect(parentRow.accountKey).toBe('opencode:openai:native')
 
     session.dispose()
   })
@@ -4498,7 +4799,7 @@ describe('OpencodeSession — status-line emission', () => {
     expect(data.totalInputTokens).toBe(0)
     expect(data.totalOutputTokens).toBe(0)
     expect(data.totalTokens).toBe(0)
-    expect(data.contextWindowSize).toBe(0)
+    expect(data.contextWindow).toEqual({ used: 0, size: 0 })
     expect(data.usedPercentage).toBeNull()
     session.dispose()
   })
@@ -4584,8 +4885,8 @@ describe('OpencodeSession — status-line emission', () => {
     expect(finalSl.cachedTokens).toBe(210)
     // totalTokens = input + output + cached = 1000 + 100 + 210 = 1310
     expect(finalSl.totalTokens).toBe(1310)
-    // contextWindowSize = 128000 (from mock)
-    expect(finalSl.contextWindowSize).toBe(128000)
+    // contextWindow = { used: lastContextLength, size: 128000 (from mock) }
+    expect(finalSl.contextWindow).toEqual({ used: 1200, size: 128000 })
     // usedPercentage = round(lastContextLength / 128000 * 100)
     // lastContextLength = input + cacheRead = 1000 + 200 = 1200
     expect(finalSl.usedPercentage).toBe(Math.round((1200 / 128000) * 100))
@@ -4683,7 +4984,7 @@ describe('OpencodeSession — status-line emission', () => {
     session.dispose()
   })
 
-  it('usedPercentage is null when contextWindowSize is 0 (unknown model)', async () => {
+  it('usedPercentage is null when the context window size is 0 (unknown model)', async () => {
     // mock returns 0 = unknown
     mockGetOpencodeModelContextWindow.mockReturnValue(0)
     mockCreateSession.mockResolvedValue({ id: SES })
@@ -4719,7 +5020,9 @@ describe('OpencodeSession — status-line emission', () => {
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     const slCalls = calls.filter((c) => c[0] === 'session:status-line')
     const finalSl = slCalls[slCalls.length - 1]![2]
-    expect(finalSl.contextWindowSize).toBe(0)
+    // size 0 is "window unknown", NOT a zero-sized window — the used half is
+    // still a real figure, and usedPercentage is the thing that goes null.
+    expect(finalSl.contextWindow).toEqual({ used: 1000, size: 0 })
     expect(finalSl.usedPercentage).toBeNull()
     expect(finalSl.remainingPercentage).toBeNull()
 
@@ -4925,7 +5228,7 @@ describe('OpencodeSession — status-line emission', () => {
     // usedPercentage must be non-null (the regression value was null → "–")
     expect(finalSl.usedPercentage).not.toBeNull()
     expect(finalSl.usedPercentage).toBe(Math.round((1500 / 64000) * 100))
-    expect(finalSl.contextWindowSize).toBe(64000)
+    expect(finalSl.contextWindow).toEqual({ used: 1500, size: 64000 })
 
     session.dispose()
   })

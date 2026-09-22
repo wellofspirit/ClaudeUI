@@ -1,4 +1,8 @@
 import * as fs from 'fs'
+import { codexBinaryAvailable } from '../codex/codex-locate'
+import { discoverCodexModels } from '../codex/model-discovery'
+import { codexCommands } from './codex-commands'
+import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -6,11 +10,9 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import {
-  loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
-  loadBackgroundOutput,
-  resolveForkAnchor
+  loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
@@ -45,6 +47,14 @@ import {
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
+import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { readAccountLimits } from '../services/usage-provider'
+import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -55,7 +65,7 @@ import type {
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary } from '../services/db'
+import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
@@ -71,8 +81,14 @@ import {
   type CommandConnection,
   type CommandRegistration
 } from './command-registry'
+// The JSON-null normaliser. It was defined in this file until the command
+// modules both transports share were swept for the same class — see its doc
+// comment for what `null` does downstream and where it is deliberately left
+// alone.
+import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
+import { usageHubCommands } from './usage-hub-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -109,6 +125,7 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
+  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -125,6 +142,7 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
+  codexDeletePlanFor,
   clearConversation
 } from './handlers-core'
 
@@ -342,26 +360,29 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       cwd: string,
-      effort?: string,
-      resumeSessionId?: string,
-      permissionMode?: string,
-      model?: string,
-      thinkingMode?: string,
-      resumeSessionAt?: string,
-      forkSession?: boolean,
-      engineId?: EngineId
+      effort?: string | null,
+      resumeSessionId?: string | null,
+      permissionMode?: string | null,
+      model?: string | null,
+      thinkingMode?: string | null,
+      resumeSessionAt?: string | null,
+      forkSession?: boolean | null,
+      engineId?: EngineId | null
     ) => {
+      // Every optional argument through `opt` — see its doc comment. `effort`
+      // is the one that broke in the field; the rest are the same shape and
+      // reach the same `!== undefined` / `?: T` consumers.
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
         cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession,
-        engineId
+        effort: opt(effort),
+        resumeSessionId: opt(resumeSessionId),
+        permissionMode: opt(permissionMode),
+        model: opt(model),
+        thinkingMode: opt(thinkingMode),
+        resumeSessionAt: opt(resumeSessionAt),
+        forkSession: opt(forkSession),
+        engineId: opt(engineId)
       })
     }
   })
@@ -391,7 +412,7 @@ export function registerRemoteHandlers(
       engineId: EngineId,
       messageIndex: number
     ) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
+      return await historyFor(engineId).forkAnchor(sessionId, cwd, messageId, messageIndex)
     }
   })
 
@@ -403,8 +424,8 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, routingId, prompt, attachments)
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> | null
+    ) => sendPrompt(manager, routingId, prompt, opt(attachments))
   })
 
   handleRemote({
@@ -551,6 +572,18 @@ export function registerRemoteHandlers(
     handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
+  // ADR-068 §2 — the per-session vendor account pin. `session-config` like the
+  // two above: choosing which stored subscription a session bills is session
+  // configuration, and the phone manages the same accounts the desktop does.
+  handleRemote({
+    channel: 'session:set-account',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, accountId: string | null) =>
+      setAccount(manager, routingId, accountId)
+  })
+
   handleRemote({
     channel: 'session:set-thinking-mode',
     capability: 'session-config',
@@ -587,7 +620,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'query',
     handler: async (): Promise<EngineModelGroup[]> => {
-      const claudeModels = (await claudeSupportedModels()).map((m) => ({
+      const claudeModels = (await claudeSupportedModels().catch(() => [])).map((m) => ({
         ...m,
         engineId: 'claude' as const,
         vendorId: 'anthropic'
@@ -600,7 +633,12 @@ export function registerRemoteHandlers(
       }
       const opencodeGroups = await discoverOpencodeModels()
       const piGroups = await discoverPiModels()
-      return [claudeGroup, ...opencodeGroups, ...piGroups]
+      return [
+        claudeGroup,
+        ...opencodeGroups,
+        ...piGroups,
+        ...(await discoverCodexModels().catch(() => []))
+      ]
     }
   })
 
@@ -718,8 +756,13 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string, sessionId: string, projectKey: string, cwd?: string) => {
-      watchSession(routingId, sessionId, projectKey, cwd)
+    handler: async (
+      routingId: string,
+      sessionId: string,
+      projectKey: string,
+      cwd?: string | null
+    ) => {
+      watchSession(routingId, sessionId, projectKey, opt(cwd))
     }
   })
   handleRemote({
@@ -738,6 +781,8 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
+      if (getSessionMeta(sessionId)?.engineId === 'codex')
+        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: reachable by any token-holding remote client. Without this,
       // projectKey='../..' + a crafted sessionId appends attacker-controlled
       // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
@@ -774,8 +819,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
     }
   })
 
@@ -801,8 +846,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-background-output',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (projectKey: string, taskId: string, outputFile?: string) => {
-      return loadBackgroundOutput(projectKey, taskId, outputFile)
+    handler: async (projectKey: string, taskId: string, outputFile?: string | null) => {
+      return loadBackgroundOutput(projectKey, taskId, opt(outputFile))
     }
   })
 
@@ -813,8 +858,8 @@ export function registerRemoteHandlers(
     channel: 'session:delete-session',
     capability: 'chat',
     kind: 'command',
-    handler: async (sessionId: string, projectKey: string, engineId?: EngineId) => {
-      await deleteSession(manager, sessionId, projectKey, engineId)
+    handler: async (sessionId: string, projectKey: string, engineId?: EngineId | null) => {
+      await deleteSession(manager, sessionId, projectKey, opt(engineId))
     }
   })
 
@@ -823,8 +868,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, permissionMode?: string) => {
-      await clearConversation(manager, routingId, permissionMode)
+    handler: async (routingId: string, permissionMode?: string | null) => {
+      await clearConversation(manager, routingId, opt(permissionMode))
     }
   })
 
@@ -835,6 +880,15 @@ export function registerRemoteHandlers(
     handler: async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     }
+  })
+
+  // The desktop twin in session.ipc.ts carries the reasoning; the two must
+  // agree on capability and kind or the registry throws.
+  handleRemote({
+    channel: 'session:codex-delete-plan',
+    capability: 'chat',
+    kind: 'query',
+    handler: async (threadId: string) => codexDeletePlanFor(manager, threadId)
   })
 
   // -------------------------------------------------------------------------
@@ -909,15 +963,15 @@ export function registerRemoteHandlers(
     channel: 'claude:load-permissions',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadClaudePermissions(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'claude:save-permissions',
     capability: 'config',
     kind: 'command',
-    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string) =>
-      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, cwd)
+    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string | null) =>
+      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, opt(cwd))
   })
   handleRemote({
     channel: 'claude:workspace-trust',
@@ -945,8 +999,8 @@ export function registerRemoteHandlers(
     channel: 'mcp:load-servers',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadMcpServers(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'mcp:read-disabled',
@@ -1005,23 +1059,76 @@ export function registerRemoteHandlers(
     }
   })
 
+  /**
+   * ADR-068 §2 — per-account ChatGPT subscription limits. Read-only and
+   * token-free (percentages and reset times), and it TRIGGERS the read: rate
+   * limits are fetched when somebody looks at them, never on a timer.
+   */
+  handleRemote({
+    channel: 'usage:chatgpt-limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      if (refresh) await chatgptRateLimits.refresh()
+      return chatgptRateLimits.snapshot()
+    }
+  })
+
+  /**
+   * ADR-071 §6 — every account's limits, across vendors. `refresh` decides
+   * whether a stored Claude account's credentials are read at all: without it
+   * the answer comes from the last persisted reading and spends no refresh
+   * grant (the owner's rule). Per-account failures travel as `state`, so one
+   * account needing a sign-in cannot blank the rest.
+   */
+  handleRemote({
+    channel: 'usage:limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      return readAccountLimits({ refresh: !!refresh })
+    }
+  })
+
+  /**
+   * ADR-071 §7 — the window-value ledger. Read-only: one row per limit window
+   * with the peak percent, what the ledger saw inside it, and the two derived
+   * figures. Closed windows are in the answer and are most of it — the samples
+   * behind them are pruned at 30 days, these rows are not.
+   */
+  handleRemote({
+    channel: 'usage:windows',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return usageWindowSummary(sanitizeUsageWindowQuery(opts))
+    }
+  })
+
+  /**
+   * ADR-071 §8 — the dashboard's one read: the ledger's hourly buckets over a
+   * range, grouped provider → account → model, with both costs, the unknown
+   * counts and a per-local-day series. Read-only, and the dashboard built on it
+   * is not desktop-only.
+   */
+  handleRemote({
+    channel: 'usage:dashboard',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
+    }
+  })
+
   handleRemote({
     channel: 'usage:set-account-filter',
     capability: 'config',
     kind: 'command',
     handler: async (account: string | null) => {
       blockUsageService.setAccountFilter(account)
-    }
-  })
-
-  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
-  // (targetEngine, targetModel). Read-only DB aggregate — safe over remote.
-  handleRemote({
-    channel: 'usage:fetch-dispatched',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => {
-      return dispatchedUsageSummary()
     }
   })
 
@@ -1157,7 +1264,8 @@ export function registerRemoteHandlers(
     handler: async (engineId: EngineId): Promise<boolean> => {
       if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
       if (engineId === 'pi') return piBinaryAvailable()
-      return true
+      if (engineId === 'codex') return codexBinaryAvailable()
+      return engineId === 'claude'
     }
   })
   handleRemote({
@@ -1387,8 +1495,8 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string) =>
-      remoteVoice.start(manager, connection, routingId, language)
+    handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
+      remoteVoice.start(manager, connection, routingId, opt(language))
   })
 
   handleRemote({
@@ -1426,6 +1534,18 @@ export function registerRemoteHandlers(
   // different one). Absent (tests, remote-disabled harnesses) the channels still
   // register and throw — the channel SET must not depend on runtime config.
   for (const cmd of ideCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The usage hub (ADR-072 §7)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop transport spreads. Remote on purpose:
+  // the combined dashboard the hub feeds is not desktop-only, and neither is the
+  // settings group that configures it. `capability: 'config'`, like the rest of
+  // the metering surface — and no shape here can return the device secret.
+  for (const cmd of usageHubCommands()) {
     handleRemote(cmd)
   }
 
@@ -1638,6 +1758,7 @@ export function registerRemoteHandlers(
   for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
+  for (const command of codexCommands(manager)) handleRemote(command)
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

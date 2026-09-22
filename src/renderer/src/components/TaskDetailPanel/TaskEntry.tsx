@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody } from '../chat/SubagentOutputBody'
@@ -41,9 +42,8 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const itemStreams = useActiveSession((s) => s.itemStreams)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
-  const subagentText = useActiveSession((s) => s.subagentStreamingText)
-  const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
@@ -62,9 +62,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // Referenced by the autoscroll effect below, so they must be computed before
   // it; they default to empty when the task block isn't present yet. `msgs` is
   // memoized so its identity is stable across renders (it's an effect dep).
-  const msgs = useMemo(() => subagentMsgs[toolUseId] || [], [subagentMsgs, toolUseId])
-  const streamText = subagentText[toolUseId] || ''
-  const streamThinking = subagentThinking[toolUseId] || ''
+  const msgs = useMemo(
+    () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
+    [subagentMsgs, itemStreams, toolUseId]
+  )
 
   useEffect(() => {
     const el = bodyRef.current
@@ -74,7 +75,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     requestAnimationFrame(() => {
       isAutoScrolling.current = false
     })
-  }, [msgs, streamText, streamThinking, bashOutput, following])
+  }, [msgs, bashOutput, following])
 
   const handleScroll = useCallback(() => {
     if (isAutoScrolling.current) return
@@ -101,7 +102,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
 
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
-  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const hasSubagentOutput = msgs.length > 0
   const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
   const isBackground = !!input.run_in_background
   const progress = taskProgressMap[toolUseId]
@@ -240,8 +241,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               <div>
                 <SubagentOutputBody
                   msgs={msgs}
-                  streamThinking={streamThinking}
-                  streamText={streamText}
                   isRunning={isRunning}
                   isBackground={isBackground}
                   elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}

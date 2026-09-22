@@ -49,9 +49,18 @@ import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-
 import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
+import { followCodexActiveAccount } from '../codex/codex-account-switch'
+import { scanCodexLineage } from '../codex/history'
+import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { usageHubClient } from '../services/usage-hub/client'
+import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
+import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
+import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
+import { usageFetcher } from '../services/usage-fetcher'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -75,6 +84,12 @@ export interface CoreServices {
   vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
+  /**
+   * The usage hub client (ADR-072 §7). Handed back so each host can stop it on
+   * the way out: it holds a ten-minute interval and a retry timer, and a
+   * half-finished push at exit is a push the cursor never advanced over.
+   */
+  usageHubClient: typeof usageHubClient
 }
 
 export interface CoreServicesOptions {
@@ -125,6 +140,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   const { remoteAccessDisabled, authDeps, notifier, autostart, hostActor, afterSessionGraph } =
     options
 
+  // Prices BEFORE sessions: `equivalentCostUsd` must resolve non-built-in
+  // models from the first recalc, on every host. No network here: this reads
+  // the persisted ~/.claude/ui/opencode-prices.json if present. The daily top-up
+  // from models.dev (ADR-071 §5) runs in the background, never throws, and
+  // leaves the loaded prices in place if the fetch fails. This used to live in
+  // the desktop's main only, so the headless server priced nothing it had not
+  // built in (metering S2d).
+  loadPersistedPrices()
+  void refreshPricesIfStale()
+
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
   const sessionManager = registerSessionIpc(authDeps)
@@ -152,6 +177,120 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
   afterSessionGraph?.(sessionManager)
+
+  // THE USAGE POLL STARTS HERE, AND NOT ONE LINE EARLIER.
+  //
+  // It used to run inside `registerSessionIpc`, which is ~25 lines above — and
+  // the hook that just returned is where the desktop runs `accountManager
+  // .init()`, hence `applyActive()`, hence `setSecurestorageEnv({ dir })`. So
+  // the poll was starting BEFORE the app knew which credential directory was
+  // active, and two things followed (S2e round 2):
+  //
+  //  - the first `trackActiveAccount()` saw no dir, took the single-account
+  //    path, and settled the one-shot identity repair as done before it ran;
+  //  - the account-switch listener `startPolling` subscribes was already
+  //    attached when the boot-time apply fired, so every launch spent a second
+  //    pointless `fetch()` on a "switch" that was just the app starting.
+  //
+  // The contract, for anything added here later: nothing may resolve an account
+  // IDENTITY, or subscribe to the switch that changes it, before this line.
+  // `setIntervalSecs` stays in `registerSessionIpc` — it only configures the
+  // timer and is where the settings are read. A host that wires no hook (the
+  // headless `claudeui-server`) reaches this line just the same.
+  usageFetcher.startPolling()
+
+  // ACTIVE-account switch -> the Codex sessions that follow it (ADR-069 §4).
+  // Here rather than in `register-auth-providers.ts` (which wires the two engine
+  // FEED targets) for two reasons: the session graph is what this needs and it
+  // exists only at this point, and `claudeui-server` never imports that
+  // registrar, so a headless host would silently keep every follower on the old
+  // account's host. `configure()` is additive, so this adds the hook without
+  // disturbing the feed targets the desktop registrar has already wired.
+  //
+  // Reads the active id back from the vault rather than taking it as an
+  // argument: the hook fires for a switch AND for the removal of the active
+  // account (which promotes another), and the status is the one answer that is
+  // right for both.
+  credentialSync.configure({
+    onActiveAccountChanged: async () => {
+      const activeId = await credentialSync
+        .getStatus()
+        .then((status) => status.activeId)
+        .catch(() => undefined)
+      // An unreadable vault is not a licence to guess: `null` here would read as
+      // "no account is active" and move every follower off its host for nothing.
+      if (activeId === undefined) return
+      await followCodexActiveAccount(sessionManager, activeId)
+    },
+    // A stored ChatGPT credential -> the ONE resolution signal (ADR-070 §2),
+    // replicated so a sign-in taken here clears the owed sign-in on every other
+    // client too. Wired at the SAME seam as the hook above, for the same reason:
+    // `CredentialSync` must not import `sync-host` (its unit tests mock almost
+    // nothing and would pull in the whole service graph), and both hosts need it.
+    //
+    // The account id rides along so the fan-out is narrowed to the credential
+    // that was actually stored: it is the vault key, the same id-space Codex
+    // puts on `session:auth-required`, so adding account B leaves the sessions
+    // broken on account A owing their sign-in.
+    onCredentialStored: (accountId) =>
+      emitEvent('provider:auth-resolved', [
+        { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
+      ])
+  })
+
+  // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
+  //
+  // Its first pass pushes limit READINGS, and a reading is filed under the
+  // account key `credentialSync` resolves — so starting it above this line would
+  // let the first push go out under whatever identity the vault had not yet
+  // reconciled. It is also the last of the three background loops to start, for
+  // the same reason `usageFetcher.startPolling()` is where it is: nothing here
+  // may resolve an account identity before that line.
+  //
+  // `start()` is a no-op when no hub is configured, which is every machine until
+  // someone pastes a URL and a token into Settings. It reads the `enabled` flag
+  // out of the database itself rather than taking it as an option, so the one
+  // answer serves both hosts and a `usage-hub:configure` can re-arm it in place.
+  usageHubClient.start()
+
+  // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
+  // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either
+  // host's entrypoint because BOTH deployments must do it, and after the
+  // session graph because that is where the settings the compiler reads are
+  // already resolved. Synchronous and cheap — one stat, one read, a hash
+  // compare — and it swallows its own failures, so boot cannot be blocked by a
+  // rule file. `armCodexRulesSync` is what permits the OTHER two triggers
+  // (a permission save, a Codex spawn prep) to touch the user's own
+  // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
+  armCodexRulesSync()
+  syncCodexRulesFile()
+
+  // Learn what every Codex thread is a branch OF, once per launch, alongside the
+  // Claude session scan the line above sits next to (`registerSessionIpc` seeds
+  // canonical and starts the directory walk; this hangs off that same moment).
+  //
+  // Detached and best-effort: it spawns an app-server, lists the threads and
+  // reads the metadata of the ones whose lineage the cache (db v17) does not
+  // already know — a handful on the first launch, usually none on the next — so
+  // it must never be on boot's critical path, and a machine with no Codex
+  // installed returns immediately. What it buys is a delete plan that is a
+  // synchronous cache read instead of a sweep of every Codex session
+  // (`codex/history.ts` `scanCodexLineage`). The refresh runs only when the scan
+  // actually learned something, because that is when a branch may have appeared
+  // in — or fallen out of — the sidebar's listing.
+  void (async () => {
+    try {
+      const { read, learned } = await scanCodexLineage()
+      if (read || learned)
+        logger.info('main', `Codex lineage scan: ${read} thread(s) read, ${learned} learned`)
+      if (learned) await refreshCanonicalDirectories()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `Codex lineage scan failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  })()
 
   // Reconcile central credentials first, then materialize all shared-provider
   // routes. Both are best-effort and must never block app startup.
@@ -262,6 +401,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     tailscaleManager,
     automationManager,
     vscodeWebService,
-    hostAnchor
+    hostAnchor,
+    usageHubClient
   }
 }

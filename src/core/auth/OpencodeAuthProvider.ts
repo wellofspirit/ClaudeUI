@@ -23,6 +23,8 @@ import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
+import type { AccountIdentity } from '../../shared/account-key'
+import { AuthFileIdentityCache } from './account-identity'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
@@ -30,6 +32,14 @@ import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/Credentia
 // Path resolution + the credential-type read live in opencode/auth-store.ts so
 // model-discovery can consult them for row-action availability without importing
 // this module (which would cycle: this file imports invalidateOpencodeModelCache).
+
+/**
+ * opencode's ChatGPT provider — the one vendor whose oauth entry names a
+ * subscription. Same literal as `CredentialSync.OPENCODE_CODEX_VENDOR_ID`,
+ * restated here because this file must not import that module at runtime (see
+ * the CredentialSync feed-target section below for why).
+ */
+const OPENCODE_CHATGPT_VENDOR_ID = 'openai'
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -53,6 +63,18 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    */
   private oauthHold: { released: boolean } | null = null
 
+  /**
+   * ADR-071 §3 account identity, off opencode's own auth.json. Separate from
+   * `cachedVendorMap` on purpose: that one caches an HTTP probe and is dropped
+   * on every mutation, this one tracks the FILE, so a sign-in change made in a
+   * terminal is picked up without a probe.
+   */
+  private readonly identityCache = new AuthFileIdentityCache(
+    'opencode',
+    resolveOpencodeAuthJsonPath,
+    OPENCODE_CHATGPT_VENDOR_ID
+  )
+
   // -------------------------------------------------------------------------
   // EngineAuthProvider interface
   // -------------------------------------------------------------------------
@@ -73,9 +95,13 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
       const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
       try {
-        const [configResp, authCatalog] = await Promise.all([
+        const [configResp, authCatalog, credentialTypes] = await Promise.all([
           client.getConfigProviders().catch(() => ({ providers: [] })),
-          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>)
+          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>),
+          // One read of opencode's own auth.json for the whole probe — the
+          // stored credential is what a vendor is actually BILLED under (see
+          // billingType below). Missing/unparseable file → {}.
+          readOpencodeCredentialTypes()
         ])
 
         const map: VendorAuthMap = {}
@@ -98,14 +124,22 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
             authState = 'unauthenticated'
           }
 
-          // billingType inference:
+          // billingType:
           // - free vendors (opencode/zen): 'free'
-          // - configured-with-oauth: 'subscription' (heuristic: if vendor has oauth options)
-          // - configured-with-api-key: 'apiKey'
-          // - unconfigured: 'unknown'
+          // - a STORED credential decides: 'oauth' → subscription, 'api' → apiKey
+          // - no stored credential, unconfigured: 'unknown'
+          // - no stored credential, configured (a key from the environment or
+          //   from opencode.json): inferred from the auth options offered
+          //
+          // The stored credential comes first because the options a vendor
+          // OFFERS cannot tell the two apart where it matters: `openai` offers
+          // both oauth and api, so a ChatGPT subscription used to read as
+          // 'apiKey' and its turns were priced as real spend (ADR-071 §2).
           let billingType: 'subscription' | 'apiKey' | 'free' | 'unknown'
           if (isFree) {
             billingType = 'free'
+          } else if (credentialTypes[vendorId]) {
+            billingType = credentialTypes[vendorId] === 'oauth' ? 'subscription' : 'apiKey'
           } else if (!isConfigured) {
             billingType = 'unknown'
           } else {
@@ -123,10 +157,16 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
           map[vendorId] = { authState, billingType }
         }
 
-        // Add any configured providers not in the auth catalog (e.g. custom)
+        // Add any configured providers not in the auth catalog (e.g. custom).
+        // A stored credential still decides the billing type — same rule as
+        // above, so a custom gateway with an API key is not read as 'unknown'.
         for (const p of configResp.providers ?? []) {
           if (!map[p.id]) {
-            map[p.id] = { authState: 'authenticated', billingType: 'unknown' }
+            const stored = credentialTypes[p.id]
+            map[p.id] = {
+              authState: 'authenticated',
+              billingType: stored ? (stored === 'oauth' ? 'subscription' : 'apiKey') : 'unknown'
+            }
           }
         }
 
@@ -381,6 +421,18 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       authState: entry.authState,
       label: entry.label
     }
+  }
+
+  /**
+   * Which ACCOUNT this vendor's turns run under (ADR-071 §3) — the key that
+   * identifies the same subscription on every machine, plus a display label.
+   *
+   * Returns nothing else: no token, no key, no claim dump. Synchronous because
+   * a usage row is written from a synchronous path. An unreadable auth.json
+   * gives `opencode:<vendor>:native`, which is the honest answer, not an error.
+   */
+  accountIdentity(vendorId: string): AccountIdentity {
+    return this.identityCache.identity(vendorId)
   }
 
   /** Warm the probe cache eagerly (call at app start or on first opencode use). */

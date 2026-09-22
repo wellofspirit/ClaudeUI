@@ -19,6 +19,23 @@ import * as os from 'os'
 import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
+vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
+vi.mock('../../../core/codex/model-discovery', () => ({
+  discoverCodexModels: vi.fn(async () => [])
+}))
+vi.mock('../../../core/codex/history', () => ({
+  listCodexSessions: vi.fn(async () => []),
+  loadCodexHistory: vi.fn()
+}))
+vi.mock('../../../core/auth/CodexAuthProvider', () => ({
+  codexAuthProvider: {
+    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
+    loginStart: vi.fn(),
+    loginStatus: vi.fn(() => ({ status: 'idle' })),
+    loginCancel: vi.fn()
+  }
+}))
+
 // ---------------------------------------------------------------------------
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
@@ -92,7 +109,7 @@ vi.mock('../../../core/services/session-watcher', () => ({
 
 vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: vi.fn(async () => []),
-  loadOpencodeSessionHistory: vi.fn(async () => [])
+  loadOpencodeSessionHistory: vi.fn(async () => ({ messages: [], statusLine: null }))
 }))
 
 // NB: pi-session-list is a lightweight fs reader whose `piAgentDir` export is
@@ -239,6 +256,18 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
+// A SPY over the REAL prepareAndCreateSession: the null-normalisation guard
+// below asserts on the args object the remote handler hands across the
+// transport boundary, while every other `session:create` test in this file
+// keeps exercising the real shared implementation underneath.
+const createSessionSpy = vi.hoisted(() => ({ prepareAndCreateSession: vi.fn() }))
+
+vi.mock('../../../core/ipc/create-session', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/ipc/create-session')>()
+  createSessionSpy.prepareAndCreateSession.mockImplementation(actual.prepareAndCreateSession)
+  return { ...actual, prepareAndCreateSession: createSessionSpy.prepareAndCreateSession }
+})
+
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
@@ -261,6 +290,7 @@ import {
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
 import { setProxyEnv } from '../../../core/sdk/proxy'
@@ -269,6 +299,8 @@ import { setModelEnv } from '../../../core/sdk/model-env'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
+import { query } from '../../../core/sdk'
+import { discoverCodexModels } from '../../../core/codex/model-discovery'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -402,6 +434,25 @@ describe('registerRemoteHandlers', () => {
     gitWatchRegistry.releaseConnection(remoteConn.connectionId)
     clearSyncSubscribersForTests()
     vi.clearAllMocks()
+  })
+
+  it('still discovers Codex when the unrelated Claude catalog fails', async () => {
+    vi.mocked(query).mockImplementationOnce(() => {
+      throw new Error('Claude unavailable')
+    })
+    const native = {
+      engineId: 'codex' as const,
+      vendorId: 'openai',
+      vendorName: 'Native OpenAI',
+      models: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
+      ]
+    }
+    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    const groups = await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
+    expect(groups).toEqual(
+      expect.arrayContaining([native, expect.objectContaining({ engineId: 'claude', models: [] })])
+    )
   })
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
@@ -1062,6 +1113,83 @@ describe('registerRemoteHandlers', () => {
       expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
     })
 
+    // The web client marshals `invoke` args as JSON, so an OMITTED optional
+    // argument arrives as an explicit `null` (Electron IPC preserves
+    // `undefined`, which is why the desktop never hit this). `null` is not
+    // "unset" to the code downstream: CodexSession.validateEffort treats only
+    // `undefined` as "no effort" and threw
+    // "Codex reasoning effort is unavailable for the selected model" on every
+    // fresh Codex session created from the web client.
+    it('normalises null optional args to undefined before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-nulls',
+          '/tmp/proj',
+          null, // effort
+          null, // resumeSessionId
+          null, // permissionMode
+          null, // model
+          null, // thinkingMode
+          null, // resumeSessionAt
+          null, // forkSession
+          null // engineId
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession).toHaveBeenCalledTimes(1)
+      const args = createSessionSpy.prepareAndCreateSession.mock.calls[0][2]
+      for (const key of [
+        'effort',
+        'resumeSessionId',
+        'permissionMode',
+        'model',
+        'thinkingMode',
+        'resumeSessionAt',
+        'forkSession',
+        'engineId'
+      ] as const) {
+        expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
+      }
+      // Required args are untouched.
+      expect(args.routingId).toBe('rid-nulls')
+      expect(args.cwd).toBe('/tmp/proj')
+    })
+
+    it('passes real optional values through unchanged', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-values',
+          '/tmp/proj',
+          'high',
+          'resume-1',
+          'plan',
+          'opencode/luna',
+          'think',
+          'anchor-1',
+          false,
+          'opencode'
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toMatchObject({
+        routingId: 'rid-values',
+        cwd: '/tmp/proj',
+        effort: 'high',
+        resumeSessionId: 'resume-1',
+        permissionMode: 'plan',
+        model: 'opencode/luna',
+        thinkingMode: 'think',
+        resumeSessionAt: 'anchor-1',
+        // `false` is a real value, not "unset" — `?? undefined` must not eat it.
+        forkSession: false,
+        engineId: 'opencode'
+      })
+    })
+
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
       await dispatcher.handle(
         makeRequest('session:create', 'rid-broadcast', '/tmp/proj'),
@@ -1334,7 +1462,6 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'stream:watch',
   'usage:fetch',
   'usage:fetch-block',
-  'usage:fetch-dispatched',
   'usage:set-account-filter'
 ] as const
 
@@ -1618,6 +1745,77 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
 const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
 
 /**
+ * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
+ *
+ * Four channels, declared in the same shared module for the same reason as the
+ * line above: the phone manages the subscription the desktop does, and one
+ * declaration is what stops the two surfaces disagreeing. All `config`, so a
+ * base connection reaches them — a vendor subscription is engine configuration
+ * (ADR-056), and switching which account the host bills is exactly the kind of
+ * thing the everything-remote ruling covers.
+ *
+ * Token-free by construction, pinned in
+ * `main/ipc/__tests__/provider-account-commands.test.ts`: `list` returns ids,
+ * emails, plan names and expiries, and the three mutations return nothing.
+ * ADDING an account is not here — that is the existing `vendor-auth:oauth-*`
+ * pair, which already completes remotely via paste-back.
+ */
+const PROVIDER_ACCOUNT_CHANNELS = [
+  'provider-account:list',
+  'provider-account:remove',
+  'provider-account:set-per-session',
+  'provider-account:switch'
+] as const
+
+/**
+ * ADR-068 §2 — the per-session ChatGPT PIN and the per-account usage it makes
+ * readable. The EIGHTH deliberate widening, and the narrowest since the provider
+ * rows: both declare `config`, so a base connection reaches them, and both are
+ * engine CONFIGURATION rather than a security surface (ADR-056).
+ *
+ * `session:set-account` is `session-config`, the same capability as
+ * `session:set-model` and `session:set-effort` beside it: choosing which stored
+ * subscription a session bills is a run-configuration choice a phone must be
+ * able to make, and the handler refuses on an engine whose
+ * `capabilities.auth.perSessionAccount` is false rather than silently doing
+ * nothing.
+ *
+ * `usage:chatgpt-limits` is a `query` joining the four `usage:*` channels the
+ * phone already reaches. Token-free by construction: percentages, reset times,
+ * the email the account list already carries, and nothing else.
+ */
+const CODEX_ACCOUNT_PIN_CHANNELS = ['session:set-account', 'usage:chatgpt-limits'] as const
+
+/**
+ * ADR-068 §3 (Slice 7) — device-code sign-in for ChatGPT.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS}
+ * for the same reason `provider-registry:list` got one: that const is the record
+ * of one dated sweep, and this is a NEW channel declared in the same shared
+ * module. It exists FOR the remote client — paste-back can complete a ChatGPT
+ * sign-in from any browser, but copying a dead page's address bar on a phone is
+ * the step device code removes.
+ *
+ * A `config` command plus a `config` query, so a base connection reaches both (a
+ * vendor subscription is engine configuration — ADR-056). Token-free by
+ * construction and pinned in
+ * `main/ipc/__tests__/vendor-device-code-commands.test.ts`: the start carries
+ * exactly `verificationUrl` / `userCode` / `expiresAt`, the status carries a
+ * state and at most the host's own error message, and the `device_auth_id` the
+ * host polls with never leaves the host.
+ *
+ * TWO channels because the WAIT cannot be one long invoke: `web/connection.ts`
+ * rejects any invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code
+ * lives for fifteen minutes. The host owns the wait; the client polls the query.
+ * That is also what makes a mid-wait reconnect free — the outcome is on the host,
+ * not in a promise attached to a dead socket.
+ */
+const CHATGPT_DEVICE_CODE_CHANNELS = [
+  'vendor-auth:device-code-start',
+  'vendor-auth:device-code-status'
+] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1648,6 +1846,22 @@ const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
 
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
+
+/**
+ * The usage hub's six channels (ADR-072 §7).
+ *
+ * Restated here rather than imported from `usage-hub-commands.ts`, like every
+ * other family in this file: a pin that imported the list it is pinning would
+ * pass whatever the source said.
+ */
+const USAGE_HUB_CHANNELS = [
+  'usage-hub:status',
+  'usage-hub:configure',
+  'usage-hub:set-secret',
+  'usage-hub:sync-now',
+  'usage-hub:resync',
+  'usage-hub:forget'
+] as const
 
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
@@ -1694,8 +1908,38 @@ describe('remote surface parity (phase 1 port)', () => {
         ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
+        ...PROVIDER_ACCOUNT_CHANNELS,
+        ...CODEX_ACCOUNT_PIN_CHANNELS,
+        ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
-        ...IDE_CHANNELS
+        ...IDE_CHANNELS,
+        // ADR-068 §1: the three `codex:login-*` channels are gone with the
+        // native device-code UI; the vault owns the ChatGPT identity and
+        // `provider-account:*` is how a remote client reads it.
+        'codex:auth-status',
+        // ADR-068 §6 (Slice 5a): the Codex engine page writes `config.toml`
+        // through the app-server, and a remote client edits settings exactly as
+        // the desktop one does.
+        'codex-config:read',
+        'codex-config:write',
+        'codex:recompile-rules',
+        'session:codex-approval',
+        // Read-only: what deleting a Codex session would remove (slice G).
+        'session:codex-delete-plan',
+        // ADR-071 §6: every account's limits, for every vendor. `config` and a
+        // query, like the two usage reads beside it — and the remote client has
+        // to reach it, because the dashboard built on it is not desktop-only.
+        'usage:limits',
+        // ADR-071 §7: the window-value ledger, read-only, for the same dashboard.
+        'usage:windows',
+        // ADR-071 §8: the dashboard's own read over the ledger's buckets.
+        'usage:dashboard',
+        // ADR-072 §7: the usage hub's six channels, declared once in
+        // `usage-hub-commands.ts` and spread by both transports. Remote because
+        // the combined dashboard and the settings group that configures it are
+        // not desktop-only — and no shape among them can return the device
+        // secret, which is why a write-only `set-secret` command is safe here.
+        ...USAGE_HUB_CHANNELS
       ].sort()
     )
   })
@@ -2082,12 +2326,16 @@ describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
       instructions: 'Sign in.'
     })),
     cancelVendorOauth: vi.fn(async () => {}),
-    oauthCallback: vi.fn(async () => true)
+    // Parameters spelled out (not `vi.fn(async () => true)`) so the null-guard
+    // below can read `mock.calls[0][2]` — an argument-less fake types its calls
+    // as an empty tuple.
+    oauthCallback: vi.fn(async (_vendorId: string, _method: number, _code?: string) => true)
   }
 
   beforeEach(() => {
     fakeProvider.probe.mockClear()
     fakeProvider.cancelVendorOauth.mockClear()
+    fakeProvider.oauthCallback.mockClear()
     makeFakeWindow()
     dispatcher = new RemoteDispatcher()
     registerRemoteHandlers(dispatcher, sessionManagerStub, undefined, {
@@ -2161,5 +2409,85 @@ describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
     expect(res.ok).toBe(true)
     expect(res.data?.url).toContain('auth.example.com')
     expect(fakeProvider.cancelVendorOauth).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------------------
+  // JSON-null optional arguments in the SHARED command modules.
+  //
+  // 922644bf normalised the remote-only handlers in `remote-handlers.ts`; the
+  // declarations `session.ipc.ts` and `remote-handlers.ts` BOTH spread carried
+  // the same class. The web client marshals `invoke` args as JSON and
+  // `api-adapter.ts` forwards every declared parameter positionally, so an
+  // argument the renderer stopped short of arrives here as an explicit `null`
+  // rather than `undefined`. These two are the ones whose consumers actually
+  // break on it — see `src/core/ipc/wire-args.ts`.
+  // -------------------------------------------------------------------------
+
+  it('vendor-auth:oauth-callback normalises a null code to undefined (GUARD — fails pre-fix)', async () => {
+    const conn = makeRemoteConnection('password', null)
+    // The `auto` method awaits the host loopback with NO code — the renderer
+    // simply omits the argument, and the wire turns that into null.
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-callback', 'opencode', 'anthropic', 0, null),
+      conn
+    )) as { ok: boolean }
+    expect(res.ok).toBe(true)
+    // `OpencodeClient.oauthCallback` spreads `code` into the POST body on
+    // `code !== undefined`, and opencode types that field
+    // `Schema.optional(Schema.String)` — a null would be sent and rejected.
+    expect(
+      fakeProvider.oauthCallback.mock.calls[0][2],
+      'code must be undefined, not null'
+    ).toBeUndefined()
+  })
+
+  it('vendor-auth:oauth-callback passes a real pasted code through unchanged', async () => {
+    const conn = makeRemoteConnection('password', null)
+    await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-callback', 'pi', 'openai-codex', 0, 'pasted-code#state'),
+      conn
+    )
+    expect(fakeProvider.oauthCallback.mock.calls[0]).toEqual([
+      'openai-codex',
+      0,
+      'pasted-code#state'
+    ])
+  })
+
+  it('shared-provider:set-default normalises a null modelId to undefined (GUARD — fails pre-fix)', async () => {
+    const setDefault = vi
+      .spyOn(sharedProviderService, 'setRouteDefaultModel')
+      .mockResolvedValue(undefined)
+    try {
+      const conn = makeRemoteConnection('password', null)
+      // Clearing the default: `ProviderSheet.tsx` sends `value || undefined`.
+      const res = (await dispatcher.handle(
+        makeRequest('shared-provider:set-default', 'ollama-local', 'pi', null),
+        conn
+      )) as { ok: boolean }
+      expect(res.ok).toBe(true)
+      // `undefined` DROPS `defaultModel` from the saved definition; `null` keeps
+      // it, and `SharedProviderRepository.save`'s `isRoute` check then refuses
+      // the whole write with "Invalid shared provider routes".
+      expect(setDefault.mock.calls[0][2], 'modelId must be undefined, not null').toBeUndefined()
+    } finally {
+      setDefault.mockRestore()
+    }
+  })
+
+  it('shared-provider:set-default passes a real modelId through unchanged', async () => {
+    const setDefault = vi
+      .spyOn(sharedProviderService, 'setRouteDefaultModel')
+      .mockResolvedValue(undefined)
+    try {
+      const conn = makeRemoteConnection('password', null)
+      await dispatcher.handle(
+        makeRequest('shared-provider:set-default', 'ollama-local', 'pi', 'llama-4'),
+        conn
+      )
+      expect(setDefault.mock.calls[0]).toEqual(['ollama-local', 'pi', 'llama-4'])
+    } finally {
+      setDefault.mockRestore()
+    }
   })
 })

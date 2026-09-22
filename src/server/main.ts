@@ -47,10 +47,20 @@
 // distribution died at startup until the entrypoint pulled it in explicitly.
 // Electron's main process never hit this because it is not bundled this way.
 import 'reflect-metadata'
+import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
+import { codexBinaryAvailable, codexLinuxSandboxWarning } from '../core/codex/codex-locate'
+import { requireServerEngineAuth } from './engine-auth'
 import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
-import { setHostAuth, setHostIsPackaged, setHostPaths, setHostPicker } from '../core/host'
+import {
+  setHostAppVersion,
+  setHostAuth,
+  setHostIsPackaged,
+  setHostOAuthLoopback,
+  setHostPaths,
+  setHostPicker
+} from '../core/host'
 import { logger } from '../core/services/logger'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
@@ -135,9 +145,29 @@ function resolveAppPath(): string {
   return fromSource
 }
 
+/**
+ * The build this server is, for the usage hub's per-device facts (ADR-072 §5).
+ *
+ * There is no `app.getVersion()` here and no version baked into the bundle, so
+ * it comes from the `package.json` beside the resolved app path when there is
+ * one — which is the repository root for a `bun src/server/main.ts` run and the
+ * distribution directory when one ships a manifest. Absent, the push says
+ * `unknown`, which is honest: the alternative is inventing a number.
+ */
+function resolveServerVersion(): string {
+  try {
+    const manifest = path.join(resolveAppPath(), 'package.json')
+    const parsed = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as { version?: unknown }
+    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 /** Wire every host adapter the headless deployment needs. */
 function installHostAdapters(): void {
   setHostPaths({ getAppPath: resolveAppPath })
+  setHostAppVersion(resolveServerVersion())
 
   // A deployed server is not a dev build, so background usage/analytics writes
   // are ON. The desktop's dev-mode skip exists to stop a dev instance fighting
@@ -159,6 +189,13 @@ function installHostAdapters(): void {
   // because the session layer would then believe a Claude account is active.
   // Vendor OAuth from a headless box is S4.
   setHostAuth(null)
+
+  // No vendor-OAuth loopback: the ChatGPT redirect is registered to
+  // `http://localhost:1455/auth/callback` (ADR-057), which lands on the REMOTE
+  // browser's own loopback, never on this box. The code arrives by paste-back
+  // or device code, so binding the fixed port here would only make concurrent
+  // sign-ins collide. `null` is the fallback anyway; stated so the choice reads.
+  setHostOAuthLoopback(null)
 }
 
 /** Apply the bootstrap flags that must land BEFORE the listener starts. */
@@ -277,18 +314,19 @@ async function main(): Promise<void> {
     // surface by construction — so the LABEL is what stops a headless box
     // claiming a `desktop-renderer` it does not have.
     hostActor: hostConnection('server-console'),
-    // The desktop-auth pair. A headless server has no OAuth browser and no
-    // multi-account UI, so both refuse loudly rather than pretending: the
-    // channels stay REGISTERED (the surface must not depend on the host, or the
-    // remote UI would render a different app on a server than on a desktop) and
-    // fail with a message that names the reason.
+    // The desktop-auth pair.
+    //
+    // `requireEngineAuth` drives the ChatGPT vault for `pi` and `codex` here —
+    // device code (ADR-068 §3) was built FOR this deployment and paste-back
+    // (ADR-057) works here too — and refuses `claude` and `opencode`, whose
+    // flows genuinely live inside cli.js and the opencode server. See
+    // `engine-auth.ts` for the whole rule. Multi-account switching has no
+    // headless UI and still refuses. The channels stay REGISTERED either way
+    // (the surface must not depend on the host, or the remote UI would render a
+    // different app on a server than on a desktop) and fail with a message that
+    // names the reason.
     authDeps: {
-      requireEngineAuth: () => {
-        throw new Error(
-          'Engine sign-in is not available on the headless server yet — sign in on the desktop app; ' +
-            'the credential vault is shared.'
-        )
-      },
+      requireEngineAuth: requireServerEngineAuth,
       setAccountEnabled: () => {
         throw new Error('Multi-account switching is not available on the headless server.')
       }
@@ -339,12 +377,40 @@ async function main(): Promise<void> {
     `claudeui-server listening on port ${status.port} (sqlite: ${isBun() ? 'bun:sqlite' : 'node:sqlite'})`
   )
 
+  // Linux ships Codex but not its sandbox: `bwrap` is a distro package, and
+  // without it the FIRST sandboxed command panics with no explanation an operator
+  // could act on. Said once here, where a headless box's only UI is its log, and
+  // only when Codex is actually installed — on every other host, and on a Linux
+  // box with bubblewrap present, this is silent. The desktop does not call it: no
+  // Linux desktop build ships.
+  // `statSync`, not `lstatSync`: Codex's own lookup follows symlinks (`which`
+  // semantics), and distros that install `bwrap` as a link would otherwise be
+  // told it is missing.
+  const sandboxWarning = codexBinaryAvailable()
+    ? codexLinuxSandboxWarning(process.platform, process.env, (candidate) => {
+        try {
+          const entry = fs.statSync(candidate)
+          return entry.isFile() && (entry.mode & 0o111) !== 0
+        } catch {
+          return false
+        }
+      })
+    : null
+  if (sandboxWarning !== null) logger.warn('server', sandboxWarning)
+
   // Graceful shutdown. `stop()` is fire-and-forget by design (see host-anchor),
   // so the exit is not gated on peers that may never close their sockets.
   let stopping = false
   const shutdown = (signal: string): void => {
     if (stopping) return
     stopping = true
+    codexAuthProvider.dispose()
+    // The usage hub's timers (ADR-072 §7) before anything slower: a push in
+    // flight is idempotent on the hub, so nothing waits on it.
+    core.usageHubClient.stop()
+    core.sessionManager.forEach((session) => {
+      if (session.engineId === 'codex') session.dispose()
+    })
     logger.info('server', `${signal} received — shutting down`)
     anchor.stop()
     // Give the listener a moment to close before the process goes, but never

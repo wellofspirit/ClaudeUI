@@ -1,3 +1,10 @@
+import {
+  applyItemStreamFrame,
+  itemStreamKey,
+  type ItemStreamFrame,
+  type ItemStreamTarget
+} from '../../core/shared/sync/item-stream'
+import { applyEvent } from '../../core/shared/sync/reducer'
 /**
  * @vitest-environment node
  *
@@ -80,15 +87,8 @@ import { registerCommand, commandRegistry } from '../../core/ipc/command-registr
 import { STREAM_WATCH_COMMAND } from '../../core/ipc/stream-watch'
 import { emitEvent, syncCore } from '../../core/services/sync-host'
 import { DEFAULT_RING_CAPACITY } from '../../core/sync/event-ring'
-import { applyStreamFrame } from '../../core/shared/sync/stream'
-import { auxFromCanonical } from '../../core/shared/sync/reducer'
 import { fromSnapshot } from '../../core/shared/sync/state'
-import type {
-  WsServerMessage,
-  WsSyncCatchup,
-  WsSyncFull,
-  StreamFrame
-} from '../../shared/remote-protocol'
+import type { WsServerMessage, WsSyncCatchup, WsSyncFull } from '../../shared/remote-protocol'
 
 const ROUTING_ID = 'rid-stream-lane'
 const CWD = '/tmp/stream-lane'
@@ -140,8 +140,21 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
     // A long answer being typed. RING_CAPACITY + a margin, so a lane that ringed
     // would have evicted the cursor several times over.
     const deltaCount = DEFAULT_RING_CAPACITY + 500
+    const target: ItemStreamTarget = { messageId: 'long-answer', blockIndex: 0, kind: 'text' }
+    emitEvent('session:item-open', [
+      ROUTING_ID,
+      {
+        target,
+        message: {
+          id: 'long-answer',
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'text', text: '' }]
+        }
+      }
+    ])
     for (let i = 0; i < deltaCount; i++) {
-      emitEvent('session:stream', [ROUTING_ID, { type: 'text', text: 'x' }])
+      emitEvent('session:item-delta', [ROUTING_ID, { target, chunk: 'x' }])
     }
     // Plus the handful of real domain events a turn produces. These DO ring, and
     // they are what the catchup must still carry.
@@ -166,69 +179,69 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
     expect(answer.type).toBe('sync-catchup')
     const catchup = answer as WsSyncCatchup
     expect(catchup.events.map((e) => e.channel)).toEqual([
+      'session:item-open',
       'session:status-line',
       'session:metering',
       'session:result'
     ])
     // And the catchup carries no deltas at all — the ring is domain events only.
+    expect(catchup.events.some((e) => e.channel === 'session:item-delta')).toBe(false)
     expect(catchup.events.some((e) => e.channel === 'session:stream')).toBe(false)
     // The structural fact underneath it: not one of those deltas took a seq.
-    expect(syncCore.currentSeq() - cursor).toBe(3)
+    expect(syncCore.currentSeq() - cursor).toBe(4)
 
     await second.client.close()
   })
+})
 
-  it('stream:watch replays the coalesced accumulation, exactly', async () => {
-    const { client, frames } = await connect()
-    await client.send({ type: 'sync', lastSeq: 0 })
-    await waitFor(() => frames.some((f) => f.type === 'sync-full'))
-    const full = frames.find((f) => f.type === 'sync-full') as WsSyncFull
-
-    // A client that syncs and never watches receives no deltas — the whole point
-    // of a subscription-scoped lane.
-    emitEvent('session:stream', [ROUTING_ID, { type: 'text', text: 'y' }])
-    await waitFor(() =>
-      syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText.endsWith('y')
-    )
-    expect(frames.filter((f) => f.type === 'stream')).toHaveLength(0)
-
-    // Watch: the replay lands immediately. It states EVERY stream of the session
-    // at offset 0, empty ones included — a stream it stayed silent about would be
-    // one re-watching could never correct.
-    await client.invoke('stream:watch', { sessionIds: [ROUTING_ID] })
-    await waitFor(() => frames.filter((f) => f.type === 'stream').length >= 2)
-    const replay = frames.filter((f): f is StreamFrame => f.type === 'stream')
-    expect(replay.map((f) => [f.streamId, f.offset])).toEqual([
-      [`${ROUTING_ID}/text`, 0],
-      [`${ROUTING_ID}/thinking`, 0]
-    ])
-    expect(replay[0].chunk).toBe(syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText)
-
-    // Fold it the way the replica does: snapshot + replay ⇒ canonical's value.
-    const replica = fromSnapshot(full.state)
-    const aux = auxFromCanonical(replica)
-    let folded = replica
-    for (const frame of replay) {
-      const outcome = applyStreamFrame(folded, aux, frame)
-      expect(outcome.result).toBe('applied')
-      folded = outcome.state
-    }
-    expect(folded.sessions[ROUTING_ID].streamingText).toBe(
-      syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText
-    )
-
-    // A live delta continues from there, at the offset the replay established.
-    const before = replay.length
-    emitEvent('session:stream', [ROUTING_ID, { type: 'text', text: 'z' }])
-    await waitFor(() => frames.filter((f) => f.type === 'stream').length > before)
-    const live = frames.filter((f): f is StreamFrame => f.type === 'stream')[before]
-    expect(live.offset).toBe(folded.sessions[ROUTING_ID].streamingText.length)
-    const continued = applyStreamFrame(folded, aux, live)
-    expect(continued.result).toBe('applied')
-    expect(continued.state.sessions[ROUTING_ID].streamingText).toBe(
-      syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText
-    )
-
-    await client.close()
+it('streams individual items over WebSocket, catches up after 5500 chunks and seals for unwatched clients', async () => {
+  const id = 'item-wire'
+  const target: ItemStreamTarget = { messageId: 'answer', blockIndex: 0, kind: 'text' }
+  const msg = (text: string) => ({
+    id: 'answer',
+    role: 'assistant' as const,
+    timestamp: 1,
+    content: [{ type: 'text' as const, text }]
   })
+  emitEvent('session:created', [id, { cwd: CWD, engineId: 'codex' }])
+  const first = await connect()
+  try {
+    await first.client.send({ type: 'sync', lastSeq: 0 })
+    await waitFor(() => first.frames.some((f) => f.type === 'sync-full'))
+    const full = first.frames.find((f) => f.type === 'sync-full') as WsSyncFull
+    emitEvent('session:item-open', [id, { target, message: msg('') }])
+    for (let n = 0; n < 5500; n++) emitEvent('session:item-delta', [id, { target, chunk: 'x' }])
+    expect(syncCore.currentSeq()).toBe(full.state.seq + 1)
+    expect(first.frames.some((f) => f.type === 'item-stream')).toBe(false)
+    const second = await connect()
+    try {
+      await second.client.send({ type: 'sync', lastSeq: full.state.seq, epoch: full.epoch })
+      await waitFor(() => second.frames.some((f) => f.type === 'sync-catchup'))
+      const catchup = second.frames.find((f) => f.type === 'sync-catchup') as WsSyncCatchup
+      let state = fromSnapshot(full.state)
+      for (const event of catchup.events) state = applyEvent(state, event)
+      await second.client.invoke('stream:watch', { sessionIds: [id] })
+      await waitFor(() => second.frames.some((f) => f.type === 'item-stream'))
+      const replay = second.frames.find((f) => f.type === 'item-stream') as ItemStreamFrame
+      const replayOutcome = applyItemStreamFrame(state, replay)
+      expect(replayOutcome.result).toBe('applied')
+      state = replayOutcome.state
+      expect(state.sessions[id].itemStreams[itemStreamKey(target)].value).toBe('x'.repeat(5500))
+      emitEvent('session:item-seal', [id, { message: msg('authoritative final') }])
+      await waitFor(() =>
+        first.frames.some((f) => f.type === 'event' && f.channel === 'session:item-seal')
+      )
+      const seal = first.frames.find(
+        (f) => f.type === 'event' && f.channel === 'session:item-seal'
+      )!
+      if (seal.type !== 'event') throw new Error('missing seal')
+      state = applyEvent(state, seal)
+      expect(state.sessions[id].messages[0].content).toEqual(msg('authoritative final').content)
+      expect(state.sessions[id].itemStreams).toEqual({})
+    } finally {
+      await second.client.close()
+    }
+  } finally {
+    await first.client.close()
+  }
 })

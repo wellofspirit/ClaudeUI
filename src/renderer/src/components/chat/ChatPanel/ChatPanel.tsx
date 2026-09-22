@@ -1,20 +1,17 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { overlayItemStreams } from '../../../../../core/shared/sync/item-stream'
 import {
   useActiveSession,
   useSessionStore,
   useFocusedAgentData
 } from '../../../stores/session-store'
-import { MessageBubble } from '../MessageBubble'
-import { StreamingText } from '../StreamingText'
-import { ThinkingBlock } from '../ThinkingBlock'
+import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
 import { SentFilesWidget } from '../../SentFilesWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
-import { VendorAuthRequiredCard } from '../VendorAuthRequiredCard'
-import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import {
@@ -52,10 +49,26 @@ function persistFullscreenHintDismissed(): void {
 
 export function ChatPanel(): React.JSX.Element {
   const focusedData = useFocusedAgentData()
-  const messages = focusedData.messages
-  const hasStreamingText = !!focusedData.streamingText
-  const streamingThinking = focusedData.streamingThinking
-  const thinkingStartedAt = focusedData.thinkingStartedAt
+  const itemStreams = useActiveSession((s) => s.itemStreams)
+  const messages = useMemo(
+    () => overlayItemStreams(focusedData.messages, itemStreams),
+    [focusedData.messages, itemStreams]
+  )
+  // The item's OWN start clock rides the open (`ActiveItemStream.startedAt`), so
+  // a thinking block that begins after a tool call times from the thought rather
+  // than from message creation. Absent for engines that do not measure it — the
+  // bubble falls back to `message.timestamp`, the pre-existing behaviour.
+  const activeThinkingByMessage = useMemo(() => {
+    const slots = new Map<string, Array<{ index: number; startedAt?: number }>>()
+    for (const stream of Object.values(itemStreams)) {
+      if (stream.target.ownerToolUseId || stream.target.kind !== 'thinking') continue
+      const current = slots.get(stream.target.messageId) ?? []
+      current.push({ index: stream.target.blockIndex, startedAt: stream.startedAt })
+      slots.set(stream.target.messageId, current)
+    }
+    return slots
+  }, [itemStreams])
+  const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
 
@@ -242,7 +255,13 @@ export function ChatPanel(): React.JSX.Element {
       ? `${chatWidthPx}px`
       : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
-  const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
+  const hasContent = messages.length > 0
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id
+    }
+    return null
+  }, [messages])
   const showEmptyScreen = !hasContent && status.state === 'idle'
 
   // Mobile web only: double-tapping the chat toggles browser fullscreen (there
@@ -263,17 +282,9 @@ export function ChatPanel(): React.JSX.Element {
     return () => clearTimeout(id)
   }, [showFullscreenHint, dismissFullscreenHint])
 
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id
-    }
-    return null
-  }, [messages])
-
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
-      <AuthBanner />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay
@@ -303,26 +314,28 @@ export function ChatPanel(): React.JSX.Element {
                   layout of the message list is untouched. They own the two
                   full-screen viewers: a thumbnail click opens the image gallery,
                   expanding a diagram card opens the diagram gallery. */}
-              <ImageGalleryProvider messages={messages}>
-                <DiagramGalleryProvider messages={messages}>
-                  {messages.map((msg) => (
-                    <div key={msg.id} className="cv-auto">
-                      <MessageBubble
-                        message={msg}
-                        pendingApprovals={pendingApprovals}
-                        isLastAssistant={msg.id === lastAssistantId}
-                        thinkingStartedAt={thinkingStartedAt}
-                      />
-                    </div>
-                  ))}
-                </DiagramGalleryProvider>
-              </ImageGalleryProvider>
+              {/* WHOSE transcript this is. A bubble that needs a session must
+                  read it from here, not from `activeSessionId` — the same
+                  component also replays automation-run history, where that
+                  pointer names an unrelated chat. */}
+              <TranscriptSessionProvider value={activeSessionId}>
+                <ImageGalleryProvider messages={messages}>
+                  <DiagramGalleryProvider messages={messages}>
+                    {messages.map((msg) => (
+                      <div key={msg.id} className="cv-auto">
+                        <MessageBubble
+                          message={msg}
+                          pendingApprovals={pendingApprovals}
+                          isLastAssistant={msg.id === lastAssistantId}
+                          activeThinking={activeThinkingByMessage.get(msg.id)}
+                        />
+                      </div>
+                    ))}
+                  </DiagramGalleryProvider>
+                </ImageGalleryProvider>
+              </TranscriptSessionProvider>
               <div className="flex flex-col gap-5">
-                {hasStreamingText && <StreamingText />}
-                {thinkingStartedAt && <ThinkingBlock text={streamingThinking} isActive />}
-                {!hasStreamingText && !thinkingStartedAt && status.state === 'running' && (
-                  <TypingIndicator />
-                )}
+                {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
               </div>
             </div>
           )}
@@ -399,14 +412,41 @@ export function ChatPanel(): React.JSX.Element {
         </div>
       )}
       <FloatingApproval />
-      <VendorAuthRequiredCard />
-      <FloatingError />
-      <SandboxViolationToast />
+      <ChatNoticeStack />
     </div>
   )
 }
 
 // ── Presentational sub-components ───────────────────────────────────
+
+/**
+ * The ONE owner of the chat's `top-12` notice slot (ADR-070 §4).
+ *
+ * `AuthRequiredRow`, `FloatingError` and `SandboxViolationToast` used to be
+ * absolutely-positioned SIBLINGS, each rendering `absolute top-12 left-0 right-0
+ * z-20` — same coordinates, same stacking order, painting over one another, so
+ * which notice the user saw was DOM order rather than intent. The positioning,
+ * the gutter and the reading width live here now and the leaves render just
+ * their cards, which makes two live notices STACK instead of overlap.
+ *
+ * `pointer-events-none` on the container with `pointer-events-auto` on the cards
+ * is kept exactly as it was: the slot sits over the transcript, so everything
+ * but a card has to stay click-through.
+ */
+export function ChatNoticeStack(): React.JSX.Element {
+  const isMobile = useIsMobile()
+  return (
+    <div
+      data-testid="ChatNoticeStack"
+      className="absolute top-12 left-0 right-0 z-20 pointer-events-none px-4 pt-2"
+    >
+      <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
+        <FloatingError />
+        <SandboxViolationToast />
+      </div>
+    </div>
+  )
+}
 
 function LoadingState(): React.JSX.Element {
   return (

@@ -30,8 +30,12 @@
 
 import { resolveContextWindow, CONTEXT_WINDOW_DEFAULT } from '../../shared/model-capabilities'
 
-/** cli.js boolean-env semantics (`__()`, cli.js@char27057). */
-function envFlag(value: string | undefined): boolean {
+/**
+ * cli.js boolean-env semantics (`__()`, cli.js@char27057). Exported so every
+ * CLAUDE_CODE_* gate in the app reads a variable the way cli.js does — notably
+ * that `0` and `false` are OFF rather than merely "set".
+ */
+export function envFlag(value: string | undefined): boolean {
   if (!value) return false
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase().trim())
 }

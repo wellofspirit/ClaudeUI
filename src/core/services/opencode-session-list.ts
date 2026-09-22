@@ -19,12 +19,15 @@ import path from 'path'
 import fs from 'fs'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
-import { convertStoredMessage } from '../opencode/event-mapper'
+import { convertStoredMessage, storedCompactionMessages } from '../opencode/event-mapper'
+import { lastOpencodeModel, opencodeHistoryStatusLine } from '../opencode/history-status-line'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
+import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { readOpencodeSessionRows } from './db'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 import { cwdToProjectKey } from '../../shared/project-key'
-import type { ChatMessage, SessionInfo } from '../../shared/types'
+import type { ChatMessage, EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
 
 /**
  * Resolve the path to opencode's global session DB. Mirrors opencode's own
@@ -115,10 +118,11 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
 }
 
 /**
- * Load a persisted opencode session's transcript as ChatMessage[], so the chat
- * view can paint the prior conversation immediately when the user clicks the
- * session in the sidebar (parity with Claude's JSONL load — no waiting for the
- * first new prompt).
+ * Load a persisted opencode session's transcript, so the chat view can paint
+ * the prior conversation immediately when the user clicks the session in the
+ * sidebar (parity with Claude's JSONL load — no waiting for the first new
+ * prompt), AND the status line that goes with it: the same stored messages
+ * carry the cost, tokens, duration and context the top bar reports (S1d).
  *
  * Read-only: uses the shared server at PERSISTED_SESSIONS_DIR. opencode's message
  * store is keyed by session id globally (the query filters by session_id, not
@@ -126,11 +130,13 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
  * its cwd — no per-cwd spawn needed.
  *
  * Reuses `convertStoredMessage` (the same part→block mapping as live turns and the
- * OpencodeSession resume replay) so there's a single rendering path.
+ * OpencodeSession resume replay) so there's a single rendering path, and
+ * `opencodeHistoryStatusLine` (the same reconstruction the session's own
+ * resume seeding runs) so the cold figure and the live one agree.
  *
- * Best-effort: returns [] on any error.
+ * Best-effort: returns no messages and a null status line on any error.
  */
-export async function loadOpencodeSessionHistory(sessionId: string): Promise<ChatMessage[]> {
+export async function loadOpencodeSessionHistory(sessionId: string): Promise<EngineHistoryLoad> {
   let acquired = false
   try {
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
@@ -139,16 +145,39 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Cha
     const stored = await client.listMessages(sessionId)
     const messages: ChatMessage[] = []
     for (const s of stored) {
+      // A compaction is a PART on an ordinary message but renders as its own
+      // system row, so it is pushed ahead of the message it rode in on.
+      messages.push(...storedCompactionMessages(s))
       const msg = convertStoredMessage(s)
       if (msg) messages.push(msg)
     }
-    return messages
+    // The billing type decides what this history was WORTH (ADR-071 §2) and it
+    // comes from the auth probe's cache, which is empty in a process that has
+    // not opened an opencode session yet. Warm it FIRST, and never let a probe
+    // failure cost the user their transcript — an unwarmed vendor simply reads
+    // as `unknown`, which prices the history at its list-price equivalent.
+    await opencodeAuthProvider.warmCache().catch(() => {})
+    const last = lastOpencodeModel(stored)
+    const statusLine =
+      stored.length > 0
+        ? opencodeHistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId))
+        : null
+    // The same last-assistant model the pricing uses, in ModelRef form: a
+    // session opencode created on its own has no model persisted here, and the
+    // transcript is the only place it is written down. Either id empty means
+    // there is nothing to seed — the picker value is `vendorId/modelId`, and a
+    // half-formed one would name no model at all.
+    const lastModel: ModelRef | null =
+      last.providerID && last.modelID
+        ? { engineId: 'opencode', vendorId: last.providerID, modelId: last.modelID }
+        : null
+    return { messages, statusLine, lastModel }
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',
       `loadOpencodeSessionHistory(${sessionId}) skipped: ${err instanceof Error ? err.message : String(err)}`
     )
-    return []
+    return { messages: [], statusLine: null }
   } finally {
     if (acquired) {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)

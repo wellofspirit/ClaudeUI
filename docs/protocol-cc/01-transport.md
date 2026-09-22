@@ -440,7 +440,7 @@ The **source binary** is cached under `.cache/claude-cli/claude-<version>-<platf
 
 Pipeline mode (`node scripts/rebundle-cli.mjs` with no args): reads `sourceBinary` from `vendor/claude-cli/version.json`, reads the patched `cli.js` from the same directory, writes `bun-claude[.exe]` alongside. `--verbose` dumps the full module inventory (~1,800 lines — off by default). NO-OP mode (`--noop <input> <output>`) reuses the original module contents unchanged and skips the concat entirely; it still drops bytecode and masks the flags, so a runnable `--noop` output is the writer-symmetry smoke test.
 
-Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631 JS (`loader == 1`: 1,627 `chunk-*.js`, the `cli` entry, `image-processor.js`, `audio-capture.js`, `hooks-worker.js`) and 184 non-JS assets (`.md`, `.zst`, `.node`, `.html`, …). Non-JS modules round-trip verbatim.
+Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631 JS (`loader == 1`: 1,627 `chunk-*.js`, the `cli` entry, `image-processor.js`, `audio-capture.js`, `hooks-worker.js`) and 184 non-JS assets (`.md`, `.zst`, `.node`, `.html`, …). At 2.1.268 the same shape holds with different counts: 1,834 modules — 1,652 JS, 182 non-JS assets. Non-JS modules round-trip verbatim, and the counts are re-derived from the binary on every extract, so nothing in the pipeline is pinned to them.
 
 **If the rebundler fails on a new Bun version**, check Bun's `StandaloneModuleGraph` source for format changes (Zig through 1.3, Rust from 1.4). The 52-byte module struct and 32-byte Offsets struct have been stable across recent Bun releases but have changed historically (pre-1.3.7 modules were 36 bytes), and Bun 1.4 added the flag-gated optional records described above.
 

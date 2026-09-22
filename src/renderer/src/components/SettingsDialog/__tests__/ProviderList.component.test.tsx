@@ -15,6 +15,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { ProviderList } from '../ProviderList'
+import { useSessionStore } from '../../../stores/session-store'
+import { UNKNOWN_PROVIDER_AUTH } from '../../../utils/sign-in-provider'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -36,7 +38,10 @@ const chatgpt: ProviderEntry = {
   credential: 'connected',
   engines: {
     pi: { enabled: true, modelCount: 4, native: true },
-    opencode: { enabled: true, modelCount: 6, native: true }
+    opencode: { enabled: true, modelCount: 6, native: true },
+    // The registry projects Codex onto the ChatGPT row since F14: it is fed by
+    // vault injection and follows the ACTIVE account.
+    codex: { enabled: true }
   },
   detail: 'ChatGPT subscription · shared with pi and opencode'
 }
@@ -69,6 +74,10 @@ const row = (id: string): HTMLElement =>
 
 beforeEach(async () => {
   app = await bootTestApp()
+  // The snapshot lives in the store now (F12) and the store is a module
+  // singleton that outlives `teardown()`: without this, a case would start on
+  // the rows the previous one left behind.
+  useSessionStore.setState({ providerRegistry: null })
   snapshot = { entries: [anthropic, chatgpt, openrouter, ollama], opencodeInstalled: true }
   app.bridge.ipcMain.handle('provider-registry:list', async () => snapshot)
   // The sheet's own reads, for the tests that open it.
@@ -121,15 +130,64 @@ describe('the rows', () => {
     expect(badge('opencode:openrouter')).toHaveTextContent('API key')
   })
 
-  it('chips the engines the provider is configured for, claude → opencode → pi', async () => {
+  it('a multi-account subscription counts its accounts on the badge (ADR-068 §2)', async () => {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'chatgpt'
+          ? {
+              ...e,
+              accounts: {
+                activeId: 'acc-1',
+                perSession: false,
+                list: [{ id: 'acc-1', email: 'a@example.com' }, { id: 'acc-2' }]
+              }
+            }
+          : e
+      )
+    }
+    await renderList()
+    const badge = within(row('chatgpt')).getByTestId('ProviderList.credential')
+    expect(badge).toHaveTextContent('2 accounts')
+    // Still the connected STATE — only the wording changes.
+    expect(badge).toHaveAttribute('data-id', 'connected')
+  })
+
+  it('chips the engines the provider is configured for, claude → opencode → pi → codex', async () => {
+    // Codex is fed by vault injection, not by a shared route (ADR-068 §1), so
+    // the chip has to be LAST in the order and present on the ChatGPT row —
+    // without it the row reads as "this subscription is not available to Codex".
     await renderList()
     const chips = (id: string): string[] =>
       within(row(id))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id!)
     expect(chips('anthropic')).toEqual(['claude'])
-    expect(chips('chatgpt')).toEqual(['opencode', 'pi'])
+    expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
     expect(chips('pi:ollama')).toEqual(['pi'])
+  })
+
+  it('dims the Codex chip when no ChatGPT account is active (F14)', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...chatgpt,
+          engines: {
+            opencode: { enabled: true },
+            pi: { enabled: true },
+            codex: { enabled: false }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await renderList()
+    const codex = within(row('chatgpt'))
+      .getAllByTestId('ProviderList.engine')
+      .find((el) => el.dataset.id === 'codex')!
+    expect(codex).toHaveTextContent('Codex')
+    expect(codex).toHaveAttribute('data-enabled', 'false')
+    expect(codex.className).toContain('opacity-50')
   })
 
   it('dims the chip of an engine the provider does not currently reach', async () => {
@@ -184,7 +242,9 @@ describe('the rows', () => {
       within(row('chatgpt'))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id)
-    ).toEqual(['pi'])
+      // Codex does not go through opencode, so a missing opencode binary says
+      // nothing about it.
+    ).toEqual(['pi', 'codex'])
   })
 
   it('keeps the card readable when the registry read fails', async () => {
@@ -193,6 +253,36 @@ describe('the rows', () => {
     })
     render(<ProviderList />)
     expect(await screen.findByTestId('ProviderList.error')).toHaveTextContent('registry exploded')
+  })
+
+  it('keeps the rows it already has when a RE-read fails', async () => {
+    // Blanking a list the user is looking at is worse than showing rows that
+    // may be a moment old — and the failure is still said out loud.
+    await renderList()
+    app.bridge.ipcMain.handle('provider-registry:list', async () => {
+      throw new Error('registry exploded')
+    })
+    await act(async () => {
+      fireEvent.click(
+        screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
+      )
+    })
+    // A sheet write routes through the same re-read.
+    app.bridge.ipcMain.handle('shared-provider:set-route', async () => undefined)
+    await act(async () => {
+      fireEvent.click(
+        screen
+          .getAllByTestId('ProviderSheet.engineToggle')
+          .find((el) => el.closest('[data-id="pi"]'))!
+      )
+    })
+    expect(await screen.findByTestId('ProviderList.error')).toHaveTextContent('registry exploded')
+    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toEqual([
+      'anthropic',
+      'chatgpt',
+      'opencode:openrouter',
+      'pi:ollama'
+    ])
   })
 })
 
@@ -219,5 +309,125 @@ describe('Manage', () => {
     })
     expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
     expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The composer's hint and the model picker's Sign in item read the SAME
+ * registry through the store (ADR-068 §3, Slice 6), and it publishes no change
+ * event. Every sheet write lands on this component's re-read, so the store
+ * refresh has to happen here or those surfaces go stale behind an open settings
+ * dialog — with the picker still offering a sign-in the user just completed.
+ */
+describe('the store’s provider-auth view', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ providerAuth: UNKNOWN_PROVIDER_AUTH })
+  })
+
+  it('is refreshed from the same read the list makes', async () => {
+    await renderList()
+    expect(useSessionStore.getState().providerAuth.chatgpt).toBe('authenticated')
+    expect(useSessionStore.getState().providerAuth.chatgptRoutes).toEqual({
+      pi: true,
+      opencode: true,
+      // Not a route at all — but it is in `engines`, and the view projects
+      // whatever the registry put there. Only pi/opencode are read back
+      // (`signInProviderFor`), so the extra key gates nothing.
+      codex: true
+    })
+  })
+
+  it('follows a real sheet write, through the same re-read', async () => {
+    app.bridge.ipcMain.handle('shared-provider:set-route', async () => undefined)
+    await renderList()
+    await act(async () => {
+      fireEvent.click(
+        screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
+      )
+    })
+    // What the NEXT read will answer — the write itself is stubbed.
+    snapshot = {
+      entries: [anthropic, { ...chatgpt, credential: 'none' }, openrouter, ollama],
+      opencodeInstalled: true
+    }
+    const piToggle = screen
+      .getAllByTestId('ProviderSheet.engineToggle')
+      .find((el) => el.closest('[data-id="pi"]'))!
+    await act(async () => {
+      fireEvent.click(piToggle)
+    })
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().providerAuth.chatgpt).toBe('unauthenticated')
+    )
+  })
+})
+
+/**
+ * F12 — the sheet's "+ Add account" hands over to the ONE sign-in dialog
+ * (ADR-068 §3), which is not a sheet write and so never reached this list's own
+ * re-read. The dialog's close is the one moment every outcome passes through,
+ * and the store already refreshes there; what was missing is that the refresh
+ * had nowhere the LIST could read it from. The sheet is still open while all of
+ * this happens, so a stale entry is a stale row the user is looking at.
+ */
+describe('a sign-in completed from the sheet', () => {
+  const oneAccount = {
+    activeId: 'acc-1',
+    perSession: false,
+    list: [{ id: 'acc-1', email: 'daniel@example.com' }]
+  }
+  const twoAccounts = {
+    ...oneAccount,
+    list: [...oneAccount.list, { id: 'acc-2', email: 'work@example.com' }]
+  }
+  const withAccounts = (accounts: ProviderEntry['accounts']): ProviderRegistrySnapshot => ({
+    entries: [anthropic, { ...chatgpt, accounts }, openrouter, ollama],
+    opencodeInstalled: true
+  })
+
+  beforeEach(() => {
+    // The sheet only renders account rows for a SUBSCRIPTION definition; the
+    // file's default stub answers no definitions at all.
+    app.bridge.ipcMain.handle('shared-provider:list', async () => [
+      {
+        id: 'chatgpt',
+        name: 'ChatGPT',
+        kind: 'subscription',
+        models: [],
+        managed: true,
+        routes: { pi: { enabled: true }, opencode: { enabled: true } }
+      }
+    ])
+  })
+
+  it('reaches the open sheet when the dialog closes', async () => {
+    snapshot = withAccounts(oneAccount)
+    await renderList()
+    await act(async () => {
+      fireEvent.click(
+        screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
+      )
+    })
+    // Since F14 the sheet's Accounts card is one link row, and its COUNT is
+    // what goes stale — the rows themselves moved to the Accounts page.
+    expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('1 account')
+
+    // The dialog is opened from the Accounts page now; no sheet write happens.
+    await act(async () => {
+      useSessionStore.getState().openSignIn({ providerId: 'chatgpt', mode: 'add' })
+    })
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'add'
+    })
+
+    // The sign-in lands: the vault now holds two accounts.
+    snapshot = withAccounts(twoAccounts)
+    await act(async () => {
+      useSessionStore.getState().closeSignIn()
+    })
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('2 accounts')
+    )
   })
 })

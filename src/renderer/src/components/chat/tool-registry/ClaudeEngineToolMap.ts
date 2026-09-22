@@ -8,6 +8,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { isAgentTool } from '../../../../../shared/types'
+import { claudeToolSpec } from './claude-tool-specs'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -32,8 +33,14 @@ function claudeKindOf(toolName: string): ToolKind {
   switch (toolName) {
     case 'Bash':
       return 'command'
+    // `MultiEdit` was removed upstream (absent from 2.1.268's tool list) but old
+    // transcripts still replay through this map, so it keeps its kind rather than
+    // degrading that history to `unknown`. `NotebookEdit` IS a file edit: it
+    // replaces one cell's source in a file on disk, which is what the diff card
+    // reads.
     case 'Edit':
     case 'MultiEdit':
+    case 'NotebookEdit':
       return 'fileEdit'
     case 'Write':
       return 'fileWrite'
@@ -51,16 +58,54 @@ function claudeKindOf(toolName: string): ToolKind {
       return 'question'
     case 'TodoWrite':
       return 'todo'
-    default:
+    default: {
       if (isAgentTool(toolName)) return 'task'
+      // The twenty tools that used to fall through to `unknown` — each one's
+      // shape is declared in claude-tool-specs.ts (docs/tool-survey.md § 7).
+      const spec = claudeToolSpec(toolName)
+      if (spec) return spec.kind
       return 'unknown'
+    }
   }
+}
+
+/**
+ * Claude's `WebSearch` result text ends with a `Links:` line carrying a JSON
+ * array of `{title, url}` — the structured rows the web card renders. Parsed
+ * defensively: a malformed tail, a non-array, or an entry without a usable url
+ * yields nothing and the body falls back to the result text, exactly as before.
+ *
+ * The array can be pretty-printed across lines, so the match runs to the END of
+ * the text rather than to the end of the line.
+ */
+export function parseClaudeWebLinks(
+  text: string | undefined
+): { title: string; url: string }[] | undefined {
+  if (!text) return undefined
+  const at = text.lastIndexOf('Links: ')
+  if (at < 0) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text.slice(at + 'Links: '.length).trim())
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(parsed)) return undefined
+  const links = parsed.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const raw = entry as Record<string, unknown>
+    const url = typeof raw.url === 'string' ? raw.url : ''
+    const title = typeof raw.title === 'string' ? raw.title : url
+    return url || title ? [{ title: title || url, url }] : []
+  })
+  return links.length ? links : undefined
 }
 
 function claudeNormalize(
   kind: ToolKind,
   input: Record<string, unknown> | undefined,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView {
   const inp = input ?? {}
 
@@ -73,6 +118,16 @@ function claudeNormalize(
       }
 
     case 'fileEdit':
+      // NotebookEdit names its fields differently (a cell's source rather than a
+      // string in a file), so it is read here rather than in a second kind.
+      if (toolName === 'NotebookEdit') {
+        return {
+          kind: 'fileEdit',
+          path: inp.notebook_path != null ? String(inp.notebook_path) : '',
+          before: inp.old_source != null ? String(inp.old_source) : '',
+          after: inp.new_source != null ? String(inp.new_source) : ''
+        }
+      }
       return {
         kind: 'fileEdit',
         path: inp.file_path != null ? String(inp.file_path) : '',
@@ -100,7 +155,8 @@ function claudeNormalize(
         query: inp.pattern != null ? String(inp.pattern) : JSON.stringify(inp)
       }
 
-    case 'web':
+    case 'web': {
+      const results = parseClaudeWebLinks(result?.toolResult)
       return {
         kind: 'web',
         target:
@@ -108,8 +164,13 @@ function claudeNormalize(
             ? String(inp.url)
             : inp.query != null
               ? String(inp.query)
-              : JSON.stringify(inp)
+              : JSON.stringify(inp),
+        // `WebFetch` fetches ONE url; `WebSearch` searches. The tool name is the
+        // only discriminator — both carry a plain string input.
+        action: toolName === 'WebFetch' ? 'fetch' : 'search',
+        ...(results ? { results } : {})
       }
+    }
 
     case 'task': {
       // Cross-engine dispatch (ADR-033 M3) shares the 'task' kind (via
@@ -194,6 +255,16 @@ function claudeNormalize(
 
     case 'mcp':
       return { kind: 'mcp', input: inp }
+
+    case 'detail':
+    case 'findings':
+    case 'note': {
+      // kindOf only answers these three for a name that HAS a spec, so the
+      // lookup cannot miss here; the fallback keeps the function total anyway.
+      const spec = toolName ? claudeToolSpec(toolName) : null
+      if (spec) return spec.build(inp, result)
+      return { kind: 'unknown', input: inp }
+    }
 
     case 'unknown':
     default:

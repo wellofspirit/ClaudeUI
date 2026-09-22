@@ -232,12 +232,78 @@ export const ANTHROPIC_MODEL_PRICING: ReadonlyArray<{ match: string; pricing: Mo
 
 // ---------------------------------------------------------------------------
 // OpenAI pricing (best-effort, flagship models)
-// Cache fields use 0.5× input for cache read; OpenAI does not have a separate
-// cache-write cost (writes are billed as standard input). We set cacheWrite
-// and cacheWrite1h equal to inputPerMTok as the closest equivalent.
+// For models OLDER than the 5.6 line, cache fields use 0.5× input for cache read
+// and OpenAI has no separate cache-write cost (writes are billed as standard
+// input), so cacheWrite/cacheWrite1h are set equal to inputPerMTok. The 5.6/6
+// line DOES publish a cache-write rate (1.25× input) and its own cached-input
+// rate (0.1× input) — those entries carry the published numbers verbatim.
 // ---------------------------------------------------------------------------
 
 const OPENAI_PRICING: PricingEntry[] = [
+  // ── The models Codex's own catalog offers (ADR-066) ─────────────────────────
+  //
+  // Sources, both fetched 2026-09-13 and in agreement to the cent:
+  //   1. developers.openai.com/api/docs/pricing — the standard-tier rows
+  //      (Model | Input | Cached input | Cache writes | Output), per MTok:
+  //        gpt-6-astra   $10.00 | $1.00 | $12.50 | $50.00
+  //        gpt-5.6-sol    $4.00 | $0.40 |  $5.00 | $20.00
+  //        gpt-5.6-terra  $2.00 | $0.20 |  $2.50 | $12.00
+  //        gpt-5.6-luna   $0.20 | $0.02 |  $0.25 |  $1.20
+  //        gpt-5.2        $1.75 | $0.175|      — | $14.00
+  //   2. models.dev/api.json, provider `openai` — the same figures as
+  //      cost.input / cache_read / cache_write / output (this is the table
+  //      opencode's own pricing comes from, so the two engines agree).
+  //
+  // The >200k-context tier (2× input, and 1.5× output on the 5.6/6 line) and the
+  // priority/batch tiers are NOT modelled: nothing on the wire says which tier a
+  // turn billed at, and guessing one would be worse than the base rate. Codex's
+  // hidden models (`gpt-daybreak-*`, `codex-auto-review`) have no public price
+  // and are deliberately absent, so the lookup returns null for them instead of
+  // a fabricated number.
+  {
+    vendorId: 'openai',
+    match: 'gpt-6-astra',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 12.5,
+      cacheReadPerMTok: 1
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-sol',
+    pricing: {
+      inputPerMTok: 4,
+      outputPerMTok: 20,
+      cacheWritePerMTok: 5,
+      cacheWrite1hPerMTok: 5,
+      cacheReadPerMTok: 0.4
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-terra',
+    pricing: {
+      inputPerMTok: 2,
+      outputPerMTok: 12,
+      cacheWritePerMTok: 2.5,
+      cacheWrite1hPerMTok: 2.5,
+      cacheReadPerMTok: 0.2
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-luna',
+    pricing: {
+      inputPerMTok: 0.2,
+      outputPerMTok: 1.2,
+      cacheWritePerMTok: 0.25,
+      cacheWrite1hPerMTok: 0.25,
+      cacheReadPerMTok: 0.02
+    }
+  },
   // GPT-5.x — source: developers.openai.com/api/docs/pricing, fetched 2026-07.
   // Order matters: substring matching means '-pro'/'-mini'/'-nano' variants MUST
   // precede their base entry (e.g. 'gpt-5.4-mini' before 'gpt-5.4'), mirroring the
@@ -245,7 +311,7 @@ const OPENAI_PRICING: PricingEntry[] = [
   // intentionally have NO entries here and fall through to substring-match their
   // base model — a notional estimate only (OpenAI's priority-tier multiplier is
   // 2.5×, but the opencode model id ↔ tier mapping is unconfirmed, so we don't
-  // guess a separate rate). gpt-5.2 is left unpriced — no authoritative source found.
+  // guess a separate rate).
   {
     vendorId: 'openai',
     match: 'gpt-5.5-pro',
@@ -318,6 +384,19 @@ const OPENAI_PRICING: PricingEntry[] = [
   {
     vendorId: 'openai',
     match: 'gpt-5.3-codex',
+    pricing: {
+      inputPerMTok: 1.75,
+      outputPerMTok: 14,
+      cacheWritePerMTok: 1.75,
+      cacheWrite1hPerMTok: 1.75,
+      cacheReadPerMTok: 0.175
+    }
+  },
+  // gpt-5.2 — still listed by Codex's catalog, and priced by both sources above
+  // ($1.75 / $0.175 cached / $14.00); no cache-write rate is published for it.
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.2',
     pricing: {
       inputPerMTok: 1.75,
       outputPerMTok: 14,
@@ -508,30 +587,74 @@ const GOOGLE_PRICING: PricingEntry[] = [
 
 const PRICING_TABLE: PricingEntry[] = [...ANTHROPIC_PRICING, ...OPENAI_PRICING, ...GOOGLE_PRICING]
 
+/** The vendors this file prices itself. Derived — never a second hand-kept list. */
+const BUILTIN_VENDOR_IDS: ReadonlySet<VendorId> = new Set(PRICING_TABLE.map((e) => e.vendorId))
+
 // ---------------------------------------------------------------------------
 // Supplemental pricing (registered at runtime by main — pure; no I/O here)
 // ---------------------------------------------------------------------------
 
 /**
  * Runtime-registered supplemental entries, populated by opencode-pricing.ts
- * from the opencode /config/providers price table (models.dev data).
- * Replace-all semantics: each registerSupplementalPricing() call replaces the
- * previous batch (one source of truth per refresh).
+ * from models.dev. Replace-all semantics: each registerSupplementalPricing()
+ * call replaces the previous batch (one source of truth per refresh).
  * Built-in PRICING_TABLE entries take precedence — supplemental is consulted
  * only when the built-in table returns null.
+ *
+ * Held as maps, not as the raw array: the batch is the whole models.dev catalog
+ * (~7,400 entries across 222 providers) and findPricing runs per usage row, so
+ * a linear scan cost ~30 µs a lookup. The maps are built once per registration.
+ *
+ * `supplementalByVendor` doubles as the set of recognised supplemental vendors:
+ * a vendor is recognised when it is a KEY here, whatever its map contains.
  */
-let supplementalPricing: PricingEntry[] = []
+let supplementalByVendor: ReadonlyMap<VendorId, ReadonlyMap<string, ModelPricing>> = new Map()
+/** Index for findPricing's cross-vendor fallback (step 3a) — see that doc comment. */
+let supplementalAnyVendor: ReadonlyMap<string, ModelPricing> = new Map()
+
+/** A free listing says nothing about what some other provider charges. */
+function isFreeListing(pricing: ModelPricing): boolean {
+  return pricing.inputPerMTok === 0 && pricing.outputPerMTok === 0
+}
 
 /**
- * Register opencode-sourced (or any external) pricing entries.
- * Called by main/services/opencode-pricing.ts after fetching + persisting prices.
+ * Register models.dev-sourced (or any external) pricing entries.
+ * Called by core/services/opencode-pricing.ts after fetching + persisting prices.
  * Pure: no I/O, no electron — main owns file persistence and calls this.
  *
  * Replace-all semantics: the entire supplemental batch is replaced on each call.
  * Built-in Anthropic/OpenAI/Google entries remain authoritative and are never replaced.
+ *
+ * Within a vendor, the FIRST entry for a model id wins, matching the scan order
+ * this replaced. The cross-vendor index is built deliberately rather than in
+ * plain registration order, because the batch now spans every provider
+ * models.dev knows — resellers and free tiers included — and the fallback it
+ * serves is a guess for a vendor we do not recognise at all. Its order is:
+ * entries under a built-in vendor id first, then the rest in registration
+ * order, first insert wins, and a free listing is never indexed.
  */
 export function registerSupplementalPricing(entries: PricingEntry[]): void {
-  supplementalPricing = entries
+  const byVendor = new Map<VendorId, Map<string, ModelPricing>>()
+  for (const entry of entries) {
+    let models = byVendor.get(entry.vendorId)
+    if (!models) {
+      models = new Map()
+      byVendor.set(entry.vendorId, models)
+    }
+    if (!models.has(entry.match)) models.set(entry.match, entry.pricing)
+  }
+
+  const anyVendor = new Map<string, ModelPricing>()
+  for (const firstParty of [true, false]) {
+    for (const entry of entries) {
+      if (BUILTIN_VENDOR_IDS.has(entry.vendorId) !== firstParty) continue
+      if (isFreeListing(entry.pricing)) continue
+      if (!anyVendor.has(entry.match)) anyVendor.set(entry.match, entry.pricing)
+    }
+  }
+
+  supplementalByVendor = byVendor
+  supplementalAnyVendor = anyVendor
 }
 
 /**
@@ -540,8 +663,8 @@ export function registerSupplementalPricing(entries: PricingEntry[]): void {
  *   1. Built-in PRICING_TABLE (authoritative — Anthropic/OpenAI/Google).
  *      Matched by SUBSTRING (entry.match) so a single family entry (`sonnet`)
  *      covers every dated variant (`claude-sonnet-4-6`).
- *   2. Supplemental table (opencode /config/providers prices, registered at runtime).
- *      Matched by EXACT equality — entries are full opencode model ids, so a
+ *   2. Supplemental table (models.dev prices, registered at runtime).
+ *      Matched by EXACT equality — entries are full models.dev model ids, so a
  *      shorter id (`claude-haiku-4-5`) must NOT shadow a longer variant
  *      (`claude-haiku-4-5-20251001`) the way substring matching would.
  *   3. Vendor-agnostic fallback — ONLY when vendorId itself is unrecognized (no
@@ -552,9 +675,13 @@ export function registerSupplementalPricing(entries: PricingEntry[]): void {
  *      run for a known vendor with an unpriced model (e.g. `openai` + a brand-new
  *      model id) — that stays a genuine miss, preserving existing vendor-scoped
  *      resolution:
- *        a. Exact modelId match across ALL supplemental entries (any vendor) —
- *           models.dev ids are specific enough that a cross-vendor exact match
- *           is safe.
+ *        a. Exact modelId match in the cross-vendor supplemental index. The
+ *           supplemental batch is the whole models.dev catalog, so one model id
+ *           is often listed by a first-party vendor AND by resellers at their
+ *           own margins, and by free tiers at 0. The index therefore prefers a
+ *           built-in vendor's listing (see BUILTIN_VENDOR_IDS), then falls back
+ *           to registration order, and never indexes a free listing — a gateway
+ *           we cannot identify is not billing us at somebody else's free rate.
  *        b. Substring match across ALL built-in tables, in PRICING_TABLE's
  *           declared order (anthropic → openai → google). If the same match
  *           string existed under multiple vendors this picks the first
@@ -570,17 +697,16 @@ function findPricing(vendorId: VendorId, modelId: string): ModelPricing | null {
       if (lower.includes(entry.match)) return entry.pricing
     }
   }
-  for (const entry of supplementalPricing) {
-    if (entry.vendorId === vendorId) {
-      vendorRecognized = true
-      if (lower === entry.match) return entry.pricing
-    }
+  const vendorModels = supplementalByVendor.get(vendorId)
+  if (vendorModels) {
+    vendorRecognized = true
+    const hit = vendorModels.get(lower)
+    if (hit) return hit
   }
   if (vendorRecognized) return null
 
-  for (const entry of supplementalPricing) {
-    if (lower === entry.match) return entry.pricing
-  }
+  const crossVendor = supplementalAnyVendor.get(lower)
+  if (crossVendor) return crossVendor
   for (const entry of PRICING_TABLE) {
     if (lower.includes(entry.match)) return entry.pricing
   }

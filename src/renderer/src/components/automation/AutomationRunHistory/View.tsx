@@ -5,6 +5,7 @@ import type { AutomationRun, ChatMessage } from '../../../../../shared/types'
 import { MessageBubble } from '../../chat/MessageBubble'
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../../chat/DiagramGallery'
+import { COST_UNKNOWN } from '../../../utils/cost'
 
 export interface AutomationRunHistoryViewProps {
   run: AutomationRun | null
@@ -90,8 +91,16 @@ export function AutomationRunHistoryView({
         <span className="text-xs text-text-muted">{time}</span>
         <span className="text-xs">{statusIcon}</span>
         <span className="text-xs text-text-muted">{duration}</span>
-        {run.totalCostUsd > 0 && (
-          <span className="text-xs text-text-muted">${run.totalCostUsd.toFixed(4)}</span>
+        {run.totalCostUsd === null ? (
+          <span data-testid="AutomationRunHistory.cost" className="text-xs text-text-muted">
+            {COST_UNKNOWN}
+          </span>
+        ) : (
+          run.totalCostUsd > 0 && (
+            <span data-testid="AutomationRunHistory.cost" className="text-xs text-text-muted">
+              ${run.totalCostUsd.toFixed(4)}
+            </span>
+          )
         )}
         {isRunning && (
           <button
@@ -124,7 +133,12 @@ export function AutomationRunHistoryView({
           <div className="space-y-3">
             {/* Same viewers as the live chat — attached-image thumbnails in a
                 replayed run are clickable too, and its diagrams page as one
-                gallery. Neither renders a wrapper element. */}
+                gallery. Neither renders a wrapper element.
+
+                Deliberately NO `TranscriptSessionProvider`: a recorded run
+                belongs to no open chat session, so every bubble that needs one
+                (the auth row) renders as history rather than acting on whatever
+                session happens to be active behind this view. */}
             <ImageGalleryProvider messages={runMessages ?? []}>
               <DiagramGalleryProvider messages={runMessages ?? []}>
                 {runMessages?.map((msg, idx) => (
@@ -133,7 +147,6 @@ export function AutomationRunHistoryView({
                     message={msg}
                     pendingApprovals={[]}
                     isLastAssistant={false}
-                    thinkingStartedAt={null}
                   />
                 ))}
               </DiagramGalleryProvider>

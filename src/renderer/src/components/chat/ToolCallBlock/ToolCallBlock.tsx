@@ -16,7 +16,8 @@ import { memo, useEffect, useState } from 'react'
 import type {
   ContentBlock,
   PendingApproval,
-  PermissionSuggestion
+  PermissionSuggestion,
+  ToolReviewBlock
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
@@ -30,12 +31,15 @@ interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
   approval?: PendingApproval
+  /** A permission judge's verdict on this call (F18) — the caller pairs it by id. */
+  review?: ToolReviewBlock
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
   block,
   result,
-  approval
+  approval,
+  review
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -72,7 +76,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   // hostedMcpKind (mermaid/mockup/mcp) is engine-independent and resolves first.
   const toolMap = engineToolMap(engineId)
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
-  const view = toolMap.normalize(kind, block.toolInput, result)
+  const view = toolMap.normalize(kind, block.toolInput, result, block.toolName)
   const toolDisplayName = toolMap.displayName(block.toolName)
 
   // Start file polling as soon as a background bash tool_use renders, independent of
@@ -148,6 +152,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       block={block}
       result={result}
       approval={approval}
+      review={review}
       isHistorical={isHistorical}
       permissionMode={permissionMode}
       expandToolCalls={expandToolCalls}

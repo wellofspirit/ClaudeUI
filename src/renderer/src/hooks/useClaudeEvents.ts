@@ -271,9 +271,6 @@ export function useClaudeEvents(): void {
       onSyncEvent('session:sandbox-violation', (routingId, message) => {
         useSessionStore.getState().addSandboxViolation(routingId, message)
       }),
-      onSyncEvent('session:vendor-auth-required', (routingId, data) => {
-        useSessionStore.getState().setVendorAuthRequired(routingId, data)
-      }),
       onSyncEvent('session:bash-output', (routingId, data) => {
         useSessionStore
           .getState()
@@ -302,6 +299,13 @@ export function useClaudeEvents(): void {
       onSyncEvent('usage:block-data', (data) => {
         useSessionStore.getState().setBlockUsage(data)
       }),
+      // ADR-068 §2: a bare nudge — a live Codex session pushed new ChatGPT rate
+      // limits, or a panel-driven read finished. The map itself is read back
+      // through `usage:chatgpt-limits`, so there is one shape and one owner.
+      // `false`: re-read what the host already holds, never provoke a fetch.
+      onSyncEvent('usage:chatgpt-limits-changed', () => {
+        void useSessionStore.getState().loadChatgptLimits(false)
+      }),
       // Auth source from session init ('none' = logged out) — drives the banner
       // Also updates the vendorAuth probe so AuthBanner reads from the probe.
       onSyncEvent('session:auth-source', (_routingId, source) => {
@@ -316,6 +320,59 @@ export function useClaudeEvents(): void {
             label: undefined
           }
         })
+      }),
+      // ADR-070 §2: a credential for this provider was stored successfully. The
+      // REPLICA already folded it into every matching session's `authRequired`
+      // (the reducer owns that); this subscription exists for the provider views
+      // the fold cannot reach, all of which are read-back caches rather than
+      // replicated state:
+      //  · `providerAuth.chatgpt` comes from `provider-registry:list`, which
+      //    publishes no change event, so every moment the answer can have changed
+      //    has to re-read it — this is now one of them;
+      //  · `providerAccounts` is the vault's own account LIST, read the same
+      //    way and with no change event either. Its only other refresh is
+      //    `SignInDialog.collectOutcome`, which runs in the client that drove
+      //    the flow — so a second client kept the pre-sign-in list (the
+      //    `Account N` placeholder, or nothing) while the `providerAuth` read
+      //    beside it already said connected;
+      //  · `vendorAuth.anthropic` is written only by `session:auth-source`, which
+      //    arrives on a cli.js SPAWN, so without a re-probe here the Claude half
+      //    stays stale until the next one (ADR-070 Context, "Why nothing clears");
+      //  · `accountsState` is written by `account:changed`, which is HOST-LOCAL
+      //    (`channels.ts`; `AccountManager.broadcast` sends it straight to the
+      //    desktop window, bypassing SyncCore). So a REMOTE client never hears
+      //    the backfill — `AccountManager.addAccount` persists `Account N` as the
+      //    placeholder email before the OAuth completes, `noteLogin` replaces it
+      //    with the real one afterwards — and every surface derived from that
+      //    field kept the placeholder for the life of the page (Slice I).
+      //
+      // The backfill is already WRITTEN when this arrives: `AuthManager.finalize`
+      // emits `provider:auth-resolved` as its LAST statement, after the
+      // `onSuccessCbs` loop that runs `noteLogin`. That ordering is deliberate
+      // (Slice D) and its emit site carries a "LAST in this function,
+      // deliberately — do not move it up" note for a second reason: a client's
+      // reaction is a read of state those callbacks refresh. This read is now a
+      // third one. Moving the emit above the loop would make all three race.
+      onSyncEvent('provider:auth-resolved', ({ providerId }) => {
+        const store = useSessionStore.getState()
+        if (providerId === 'chatgpt') {
+          void store.refreshProviderAuth()
+          void store.loadProviderAccounts()
+          return
+        }
+        if (providerId !== 'anthropic') return
+        void window.api
+          .vendorAuthProbe('claude')
+          .then((map) => useSessionStore.getState().setVendorAuth(map))
+          .catch(() => {
+            /* No host for this engine (claudeui-server) or the read failed — keep the last answer. */
+          })
+        void window.api
+          .getAccounts()
+          .then((state) => useSessionStore.getState().setAccountsState(state))
+          .catch(() => {
+            /* Same posture as above — a failed read keeps the last good answer. */
+          })
       }),
       onSyncEvent('voice:error', (routingId, error) => {
         useSessionStore.getState().addError(routingId, error)
@@ -539,8 +596,9 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
 
     case 'session:result': {
       const session = store.sessions[routingId]
-      // Clear any pending vendor auth required card when a turn succeeds
-      store.clearVendorAuthRequired(routingId)
+      // The owed sign-in is the REDUCER's now (cleared on the next running
+      // status, ADR-068 §4) — a second clear here would be a second
+      // interpretation of the same fact, and a sealed field has one writer.
       // Mark attention + notify when the agent's turn ends (user's turn)
       if (!session?.sdkActive) return
       // …unless it isn't: a `result` under a running delegated task is followed by

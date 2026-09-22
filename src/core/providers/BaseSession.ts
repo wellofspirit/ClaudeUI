@@ -84,19 +84,10 @@ export abstract class BaseSession implements ISession {
   private flushingQueue = false
 
   /**
-   * Thinking-span clock (SyncCore phase 4b). `thinkingStartedAt` is the wall
-   * clock at the first thinking delta of the current span; `sealedThinkingMs`
-   * holds an already-sealed span's elapsed time until the next
-   * `session:message` can carry it.
-   *
-   * Lives HERE, on the one chokepoint all three engines' events pass through
-   * ({@link send}), rather than in claude-session / OpencodeSession / PiSession:
-   * the seal rule is a function of (channel, payload) only, it is the exact rule
-   * `applyEvent` applies to decide a span ended, and three copies of a clock +
-   * state machine would be three chances to disagree with it.
+   * A boundary fired while a flush was mid-forward. Remembered rather than
+   * dropped — see {@link flushQueuedItems}.
    */
-  private thinkingStartedAt: number | null = null
-  private sealedThinkingMs: number | null = null
+  private queueFlushRerun = false
 
   constructor(routingId: string, win: HostWindowHandle | null, cwd: string) {
     this.routingId = routingId
@@ -114,7 +105,8 @@ export abstract class BaseSession implements ISession {
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    clientUserMessageId?: string
   ): Promise<void>
   abstract interrupt(): Promise<void>
   abstract cancel(): void
@@ -182,30 +174,68 @@ export abstract class BaseSession implements ISession {
   }
 
   /**
+   * Hand ONE held item to the engine. The default is an ordinary prompt — for
+   * opencode and pi a send during a running turn IS the steer, so `run()` picks
+   * the right transport on its own. CodexSession overrides this: its two
+   * transports are different RPCs (`turn/steer` mid-turn, `turn/start` at idle)
+   * and it correlates by a client-chosen id rather than by text.
+   *
+   * Delivery is reported through the queue, not the return value: leaving the
+   * item `queued` tells {@link flushQueuedItems} nothing landed.
+   */
+  protected forwardQueuedItem(item: QueuedItem): Promise<void> {
+    return this.run(item.text, item.attachments)
+  }
+
+  /**
    * Forward every held item, oldest first, at an engine sub-turn boundary.
-   * Serialized: a boundary firing while a forward is in flight is a no-op —
-   * the running loop picks newly queued items up on its next pass.
+   *
+   * Serialized — only one flush runs at a time — but a boundary that lands
+   * while a forward is in flight is REMEMBERED, not dropped, and costs one
+   * more pass once the in-flight flush settles.
+   *
+   * Dropping it (the original behaviour) stranded items, because the running
+   * pass does NOT necessarily pick them up: a forward the engine refused
+   * leaves its item `queued` and breaks the loop, and the boundary that was
+   * swallowed is frequently the last one this turn — `turn end` in particular
+   * emits nothing after itself. The item then sat visible-but-dead on every
+   * client's queue card until the user sent something else. The concrete race:
+   * a mid-turn steer is still awaiting the engine when the turn ends; the
+   * turn-end call returns early; the steer is refused (no turn to steer); and
+   * nothing ever retries it as a fresh turn.
+   *
+   * Termination: the rerun flag is set only by an incoming boundary and is
+   * coalesced (one extra pass however many boundaries arrive during a pass),
+   * so passes are bounded by real engine events.
    */
   protected async flushQueuedItems(): Promise<void> {
-    if (this.flushingQueue) return
+    if (this.flushingQueue) {
+      this.queueFlushRerun = true
+      return
+    }
     this.flushingQueue = true
     try {
-      for (let item = this.queue.nextUnforwarded(); item; item = this.queue.nextUnforwarded()) {
-        this.queue.markForwarded(item)
-        await this.run(item.text, item.attachments)
-        // Delivery is acknowledged by the engine's own post-success path
-        // (onPromptDelivered). Still pending here means the send failed —
-        // which already surfaced `session:error` — so put the item back in the
-        // recallable pool and stop; the next boundary retries it. Never mark it
-        // consumed: that would paint a message into the transcript that the
-        // engine never received.
-        if (item.state === 'queued') {
-          this.queue.unmarkForwarded(item)
-          break
+      do {
+        this.queueFlushRerun = false
+        for (let item = this.queue.nextUnforwarded(); item; item = this.queue.nextUnforwarded()) {
+          this.queue.markForwarded(item)
+          await this.forwardQueuedItem(item)
+          // Delivery is acknowledged by the engine's own post-success path
+          // (onPromptDelivered). Still pending here means the send failed —
+          // which already surfaced `session:error` — so put the item back in
+          // the recallable pool and stop; the next boundary (including one
+          // that arrived during this await) retries it. Never mark it
+          // consumed: that would paint a message into the transcript that the
+          // engine never received.
+          if (item.state === 'queued') {
+            this.queue.unmarkForwarded(item)
+            break
+          }
         }
-      }
+      } while (this.queueFlushRerun)
     } finally {
       this.flushingQueue = false
+      this.queueFlushRerun = false
     }
   }
 
@@ -311,13 +341,13 @@ export abstract class BaseSession implements ISession {
    * later reopen/resume will construct the session object with (a fresh
    * session's temporary pre-rekey id naturally has zero rows; SessionManager.
    * rekey() carries any dispatch already recorded under it forward via
-   * renameDispatchedUsage, so the eventual stable id sees them here).
+   * renameUsageEventParent, so the eventual stable id sees them here).
    *
    * Best-effort: called bare from session-construction paths (ClaudeSession's
    * constructor, OpencodeSession's replayStoredHistory) — a DB open/query
    * failure must never break session creation over a cosmetic feature, so
    * failures are swallowed and logged (same pattern as SessionManager.rekey's
-   * renameDispatchedUsage call).
+   * renameUsageEventParent call).
    */
   protected seedDispatchedCosts(): void {
     try {
@@ -376,87 +406,9 @@ export abstract class BaseSession implements ISession {
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire
    * encoding"). It is read fresh on every send, so a rekey mid-turn is picked up
    * without any re-registration.
-   *
-   * The payload passes through {@link trackThinkingSpan} first, which is where a
-   * sealed thinking span's elapsed ms is attached (phase 4b).
    */
   protected send(channel: string, data: unknown): void {
-    emitEvent(channel, [this.routingId, this.trackThinkingSpan(channel, data)])
-  }
-
-  /**
-   * Time the current thinking span and stamp its elapsed ms on the event that
-   * seals it — the emitter half of replicable "Thought for Xs".
-   *
-   * The seal points mirror the renderer's store handlers exactly (session-store
-   * `appendStreamingThinking` / `appendStreamingText` / `addMessage` /
-   * `setStatus` / `retractMessages`), because those are the points `applyEvent`
-   * mirrors too:
-   *
-   *  - a `thinking` delta OPENS the span (first delta wins — a span is one
-   *    continuous run of thinking output);
-   *  - a `text` delta SEALS it, but there is no thinking block on the wire yet:
-   *    park the elapsed time for the message that will carry the block;
-   *  - a `session:message` with any non-thinking content seals a still-open span
-   *    and carries either that elapsed time or the parked one, ONCE (the reducer
-   *    owns it from there — re-sending would stamp a later span with a stale
-   *    duration);
-   *  - `idle`/`disconnected` status and a retraction abandon the span with no
-   *    stamp — BOTH the open clock and an already-parked duration.
-   *
-   * **Phase 4c fixed the parked half.** Until 4c only `thinkingStartedAt` was
-   * cleared at a turn boundary, so a span sealed by a text delta whose message
-   * never arrived (interrupt, refusal retraction, engine death) left
-   * `sealedThinkingMs` parked — and the NEXT turn's first message shipped it,
-   * stamping a fresh thinking block with the previous turn's elapsed time. It was
-   * left in place deliberately in 4b: the renderer's own
-   * `pendingThinkingDurationMs` leaked the same value the same way, so the two
-   * sides agreed and the shadow comparator stayed quiet. 4c deleted the renderer's
-   * clock, so there is no mirror left to preserve and the leak is just a leak.
-   *
-   * Returns the payload to emit — a shallow copy when a duration is attached, so
-   * the caller's object (which engines also keep in their own message history) is
-   * never mutated.
-   */
-  private trackThinkingSpan(channel: string, data: unknown): unknown {
-    switch (channel) {
-      case 'session:stream': {
-        const delta = data as { type?: string } | null
-        if (delta?.type === 'thinking') {
-          this.thinkingStartedAt ??= Date.now()
-        } else if (this.thinkingStartedAt !== null) {
-          this.sealedThinkingMs = Date.now() - this.thinkingStartedAt
-          this.thinkingStartedAt = null
-        }
-        return data
-      }
-      case 'session:message': {
-        const message = data as ChatMessage | null
-        if (!message || !Array.isArray(message.content)) return data
-        const sealsHere =
-          this.thinkingStartedAt !== null &&
-          message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
-        const durationMs = sealsHere ? Date.now() - this.thinkingStartedAt! : this.sealedThinkingMs
-        if (sealsHere) this.thinkingStartedAt = null
-        if (durationMs === null) return data
-        this.sealedThinkingMs = null
-        return { ...message, thinkingDurationMs: durationMs }
-      }
-      case 'session:status': {
-        const status = data as SessionStatus | null
-        if (status?.state === 'idle' || status?.state === 'disconnected') {
-          this.thinkingStartedAt = null
-          this.sealedThinkingMs = null
-        }
-        return data
-      }
-      case 'session:messages-retracted':
-        this.thinkingStartedAt = null
-        this.sealedThinkingMs = null
-        return data
-      default:
-        return data
-    }
+    emitEvent(channel, [this.routingId, data])
   }
 
   /**

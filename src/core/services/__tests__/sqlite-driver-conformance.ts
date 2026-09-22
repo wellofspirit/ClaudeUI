@@ -121,8 +121,8 @@ export function runSqliteDriverConformance(driver: SqliteDriver, dbPath: string)
     insert.run('beta', 2.5)
 
     // A prepared statement must be REUSABLE across calls — every bulk writer in
-    // db.ts (`insertUsageEvents`, `upsertDailyUsage`) prepares once and runs in
-    // a loop.
+    // db.ts (`insertUsageEvents`, `upsertUsageBuckets`) prepares once and runs
+    // in a loop.
     const third = insert.run('gamma', 3.5)
     assertEqual(Number(third.lastInsertRowid), 3, 'a reused statement keeps inserting')
 

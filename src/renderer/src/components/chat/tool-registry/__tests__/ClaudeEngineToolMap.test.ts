@@ -10,6 +10,9 @@ import { describe, it, expect } from 'vitest'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { hostedMcpKind } from '../../../../../../shared/tool-kinds'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
+import type { ContentBlock } from '../../../../../../shared/types'
+
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
 // ---------------------------------------------------------------------------
 // kindOf — every Claude tool name → expected kind
@@ -402,5 +405,73 @@ describe('hostedMcpKind', () => {
     expect(hostedMcpKind('Edit')).toBeNull()
     expect(hostedMcpKind('Read')).toBeNull()
     expect(hostedMcpKind('NotATool')).toBeNull()
+  })
+})
+
+/**
+ * F20 — the web card stopped being a JSON dump. `WebSearch`'s result text ends
+ * with a `Links:` JSON array, which is the only structured result Claude gives
+ * us; `WebFetch` fetches one url and takes the `fetch` action.
+ */
+describe('ClaudeEngineToolMap — web results and actions', () => {
+  const result = (toolResult: string): ToolResultBlock => ({
+    type: 'tool_result',
+    toolUseId: 'tu',
+    toolResult
+  })
+
+  it('parses the Links: array of a WebSearch result into structured rows', () => {
+    const view = ClaudeEngineToolMap.normalize(
+      'web',
+      { query: 'electron 38' },
+      result(
+        'Web search results\n\nLinks: [{"title":"Electron 38","url":"https://electronjs.org"},{"title":"Breaking changes","url":"https://electronjs.org/docs"}]'
+      ),
+      'WebSearch'
+    )
+    expect(view).toEqual({
+      kind: 'web',
+      target: 'electron 38',
+      action: 'search',
+      results: [
+        { title: 'Electron 38', url: 'https://electronjs.org' },
+        { title: 'Breaking changes', url: 'https://electronjs.org/docs' }
+      ]
+    })
+  })
+
+  it('marks WebFetch as a fetch and leaves it without rows', () => {
+    expect(
+      ClaudeEngineToolMap.normalize(
+        'web',
+        { url: 'https://electronjs.org/docs' },
+        result('the page text'),
+        'WebFetch'
+      )
+    ).toEqual({ kind: 'web', target: 'https://electronjs.org/docs', action: 'fetch' })
+  })
+
+  it('never lets a malformed Links: tail become rows or a throw', () => {
+    for (const text of [
+      'Links: not json',
+      'Links: {"title":"x"}',
+      'Links: []',
+      'Links: [1,2,3]',
+      'Links: [{"snippet":"no url and no title"}]',
+      'no links at all'
+    ]) {
+      const view = ClaudeEngineToolMap.normalize('web', { query: 'q' }, result(text), 'WebSearch')
+      expect(view.kind === 'web' && view.results).toBeFalsy()
+    }
+  })
+
+  it('reads a pretty-printed Links: array that runs past the end of its line', () => {
+    const view = ClaudeEngineToolMap.normalize(
+      'web',
+      { query: 'q' },
+      result('Links: [\n  {"title":"A","url":"https://a.test"}\n]'),
+      'WebSearch'
+    )
+    expect(view).toMatchObject({ results: [{ title: 'A', url: 'https://a.test' }] })
   })
 })

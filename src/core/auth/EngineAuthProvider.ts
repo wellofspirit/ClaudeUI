@@ -18,6 +18,8 @@ import type {
   VendorId,
   VendorAuthMap,
   VendorAuthOption,
+  VendorDeviceCodeStart,
+  VendorDeviceCodeStatus,
   AuthFlowState,
   AccountsState
 } from '../../shared/types'
@@ -65,6 +67,18 @@ export interface EngineAuthProvider {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+
+  /**
+   * Start a DEVICE-CODE sign-in for a vendor (ADR-068 §3, Slice 7). Only pi
+   * implements it, and only for `openai-codex` — the same vendor gate
+   * `oauthAuthorize` applies. It also starts the HOST-SIDE wait, so the caller
+   * follows it with `deviceCodeStatus()` rather than holding an invoke open for
+   * fifteen minutes (the web transport times an invoke out at thirty seconds).
+   */
+  deviceCodeStart?(vendorId: VendorId): Promise<VendorDeviceCodeStart>
+
+  /** Where the wait `deviceCodeStart` began has got to. Never carries a token. */
+  deviceCodeStatus?(): Promise<VendorDeviceCodeStatus>
 
   /**
    * POST /provider/{vendorId}/oauth/callback — submit the paste code.

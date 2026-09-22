@@ -8,6 +8,7 @@ import type {
   ModelInfo
 } from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
+import { dedupeResolvedModels } from '../../chat/InputBox/utils'
 
 export function AutomationConfig(): React.JSX.Element {
   const selectedId = useAutomationStore((s) => s.selectedAutomationId)
@@ -26,8 +27,17 @@ export function AutomationConfig(): React.JSX.Element {
 }
 
 function AutomationConfigController({ automation }: { automation: Automation }): React.JSX.Element {
-  const [models, setModels] = useState<ModelOption[]>([])
+  const [fetchedModels, setFetchedModels] = useState<ModelOption[]>([])
   const [globalPerms, setGlobalPerms] = useState<InheritedPerms | null>(null)
+
+  // `shortName` comes off the description, and cli.js lists `default` and its
+  // concrete equivalent (`opus[1m]`) with an identical one — so the raw catalog
+  // yields two rows that read the same. Collapse them on `resolvedModel`,
+  // keeping whichever row this automation is actually pinned to.
+  const models = useMemo(
+    () => dedupeResolvedModels(fetchedModels, automation.model),
+    [fetchedModels, automation.model]
+  )
 
   const runs = useAutomationStore((s) => s.runs[automation.id])
   const detailTab = useAutomationStore((s) => s.detailTab)
@@ -38,7 +48,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
 
   useEffect(() => {
     window.api.getModels().then((infos: ModelInfo[]) => {
-      setModels(
+      setFetchedModels(
         infos.map((m) => ({
           ...m,
           shortName: m.description?.split('·')[0]?.trim() || m.displayName

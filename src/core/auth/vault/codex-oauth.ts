@@ -53,13 +53,26 @@ export interface PkceCodes {
   challenge: string
 }
 
-/** Claims this module reads off the id_token (preferred) / access_token (fallback) JWT. */
+/**
+ * Claims this module reads off the id_token (preferred) / access_token (fallback) JWT.
+ *
+ * `chatgpt_user_id` (falling back to `user_id`) is the STABLE per-user claim
+ * ADR-071 §3 puts in the second half of a `chatgpt:` account key. Both live
+ * inside the `https://api.openai.com/auth` namespace on a real token — the
+ * top-level spellings mirror how `chatgpt_account_id` is read at both levels.
+ */
 export interface JwtClaims {
   chatgpt_account_id?: string
+  chatgpt_plan_type?: string
+  chatgpt_user_id?: string
+  user_id?: string
   organizations?: Array<{ id: string }>
   email?: string
   'https://api.openai.com/auth'?: {
     chatgpt_account_id?: string
+    chatgpt_plan_type?: string
+    chatgpt_user_id?: string
+    user_id?: string
   }
 }
 
@@ -89,6 +102,20 @@ export interface VaultCredential {
   expires: number
   accountId?: string
   email?: string
+  /**
+   * The ChatGPT subscription tier off the JWT (`chatgpt_plan_type`). Carried so
+   * an account row can say which plan it is, and so Codex's injected-token login
+   * can forward `chatgptPlanType` (ADR-068 §1) without re-parsing the JWT.
+   */
+  planType?: string
+  /**
+   * The stable user claim (`chatgpt_user_id`, else `user_id`) — the user half
+   * of ADR-071 §3's `chatgpt:<subscription>:<user>` key. Persisted so a usage
+   * row can name the account without re-parsing an access token, and so an
+   * expired credential still resolves to the account it belongs to. Absent on
+   * every credential stored before S2a2; derived from the access token on read.
+   */
+  userId?: string
 }
 
 /** What AuthVault needs from a login flow — CodexLoginFlow implements this; tests can fake it. */
@@ -219,6 +246,15 @@ function accountIdFromClaims(claims: JwtClaims): string | undefined {
   )
 }
 
+function planTypeFromClaims(claims: JwtClaims): string | undefined {
+  return claims['https://api.openai.com/auth']?.chatgpt_plan_type || claims.chatgpt_plan_type
+}
+
+function userIdFromClaims(claims: JwtClaims): string | undefined {
+  const ns = claims['https://api.openai.com/auth']
+  return ns?.chatgpt_user_id || ns?.user_id || claims.chatgpt_user_id || claims.user_id
+}
+
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */
 export function extractAccountId(tokens: {
   id_token?: string
@@ -232,6 +268,44 @@ export function extractAccountId(tokens: {
   if (tokens.access_token) {
     const claims = parseJwtClaims(tokens.access_token)
     return claims ? accountIdFromClaims(claims) : undefined
+  }
+  return undefined
+}
+
+/** Same id_token-preferred/access_token-fallback priority as extractAccountId, for `chatgpt_plan_type`. */
+export function extractPlanType(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
+  if (tokens.id_token) {
+    const claims = parseJwtClaims(tokens.id_token)
+    const planType = claims && planTypeFromClaims(claims)
+    if (planType) return planType
+  }
+  if (tokens.access_token) {
+    const claims = parseJwtClaims(tokens.access_token)
+    return claims ? planTypeFromClaims(claims) : undefined
+  }
+  return undefined
+}
+
+/**
+ * Same id_token-preferred/access_token-fallback priority as extractAccountId,
+ * for the stable user claim (`chatgpt_user_id`, then `user_id`) — the user half
+ * of ADR-071 §3's `chatgpt:<account>:<user>` key.
+ */
+export function extractUserId(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
+  if (tokens.id_token) {
+    const claims = parseJwtClaims(tokens.id_token)
+    const userId = claims && userIdFromClaims(claims)
+    if (userId) return userId
+  }
+  if (tokens.access_token) {
+    const claims = parseJwtClaims(tokens.access_token)
+    return claims ? userIdFromClaims(claims) : undefined
   }
   return undefined
 }
@@ -358,7 +432,7 @@ export async function refreshAccessToken(
 export function buildVaultCredential(
   tokens: TokenResponse,
   now: () => number,
-  prior?: { accountId?: string; email?: string }
+  prior?: { accountId?: string; email?: string; planType?: string; userId?: string }
 ): VaultCredential {
   const cred: VaultCredential = {
     type: 'oauth',
@@ -368,8 +442,12 @@ export function buildVaultCredential(
   }
   const accountId = extractAccountId(tokens) ?? prior?.accountId
   const email = extractEmail(tokens) ?? prior?.email
+  const planType = extractPlanType(tokens) ?? prior?.planType
+  const userId = extractUserId(tokens) ?? prior?.userId
   if (accountId) cred.accountId = accountId
   if (email) cred.email = email
+  if (planType) cred.planType = planType
+  if (userId) cred.userId = userId
   return cred
 }
 
@@ -424,6 +502,19 @@ export interface CodexLoginFlowOptions {
   deps?: OAuthDeps
   /** Clock used for `expires` math. Defaults to Date.now. */
   now?: () => number
+  /**
+   * Bind the loopback callback server? Defaults to `true` (the desktop).
+   *
+   * `false` is the HEADLESS shape: the redirect URI is registered to CLIENT_ID
+   * and cannot change (ADR-057), so on `claudeui-server` the browser's redirect
+   * lands on the REMOTE machine's own loopback and can never reach this process.
+   * The listener would then receive nothing while holding the fixed port 1455
+   * for the whole `timeoutMs`, so two concurrent server sign-ins would collide
+   * on EADDRINUSE. With `false` everything else is identical — PKCE, state, the
+   * armed pending wait, the timeout, and a byte-identical authorize URL — and
+   * the code arrives through `completeFromPastedInput` instead.
+   */
+  loopback?: boolean
 }
 
 type TerminalResult = { ok: true; cred: VaultCredential } | { ok: false; err: Error }
@@ -449,6 +540,8 @@ export class CodexLoginFlow implements LoginFlow {
   private readonly timeoutMs: number
   private readonly deps: OAuthDeps
   private readonly now: () => number
+  /** Whether start() binds the loopback callback server. See CodexLoginFlowOptions.loopback. */
+  private readonly loopback: boolean
 
   private server: Server | undefined
   /** The port actually bound, read off server.address() after listen() resolves — may differ from requestedPort when requestedPort is 0. */
@@ -465,6 +558,7 @@ export class CodexLoginFlow implements LoginFlow {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.deps = options.deps ?? defaultDeps()
     this.now = options.now ?? (() => Date.now())
+    this.loopback = options.loopback ?? true
   }
 
   /** `http://localhost:<port>/auth/callback` — the port actually bound once listening, else the requested one. */
@@ -494,12 +588,18 @@ export class CodexLoginFlow implements LoginFlow {
     // thrown start() and, `timeoutMs` later, rejects a pendingPromise no one is
     // awaiting — an unhandled rejection. On a bind failure, tear the (optimist-
     // ically armed) pending wait down and rethrow so the flow is left inert.
-    try {
-      await this.listen()
-    } catch (err) {
-      this.pending = undefined
-      this.pendingPromise = undefined
-      throw err
+    //
+    // With `loopback: false` there is nothing to bind and nothing to fail: the
+    // redirect never comes back to this host, so `boundPort` stays undefined and
+    // `redirectUri` falls through to the requested (registered) port.
+    if (this.loopback) {
+      try {
+        await this.listen()
+      } catch (err) {
+        this.pending = undefined
+        this.pendingPromise = undefined
+        throw err
+      }
     }
 
     this.timeoutHandle = setTimeout(() => {

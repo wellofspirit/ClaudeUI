@@ -467,7 +467,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 500,
         cachedTokens: 200,
         totalTokens: 1500,
-        contextWindowSize: 200000,
+        contextWindow: { used: 1500, size: 200000 },
         usedPercentage: 0.75,
         remainingPercentage: 99.25
       }
@@ -489,7 +489,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 50,
         cachedTokens: 0,
         totalTokens: 150,
-        contextWindowSize: 200000,
+        contextWindow: { used: 200, size: 200000 },
         usedPercentage: 0.1,
         remainingPercentage: 99.9
       }
@@ -657,7 +657,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 100,
         cachedTokens: 50,
         totalTokens: 300,
-        contextWindowSize: 200000,
+        contextWindow: { used: 300, size: 200000 },
         usedPercentage: 0.15,
         remainingPercentage: 99.85
       }
@@ -1035,7 +1035,8 @@ describe('useClaudeEvents extended component tests', () => {
         extraUsage: null,
         planName: 'claude_max_5x',
         fetchedAt: Date.now(),
-        error: null
+        error: null,
+        accountLabel: 'alice@example.test'
       }
 
       app.emit('usage:data', usageData)
@@ -1053,14 +1054,15 @@ describe('useClaudeEvents extended component tests', () => {
         extraUsage: null,
         planName: null,
         fetchedAt: Date.now(),
-        error: null
+        error: null,
+        accountLabel: null
       }
       const second: AccountUsage = { ...first, fiveHour: { usedPercent: 90, resetsAt: null } }
 
       app.emit('usage:data', first)
       app.emit('usage:data', second)
 
-      expect(useSessionStore.getState().accountUsage?.fiveHour.usedPercent).toBe(90)
+      expect(useSessionStore.getState().accountUsage?.fiveHour?.usedPercent).toBe(90)
     })
   })
 
@@ -1469,6 +1471,113 @@ describe('useClaudeEvents extended component tests', () => {
       )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
+    })
+  })
+
+  // ── ADR-070 §2 / Slice I: the one resolution signal, and the reads it owes ──
+  //
+  // `account:changed` is HOST-LOCAL — `AccountManager.broadcast` sends it
+  // straight to the desktop window, bypassing SyncCore — so a remote client
+  // never hears the backfill that turns the `Account N` placeholder into the
+  // real email. `provider:auth-resolved` is replicated and lands AFTER
+  // `noteLogin` has written it (it is `finalize`'s last statement, deliberately),
+  // so it is the edge a web client can learn from.
+  describe('provider:auth-resolved', () => {
+    const BACKFILLED = {
+      enabled: true,
+      activeId: 'a2',
+      accounts: [
+        {
+          id: 'a2',
+          email: 'two@example.com',
+          subscriptionType: 'Claude Pro',
+          organization: null,
+          createdAt: 0
+        }
+      ]
+    }
+
+    it('anthropic re-reads the accounts, so a remote client sees the backfill', async () => {
+      const getAccounts = vi.fn(async () => BACKFILLED)
+      Object.assign(window.api, { getAccounts })
+
+      app.emit('provider:auth-resolved', { providerId: 'anthropic' })
+
+      await vi.waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(useSessionStore.getState().accountsState).toEqual(BACKFILLED))
+    })
+
+    it('chatgpt does not read the ANTHROPIC accounts — the arms are disjoint', async () => {
+      useSessionStore.setState({ accountsState: null })
+      const getAccounts = vi.fn(async () => BACKFILLED)
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { getAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt' })
+
+      // The ChatGPT arm ran — so "no account read" is an assertion about the
+      // arms being disjoint, not about the event having been missed.
+      await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
+      expect(getAccounts).not.toHaveBeenCalled()
+      expect(useSessionStore.getState().accountsState).toBeNull()
+    })
+
+    /**
+     * `providerAccounts` is the ChatGPT twin of `accountsState` and it is
+     * host-local in the same way — nothing publishes a change event for the
+     * vault at all, so the only edge that refreshed it was `SignInDialog`'s own
+     * `collectOutcome`. A SECOND client therefore kept the pre-sign-in list
+     * (the `Account N` placeholder, or no account at all) for the life of the
+     * page, while the `providerAuth` the same handler refreshed said connected.
+     */
+    it('chatgpt re-reads the VAULT account list, so a second client is not stale', async () => {
+      const VAULT = {
+        activeId: 'v1',
+        perSession: false,
+        accounts: [{ id: 'v1', email: 'vault@example.com', expiresAt: 0, needsReauth: false }]
+      }
+      useSessionStore.setState({ providerAccounts: null })
+      const listProviderAccounts = vi.fn(async () => VAULT)
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { listProviderAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt' })
+
+      await vi.waitFor(() => expect(listProviderAccounts).toHaveBeenCalledWith('chatgpt'))
+      await vi.waitFor(() => expect(useSessionStore.getState().providerAccounts).toEqual(VAULT))
+    })
+
+    /**
+     * Another engineer's slice adds an optional `accountId` to this payload.
+     * The handler must not start depending on it — both reads are unconditional
+     * refreshes of host-owned state, not a per-account patch.
+     */
+    it('tolerates an accountId on the payload without changing what it reads', async () => {
+      const listProviderAccounts = vi.fn(async () => ({
+        activeId: 'v1',
+        perSession: false,
+        accounts: []
+      }))
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { listProviderAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt', accountId: 'v9' })
+
+      await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(listProviderAccounts).toHaveBeenCalledTimes(1))
+    })
+
+    it('a failed read keeps the last good answer, exactly like the probe beside it', async () => {
+      useSessionStore.setState({ accountsState: BACKFILLED })
+      const getAccounts = vi.fn(async () => {
+        throw new Error('account:get failed')
+      })
+      Object.assign(window.api, { getAccounts })
+
+      app.emit('provider:auth-resolved', { providerId: 'anthropic' })
+
+      await vi.waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(1))
+      expect(useSessionStore.getState().accountsState).toEqual(BACKFILLED)
     })
   })
 

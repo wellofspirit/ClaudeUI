@@ -11,6 +11,8 @@
  * renderer and the web client all read this module.
  */
 
+import type { ItemStreams } from './item-stream'
+
 import type {
   ChatMessage,
   SessionStatus,
@@ -28,15 +30,19 @@ import type {
   ModelRef,
   MeteringSnapshot
 } from '../../../shared/types'
-import type { FullStateSnapshot, PerSessionSnapshot } from '../../../shared/remote-protocol'
+import type {
+  AuthRequiredState,
+  FullStateSnapshot,
+  PerSessionSnapshot
+} from '../../../shared/remote-protocol'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 export interface CanonicalSessionState {
   routingId: string
   cwd: string
   messages: ChatMessage[]
-  streamingText: string
-  streamingThinking: string
+  itemStreams: ItemStreams
+  itemStreamRevision: number
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   /** Derived on message-apply (reducer-internal, ratified §2) — never client-computed. */
@@ -49,8 +55,6 @@ export interface CanonicalSessionState {
   activeTasks: Record<string, { taskId: string; taskType: string }>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
-  subagentStreamingText: Record<string, string>
-  subagentStreamingThinking: Record<string, string>
   permissionMode: string
   /** `null` when unset — matches what every producer actually puts on the wire. */
   effort: string | null
@@ -64,6 +68,23 @@ export interface CanonicalSessionState {
   sdkActive: boolean
   selectedEngineId: EngineId
   selectedModel: string
+  /** A catalog preview is not an explicit native model override. */
+  codexModelExplicit?: boolean
+  /**
+   * The credential this session needs was rejected and could not be renewed
+   * (ADR-068 §4, widened to the three lifetimes of ADR-070 §2).
+   *
+   * ON the wire since slice 3 (`PerSessionSnapshot.authRequired`): the row that
+   * renders it is engine-neutral, so a client that reconnects mid-outage has to
+   * learn the owed sign-in from the snapshot as well as from the ringed event.
+   *
+   * The reducer is the only writer — `session:auth-required` sets it (with the
+   * engine's own words and the prompt whose turn died),
+   * `provider:auth-resolved` marks it resolved, and a running turn nulls it. Its
+   * shape is {@link AuthRequiredState}, declared on the wire type so canonical,
+   * the snapshot and the store cannot drift.
+   */
+  authRequired: AuthRequiredState | null
   /**
    * Core-internal, never serialized: has this session's transcript been seeded
    * from its on-disk history yet? The shadow comparator masks unseeded sessions,
@@ -112,8 +133,8 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     routingId,
     cwd,
     messages: [],
-    streamingText: '',
-    streamingThinking: '',
+    itemStreams: {},
+    itemStreamRevision: 0,
     status: { ...DEFAULT_STATUS },
     pendingApprovals: [],
     todos: [],
@@ -123,8 +144,6 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     activeTasks: {},
     taskProgressMap: {},
     subagentMessages: {},
-    subagentStreamingText: {},
-    subagentStreamingThinking: {},
     permissionMode: 'default',
     effort: null,
     thinkingMode: null,
@@ -136,6 +155,7 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     sdkActive: false,
     selectedEngineId: 'claude',
     selectedModel: 'default',
+    authRequired: null,
     seeded: false
   }
 }
@@ -188,8 +208,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       routingId: id,
       cwd: s.cwd,
       messages: s.messages,
-      streamingText: s.streamingText,
-      streamingThinking: s.streamingThinking,
+      itemStreams: s.itemStreams ?? {},
+      itemStreamRevision: s.itemStreamRevision ?? 0,
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
@@ -199,8 +219,6 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       activeTasks: s.activeTasks ?? {},
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
-      subagentStreamingText: s.subagentStreamingText,
-      subagentStreamingThinking: s.subagentStreamingThinking,
       permissionMode: s.permissionMode,
       effort: s.effort ?? null,
       thinkingMode: s.thinkingMode ?? null,
@@ -217,6 +235,11 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
+      // The WHOLE object, never a field-by-field rebuild: `AuthRequiredState`
+      // grew from two fields to five (ADR-070 §2) and a rebuild is the shape of
+      // edit that silently drops the new ones on every resync.
+      authRequired: s.authRequired ?? null,
       seeded: true
     }
   }
@@ -252,8 +275,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       routingId: id,
       cwd: s.cwd,
       messages: s.messages,
-      streamingText: s.streamingText,
-      streamingThinking: s.streamingThinking,
+      itemStreams: s.itemStreams ?? {},
+      itemStreamRevision: s.itemStreamRevision ?? 0,
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
@@ -263,8 +286,6 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
-      subagentStreamingText: s.subagentStreamingText,
-      subagentStreamingThinking: s.subagentStreamingThinking,
       permissionMode: s.permissionMode,
       effort: s.effort,
       thinkingMode: s.thinkingMode,
@@ -275,7 +296,9 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       sdkSkillNames: state.sdkSkillNames,
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,
-      selectedModel: s.selectedModel
+      selectedModel: s.selectedModel,
+      authRequired: s.authRequired,
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {})
     }
   }
   return {

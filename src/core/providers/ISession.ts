@@ -17,6 +17,10 @@ import type { HostWindowHandle } from '../host'
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
+  resolveCodexApproval?(
+    requestId: string,
+    decision: import('../../shared/codex-types').CodexApprovalDecision
+  ): void
   readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
@@ -34,7 +38,8 @@ export interface ISession {
   /** Run a prompt turn. Passing null spawns the process without sending a message. */
   run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    clientUserMessageId?: string
   ): Promise<void>
 
   /** Queue of record (ADR-053): items still awaiting consumption, oldest first. */
@@ -113,8 +118,17 @@ export interface ISession {
   voiceStartRecording?(language: string): Promise<void>
   voiceStopRecording?(): Promise<void>
 
+  /**
+   * Pin this session to one stored vendor account, or `null` to follow the
+   * globally active one (ADR-068 §2). Gated by
+   * `capabilities.auth.perSessionAccount` — Codex only today; the channel
+   * refuses on every other engine rather than relying on the optional call, so
+   * a client gets a reason instead of silence.
+   */
+  setAccount?(accountId: string | null): Promise<void>
+
   /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
-  setEffort?(effort: string): void
+  setEffort?(effort: string): void | Promise<void>
   /** Thinking mode (gated by capabilities.reasoning.thinking != null). */
   setThinkingMode?(mode: string): void
 
@@ -172,6 +186,18 @@ export interface ISession {
    * (see collab-tool.ts) and don't implement this.
    */
   getAutonomyMode?(): string
+
+  /**
+   * The provider-wide ACTIVE account changed to `activeAccountId` (null = none).
+   *
+   * Optional: only an engine whose sessions share ONE process per account has
+   * anything to do here. Codex implements it (ADR-069 §4) — a session that
+   * follows the active account leaves the host it was on and continues on the
+   * new account's at its next prompt, while a pinned session is untouched.
+   * opencode recycles its servers through its own auth provider instead
+   * (ADR-047), and Claude and pi carry their credential per process.
+   */
+  followActiveAccount?(activeAccountId: string | null): Promise<void>
 
   /**
    * Ask a one-off question outside the main conversation history (the `/btw`

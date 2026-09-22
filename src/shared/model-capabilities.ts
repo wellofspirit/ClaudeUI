@@ -22,6 +22,9 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
  */
 export interface ModelCapabilityInput {
   value: string
+  /** See `ModelInfo.resolvedModel` — the concrete id an alias resolves to.
+   *  Preferred over `value` for every id-keyed derivation below. */
+  resolvedModel?: string
   supportsEffort?: boolean
   supportedEffortLevels?: readonly EffortLevel[]
   supportsAdaptiveThinking?: boolean
@@ -377,6 +380,12 @@ const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus', 'sonnet'])
  * Crucially, resolution is keyed on the model VALUE, not the SDK-provided
  * description: implicit-1M models (Fable 5, Opus 4.8) carry no "1m" marker in
  * their description, so a description heuristic silently caps them at 200K.
+ *
+ * Opaque aliases are the flip side of that: `default` names no model family at
+ * all and deliberately falls through to `CONTEXT_WINDOW_DEFAULT`, because only
+ * cli.js knows what it points at. A caller holding a `ModelInfo` must therefore
+ * pass `resolvedModel` (`default` → `claude-opus-5[1m]`) rather than `value`,
+ * or a 1M session is sized at 200K.
  */
 export function resolveContextWindow(modelValue: string | undefined | null): number {
   if (!modelValue) return CONTEXT_WINDOW_DEFAULT
@@ -416,7 +425,17 @@ export interface EngineCapabilities {
   sandbox: boolean
   proxy: boolean
   autonomyModes: AutonomyMode[]
-  auth: { canDriveLogin: boolean; multiAccount: boolean }
+  /**
+   * `canDriveLogin` — the app can start this engine's sign-in itself.
+   * `multiAccount`  — the engine's own store holds several accounts at once.
+   * `perSessionAccount` — a SINGLE session can be pinned to one stored account
+   *   independently of the global active one (ADR-068 §2). True for Codex only:
+   *   its identity is injected per process (`account/login/start
+   *   {type:'chatgptAuthTokens'}`), so re-pointing one live process costs one
+   *   request. pi and opencode read a single-slot file, and Claude would need a
+   *   per-spawn credential directory — a separate decision, not this flag.
+   */
+  auth: { canDriveLogin: boolean; multiAccount: boolean; perSessionAccount: boolean }
   /**
    * ADR-033 (cross-engine dispatch) + ADR-030 (capability honesty): "this
    * engine can host the `dispatch_agent` tool AND at least one OTHER engine is
@@ -438,6 +457,8 @@ export interface EngineCapabilities {
  * ThinkingMode/EffortLevel come from this module (the single source of truth).
  */
 export interface ReasoningCapability {
+  /** Native catalog values, not coerced into Claude's effort vocabulary. */
+  nativeEffort?: { options: Array<{ value: string; description: string }> }
   /** Thinking mode picker (adaptive|enabled|disabled). Present when model supports thinking. */
   thinking?: { modes: readonly ThinkingMode[]; supportsBudget?: boolean }
   /** Effort tier picker. Present when model supports effort levels. */
@@ -486,8 +507,113 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: true,
   proxy: true,
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
-  auth: { canDriveLogin: true, multiAccount: true },
+  auth: { canDriveLogin: true, multiAccount: true, perSessionAccount: false },
   crossEngineDispatch: true
+}
+
+export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  // ClaudeUI's three hosted UI tools (render_mermaid / create_mockup /
+  // show_mockup) run over Codex's native dynamic-tool channel — declared on
+  // `thread/start`, called back as `item/tool/call`
+  // (src/core/codex/codex-hosted-tools.ts). True on BOTH paths, which is what
+  // ADR-030 asks before the flag goes up: a resumed thread keeps them, because
+  // the specs live in the rollout's SessionMeta and come back from there even
+  // though `thread/resume` has no field to re-send them (pinned end to end by
+  // src/integration/codex/codex-app-server.integration.test.ts). It does NOT
+  // mean Codex hosts MCP servers — the runtime MCP verbs stay gated on method
+  // presence (`mcpServerStatus` and friends), which this engine has none of,
+  // and the MCP UI is `engineId === 'claude'` only.
+  hostedMcp: true,
+  backgroundTasks: false,
+  // Native children (ADR-066 slice F). Codex's stock `multi_agent_v1` tools
+  // spawn child THREADS in the root's own process; the app-server attaches
+  // every initialized connection to every thread it creates, so this client
+  // sees each child's items, deltas and approval requests on the same
+  // connection and renders them as the spawning call's subagent transcript.
+  // True on BOTH paths, which is what ADR-030 asks before the flag goes up:
+  // live (CodexSession's child routing) and cold (`loadCodexHistory` reads each
+  // child thread back under the same parent tool_use id).
+  subagents: true,
+  // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
+  // permission engine over `untrusted` + a readOnly native sandbox (ADR-066).
+  plan: true,
+  // Native `thread/fork`, whose granularity is the TURN: a branch copies the
+  // source through the turn that owns the clicked message into a NEW thread and
+  // leaves the source untouched. Both flags go up together because that verb is
+  // the only branch this engine has — there is no whole-session clone separate
+  // from it, so `fork` without `forkFromMessage` would describe nothing. The
+  // renderer's optimistic seed still slices at the MESSAGE, so a branch cut
+  // mid-turn shows fewer rows than it actually kept until the next cold load
+  // replaces the seed with the fork's own history (ADR-066).
+  fork: true,
+  forkFromMessage: true,
+  // Both true together, as on pi: they gate the SAME send-while-busy
+  // affordance, and ADR-053's full path works here — core holds the item
+  // (recallable), forwards it with `turn/steer` + `expectedTurnId` at the next
+  // completed sub-turn item, and broadcasts the `consumed` transition.
+  // `capabilities.steer` is read nowhere in the renderer (InputBox derives
+  // `queueEnabled` from `queue` alone); it is the ADR-030 honesty flag for
+  // "this lands in the RUNNING turn", which `turn/steer` is.
+  steer: true,
+  queue: true,
+  slashCommands: false,
+  skills: false,
+  sideQuestion: false,
+  interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
+  // ADR-068 §2: the ONE engine whose session can be pinned to a stored
+  // ChatGPT account of its own — the identity is injected per app-server
+  // process, so re-pointing a live one is a single `account/login/start`.
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true },
+  // ADR-033 slice E — Codex as a dispatch SOURCE: `dispatch_agent` rides the
+  // same native dynamic-tool channel the hosted three do, gated by the shared
+  // permission engine (kind `task`: asks in default/acceptEdits/auto, denies
+  // in plan) and executed by `CodexSession.dispatchAgent` against the shared
+  // `crossEngineDispatcher`. Codex as a dispatch TARGET is NOT shipped — the
+  // dispatcher has no Codex target factory, so a `codex` target is refused.
+  // The honest per-session value ANDs this with the runtime
+  // `crossEngineDispatchAvailable('codex')` check (CodexSession's constructor).
+  crossEngineDispatch: true
+}
+
+/**
+ * Does the codex catalog row for `model` publish `effort`?
+ *
+ * THE predicate for "this native tier is legal on this model" — the pre-spawn
+ * pick (`resolveSessionSdkOptions`) and the model switch (`handleSelectModel`)
+ * ask it the same way, because the engine does: `CodexSession.validateEffort`
+ * refuses a thread start on a tier the model never listed.
+ */
+export function codexPublishesEffort(
+  codexModels: ReadonlyArray<{
+    value: string
+    nativeEffortOptions?: ReadonlyArray<{ value: string }>
+  }>,
+  model: string | undefined,
+  effort: string | null | undefined
+): boolean {
+  if (!model || !effort) return false
+  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
+  return !!options?.some((option) => option.value === effort)
+}
+
+export function resolveCodexCapabilities(model?: {
+  vision?: boolean
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+}): ResolvedCapabilities {
+  return resolveCapabilities(CODEX_ENGINE_CAPABILITIES, {
+    reasoning: model?.nativeEffortOptions?.length
+      ? { nativeEffort: { options: model.nativeEffortOptions } }
+      : {},
+    vision: model?.vision ?? false,
+    toolCalling: true,
+    contextWindow: 0,
+    maxOutput: 0,
+    promptCaching: false
+  })
 }
 
 /**
@@ -513,8 +639,12 @@ export function claudeModelCapabilities(
     reasoning,
     vision: true,
     toolCalling: true,
-    contextWindow: resolveContextWindow(model?.value ?? null),
-    maxOutput: maxOutputTokens(model?.value ?? null),
+    // Both figures are keyed on a model ID, and `value` may be an opaque alias
+    // (`default`) that no id-based resolver can see through. cli.js hands us the
+    // concrete target in `resolvedModel` — prefer it, fall back to `value` for
+    // every engine whose catalog has no such field.
+    contextWindow: resolveContextWindow(model?.resolvedModel ?? model?.value ?? null),
+    maxOutput: maxOutputTokens(model?.resolvedModel ?? model?.value ?? null),
     promptCaching: true
   }
 }
@@ -570,13 +700,31 @@ export function resolveCapabilities(
  * id-based heuristics (effort, thinking, context window) key on that id rather
  * than the alias string. The 'default' alias has no canonicalization, preserving
  * its pass-through behaviour.
+ *
+ * `resolvedModel` is the concrete id cli.js reports in system/init (ClaudeSession
+ * tracks it as `resolvedModelId`). Pass it whenever it is known: `default`
+ * canonicalizes to nothing useful, so without it a `default` session's
+ * `contextWindow` is the 200K fallback even when the session is really running a
+ * 1M model.
+ *
+ * It is deliberately NOT canonicalized. `canonicalizeModelValue` routes an
+ * unknown id through `normaliseModelId`, whose `/claude-[a-z0-9-]+/` match stops
+ * at the bracket and DROPS a `[1m]` suffix that `resolveContextWindow` needs:
+ * verified `canonicalizeModelValue('claude-opus-5[1m]') === 'claude-opus-5'`.
+ * That is harmless for the 2.1.268 catalog (opus-5 and fable-5-1 are
+ * implicit-1M anyway) but not in general — `claude-sonnet-4-6[1m]` resolves to
+ * 1M raw and 200K canonicalized, a silent 5x undersize. The wire id is already
+ * concrete; it needs no alias translation.
  */
-export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedCapabilities {
+export function resolveClaudeCapabilities(
+  modelValue?: string | null,
+  resolvedModel?: string | null
+): ResolvedCapabilities {
   const raw = modelValue ?? 'default'
   const canonical = canonicalizeModelValue(raw) || raw
   return resolveCapabilities(
     CLAUDE_ENGINE_CAPABILITIES,
-    claudeModelCapabilities({ value: canonical })
+    claudeModelCapabilities({ value: canonical, resolvedModel: resolvedModel ?? undefined })
   )
 }
 
@@ -616,7 +764,7 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['plan', 'ask', 'full'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 
@@ -826,7 +974,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 

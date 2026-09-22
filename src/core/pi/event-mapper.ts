@@ -19,6 +19,7 @@
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type {
   PiAgentMessage,
   PiAssistantContentBlock,
@@ -44,6 +45,20 @@ export interface PiMapperState {
    *  mid-turn upsert. Reset with `currentMessageId` at both ends of the
    *  message's life so nothing bleeds into the next one. */
   blocks: Map<number, PiAssistantContentBlock>
+  /** Text accumulated from deltas for each native contentIndex. */
+  blockValues: Map<number, string>
+  /** First meaningful thinking delta time, keyed by native contentIndex. */
+  thinkingStartedAt: Map<number, number>
+  /** Completed thinking durations retained for the authoritative full-message seal. */
+  thinkingDurationMs: Map<number, number>
+  /** Native block indexes with an active item-open already emitted. */
+  openedBlocks: Set<number>
+  /** Completed block indexes; late deltas for them are discarded. */
+  sealedBlocks: Set<number>
+  /** Stable presentation timestamp for the current synthesized message. */
+  currentMessageTimestamp: number | null
+  /** Rejects late updates after a terminal message_end until the next message_start. */
+  messageEnded: boolean
   /** Wall-clock run start (ms), set by the caller (PiSession) when a prompt is
    *  sent; read at agent_settled to compute `result.durationMs`. */
   startTimeMs: number
@@ -71,6 +86,13 @@ export function createPiMapperState(): PiMapperState {
   return {
     currentMessageId: null,
     blocks: new Map(),
+    blockValues: new Map(),
+    thinkingStartedAt: new Map(),
+    thinkingDurationMs: new Map(),
+    openedBlocks: new Set(),
+    sealedBlocks: new Set(),
+    currentMessageTimestamp: null,
+    messageEnded: false,
     startTimeMs: 0,
     totalCostUsd: 0,
     sessionId: null,
@@ -120,7 +142,9 @@ export interface PiSubagentUpdatePayload {
 }
 
 export type PiMapperOutput =
-  | { kind: 'stream'; streamType: 'text' | 'thinking'; delta: string; messageId: string }
+  | { kind: 'item_open'; target: ItemStreamTarget; message: ChatMessage; startedAt?: number }
+  | { kind: 'item_delta'; target: ItemStreamTarget; chunk: string; message: ChatMessage }
+  | { kind: 'item_seal'; target?: ItemStreamTarget; message: ChatMessage }
   | { kind: 'message'; message: ChatMessage }
   | {
       kind: 'tool_result'
@@ -141,6 +165,14 @@ export type PiMapperOutput =
     }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
+  /**
+   * A turn that died on a REJECTED CREDENTIAL (401/403) rather than on an
+   * ordinary failure. Mirrors opencode/event-mapper.ts's identical variant:
+   * `vendorId` is pi's own id for the provider (`msg.provider`), which only the
+   * session can translate into the provider the sign-in dialog acts on, and
+   * `message` is the vendor's verbatim words so the session can keep them.
+   */
+  | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
   // M5b — in-pi subagents (pi-subagent-source.ts). Carries the `subagent`
   // tool's `cuiSubagent` details, validated (never a raw pass-through of
@@ -165,6 +197,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       if (msg.role === 'assistant') {
         state.currentMessageId = uuid()
         state.blocks.clear()
+        state.blockValues.clear()
+        state.thinkingStartedAt.clear()
+        state.thinkingDurationMs.clear()
+        state.openedBlocks.clear()
+        state.sealedBlocks.clear()
+        state.currentMessageTimestamp = msg.timestamp ?? Date.now()
+        state.messageEnded = false
       }
       // user/bashExecution (and any other role) → ignore: the renderer already
       // renders the user's prompt optimistically; bashExecution messages never
@@ -173,36 +212,82 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     }
 
     case 'message_update': {
+      if (state.messageEnded) return [{ kind: 'ignore' }]
       const { assistantMessageEvent: amEvent } = ev as Extract<PiEvent, { type: 'message_update' }>
       const messageId = ensureMessageId(state)
 
       if (amEvent.type === 'text_delta' || amEvent.type === 'thinking_delta') {
         const delta = amEvent.delta ?? ''
         if (!delta) return [{ kind: 'ignore' }]
-        return [
-          {
-            kind: 'stream',
-            streamType: amEvent.type === 'text_delta' ? 'text' : 'thinking',
-            delta,
-            messageId
+        const kind = amEvent.type === 'text_delta' ? 'text' : 'thinking'
+        const index = normalizedContentIndex(state, amEvent.contentIndex)
+        if (state.sealedBlocks.has(index)) return [{ kind: 'ignore' }]
+        const previous = state.blockValues.get(index)
+        const value = (previous ?? '') + delta
+        state.blockValues.set(index, value)
+        setPiBlock(
+          state,
+          index,
+          kind === 'text' ? { type: 'text', text: value } : { type: 'thinking', thinking: value }
+        )
+        if (kind === 'thinking' && previous === undefined)
+          state.thinkingStartedAt.set(index, Date.now())
+        const blockIndex = renderedBlockIndex(state, index)
+        if (blockIndex === null) return [{ kind: 'ignore' }]
+        const target: ItemStreamTarget = { messageId, blockIndex, kind }
+        const outputs: PiMapperOutput[] = []
+        if (!state.openedBlocks.has(index)) {
+          const scaffold = buildInFlightMessage(state, messageId)
+          if (scaffold) {
+            const block = scaffold.content[blockIndex]
+            if (block?.type === kind)
+              scaffold.content[blockIndex] = { ...block, text: previous ?? '' }
+            const startedAt = state.thinkingStartedAt.get(index)
+            outputs.push({
+              kind: 'item_open',
+              target,
+              message: scaffold,
+              // Thinking only — `thinkingStartedAt` was just set above for the
+              // first delta of this block; text blocks never enter that map.
+              ...(startedAt === undefined ? {} : { startedAt })
+            })
+            state.openedBlocks.add(index)
           }
-        ]
+        }
+        const message = buildInFlightMessage(state, messageId)
+        if (state.openedBlocks.has(index) && message)
+          outputs.push({ kind: 'item_delta', target, chunk: delta, message })
+        return outputs
+      }
+
+      if (amEvent.type === 'text_start' || amEvent.type === 'thinking_start') {
+        const index = normalizedContentIndex(state, amEvent.contentIndex)
+        if (!state.blocks.has(index))
+          setPiBlock(
+            state,
+            index,
+            amEvent.type === 'text_start'
+              ? { type: 'text', text: '' }
+              : { type: 'thinking', thinking: '' }
+          )
+        return [{ kind: 'ignore' }]
       }
 
       // The `*_end` events carry the block's FULL accumulated value, so each
       // simply overwrites its slot — no string concatenation, and replaying one
       // is idempotent.
       if (amEvent.type === 'text_end') {
-        setPiBlock(state, amEvent.contentIndex, { type: 'text', text: amEvent.content ?? '' })
-        return [{ kind: 'ignore' }]
+        return sealEndedBlock(state, messageId, amEvent.contentIndex, 'text', amEvent.content ?? '')
       }
 
       if (amEvent.type === 'thinking_end') {
-        setPiBlock(state, amEvent.contentIndex, {
-          type: 'thinking',
-          thinking: amEvent.content ?? ''
-        })
-        return [{ kind: 'ignore' }]
+        return sealEndedBlock(
+          state,
+          messageId,
+          amEvent.contentIndex,
+          'thinking',
+          amEvent.content ?? ''
+        )
       }
 
       if (amEvent.type === 'toolcall_end') {
@@ -215,7 +300,28 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         setPiBlock(state, amEvent.contentIndex, amEvent.toolCall)
         const content = orderedPiBlocks(state)
         recordPiEditToolPaths(state, content)
-        return [{ kind: 'message', message: buildPiChatMessage(messageId, content) }]
+        return [
+          {
+            kind: 'message',
+            message: withThinkingDurations(
+              {
+                ...buildPiChatMessage(messageId, content),
+                timestamp: state.currentMessageTimestamp ?? Date.now()
+              },
+              state.thinkingDurationMs
+            )
+          }
+        ]
+      }
+
+      if (amEvent.type === 'toolcall_start' && amEvent.id && amEvent.toolName) {
+        setPiBlock(state, amEvent.contentIndex, {
+          type: 'toolCall',
+          id: amEvent.id,
+          name: amEvent.toolName,
+          arguments: {}
+        })
+        return [{ kind: 'ignore' }]
       }
 
       // start/text_start/thinking_start/toolcall_start/toolcall_delta/done/
@@ -230,12 +336,30 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       const msg = (ev as Extract<PiEvent, { type: 'message_end' }>).message
 
       if (msg.role === 'assistant') {
+        if (state.messageEnded) return [{ kind: 'ignore' }]
         const messageId = ensureMessageId(state)
+        finalizeActiveThinking(state)
+        const fallbackMessage = buildInFlightMessage(state, messageId)
+        const fallback = fallbackMessage
+          ? withThinkingDurations(fallbackMessage, state.thinkingDurationMs)
+          : null
+        const message = withThinkingDurations(
+          {
+            ...buildPiChatMessage(messageId, msg.content),
+            timestamp: state.currentMessageTimestamp ?? msg.timestamp ?? Date.now()
+          },
+          state.thinkingDurationMs
+        )
         state.currentMessageId = null
         state.blocks.clear()
+        state.blockValues.clear()
+        state.thinkingStartedAt.clear()
+        state.thinkingDurationMs.clear()
+        state.openedBlocks.clear()
+        state.sealedBlocks.clear()
+        state.currentMessageTimestamp = null
+        state.messageEnded = true
         recordPiEditToolPaths(state, msg.content)
-
-        const message = buildPiChatMessage(messageId, msg.content)
         // `usage` is guarded defensively: an errored/aborted turn (M-PI2) may
         // carry a partial or absent usage snapshot, and this branch now runs for
         // those too.
@@ -253,7 +377,9 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         // fork-anchor.ts) drifts one ahead of the on-disk transcript and every
         // later fork silently drops the wrong turn.
         if (message.content.length > 0) {
-          outputs.push({ kind: 'message', message })
+          outputs.push({ kind: 'item_seal', message })
+        } else if (fallback?.content.length) {
+          outputs.push({ kind: 'item_seal', message: fallback })
         }
 
         if (usage) {
@@ -279,10 +405,15 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         // empty assistant message with no banner. 'aborted' is a user Stop, NOT
         // an error, so it never raises a banner.
         if (msg.stopReason === 'error') {
-          outputs.push({
-            kind: 'error',
-            message: msg.errorMessage || 'pi reported a turn error'
-          })
+          const message = msg.errorMessage || 'pi reported a turn error'
+          // A REJECTED CREDENTIAL is not an ordinary turn error — it needs a
+          // sign-in, not a banner (ADR-068 §4). 401/403 only: a 429 is a quota
+          // the same credential will serve again, and a 5xx is the vendor's.
+          outputs.push(
+            isPiAuthStatus(piErrorStatusCode(msg.errorMessage))
+              ? { kind: 'auth-required', vendorId: msg.provider, message }
+              : { kind: 'error', message }
+          )
         }
 
         return outputs
@@ -348,11 +479,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     case 'compaction_end': {
       const { result } = ev as Extract<PiEvent, { type: 'compaction_end' }>
       if (!result) return [{ kind: 'ignore' }] // aborted or failed — nothing to show
-      const firstLine = result.summary.split('\n')[0] ?? ''
       const message: ChatMessage = {
         id: uuid(),
         role: 'system',
-        content: [{ type: 'compact_separator', text: firstLine }],
+        // The WHOLE summary (F20). `CompactSeparator` collapses it to a header
+        // and reveals the body on click, so keeping only the first line threw
+        // away the one real compaction summary any harness gives us.
+        content: [{ type: 'compact_separator', text: result.summary }],
         timestamp: Date.now()
       }
       return [{ kind: 'message', message }]
@@ -422,16 +555,176 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
   }
 }
 
+/** Seal a received partial when the native process ends before message_end. */
+export function finishPiMessage(state: PiMapperState): PiMapperOutput[] {
+  if (!state.currentMessageId || state.messageEnded) return []
+  finalizeActiveThinking(state)
+  const inFlight = buildInFlightMessage(state, state.currentMessageId)
+  const message = inFlight ? withThinkingDurations(inFlight, state.thinkingDurationMs) : null
+  state.currentMessageId = null
+  state.blocks.clear()
+  state.blockValues.clear()
+  state.thinkingStartedAt.clear()
+  state.thinkingDurationMs.clear()
+  state.openedBlocks.clear()
+  state.sealedBlocks.clear()
+  state.currentMessageTimestamp = null
+  state.messageEnded = true
+  return message?.content.length ? [{ kind: 'item_seal', message }] : []
+}
+
+function finalizeActiveThinking(state: PiMapperState): void {
+  const now = Date.now()
+  for (const [index, startedAt] of state.thinkingStartedAt) {
+    state.thinkingDurationMs.set(index, Math.max(0, now - startedAt))
+  }
+  state.thinkingStartedAt.clear()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The HTTP status a failed turn's `errorMessage` opens with, or null.
+ *
+ * pi hands the ADAPTER's own error text through verbatim, so there is no status
+ * field to read and the text's shape depends on `msg.api` (probed against the
+ * vendored pi 0.84.3):
+ *
+ *   anthropic-messages  `401 {"type":"error","error":{…}}`
+ *   openai-responses    `OpenAI API error (401): {…}`
+ *   openai-responses    `OpenAI API error (403): 403 status code (no body)`
+ *
+ * Both alternatives are ANCHORED at the start of the string, and that is the
+ * point: keying on a bare `\d{3}` anywhere would let a provider's own prose
+ * ("the previous 401 has been cleared") raise a sign-in dialog. The 403 row is
+ * also why this keys on the STATUS and never on body text — that body can be
+ * absent entirely.
+ */
+const PI_ERROR_STATUS_RE = /^(?:(\d{3})(?!\d)|[A-Za-z][A-Za-z ]*API error \((\d{3})\))/
+
+function piErrorStatusCode(errorMessage: string | undefined): number | null {
+  if (!errorMessage) return null
+  const match = PI_ERROR_STATUS_RE.exec(errorMessage.trim())
+  if (!match) return null
+  return Number(match[1] ?? match[2])
+}
+
+/**
+ * Which statuses mean "this credential was rejected" (owner's ruling): 401 and
+ * 403, and nothing else. A 429 is a live credential out of quota and a 5xx is
+ * the vendor's own fault — both stay ordinary turn errors.
+ */
+function isPiAuthStatus(code: number | null): boolean {
+  return code === 401 || code === 403
+}
 
 /** Get the in-flight message id, minting (and storing) one defensively if a
  *  message_start was somehow missed — keeps the upsert-by-id contract intact
  *  for any events that follow. */
 function ensureMessageId(state: PiMapperState): string {
-  if (!state.currentMessageId) state.currentMessageId = uuid()
+  if (!state.currentMessageId) {
+    state.currentMessageId = uuid()
+    state.currentMessageTimestamp = Date.now()
+  }
   return state.currentMessageId
+}
+
+function normalizedContentIndex(state: PiMapperState, index: number | undefined): number {
+  return typeof index === 'number' && Number.isSafeInteger(index) && index >= 0
+    ? index
+    : state.blocks.size
+}
+
+function buildInFlightMessage(state: PiMapperState, messageId: string): ChatMessage | null {
+  const entries = [...state.blocks.entries()].sort(([a], [b]) => a - b)
+  if (!entries.length) return null
+  if (entries.some(([index], position) => index !== position)) return null
+  const visible = entries.map(([, block]) => block)
+  return withThinkingDurations(
+    {
+      ...buildPiChatMessage(messageId, visible),
+      timestamp: state.currentMessageTimestamp ?? Date.now()
+    },
+    state.thinkingDurationMs
+  )
+}
+
+function renderedBlockIndex(state: PiMapperState, nativeIndex: number): number | null {
+  for (let index = 0; index <= nativeIndex; index += 1) {
+    if (!state.blocks.has(index)) return null
+  }
+  return nativeIndex
+}
+
+function sealEndedBlock(
+  state: PiMapperState,
+  messageId: string,
+  contentIndex: number | undefined,
+  kind: 'text' | 'thinking',
+  authoritative: string
+): PiMapperOutput[] {
+  const index = normalizedContentIndex(state, contentIndex)
+  if (state.sealedBlocks.has(index)) return [{ kind: 'ignore' }]
+  const previous = state.blockValues.get(index)
+  const value = authoritative || previous || ''
+  if (!value) {
+    state.blockValues.delete(index)
+    setPiBlock(
+      state,
+      index,
+      kind === 'text' ? { type: 'text', text: '' } : { type: 'thinking', thinking: '' }
+    )
+    state.thinkingStartedAt.delete(index)
+    state.sealedBlocks.add(index)
+    return [{ kind: 'ignore' }]
+  }
+  state.blockValues.set(index, value)
+  setPiBlock(
+    state,
+    index,
+    kind === 'text' ? { type: 'text', text: value } : { type: 'thinking', thinking: value }
+  )
+  const message = buildInFlightMessage(state, messageId)
+  if (!message) return [{ kind: 'ignore' }]
+  const blockIndex = renderedBlockIndex(state, index)
+  if (blockIndex === null) return [{ kind: 'ignore' }]
+  if (kind === 'thinking') {
+    const started = state.thinkingStartedAt.get(index)
+    const block = message.content[blockIndex]
+    if (started !== undefined)
+      state.thinkingDurationMs.set(index, Math.max(0, Date.now() - started))
+    const durationMs = state.thinkingDurationMs.get(index)
+    if (durationMs !== undefined && block?.type === 'thinking')
+      message.content[blockIndex] = { ...block, durationMs }
+    state.thinkingStartedAt.delete(index)
+  }
+  const target: ItemStreamTarget = { messageId, blockIndex, kind }
+  const outputs: PiMapperOutput[] = []
+  if (!state.openedBlocks.has(index)) {
+    const scaffold = { ...message, content: [...message.content] }
+    const block = scaffold.content[blockIndex]
+    if (block?.type === kind) scaffold.content[blockIndex] = { ...block, text: '' }
+    outputs.push({ kind: 'item_open', target, message: scaffold })
+    state.openedBlocks.add(index)
+  }
+  outputs.push({ kind: 'item_seal', target, message })
+  state.openedBlocks.delete(index)
+  state.sealedBlocks.add(index)
+  return outputs
+}
+
+function withThinkingDurations(message: ChatMessage, durations: Map<number, number>): ChatMessage {
+  if (!durations.size) return message
+  return {
+    ...message,
+    content: message.content.map((block, index) =>
+      block.type === 'thinking' && durations.has(index)
+        ? { ...block, durationMs: durations.get(index) }
+        : block
+    )
+  }
 }
 
 /**

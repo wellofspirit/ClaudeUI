@@ -334,3 +334,27 @@ describe('OpencodeEngineToolMap.normalize', () => {
     })
   })
 })
+
+/**
+ * F20 — `websearch` takes `query` and `webfetch` takes `url`; reading only
+ * `url` turned every search card into a JSON dump of its own input.
+ */
+describe('OpencodeEngineToolMap — web targets and actions', () => {
+  it('reads the query for websearch and marks it a search', () => {
+    expect(
+      OpencodeEngineToolMap.normalize('web', { query: 'electron 38' }, undefined, 'websearch')
+    ).toEqual({ kind: 'web', target: 'electron 38', action: 'search' })
+  })
+
+  it('reads the url for webfetch and marks it a fetch', () => {
+    expect(
+      OpencodeEngineToolMap.normalize('web', { url: 'https://e.test' }, undefined, 'webfetch')
+    ).toEqual({ kind: 'web', target: 'https://e.test', action: 'fetch' })
+  })
+
+  it('still falls back to the JSON dump when neither field is present', () => {
+    expect(
+      OpencodeEngineToolMap.normalize('web', { other: 1 }, undefined, 'websearch')
+    ).toMatchObject({ target: '{"other":1}' })
+  })
+})

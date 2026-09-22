@@ -1197,3 +1197,73 @@ describe('withoutAllowRules — the auto-mode allow filter', () => {
     ).toEqual({ decision: 'allow', source: 'session-allow' })
   })
 })
+
+/**
+ * Slice 4b guard. Claude's MCP rule vocabulary is `mcp__<server>` (every tool
+ * on one server) and `mcp__<server>__<tool>` (one tool); neither takes a
+ * specifier. Before this slice `ruleMatchesTool` mapped a rule's tool name
+ * through CLAUDE_TOOL_TO_KIND, which lists only Bash/Edit/Write/Read/Grep/
+ * Glob/LS — so every `mcp__…` rule a user wrote was inert on this engine, in
+ * every tier, and an MCP tool call fell straight through to the mode base.
+ * Codex's MCP approval (ADR-067) is gated through exactly this ladder, so the
+ * rules have to bind here or they bind nowhere.
+ */
+describe('decide — MCP rules in Claude vocabulary (Slice 4b)', () => {
+  const ctx = (partial: Partial<MergedClaudeRules>) => ({
+    mode: 'default',
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    cwd: '/repo'
+  })
+
+  it('an exact tool rule matches that tool in every tier', () => {
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ deny: ['mcp__probe__ping'] }))).toEqual({
+      decision: 'deny',
+      source: 'deny-rule',
+      rule: 'mcp__probe__ping'
+    })
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe__ping'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__probe__ping'
+    })
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ ask: ['mcp__probe__ping'] }))).toEqual({
+      decision: 'ask',
+      source: 'ask-rule',
+      rule: 'mcp__probe__ping'
+    })
+  })
+
+  it('a server rule covers every tool on that server and nothing else', () => {
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__probe'
+    })
+    // The bare server name itself — what the gate falls back to when the tool
+    // name cannot be read off the elicitation.
+    expect(decideWithSource('mcp__probe', {}, ctx({ allow: ['mcp__probe'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__probe'
+    })
+    // A prefix that is not a segment boundary must NOT match.
+    expect(decide('mcp__probe-two__ping', {}, ctx({ allow: ['mcp__probe'] }))).toBe('ask')
+    // A different tool on the same server is not covered by an exact tool rule.
+    expect(decide('mcp__probe__pong', {}, ctx({ allow: ['mcp__probe__ping'] }))).toBe('ask')
+  })
+
+  it('leaves non-MCP tool names and specifier forms exactly as they were', () => {
+    // A bare `Bash` rule still matches bash and only bash.
+    expect(decide('mcp__probe__ping', {}, ctx({ allow: ['Bash'] }))).toBe('ask')
+    // Claude has no specifier form for MCP rules; one is not invented here.
+    expect(decide('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe__ping(x)'] }))).toBe('ask')
+    // …but `(*)`/`()` collapse to a whole-tool rule in parseClaudeRule, so they
+    // keep the meaning a user reading Claude's own syntax would expect.
+    expect(decide('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe__ping(*)'] }))).toBe('allow')
+  })
+
+  it('scopes "allow for this session" to the full mcp tool name', () => {
+    expect(sessionAllowKey('mcp__probe__ping', {})).toBe('mcp__probe__ping')
+  })
+})

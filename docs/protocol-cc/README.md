@@ -11,14 +11,15 @@ Reference documentation for the complete wire protocol between ClaudeUI's SDK ha
 ## Verified against
 
 ```
-cli.js version: 2.1.261
-upstream SDK:   @anthropic-ai/claude-code 2.1.261 (Bun 1.4.1 standalone binary, chunked ESM graph)
+cli.js version: 2.1.268
+upstream SDK:   @anthropic-ai/claude-code 2.1.268 (Bun 1.4.1 standalone binary, chunked ESM graph)
 ```
 
 > Bundle-format note: since 2.1.261 the vendored `vendor/claude-cli/cli.js` is a
-> concatenation of ~1,630 minified ESM chunks behind `// @bun-chunk` delimiter
-> lines (see 01-transport §1.12). Char anchors recorded in these docs before
-> 2.1.261 refer to the old monolithic bundle — re-locate by string literal.
+> concatenation of minified ESM chunks behind `// @bun-chunk` delimiter lines
+> (1,631 at 2.1.261, 1,652 at 2.1.268 on win32-x64 — see 01-transport §1.12).
+> Char anchors recorded in these docs before 2.1.261 refer to the old monolithic
+> bundle — re-locate by string literal.
 
 The doc should be re-verified each time `package.json#claudeCliVersion` bumps. See `12-maintenance.md` for the drift check workflow.
 

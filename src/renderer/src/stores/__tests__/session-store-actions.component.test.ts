@@ -1206,82 +1206,6 @@ describe('setStatus', () => {
 
   // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
   // is deleted (4c) — see base-session-thinking-span.test.ts.
-
-  it('clears foreground subagent streaming buffers on idle', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')]
-      })
-    )
-    seed.subagentStreamThinking('r1', 'tool-fg', 'subagent thinking...')
-    seed.subagentStreamText('r1', 'tool-fg', 'subagent answering...')
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
-    expect(s.subagentStreamingText['tool-fg']).toBe('')
-  })
-
-  it('preserves background subagent streaming buffers on idle', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [
-          makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')
-        ]
-      })
-    )
-    // appendSubagentStreamingText clears thinking by design (text supersedes
-    // thinking in the live preview), so seed both buffers directly.
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        r1: {
-          ...state.sessions.r1,
-          subagentStreamingThinking: { 'tool-bg': 'still thinking...' },
-          subagentStreamingText: { 'tool-bg': 'still answering...' }
-        }
-      }
-    }))
-    mirrorStoreIntoReplica()
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-bg']).toBe('still thinking...')
-    expect(s.subagentStreamingText['tool-bg']).toBe('still answering...')
-  })
-
-  it('clears foreground but not background subagent buffers when both are present', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [
-          makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
-          makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg')
-        ]
-      })
-    )
-    seed.subagentStreamThinking('r1', 'tool-fg', 'fg thinking')
-    seed.subagentStreamThinking('r1', 'tool-bg', 'bg thinking')
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
-    expect(s.subagentStreamingThinking['tool-bg']).toBe('bg thinking')
-  })
 })
 
 describe('updateTaskProgress', () => {
@@ -1379,13 +1303,6 @@ describe('appendSubagentMessageBatch', () => {
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
     expect(msgs[0].content[0]).toMatchObject({ text: 'new' })
-  })
-
-  it('clears streaming text and thinking', () => {
-    store().createNewSession('r1', '/test')
-    seed.subagentStreamText('r1', 'tool-1', 'partial...')
-    seed.subagentMessageBatch('r1', 'tool-1', [makeAssistantMessage('done')])
-    expect(store().sessions['r1'].subagentStreamingText['tool-1']).toBe('')
   })
 })
 
@@ -2284,6 +2201,62 @@ describe('stale CONFIGURED default model errors instead of substituting (Item 3b
 
     expect(store().sessions['r-pi-stale'].selectedModel).toBe('')
     expect(store().sessions['r-pi-stale'].errors.join(' ')).toContain('openai-codex/gone')
+  })
+
+  /**
+   * ADR-068 §4, the SERVICE path, re-routed by ADR-070 §1. An empty Codex catalog
+   * has two causes needing opposite advice, and only the probe can tell them
+   * apart — so it asks before it advises, and keeps the installation hint
+   * whenever it has no answer.
+   *
+   * What changed: a REFUSED credential no longer joins `errors[]` as a string
+   * with a bespoke Sign in button matched on its exact text. It raises the same
+   * `authRequired` a failed turn does, so discovery and a turn produce one row
+   * with one action. The generic hint is still an ordinary error, because
+   * "check the installation" is not fixed by signing in.
+   */
+  it('an empty Codex catalog raises the auth fact only when the probe blames the credential', async () => {
+    // The banner's real producer is switching a not-yet-spawned session to Codex
+    // and finding nothing to run — `setSelectedEngine`'s no-resolved-model branch.
+    const stage = async (probe: () => Promise<unknown>, routingId: string): Promise<void> => {
+      ;(window.api as any).vendorAuthProbe = vi.fn(probe)
+      useSessionStore.setState({
+        activeSessionId: null,
+        lastSelectedEngineId: 'claude',
+        availableModels: []
+      })
+      store().createNewSession(routingId, '/proj')
+      useSessionStore.setState({ activeSessionId: routingId, availableModels: [] })
+      store().setSelectedEngine('codex')
+    }
+
+    await stage(
+      async () => ({ openai: { authState: 'unauthenticated', requiresLogin: true } }),
+      'r-codex-refused'
+    )
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-refused'].authRequired).toEqual({
+        providerId: 'chatgpt',
+        message:
+          'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
+      })
+    )
+    // …and NOT as a card on the error list as well. One fact, one surface.
+    expect(store().sessions['r-codex-refused'].errors).toEqual([])
+
+    await stage(async () => ({ openai: { authState: 'authenticated' } }), 'r-codex-healthy')
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-healthy'].errors.join(' ')).toContain('Check installation')
+    )
+    expect(store().sessions['r-codex-healthy'].authRequired).toBeNull()
+
+    await stage(async () => {
+      throw new Error('probe failed')
+    }, 'r-codex-unknown')
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-unknown'].errors.join(' ')).toContain('Check installation')
+    )
+    expect(store().sessions['r-codex-unknown'].authRequired).toBeNull()
   })
 
   it('an EMPTY engine model list cannot validate, so the configured value passes through', () => {

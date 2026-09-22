@@ -7,6 +7,8 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { hydrateConfigFromDisk } from './stores/session-store'
 import { startReplica, hydrateReplica } from './stores/replica'
 import { startDesktopSync } from './sync/desktop-transport'
+import { installVerifierHooks } from './utils/verifier-hooks'
+import { startProjectionAudit } from './utils/projection-audit'
 
 // Global error handlers — forward uncaught renderer errors to the main process log file
 window.onerror = (message, source, lineno, colno, error): void => {
@@ -34,9 +36,22 @@ window.onunhandledrejection = (event: PromiseRejectionEvent): void => {
 // equal values. `hydrateReplica`'s catalog fallbacks are what keep a snapshot with
 // no sessions (a cold desktop boot) from blanking what hydration filled in.
 startReplica()
+// The render-loss detector (F4). It observes the fold through the replica's
+// post-apply seam and warns — once, at turn end, only when something is actually
+// wrong — so an intermittent lost reply reports itself instead of needing to be
+// caught live. Started next to the replica for the same reason the tap is: an
+// audit that only starts with React would miss the first turn, which is exactly
+// where the loss was seen.
+startProjectionAudit()
 startDesktopSync((snapshot, isResync) => {
   hydrateReplica(snapshot, isResync)
 })
+
+// Real-app harness hooks — a no-op unless this launch opted in (see
+// `src/shared/verifier-hooks.ts`). Installed after `startReplica()` so the handle
+// can never hand out a canonical state whose fold has not been wired, and before
+// render so a `page.evaluate` racing the first paint still finds it.
+installVerifierHooks()
 
 // Hydrate persisted config from ~/.claude/ui/config.json, then render
 hydrateConfigFromDisk().finally(() => {

@@ -81,9 +81,38 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
     case 'plan':
       return ''
 
+    case 'detail': {
+      if (view.kind !== 'detail') return ''
+      // The first field is the spec's own headline for the call — the skill that
+      // ran, the schedule that was set, the agent a message went to.
+      const first = view.fields[0]
+      return first ? first.value : ''
+    }
+
+    case 'findings': {
+      if (view.kind !== 'findings') return ''
+      const n = view.findings.length
+      const confirmed = view.findings.filter((f) => f.verdict?.toUpperCase() === 'CONFIRMED').length
+      const head = `${n} finding${n === 1 ? '' : 's'}`
+      return confirmed > 0 ? `${head} · ${confirmed} confirmed` : head
+    }
+
+    // A note never reaches a card header (it is lifted to its own row), but the
+    // subagent view renders every kind through ToolCard, so it needs an answer.
+    case 'note':
+      return view.kind === 'note' ? view.text : ''
+
     case 'mcp':
+      // `server / tool` when the engine's name was splittable (Codex's
+      // `mcp__<server>__<tool>`, F20). Engines whose MCP names carry neither —
+      // opencode's underscore-joined `server_tool`, and any caller that
+      // normalized without a tool name — keep today's JSON dump.
+      if (view.kind === 'mcp' && view.server)
+        return view.tool ? `${view.server} / ${view.tool}` : view.server
+      return view.kind === 'mcp' ? JSON.stringify(view.input) : ''
+
     case 'unknown':
     default:
-      return view.kind === 'mcp' || view.kind === 'unknown' ? JSON.stringify(view.input) : ''
+      return view.kind === 'unknown' ? JSON.stringify(view.input) : ''
   }
 }

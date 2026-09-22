@@ -63,9 +63,8 @@ beforeEach(() => {
         isHistorical: false,
         forkOrigin: null,
         messages: [],
-        streamingText: '',
-        streamingThinking: '',
-        thinkingStartedAt: null,
+        itemStreams: {},
+        itemStreamRevision: 0,
         evicted: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
@@ -79,8 +78,6 @@ beforeEach(() => {
         openedTaskToolUseIds: [],
         rightPanel: 'none',
         subagentMessages: {},
-        subagentStreamingText: {},
-        subagentStreamingThinking: {},
         bashOutputs: {},
         backgroundOutputs: {},
         backgroundWatcherCounts: {},
@@ -119,7 +116,7 @@ beforeEach(() => {
         btwQuestion: null,
         btwResponse: null,
         btwLoading: false,
-        vendorAuthRequired: null
+        authRequired: null
       }
     },
     settings: {
@@ -152,7 +149,6 @@ function renderMsg(toolName: string, toolInput?: Record<string, unknown>): void 
       message={makeMessage(toolName, toolInput)}
       pendingApprovals={[]}
       isLastAssistant={true}
-      thinkingStartedAt={null}
     />
   )
 }

@@ -23,6 +23,47 @@ export interface SharedProviderRoute {
   defaultModel?: string
 }
 
+/**
+ * The NATIVE provider id ChatGPT's route lands on in each configurable harness
+ * (ADR-068 §3). The managed `chatgpt` definition pins both — the mapping is not
+ * the user's to change — and `SharedProviderRepository.normalizeChatgpt` rewrites
+ * a hand-edited file back to it.
+ *
+ * Lives here rather than beside the definition because the RENDERER needs the
+ * same fact: "does this picker group belong to the ChatGPT route?" is asked of
+ * a `(engineId, vendorId)` pair, and answering it from a second hard-coded copy
+ * is how a route rename would silently stop offering a sign-in.
+ */
+export const CHATGPT_ROUTE_PROVIDER_IDS: Record<ConfigurableHarnessId, string> = {
+  pi: 'openai-codex',
+  opencode: 'openai'
+}
+
+/**
+ * One stored subscription account, as everything OUTSIDE the vault sees it
+ * (ADR-068 §2): an id to name it by, and the identity claims read off the JWT.
+ * Never any token material.
+ */
+export interface SharedProviderAccountSummary {
+  id: string
+  email?: string
+  accountId?: string
+  planType?: string
+}
+
+/** {@link SharedProviderAccountSummary} plus what the refresher knows about it. */
+export interface SharedProviderAccountStatus extends SharedProviderAccountSummary {
+  expiresAt: number
+  needsReauth: boolean
+}
+
+/** What `provider-account:list` answers: the stored accounts and the policy over them. */
+export interface SharedProviderAccountList {
+  activeId: string | null
+  perSession: boolean
+  accounts: SharedProviderAccountStatus[]
+}
+
 export interface SharedProviderDefinition {
   id: string
   name: string
@@ -31,6 +72,13 @@ export interface SharedProviderDefinition {
   baseUrl?: string
   models: SharedProviderModel[]
   routes: Record<ConfigurableHarnessId, SharedProviderRoute>
+  /**
+   * Account policy for a `kind: 'subscription'` provider (ADR-068 §2).
+   * `perSession` off (the default, and the meaning of an absent value) means one
+   * ACTIVE account for everything; on, a session may pin one of the stored
+   * accounts. Meaningless on a custom provider, which holds one API key.
+   */
+  accounts?: { perSession: boolean }
   managed: true
 }
 

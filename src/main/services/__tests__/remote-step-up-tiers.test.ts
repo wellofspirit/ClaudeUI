@@ -123,15 +123,15 @@ import {
   type CommandConnection
 } from '../../../core/ipc/command-registry'
 import { emitEvent, streamSubscriberCount, syncCore } from '../../../core/services/sync-host'
+import { MAX_STREAM_WATCH, type StreamEventFrame } from '../../../core/shared/sync/stream'
 import {
-  MAX_STREAM_WATCH,
-  applyStreamFrame,
-  type StreamApplyResult,
-  type StreamEventFrame,
-  type StreamFrame
-} from '../../../core/shared/sync/stream'
-import { auxFromCanonical } from '../../../core/shared/sync/reducer'
+  applyItemStreamFrame,
+  itemStreamKey,
+  type ItemStreamFrame,
+  type ItemStreamTarget
+} from '../../../core/shared/sync/item-stream'
 import { fromSnapshot } from '../../../core/shared/sync/state'
+import { applyEvent } from '../../../core/shared/sync/reducer'
 import { SyncClient } from '../../../core/shared/sync/sync-client'
 
 // ---------------------------------------------------------------------------
@@ -309,6 +309,31 @@ async function invoke(client: RawClient, channel: string, ...args: unknown[]): P
 
 const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 40))
 
+const watchTarget = (routingId: string): ItemStreamTarget => ({
+  messageId: `watch-${routingId}`,
+  blockIndex: 0,
+  kind: 'text'
+})
+
+function emitWatchItem(routingId: string, chunk: string, open = false): void {
+  const target = watchTarget(routingId)
+  if (open) {
+    emitEvent('session:item-open', [
+      routingId,
+      {
+        target,
+        message: {
+          id: target.messageId,
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'text', text: '' }]
+        }
+      }
+    ])
+  }
+  emitEvent('session:item-delta', [routingId, { target, chunk }])
+}
+
 /**
  * Drive the stream lane's BACKPRESSURE branch (phase 5 S2).
  *
@@ -341,7 +366,7 @@ const congest = (bytes: number): void => {
 
 /**
  * A REAL client replica behind a raw socket: `SyncClient` fed by the frames the
- * server actually sent, folding `applyStreamFrame` the way `stores/replica.ts`
+ * server actually sent, folding item frames the way `stores/replica.ts`
  * does.
  *
  * Deliberately the production pieces and not a hand-rolled accumulator — the
@@ -354,23 +379,30 @@ function makeReplicaFold(
   client: RawClient,
   routingId: string
 ): {
-  streams: StreamFrame[]
-  results: StreamApplyResult[]
+  streams: ItemStreamFrame[]
+  results: Array<'applied' | 'mismatch' | 'unknown'>
   text: () => string
   settle: () => Promise<void>
   reset: () => void
 } {
-  let state = fromSnapshot(syncCore.getSnapshot())
-  const aux = auxFromCanonical(state)
+  const snapshot = syncCore.getSnapshot()
+  let state = fromSnapshot(snapshot)
   const sync = new SyncClient({ requestResync: () => {} })
+  sync.setFullStateHandler((full) => {
+    state = fromSnapshot(full)
+  })
+  sync.onAnyEvent((event) => {
+    state = applyEvent(state, event)
+  })
+  sync.applyFullState(snapshot, 'fixture-epoch', snapshot.seq)
   // The gate is a one-way latch and stream frames are DROPPED while it is closed;
   // a mounted app is what this stands in for.
   sync.markReady()
-  const streams: StreamFrame[] = []
-  const results: StreamApplyResult[] = []
-  sync.onStreamFrame((frame) => {
+  const streams: ItemStreamFrame[] = []
+  const results: Array<'applied' | 'mismatch' | 'unknown'> = []
+  sync.onItemStreamFrame((frame) => {
     streams.push(frame)
-    const outcome = applyStreamFrame(state, aux, frame)
+    const outcome = applyItemStreamFrame(state, frame)
     state = outcome.state
     results.push(outcome.result)
   })
@@ -378,13 +410,14 @@ function makeReplicaFold(
   return {
     streams,
     results,
-    text: () => state.sessions[routingId].streamingText,
+    text: () => state.sessions[routingId].itemStreams[itemStreamKey(watchTarget(routingId))].value,
     settle: async () => {
-      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 100))
       // Feed only what has not been fed, in arrival order — the transport's job.
       for (; consumed < client.frames.length; consumed++) {
         const frame = client.frames[consumed]
-        if (frame.type === 'stream') sync.receiveStreamFrame(frame)
+        if (frame.type === 'event') sync.receiveEvent(frame)
+        if (frame.type === 'item-stream') sync.receiveItemStreamFrame(frame)
       }
     },
     reset: () => {
@@ -923,12 +956,12 @@ describe('ADR-054 step-up tiers over the socket', () => {
       syncCore.clearRing()
       emitEvent('session:created', [RID, { cwd: '/repo' }])
       emitEvent('session:created', [OTHER, { cwd: '/repo' }])
-      emitEvent('session:stream', [RID, { type: 'text', text: 'hello' }])
-      emitEvent('session:stream', [OTHER, { type: 'text', text: 'other' }])
+      emitWatchItem(RID, 'hello', true)
+      emitWatchItem(OTHER, 'other', true)
     }
 
-    const streamsOf = (c: RawClient): StreamFrame[] =>
-      c.frames.filter((f): f is StreamFrame => f.type === 'stream')
+    const streamsOf = (c: RawClient): ItemStreamFrame[] =>
+      c.frames.filter((f): f is ItemStreamFrame => f.type === 'item-stream')
 
     afterEach(() => {
       syncCore.resetCanonicalForTests()
@@ -943,26 +976,30 @@ describe('ADR-054 step-up tiers over the socket', () => {
       const c = await connectWithPassword()
       c.frames.length = 0
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
-      // Every stream of the session, at offset 0, empty ones included — a stream
-      // the replay stayed silent about is one a re-watch could never correct.
       expect(streamsOf(c)).toEqual([
-        { type: 'stream', streamId: `${RID}/text`, turnId: 0, offset: 0, chunk: 'hello' },
-        { type: 'stream', streamId: `${RID}/thinking`, turnId: 0, offset: 0, chunk: '' }
+        expect.objectContaining({
+          type: 'item-stream',
+          op: 'replace',
+          routingId: RID,
+          streams: expect.objectContaining({
+            [itemStreamKey(watchTarget(RID))]: expect.objectContaining({ value: 'hello' })
+          })
+        })
       ])
 
       // A live delta on the WATCHED session arrives; one on the other does not.
       c.frames.length = 0
-      emitEvent('session:stream', [RID, { type: 'text', text: '!' }])
-      emitEvent('session:stream', [OTHER, { type: 'text', text: '!' }])
+      emitWatchItem(RID, '!')
+      emitWatchItem(OTHER, '!')
       await new Promise((r) => setTimeout(r, 50))
       expect(streamsOf(c)).toEqual([
-        {
-          type: 'stream',
-          streamId: `${RID}/text`,
-          turnId: 0,
+        expect.objectContaining({
+          type: 'item-stream',
+          op: 'append',
+          routingId: RID,
           offset: 'hello'.length,
           chunk: '!'
-        }
+        })
       ])
     })
 
@@ -975,17 +1012,17 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // Switching sessions is one call. The previous id must STOP being watched,
       // or a phone that visits ten sessions ends up receiving all ten.
       await invoke(c, 'stream:watch', { sessionIds: [OTHER] })
-      expect(streamsOf(c).map((f) => f.streamId)).toEqual([`${OTHER}/text`, `${OTHER}/thinking`])
+      expect(streamsOf(c).map((f) => f.routingId)).toEqual([OTHER])
       c.frames.length = 0
-      emitEvent('session:stream', [RID, { type: 'text', text: 'ignored' }])
-      emitEvent('session:stream', [OTHER, { type: 'text', text: 'kept' }])
+      emitWatchItem(RID, 'ignored')
+      emitWatchItem(OTHER, 'kept')
       await new Promise((r) => setTimeout(r, 50))
-      expect(streamsOf(c).map((f) => f.chunk)).toEqual(['kept'])
+      expect(streamsOf(c).map((f) => (f.op === 'append' ? f.chunk : ''))).toEqual(['kept'])
 
       // The empty set is legal and means "nothing" — how a client stops watching.
       await invoke(c, 'stream:watch', { sessionIds: [] })
       c.frames.length = 0
-      emitEvent('session:stream', [OTHER, { type: 'text', text: 'gone' }])
+      emitWatchItem(OTHER, 'gone')
       await new Promise((r) => setTimeout(r, 50))
       expect(streamsOf(c)).toEqual([])
     })
@@ -1005,9 +1042,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
         sessionIds: Array.from({ length: MAX_STREAM_WATCH }, () => RID)
       })
       c.frames.length = 0
-      emitEvent('session:stream', [RID, { type: 'text', text: 'x' }])
+      emitWatchItem(RID, 'x')
       await new Promise((r) => setTimeout(r, 50))
-      expect(streamsOf(c).map((f) => f.chunk)).toEqual(['x'])
+      expect(streamsOf(c).map((f) => (f.op === 'append' ? f.chunk : ''))).toEqual(['x'])
     })
 
     it('rejects a malformed payload', async () => {
@@ -1030,9 +1067,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       await invoke(a, 'stream:watch', { sessionIds: [RID] })
       a.frames.length = 0
       b.frames.length = 0
-      emitEvent('session:stream', [RID, { type: 'text', text: 'private' }])
+      emitWatchItem(RID, 'private')
       await new Promise((r) => setTimeout(r, 50))
-      expect(streamsOf(a).map((f) => f.chunk)).toEqual(['private'])
+      expect(streamsOf(a).map((f) => (f.op === 'append' ? f.chunk : ''))).toEqual(['private'])
       expect(streamsOf(b)).toEqual([])
     })
 
@@ -1048,7 +1085,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // is what makes the max-age cut below sufficient.
       await vi.waitFor(() => expect(streamSubscriberCount()).toBe(0), { timeout: 3000 })
       // And emitting into the void does not throw.
-      emitEvent('session:stream', [RID, { type: 'text', text: 'after' }])
+      emitWatchItem(RID, 'after')
     })
 
     it('the 4010 max-age cut takes the watch with it', async () => {
@@ -1177,16 +1214,16 @@ describe('ADR-054 step-up tiers over the socket', () => {
       const replica = makeReplicaFold(c, RID)
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       await replica.settle()
-      // The replay hydrated it: snapshot value, re-stated at offset 0.
+      // The snapshot already hydrated this replica before it subscribed.
       expect(replica.text()).toBe('hello')
-      expect(replica.results).toEqual(['applied', 'applied'])
+      expect(replica.results).toEqual(['applied'])
       replica.reset()
 
       // Simulate a socket that is not keeping up. `bufferedAmount` is the real
       // measurement the sink reads (the same one the remote PTY uses), so
       // controlling it drives the production branch rather than a test seam.
       congest(2 * 1024 * 1024)
-      emitEvent('session:stream', [RID, { type: 'text', text: 'LOST' }])
+      emitWatchItem(RID, 'LOST')
       emitEvent('session:bash-output', [RID, { toolUseId: 'tu-1', output: 'also lost' }])
       // THE EVENT LANE IS NEVER DROPPED. A missing event is a permanent hole in a
       // seq-ordered stream; this is the tool_result that makes losing the tail
@@ -1201,7 +1238,10 @@ describe('ADR-054 step-up tiers over the socket', () => {
       ).toHaveLength(1)
       // Canonical moved on without the client, which is the whole hazard.
       expect(replica.text()).toBe('hello')
-      expect(syncCore.getCanonicalState().sessions[RID].streamingText).toBe('helloLOST')
+      expect(
+        syncCore.getCanonicalState().sessions[RID].itemStreams[itemStreamKey(watchTarget(RID))]
+          .value
+      ).toBe('helloLOST')
 
       // Relief. The next delta IS delivered, but its offset counts the chunk that
       // was dropped, so the client cannot place it: the fold is a no-op returning
@@ -1209,9 +1249,11 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // triggers the S1 cure. Silently appending here is the corruption the offset
       // guard exists to make impossible.
       congest(0)
-      emitEvent('session:stream', [RID, { type: 'text', text: 'kept' }])
+      emitWatchItem(RID, 'kept')
       await replica.settle()
       expect(replica.streams).toHaveLength(1)
+      expect(replica.streams[0].op).toBe('append')
+      if (replica.streams[0].op !== 'append') throw new Error('missing append')
       expect(replica.streams[0].offset).toBe('helloLOST'.length)
       expect(replica.results).toEqual(['mismatch'])
       expect(replica.text()).toBe('hello')
@@ -1225,7 +1267,10 @@ describe('ADR-054 step-up tiers over the socket', () => {
       await replica.settle()
       expect(replica.results.every((r) => r === 'applied')).toBe(true)
       expect(replica.text()).toBe('helloLOSTkept')
-      expect(replica.text()).toBe(syncCore.getCanonicalState().sessions[RID].streamingText)
+      expect(replica.text()).toBe(
+        syncCore.getCanonicalState().sessions[RID].itemStreams[itemStreamKey(watchTarget(RID))]
+          .value
+      )
     })
   })
 

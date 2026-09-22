@@ -3,8 +3,28 @@
   "why": "A session spawns under a temporary routing id, streams, and only then learns its engine sessionId. Every client used to react to session:status by invoking session:rekey, so N clients fired N duplicate invokes; core owns the rekey now and the duplicates must converge on ONE application. The re-delivered status events below stand in for those duplicates.",
   "events": [
     { "channel": "session:created", "args": ["temp-1", { "cwd": "/repo" }] },
-    { "channel": "session:stream", "args": ["temp-1", { "type": "thinking", "text": "planning" }] },
-    { "channel": "session:stream", "args": ["temp-1", { "type": "text", "text": "Sure, " }] },
+    {
+      "channel": "session:item-open",
+      "args": [
+        "temp-1",
+        {
+          "target": { "messageId": "m1", "blockIndex": 0, "kind": "text" },
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "" }],
+            "timestamp": 0
+          }
+        }
+      ]
+    },
+    {
+      "channel": "session:item-delta",
+      "args": [
+        "temp-1",
+        { "target": { "messageId": "m1", "blockIndex": 0, "kind": "text" }, "chunk": "Sure, " }
+      ]
+    },
     {
       "channel": "session:status",
       "args": [
@@ -50,16 +70,25 @@
         }
       ]
     },
-    { "channel": "session:stream", "args": ["uuid-9", { "type": "text", "text": "done." }] },
     {
-      "channel": "session:message",
+      "channel": "session:item-delta",
+      "args": [
+        "uuid-9",
+        { "target": { "messageId": "m1", "blockIndex": 0, "kind": "text" }, "chunk": "done." }
+      ]
+    },
+    {
+      "channel": "session:item-seal",
       "args": [
         "uuid-9",
         {
-          "id": "m1",
-          "role": "assistant",
-          "content": [{ "type": "text", "text": "Sure, done." }],
-          "timestamp": 0
+          "target": { "messageId": "m1", "blockIndex": 0, "kind": "text" },
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "Sure, done." }],
+            "timestamp": 0
+          }
         }
       ]
     },
@@ -85,8 +114,6 @@
     "uuid-9": {
       "routingId": "uuid-9",
       "cwd": "/repo",
-      "streamingText": "",
-      "streamingThinking": "",
       "sdkActive": true,
       "messages": [
         {

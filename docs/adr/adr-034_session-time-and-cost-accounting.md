@@ -1,6 +1,7 @@
 # ADR-034 — Session time & per-model cost accounting in the session status line
 
 **Status:** Accepted
+**Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §2 gives `totalCostUsd` one meaning on every engine. The ruling that dispatched spend stays out of the session headline is unchanged.
 **Relates to:** ADR-011 (usage analytics identity), ADR-020 (persistence/config plane), ADR-033 (cross-engine dispatch — amends its M4 claude-target usage capture)
 
 ## Context

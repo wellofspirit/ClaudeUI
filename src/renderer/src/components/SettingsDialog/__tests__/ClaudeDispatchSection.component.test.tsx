@@ -306,13 +306,32 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
     expect(screen.getByTestId('ClaudeDispatchSection.maxCostRow').textContent).toContain('USD')
   })
 
-  it('does NOT offer the turn/inactivity timeouts — they govern the opencode direction only', async () => {
-    // The Claude direction still runs on the fixed 10-minute DISPATCH_TIMEOUT_MS
-    // (ADR-033's 2026-09-01 amendment); rendering the editors here would write
-    // config nothing reads.
+  it('offers the turn/inactivity timeouts, with "no limit" as what EMPTY means', async () => {
+    // ADR-033's 2026-09-18 amendment: the two caps govern EVERY dispatch
+    // direction and have no built-in default, so the Claude section draws them
+    // like the opencode one and an empty field is honestly "no limit".
     await renderLoaded()
-    expect(screen.queryByTestId('ClaudeDispatchSection.turnTimeout')).toBeNull()
-    expect(screen.queryByTestId('ClaudeDispatchSection.idleTimeout')).toBeNull()
+
+    const turn = screen.getByTestId('ClaudeDispatchSection.turnTimeout') as HTMLInputElement
+    const idle = screen.getByTestId('ClaudeDispatchSection.idleTimeout') as HTMLInputElement
+    expect(turn.placeholder).toBe('no limit')
+    expect(idle.placeholder).toBe('no limit')
+    expect(screen.getByTestId('ClaudeDispatchSection.turnTimeoutRow').textContent).toContain('min')
+    expect(screen.getByTestId('ClaudeDispatchSection.idleTimeoutRow').textContent).toContain(
+      'Empty or 0 means no limit.'
+    )
+  })
+
+  it('writes the turn/inactivity caps into engines/claude.json in MILLISECONDS', async () => {
+    await renderLoaded()
+
+    commitNumber('ClaudeDispatchSection.turnTimeout', '90')
+    commitNumber('ClaudeDispatchSection.idleTimeout', '5')
+
+    expect(savedConfigs.at(-1)!.dispatch).toMatchObject({
+      turnTimeoutMs: 5_400_000,
+      idleTimeoutMs: 300_000
+    })
   })
 })
 

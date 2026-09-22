@@ -44,8 +44,6 @@ function baseSnapshotSession(routingId: string): FullStateSnapshot['sessions'][s
     routingId,
     cwd: '/test',
     messages: [],
-    streamingText: '',
-    streamingThinking: '',
     status: {
       state: 'idle',
       sessionId: null,
@@ -61,8 +59,6 @@ function baseSnapshotSession(routingId: string): FullStateSnapshot['sessions'][s
     taskNotifications: [],
     taskProgressMap: {},
     subagentMessages: {},
-    subagentStreamingText: {},
-    subagentStreamingThinking: {},
     permissionMode: 'default',
     effort: 'medium',
     thinkingMode: 'adaptive',

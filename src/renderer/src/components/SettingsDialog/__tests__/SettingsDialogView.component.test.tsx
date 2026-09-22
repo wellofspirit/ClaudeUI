@@ -163,7 +163,11 @@ describe('the rail', () => {
     expect(layer).toHaveClass('transition-opacity', 'duration-100', 'motion-reduce:transition-none')
     expect(layer.className).not.toMatch(/transition-colors/)
     expect(button.className).not.toMatch(/transition-colors/)
-    expect(button).toHaveClass('transition-[color]', 'duration-100', 'motion-reduce:transition-none')
+    expect(button).toHaveClass(
+      'transition-[color]',
+      'duration-100',
+      'motion-reduce:transition-none'
+    )
 
     // Active again: same nodes, opacity flips back on.
     rerender({ activeGroup: 'theme' })
@@ -466,11 +470,12 @@ describe('engine segments', () => {
     expect(segment).toBeInTheDocument()
     expect(
       screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
-    ).toEqual(['opencode', 'pi'])
+    ).toEqual(['opencode', 'pi', 'codex'])
 
     const keys = screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)
     expect(keys).toContain('opencodeAutoMode')
     expect(keys).not.toContain('piAutoMode')
+    expect(keys).not.toContain('codexAutoMode')
   })
 
   it('switching the segment swaps which items render', () => {
@@ -494,12 +499,15 @@ describe('engine segments', () => {
     expect(tags).toContain('engines/pi.json')
   })
 
-  it('offers all three engines on the dispatch page (pi joined as a target)', () => {
+  it('offers all four engines on the dispatch page (pi, then Codex, joined as targets)', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'pi' as EngineId } })
     expect(
       screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
-    ).toEqual(['claude', 'opencode', 'pi'])
+    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    // The app-level Concurrency row leads the page: its cap bounds every
+    // direction, so it is read before any per-target rule (ADR-033, 2026-09-18).
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'piDispatch',
       'piDispatchLimits'
     ])
@@ -523,7 +531,7 @@ describe('engine segments', () => {
     expect(limits.queryByTestId('SettingsGroup.storage')).not.toBeInTheDocument()
     expect(limits.queryByTestId('SettingsGroup.note.badge')).not.toBeInTheDocument()
     expect(limits.getByTestId('SettingsGroup.note')).toHaveTextContent(
-      'Governs dispatch_agent calls into opencode from a Claude or pi session'
+      'Governs dispatch_agent calls into opencode from a Claude, pi or Codex session'
     )
     expect(
       within(byId('SettingsGroup', 'into')).getByTestId('SettingsGroup.storage')
@@ -531,6 +539,7 @@ describe('engine segments', () => {
 
     // …and the Limits card renders the engine the segment above it is on.
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'opencodeDispatch',
       'opencodeDispatchLimits'
     ])
@@ -539,6 +548,7 @@ describe('engine segments', () => {
   it('switching the into segment swaps the Limits card with it', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'claude' as EngineId } })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -550,6 +560,7 @@ describe('engine segments', () => {
       engineByGroup: { 'dispatch/into': 'claude' as EngineId, 'dispatch/limits': 'pi' as EngineId }
     })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])

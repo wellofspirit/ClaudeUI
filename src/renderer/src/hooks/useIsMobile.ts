@@ -7,7 +7,7 @@ import { useState, useEffect } from 'react'
  * `<= 768`: at 768 the two disagreed, and the phone fork was drawn with the
  * desktop's `md`-and-up rules (ADR-065 phase 7).
  */
-const MOBILE_BREAKPOINT = 768
+export const MOBILE_BREAKPOINT = 768
 
 /** The widest viewport that is still a phone — what `max-md:` resolves to. */
 const MOBILE_MAX_WIDTH = MOBILE_BREAKPOINT - 0.02

@@ -18,15 +18,14 @@ import {
   getUsageEventByMessageId,
   recordWindowSample,
   getWindowSamples,
+  latestWindowSamples,
   pruneUsageTables,
-  upsertDailyUsage,
-  seedDailyUsageIfAbsent,
-  getAllDailyUsage,
-  hasDailyUsage,
-  deleteDailyUsageForDate,
-  type UsageEventRow,
+  upsertUsageBuckets,
+  getUsageBucketsSince,
+  deleteSeedUsageBuckets,
+  type UsageEventInsert,
   type WindowSampleRow,
-  type DailyUsageRow,
+  type UsageBucketWrite,
   type Db
 } from '../../../core/services/db'
 
@@ -50,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v11 (webauthn_credential
-      // + auth-policy columns, ADR-052 passkeys).
-      expect(userVersion(db)).toBe(14)
+      // Bump alongside MIGRATIONS in db.ts — currently v27 (the hub's account
+      // names and the one-time cursor reset).
+      expect(userVersion(db)).toBe(27)
     } finally {
       db.close()
     }
@@ -120,7 +119,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
 // usage_event repository
 // ---------------------------------------------------------------------------
 
-function makeEvent(overrides: Partial<UsageEventRow> = {}): UsageEventRow {
+function makeEvent(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
   return {
     id: 'evt_' + Math.random().toString(36).slice(2),
     ts: Date.now(),
@@ -269,6 +268,9 @@ function makeSample(overrides: Partial<WindowSampleRow> = {}): WindowSampleRow {
     accountUuid: 'uuid_test',
     usedPercent: 42.5,
     canonicalEnd: 1_700_000_000_000,
+    accountKey: 'anthropic:org_test:uuid_test',
+    windowKind: '5h',
+    windowMinutes: null,
     ...overrides
   }
 }
@@ -345,11 +347,71 @@ describe('recordWindowSample / getWindowSamples', () => {
     expect(tsList).toEqual([...tsList].sort((a, b) => a - b))
   })
 
+  it('is the FIVE-HOUR series only — the weekly kinds must not eat the budget', () => {
+    // The projection regresses over 5-hour samples; sharing one LIMIT across
+    // every kind would quarter its history on an account with scoped weeklies.
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '5h', usedPercent: 10 }))
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '7d', usedPercent: 20 }))
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '7d:opus', usedPercent: 30 }))
+
+    const rows = getWindowSamples('kinds')
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].usedPercent).toBeCloseTo(10)
+  })
+
   it('multiple samples per window are allowed (no unique constraint)', () => {
     recordWindowSample(makeSample({ accountUuid: 'ua2', canonicalEnd: 100 }))
     recordWindowSample(makeSample({ accountUuid: 'ua2', canonicalEnd: 100 }))
     const rows = getWindowSamples('ua2')
     expect(rows).toHaveLength(2) // both rows kept
+  })
+})
+
+/**
+ * ADR-071 §6 — what an INACTIVE account's limits are answered from when no
+ * refresh grant may be spent: the newest sample of each window kind.
+ */
+describe('latestWindowSamples', () => {
+  const KEY = 'anthropic:org_x:uuid_x'
+
+  it('returns the newest sample of every kind, one per kind', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 1000, usedPercent: 10 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 3000, usedPercent: 30 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '7d', ts: 2000, usedPercent: 20 }))
+
+    const rows = latestWindowSamples(KEY)
+
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => [r.windowKind, r.usedPercent])).toEqual(
+      expect.arrayContaining([
+        ['5h', 30],
+        ['7d', 20]
+      ])
+    )
+  })
+
+  it('never answers with another account’s samples', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 1000, usedPercent: 11 }))
+    recordWindowSample(
+      makeSample({ accountKey: 'anthropic:org_y:uuid_y', windowKind: '5h', ts: 9000 })
+    )
+
+    const rows = latestWindowSamples(KEY)
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].usedPercent).toBeCloseTo(11)
+  })
+
+  it('is empty for an account nothing was ever recorded for', () => {
+    expect(latestWindowSamples('anthropic:org_none:uuid_none')).toEqual([])
+  })
+
+  it('keeps one row per kind even when two share the newest timestamp', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 5000 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 5000 }))
+
+    expect(latestWindowSamples(KEY)).toHaveLength(1)
   })
 })
 
@@ -407,105 +469,143 @@ describe('pruneUsageTables (M-DB3)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// daily_usage repository (Phase 7 Pass 2 — Full SQL)
+// usage_bucket repository (ADR-071 §1)
 // ---------------------------------------------------------------------------
 
-function makeDaily(overrides: Partial<DailyUsageRow> = {}): DailyUsageRow {
+function makeBucket(overrides: Partial<UsageBucketWrite> = {}): UsageBucketWrite {
   return {
-    date: '2026-06-20',
+    hourUtc: Date.UTC(2026, 5, 20, 9),
+    accountKey: 'anthropic:org-1:acct-1',
+    billingType: 'subscription',
     engineId: 'claude',
     vendorId: 'anthropic',
     modelId: 'claude-sonnet-4-6',
+    origin: 'session',
     inputTokens: 1000,
     outputTokens: 500,
     cacheWriteTokens: 100,
+    cacheWrite1hTokens: 10,
     cacheReadTokens: 50,
-    costUsd: 0.012,
+    apiCostUsd: 0.012,
+    billedCostUsd: 0,
+    unbilledApiCostUsd: 0,
+    unknownApiCostCount: 0,
+    unknownBilledCostCount: 0,
     requestCount: 3,
-    peakApiPercent: 42,
     source: 'rollup',
     ...overrides
   }
 }
 
-describe('daily_usage repository', () => {
-  it('hasDailyUsage is false on a fresh DB', () => {
-    expect(hasDailyUsage()).toBe(false)
-  })
-
-  it('upsertDailyUsage round-trips all fields', () => {
-    upsertDailyUsage([makeDaily()])
-    const rows = getAllDailyUsage()
+describe('usage_bucket repository', () => {
+  it('upsertUsageBuckets round-trips every field and stamps the write’s rev', () => {
+    const rev = upsertUsageBuckets([makeBucket()])
+    const rows = getUsageBucketsSince(0)
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toEqual(makeDaily())
-    expect(hasDailyUsage()).toBe(true)
+    expect(rows[0]).toEqual({ ...makeBucket(), rev })
   })
 
-  it('upsertDailyUsage REPLACES on the composite PK', () => {
-    upsertDailyUsage([makeDaily({ inputTokens: 1000, costUsd: 0.01 })])
-    upsertDailyUsage([makeDaily({ inputTokens: 9999, costUsd: 0.99 })])
-    const rows = getAllDailyUsage()
-    expect(rows).toHaveLength(1) // same PK → replaced, not duplicated
+  it('REPLACES on the seven dimension columns, under a higher rev', () => {
+    const first = upsertUsageBuckets([makeBucket({ inputTokens: 1000, apiCostUsd: 0.01 })])
+    const second = upsertUsageBuckets([makeBucket({ inputTokens: 9999, apiCostUsd: 0.99 })])
+    const rows = getUsageBucketsSince(0)
+    expect(rows).toHaveLength(1) // same key → replaced, not duplicated
     expect(rows[0].inputTokens).toBe(9999)
-    expect(rows[0].costUsd).toBeCloseTo(0.99)
+    expect(rows[0].apiCostUsd).toBeCloseTo(0.99)
+    // A puller that has seen the first rev must be told this row changed.
+    expect(second).toBeGreaterThan(first)
+    expect(rows[0].rev).toBe(second)
   })
 
-  it('distinct models on the same day are separate rows', () => {
-    upsertDailyUsage([
-      makeDaily({ modelId: 'claude-sonnet-4-6' }),
-      makeDaily({ modelId: 'claude-opus-4-8' })
+  it('every bucket in one write shares the same rev', () => {
+    upsertUsageBuckets([makeBucket()])
+    const rev = upsertUsageBuckets([
+      makeBucket({ modelId: 'a' }),
+      makeBucket({ modelId: 'b' }),
+      makeBucket({ modelId: 'c' })
     ])
-    expect(getAllDailyUsage()).toHaveLength(2)
+    const revs = getUsageBucketsSince(0)
+      .filter((r) => r.modelId !== 'claude-sonnet-4-6')
+      .map((r) => r.rev)
+    expect(revs).toEqual([rev, rev, rev])
   })
 
-  it('distinct engines on the same day/model are separate rows', () => {
-    upsertDailyUsage([
-      makeDaily({ engineId: 'claude', vendorId: 'anthropic', modelId: 'm' }),
-      makeDaily({ engineId: 'opencode', vendorId: 'openai', modelId: 'm' })
+  it('each dimension column is part of the key', () => {
+    upsertUsageBuckets([
+      makeBucket(),
+      makeBucket({ hourUtc: Date.UTC(2026, 5, 20, 10) }),
+      makeBucket({ accountKey: 'other' }),
+      makeBucket({ billingType: 'apiKey' }),
+      makeBucket({ engineId: 'opencode' }),
+      makeBucket({ vendorId: 'openai' }),
+      makeBucket({ modelId: 'other-model' }),
+      makeBucket({ origin: 'dispatch' })
     ])
-    expect(getAllDailyUsage()).toHaveLength(2)
+    expect(getUsageBucketsSince(0)).toHaveLength(8)
   })
 
-  it('getAllDailyUsage returns rows ordered by date asc', () => {
-    upsertDailyUsage([
-      makeDaily({ date: '2026-06-22' }),
-      makeDaily({ date: '2026-06-20' }),
-      makeDaily({ date: '2026-06-21' })
+  it('getUsageBucketsSince returns rows oldest hour first', () => {
+    upsertUsageBuckets([
+      makeBucket({ hourUtc: Date.UTC(2026, 5, 20, 11) }),
+      makeBucket({ hourUtc: Date.UTC(2026, 5, 20, 9) }),
+      makeBucket({ hourUtc: Date.UTC(2026, 5, 20, 10) })
     ])
-    expect(getAllDailyUsage().map((r) => r.date)).toEqual([
-      '2026-06-20',
-      '2026-06-21',
-      '2026-06-22'
+    expect(getUsageBucketsSince(0).map((r) => r.hourUtc)).toEqual([
+      Date.UTC(2026, 5, 20, 9),
+      Date.UTC(2026, 5, 20, 10),
+      Date.UTC(2026, 5, 20, 11)
     ])
   })
 
-  it('seedDailyUsageIfAbsent does NOT overwrite an existing rollup row', () => {
-    upsertDailyUsage([makeDaily({ inputTokens: 1000, source: 'rollup' })])
-    seedDailyUsageIfAbsent([makeDaily({ inputTokens: 9999, source: 'seed' })])
-    const rows = getAllDailyUsage()
-    expect(rows).toHaveLength(1)
-    expect(rows[0].inputTokens).toBe(1000) // rollup row preserved
-    expect(rows[0].source).toBe('rollup')
+  it('keeps the unknown-cost counts, so a sum can say what is missing from it', () => {
+    upsertUsageBuckets([
+      makeBucket({
+        apiCostUsd: 0.5,
+        billedCostUsd: 0,
+        unbilledApiCostUsd: 0.4,
+        unknownApiCostCount: 2,
+        unknownBilledCostCount: 7,
+        requestCount: 9
+      })
+    ])
+    const row = getUsageBucketsSince(0)[0]
+    expect(row.unknownApiCostCount).toBe(2)
+    expect(row.unknownBilledCostCount).toBe(7)
+    expect(row.unbilledApiCostUsd).toBeCloseTo(0.4)
+    expect(row.requestCount).toBe(9)
   })
 
-  it('seedDailyUsageIfAbsent inserts rows for absent keys', () => {
-    seedDailyUsageIfAbsent([makeDaily({ date: '2026-01-01', source: 'seed' })])
-    const rows = getAllDailyUsage()
-    expect(rows).toHaveLength(1)
-    expect(rows[0].source).toBe('seed')
+  it('deleteSeedUsageBuckets removes seeds at the given hours and never a rollup', () => {
+    const seedHour = Date.UTC(2026, 5, 20, 12)
+    upsertUsageBuckets([
+      makeBucket({ hourUtc: seedHour, source: 'seed' }),
+      // Same hour, a DIFFERENT model — a rollup bucket that happens to sit at
+      // midday must survive.
+      makeBucket({ hourUtc: seedHour, modelId: 'rolled-up', source: 'rollup' }),
+      makeBucket({ hourUtc: Date.UTC(2026, 5, 21, 12), source: 'seed' })
+    ])
+
+    deleteSeedUsageBuckets([seedHour])
+
+    const rows = getUsageBucketsSince(0)
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.modelId)).toEqual(['rolled-up', 'claude-sonnet-4-6'])
   })
 
-  it('deleteDailyUsageForDate removes only that date', () => {
-    upsertDailyUsage([makeDaily({ date: '2026-06-20' }), makeDaily({ date: '2026-06-21' })])
-    deleteDailyUsageForDate('2026-06-20')
-    const rows = getAllDailyUsage()
-    expect(rows).toHaveLength(1)
-    expect(rows[0].date).toBe('2026-06-21')
+  it('a rev is never reissued after a delete empties the table', () => {
+    const hour = Date.UTC(2026, 5, 20, 12)
+    const first = upsertUsageBuckets([makeBucket({ hourUtc: hour, source: 'seed' })])
+    deleteSeedUsageBuckets([hour])
+    expect(getUsageBucketsSince(0)).toHaveLength(0)
+    // The guard on the counter: a MAX(rev)+1 scheme would hand out `first`
+    // again here, and a puller asking for everything after it would never see
+    // these rows (ADR-072 §3).
+    expect(upsertUsageBuckets([makeBucket()])).toBeGreaterThan(first)
   })
 
-  it('batch upsert + seed are idempotent / no-op on empty', () => {
-    expect(() => upsertDailyUsage([])).not.toThrow()
-    expect(() => seedDailyUsageIfAbsent([])).not.toThrow()
-    expect(getAllDailyUsage()).toHaveLength(0)
+  it('an empty write is a no-op and issues no rev', () => {
+    expect(upsertUsageBuckets([])).toBe(0)
+    expect(() => deleteSeedUsageBuckets([])).not.toThrow()
+    expect(getUsageBucketsSince(0)).toHaveLength(0)
   })
 })

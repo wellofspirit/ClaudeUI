@@ -20,7 +20,10 @@ import type {
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
+import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
+import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
@@ -29,7 +32,8 @@ import {
   createPiMapperState,
   buildPiChatMessage,
   piToolResultImages,
-  piToolResultText
+  piToolResultText,
+  finishPiMessage
 } from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type {
@@ -89,10 +93,15 @@ import {
   classify,
   formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
+  type ClassifyResult,
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
-import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
+import {
+  AutoModeDenialTracker,
+  autoModeReviewBlock,
+  formatAutoModeDenyReason
+} from '../automode/denial-tracker'
 import {
   analyzeRedirects,
   captureGitRemotes,
@@ -109,11 +118,8 @@ import {
 } from '../automode/ground-truth'
 import { PiJudge } from './pi-judge'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import {
-  suggestionDestinationToScope,
-  suggestionRuleToClaudeString
-} from '../opencode/permission-compiler'
+import { persistAllowSuggestions } from '../opencode/permission-compiler'
+import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 // Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
 // pure key/value dedup+throttle gate, no opencode-specific assumption baked
 // in (verified — takes a caller-supplied emit callback and ambient
@@ -435,8 +441,23 @@ export class PiSession extends BaseSession {
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
-  /** Cost from stored history, seeded ONCE on resume from `get_session_stats().cost`. */
-  private costBaseUsd = 0
+  /**
+   * Cost from stored history, seeded ONCE on resume from `get_session_stats()`.
+   *
+   * ADR-071 §2: pi's own figure is a LIST-price computation whatever the
+   * credential, so under a subscription it is what the usage was worth, not
+   * what was billed. Both halves below hold cost INPUTS (piCostInputs); the
+   * billing type is applied when a figure is read, because the auth probe
+   * resolves asynchronously and a session that captured its history first must
+   * not be stuck with what `unknown` made of it.
+   *
+   * pi reports history as one aggregate, so the base is at most one entry —
+   * which also means an unpriced history counts as ONE unknown message rather
+   * than however many it really held. The live half is exact.
+   */
+  private costBase: PiCostInputs[] = []
+  /** One entry per assistant message metered in THIS process. */
+  private liveCostInputs: PiCostInputs[] = []
   private sumInputTokens = 0
   private sumOutputTokens = 0
   private sumCacheReadTokens = 0
@@ -483,10 +504,15 @@ export class PiSession extends BaseSession {
     // Warm the auth probe so status.account resolves shortly after construction
     // (mirrors OpencodeSession's opencodeAuthProvider.warmCache().then(sendStatus)
     // constructor call) — account stays null on the very first sendStatus() above
-    // until this resolves.
+    // until this resolves. The status line goes out again too: its billed figure
+    // depends on the vendor's billing type (ADR-071 §2), which is `unknown`
+    // until the probe lands, and a reopened session may run no further turn.
     piAuthProvider
       .probe()
-      .then(() => this.sendStatus())
+      .then(() => {
+        this.sendStatus()
+        this.sendStatusLine()
+      })
       .catch(() => {})
   }
 
@@ -494,8 +520,14 @@ export class PiSession extends BaseSession {
     return this.isProcessing
   }
 
-  private get totalCostUsd(): number {
-    return this.costBaseUsd + this.mapperState.totalCostUsd
+  /** History base + this process's messages, by the cost rule (ADR-071 §2). */
+  private costTally(): TotalCosts {
+    return totalCosts([...this.costBase, ...this.liveCostInputs].map(resolvePiCosts))
+  }
+
+  /** The headline figure: the known total, null when nothing could be priced. */
+  private get totalCostUsd(): number | null {
+    return this.costTally().displayCostUsd
   }
 
   get status(): SessionStatus {
@@ -770,6 +802,7 @@ export class PiSession extends BaseSession {
       // THIRD process, leaking the second). Only the attached client's own exit
       // may run this teardown.
       if (this.client !== client) return
+      this.dispatchOutputs(finishPiMessage(this.mapperState))
       this.isProcessing = false
       this.disconnected = true
       this.client = null
@@ -1034,7 +1067,9 @@ export class PiSession extends BaseSession {
     if (this.replayedHistory) return
     this.replayedHistory = true
     try {
-      const messages = await loadPiSessionHistory(sessionId)
+      // The status line the loader also returns is for a COLD open (no session
+      // object): this one seeds its own base from pi's tally below.
+      const { messages } = await loadPiSessionHistory(sessionId)
       logger.info('PiSession', `Replaying ${messages.length} stored messages for ${sessionId}`)
 
       for (const msg of messages) {
@@ -1062,7 +1097,21 @@ export class PiSession extends BaseSession {
           type: 'get_session_stats'
         })
         if (statsResp.success && statsResp.data) {
-          this.costBaseUsd = statsResp.data.cost
+          const model = engineMeta('pi').decodeModelValue(this._model)
+          // Nothing metered means there is no history to price — an empty base,
+          // not an unpriced one. Seeding an entry here would report a session
+          // that has cost nothing yet as "unknown" on any unpriced model.
+          const metered = statsResp.data.cost > 0 || statsResp.data.tokens.total > 0
+          this.costBase = metered
+            ? [
+                piCostInputs(
+                  model.vendorId,
+                  model.modelId,
+                  statsResp.data.tokens,
+                  statsResp.data.cost
+                )
+              ]
+            : []
           this.sumInputTokens = statsResp.data.tokens.input
           this.sumOutputTokens = statsResp.data.tokens.output
           this.sumCacheReadTokens = statsResp.data.tokens.cacheRead
@@ -1214,9 +1263,28 @@ export class PiSession extends BaseSession {
 
   private dispatchOutput(output: PiMapperOutput): void {
     switch (output.kind) {
-      case 'stream':
-        this.send('session:stream', { type: output.streamType, text: output.delta })
+      case 'item_open':
+        this.rememberPiMessage(output.message)
+        this.send('session:item-open', {
+          target: output.target,
+          message: output.message,
+          ...(output.startedAt === undefined ? {} : { startedAt: output.startedAt })
+        })
         break
+
+      case 'item_delta':
+        this.rememberPiMessage(output.message)
+        this.send('session:item-delta', { target: output.target, chunk: output.chunk })
+        break
+
+      case 'item_seal': {
+        this.rememberPiMessage(output.message)
+        this.send('session:item-seal', {
+          message: output.message,
+          ...(output.target ? { target: output.target } : {})
+        })
+        break
+      }
 
       case 'message': {
         const idx = this.messageHistory.findIndex((m) => m.id === output.message.id)
@@ -1259,7 +1327,10 @@ export class PiSession extends BaseSession {
         }
         break
 
-      case 'usage':
+      case 'usage': {
+        // ADR-071 §3: the account this vendor's turns run under, read from
+        // pi's own auth.json per turn.
+        const identity = piAuthProvider.accountIdentity(output.provider)
         recordUsageEvent({
           engineId: 'pi',
           vendorId: output.provider,
@@ -1280,8 +1351,24 @@ export class PiSession extends BaseSession {
           engineCostUsd: output.costUsd,
           sessionId: this.piSessionId,
           messageId: output.messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: identity.accountKey,
+          accountLabel: identity.accountLabel,
+          billingType: piAuthProvider.buildPiAccountRef(output.provider)?.billingType ?? 'unknown',
+          origin: 'session',
+          parentRoutingId: null,
+          // pi reports a LIST PRICE, not a charge: its catalog knows
+          // long-context tiers our table does not (S1b), but the figure is the
+          // same whether the credential is a subscription or an API key.
+          engineCostIsEquivalent: true
         })
+        // ADR-071 §2: the headline follows the cost rule, so what this message
+        // adds is its DISPLAY cost — pi's own figure only when the rule says
+        // that is what the user was charged. The ledger row above keeps pi's
+        // raw figure as `engineCostUsd`, unchanged.
+        this.liveCostInputs.push(
+          piCostInputs(output.provider, output.modelId, output.tokens, output.costUsd)
+        )
         this.sumInputTokens += output.tokens.input
         this.sumOutputTokens += output.tokens.output
         this.sumCacheReadTokens += output.tokens.cacheRead
@@ -1289,6 +1376,7 @@ export class PiSession extends BaseSession {
         this.lastContextLength = output.tokens.input + output.tokens.cacheRead
         this.sendStatusLine()
         break
+      }
 
       case 'subagent_update':
         this.handleSubagentUpdate(output.toolUseId, output.payload)
@@ -1316,6 +1404,32 @@ export class PiSession extends BaseSession {
         void this.flushQueuedItems()
         break
 
+      case 'auth-required': {
+        // ADR-068 §4: one event for every engine, naming the PROVIDER the
+        // sign-in dialog can act on rather than pi's own vendor id.
+        //
+        // ADR-070 §1: pi's verbatim message rides ON the event and the companion
+        // `session:error` is GONE — it was a second, separately dismissable card
+        // for the same fact. The words survive twice over: as the row's in-place
+        // disclosure, and as the neutral transcript block below, which is the
+        // permanent record a floating card never was.
+        //
+        // Deliberately NO processing-state work here, unlike OpencodeSession's
+        // twin: opencode's `session.error` IS the turn's end, while pi's
+        // failed turn still runs on to `agent_settled` → the 'result' case
+        // above, which owns isProcessing/status/inactivity/queue-flush. This
+        // arm therefore does exactly what pi's own 'error' arm below does —
+        // emit, and let the turn end itself.
+        const providerId = piAuthRequiredProviderId(output.vendorId)
+        this.send('session:auth-required', { providerId, message: output.message })
+        // The SAME providerId on the block, so the row still names the provider
+        // once the live `authRequired` has settled (ADR-070 §4).
+        const message = authErrorTranscriptMessage(uuid(), output.message, providerId)
+        this.rememberPiMessage(message)
+        this.send('session:message', message)
+        break
+      }
+
       case 'error':
         this.send('session:error', output.message)
         break
@@ -1323,6 +1437,12 @@ export class PiSession extends BaseSession {
       case 'ignore':
         break
     }
+  }
+
+  private rememberPiMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((candidate) => candidate.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
   }
 
   /**
@@ -1378,6 +1498,7 @@ export class PiSession extends BaseSession {
           if (oldest !== undefined) this.recordedSubagentUsage.delete(oldest)
         }
         const ref = engineMeta('pi').decodeModelValue(agent.model ?? this._model)
+        const identity = piAuthProvider.accountIdentity(ref.vendorId)
         recordUsageEvent({
           engineId: 'pi',
           vendorId: ref.vendorId,
@@ -1394,7 +1515,15 @@ export class PiSession extends BaseSession {
           engineCostUsd: agent.usage.cost,
           sessionId: this.piSessionId,
           messageId: `subagent-${toolUseId}-${agent.agent}-${index}`,
-          source: 'live'
+          source: 'live',
+          accountKey: identity.accountKey,
+          accountLabel: identity.accountLabel,
+          billingType: piAuthProvider.buildPiAccountRef(ref.vendorId)?.billingType ?? 'unknown',
+          // A subagent's spend is its own row, attributed back to the session
+          // that spawned it (ADR-071 §1).
+          origin: 'child',
+          parentRoutingId: this.routingId,
+          engineCostIsEquivalent: true
         })
       }
     })
@@ -1432,6 +1561,7 @@ export class PiSession extends BaseSession {
 
   cancel(): void {
     this.clearInactivityTimer()
+    this.dispatchOutputs(finishPiMessage(this.mapperState))
     this._cancelled = true
     this.isProcessing = false
     this.disconnected = false
@@ -2022,39 +2152,13 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * Write "always allow" suggestions to the shared Claude permission store —
-   * mirrors OpencodeSession.persistAllowRules (same shared helpers
-   * `suggestionDestinationToScope`/`suggestionRuleToClaudeString` from
-   * permission-compiler.ts; the small grouping loop is intentionally
-   * duplicated here rather than extracted, per the M2a kickoff spec). Also
-   * invalidates the rules cache so the newly-persisted rule is honored on the
-   * VERY NEXT gate call in this same session, without waiting for an explicit
-   * notifySettingsChanged().
+   * Write "always allow" suggestions to the shared Claude permission store (the
+   * one copy lives in permission-compiler.ts) and invalidate the rules cache so
+   * the newly-persisted rule is honored on the VERY NEXT gate call in this same
+   * session, without waiting for an explicit notifySettingsChanged().
    */
   private persistAllowRules(suggestions: PermissionSuggestion[]): void {
-    try {
-      const byScope = new Map<'user' | 'project' | 'local', string[]>()
-      for (const s of suggestions) {
-        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
-        const scope = suggestionDestinationToScope(s.destination)
-        if (!scope) continue
-        const arr = byScope.get(scope) ?? []
-        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
-        byScope.set(scope, arr)
-      }
-      for (const [scope, ruleStrings] of byScope) {
-        const perms = loadClaudePermissions(scope, this.cwd)
-        const allowSet = new Set(perms.allow)
-        for (const r of ruleStrings) allowSet.add(r)
-        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
-      }
-      if (byScope.size > 0) this.cachedRules = null
-    } catch (err) {
-      logger.warn(
-        'PiSession',
-        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+    if (persistAllowSuggestions(suggestions, this.cwd, 'PiSession')) this.cachedRules = null
   }
 
   /** Hot-reload parity with Claude: invalidate the cached rules so the NEXT gate call re-reads the (just-edited) permission files from disk. */
@@ -2369,10 +2473,12 @@ export class PiSession extends BaseSession {
         // something THIS monitor denied (post-block consent inheritance), not
         // as a fresh proposal.
         this.recordToolOutcome(toolCallId, 'automode-blocked')
+        this.sendToolReview(toolCallId, result)
         return decided({ behavior: 'deny', reason: formatAutoModeDenyReason(result) })
       }
 
       this.autoDenials.recordAllow()
+      this.sendToolReview(toolCallId, result)
       return decided({ behavior: 'allow' })
     } catch (err) {
       logger.warn(
@@ -2381,6 +2487,28 @@ export class PiSession extends BaseSession {
       )
       return ASK_HUMAN
     }
+  }
+
+  /**
+   * The judge's verdict on the card it judged (F18).
+   *
+   * `toolCallId` is pi's own call id, which is EXACTLY the `toolUseId` the
+   * transcript's `tool_use` block carries (`event-mapper.ts` maps
+   * `toolCall → tool_use { toolUseId: id }`), so the reducer binds it to the
+   * right card. No hold is needed the way Codex needs one: the assistant
+   * `message_end` that mints the block precedes `tool_execution_*` on pi's own
+   * verified event order, and the judge round-trip that produced this verdict
+   * sits on top of that.
+   *
+   * Only a real verdict reaches here — a fast-path allow returns before the
+   * judge, an `unavailable` result and a denial cap both return ASK_HUMAN, and
+   * the human's approval card carries its own reason.
+   */
+  private sendToolReview(toolCallId: string, result: ClassifyResult): void {
+    this.send('session:tool-review', {
+      toolUseId: toolCallId,
+      review: autoModeReviewBlock(toolCallId, uuid(), result)
+    })
   }
 
   // ── Hosted tools + cross-engine dispatch (M4a+b) ─────────────────────────────
@@ -2692,15 +2820,18 @@ export class PiSession extends BaseSession {
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = this.sumCacheReadTokens + this.sumCacheWriteTokens
     const totalTokens = this.sumInputTokens + this.sumOutputTokens + cachedTokens
+    const costs = this.costTally()
     return {
-      totalCostUsd: this.totalCostUsd,
+      totalCostUsd: costs.displayCostUsd,
+      billedCostUsd: costs.billedCostUsd,
+      ...(costs.unknownMessages > 0 ? { unknownCostMessages: costs.unknownMessages } : {}),
       totalDurationMs: this.accTotalDurationMs,
       totalApiDurationMs: 0,
       totalInputTokens: this.sumInputTokens,
       totalOutputTokens: this.sumOutputTokens,
       cachedTokens,
       totalTokens,
-      contextWindowSize: ctx,
+      contextWindow: { used: this.lastContextLength, size: ctx },
       usedPercentage,
       remainingPercentage,
       turnStartedAtMs:

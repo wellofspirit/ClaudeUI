@@ -16,9 +16,8 @@
 import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import { applyEvent, emptyAux, checkDerivedFields } from '../reducer'
-import { isVolatileStream } from '../channels'
-import { applyStreamFrame, streamFrameFrom } from '../stream'
+import { applyEvent, checkDerivedFields } from '../reducer'
+import { applyItemStreamFrame, itemAppendFrame } from '../item-stream'
 import { emptyCanonicalState, type CanonicalState } from '../state'
 
 interface Fixture {
@@ -45,22 +44,20 @@ function loadFixtures(): Array<{ file: string; fixture: Fixture }> {
 /**
  * Replay a fixture the way the HOST does — routed by the channel's class.
  *
- * A fixture records an EMISSION stream, not an event stream, so a `volatile`
- * channel (phase 5 S1) belongs on the stream lane rather than in `applyEvent`.
- * Routing here instead of deleting those lines keeps `mid-stream-rekey.json`
- * honest: its deltas are what make the rekey a MID-STREAM one, and they still
- * exercise the aux the two lanes share.
+ * A fixture records emissions. Item deltas ride the volatile lane while item
+ * open/seal lifecycle events pass through the reliable reducer.
  */
 function replay(fixture: Fixture): CanonicalState {
-  const aux = emptyAux()
   let state = emptyCanonicalState()
   fixture.events.forEach((event, i) => {
-    if (isVolatileStream(event.channel)) {
-      const frame = streamFrameFrom(state, aux, event.channel, event.args)
-      if (frame) state = applyStreamFrame(state, aux, frame).state
+    if (event.channel === 'session:item-delta') {
+      const routingId = event.args[0]
+      if (typeof routingId !== 'string') return
+      const frame = itemAppendFrame(state, routingId, event.args[1], i)
+      if (frame) state = applyItemStreamFrame(state, frame).state
       return
     }
-    state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 }, aux)
+    state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 })
   })
   return state
 }
@@ -108,17 +105,26 @@ describe('golden replay fixtures', () => {
         // Catchup replays a SUFFIX on top of an existing state. If folding
         // 1..k then k+1..n differed from folding 1..n, every reconnect would
         // diverge from the client that stayed connected.
-        const aux = emptyAux()
         let state = emptyCanonicalState()
         const half = Math.floor(fixture.events.length / 2)
         fixture.events.forEach((event, i) => {
           if (i < half) {
-            state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 }, aux)
+            if (event.channel === 'session:item-delta') {
+              const frame = itemAppendFrame(state, event.args[0] as string, event.args[1], i)
+              if (frame) state = applyItemStreamFrame(state, frame).state
+            } else {
+              state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 })
+            }
           }
         })
         fixture.events.forEach((event, i) => {
           if (i >= half) {
-            state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 }, aux)
+            if (event.channel === 'session:item-delta') {
+              const frame = itemAppendFrame(state, event.args[0] as string, event.args[1], i)
+              if (frame) state = applyItemStreamFrame(state, frame).state
+            } else {
+              state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 })
+            }
           }
         })
         expect(JSON.stringify(state)).toBe(JSON.stringify(replay(fixture)))

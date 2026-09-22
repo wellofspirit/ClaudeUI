@@ -7,6 +7,16 @@
  * its models reach the picker (MODELS IN THE PICKER). Everything is built from
  * the row vocabulary — the sheet invents no control of its own.
  *
+ * ON A SUBSCRIPTION THE FIRST QUESTION IS PLURAL (ADR-068 §2), AND IT IS
+ * ANSWERED SOMEWHERE ELSE (F14). The vault holds N ChatGPT accounts with one
+ * ACTIVE; every provider's stored accounts are managed on Models & providers ›
+ * Accounts, beside Anthropic's, so the Credential group becomes ONE LINK row
+ * naming the count and pointing there. Two homes for one list is what that move
+ * removed. Disconnect still means the whole SET — it is a provider action, not
+ * an account one — so it stays in this sheet's footer. A row with no account
+ * list falls back to the single-credential rows: an empty Accounts card would
+ * read as "no subscription".
+ *
  * IT OWNS NO STATE OF RECORD. Every action routes to an EXISTING writer, and
  * after each write the sheet asks its parent to re-read `provider-registry:list`
  * and re-render it from the fresh entry. There is no change event on the
@@ -83,6 +93,7 @@ import {
   type CurationSort
 } from './ModelCurationList'
 import { SheetFrame, SheetGroup } from './SheetFrame'
+import type { SettingsTarget } from './settings-target'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
 import { OpencodeProviderConfigModal } from './OpencodeProviders'
@@ -91,8 +102,11 @@ import { PiProviderModal } from './PiCustomProviders'
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
 
-/** The row order of the ENABLED FOR group — claude first, as on the board. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/**
+ * The row order of the ENABLED FOR group — claude first, as on the board, and
+ * codex last because it is not a route at all (see {@link codexRow}).
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 // ── Shared atoms (the list imports these; the direction is list → sheet) ──────
 
@@ -123,9 +137,16 @@ const CREDENTIAL_TINT: Record<ProviderCredential, string> = {
 
 export function CredentialChip({
   credential,
+  label,
   testid
 }: {
   credential: ProviderCredential
+  /**
+   * Overrides the WORD, never the state: a multi-account subscription reads
+   * "2 accounts" while still being `connected` (ADR-068 §2), and `data-id`
+   * stays the state so nothing downstream has to parse prose.
+   */
+  label?: string
   testid: string
 }): React.JSX.Element {
   return (
@@ -134,7 +155,7 @@ export function CredentialChip({
       data-id={credential}
       className={`shrink-0 rounded-full px-[7px] text-[10.5px] leading-4 font-medium ${CREDENTIAL_TINT[credential]}`}
     >
-      {CREDENTIAL_LABEL[credential]}
+      {label ?? CREDENTIAL_LABEL[credential]}
     </span>
   )
 }
@@ -143,10 +164,18 @@ export function CredentialChip({
 export function EngineChip({
   engine,
   enabled,
+  label,
   testid
 }: {
   engine: EngineId
   enabled: boolean
+  /**
+   * Overrides the WORD, never the engine: `data-id` stays the `EngineId`, so
+   * nothing downstream has to parse prose. Its one caller is `SignInDialog`'s
+   * header, where the Claude chip names the PRODUCT the credential feeds
+   * ("Claude Code") beside a title that already says "Claude".
+   */
+  label?: string
   testid: string
 }): React.JSX.Element {
   return (
@@ -160,7 +189,7 @@ export function EngineChip({
           : 'border-border/50 text-text-muted opacity-50'
       }`}
     >
-      {engineMeta(engine).label}
+      {label ?? engineMeta(engine).label}
     </span>
   )
 }
@@ -237,26 +266,27 @@ export interface ProviderSheetProps {
   entry: ProviderEntry
   /** The registry's one degraded case — no opencode binary (owner ruling 2). */
   opencodeInstalled: boolean
+  /**
+   * The render context's navigator, threaded through the list (F14): the
+   * Accounts row links to Models & providers › Accounts, where every provider's
+   * stored accounts live. Absent means the link renders as plain text rather
+   * than a dead button.
+   */
+  navigate?: (target: SettingsTarget) => void
   onClose: () => void
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
    * snapshot, and closes the sheet itself when this entry is gone from it.
    */
   onWrote: () => Promise<void>
-  /**
-   * Open the Add sheet, optionally on one row. Signing in to a subscription
-   * lives THERE (it is how a provider is acquired), so the not-connected
-   * credential row hands over rather than growing a second sign-in surface.
-   */
-  onAddProvider?: (focusId?: string) => void
 }
 
 export function ProviderSheet({
   entry,
   opencodeInstalled,
+  navigate,
   onClose,
-  onWrote,
-  onAddProvider
+  onWrote
 }: ProviderSheetProps): React.JSX.Element {
   /**
    * The shared DEFINITION behind a shared row. The read model deliberately does
@@ -274,13 +304,25 @@ export function ProviderSheet({
     definition: SharedProviderDefinition | null
   }>({ resolved: false, definition: null })
   const definition = shared.definition
+  /**
+   * The ONE sign-in surface (ADR-068 §3). A subscription's sign-in used to be
+   * handed to the Add sheet, which rendered `VendorOAuthFlow` inline; now both
+   * the "Sign in" row and "+ Add account" open the dialog, so the Manage sheet
+   * carries no flow. `VendorOAuthFlow` stays for opencode-NATIVE vendor OAuth,
+   * which has no dialog driver.
+   */
+  const openSignIn = useSessionStore((s) => s.openSignIn)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** null = not editing; a string = the key being typed. Never pre-filled. */
   const [keyDraft, setKeyDraft] = useState<string | null>(null)
   const [piKeyDraft, setPiKeyDraft] = useState<string | null>(null)
-  /** Which destructive action is one click from happening. */
-  const [confirming, setConfirming] = useState<'remove' | 'pi-off' | 'disconnect' | null>(null)
+  /**
+   * Which destructive action is one click from happening. A string rather than a
+   * union because one of them is per-ROW (`account:<id>`): arming "Remove" on
+   * one account must not arm it on every other account's row too.
+   */
+  const [confirming, setConfirming] = useState<string | null>(null)
   /** The provider's catalog size, reported up by the curation block. */
   const [catalogTotal, setCatalogTotal] = useState<number | null>(null)
   /**
@@ -378,10 +420,7 @@ export function ProviderSheet({
   }, [run])
 
   /** Two-click confirm: arm on the first press, act on the second. */
-  const confirmThen = (
-    which: 'remove' | 'pi-off' | 'disconnect',
-    action: () => Promise<void>
-  ): void => {
+  const confirmThen = (which: string, action: () => Promise<void>): void => {
     if (confirming !== which) {
       setConfirming(which)
       return
@@ -445,6 +484,18 @@ export function ProviderSheet({
       )}
     </SettingRow>
   )
+
+  /**
+   * The stored subscription accounts (ADR-068 §2), or undefined when this row has
+   * none — a build with no account list, or a provider that never has one. The
+   * single-credential rows below are the fallback, not an empty card: an empty
+   * Accounts card reads as "you have no subscription", which is a different
+   * thing from "this row does not do accounts".
+   */
+  const accounts =
+    isShared && definition?.kind === 'subscription' && entry.accounts?.list.length
+      ? entry.accounts
+      : undefined
 
   function credentialRows(): React.JSX.Element {
     if (isShared && !shared.resolved) {
@@ -523,8 +574,8 @@ export function ProviderSheet({
           <Button
             variant="tinted"
             testid={`${SHEET}.signIn`}
-            disabled={busy || !onAddProvider}
-            onClick={() => onAddProvider?.(entry.id)}
+            disabled={busy}
+            onClick={() => openSignIn({ providerId: 'chatgpt', mode: 'reauth' })}
           >
             Sign in
           </Button>
@@ -702,7 +753,26 @@ export function ProviderSheet({
     )
   }
 
+  /**
+   * Codex, which is not a route (ADR-068 §1). The vault injects the ACTIVE
+   * ChatGPT account into every app-server ClaudeUI starts, so there is nothing
+   * here to enable or disable — a toggle would promise a switch the vault does
+   * not have. The row exists to SAY that, and to point at the one place the
+   * account is chosen.
+   */
+  function codexRow(): React.JSX.Element {
+    return (
+      <SettingRow
+        testid={`${SHEET}.engine`}
+        dataId="codex"
+        label="Codex"
+        description="Codex always uses the active ChatGPT account. Pin a different one per session from the Accounts page."
+      />
+    )
+  }
+
   const engineRow = (engine: EngineId): React.JSX.Element => {
+    if (engine === 'codex') return codexRow()
     if (engine === 'claude') {
       // Always off, always disabled: Claude Code talks to Anthropic's endpoint
       // and nothing else, so this row exists to SAY so rather than to be used.
@@ -967,6 +1037,22 @@ export function ProviderSheet({
             >
               {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
             </Button>
+            {/* With accounts, disconnecting is the whole SET — a per-account
+                Remove is above, on the account it names. */}
+            {accounts && (
+              <Button
+                variant="danger"
+                testid={`${SHEET}.disconnect`}
+                disabled={busy}
+                onClick={() =>
+                  confirmThen('disconnect', () => window.api.disconnectSharedProvider(entry.id))
+                }
+              >
+                {confirming === 'disconnect'
+                  ? 'Disconnect all accounts?'
+                  : 'Disconnect all accounts'}
+              </Button>
+            )}
             {/* One error slot for every write on the sheet: the row that failed is
                 always visible above it, and three copies of the same banner is how
                 a surface ends up reporting a stale failure next to a fresh row. */}
@@ -982,9 +1068,35 @@ export function ProviderSheet({
           </>
         }
       >
-        <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
-          {credentialRows()}
-        </SheetGroup>
+        {accounts ? (
+          <SheetGroup testid={`${SHEET}.group`} id="accounts" label="Accounts">
+            {/* The rows live on Models & providers › Accounts (F14), beside
+                Anthropic's — one page for every provider's accounts, rather
+                than one list on a page and another inside a sheet. */}
+            <SettingRow
+              testid={`${SHEET}.accountsLink`}
+              label={`${accounts.list.length} account${accounts.list.length === 1 ? '' : 's'} · managed on Accounts`}
+              description="Switching, removing and per-session pinning all live on the Accounts page."
+            >
+              <Button
+                variant="link"
+                testid={`${SHEET}.manageAccounts`}
+                disabled={!navigate}
+                onClick={() => {
+                  // Close first: the jump lands on the page BEHIND this sheet.
+                  onClose()
+                  navigate?.({ page: 'models', group: 'accounts' })
+                }}
+              >
+                Accounts ›
+              </Button>
+            </SettingRow>
+          </SheetGroup>
+        ) : (
+          <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
+            {credentialRows()}
+          </SheetGroup>
+        )}
 
         <SheetGroup
           testid={`${SHEET}.group`}
@@ -1005,7 +1117,12 @@ export function ProviderSheet({
             ) : undefined
           }
         >
-          {ENGINE_ORDER.map((engine) => (
+          {/* Codex is filtered rather than rendered as null: the group card
+              draws its separators with `divide-y`, so an empty wrapper would
+              leave a stray rule under the last real row. */}
+          {ENGINE_ORDER.filter(
+            (engine) => engine !== 'codex' || entry.engines.codex !== undefined
+          ).map((engine) => (
             <div key={engine}>{engineRow(engine)}</div>
           ))}
           {defaultModelRows()}

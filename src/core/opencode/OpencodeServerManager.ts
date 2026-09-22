@@ -93,13 +93,24 @@ function locateBinary(): string {
   return candidates[0]
 }
 
-/** ~20 minutes — must exceed the dispatcher's 10-min DISPATCH_TIMEOUT_MS so a
- *  long-running Claude target never gets cut off by opencode's OWN per-server
- *  MCP callTool timeout (config default 5s — see
- *  src/shared/opencode-config-schema.1.18.29.json `McpRemoteConfig.timeout`,
- *  read by `requestTimeout()` in vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663).
- *  The dispatcher's own heartbeat (sendProgress) ALSO resets this — belt and
- *  suspenders, since opencode may not always ride a progressToken. */
+/**
+ * ~20 minutes on opencode's OWN per-server MCP callTool timeout (config default
+ * 5 s — see src/shared/opencode-config-schema.1.18.29.json
+ * `McpRemoteConfig.timeout`, read by `requestTimeout()` in
+ * vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663), so a
+ * long-running dispatch into another engine is never cut off from the CALLER's
+ * end.
+ *
+ * It is an IDLE cap, not an absolute one: `McpCatalog.convertTool` passes
+ * `resetTimeoutOnProgress: true` plus an `onprogress` hook (which is what makes
+ * the MCP SDK attach a progress token at all) and NO `maxTotalTimeout`, the
+ * SDK's only absolute ceiling — so the dispatcher's 15 s `sendProgress`
+ * heartbeat keeps resetting it for as long as the dispatched turn runs. That
+ * is what lets ADR-033's 2026-09-18 amendment ("a dispatched agent runs until
+ * the user's limit, and an unset limit means none") hold with opencode as the
+ * caller. Orders of magnitude above the heartbeat interval, so a slow heartbeat
+ * round-trip can never trip it either.
+ */
 const DISPATCH_MCP_TIMEOUT_MS = 20 * 60 * 1000
 
 /**
@@ -155,10 +166,10 @@ export function buildOpencodeConfigContent(
           Authorization: `Bearer ${mcpToken}`
         },
         enabled: true,
-        // ADR-033 M2: a dispatched Claude target can run far longer than
-        // opencode's 5s MCP-request default (McpRemoteConfig.timeout) — a
-        // long dispatch would otherwise have its callTool cancelled out from
-        // under it. See DISPATCH_MCP_TIMEOUT_MS doc comment above.
+        // ADR-033 M2: a dispatched target can run far longer than opencode's
+        // 5s MCP-request default (McpRemoteConfig.timeout) — a long dispatch
+        // would otherwise have its callTool cancelled out from under it. Idle,
+        // not absolute: see DISPATCH_MCP_TIMEOUT_MS's doc comment above.
         timeout: DISPATCH_MCP_TIMEOUT_MS
       },
       ...(bridgedMcp ?? {})

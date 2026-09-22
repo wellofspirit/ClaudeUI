@@ -49,10 +49,12 @@ import type {
   TaskStartedData,
   TodoItem,
   ToolResultImage,
+  ToolReviewBlock,
   FileDiff,
   UISessionConfig,
   WatchUpdate
 } from '../../../shared/types'
+import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 /** Attachment shape as it rides `session:user-message` / a queued item. */
 export interface WireAttachment {
@@ -65,6 +67,8 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   // Session lifecycle + transcript
   // -------------------------------------------------------------------------
+  'session:item-open': (routingId: string, data: ItemStreamOpen) => void
+  'session:item-seal': (routingId: string, data: ItemStreamSeal) => void
   /**
    * A session was spawned. The payload carries the config it spawned WITH
    * (`prepareAndCreateSession`): `permissionMode`, `engineId` and the RESOLVED
@@ -151,6 +155,17 @@ export interface SyncEventMap {
       images?: ToolResultImage[]
     }
   ) => void
+  /**
+   * A permission judge's verdict on the tool call it judged (F18). Shaped like
+   * `session:tool-result` for the same reason: it is a block that attaches to an
+   * assistant message that ALREADY exists. The producer is responsible for
+   * holding it until the `tool_use` has landed — the reducer drops a verdict it
+   * cannot bind rather than minting a message for it.
+   */
+  'session:tool-review': (
+    routingId: string,
+    data: { toolUseId: string; review: ToolReviewBlock }
+  ) => void
   'session:status': (routingId: string, status: SessionStatus) => void
   'session:result': (routingId: string, result: SessionResult) => void
 
@@ -214,9 +229,35 @@ export interface SyncEventMap {
   'session:error': (routingId: string, error: string) => void
   'session:warning': (routingId: string, warning: string) => void
   'session:sandbox-violation': (routingId: string, message: string) => void
-  'session:vendor-auth-required': (
+  /**
+   * A credential the session needs was rejected and cannot be renewed
+   * (ADR-068 §4) — the ONE auth event, from every engine that can tell a
+   * rejected credential apart. Codex raises it when it cannot answer the
+   * app-server's `account/chatgptAuthTokens/refresh`, opencode for a
+   * `ProviderAuthError` carrying a vendor, Claude for an `authentication`
+   * api_error, and pi for a turn whose `errorMessage` opens with a 401/403 (the
+   * only status it exposes — see `core/pi/event-mapper.ts`'s classifier).
+   *
+   * `providerId` is what the sign-in dialog acts on: `anthropic`, `chatgpt`, or
+   * `opencode:<vendorId>` / `pi:<vendorId>` for a vendor no shared provider owns
+   * (those have no flow, so the row opens Settings › Models & providers
+   * instead).
+   *
+   * **`message` is the emitting engine's verbatim words, and emitting a
+   * companion `session:error` alongside this event is FORBIDDEN** (ADR-070 §1).
+   * This comment used to say the opposite — "it carries no message, the emitting
+   * engine sends its own words as `session:error`" — and that sanction is
+   * precisely how ADR-068 §4's "one event, one card" shipped as one event and
+   * several independently-dismissable cards. The information-preservation
+   * instinct was right and the delivery was wrong: the text rides here, and the
+   * row discloses it in place. A guard test per engine pins the absence of the
+   * duplicate. Every engine ALSO puts the same text in the transcript as an
+   * `api_error` / `errorType: 'authentication'` block, so the failure has a
+   * permanent, correctly-anchored home rather than a card that vanishes.
+   */
+  'session:auth-required': (
     routingId: string,
-    data: { vendorId: string; message: string }
+    data: { providerId: string; accountId?: string; message?: string }
   ) => void
   /**
    * Login status from session init: 'authenticated' | 'none'. The
@@ -250,6 +291,56 @@ export interface SyncEventMap {
   'mockup:file-changed': (directory: string) => void
   'usage:data': (data: AccountUsage) => void
   'usage:block-data': (data: BlockUsageData) => void
+  /**
+   * Per-account ChatGPT rate limits changed (ADR-068 §2) — a live session pushed
+   * an `account/rateLimits/updated`, or a panel-driven read finished. Deliberately
+   * PAYLOAD-FREE: clients re-query `usage:chatgpt-limits`, so the map has exactly
+   * one shape and one owner.
+   */
+  'usage:chatgpt-limits-changed': () => void
+  /**
+   * An account's limits reading changed, for any vendor (ADR-071 §6) — a stored
+   * Claude account was read on demand, or a ChatGPT snapshot landed. PAYLOAD-FREE
+   * like its ADR-068 sibling: `usage:limits` is the one shape, and it takes a
+   * `refresh` flag that decides whether reading it spends anything.
+   */
+  'usage:limits-changed': () => void
+  /**
+   * The usage hub client's state or its cached remote rows moved (ADR-072 §7) —
+   * a push landed, a pull stored rows, a credential was refused. PAYLOAD-FREE
+   * like the two usage nudges above it: `usage-hub:status` is the one shape, and
+   * it carries figures a fan-out has no business duplicating.
+   */
+  'usage-hub:changed': () => void
+  /**
+   * A credential for `providerId` was successfully stored — the ONE resolution
+   * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
+   * credential is good now", so every auth surface invented its own clear
+   * condition and none of them was "the user signed in".
+   *
+   * APP-LEVEL on purpose: it is a fact about a PROVIDER, not about a session, so
+   * it carries no routingId. The reducer fans it across every session whose
+   * `authRequired.providerId` matches and marks them resolved — one fold, so a
+   * desktop sign-in clears the owed sign-in on the phone too.
+   *
+   * `accountId` is the VAULT account id the credential landed on — the same
+   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * on one side, `CredentialSync.keyForCredential` on the other). It narrows the
+   * fan-out: a provider can hold several accounts, so adding ChatGPT account B
+   * must not announce that the sessions broken on account A are fixed. The
+   * reducer skips a session only when BOTH ids are present and differ, so absent
+   * on either side still matches — which is what Anthropic (one credential, no
+   * id) and every older emitter rely on.
+   *
+   * Emitted by Anthropic's own success transition (`AuthManager.finalize`) and
+   * by the vault's one post-completion tail
+   * (`CredentialSync.applyCompletedLogin`, which covers the desktop loopback,
+   * the ADR-057 paste-back and the device-code flow alike).
+   *
+   * Still no token, no URL and no flow state: it is replicated to every remote
+   * client, and a vault account id is an opaque local handle.
+   */
+  'provider:auth-resolved': (data: { providerId: string; accountId?: string }) => void
 
   // -------------------------------------------------------------------------
   // Automation

@@ -9,16 +9,10 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import {
-  applyEvent,
-  emptyAux,
-  auxFromCanonical,
-  checkDerivedFields,
-  rekeyTargetFor,
-  type ReducerAux
-} from '../reducer'
-import { isVolatileStream } from '../channels'
-import { applyStreamFrame, streamFrameFrom } from '../stream'
+import { applyEvent, checkDerivedFields, rekeyTargetFor } from '../reducer'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { channelSpec } from '../channels'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../../../shared/types'
 
@@ -36,28 +30,15 @@ function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
 }
 
 /**
- * Fold a list of `[channel, ...args]` tuples, assigning seqs 1..n — routed by the
- * channel's CLASS exactly as `SyncCore.process` routes it.
- *
- * A `volatile` channel (phase 5 S1) never reaches `applyEvent`: it is translated
- * into a stream frame and folded by `applyStreamFrame`. Keeping ONE fold helper
- * that knows both lanes is deliberate — the seal/clear interplay between them
- * (a text delta seals a thinking span; a `session:message` clears the buffer and
- * bumps its generation) is only testable if a test can express both.
+ * Fold reliable `[channel, ...args]` tuples, assigning seqs 1..n.
  */
 function fold(
   events: Array<[string, ...unknown[]]>,
-  initial: CanonicalState = emptyCanonicalState(),
-  aux: ReducerAux = emptyAux()
+  initial: CanonicalState = emptyCanonicalState()
 ): CanonicalState {
   let state = initial
   events.forEach(([channel, ...args], i) => {
-    if (isVolatileStream(channel)) {
-      const frame = streamFrameFrom(state, aux, channel, args)
-      if (frame) state = applyStreamFrame(state, aux, frame).state
-      return
-    }
-    state = applyEvent(state, { channel, args, seq: i + 1 }, aux)
+    state = applyEvent(state, { channel, args, seq: i + 1 })
   })
   return state
 }
@@ -123,23 +104,6 @@ describe('reducer — session registry', () => {
     // Identity-stable too: the replica's projection is identity-diffed, so a
     // no-op that returned a fresh object would re-write every slice.
     expect(after).toBe(before)
-  })
-
-  it('a stream delta for an unknown id leaves no orphan thinking-span flag', () => {
-    // The aux write used to happen before the (bootstrapping) session write, so a
-    // delta for a dead id parked `thinkingOpen` that a same-id respawn inherited
-    // — its first real thinking output would be blanked by the next text delta.
-    const aux = emptyAux()
-    applyEvent(
-      emptyCanonicalState(),
-      {
-        channel: 'session:stream',
-        args: ['rid', { type: 'thinking', text: 'hmm' }],
-        seq: 1
-      },
-      aux
-    )
-    expect(aux.thinkingOpen['rid']).toBeUndefined()
   })
 
   it('session:watch-update KEEPS the bootstrap — it is the only birth event a watched session has', () => {
@@ -225,25 +189,21 @@ describe('reducer — session registry', () => {
         { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
       ]
     ])
-    const again = applyEvent(
-      seeded,
-      {
-        channel: 'session:created',
-        args: [
-          'rid',
-          { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
-        ],
-        seq: 2
-      },
-      emptyAux()
-    )
+    const again = applyEvent(seeded, {
+      channel: 'session:created',
+      args: [
+        'rid',
+        { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
+      ],
+      seq: 2
+    })
     expect(again.sessions['rid']).toEqual(seeded.sessions['rid'])
 
-    const oldShape = applyEvent(
-      seeded,
-      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 3 },
-      emptyAux()
-    )
+    const oldShape = applyEvent(seeded, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo' }],
+      seq: 3
+    })
     expect(oldShape.sessions['rid'].permissionMode).toBe('acceptEdits')
     expect(oldShape.sessions['rid'].selectedEngineId).toBe('opencode')
     expect(oldShape.sessions['rid'].selectedModel).toBe('zen/qwen')
@@ -296,24 +256,6 @@ describe('reducer — session:removed (explicit delete)', () => {
     expect(twice).toBe(once)
   })
 
-  it('drops the thinking-span bookkeeping, so a same-id respawn starts clean', () => {
-    const aux = emptyAux()
-    // The span is opened by the STREAM lane (phase 5 S1) and dropped by the event
-    // lane's removal branch — the aux is what the two share.
-    const state = fold(
-      [created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]],
-      emptyCanonicalState(),
-      aux
-    )
-    expect(aux.thinkingOpen['rid']).toBe(true)
-    expect(aux.streamTurn).not.toEqual({})
-    applyEvent(state, { channel: 'session:removed', args: ['rid'], seq: 3 }, aux)
-    expect(aux.thinkingOpen['rid']).toBeUndefined()
-    // The stream generations go with it, or a same-id respawn's first frame would
-    // be judged against a dead session's turn counter.
-    expect(aux.streamTurn).toEqual({})
-  })
-
   it('a late engine event after a removal cannot resurrect the session (F7)', () => {
     const s = fold([
       created('rid'),
@@ -339,7 +281,6 @@ describe('reducer — session:conversation-cleared', () => {
         { cwd: '/repo', permissionMode: 'plan', engineId: 'pi', model: 'gpt-5' }
       ],
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
-      ['session:stream', 'rid', { type: 'text', text: 'partial' }],
       ['session:approval-request', 'rid', { requestId: 'r1', toolUseId: 't1' }],
       ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'b' }],
       [
@@ -354,7 +295,6 @@ describe('reducer — session:conversation-cleared', () => {
     const s = fold([['session:conversation-cleared', 'rid', {}]], dirty())
     const session = s.sessions['rid']
     expect(session.messages).toEqual([])
-    expect(session.streamingText).toBe('')
     expect(session.pendingApprovals).toEqual([])
     expect(session.activeTasks).toEqual({})
     expect(session.queue).toEqual([])
@@ -406,22 +346,6 @@ describe('reducer — session:conversation-cleared', () => {
     expect(s.sessions['rid'].permissionMode).toBe('default')
   })
 
-  it('closes any open thinking span', () => {
-    const aux = emptyAux()
-    let state = applyEvent(
-      emptyCanonicalState(),
-      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 1 },
-      aux
-    )
-    state = applyEvent(
-      state,
-      { channel: 'session:stream', args: ['rid', { type: 'thinking', text: 'hmm' }], seq: 2 },
-      aux
-    )
-    applyEvent(state, { channel: 'session:conversation-cleared', args: ['rid', {}], seq: 3 }, aux)
-    expect(aux.thinkingOpen['rid']).toBe(false)
-  })
-
   it('is a no-op for an unknown id', () => {
     const before = emptyCanonicalState()
     expect(fold([['session:conversation-cleared', 'ghost', {}]], before)).toBe(before)
@@ -469,36 +393,6 @@ describe('reducer — transcript', () => {
     expect(msg[0].content.map((b) => b.type)).toEqual(['text', 'tool_use'])
   })
 
-  it('clears the streaming buffer when a message lands', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'text', text: 'strea' }],
-      ['session:stream', 'rid', { type: 'text', text: 'ming' }],
-      ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'streaming' }])]
-    ])
-    expect(s.sessions['rid'].streamingText).toBe('')
-  })
-
-  it('accumulates text and thinking into separate buffers', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'thinking', text: '...' }]
-    ])
-    expect(s.sessions['rid'].streamingThinking).toBe('hmm...')
-    expect(s.sessions['rid'].streamingText).toBe('')
-  })
-
-  it('seals an open thinking span when text starts (clock-free)', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }]
-    ])
-    expect(s.sessions['rid'].streamingThinking).toBe('')
-    expect(s.sessions['rid'].streamingText).toBe('answer')
-  })
-
   it('attaches a tool_result to its tool_use, first result wins (idempotent)', () => {
     const s = fold([
       created(),
@@ -515,16 +409,93 @@ describe('reducer — transcript', () => {
     expect(results[0]).toMatchObject({ toolResult: 'first' })
   })
 
-  it('retracts messages by id and clears streaming buffers', () => {
+  /**
+   * F18 — a judge's verdict is a block on the card it judged, so it attaches to
+   * the assistant message holding the `tool_use` exactly as a `tool_result`
+   * does. Its identity is `reviewId`, not `toolUseId`: a re-review after
+   * "approve anyway" is a SECOND verdict on the same call and must append.
+   */
+  describe('session:tool-review', () => {
+    const review = (over: Record<string, unknown> = {}) => ({
+      type: 'tool_review' as const,
+      toolUseId: 't1',
+      reviewId: 'rv-1',
+      reviewer: 'codex-auto-review' as const,
+      decision: 'approved' as const,
+      riskLevel: 'medium' as const,
+      rationale: 'Stays inside the workspace.',
+      ...over
+    })
+    const hostMessage = (): [string, ...unknown[]] => [
+      'session:message',
+      'rid',
+      assistant('m1', [{ type: 'tool_use', toolUseId: 't1', toolName: 'Bash', toolInput: {} }])
+    ]
+    const reviews = (s: CanonicalState) =>
+      s.sessions['rid'].messages.flatMap((m) => m.content.filter((b) => b.type === 'tool_review'))
+
+    it('attaches the verdict to the message holding its tool_use', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toEqual([review()])
+    })
+
+    it('is idempotent by reviewId — a replayed catch-up appends once', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toHaveLength(1)
+    })
+
+    it('appends a SECOND verdict with a different reviewId (a re-review)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        [
+          'session:tool-review',
+          'rid',
+          { toolUseId: 't1', review: review({ reviewId: 'rv-2', decision: 'denied' }) }
+        ]
+      ])
+      expect(reviews(s).map((b) => b.reviewId)).toEqual(['rv-1', 'rv-2'])
+    })
+
+    it('is dropped when no message holds the tool_use (the producer holds)', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toEqual([])
+    })
+
+    it('survives an item-scoped upsert of its host message (mergeContentBlocks)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        // The same message again, as a delta re-emits it mid-turn.
+        hostMessage()
+      ])
+      expect(reviews(s)).toEqual([review()])
+    })
+  })
+
+  it('retracts messages by id', () => {
     const s = fold([
       created(),
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'a' }])],
       ['session:message', 'rid', assistant('m2', [{ type: 'text', text: 'b' }])],
-      ['session:stream', 'rid', { type: 'text', text: 'partial' }],
       ['session:messages-retracted', 'rid', { messageIds: ['m1'] }]
     ])
     expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m2'])
-    expect(s.sessions['rid'].streamingText).toBe('')
   })
 
   it('mints a DETERMINISTIC id for a user message (the payload carries none)', () => {
@@ -578,12 +549,10 @@ describe('reducer — event-carried identity (phase 4b)', () => {
   })
 })
 
-describe('reducer — emitter-supplied thinking duration (phase 4b)', () => {
+describe('reducer — reliable thinking duration', () => {
   it('moves thinkingDurationMs onto the sealed block and drops the field', () => {
     const s = fold([
       created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'weighing' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }],
       [
         'session:message',
         'rid',
@@ -795,8 +764,31 @@ describe('reducer — per-session config (item 6)', () => {
 })
 
 describe('reducer — cost + metering REPLACE, never accumulate (invariant 6)', () => {
-  const line = (cost: number): StatusLineData =>
+  const line = (cost: number | null): StatusLineData =>
     ({ totalCostUsd: cost, model: 'sonnet' }) as unknown as StatusLineData
+
+  it('carries a NULL (unpriced) cost through unchanged — null is not 0', () => {
+    // An engine that cannot price a turn reports null, and every replica has to
+    // keep telling "unknown" apart from "known to be free". A reducer that
+    // coerced (`?? 0`) would launder the former into the latter on every hop.
+    const s = fold([
+      created(),
+      ['session:status', 'rid', status({ engineId: 'codex', totalCostUsd: null })],
+      ['session:status-line', 'rid', line(null)]
+    ])
+    expect(s.sessions['rid'].status.totalCostUsd).toBeNull()
+    expect(s.sessions['rid'].statusLine?.totalCostUsd).toBeNull()
+
+    // …and survives the snapshot a remote/web client hydrates from.
+    const restored = fromSnapshot(toSnapshot(s, 3))
+    expect(restored.sessions['rid'].status.totalCostUsd).toBeNull()
+    expect(restored.sessions['rid'].statusLine?.totalCostUsd).toBeNull()
+  })
+
+  it('a KNOWN zero cost stays 0, never collapsing into null', () => {
+    const s = fold([created(), ['session:status-line', 'rid', line(0)]])
+    expect(s.sessions['rid'].statusLine?.totalCostUsd).toBe(0)
+  })
 
   it('a status-line sequence ends at the LAST value, not the sum', () => {
     // Engine cost fields are cumulative-per-process snapshots (see
@@ -1167,7 +1159,7 @@ describe('reducer — app-level config', () => {
   })
 })
 
-describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () => {
+describe('snapshot restore — fromSnapshot (phase 4b)', () => {
   it('round-trips canonical state through the wire shape', () => {
     const live = fold([
       created(),
@@ -1197,6 +1189,16 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
       )
     })
     expect(strip(restored)).toEqual(strip(live))
+    for (const session of [
+      live.sessions.rid,
+      restored.sessions.rid,
+      toSnapshot(live, 42).sessions.rid
+    ]) {
+      expect(session).not.toHaveProperty('streamingText')
+      expect(session).not.toHaveProperty('streamingThinking')
+      expect(session).not.toHaveProperty('subagentStreamingText')
+      expect(session).not.toHaveProperty('subagentStreamingThinking')
+    }
   })
 
   it("fills defaults for an older host's snapshot (absent optional fields)", () => {
@@ -1207,16 +1209,12 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
           routingId: 'rid',
           cwd: '/repo',
           messages: [],
-          streamingText: '',
-          streamingThinking: '',
           status: status({ state: 'idle' }),
           pendingApprovals: [],
           todos: [],
           taskNotifications: [],
           taskProgressMap: {},
           subagentMessages: {},
-          subagentStreamingText: {},
-          subagentStreamingThinking: {},
           permissionMode: 'default',
           effort: null,
           statusLine: null,
@@ -1241,27 +1239,6 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
     expect(s.selectedEngineId).toBe('claude')
     expect(restored.autoModeDisabledBySettings).toBe(false)
   })
-
-  it('recovers the open-thinking-span flag from streamingThinking', () => {
-    // The flag is core-internal, but it is DERIVABLE: a non-empty thinking buffer
-    // IS an unsealed span. Without recovering it, a client restored mid-span would
-    // never clear that buffer — stale thinking text under a finished answer.
-    const midSpan = fold([created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]])
-    const restored = fromSnapshot(toSnapshot(midSpan, 2))
-    const aux = auxFromCanonical(restored)
-    expect(aux.thinkingOpen['rid']).toBe(true)
-
-    const sealed = fold(
-      [['session:stream', 'rid', { type: 'text', text: 'answer' }]],
-      restored,
-      aux
-    )
-    expect(sealed.sessions['rid'].streamingThinking).toBe('')
-    // And an idle session restores with no open span at all.
-    expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual(
-      {}
-    )
-  })
 })
 
 describe('reducer — purity (invariant 5)', () => {
@@ -1279,8 +1256,6 @@ describe('reducer — purity (invariant 5)', () => {
     fold([
       created(),
       ['session:user-message', 'rid', { prompt: 'hi' }],
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }],
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'answer' }])],
       ['session:status', 'rid', status({ state: 'idle' })],
       ['session:result', 'rid', {}],
@@ -1316,10 +1291,9 @@ describe('reducer — purity (invariant 5)', () => {
 })
 
 describe('reducer — subagents', () => {
-  it('upserts subagent messages and clears the buffers for that subagent', () => {
+  it('upserts subagent messages', () => {
     const s = fold([
       created(),
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'task-1', text: 'partial' }],
       [
         'session:subagent-message',
         'rid',
@@ -1327,31 +1301,6 @@ describe('reducer — subagents', () => {
       ]
     ])
     expect(s.sessions['rid'].subagentMessages['task-1'].map((m) => m.id)).toEqual(['s1'])
-    expect(s.sessions['rid'].subagentStreamingText['task-1']).toBe('')
-  })
-
-  it('clears FOREGROUND subagent buffers when the parent goes idle, keeps background', () => {
-    const s = fold([
-      created(),
-      [
-        'session:message',
-        'rid',
-        assistant('m1', [
-          {
-            type: 'tool_use',
-            toolUseId: 'bg-1',
-            toolName: 'Task',
-            toolInput: { run_in_background: true }
-          },
-          { type: 'tool_use', toolUseId: 'fg-1', toolName: 'Task', toolInput: {} }
-        ])
-      ],
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'bg-1', text: 'still going' }],
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'fg-1', text: 'stale' }],
-      ['session:status', 'rid', status({ state: 'idle' })]
-    ])
-    expect(s.sessions['rid'].subagentStreamingText['bg-1']).toBe('still going')
-    expect(s.sessions['rid'].subagentStreamingText['fg-1']).toBe('')
   })
 
   it('a task notification drops the task from activeTasks', () => {
@@ -1385,5 +1334,239 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].activeTasks).toEqual({
       t1: { taskId: 'a', taskType: 'local_agent' }
     })
+  })
+})
+
+describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3)', () => {
+  it('sets authRequired, a running turn clears it, and a snapshot round-trip keeps it', () => {
+    const owed = fold([
+      created(),
+      ['session:status', 'rid', status({ state: 'idle' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', accountId: 'acct-a' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      accountId: 'acct-a'
+    })
+
+    // The wire carries it now — slice 2a deliberately blanked it on restore
+    // because nothing rendered it; slice 3 is the client that does.
+    const restored = fromSnapshot(toSnapshot(owed, 7))
+    expect(restored.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      accountId: 'acct-a'
+    })
+
+    const cleared = fold([['session:status', 'rid', status({ state: 'running' })]], owed)
+    expect(cleared.sessions['rid'].authRequired).toBeNull()
+  })
+
+  it('session:vendor-auth-required is gone from the channel specs and the event map', () => {
+    expect(channelSpec('session:vendor-auth-required')).toBeUndefined()
+    const events = readFileSync(join(process.cwd(), 'src/core/shared/sync/events.ts'), 'utf8')
+    expect(events).not.toContain('session:vendor-auth-required')
+    expect(events).toContain("'session:auth-required'")
+  })
+
+  // ── ADR-070 §2/§3: the engine's words and the retry, captured at failure time ──
+
+  it('captures the engine’s message and the LAST user prompt', () => {
+    const owed = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'first prompt' }],
+      ['session:user-message', 'rid', { id: 'u2', prompt: 'fix the parser' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'Token expired' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'Token expired',
+      retryPrompt: 'fix the parser'
+    })
+    // Lifetime 1 is `resolved` ABSENT, not `false`.
+    expect('resolved' in owed.sessions['rid'].authRequired!).toBe(false)
+  })
+
+  it('joins every text block of that message, and trims', () => {
+    // The two component-side copies of this walk disagreed on exactly this —
+    // `AuthRequiredRow` took the FIRST text block, `AuthErrorBlock` joined all of
+    // them — so the retry the user got depended on which surface they clicked. A
+    // replayed history message (opencode's `convertStoredMessage`) is where a
+    // multi-block user turn actually comes from.
+    const owed = fold([
+      created(),
+      [
+        'session:message',
+        'rid',
+        {
+          id: 'u-multi',
+          role: 'user',
+          timestamp: 0,
+          content: [
+            { type: 'text', text: '  fix the parser' },
+            { type: 'text', text: 'and the tests  ' }
+          ]
+        }
+      ],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'anthropic' }]
+    ])
+    expect(owed.sessions['rid'].authRequired!.retryPrompt).toBe('fix the parser\nand the tests')
+  })
+
+  it('omits retryPrompt when the session has no user message to retry', () => {
+    const owed = fold([
+      created(),
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'anthropic' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({ providerId: 'anthropic' })
+  })
+
+  /**
+   * GUARD — the retry belongs to a turn this failure actually killed.
+   *
+   * Codex's host fans one failed refresh to EVERY session attached to the
+   * process (ADR-069 §8), so a session that has been idle for hours hears about
+   * a credential it was not using. Capturing its last prompt there meant the
+   * sign-in dialog then offered to "retry" a turn that completed long ago.
+   */
+  it('captures retryPrompt only while the session’s turn is in flight', () => {
+    const idle = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'finished hours ago' }],
+      ['session:status', 'rid', status({ state: 'idle' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'rejected' }]
+    ])
+    expect(idle.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'rejected'
+    })
+
+    const running = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'the killed prompt' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'rejected' }]
+    ])
+    expect(running.sessions['rid'].authRequired!.retryPrompt).toBe('the killed prompt')
+  })
+
+  it('a snapshot round-trip carries all five fields', () => {
+    const owed = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'retry me' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      [
+        'session:auth-required',
+        'rid',
+        { providerId: 'chatgpt', accountId: 'acct-a', message: 'Token expired' }
+      ],
+      ['provider:auth-resolved', { providerId: 'chatgpt' }]
+    ])
+    const expected = {
+      providerId: 'chatgpt',
+      accountId: 'acct-a',
+      message: 'Token expired',
+      retryPrompt: 'retry me',
+      resolved: true
+    }
+    expect(owed.sessions['rid'].authRequired).toEqual(expected)
+    // The widening is worthless if a resync drops three of the five.
+    expect(fromSnapshot(toSnapshot(owed, 9)).sessions['rid'].authRequired).toEqual(expected)
+  })
+})
+
+describe('provider:auth-resolved — the one resolution signal (ADR-070 §2)', () => {
+  /** Two sessions owing DIFFERENT providers, plus one owing nothing. */
+  const owedByThree = (): CanonicalState =>
+    fold([
+      created('r-chatgpt'),
+      created('r-anthropic'),
+      created('r-fine'),
+      ['session:user-message', 'r-chatgpt', { id: 'u1', prompt: 'the killed prompt' }],
+      ['session:status', 'r-chatgpt', status({ state: 'running' })],
+      ['session:auth-required', 'r-chatgpt', { providerId: 'chatgpt', message: 'Token expired' }],
+      ['session:auth-required', 'r-anthropic', { providerId: 'anthropic', message: '401' }]
+    ])
+
+  it('marks only the sessions blaming THAT provider, keeping everything else', () => {
+    const before = owedByThree()
+    const after = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+
+    expect(after.sessions['r-chatgpt'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'Token expired',
+      // Lifetime 2 keeps the retry: it is what makes closing the dialog safe.
+      retryPrompt: 'the killed prompt',
+      resolved: true
+    })
+    // A different provider is untouched, by identity — not merely equal.
+    expect(after.sessions['r-anthropic']).toBe(before.sessions['r-anthropic'])
+    expect(after.sessions['r-fine']).toBe(before.sessions['r-fine'])
+  })
+
+  it('returns the IDENTICAL state object when nothing matched', () => {
+    // `replica.ts` identity-diffs the projection ("Projection is identity-diffed,
+    // and that is load-bearing"), so a fresh object here would re-write every
+    // session — and revert any in-flight local write — on a sign-in that fixed
+    // nothing. `toBe`, deliberately, not `toEqual`.
+    const before = owedByThree()
+    expect(fold([['provider:auth-resolved', { providerId: 'pi:anthropic' }]], before)).toBe(before)
+    expect(fold([['provider:auth-resolved', {}]], before)).toBe(before)
+    // Idempotent: a second signal for an already-resolved provider changes nothing.
+    const resolved = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+    expect(fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], resolved)).toBe(resolved)
+  })
+
+  /**
+   * GUARD — a provider can hold several accounts (ADR-068 §2). Without the id on
+   * the signal, ADDING ChatGPT account B announced "chatgpt works now" and every
+   * session broken on account A was marked resolved — a fixed-credential row for
+   * a credential nobody touched.
+   */
+  it('skips a session whose broken account is not the one that was stored', () => {
+    const before = fold([
+      created('r-a'),
+      created('r-b'),
+      created('r-either'),
+      ['session:auth-required', 'r-a', { providerId: 'chatgpt', accountId: 'acct-a' }],
+      ['session:auth-required', 'r-b', { providerId: 'chatgpt', accountId: 'acct-b' }],
+      ['session:auth-required', 'r-either', { providerId: 'chatgpt' }]
+    ])
+
+    const after = fold(
+      [['provider:auth-resolved', { providerId: 'chatgpt', accountId: 'acct-b' }]],
+      before
+    )
+
+    expect(after.sessions['r-b'].authRequired!.resolved).toBe(true)
+    // Identity, not equality: account A was never in question.
+    expect(after.sessions['r-a']).toBe(before.sessions['r-a'])
+    // An absent id on EITHER side matches — today's behaviour, and Anthropic's,
+    // which names no account at all.
+    expect(after.sessions['r-either'].authRequired!.resolved).toBe(true)
+  })
+
+  it('an account-less signal still resolves every session for that provider', () => {
+    const before = fold([
+      created('r-a'),
+      created('r-b'),
+      ['session:auth-required', 'r-a', { providerId: 'chatgpt', accountId: 'acct-a' }],
+      ['session:auth-required', 'r-b', { providerId: 'chatgpt', accountId: 'acct-b' }]
+    ])
+
+    const after = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+
+    expect(after.sessions['r-a'].authRequired!.resolved).toBe(true)
+    expect(after.sessions['r-b'].authRequired!.resolved).toBe(true)
+  })
+
+  it('a running turn still nulls the WHOLE field, resolved or not', () => {
+    // Lifetime 3 (`reducer.ts`'s status rule) is unchanged by the other two: a
+    // turn that runs is the proof, and it settles the resolved state as well.
+    const resolved = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], owedByThree())
+    const ran = fold([['session:status', 'r-chatgpt', status({ state: 'running' })]], resolved)
+    expect(ran.sessions['r-chatgpt'].authRequired).toBeNull()
   })
 })

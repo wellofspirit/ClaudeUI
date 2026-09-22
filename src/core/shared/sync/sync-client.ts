@@ -1,5 +1,6 @@
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
-import { isStreamEventFrame, isStreamFrame, type StreamFrame } from './stream'
+import { isItemStreamFrame, type ItemStreamFrame } from './item-stream'
+import { isStreamEventFrame } from './stream'
 
 /** One domain event as a transport hands it over (frame envelope stripped). */
 export interface SyncEvent {
@@ -12,8 +13,8 @@ export type SyncListener = (...args: unknown[]) => void
 export type SyncFullStateHandler = (state: FullStateSnapshot) => void
 /** Raw-event tap (SyncCore phase 4c) — see {@link SyncClient.onAnyEvent}. */
 export type SyncEventTap = (event: SyncEvent) => void
-/** Volatile-lane tap (phase 5 S1) — see {@link SyncClient.onStreamFrame}. */
-export type SyncStreamTap = (frame: StreamFrame) => void
+/** Item-addressed volatile-lane tap. */
+export type SyncItemStreamTap = (frame: ItemStreamFrame) => void
 /** Fired whenever a `sync` was ANSWERED — see {@link SyncClient.onSyncAnswered}. */
 export type SyncAnsweredTap = () => void
 
@@ -62,13 +63,16 @@ const DEFAULT_BUFFER_LIMIT = 5000
 export class SyncClient {
   private readonly listeners = new Map<string, Set<SyncListener>>()
   private readonly taps = new Set<SyncEventTap>()
-  private readonly streamTaps = new Set<SyncStreamTap>()
+  private readonly itemStreamTaps = new Set<SyncItemStreamTap>()
+  private itemResyncPending = false
   private readonly answeredTaps = new Set<SyncAnsweredTap>()
   private readonly requestResync: () => void
   private readonly bufferLimit: number
   /** Pre-ready (and mid-flush) events, kept in seq order. */
   private readonly buffer: SyncEvent[] = []
   private lastSeq = 0
+  /** See {@link getResyncCount}. */
+  private resyncCount = 0
   private epoch?: string
   private ready = false
   private draining = false
@@ -125,19 +129,29 @@ export class SyncClient {
     }
   }
 
-  /**
-   * Subscribe to the VOLATILE STREAM lane (phase 5 S1).
-   *
-   * Deliberately separate from {@link onAnyEvent}: a stream frame is not an
-   * event. It carries no seq, so it must NOT touch `lastSeq`, the pre-ready
-   * buffer or gap detection — a delta that advanced the cursor would make the
-   * client claim it had applied events it never saw, which is the exact hole the
-   * ack discipline exists to prevent.
-   */
-  onStreamFrame(cb: SyncStreamTap): () => void {
-    this.streamTaps.add(cb)
+  /** Subscribe to item frames without advancing the reliable event cursor. */
+  onItemStreamFrame(cb: SyncItemStreamTap): () => void {
+    this.itemStreamTaps.add(cb)
     return () => {
-      this.streamTaps.delete(cb)
+      this.itemStreamTaps.delete(cb)
+    }
+  }
+
+  receiveItemStreamFrame(frame: unknown): void {
+    if (!this.ready || !isItemStreamFrame(frame)) return
+    if (frame.atSeq > this.lastSeq || this.draining) {
+      if (!this.itemResyncPending) {
+        this.itemResyncPending = true
+        this.triggerResync()
+      }
+      return // answered sync triggers rewatch; never apply before the open
+    }
+    for (const tap of this.itemStreamTaps) {
+      try {
+        tap(frame)
+      } catch {
+        /* isolate subscribers */
+      }
     }
   }
 
@@ -187,32 +201,24 @@ export class SyncClient {
     return this.epoch
   }
 
+  /**
+   * How many resyncs this client has ASKED for, ever.
+   *
+   * Monotonic for the client's lifetime — the answering {@link applyFullState}
+   * does not reset it, and neither does a reconnect. A resync REPLACES canonical
+   * wholesale, which makes it the one routine event that can explain a
+   * transcript the renderer no longer has; the render-loss detector
+   * (`renderer/src/utils/projection-audit.ts`) reads this at turn start and at
+   * turn end and reports the DIFFERENCE, a question a per-connection counter
+   * could not answer.
+   */
+  getResyncCount(): number {
+    return this.resyncCount
+  }
+
   /** A live event frame. */
   receiveEvent(event: SyncEvent): void {
     this.ingest(event, true)
-  }
-
-  /**
-   * A volatile stream frame (phase 5 S1). Validated here so a transport cannot
-   * hand a malformed one to the replica.
-   *
-   * **Pre-ready frames are DROPPED, not buffered — a deliberate loss.** The
-   * readiness gate exists because an EVENT dropped before the listeners mount is
-   * a permanent hole in a seq-ordered stream. A stream frame is not: the
-   * post-ready `stream:watch` replays the whole accumulation at `offset: 0`,
-   * which supersedes anything that arrived early by construction. Buffering them
-   * would mean applying deltas at offsets the replay has already invalidated.
-   */
-  receiveStreamFrame(frame: unknown): void {
-    if (!this.ready) return
-    if (!isStreamFrame(frame)) return
-    for (const tap of this.streamTaps) {
-      try {
-        tap(frame)
-      } catch {
-        /* one broken tap must not stop the others */
-      }
-    }
   }
 
   /**
@@ -225,7 +231,7 @@ export class SyncClient {
    * keeps working with no rewiring and there is no second interpretation of the
    * payload to drift.
    *
-   * It is NOT an event, so — exactly like {@link receiveStreamFrame} — it never
+   * It is NOT an event, so it never
    * touches `lastSeq`, the buffer, the gap check or the `onAnyEvent` taps (the
    * replica folds those, and a tail has no canonical field to fold into).
    *
@@ -280,6 +286,7 @@ export class SyncClient {
   }
 
   private announceAnswered(): void {
+    this.itemResyncPending = false
     for (const tap of this.answeredTaps) {
       try {
         tap()
@@ -304,7 +311,7 @@ export class SyncClient {
     if (gapCheck && this.lastSeq > 0 && event.seq > this.lastSeq + 1) {
       // Something was missed. Do NOT apply this event as if it were contiguous:
       // acking it would strand the missing range forever.
-      this.requestResync()
+      this.triggerResync()
       return
     }
     this.dispatch(event)
@@ -334,7 +341,7 @@ export class SyncClient {
           // pruned the oldest entries. Drop the rest and let the catchup
           // redeliver from the cursor; dispatching across it would ack the hole.
           this.buffer.length = 0
-          this.requestResync()
+          this.triggerResync()
           return
         }
         this.dispatch(event)
@@ -342,6 +349,16 @@ export class SyncClient {
     } finally {
       this.draining = false
     }
+  }
+
+  /**
+   * The ONE way a resync is asked for, so {@link getResyncCount} cannot drift
+   * from the transport's actual behaviour: a second call site added later gets
+   * counted whether or not its author knew the counter existed.
+   */
+  private triggerResync(): void {
+    this.resyncCount++
+    this.requestResync()
   }
 
   private dispatch(event: SyncEvent): void {

@@ -7,10 +7,10 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeChatMessage,
-  makeAssistantMessage,
   makeToolUseBlock,
   makeSessionStatus,
   makePendingApproval,
@@ -91,8 +91,8 @@ describe('E2E: tool use denial flow', () => {
     })
 
     // Assistant continues with alternate response
-    app.emit('session:stream', routingId, { type: 'text', text: 'I cannot do that.' })
-    app.emit('session:message', routingId, makeAssistantMessage('I cannot do that.'))
+    const continuation = emitItemDelta(app, routingId, 'I cannot do that.', { open: true })
+    sealItem(app, routingId, continuation, 'I cannot do that.')
 
     // The tool_result above already cleared the approval — idle is a no-op here.
     app.emit(

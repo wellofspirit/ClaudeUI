@@ -940,15 +940,12 @@ export interface WsVoiceAudio {
 // Volatile stream lane (SyncCore phase 5)
 // ---------------------------------------------------------------------------
 //
-// Both flavors are declared in `shared/sync/stream.ts` — with the streamId
-// scheme, the validators and the one reducer that interprets a text frame — and
-// re-exported here so the frame unions stay the single list of what may cross a
-// socket. Like `term-data`, neither enters the event ring and neither reaches the
-// audit log (security.md §Audit): a delta stream is fully summarized by the
-// accumulation in canonical state, and a tail (`stream-ev`, S2) is a lossy
-// preview whose durable record is the event lane.
-export type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
-import type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
+// Item lifecycle frames and pass-through tails share the volatile lane. Like
+// `term-data`, neither enters the event ring or audit log; item state is carried
+// by snapshots and a tail is a lossy preview of a durable reliable event.
+export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
+import type { StreamEventFrame } from '../core/shared/sync/stream'
+import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
   | WsAuthRequest
@@ -980,7 +977,7 @@ export type WsServerMessage =
   | WsTermResized
   | WsTermExit
   | WsTermDetached
-  | StreamFrame
+  | ItemStreamFrame
   | StreamEventFrame
 
 // ---------------------------------------------------------------------------
@@ -1022,8 +1019,8 @@ export interface PerSessionSnapshot {
   routingId: string
   cwd: string
   messages: ChatMessage[]
-  streamingText: string
-  streamingThinking: string
+  itemStreams?: ItemStreams
+  itemStreamRevision?: number
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   todos: TodoItem[]
@@ -1041,8 +1038,6 @@ export interface PerSessionSnapshot {
   activeTasks?: Record<string, { taskId: string; taskType: string }>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
-  subagentStreamingText: Record<string, string>
-  subagentStreamingThinking: Record<string, string>
   permissionMode: string
   /**
    * `null` when unset. The declaration used to say `string`, but no producer has
@@ -1072,6 +1067,46 @@ export interface PerSessionSnapshot {
   selectedEngineId?: EngineId
   /** Model picker value within the selected engine. */
   selectedModel?: string
+  codexModelExplicit?: boolean
+  /**
+   * The sign-in this session owes — see {@link AuthRequiredState}. Optional for
+   * the same older-server-compat reason as {@link PerSessionSnapshot.queue}: a
+   * host that predates slice 3 sends none, which reads as "nothing owed".
+   */
+  authRequired?: AuthRequiredState | null
+}
+
+/**
+ * The sign-in a session owes, and how far along fixing it is (ADR-070 §2).
+ *
+ * Declared once and shared by the wire, core's `CanonicalSessionState` and the
+ * renderer store, because all three hold the SAME object: the reducer builds it
+ * and every other layer only reads it.
+ *
+ * Three lifetimes, not one (ADR-070 §2):
+ *
+ *  1. **broken** — `session:auth-required` set it and `resolved` is absent/false;
+ *  2. **resolved, retry owed** — `provider:auth-resolved` for this `providerId`
+ *     (and, when both sides name one, this `accountId`) set `resolved: true`
+ *     and kept `retryPrompt`;
+ *  3. **settled** — the field is `null`, which the `status.state === 'running'`
+ *     rule does (a turn that runs is the proof the credential works).
+ */
+export interface AuthRequiredState {
+  /** What the sign-in dialog acts on: `anthropic`, `chatgpt`, `opencode:<v>`, `pi:<v>`. */
+  providerId: string
+  /** Which stored account was refused, when the provider has several. */
+  accountId?: string
+  /** The emitting engine's verbatim words. Rendered as in-place disclosure, never paraphrased. */
+  message?: string
+  /**
+   * The prompt whose turn this killed, captured by the reducer at failure time.
+   * Absent when no turn was running — an idle session told about a dead
+   * credential has nothing to retry.
+   */
+  retryPrompt?: string
+  /** The credential is good again but the retry has not been taken yet (ADR-070 §2 lifetime 2). */
+  resolved?: boolean
 }
 
 export interface FullStateSnapshot {

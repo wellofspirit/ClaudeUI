@@ -20,8 +20,10 @@ import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
+import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
+import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 // Host-local emissions (`voice:state`) go through the funnel like everything else
@@ -183,7 +185,7 @@ export class ClaudeSession extends BaseSession {
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
-    const base = resolveClaudeCapabilities(this.model)
+    const base = resolveClaudeCapabilities(this.model, this.resolvedModelId)
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
     // but the HONEST per-session value also requires the opencode binary to
     // actually be vendored — otherwise there is no possible dispatch target.
@@ -201,6 +203,35 @@ export class ClaudeSession extends BaseSession {
    * model_refusal_fallback arrives with retracted_message_uuids.
    */
   private wireUuidToMessageId = new Map<string, string>()
+  private readonly itemStreams = new ClaudeItemStreamLifecycle({
+    open: (target, message, startedAt) =>
+      this.send('session:item-open', {
+        target,
+        message,
+        ...(startedAt === undefined ? {} : { startedAt })
+      }),
+    delta: (target, chunk) => this.send('session:item-delta', { target, chunk }),
+    seal: (target, message, ownerToolUseId) =>
+      this.send('session:item-seal', {
+        ...(target ? { target } : {}),
+        message,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      }),
+    updateLocal: (message, ownerToolUseId) => {
+      if (!ownerToolUseId) this.upsertMessage(message)
+    },
+    // Same two sends the ordinary (non-item) assistant path makes, so a block the
+    // item lane does not carry is in the transcript before anything can refer to
+    // it. Upsert-by-id on every client, so a later seal folds over it.
+    publish: (message, ownerToolUseId) => {
+      if (ownerToolUseId) {
+        this.send('session:subagent-message', { toolUseId: ownerToolUseId, message })
+        return
+      }
+      this.upsertMessage(message)
+      this.send('session:message', message)
+    }
+  })
   private abortController: AbortController | null = null
   private isProcessing = false
   private wasInterrupted = false
@@ -277,6 +308,11 @@ export class ClaudeSession extends BaseSession {
    *  (and other server-resolved aliases) actually map to. Used to resolve the
    *  context window when `this.model` is an ambiguous alias. */
   private resolvedModelId: string | null = null
+  /** One-shot bootstrap facts (slash commands, skills, MCP servers, the init
+   *  permission-mode reconciliation) are captured from the FIRST system/init only.
+   *  `resolvedModelId` above is deliberately NOT one-shot — cli.js re-emits
+   *  system/init every turn with the model actually in force. */
+  private initCaptured = false
   private resumeSessionId: string | undefined
   /** Fork ("branch off") seeding: when set on creation, the FIRST run resumes
    *  `resumeSessionId` truncated to this line uuid with `--fork-session`, so a
@@ -944,6 +980,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       myAbort.abort()
 
       if (!superseded) {
+        if (!this.disposed) this.itemStreams.sealAll()
         this.messageChannel?.end()
         this.messageChannel = null
         // Reject any in-flight ensureActiveQuery() awaits so callers don't
@@ -1072,18 +1109,39 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   /**
    * Extract session_id, init metadata (slash commands, skills, mcp_servers,
    * permissionMode), and slug from whichever message carries them first.
-   * cli.js always includes session_id on the first system/init, but other
-   * messages may arrive with it too depending on the flow.
+   *
+   * The session_id latch and the system/init capture are INDEPENDENT. They used
+   * to be nested — init metadata was only read from the first message that also
+   * established the session id — and `system/queued_command_consumed` (which
+   * carries a `session_id` and, because the drain path is how every prompt
+   * reaches its turn, always lands BEFORE `system/init`) tripped that latch
+   * first, so the init branch never ran at all.
    */
   private captureSessionBootstrap(msg: SDKMessage, type: string): void {
+    const isInit = type === 'system' && (msg as SystemMessage).subtype === 'init'
+
     if (msg.session_id && !this.sessionId) {
       this.sessionId = msg.session_id
+      this.sendStatus()
+    }
 
-      if (type === 'system' && (msg as SystemMessage).subtype === 'init') {
-        const sys = msg as SystemMessage
-        // Resolved canonical model id (e.g. "default" → "claude-opus-4-8"),
-        // used to size the context window when this.model is an alias.
-        if (sys.model) this.resolvedModelId = sys.model
+    if (isInit) {
+      const sys = msg as SystemMessage
+      // Resolved canonical model id ("default" → "claude-opus-5[1m]"), which is
+      // how contextWindowSize sizes an opaque alias. cli.js re-emits system/init
+      // at the head of EVERY turn carrying the model actually in force (verified
+      // on 2.1.268: --model haiku → "claude-haiku-4-5-20251001", then a set_model
+      // to "default" → "claude-opus-5[1m]" on the next turn), so this is
+      // re-captured every time and a mid-session setModel self-heals.
+      if (sys.model && sys.model !== this.resolvedModelId) {
+        this.resolvedModelId = sys.model
+        // The window just changed — re-emit the derived figures.
+        this.send('session:status-line', this.buildStatusLineFromAccumulators())
+        this.sendMetering()
+      }
+
+      if (!this.initCaptured) {
+        this.initCaptured = true
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
@@ -1115,8 +1173,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           this.send('session:permission-mode', initMode)
         }
       }
-
-      this.sendStatus()
     }
 
     if (msg.slug && !this.slug) {
@@ -1143,6 +1199,27 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       if (errMsg) {
         this.upsertMessage(errMsg)
         this.send('session:message', errMsg)
+        // ADR-068 §4: the block stays in the transcript as DATA; the OWED
+        // SIGN-IN is a separate fact every engine now reports the same way, so
+        // the one row and the one dialog serve Claude too. Only the
+        // `authentication` class — a rate limit is not a sign-in problem.
+        //
+        // ADR-070 §1: the block's own `errorMessage` also rides on the event, so
+        // the row's disclosure reads cli.js's words on Claude exactly as it reads
+        // the vendor's on the other three. The block carries the provider too
+        // (see `transformApiErrorMessage`) — the event's copy is nulled when the
+        // failure settles and the block's is not.
+        const authBlock = errMsg.content.find(
+          (block) => block.type === 'api_error' && block.errorType === 'authentication'
+        )
+        if (authBlock) {
+          this.send('session:auth-required', {
+            providerId: ANTHROPIC_AUTH_PROVIDER_ID,
+            ...(authBlock.type === 'api_error' && authBlock.errorMessage
+              ? { message: authBlock.errorMessage }
+              : {})
+          })
+        }
         return
       }
     }
@@ -1153,12 +1230,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const hadUsage = this.accumulateUsage(msg, isSidechain)
 
     if (chatMsg) {
+      if (!parentToolUseId && typeof msg.uuid === 'string') {
+        this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+      }
+      const snapshot = this.itemStreams.handleSnapshot(chatMsg, parentToolUseId)
+      if (snapshot !== 'none') {
+        if (hadUsage && !parentToolUseId) this.scheduleStatusLineUpdate()
+        return
+      }
       if (parentToolUseId) {
         this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
       } else {
-        if (typeof msg.uuid === 'string') {
-          this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
-        }
         this.upsertMessage(chatMsg)
         this.send('session:message', chatMsg)
         // Only update status line when usage actually changed (final message per API call)
@@ -1170,34 +1252,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleStreamEvent(msg: StreamEventMessage): void {
     const routingId = msg.parent_tool_use_id ?? undefined
     const event = msg.event
-    if (!event || event.type !== 'content_block_delta') return
-
-    const delta = event.delta
-    if (!delta) return
-
-    if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      if (routingId) {
-        this.send('session:subagent-stream', {
-          toolUseId: routingId,
-          type: 'text',
-          text: delta.text
-        })
-      } else {
-        this.send('session:stream', { type: 'text', text: delta.text })
-      }
-      return
-    }
-    if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-      if (routingId) {
-        this.send('session:subagent-stream', {
-          toolUseId: routingId,
-          type: 'thinking',
-          text: delta.thinking
-        })
-      } else {
-        this.send('session:stream', { type: 'thinking', text: delta.thinking })
-      }
-    }
+    if (event) this.itemStreams.handleEvent(event, routingId)
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {
@@ -1231,10 +1286,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       return
     }
     if (msg.subtype === 'queued_command_consumed') {
-      // cli.js has taken this text off its queue and is injecting it into the
-      // turn (docs/protocol-cc/04-system-subtypes.md §4.10). Text correlation is
+      // cli.js has taken this text off its queue (docs/protocol-cc/
+      // 04-system-subtypes.md §4.10). Either it absorbed the item into the
+      // running turn as an attachment, or — when cli.js was between turns —
+      // it dequeued the item and is starting a fresh turn with it as the
+      // prompt; `queue-control` Parts A2 and A3 emit the same message for both,
+      // so this handler does not have to tell them apart. Text correlation is
       // all the wire gives us — ADR-053 pins first-match, duplicates being
-      // interchangeable.
+      // interchangeable — and a prompt that was never queued here (every
+      // ordinary send travels the drain too) is a no-op in `consumeByText`.
       //
       // `msg.prompt` is the queued attachment's prompt VERBATIM, so it is an
       // ARRAY of content blocks whenever the queued message carried images or a
@@ -1251,9 +1311,29 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleModelFallback(msg)
       return
     }
-    // Unknown / init / compact_boundary — init is already consumed in
-    // captureSessionBootstrap; compact_boundary is informational and not
-    // currently surfaced. Fall through silently.
+    if (msg.subtype === 'compact_boundary') {
+      // cli.js compacted the transcript (docs/protocol-cc/04-system-subtypes.md
+      // § 4.8). It was dropped live and only ever appeared on a JSONL reload, so
+      // the conversation silently lost its history mid-session with no marker at
+      // all until the next open. The `compact_metadata` carries no summary text,
+      // so this is the HAIRLINE form of the separator; the expandable amber card
+      // is what the reload path builds from the `isCompactSummary` user line
+      // that follows.
+      //
+      // Idempotent by id: the reload path keys the same boundary off `uuid`, so
+      // a session that compacts and is then reopened shows ONE separator.
+      const boundary: ChatMessage = {
+        id: typeof msg.uuid === 'string' ? msg.uuid : `compact-${uuid()}`,
+        role: 'system',
+        content: [{ type: 'compact_separator' }],
+        timestamp: Date.now()
+      }
+      this.upsertMessage(boundary)
+      this.send('session:message', boundary)
+      return
+    }
+    // Unknown / init — init is already consumed in captureSessionBootstrap.
+    // Fall through silently.
   }
 
   /**
@@ -1292,6 +1372,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       if (messageIds.length > 0) {
         this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
       }
+      this.itemStreams.retract(messageIds)
       this.send('session:messages-retracted', { messageIds })
     }
   }
@@ -1345,6 +1426,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const toolUseId = this.taskIdMap.get(taskId) || null
     if (!toolUseId) return
 
+    this.itemStreams.sealOwner(toolUseId, true)
     this.markBackgroundDone(toolUseId)
     this.taskIdMap.delete(taskId)
 
@@ -1373,6 +1455,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // already evicted by an earlier stopTask/task_updated race).
     const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
     if (matchedToolUseId) {
+      this.itemStreams.sealOwner(matchedToolUseId, true)
       this.markBackgroundDone(matchedToolUseId)
       this.taskIdMap.delete(taskId)
     }
@@ -1428,6 +1511,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
+    this.itemStreams.sealOwner(undefined)
     // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
     // REPLACE the live overlay, never add (see the field doc comment on
     // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
@@ -1446,7 +1530,22 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     } else {
       // No per-model breakdown on this result — attribute the whole turn's
       // cost to the currently selected model rather than dropping it.
-      this.liveModelCosts = new Map([[this.model, cost]])
+      //
+      // Keyed on the id init resolved, never the alias: `default` is not a
+      // model, so it prices as the $3/$15 unknown-model guess if this map ever
+      // reaches the pricing table, and it renders as "default" in the cost
+      // breakdown either way. The respawn-boundary fold above copies these keys
+      // straight into modelCostBase, so an alias here outlives the process that
+      // produced it.
+      //
+      // Deliberately broader than the two window sites (the contextWindowSize
+      // getter, buildMeteringSnapshot), which prefer the resolved id only when
+      // `this.model === 'default'`. They can afford that narrow test because
+      // resolveContextWindow reads every OTHER alias correctly on its own
+      // ('haiku' → 200K, 'sonnet' → 1M) — `default` is the single one it cannot
+      // see through. A cost KEY has no such luck: every alias is a wrong key.
+      // Don't "unify" the three sites; they answer different questions.
+      this.liveModelCosts = new Map([[this.resolvedModelId ?? this.model, cost]])
     }
 
     this.isProcessing = false
@@ -1536,8 +1635,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * post-send ack consumes each one. Claude has no such hold:
    * {@link onPromptQueued} pushes into cli.js's native queue the instant an item
    * lands, and a push that races the turn's `result` is taken by cli.js as the
-   * NEXT turn's fresh prompt — so `queued_command_consumed` never arrives and
-   * the item would sit 'queued' on every client's card while its text runs.
+   * NEXT turn's fresh prompt.
+   *
+   * A SAFETY NET, not the mechanism. `queue-control` Part A3 (2026-09-13) made
+   * the between-turns drain emit `queued_command_consumed` too, so the drain
+   * normally consumes the item — with the right text, at the right moment —
+   * before this ever sees it. What is left for this flush is the ordering
+   * residue: a push whose drain notification has not reached us by the time
+   * `result` does, and any item cli.js loses track of.
    *
    * Marking everything still pending 'consumed' here is truthful in BOTH states
    * a `result` can find:
@@ -1546,7 +1651,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *     our already-consumed item (`consumeByText` matches `state === 'queued'`
    *     only, and `emit()` has already pruned it);
    *  b) the push landed after `result` and is already running as a fresh prompt,
-   *     with no consumed notification ever coming.
+   *     its A3 notification still in flight behind this `result`.
    * Either way the text WILL run, which is exactly what 'consumed' asserts. One
    * broadcast covers the whole list, and renderer synthesis stays exactly-once
    * because the chat message id is derived from the item id (`steer-${itemId}`).
@@ -1610,9 +1715,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.accOutputTokens = metrics.totalOutputTokens
       this.accCachedTokens = metrics.cachedTokens
       this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
-      this.lastContextLength = metrics.contextWindowSize
+      this.lastContextLength = metrics.contextWindow.used
       if (seedCost) {
-        this.costBaseUsd = metrics.totalCostUsd
+        // The transcript recompute always yields a figure (StatusLineData's
+        // cost is nullable for engines that cannot price a turn; this one
+        // prices from the table, so null never reaches here).
+        this.costBaseUsd = metrics.totalCostUsd ?? 0
         this.modelCostBase = new Map((metrics.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
       }
       this.send('session:status-line', this.buildStatusLineFromAccumulators())
@@ -2113,7 +2221,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       totalOutputTokens: this.accOutputTokens,
       cachedTokens: this.accCachedTokens,
       totalTokens: this.accInputTokens + this.accOutputTokens + this.accCachedTokens,
-      contextWindowSize: this.lastContextLength,
+      contextWindow: { used: this.lastContextLength, size: ctxWindow },
       usedPercentage: usedPct,
       remainingPercentage: usedPct !== null ? 100 - usedPct : null,
       turnStartedAtMs: this.turnStartedAtMs,
@@ -2279,6 +2387,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.pendingApprovals.clear()
 
     this.wasInterrupted = true
+    if (!this.disposed) this.itemStreams.sealAll()
     this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
@@ -2355,6 +2464,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       try {
         this.wasInterrupted = true
         await this.activeQuery.interrupt()
+        this.itemStreams.sealOwner(toolUseId, true)
         return { success: true }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -2368,6 +2478,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
     try {
       await this.activeQuery.stopTask(taskId)
+      this.itemStreams.sealOwner(toolUseId, true)
 
       // The SDK's TaskStop calls the notification sender (HDY → VB), but VB
       // enqueues to the CLI's output queue which is only consumed during model
@@ -2429,11 +2540,21 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     if (!text) text = (msg.error as string) || 'API error'
 
+    const errorType = classifyApiError(text, msg.error)
     return {
       id: (betaMessage?.id as string) || (msg.uuid as string) || `error-${uuid()}`,
       role: 'system',
       content: [
-        { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
+        {
+          type: 'api_error',
+          errorType,
+          errorMessage: text,
+          // ADR-070 §4: the refused credential's provider rides on the BLOCK,
+          // so the row still names Claude once the failure has settled — which
+          // is the state every reloaded transcript restores to. Only for the
+          // auth class; a rate limit is nobody's credential.
+          ...(errorType === 'authentication' ? { providerId: ANTHROPIC_AUTH_PROVIDER_ID } : {})
+        }
       ],
       timestamp: Date.now()
     }
@@ -2754,6 +2875,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *  (M-CL3). Sets the flag BEFORE cancel() so cancel()'s own status emit is
    *  suppressed too. */
   dispose(): void {
+    this.itemStreams.sealAll()
     this.disposed = true
     this.cancel()
   }

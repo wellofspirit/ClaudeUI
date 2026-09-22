@@ -30,9 +30,20 @@ import { act } from 'react'
 import type { RemoteAuthMethod } from '../../shared/remote-protocol'
 
 vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app</div> }))
+// The web entry lazy-imports the render-loss detector beside the replica, and
+// the detector imports the REAL session store — the whole renderer graph. This
+// test never waits on that import, so on a slow runner it was still resolving
+// when the environment tore down: every test green, and vitest failing the run
+// on an EnvironmentTeardownError. Nothing here is about the audit; stub it.
+vi.mock('@renderer/utils/projection-audit', () => ({ startProjectionAudit: () => {} }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {}
+  hydrateReplica: () => {},
+  // The render-loss detector starts beside the replica on this path and observes
+  // it through the post-apply seam, so the mock has to offer one.
+  onReplicaApplied: () => () => {},
+  getReplicaState: () => ({ sessions: {} }),
+  resolveRekeyed: (id: string) => id
 }))
 
 /** The scripted socket the client transport talks to. */

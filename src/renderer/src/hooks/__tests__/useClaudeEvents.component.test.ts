@@ -126,33 +126,6 @@ describe('useClaudeEvents component tests', () => {
     })
   })
 
-  describe('streaming', () => {
-    it('accumulates streaming text from stream events', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      app.emit('session:stream', routingId, { type: 'text', text: 'Hello ' })
-      app.emit('session:stream', routingId, { type: 'text', text: 'world' })
-
-      expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('Hello world')
-    })
-
-    it('accumulates thinking text separately', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      app.emit('session:stream', routingId, {
-        type: 'thinking',
-        text: 'Let me think...'
-      })
-
-      expect(useSessionStore.getState().sessions[routingId].streamingThinking).toBe(
-        'Let me think...'
-      )
-      expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('')
-    })
-  })
-
   describe('session rekey', () => {
     it('rekeys session when status event has different sessionId', () => {
       const tempId = 'temp-route'
@@ -423,38 +396,6 @@ describe('useClaudeEvents component tests', () => {
       app.emit('session:permission-mode', routingId, 'auto')
 
       expect(useSessionStore.getState().sessions[routingId].permissionMode).toBe('auto')
-    })
-  })
-
-  describe('subagent streaming', () => {
-    it('accumulates subagent streaming text', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      app.emit('session:subagent-stream', routingId, {
-        toolUseId: 'agent-1',
-        type: 'text',
-        text: 'working on it...'
-      })
-
-      expect(useSessionStore.getState().sessions[routingId].subagentStreamingText['agent-1']).toBe(
-        'working on it...'
-      )
-    })
-
-    it('accumulates subagent thinking text separately', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      app.emit('session:subagent-stream', routingId, {
-        toolUseId: 'agent-1',
-        type: 'thinking',
-        text: 'analyzing...'
-      })
-
-      expect(
-        useSessionStore.getState().sessions[routingId].subagentStreamingThinking['agent-1']
-      ).toBe('analyzing...')
     })
   })
 

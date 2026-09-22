@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
+import { itemStreamKey } from '../../core/shared/sync/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeAssistantMessage,
@@ -51,8 +53,11 @@ describe('E2E: multi-turn conversation', () => {
       makeSessionStatus({ state: 'running', sessionId: routingId })
     )
     app.emit('session:user-message', routingId, { prompt: 'What is 2+2?', queued: false })
-    app.emit('session:stream', routingId, { type: 'text', text: 'The answer is 4.' })
-    app.emit('session:message', routingId, makeAssistantMessage('The answer is 4.'))
+    const turn1 = emitItemDelta(app, routingId, 'The answer is 4.', {
+      messageId: 'turn-1',
+      open: true
+    })
+    sealItem(app, routingId, turn1, 'The answer is 4.')
     app.emit('session:result', routingId)
     app.emit(
       'session:status',
@@ -67,8 +72,11 @@ describe('E2E: multi-turn conversation', () => {
       makeSessionStatus({ state: 'running', sessionId: routingId })
     )
     app.emit('session:user-message', routingId, { prompt: 'And 3+3?', queued: false })
-    app.emit('session:stream', routingId, { type: 'text', text: 'That is 6.' })
-    app.emit('session:message', routingId, makeAssistantMessage('That is 6.'))
+    const turn2 = emitItemDelta(app, routingId, 'That is 6.', {
+      messageId: 'turn-2',
+      open: true
+    })
+    sealItem(app, routingId, turn2, 'That is 6.')
     app.emit('session:result', routingId)
     app.emit(
       'session:status',
@@ -137,18 +145,27 @@ describe('E2E: multi-turn conversation', () => {
     expect(useSessionStore.getState().sessions[routingId].status.totalCostUsd).toBe(0.04)
   })
 
-  it('streaming text clears between turns (addMessage resets streamingText)', () => {
+  it('sealing one item clears it before the next turn opens', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:stream', routingId, { type: 'text', text: 'turn-1 streaming' })
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('turn-1 streaming')
+    const turn1 = emitItemDelta(app, routingId, 'turn-1 streaming', {
+      messageId: 'turn-1',
+      open: true
+    })
+    expect(
+      useSessionStore.getState().sessions[routingId].itemStreams[itemStreamKey(turn1)].value
+    ).toBe('turn-1 streaming')
 
-    app.emit('session:message', routingId, makeAssistantMessage('turn-1 streaming'))
-    // streamingText resets when the final message arrives
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('')
+    sealItem(app, routingId, turn1, 'turn-1 streaming')
+    expect(useSessionStore.getState().sessions[routingId].itemStreams).toEqual({})
 
-    app.emit('session:stream', routingId, { type: 'text', text: 'turn-2 streaming' })
-    expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('turn-2 streaming')
+    const turn2 = emitItemDelta(app, routingId, 'turn-2 streaming', {
+      messageId: 'turn-2',
+      open: true
+    })
+    expect(
+      useSessionStore.getState().sessions[routingId].itemStreams[itemStreamKey(turn2)].value
+    ).toBe('turn-2 streaming')
   })
 })

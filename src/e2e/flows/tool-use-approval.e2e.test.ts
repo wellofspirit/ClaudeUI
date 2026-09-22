@@ -7,10 +7,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeChatMessage,
-  makeAssistantMessage,
   makeToolUseBlock,
   makeSessionStatus,
   makePendingApproval,
@@ -96,8 +96,8 @@ describe('E2E: tool use approval flow', () => {
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
 
     // Continuation text
-    app.emit('session:stream', routingId, { type: 'text', text: 'Found two files.' })
-    app.emit('session:message', routingId, makeAssistantMessage('Found two files.'))
+    const continuation = emitItemDelta(app, routingId, 'Found two files.', { open: true })
+    sealItem(app, routingId, continuation, 'Found two files.')
 
     app.emit('session:result', routingId)
     app.emit(

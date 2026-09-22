@@ -18,6 +18,7 @@ import {
   canonicalizeModelValue,
   resolveContextWindow,
   resolveClaudeCapabilities,
+  claudeModelCapabilities,
   resolveOpencodeCapabilitiesFromModel,
   maxOutputTokens,
   CONTEXT_WINDOW_1M,
@@ -516,6 +517,72 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('')).toBe(DEFAULT)
     expect(resolveContextWindow(undefined)).toBe(DEFAULT)
     expect(resolveContextWindow(null)).toBe(DEFAULT)
+  })
+
+  // The `default` alias names no model family, so it cannot resolve here by
+  // design — which is exactly why claudeModelCapabilities must be handed
+  // `resolvedModel` (next block).
+  it('leaves the opaque `default` alias at 200K — only cli.js knows its target', () => {
+    expect(resolveContextWindow('default')).toBe(DEFAULT)
+  })
+})
+
+describe('claudeModelCapabilities — sizing from resolvedModel', () => {
+  const ONE_M = 1_000_000
+  const DEFAULT = 200_000
+
+  it('sizes the opaque `default` alias from its resolvedModel', () => {
+    expect(
+      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })
+        .contextWindow
+    ).toBe(ONE_M)
+  })
+
+  it('falls back to `value` when no resolvedModel is present (non-Claude catalogs)', () => {
+    expect(claudeModelCapabilities({ value: 'default' }).contextWindow).toBe(DEFAULT)
+  })
+
+  it('a resolvedModel that is genuinely 200K stays 200K', () => {
+    expect(
+      claudeModelCapabilities({ value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' })
+        .contextWindow
+    ).toBe(DEFAULT)
+  })
+
+  // maxOutput is routed through resolvedModel too. It agrees with the `value`
+  // derivation on all five real 2.1.268 catalog rows; haiku is the one row
+  // where the figure is not the 128K unknown-model default, so it is the row
+  // that would expose a divergence.
+  it('resolveClaudeCapabilities sizes a `default` session from the init-reported id', () => {
+    expect(resolveClaudeCapabilities('default', 'claude-opus-5[1m]').contextWindow).toBe(ONE_M)
+  })
+
+  it('resolveClaudeCapabilities is unchanged without the second argument', () => {
+    expect(resolveClaudeCapabilities('default').contextWindow).toBe(DEFAULT)
+  })
+
+  /**
+   * The resolved id must reach claudeModelCapabilities RAW. Canonicalizing it
+   * would strip a `[1m]` suffix that resolveContextWindow depends on —
+   * `canonicalizeModelValue('claude-sonnet-4-6[1m]')` is 'claude-sonnet-4-6',
+   * which is a 200K model. (The 2.1.268 catalog happens not to expose this,
+   * because its 1M rows are implicit-1M base models either way.)
+   */
+  it('does NOT canonicalize the resolved id — the [1m] suffix is load-bearing', () => {
+    expect(canonicalizeModelValue('claude-sonnet-4-6[1m]')).toBe('claude-sonnet-4-6')
+    expect(resolveContextWindow('claude-sonnet-4-6')).toBe(DEFAULT)
+    // Passed through raw, so the suffix survives and the window stays 1M.
+    expect(resolveClaudeCapabilities('default', 'claude-sonnet-4-6[1m]').contextWindow).toBe(ONE_M)
+  })
+
+  it('routes maxOutput through resolvedModel without changing any real catalog row', () => {
+    expect(
+      claudeModelCapabilities({ value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' })
+        .maxOutput
+    ).toBe(maxOutputTokens('haiku'))
+    expect(
+      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' }).maxOutput
+    ).toBe(128_000)
   })
 })
 

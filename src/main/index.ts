@@ -9,6 +9,7 @@ import {
   crashReporter,
   dialog
 } from 'electron'
+import { codexHostRegistry } from '../core/codex/CodexHost'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -57,7 +58,6 @@ import { LogViewer } from './services/log-viewer'
 import { logger } from '../core/services/logger'
 import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
-import { loadPersistedPrices } from '../core/services/opencode-pricing'
 import { QuitCoordinator } from './quit-coordinator'
 import {
   isAllowedExternalUrl,
@@ -68,8 +68,9 @@ import {
   type AppOrigin
 } from '../core/shell-security'
 import { readImagePreview } from '../core/sent-file-security'
-import { setHostPaths } from '../core/host'
+import { setHostAppVersion, setHostPaths } from '../core/host'
 import { setSqliteDriver } from '../core/services/sqlite-driver'
+import { verifierHooksEnabled, VERIFIER_HOOKS_SWITCH } from '../shared/verifier-hooks'
 import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
 import icon from '../../resources/icon.png?asset'
 
@@ -137,6 +138,18 @@ const remoteAccessDisabled =
 // would put the whole app into browser headless mode and break it.
 const headlessWindow =
   process.env.CLAUDEUI_HEADLESS === '1' || process.argv.includes('--claudeui-headless')
+
+// Verifier hooks (real-app harness): publish `window.__claudeuiVerifier` in the
+// renderer so `scripts/app-shot.mjs --eval/--state` can read the store and the
+// replica's canonical copy. Off unless asked for — rationale and the two switch
+// forms live in `src/shared/verifier-hooks.ts`.
+//
+// Main resolves it here and FORWARDS the switch to the preload through
+// `additionalArguments`: the preload runs in the renderer process, whose argv is
+// Chromium's, so the CLI form would otherwise reach main and stop there. (The env
+// var is inherited by the renderer process on its own; the forward is what makes
+// the two forms equivalent.)
+const verifierHooks = verifierHooksEnabled()
 
 // WINDOWLESS mode (SyncCore phase 4d): boot core and serve, with no BrowserWindow
 // at all. This is the phase-4 exit criterion — canonical state, the remote HTTP+WS
@@ -302,7 +315,10 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
-      webviewTag: true
+      webviewTag: true,
+      // Carries the verifier opt-in into the renderer process, where the preload
+      // reads it off its own argv. Empty (not omitted) in every normal launch.
+      additionalArguments: verifierHooks ? [VERIFIER_HOOKS_SWITCH] : []
     }
   })
   currentWindow = mainWindow
@@ -623,6 +639,10 @@ app.whenReady().then(() => {
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
   const versionInfo = { appVersion, cliVersion }
+  // Publish it to core as well (ADR-072 §5): the usage hub sends the app version
+  // with each push so the hub's machine list can say which build a device is on,
+  // and `app.getVersion()` is reachable from main alone.
+  setHostAppVersion(appVersion)
   ipcMain.handle('app:version-info', () => versionInfo)
   // Mirror to the remote dispatcher so the web client's Settings dialog can
   // read the server's build versions.
@@ -678,11 +698,6 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // Phase 9b: register any previously-fetched opencode pricing entries so
-  // equivalentCostUsd resolves opencode model costs from the very first recalc.
-  // No server spin-up — reads the persisted ~/.claude/ui/opencode-prices.json if present.
-  loadPersistedPrices()
-
   // ── Core, BEFORE any window decision (SyncCore phase 4d) ───────────
   // Sessions, canonical state, the remote HTTP+WS server, watchers, seeds. None
   // of it needs a window; `createWindow()` below only attaches to it.
@@ -708,7 +723,21 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
+      // Every Codex app-server (ADR-069 §6): stdin EOF first, so the binary
+      // closes its sqlite state files itself, and the process tree is killed
+      // only if it outlives the grace. Bounded — nothing here waits on a child,
+      // and a parent that exits first closes the pipe, which is the same EOF.
+      //
+      // This is the WHOLE Codex teardown since H2: a session is a thread on one
+      // of these hosts, so closing them ends every Codex turn and every Codex
+      // child thread this app started. Each attached session is told (ADR-069
+      // §5) and settles its own cards on the way out.
+      codexHostRegistry.dispose()
       void core?.remoteServer.stop()
+      // The usage hub's timers (ADR-072 §7). Nothing waits on the client: a
+      // push in flight is idempotent on the hub, so the worst a killed one
+      // costs is a batch re-sent as duplicates on the next launch.
+      core?.usageHubClient.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe

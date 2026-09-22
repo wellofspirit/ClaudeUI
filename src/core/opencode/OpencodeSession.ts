@@ -6,6 +6,7 @@ import { OpencodeClient } from './OpencodeClient'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
+import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -32,23 +33,29 @@ import {
   parseModelString
 } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
+import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
+import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import {
   mapEvent,
+  buildChatMessage,
   extractToolResult,
   convertStoredMessage,
-  computeStoredDurationMs
+  storedCompactionMessages
 } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import type { OpencodeStreamItem } from './event-mapper'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { loadClaudePermissions } from '../services/claude-settings'
 import {
   compileClaudeRulesToOpencode,
-  suggestionDestinationToScope,
-  suggestionRuleToClaudeString,
+  persistAllowSuggestions,
   withoutAllowRules
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
@@ -59,10 +66,15 @@ import {
   classify,
   formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
+  type ClassifyResult,
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
-import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
+import {
+  AutoModeDenialTracker,
+  autoModeReviewBlock,
+  formatAutoModeDenyReason
+} from '../automode/denial-tracker'
 import {
   analyzeRedirects,
   captureGitRemotes,
@@ -80,6 +92,7 @@ import {
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
+import { opencodeAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
@@ -183,27 +196,50 @@ export class OpencodeSession extends BaseSession {
    * Cost tracking — base + live overlay (Slice B, durable across reloads,
    * mirrors ClaudeSession's costBaseUsd/liveTotalCostUsd split).
    *
-   * - costBaseUsd / modelCostBase: cost from stored history, seeded ONCE at
+   * - costBase / modelCostBase: cost from stored history, seeded ONCE at
    *   replayStoredHistory (a single OpencodeSession object only ever replays
    *   once — replayStoredHistory is gated on `!this.openSessionId`/`!this.
    *   openSessionId` branches that can't re-fire after openSessionId is set —
    *   so no respawn-fold is needed here, unlike Claude's spawn-per-turn model).
-   * - liveTotalCostUsd / liveModelCosts: cost accumulated THIS live session,
-   *   since resume/creation. liveTotalCostUsd is synced from
-   *   sumAccumulatorCosts(accumulators) (event-mapper.ts) — a full recompute
-   *   over live accumulators only, which is why the historical base MUST live
-   *   in a separate field rather than seeding the same one sumAccumulatorCosts
-   *   writes to (a live cost_update would otherwise overwrite/discard the
-   *   seeded historical total).
+   * - the live half is recomputed from `accumulators` on demand (costTally),
+   *   which is why the historical base MUST live in a separate field: a live
+   *   recompute knows nothing about the messages that preceded this process.
    *
-   * this.totalCostUsd (below) is a getter: costBaseUsd + liveTotalCostUsd.
+   * ADR-071 §2: the headline is not opencode's own `info.cost` — under a
+   * subscription opencode charges zero and the session is worth the list price
+   * of its tokens. What is stored is each message's cost INPUTS
+   * (opencodeCostInputs); the billing type is applied when a figure is read,
+   * because the auth probe resolves asynchronously and a session opened before
+   * it lands must not be stuck with what `unknown` made of its history. The
+   * engine's raw figures survive alongside, in rawCostBaseUsd /
+   * liveTotalCostUsd, for the one consumer that asks for what the ENGINE
+   * reported (sendMetering).
+   *
+   * this.totalCostUsd (below) is a getter over base + live.
    */
-  private costBaseUsd = 0
+  private costBase: OpencodeCostInputs[] = []
   private modelCostBase = new Map<string, number>()
+  /** Engine-reported cost from stored history — MeteringSnapshot's input. */
+  private rawCostBaseUsd = 0
+  /** Engine-reported cost of this live process, synced from the mapper's
+   *  sumAccumulatorCosts ref. Not the headline (see the block comment). */
   private liveTotalCostUsd = 0
-  /** modelId → summed cost, own (non-child) messages only, populated in
+  /** modelId → summed display cost, own (non-child) messages only, populated in
    *  recordTurnUsage at the same point each message's cost is finalized. */
   private liveModelCosts = new Map<string, number>()
+  /** messageId → the cost inputs a message settled on at turn end. Frozen so a
+   *  mid-session model switch cannot re-price a finished message under a model
+   *  that never produced it (the per-model breakdown attributes it to the model
+   *  that did). The billing type is NOT frozen with them. */
+  private settledCostInputs = new Map<string, OpencodeCostInputs>()
+  /**
+   * Token totals from stored history, seeded on resume beside the cost base.
+   *
+   * The status line reports history + live, the way cost does; `sendMetering`
+   * deliberately does not add it, because a MeteringSnapshot describes what
+   * THIS process metered and the ledger rows behind it are per-turn.
+   */
+  private tokenBase: OpencodeHistoryTokens = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
   private startTimeMs = 0
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
    *  Base is reconstructed from stored history on resume (replayStoredHistory),
@@ -226,6 +262,10 @@ export class OpencodeSession extends BaseSession {
   private pendingQuestions = new Map<string, AskUserQuestion[]>()
   // Per-message part accumulator keyed by messageId
   private accumulators = new Map<string, MessageAccumulator>()
+  private activeStreamItems = new Map<
+    string,
+    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
+  >()
   // Track last emitted tool completion per partId to avoid double-emitting
   private emittedToolResults = new Set<string>()
   // Live bash output streaming (own-session only — parity with Claude's
@@ -374,9 +414,54 @@ export class OpencodeSession extends BaseSession {
     return this.isProcessing
   }
 
-  /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */
-  private get totalCostUsd(): number {
-    return this.costBaseUsd + this.liveTotalCostUsd
+  /**
+   * The session's costs: history base + this process's own messages, each one
+   * resolved by the cost rule (see the field doc comment for the split).
+   *
+   * A message the pricing table cannot price is counted as unknown, never as
+   * zero (ADR-030) — `totalCosts` keeps the known part and the unknown count
+   * apart so the status line can report both.
+   */
+  private costTally(): TotalCosts {
+    return totalCosts([...this.costBase, ...this.liveCostInputs()].map(resolveOpencodeCosts))
+  }
+
+  /**
+   * Cost inputs for this process's own (non-child) assistant messages.
+   *
+   * Own messages carry no per-message model of their own, so they are priced
+   * under the session's CURRENT model — the same simplification (and the same
+   * reason) as recordTurnUsage's attribution. Messages that already settled at
+   * a turn end keep the inputs they settled on.
+   */
+  private liveCostInputs(): OpencodeCostInputs[] {
+    const parsed = parseModelString(this._model)
+    const out: OpencodeCostInputs[] = []
+    for (const [messageId, acc] of this.accumulators) {
+      if (acc.isChild) continue
+      if (acc.role === 'user' || acc.role === 'system') continue
+      // Nothing metered yet — not an unpriced message, an empty one. Same
+      // condition recordTurnUsage skips on, deliberately: a message that has
+      // only just been announced must not flash through the headline as an
+      // unpriced one on its way to being metered.
+      if (!acc.cost && !acc.tokens) continue
+      const settled = this.settledCostInputs.get(messageId)
+      out.push(
+        settled ??
+          opencodeCostInputs(parsed.providerID, parsed.modelID, acc.tokens, acc.cost ?? null)
+      )
+    }
+    return out
+  }
+
+  /** What opencode itself reported spending, history + live. */
+  private get engineReportedCostUsd(): number {
+    return this.rawCostBaseUsd + this.liveTotalCostUsd
+  }
+
+  /** The headline figure: the known total, null when nothing could be priced. */
+  private get totalCostUsd(): number | null {
+    return this.costTally().displayCostUsd
   }
 
   /** modelCostBase merged with liveModelCosts, summed per model id. */
@@ -701,35 +786,26 @@ export class OpencodeSession extends BaseSession {
         `Replaying ${storedMessages.length} stored messages for ${sessionId}`
       )
 
-      // Reconstruct the active-duration baseline from history BEFORE any new
-      // turn runs (run() sets startTimeMs / accumulates further turns after
-      // this call returns) — see computeStoredDurationMs for the semantic.
-      this.accTotalDurationMs = computeStoredDurationMs(storedMessages)
-
-      // Slice B — cost durability across reloads: seed costBaseUsd/modelCostBase
-      // from stored history BEFORE ensureSSEConsumer() starts (run()/eagerConnect()
-      // both call replayStoredHistory before starting the SSE consumer), so the
-      // live overlay never has to catch up from zero. listMessages(sessionId)
-      // only returns THIS session's own messages — child (subagent) messages
-      // live under a distinct session id and are never included here, so no
-      // explicit child filtering is needed (mirrors sumAccumulatorCosts/
-      // recordTurnUsage excluding children from the live overlay).
-      let seededCostBase = 0
-      const seededModelCostBase = new Map<string, number>()
-      for (const stored of storedMessages) {
-        const info = stored.info
-        if (!info || info.role !== 'assistant') continue
-        const cost = typeof info.cost === 'number' ? info.cost : 0
-        seededCostBase += cost
-        const modelId = info.modelID
-        if (modelId) {
-          seededModelCostBase.set(modelId, (seededModelCostBase.get(modelId) ?? 0) + cost)
-        }
-      }
-      this.costBaseUsd = seededCostBase
-      this.modelCostBase = seededModelCostBase
+      // Slice B — cost durability across reloads: seed the cost base, the
+      // per-model breakdown, the token base, the context meter and the
+      // active-duration baseline from stored history BEFORE ensureSSEConsumer()
+      // starts (run()/eagerConnect() both call replayStoredHistory before
+      // starting the SSE consumer) and before any new turn runs, so neither
+      // overlay has to catch up from zero.
+      //
+      // S1d: the reconstruction itself lives in history-status-line.ts, which
+      // is also what a COLD sidebar open builds its status line from — one
+      // loop, so a reopened session and the same session after its first new
+      // turn cannot report different histories.
+      const seed = opencodeHistorySeed(storedMessages, parseModelString(this._model))
+      this.costBase = seed.costInputs
+      this.rawCostBaseUsd = seed.engineReportedCostUsd
+      this.modelCostBase = seed.modelCosts
+      this.tokenBase = seed.tokens
+      this.lastContextLength = seed.lastContextLength
+      this.accTotalDurationMs = seed.totalDurationMs
       // Slice C — cross-engine dispatched cost durability: seed from
-      // dispatched_usage, keyed by this.routingId (the STABLE id a later
+      // the usage ledger, keyed by this.routingId (the STABLE id a later
       // reopen constructs this session object with — see seedDispatchedCosts'
       // doc comment on BaseSession).
       this.seedDispatchedCosts()
@@ -740,18 +816,17 @@ export class OpencodeSession extends BaseSession {
       this.sendStatusLine()
 
       for (const stored of storedMessages) {
+        // Compaction parts ride an ordinary message but render as their own
+        // system row (see storedCompactionMessages); replayed ahead of it.
+        for (const separator of storedCompactionMessages(stored)) {
+          this.rememberOpencodeMessage(separator)
+          this.send('session:message', separator)
+        }
         const msg = convertStoredMessage(stored)
         if (!msg) continue
 
-        // Add to local history (for getMessages() and future turns)
-        const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
-        if (idx >= 0) {
-          this.messageHistory[idx] = msg
-        } else {
-          this.messageHistory.push(msg)
-        }
-
-        // Emit to renderer
+        // Add to local history (for getMessages() and future turns), then emit.
+        this.rememberOpencodeMessage(msg)
         this.send('session:message', msg)
 
         // Emit tool_result events for completed tool parts so the renderer
@@ -827,6 +902,7 @@ export class OpencodeSession extends BaseSession {
   private markDisconnected(reason: string): void {
     if (this.disconnected && !this.conn) return
     this.disconnected = true
+    this.sealStreamItems()
     if (this.isProcessing) {
       // A turn was in flight — unwedge it and tell the user why it stopped.
       this.isProcessing = false
@@ -1020,12 +1096,13 @@ export class OpencodeSession extends BaseSession {
       if (this.sseAbort === abort) this.sseAbort = null
       return
     }
-    // Starts at liveTotalCostUsd (0 for a fresh/just-resumed session) — NOT
-    // this.totalCostUsd (costBaseUsd + liveTotalCostUsd) — because
+    // The ENGINE-reported live total (what opencode says it charged), not the
+    // headline — the headline is the cost rule's answer and is recomputed from
+    // the accumulators on demand (costTally). Starts at liveTotalCostUsd (0 for
+    // a fresh/just-resumed session) and never at the history base, because
     // sumAccumulatorCosts (event-mapper.ts) always REPLACES this ref with a
-    // full recompute over the (base-less) live accumulators map. Seeding it
-    // with the base here would just get discarded on the first cost_update;
-    // the base is combined with the live value only at the totalCostUsd getter.
+    // full recompute over the (base-less) live accumulators map; a base seeded
+    // here would just get discarded on the first cost_update.
     const totalCostRef = { value: this.liveTotalCostUsd }
 
     try {
@@ -1076,22 +1153,40 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /**
+   * Upsert one row into `messageHistory` by id — the ONE copy of that rule for
+   * this class (mirrors `PiSession.rememberPiMessage`). It had grown five
+   * identical hand-written copies, which is four chances for the next one to
+   * push a duplicate instead.
+   */
+  private rememberOpencodeMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
+  }
+
+  /**
+   * Put one row THIS class authored (not the mapper) into history and on the
+   * wire — the same upsert-by-id the mapper's `message` case does, minus the
+   * tool-part accumulator bookkeeping, which only applies to a message opencode
+   * itself produced.
+   */
+  private rememberAndSend(message: ChatMessage): void {
+    this.rememberOpencodeMessage(message)
+    this.send('session:message', message)
+  }
+
   private dispatchMapperOutput(output: MapperOutput): void {
     switch (output.kind) {
       case 'stream':
-        this.send('session:stream', { type: output.streamType, text: output.delta })
+        this.appendStreamItem(output.item, output.delta)
         break
 
       case 'message': {
         const msg = output.message
-        // Upsert into local history
-        const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
-        if (idx >= 0) {
-          this.messageHistory[idx] = msg
-        } else {
-          this.messageHistory.push(msg)
-        }
-        this.send('session:message', msg)
+        this.rememberOpencodeMessage(msg)
+        if (output.item) this.updateStreamItem(output.item, msg)
+        else this.send('session:message', msg)
 
         // Check for newly completed tool parts in the accumulator
         const acc = this.accumulators.get(msg.id)
@@ -1184,6 +1279,7 @@ export class OpencodeSession extends BaseSession {
       }
 
       case 'result':
+        this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
         // Turn just completed — its wall-clock cost moves from the live
         // "in flight" delta (turnStartedAtMs) into the completed-turns total.
@@ -1226,17 +1322,31 @@ export class OpencodeSession extends BaseSession {
         this.sendStatusLine()
         break
 
-      case 'auth-required':
+      case 'auth-required': {
         this.isProcessing = false
-        this.send('session:vendor-auth-required', {
-          vendorId: output.vendorId,
-          message: output.message
-        })
+        // ADR-068 §4: one event for every engine, naming the PROVIDER the
+        // sign-in dialog can act on rather than opencode's own vendor id.
+        //
+        // ADR-070 §1: opencode's verbatim message rides ON the event and the
+        // companion `session:error` is GONE — it was a second, separately
+        // dismissable card for the same fact. The words are not lost: the row
+        // discloses them in place, and the neutral transcript block below gives
+        // them a permanent home the floating card never had.
+        //
+        // ORDER: before `sendStatus()` below. The reducer captures the retry only
+        // while the canonical status still reads `running`.
+        const providerId = opencodeAuthRequiredProviderId(output.vendorId)
+        this.send('session:auth-required', { providerId, message: output.message })
+        // The SAME providerId on the block, so the row still names the provider
+        // once the live `authRequired` has settled (ADR-070 §4).
+        this.rememberAndSend(authErrorTranscriptMessage(uuid(), output.message, providerId))
         this.sendStatus()
         this.resetInactivityTimer()
         break
+      }
 
       case 'error':
+        this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
         this.send('session:error', output.message)
         this.sendStatus()
@@ -1244,16 +1354,13 @@ export class OpencodeSession extends BaseSession {
         break
 
       case 'subagent-stream':
-        this.send('session:subagent-stream', {
-          toolUseId: output.toolUseId,
-          type: output.streamType,
-          text: output.delta
-        })
+        this.appendStreamItem(output.item, output.delta, output.toolUseId)
         break
 
       case 'subagent-message': {
         const { toolUseId, message } = output
-        this.send('session:subagent-message', { toolUseId, message })
+        if (output.item) this.updateStreamItem(output.item, message, toolUseId)
+        else this.send('session:subagent-message', { toolUseId, message })
 
         // Extract newly completed child tool parts → session:subagent-tool-result.
         // Mirrors the own 'message' case's extractToolResult + emittedToolResults dedup.
@@ -1281,6 +1388,7 @@ export class OpencodeSession extends BaseSession {
       }
 
       case 'task-notification':
+        this.sealStreamItems(output.notification.taskId)
         this.send('session:task-notification', output.notification)
         // Tidy: remove the completed/failed child mapping so its sessionId is no
         // longer tracked (also prevents a future session with the same id from
@@ -1301,10 +1409,125 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  private streamItemKey(ownerSessionId: string, partId: string): string {
+    return JSON.stringify([ownerSessionId, partId])
+  }
+
+  private streamTarget(item: OpencodeStreamItem, ownerToolUseId?: string): ItemStreamTarget {
+    return {
+      messageId: item.messageId,
+      blockIndex: item.blockIndex,
+      kind: item.kind,
+      ...(ownerToolUseId ? { ownerToolUseId } : {})
+    }
+  }
+
+  private updateStreamItem(
+    item: OpencodeStreamItem,
+    message: ChatMessage,
+    ownerToolUseId?: string
+  ): void {
+    const ownerSessionId = ownerToolUseId
+      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
+      : (this.openSessionId ?? '')
+    const key = this.streamItemKey(ownerSessionId, item.partId)
+    const target = this.streamTarget(item, ownerToolUseId)
+    const active = this.activeStreamItems.get(key)
+    const snap = this.accumulators.get(item.messageId)?.parts.get(item.partId)
+    if (snap?.sealed) {
+      if (item.completed)
+        this.send('session:item-seal', {
+          target,
+          message,
+          ...(ownerToolUseId ? { ownerToolUseId } : {})
+        })
+      return
+    }
+    const block = message.content[item.blockIndex]
+    if (
+      !active &&
+      item.kind === 'thinking' &&
+      block?.type === 'thinking' &&
+      block.text.length === 0
+    )
+      return
+    if (!active) {
+      this.activeStreamItems.set(key, { target, ownerSessionId, partId: item.partId })
+      this.send('session:item-open', {
+        target,
+        message,
+        // opencode times its own reasoning parts; fall back to now when the
+        // snapshot has no start yet.
+        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
+      })
+    }
+    if (item.completed) {
+      this.send('session:item-seal', {
+        target,
+        message,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      })
+      this.activeStreamItems.delete(key)
+      if (snap) snap.sealed = true
+    }
+  }
+
+  private appendStreamItem(item: OpencodeStreamItem, chunk: string, ownerToolUseId?: string): void {
+    const ownerSessionId = ownerToolUseId
+      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
+      : (this.openSessionId ?? '')
+    const acc = this.accumulators.get(item.messageId)
+    const key = this.streamItemKey(ownerSessionId, item.partId)
+    let active = this.activeStreamItems.get(key)
+    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
+      const target = this.streamTarget(item, ownerToolUseId)
+      const message = buildChatMessage(item.messageId, acc)
+      const content = [...message.content]
+      content[item.blockIndex] =
+        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
+      this.send('session:item-open', {
+        target,
+        message: { ...message, content },
+        ...(item.kind === 'thinking'
+          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
+          : {})
+      })
+      active = { target, ownerSessionId, partId: item.partId }
+      this.activeStreamItems.set(key, active)
+    }
+    if (!active) return
+    this.send('session:item-delta', { target: active.target, chunk })
+    if (acc && !ownerToolUseId) this.rememberOpencodeMessage(buildChatMessage(item.messageId, acc))
+  }
+
+  private sealStreamItems(ownerSessionId?: string): void {
+    for (const [key, active] of this.activeStreamItems) {
+      if (ownerSessionId !== undefined && active.ownerSessionId !== ownerSessionId) continue
+      const acc = this.accumulators.get(active.target.messageId)
+      if (acc) {
+        const snap = acc.parts.get(active.partId)
+        if (snap) {
+          snap.sealed = true
+          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
+            const end = Date.now()
+            snap.time = { start: snap.time?.start ?? end, end }
+          }
+        }
+        this.send('session:item-seal', {
+          target: active.target,
+          message: buildChatMessage(active.target.messageId, acc),
+          ...(active.target.ownerToolUseId ? { ownerToolUseId: active.target.ownerToolUseId } : {})
+        })
+      }
+      this.activeStreamItems.delete(key)
+    }
+  }
+
   async interrupt(): Promise<void> {
     if (this.client && this.openSessionId) {
       try {
         await this.client.abortSession(this.openSessionId)
+        this.sealStreamItems(this.openSessionId)
       } catch (err) {
         logger.warn(
           'OpencodeSession',
@@ -1316,6 +1539,7 @@ export class OpencodeSession extends BaseSession {
 
   cancel(): void {
     this.clearInactivityTimer()
+    this.sealStreamItems()
     this._cancelled = true
     this.isProcessing = false
     // Deliberate teardown (window close, idle timeout) is still a disconnect as
@@ -1445,33 +1669,9 @@ export class OpencodeSession extends BaseSession {
 
     // Persist the rule to the shared store so it recompiles onto opencode next
     // spawn + shows in PermissionsDialog (session + shared store — ADR-022).
-    if (persist) this.persistAllowRules(updatedPermissions!)
-  }
-
-  /** Write "always allow" suggestions to the shared Claude permission store. */
-  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
-    try {
-      const byScope = new Map<'user' | 'project' | 'local', string[]>()
-      for (const s of suggestions) {
-        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
-        const scope = suggestionDestinationToScope(s.destination)
-        if (!scope) continue // 'session' → opencode's 'always' reply already covers it
-        const arr = byScope.get(scope) ?? []
-        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
-        byScope.set(scope, arr)
-      }
-      for (const [scope, ruleStrings] of byScope) {
-        const perms = loadClaudePermissions(scope, this.cwd)
-        const allowSet = new Set(perms.allow)
-        for (const r of ruleStrings) allowSet.add(r)
-        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
-      }
-    } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+    // 'session' destinations are skipped by the shared persister — opencode's
+    // own `always` reply already covers them.
+    if (persist) persistAllowSuggestions(updatedPermissions!, this.cwd, 'OpencodeSession')
   }
 
   async setModel(model: string): Promise<void> {
@@ -1960,9 +2160,11 @@ export class OpencodeSession extends BaseSession {
         // retry of something THIS monitor denied (post-block consent
         // inheritance), not as a fresh proposal.
         if (approval.toolUseId) this.recordToolOutcome(approval.toolUseId, 'automode-blocked')
+        this.sendToolReview(approval.toolUseId, result)
         this.autoReply(approval.requestId, 'reject', formatAutoModeDenyReason(result))
       } else {
         this.autoDenials.recordAllow()
+        this.sendToolReview(approval.toolUseId, result)
         this.autoReply(approval.requestId, 'once')
       }
     } catch (err) {
@@ -1972,6 +2174,26 @@ export class OpencodeSession extends BaseSession {
       )
       this.fallbackToHuman(approval)
     }
+  }
+
+  /**
+   * The judge's verdict on the card it judged (F18).
+   *
+   * `approval.toolUseId` is `permission.asked`'s `tool.callID`, which is EXACTLY
+   * the id `buildChatMessage` puts on the `tool_use` block (`snap.callID`), so
+   * the reducer binds it to the right card. No hold is needed here the way Codex
+   * needs one: the tool part carrying `state.input` is published
+   * (`message.part.updated`, which emits the whole assistant message) BEFORE the
+   * tool calls `ctx.ask` — the fact M-OC6 already relies on to read the real
+   * input off the accumulator — and the judge call that produced this verdict
+   * took a model round-trip on top of that.
+   */
+  private sendToolReview(toolUseId: string | undefined, result: ClassifyResult): void {
+    if (!toolUseId) return
+    this.send('session:tool-review', {
+      toolUseId,
+      review: autoModeReviewBlock(toolUseId, uuid(), result)
+    })
   }
 
   /**
@@ -2079,6 +2301,20 @@ export class OpencodeSession extends BaseSession {
   private recordTurnUsage(): void {
     const parsed = parseModelString(this._model)
     const ownAccount = opencodeAuthProvider.buildAccountRef(parsed.providerID)
+    // ADR-071 §3: which account this vendor's turns run under, read per TURN
+    // (so a sign-in change between turns attributes each turn to the account
+    // that actually ran it) but once per provider id, not once per message —
+    // a turn's child accumulators are usually all on the same provider.
+    const identities = new Map<string, AccountIdentity>()
+    const identityFor = (providerID: string): AccountIdentity => {
+      let identity = identities.get(providerID)
+      if (!identity) {
+        identity = opencodeAuthProvider.accountIdentity(providerID)
+        identities.set(providerID, identity)
+      }
+      return identity
+    }
+    const ownIdentity = identityFor(parsed.providerID)
 
     for (const [messageId, acc] of this.accumulators) {
       // Only record assistant messages that have cost or token data
@@ -2105,10 +2341,24 @@ export class OpencodeSession extends BaseSession {
         // naturally attributes turn N's messages to whichever model was active
         // when turn N's session.idle fired. Matches recordUsageEvent's own
         // attribution below (same simplification, same precedent).
-        this.liveModelCosts.set(
+        //
+        // ADR-071 §2: the figure is the DISPLAY cost, not opencode's own —
+        // the breakdown has to add up to the headline. The message's inputs are
+        // frozen here so a later model switch cannot silently re-price it.
+        const inputs = opencodeCostInputs(
+          parsed.providerID,
           parsed.modelID,
-          (this.liveModelCosts.get(parsed.modelID) ?? 0) + (acc.cost ?? 0)
+          tokens,
+          acc.cost ?? null
         )
+        this.settledCostInputs.set(messageId, inputs)
+        const displayCostUsd = resolveOpencodeCosts(inputs).displayCostUsd
+        if (displayCostUsd !== null) {
+          this.liveModelCosts.set(
+            parsed.modelID,
+            (this.liveModelCosts.get(parsed.modelID) ?? 0) + displayCostUsd
+          )
+        }
 
         // Own (parent) message — attribute to this session's model.
         recordUsageEvent({
@@ -2127,7 +2377,14 @@ export class OpencodeSession extends BaseSession {
           engineCostUsd: acc.cost ?? null,
           sessionId: this.openSessionId,
           messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: ownIdentity.accountKey,
+          accountLabel: ownIdentity.accountLabel,
+          billingType: ownAccount?.billingType ?? 'unknown',
+          origin: 'session',
+          parentRoutingId: null,
+          // opencode's `cost` is what it charged, not a list-price estimate.
+          engineCostIsEquivalent: false
         })
       } else {
         // Child (subagent) message — attribute to the CHILD's own model + session.
@@ -2140,6 +2397,7 @@ export class OpencodeSession extends BaseSession {
           continue
         }
         const childAccount = opencodeAuthProvider.buildAccountRef(acc.model.providerID)
+        const childIdentity = identityFor(acc.model.providerID)
         recordUsageEvent({
           engineId: 'opencode',
           vendorId: acc.model.providerID,
@@ -2156,7 +2414,15 @@ export class OpencodeSession extends BaseSession {
           engineCostUsd: acc.cost ?? null,
           sessionId: acc.childSessionId ?? null,
           messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: childIdentity.accountKey,
+          accountLabel: childIdentity.accountLabel,
+          billingType: childAccount?.billingType ?? 'unknown',
+          // A subagent's spend is its own row, attributed back to the session
+          // that spawned it (ADR-071 §1).
+          origin: 'child',
+          parentRoutingId: this.routingId,
+          engineCostIsEquivalent: false
         })
       }
     }
@@ -2165,7 +2431,9 @@ export class OpencodeSession extends BaseSession {
   /**
    * Sum the cumulative tokens from all own (non-child) assistant accumulators.
    * Returns { input, output, cacheWrite, cacheRead }.
-   * Extracted from sendMetering for reuse in buildStatusLine (DRY).
+   *
+   * THIS PROCESS only — buildStatusLine adds the history base on top (see
+   * tokenBase), sendMetering deliberately does not.
    */
   private sumSessionTokens(): {
     input: number
@@ -2201,7 +2469,16 @@ export class OpencodeSession extends BaseSession {
    */
   private buildStatusLine(): StatusLineData {
     const parsed = parseModelString(this._model)
-    const sum = this.sumSessionTokens()
+    const live = this.sumSessionTokens()
+    // History + live, the same split cost uses: a resumed session's tokens are
+    // not this process's alone, and the figure must not drop back to one
+    // turn's worth the moment a reopened session is prompted.
+    const sum = {
+      input: this.tokenBase.input + live.input,
+      output: this.tokenBase.output + live.output,
+      cacheWrite: this.tokenBase.cacheWrite + live.cacheWrite,
+      cacheRead: this.tokenBase.cacheRead + live.cacheRead
+    }
     const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
     const usedPercentage =
       ctx > 0 && this.lastContextLength > 0
@@ -2210,15 +2487,18 @@ export class OpencodeSession extends BaseSession {
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = sum.cacheRead + sum.cacheWrite
     const totalTokens = sum.input + sum.output + cachedTokens
+    const costs = this.costTally()
     return {
-      totalCostUsd: this.totalCostUsd,
+      totalCostUsd: costs.displayCostUsd,
+      billedCostUsd: costs.billedCostUsd,
+      ...(costs.unknownMessages > 0 ? { unknownCostMessages: costs.unknownMessages } : {}),
       totalDurationMs: this.accTotalDurationMs,
       totalApiDurationMs: 0,
       totalInputTokens: sum.input,
       totalOutputTokens: sum.output,
       cachedTokens,
       totalTokens,
-      contextWindowSize: ctx,
+      contextWindow: { used: this.lastContextLength, size: ctx },
       usedPercentage,
       remainingPercentage,
       turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null,
@@ -2262,7 +2542,10 @@ export class OpencodeSession extends BaseSession {
           total: input + output + cacheWrite + cacheRead
         },
         equivalentCostUsd: equiv,
-        engineReportedCostUsd: this.totalCostUsd,
+        // What opencode itself reported, NOT the headline — the headline is the
+        // cost rule's answer now (ADR-071 §2) and this field's one job is to
+        // carry the engine's raw claim beside the equivalent.
+        engineReportedCostUsd: this.engineReportedCostUsd,
         contextWindow: { used: this.lastContextLength, size: ctx }
         // window omitted — opencode has no usage provider (cumulative meter)
       }

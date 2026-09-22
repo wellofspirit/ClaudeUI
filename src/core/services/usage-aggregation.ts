@@ -18,13 +18,15 @@
  */
 
 import type {
+  BillingType,
   TokenCounts,
   ModelTokenBreakdown,
   UsageBlock,
   EngineUsageSummary
 } from '../../shared/types'
-import { accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import { accountForTimestamp, type AccountLogEntry } from './usage-windows'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { displayCostFromRow } from '../../shared/cost-rule'
 
 // ---------------------------------------------------------------------------
 // Constants (mirror block-usage.ts)
@@ -86,6 +88,10 @@ export interface UsageCostRow {
   cacheReadTokens: number
   equivCostUsd: number | null
   engineCostUsd: number | null
+  /** ADR-071 §1's resolved pair and the billing type it was resolved under. */
+  billingType: BillingType
+  apiCostUsd: number | null
+  billedCostUsd: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +115,8 @@ function addTokens(a: TokenCounts, b: TokenCounts): TokenCounts {
   }
 }
 
-function floorToHour(ts: number): number {
+/** The start of the UTC hour containing `ts` — the `usage_bucket` key. */
+export function floorToHour(ts: number): number {
   return Math.floor(ts / MS_PER_HOUR) * MS_PER_HOUR
 }
 
@@ -305,7 +312,7 @@ function buildBlock(
 export function groupEntriesIntoBlocks(
   entries: AggEntry[],
   knownWindows: ApiWindow[],
-  accountLog: AccountLogRecord[],
+  accountLog: AccountLogEntry[],
   now: number = Date.now()
 ): UsageBlock[] {
   if (entries.length === 0) return []
@@ -443,26 +450,28 @@ export function computeProjectionWLS(
 // ---------------------------------------------------------------------------
 
 /**
- * Select the display cost for a usage_event row. `engineCostUsd` stays
- * authoritative when it reflects a real, nonzero spend. When the engine reports
- * null OR 0 — which for opencode on a company enterprise/pooled plan means
- * "billed elsewhere", not "free" — fall back to the best available list-price
- * estimate: the row's stored `equivCostUsd` (computed at record time by
- * recordUsageEvent), but ONLY when it's a genuine positive estimate (`> 0`). A
- * stored 0 is treated the same as null and falls through to a fresh recompute —
- * this self-heals rows recorded while opencode-pricing.ts still poisoned the
- * table with $0 entries for subscription-zeroed catalog costs (see
- * opencode-pricing.ts's isZeroCost): once real pricing is registered, the
- * recompute can resolve a nonzero estimate for the same row instead of being
- * stuck on the stale stored 0. If that's null too (no pricing registered for
- * this vendor/model — row predates the pricing entry, or the row's vendorId is
- * a custom/gateway id that wasn't priced at insert time), fall back to
- * `engineCostUsd ?? 0`. Genuinely-free models (opencode zen free tier) still
- * show $0 via this same fallthrough — they simply have no pricing entry
- * registered at all (see opencode-pricing.ts's isZeroCost), so both the stored
- * equiv and the recompute are null/0 and we land on `engineCostUsd ?? 0` (0).
+ * The display cost of one `usage_event` row (ADR-071 §1/§2).
+ *
+ * The row already carries the resolved pair, so there is nothing to guess:
+ * `displayCostFromRow` applies the one rule — what the tokens were worth under
+ * a subscription, what was actually charged under an API key — and this
+ * function's only job is turning its "unknown" into the number a caller that
+ * must have one can use.
+ *
+ * THE FALLBACK IS FOR OLD ROWS ONLY. A row written before v18 whose backfill
+ * could fill neither cost column (nothing priced it, and the engine reported
+ * nothing either) still has to render as something. The chain below is the
+ * pre-ADR-071 heuristic, kept verbatim for exactly those rows: the engine's
+ * figure when it is a real nonzero spend, else a positive stored equivalent,
+ * else a fresh recompute against the current pricing table (which self-heals a
+ * row recorded before its model had a price), else `engineCostUsd ?? 0`.
+ *
+ * Every row written since v18 resolves on the first line and never reaches it.
  */
 export function selectRowCostUsd(row: UsageCostRow): number {
+  const display = displayCostFromRow(row)
+  if (display !== null) return display
+
   if (typeof row.engineCostUsd === 'number' && row.engineCostUsd > 0) return row.engineCostUsd
   if (row.equivCostUsd !== null && row.equivCostUsd > 0) return row.equivCostUsd
   const recomputed = equivalentCostUsd(row.vendorId, row.modelId, {
@@ -473,6 +482,39 @@ export function selectRowCostUsd(row: UsageCostRow): number {
     cacheReadTokens: row.cacheReadTokens
   })
   return recomputed ?? row.engineCostUsd ?? 0
+}
+
+/** The cost sums an hourly bucket carries. */
+export interface BucketCostSums {
+  billingType: BillingType
+  apiCostUsd: number
+  billedCostUsd: number
+  unbilledApiCostUsd: number
+}
+
+/**
+ * The display cost of one hourly bucket: the SUM of its rows' display costs,
+ * by the one rule (ADR-071 §1).
+ *
+ * The bucket is summed so that it can be handed to the ROW rule unchanged. A
+ * row under `apiKey` or `unknown` displays `billed ?? api`, so an hour that
+ * mixes turns which reported a charge with turns which did not cannot be
+ * resolved from `billed_cost_usd` and `api_cost_usd` alone — the first leaves
+ * the unbilled turns out, the second double counts the billed ones.
+ * `unbilled_api_cost_usd` is the `api` half of that `??` summed separately, so
+ * `billedCostUsd + unbilledApiCostUsd` is exactly Σ(billed ?? api) and the two
+ * paths agree turn for turn. A subscription bucket still shows its API
+ * equivalent and a free one still shows zero, because that is what the row rule
+ * does with the same arguments.
+ */
+export function bucketDisplayCostUsd(bucket: BucketCostSums): number {
+  return (
+    displayCostFromRow({
+      billingType: bucket.billingType,
+      apiCostUsd: bucket.apiCostUsd,
+      billedCostUsd: bucket.billedCostUsd + bucket.unbilledApiCostUsd
+    }) ?? 0
+  )
 }
 
 // ---------------------------------------------------------------------------

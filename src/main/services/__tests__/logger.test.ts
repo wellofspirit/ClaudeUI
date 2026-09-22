@@ -428,6 +428,9 @@ describe('logger — CLAUDE_UI_LOG_DIR redirect (guard: fails pre-fix, when LOG_
       mod.flushSync()
 
       const redirectedFile = nodePath.join(redirectDir, `${dayKey()}.log`)
+      // Same directory the exported accessor reports, so a sidecar writer
+      // (CodexAppServerClient's opt-in stderr file) lands beside the day's log.
+      expect(mod.getLogDir()).toBe(redirectDir)
       expect(realFs.existsSync(redirectedFile)).toBe(true)
       expect(realFs.readFileSync(redirectedFile, 'utf-8')).toContain(marker)
 

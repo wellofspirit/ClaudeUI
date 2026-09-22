@@ -8,8 +8,8 @@ import { SessionManager } from '../../core/services/session-manager'
 import { AutomationManager } from '../../core/services/automation-manager'
 import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
 import { commandRegistry, hostConnection, registerCommand } from '../../core/ipc/command-registry'
-import { addStreamObserver, addSyncSubscriber } from '../../core/services/sync-host'
-import { streamFrameToEmission } from '../../core/shared/sync/stream'
+import { addStreamObserver, addSyncSubscriber, syncCore } from '../../core/services/sync-host'
+import { overlayItemStreams } from '../../core/shared/sync/item-stream'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -93,6 +93,29 @@ export class PluginManager {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
       this.fireSessionScoped(channel, args)
+      if (channel === 'session:item-seal') {
+        const routingId = args[0] as string
+        const data = args[1] as {
+          message: { id: string }
+          ownerToolUseId?: string
+          target?: { ownerToolUseId?: string }
+        }
+        const ownerToolUseId = data.ownerToolUseId ?? data.target?.ownerToolUseId
+        const compatibilityChannel = ownerToolUseId ? 'session:subagent-message' : 'session:message'
+        if (!this.hasListeners(compatibilityChannel)) return
+        const session = syncCore.getCanonicalState().sessions[routingId]
+        const canonical = ownerToolUseId
+          ? session?.subagentMessages[ownerToolUseId]?.find(
+              (message) => message.id === data.message.id
+            )
+          : session?.messages.find((message) => message.id === data.message.id)
+        if (!session || !canonical) return
+        const message = overlayItemStreams([canonical], session.itemStreams)[0]
+        this.fireSessionScoped(compatibilityChannel, [
+          routingId,
+          ownerToolUseId ? { toolUseId: ownerToolUseId, message } : message
+        ])
+      }
     })
 
     // The VOLATILE LANE (phase 5 S1, extended by S2). The two delta channels and
@@ -100,14 +123,54 @@ export class PluginManager {
     // longer sees them — but a plugin's contract predates the lane split and must
     // not change because of it. An in-process OBSERVER receives every frame (it
     // has no session selection to filter by, unlike a remote connection) and it is
-    // re-materialized into the emission shape plugins have always been handed: a
-    // text frame through the shared inverse, a PASS-THROUGH frame by simply
-    // reading `(channel, args)` back off it — it never stopped being the emission.
+    // re-materialized into the emission shape plugins have always been handed.
+    // Item appends synthesize the legacy plugin event names in process; a
+    // PASS-THROUGH frame is already the original `(channel, args)` emission.
     //
     // GATED on someone actually listening: with no plugin subscribed to these
     // channels the synthesis is skipped entirely, so the token firehose costs
     // nothing on a machine with no plugins — which is every machine by default.
     this.unsubscribeStream = addStreamObserver((frame) => {
+      if (frame.type === 'item-stream') {
+        if (frame.op !== 'append') return
+        if (this.hasListeners('session:item-delta'))
+          this.fireSessionScoped('session:item-delta', [frame.routingId, frame])
+        if (!frame.target.ownerToolUseId) {
+          // Both root branches are gated BEFORE the canonical read: with nobody
+          // listening the whole synthesis — lookup included — must cost nothing.
+          const wantsMessage = this.hasListeners('session:message')
+          const wantsStream = this.hasListeners('session:stream')
+          if (!wantsMessage && !wantsStream) return
+          const session = syncCore.getCanonicalState().sessions[frame.routingId]
+          if (!session) return
+          if (session.selectedEngineId === 'codex') {
+            if (wantsMessage) {
+              const message = session.messages.find((m) => m.id === frame.target.messageId)
+              if (message)
+                this.fireSessionScoped('session:message', [
+                  frame.routingId,
+                  overlayItemStreams([message], session.itemStreams)[0]
+                ])
+            }
+          } else if (frame.target.kind !== 'plan' && wantsStream) {
+            this.fireSessionScoped('session:stream', [
+              frame.routingId,
+              { type: frame.target.kind, text: frame.chunk }
+            ])
+          }
+          return
+        }
+        if (frame.target.kind !== 'plan' && this.hasListeners('session:subagent-stream'))
+          this.fireSessionScoped('session:subagent-stream', [
+            frame.routingId,
+            {
+              toolUseId: frame.target.ownerToolUseId,
+              type: frame.target.kind,
+              text: frame.chunk
+            }
+          ])
+        return
+      }
       if (frame.type === 'stream-ev') {
         if (!this.hasListeners(frame.channel)) return
         if (this.tracing) {
@@ -116,24 +179,12 @@ export class PluginManager {
         this.fireSessionScoped(frame.channel, frame.args)
         return
       }
-      if (!this.hasStreamListeners()) return
-      const emission = streamFrameToEmission(frame)
-      if (!emission) return
-      if (this.tracing) {
-        logger.debug(LOG_SOURCE, `[trace] ${emission.channel} ${frame.streamId}`)
-      }
-      this.fireSessionScoped(emission.channel, [emission.routingId, emission.data])
     })
   }
 
   /** Is any plugin listening to `channel`? */
   private hasListeners(channel: string): boolean {
     return (this.eventListeners.get(channel)?.size ?? 0) > 0
-  }
-
-  /** Is any plugin listening to the lane's two TEXT-STREAM channels? */
-  private hasStreamListeners(): boolean {
-    return this.hasListeners('session:stream') || this.hasListeners('session:subagent-stream')
   }
 
   /** One wrapper for both lanes — see the ADR-005 event shape note above. */

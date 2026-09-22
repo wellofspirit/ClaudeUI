@@ -27,10 +27,20 @@
  * and the rect is in page px, so the ratio IS the effective zoom, whichever
  * ancestor applies it (and 1 when none does).
  *
- * WHY SCROLL CLOSES THE MENU. A fixed menu is measured once and cannot follow
- * its anchor, so any scroll OUTSIDE the menu would leave it stranded beside
- * nothing. Closing is the honest answer and matches how a native select
- * behaves; scrolling the menu's own option list is of course exempt.
+ * WHAT SCROLL DOES. A fixed menu does not move with its anchor, so a scroll
+ * outside the menu RE-MEASURES it — the menu follows the trigger. It used to
+ * close instead, which lost to the app's own scrolling: clicking a trigger that
+ * is only half visible scrolls it into view AFTER the menu opens (the browser
+ * does this for the focus the click gives the button), and that scroll killed
+ * the menu the click had just opened — reproduced in Settings › Engines ›
+ * Codex, where such a trigger could not be opened at all. Trackpad inertia
+ * after a deliberate scroll does the same. The menu now closes only once the
+ * anchor's rect is entirely outside the viewport, which is the one case where a
+ * fixed menu really would be stranded beside nothing. Scrolling the menu's own
+ * option list is exempt from both. Accepted: while the anchor is inside the
+ * viewport but clipped by an `overflow` ancestor, the menu tracks the clipped
+ * anchor and stays visible — the alternative is per-ancestor clip tests for a
+ * case the user is actively scrolling out of.
  */
 
 import { useLayoutEffect, useRef, useState } from 'react'
@@ -49,14 +59,49 @@ const GAP = 4
 /** Keep the menu this far from the viewport's right edge when it overflows. */
 const EDGE = 8
 
+/** The anchor and the viewport in the anchor's own CSS px, plus that scale. */
+interface Frame {
+  scale: number
+  top: number
+  bottom: number
+  left: number
+  right: number
+  width: number
+  vh: number
+  vw: number
+}
+
+/**
+ * Measure the anchor and the viewport in the anchor's OWN CSS px — the space a
+ * fixed offset resolves in. `offsetWidth` is already in that space while the
+ * rect is in page px, so their ratio is the effective zoom (THE ZOOM TRAP
+ * above). Both the placement pass and the scroll handler read through this, so
+ * "still on screen?" is asked in the same coordinates the menu is placed in.
+ */
+function frameOf(anchor: HTMLElement): Frame {
+  const rect = anchor.getBoundingClientRect()
+  const scale = anchor.offsetWidth ? rect.width / anchor.offsetWidth : 1
+  return {
+    scale,
+    top: rect.top / scale,
+    bottom: rect.bottom / scale,
+    left: rect.left / scale,
+    right: rect.right / scale,
+    width: rect.width / scale,
+    vh: window.innerHeight / scale,
+    vw: window.innerWidth / scale
+  }
+}
+
 /**
  * Position a menu next to `anchorRef` with `position: fixed`, so no overflow
  * ancestor clips it.
  *
- * Measured when `open` turns true and re-measured on window resize; any scroll
- * outside the menu itself CLOSES the menu (a fixed menu cannot follow its
- * anchor). `placement` is the PREFERRED side: it flips when that side has less
- * room than the menu needs and the other side has more.
+ * Measured when `open` turns true, and re-measured on window resize and on any
+ * scroll outside the menu itself, so the fixed menu follows its anchor; it
+ * closes only once the anchor has left the viewport entirely. `placement` is
+ * the PREFERRED side: it flips when that side has less room than the menu needs
+ * and the other side has more.
  *
  * Returns `null` while closed, and on the first render of an open menu — the
  * measurement happens in a layout effect, before paint, so the caller renders
@@ -100,25 +145,18 @@ export function useAnchoredMenu({
       // anchor we are about to measure.
       if (menu) menu.style.position = 'fixed'
 
-      const rect = anchor.getBoundingClientRect()
-      // offsetWidth is in the anchor's own CSS px, the rect in page px — the
-      // ratio is the effective zoom (see THE ZOOM TRAP above).
-      const scale = anchor.offsetWidth ? rect.width / anchor.offsetWidth : 1
-      const vh = window.innerHeight / scale
-      const vw = window.innerWidth / scale
-      const anchorTop = rect.top / scale
-      const anchorBottom = rect.bottom / scale
+      const f = frameOf(anchor)
 
-      const room = { down: vh - anchorBottom, up: anchorTop }
+      const room = { down: f.vh - f.bottom, up: f.top }
       const other = placement === 'down' ? 'up' : 'down'
       const side = room[placement] < MENU_ROOM && room[other] > room[placement] ? other : placement
 
-      const minWidth = rect.width / scale
-      let left = rect.left / scale
+      const minWidth = f.width
+      let left = f.left
       // Only ONE inset is ever set; the other stays `auto` so the menu grows
       // away from the trigger rather than being stretched between two edges.
       const inset: React.CSSProperties =
-        side === 'down' ? { top: anchorBottom + GAP } : { bottom: vh - anchorTop + GAP }
+        side === 'down' ? { top: f.bottom + GAP } : { bottom: f.vh - f.top + GAP }
 
       // Second pass: the menu can be wider than its trigger (`w-max`), so a
       // trigger near the right edge would push it off screen. Apply what we
@@ -128,7 +166,7 @@ export function useAnchoredMenu({
         menu.style.minWidth = `${minWidth}px`
         menu.style.top = inset.top === undefined ? '' : `${inset.top}px`
         menu.style.bottom = inset.bottom === undefined ? '' : `${inset.bottom}px`
-        const overflow = menu.getBoundingClientRect().right / scale - (vw - EDGE)
+        const overflow = menu.getBoundingClientRect().right / f.scale - (f.vw - EDGE)
         if (overflow > 0) left -= overflow
       }
 
@@ -140,7 +178,17 @@ export function useAnchoredMenu({
     const onScroll = (e: Event): void => {
       const menu = menuRef.current
       if (menu && e.target instanceof Node && menu.contains(e.target)) return
-      closeRef.current()
+      const anchor = anchorRef.current
+      if (!anchor) return
+
+      // The anchor moved under a fixed menu: follow it, unless it has left the
+      // viewport altogether — only then is there nothing left to sit beside.
+      const f = frameOf(anchor)
+      if (f.bottom <= 0 || f.top >= f.vh || f.right <= 0 || f.left >= f.vw) {
+        closeRef.current()
+        return
+      }
+      measure()
     }
     // Capture phase: a scroll event does not bubble, but it is still seen on
     // the way down to its target, which is how an arbitrary scroll container

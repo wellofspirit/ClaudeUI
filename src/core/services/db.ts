@@ -21,18 +21,23 @@
  */
 
 import * as fs from 'fs'
+import { parseCodexSettings } from '../codex/settings'
 import * as path from 'path'
 import * as os from 'os'
 import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
 import type {
+  BillingType,
   EngineId,
   ModelRef,
   AccountInfo,
-  DispatchedUsageSummary,
   RemoteAuthPolicy,
-  StepUpTier
+  StepUpTier,
+  UsageOrigin,
+  UsageWindowRow
 } from '../../shared/types'
-import { engineMeta } from '../../shared/engine-meta'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { displayCostFromRow } from '../../shared/cost-rule'
+import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -58,31 +63,70 @@ export interface UsageEventRow {
   sessionId: string | null
   messageId: string
   source: 'live' | 'backfill'
+  // -- ADR-071 §1, migration v18 ------------------------------------------
+  /** Machine-independent account identity (ADR-071 §3). 'unknown' predates the ADR. */
+  accountKey: string
+  /** What a person calls the account. Display only. */
+  accountLabel: string | null
+  /** The billing type as it stood when the row was written. */
+  billingType: BillingType
+  /** Where the turn came from. */
+  origin: UsageOrigin
+  /** The dispatching or spawning session, for 'child' and 'dispatch' rows. */
+  parentRoutingId: string | null
+  /** Tokens at list price. Null when the model has no known price. */
+  apiCostUsd: number | null
+  /** Money that left a wallet. Null when we cannot know. */
+  billedCostUsd: number | null
 }
+
+/**
+ * What a WRITER has to supply. The seven ADR-071 columns are optional here and
+ * only here, so that a row built against the pre-v18 shape still compiles down
+ * onto its SQL defaults ('unknown' / 'session' / NULL).
+ *
+ * That is a concession to old test fixtures, NOT a licence for product code:
+ * `recordUsageEvent` and the reconciler's row builders pass all seven
+ * explicitly, every time, so a new call site cannot quietly skip attribution.
+ */
+export type UsageEventInsert = Omit<UsageEventRow, keyof UsageEventAttribution> &
+  Partial<UsageEventAttribution>
+
+/** The v18 columns, named once so the insert type can make exactly them optional. */
+type UsageEventAttribution = Pick<
+  UsageEventRow,
+  | 'accountKey'
+  | 'accountLabel'
+  | 'billingType'
+  | 'origin'
+  | 'parentRoutingId'
+  | 'apiCostUsd'
+  | 'billedCostUsd'
+>
 
 /** One window-utilization sample (feeds WLS apiPercent series + block alignment). */
 export interface WindowSampleRow {
   id: string
   ts: number
+  /**
+   * The Claude account uuid the sample was observed under, and the key the WLS
+   * projection still reads by ({@link getWindowSamples}). A vendor with no such
+   * uuid — a ChatGPT workspace — carries its `accountKey` here, so the column
+   * stays NOT NULL without a second meaning of "none".
+   */
   accountUuid: string
   usedPercent: number
   canonicalEnd: number
-}
-
-/** One per-day per-model usage rollup row (the durable 30-day-chart store). */
-export interface DailyUsageRow {
-  date: string
-  engineId: string
-  vendorId: string
-  modelId: string
-  inputTokens: number
-  outputTokens: number
-  cacheWriteTokens: number
-  cacheReadTokens: number
-  costUsd: number
-  requestCount: number
-  peakApiPercent: number
-  source: 'rollup' | 'seed'
+  /** ADR-071 §3's account key — what makes the reading comparable across machines. */
+  accountKey: string
+  /** The window's canonical id: `5h`, `7d`, `7d:<model>`, `3d`, `primary` (ADR-071 §6). */
+  windowKind: string
+  /**
+   * How long the window lasts, as the VENDOR stated it (S3c) — null when it
+   * said nothing, which is every Claude reading (its window names carry their
+   * own lengths) and every row written before v25.
+   */
+  windowMinutes: number | null
 }
 
 /**
@@ -101,6 +145,13 @@ export type Db = SqliteDatabase
 export interface SessionMeta {
   engineId: EngineId
   model?: ModelRef
+  /** Tokens the session's native context last held (v24). Codex only, so far:
+   *  it is the one engine whose context meter cannot be recomputed from a
+   *  history read. Absent on a write MERGES — see {@link setSessionMeta}. */
+  contextUsed?: number | null
+  /** The model's context window in tokens at that moment (v24), null/absent
+   *  when the engine never reported one. */
+  contextWindow?: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +594,761 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE remote_config ADD COLUMN ide_cli_path TEXT;
       `)
     }
+  },
+  {
+    version: 15,
+    up(db) {
+      db.exec(`CREATE TABLE codex_session_overrides (
+        session_id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`)
+    }
+  },
+  {
+    // v16 — the Codex FORK REGISTRY.
+    //
+    // `thread/list` never returns a forked thread, so the sidebar has to know
+    // about a branch some other way. It used to derive them: every codex id in
+    // `session_meta` that the native list omitted got a `thread/read` on every
+    // refresh, which after a few deletions is mostly dead ids re-probed forever
+    // (an unbounded-in-N sweep, ADR-066 open item). This table is the explicit
+    // record instead — written once when `thread/fork` lands, read back as the
+    // exact set of ids to probe, and pruned when the binary says the thread is
+    // gone for good.
+    //
+    // `forked_from_id` is the source thread, kept for lineage/debugging (and
+    // NULLABLE because the one-time adoption of pre-existing forks can only
+    // learn it from the thread itself, which may not carry it).
+    version: 16,
+    up(db) {
+      db.exec(`CREATE TABLE codex_forks (
+        thread_id TEXT PRIMARY KEY,
+        forked_from_id TEXT,
+        created_at INTEGER NOT NULL
+      )`)
+    }
+  },
+  {
+    // v17 — the fork registry becomes a LINEAGE CACHE.
+    //
+    // v16 recorded branches only, so a ROOT never earned a row and stayed a
+    // candidate for a `thread/read` forever: every delete plan swept the
+    // lineage of every codex `session_meta` id the table did not name, and the
+    // sweep never shrank (~0.9 s with 25 sessions, ADR-066 open item 3). The
+    // table now holds ONE ROW PER THREAD ClaudeUI has asked about, root or
+    // branch, and having a row is what stops the next scan re-reading it.
+    //
+    //  - `forked_from_id` still means lineage, and NULL now means "a root, a
+    //    thread with no learnable source, or an id the binary has twice said it
+    //    cannot resolve" — the three cases that are alike in the only way any
+    //    reader cares about: they are not a branch of anything.
+    //  - `verified_at` is the NATIVE `updatedAt` (unix seconds) the lineage was
+    //    read at. The launch scan re-reads a thread only when the listing shows
+    //    a different one, so an unchanged thread costs nothing after its first
+    //    read. NULL means "never verified": a v16 row, or a confirmed-gone id.
+    //  - `lineage_checked_at` is the wall clock of that read, for diagnostics.
+    //
+    // The table KEEPS ITS NAME: `CodexSession` registers a branch it mints
+    // through `registerCodexFork` and a rename would be churn in a file this
+    // change does not otherwise touch. Existing rows migrate as they are, with
+    // `verified_at` NULL so the first scan verifies each one exactly once.
+    //
+    // The DATA step drops the one-time adoption MARKER (`thread_id = ''`,
+    // generation in `forked_from_id`). The cache replaces it: an id with a row
+    // is not re-read, which is what the marker was for, without the "have I
+    // swept yet" flag that finished wrongly twice.
+    version: 17,
+    up(db) {
+      db.exec(`
+        ALTER TABLE codex_forks ADD COLUMN verified_at INTEGER;
+        ALTER TABLE codex_forks ADD COLUMN lineage_checked_at INTEGER;
+        DELETE FROM codex_forks WHERE thread_id = '';
+      `)
+    }
+  },
+  {
+    // v18 — ADR-071 §1: usage_event becomes THE ledger.
+    //
+    // Seven columns, in three groups:
+    //
+    //  - WHO. `account_key` is the machine-independent account identity (§3),
+    //    so the same subscription is one account on every machine and in the
+    //    hub; `account_label` is the display half. A row that predates this
+    //    migration keeps `'unknown'` and still counts in totals (owner ruling,
+    //    2026-09-20) — there is no way to learn after the fact which account
+    //    ran it.
+    //  - WHAT KIND. `billing_type` is captured AT WRITE TIME, because the
+    //    answer changes: the same vendor can be a subscription this week and
+    //    an API key the next, and a row priced under one rule must not be
+    //    re-read under the other. `origin` and `parent_routing_id` say whether
+    //    the turn was the session's own, a subagent's, or dispatched work, and
+    //    from where.
+    //  - HOW MUCH. `api_cost_usd` and `billed_cost_usd` are cost-rule.ts's two
+    //    figures, derived ONCE at write time from `equiv_cost_usd` and
+    //    `engine_cost_usd`, which stay exactly as they are: the raw inputs.
+    //
+    // The backfill fills `api_cost_usd` with the row's best LIST-PRICE figure.
+    // For most engines that is `equiv_cost_usd`. For a CLAUDE row it is
+    // `engine_cost_usd` when there is one: both of a Claude row's figures are
+    // equivalents (cli.js reports an equivalent whatever the plan, ADR-034),
+    // and the engine one is the precise of the two — it prices the 1h cache
+    // tier, where the table figure treats every cache write as 5m. That is
+    // also the figure `selectRowCostUsd` shows today, so switching the
+    // dashboard to this column cannot move a historical total. The live Claude
+    // row builders apply the same rule (usage-recorder's backfillAttribution).
+    //
+    // `billed_cost_usd` stays NULL on every migrated row: the billing type of
+    // an old row is not known, and NULL is how this schema says unknown
+    // (ADR-030). It is never summed as zero.
+    version: 18,
+    up(db) {
+      db.exec(`
+        ALTER TABLE usage_event ADD COLUMN account_key TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_event ADD COLUMN account_label TEXT;
+        ALTER TABLE usage_event ADD COLUMN billing_type TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_event ADD COLUMN origin TEXT NOT NULL DEFAULT 'session';
+        ALTER TABLE usage_event ADD COLUMN parent_routing_id TEXT;
+        ALTER TABLE usage_event ADD COLUMN api_cost_usd REAL;
+        ALTER TABLE usage_event ADD COLUMN billed_cost_usd REAL;
+        CREATE INDEX IF NOT EXISTS idx_usage_event_account_key_ts
+          ON usage_event(account_key, ts);
+        UPDATE usage_event SET api_cost_usd = CASE
+          WHEN engine_id = 'claude' AND engine_cost_usd IS NOT NULL AND engine_cost_usd > 0
+            THEN engine_cost_usd
+          ELSE equiv_cost_usd
+        END;
+      `)
+    }
+  },
+  {
+    // v19 — ADR-071 §1: the dispatched turns already on disk become ledger
+    // rows, so the ledger is the whole history and not just what was recorded
+    // after S2c shipped. One `usage_event` row per `dispatched_usage` row,
+    // `origin = 'dispatch'`.
+    //
+    // `dispatched_usage` is NOT dropped and nothing stops writing it: its
+    // readers (the session breakdown and the dashboard's Delegated section)
+    // move in S2c2, which is also when this table goes.
+    //
+    // WHAT IS COPIED, and what deliberately is not:
+    //
+    //  - TOKENS STAY 0. The old table recorded one TOTAL and no split, and
+    //    there is no honest column to put a total in — `input_tokens` would
+    //    claim the whole turn was prompt. A gap is better than a lie, so the
+    //    total is recorded nowhere. S2c2's readers must therefore NOT read a
+    //    zero split as "this turn was free"; the cost columns are what these
+    //    rows carry.
+    //  - `api_cost_usd` takes `cost_usd`, which is what the dispatcher's own
+    //    cost rule resolved for the turn (ADR-071 §2's display figure).
+    //    `billed_cost_usd` stays NULL: the billing type of a dispatched turn
+    //    was never recorded, and NULL is how this schema says unknown.
+    //  - `equiv_cost_usd` and `engine_cost_usd` stay NULL. Both are RAW
+    //    ENGINE INPUTS, and `cost_usd` is neither — it is already a resolved
+    //    figure. Leaving them null also keeps `selectRowCostUsd` (which today
+    //    reads exactly those two) returning 0 for these rows, so copying
+    //    history cannot move a figure the dashboard shows before S2c2 moves
+    //    its readers deliberately.
+    //  - `account_key` and `billing_type` are `'unknown'`: which account ran a
+    //    past dispatched turn cannot be learned after the fact (owner ruling,
+    //    2026-09-20 — such rows still count in totals).
+    //  - `parent_routing_id` takes `from_routing_id`, the column that means
+    //    the same thing. `SessionManager.rekey()` already renames both.
+    //
+    // The vendor and the model come from `target_model` the way the dispatcher
+    // parses it (`engineMeta(engine).decodeModelValue`): Claude and Codex
+    // encode the bare model id under a fixed vendor; opencode and pi encode
+    // `<vendor>/<model>` and split on the FIRST slash, falling back to the
+    // engine's default vendor when there is none.
+    //
+    // `INSERT OR IGNORE` + the `message_id` UNIQUE make a second pass a no-op.
+    version: 19,
+    up(db) {
+      // Every arm is keyed on the ENGINE first, mirroring `dispatchModelRef`:
+      // only opencode and pi encode a vendor in the model string at all, so an
+      // engine this build does not know is `unknown` whether or not its model
+      // happens to contain a slash.
+      const vendorSql = `CASE
+        WHEN d.target_engine = 'claude' THEN 'anthropic'
+        WHEN d.target_engine = 'codex' THEN 'openai'
+        WHEN d.target_engine IN ('opencode', 'pi') AND instr(d.target_model, '/') > 0
+          THEN substr(d.target_model, 1, instr(d.target_model, '/') - 1)
+        WHEN d.target_engine = 'opencode' THEN 'opencode'
+        WHEN d.target_engine = 'pi' THEN 'openai-codex'
+        ELSE 'unknown'
+      END`
+      const modelSql = `CASE
+        WHEN d.target_engine IN ('opencode', 'pi') AND instr(d.target_model, '/') > 0
+          THEN substr(d.target_model, instr(d.target_model, '/') + 1)
+        ELSE d.target_model
+      END`
+      db.exec(`
+        INSERT OR IGNORE INTO usage_event (
+          id, ts, engine_id, vendor_id, account_id, account_uuid, model_id,
+          input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+          cache_read_tokens, equiv_cost_usd, engine_cost_usd,
+          session_id, message_id, source,
+          account_key, account_label, billing_type, origin, parent_routing_id,
+          api_cost_usd, billed_cost_usd
+        )
+        SELECT
+          'dispatched:' || d.id,
+          d.ts,
+          d.target_engine,
+          ${vendorSql},
+          NULL,
+          NULL,
+          ${modelSql},
+          0, 0, 0, 0, 0,
+          NULL,
+          NULL,
+          d.target_session_id,
+          'dispatched:' || d.id,
+          'backfill',
+          'unknown',
+          NULL,
+          'unknown',
+          'dispatch',
+          d.from_routing_id,
+          d.cost_usd,
+          NULL
+        FROM dispatched_usage d;
+      `)
+    }
+  },
+  {
+    // v20 — ADR-071 §1: the ledger is the only STORE, and `usage_bucket`
+    // replaces `daily_usage`.
+    //
+    // Three acts, in this order, because each needs the tables the next one
+    // removes:
+    //
+    //  1. DELETE the reconciler's duplicates of dispatched opencode turns.
+    //  2. CREATE `usage_bucket` and seed it from `daily_usage`.
+    //  3. DROP `daily_usage` and `dispatched_usage`.
+    //
+    // 1. THE DUPLICATES. Until S2c the opencode reconciler imported the
+    // throwaway sessions the DISPATCHER creates as if they were the user's
+    // own, so every dispatched opencode turn older than that is in the ledger
+    // twice: once as an `origin 'session'` row under opencode's own message
+    // id, and once as v19's `dispatched:<id>` copy of the same turn (the two
+    // even share a `session_id`). The old dashboard double counted them too —
+    // once in the per-engine total, once in the Delegated section — and this
+    // slice's readers, which count `dispatch` rows in the same totals, would
+    // keep doing it. The `dispatched:` copy is the one kept: it carries
+    // `parent_routing_id` (which session delegated the work) and the
+    // dispatcher's own resolved cost; the reconciler's copy has neither.
+    //
+    // 2. THE BUCKETS. Hourly and in UTC so a reader in any timezone can group
+    // them into local days and ADR-072's hub can hold the same table. `rev` is
+    // the hub's pull cursor: every write stamps the rows it replaces with one
+    // fresh, monotonically increasing number (see `nextUsageBucketRev`).
+    // `unknown_api_cost_count` and `unknown_billed_cost_count` are how a sum
+    // says what is MISSING from it rather than absorbing an unknown as zero
+    // (ADR-030).
+    //
+    // `unbilled_api_cost_usd` is what makes an hour's display cost equal the
+    // sum of its rows' display costs. The per-row rule under `apiKey` and
+    // `unknown` is `billed ?? api`, so an hour mixing turns that reported a
+    // charge with turns that did not cannot be resolved from two sums alone:
+    // `billed_cost_usd` leaves the unbilled turns out and `api_cost_usd`
+    // double counts the billed ones. This column carries exactly the `api`
+    // half of that `??` — the API-equivalent of the rows with no known bill —
+    // so `billed_cost_usd + unbilled_api_cost_usd` IS Σ(billed ?? api).
+    //
+    // Each `daily_usage` row becomes ONE bucket at 12:00 UTC of its date. The
+    // old table recorded no account, no billing type and no origin, so those
+    // are `unknown`/`unknown`/`session`, and its one cost is an API-equivalent
+    // (`selectRowCostUsd`'s figure): `billed_cost_usd` is 0 with every request
+    // counted as an unknown bill — never a claimed zero — and the whole figure
+    // is `unbilled_api_cost_usd`, since not one of the day's bills is known.
+    // `rev` 1 is the first revision — nothing has pulled these yet, and the
+    // counter starts at 2.
+    //
+    // MIDDAY IS NOT ALWAYS THE RIGHT LOCAL DAY. 12:00 UTC falls inside the
+    // local day the row was bucketed by from UTC-12 to UTC+12, and ADR-071 §1
+    // chose it for that. At UTC+13/+14 (Chatham, Kiritimati, Samoa in summer)
+    // it lands in the NEXT local day, so a migrated day shows up shifted by
+    // one there, and a day the rollup rebuilds retires its neighbour's seed
+    // rather than its own. Accepted: it affects migrated days only, the shift
+    // is one day, and the alternative — a per-timezone seed instant — would
+    // bake THIS machine's zone into a table ADR-072 shares between machines.
+    //
+    // A `date` SQLite cannot parse yields a NULL instant; such a row is
+    // skipped rather than allowed to fail the whole migration, since its day
+    // is unrecoverable either way.
+    //
+    // The two `usage_event` indexes come with the READERS this slice moves
+    // here: the Delegated section scans by `origin`, and the per-session
+    // dispatched-cost breakdown — which runs on every session construction —
+    // looks a routing id up. `dispatched_usage` had an index for each; the
+    // ledger needs the same two or both reads become full scans of a table
+    // three orders of magnitude bigger.
+    version: 20,
+    up(db) {
+      db.exec(`
+        DELETE FROM usage_event
+        WHERE origin = 'session'
+          AND engine_id = 'opencode'
+          AND session_id IN (
+            SELECT DISTINCT target_session_id FROM dispatched_usage
+            WHERE target_engine = 'opencode' AND target_session_id IS NOT NULL
+          );
+
+        CREATE TABLE IF NOT EXISTS usage_bucket (
+          hour_utc                  INTEGER NOT NULL,
+          account_key               TEXT NOT NULL,
+          billing_type              TEXT NOT NULL,
+          engine_id                 TEXT NOT NULL,
+          vendor_id                 TEXT NOT NULL,
+          model_id                  TEXT NOT NULL,
+          origin                    TEXT NOT NULL,
+          input_tokens              INTEGER NOT NULL DEFAULT 0,
+          output_tokens             INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens        INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens     INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens         INTEGER NOT NULL DEFAULT 0,
+          api_cost_usd              REAL NOT NULL DEFAULT 0,
+          billed_cost_usd           REAL NOT NULL DEFAULT 0,
+          unbilled_api_cost_usd     REAL NOT NULL DEFAULT 0,
+          unknown_api_cost_count    INTEGER NOT NULL DEFAULT 0,
+          unknown_billed_cost_count INTEGER NOT NULL DEFAULT 0,
+          request_count             INTEGER NOT NULL DEFAULT 0,
+          source                    TEXT NOT NULL DEFAULT 'rollup',
+          rev                       INTEGER NOT NULL,
+          PRIMARY KEY (hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_bucket_rev ON usage_bucket(rev);
+        CREATE INDEX IF NOT EXISTS idx_usage_bucket_hour ON usage_bucket(hour_utc);
+
+        CREATE TABLE IF NOT EXISTS usage_bucket_rev (
+          id       INTEGER PRIMARY KEY CHECK (id = 1),
+          next_rev INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO usage_bucket_rev (id, next_rev) VALUES (1, 2);
+
+        CREATE INDEX IF NOT EXISTS idx_usage_event_origin_ts
+          ON usage_event(origin, ts);
+        CREATE INDEX IF NOT EXISTS idx_usage_event_parent_routing
+          ON usage_event(parent_routing_id);
+
+        INSERT INTO usage_bucket (
+          hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+          input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+          cache_read_tokens, api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+          unknown_api_cost_count, unknown_billed_cost_count,
+          request_count, source, rev
+        )
+        SELECT
+          CAST(strftime('%s', d.date || ' 12:00:00') AS INTEGER) * 1000,
+          'unknown', 'unknown',
+          d.engine_id, d.vendor_id, d.model_id, 'session',
+          d.input_tokens, d.output_tokens, d.cache_write_tokens, 0, d.cache_read_tokens,
+          d.cost_usd, 0, d.cost_usd,
+          0, d.request_count,
+          d.request_count, 'seed', 1
+        FROM daily_usage d
+        WHERE strftime('%s', d.date || ' 12:00:00') IS NOT NULL;
+
+        DROP TABLE daily_usage;
+        DROP TABLE dispatched_usage;
+      `)
+    }
+  },
+  {
+    // v21 — ADR-071 §6: one limits provider per vendor, and the readings are kept.
+    //
+    // THE ACCOUNT'S IDENTITY. `~/.claude.json` describes the ACTIVE account and
+    // nothing else, so an account the limits provider only holds credentials
+    // for has nothing to key its reading by. The four columns are that identity,
+    // learned while the account IS active (`UsageFetcher.trackActiveAccount`)
+    // and kept for when it is not. They are nullable on purpose: an account that
+    // has not been active since this shipped has never been observed, and a
+    // guess would mint an account key that names the wrong subscription.
+    //
+    // THE READINGS. `usage_window_sample` stops being the active Claude
+    // account's 5-hour series and becomes every account's series for every
+    // window kind, so it needs both halves of that identity. Existing rows are
+    // exactly what the column defaults say — the active account's 5-hour
+    // samples — except for the account half, which SQL cannot recover: the key
+    // lives in the account LOG (`account-log.jsonl`, resolved by
+    // `claudeAccountAttribution` against each row's timestamp), not in any
+    // table. They stay at `unknown` and stay usable, because the WLS projection
+    // reads them by `account_uuid` and that column is untouched.
+    //
+    // The index is the `refresh: false` read: newest sample per window kind for
+    // one account key, which is what an INACTIVE account's limits are answered
+    // from when no token may be spent.
+    version: 21,
+    up(db) {
+      db.exec(`
+        ALTER TABLE account ADD COLUMN account_uuid TEXT;
+        ALTER TABLE account ADD COLUMN organization_uuid TEXT;
+        ALTER TABLE account ADD COLUMN organization_name TEXT;
+        ALTER TABLE account ADD COLUMN billing_type TEXT;
+
+        ALTER TABLE usage_window_sample ADD COLUMN account_key TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_window_sample ADD COLUMN window_kind TEXT NOT NULL DEFAULT '5h';
+
+        CREATE INDEX IF NOT EXISTS idx_window_sample_key_kind_ts
+          ON usage_window_sample(account_key, window_kind, ts);
+      `)
+    }
+  },
+  {
+    // v22 — ADR-071 §7: the window-value ledger.
+    //
+    // One row per `(account_key, window_kind, canonical_end)`: the highest
+    // utilization the account ever reported for that window, beside what the
+    // ledger saw the account spend INSIDE it. Dividing the two is how the
+    // dashboard answers what a subscription is worth, and the ADR states the
+    // bias up front — the percent is the account's GLOBAL utilization while the
+    // dollars are only what this machine saw, so usage on another machine or in
+    // claude.ai pushes the percent up without adding dollars and the implied
+    // value reads low.
+    //
+    // NOT BUILT ON `usage_bucket`. The buckets are hourly; a canonical window
+    // end is not hour-aligned (ends at :40 past the hour are ordinary — see
+    // `usage-windows.ts`), so the bucket containing a boundary straddles it and
+    // cannot be split. The numerator sums `usage_event` directly, which v18's
+    // `(account_key, ts)` index serves.
+    //
+    // THE SEED. Every window the persisted samples already name gets a row with
+    // its peak, OPEN and with zero sums: the first recompute fills the sums, and
+    // closes only the windows whose end is more than `WINDOW_CLOSE_GRACE_MS`
+    // past — turns arrive with historical timestamps. `unknown` is excluded — it is the
+    // shared bucket every pre-v21 sample landed in, so a peak taken over it
+    // would be the maximum across all accounts at once, and its ledger sum
+    // would be everything nothing could attribute.
+    //
+    // `window_start` is restated as SQL here because a migration cannot call
+    // into TypeScript. `windowDurationMs` in `usage-window-ledger.ts` is the one
+    // statement of the rule, and every seeded row's start is rewritten from it
+    // by the first recompute, since seeded rows are open.
+    version: 22,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_window (
+          account_key        TEXT    NOT NULL,
+          window_kind        TEXT    NOT NULL,
+          canonical_end      INTEGER NOT NULL,
+          window_start       INTEGER NOT NULL,
+          peak_percent       REAL    NOT NULL DEFAULT 0,
+          api_cost_usd       REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd    REAL    NOT NULL DEFAULT 0,
+          unknown_cost_count INTEGER NOT NULL DEFAULT 0,
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          sample_count       INTEGER NOT NULL DEFAULT 0,
+          closed             INTEGER NOT NULL DEFAULT 0,
+          updated_at         INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_key, window_kind, canonical_end)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_usage_window_open
+          ON usage_window(closed, canonical_end);
+        CREATE INDEX IF NOT EXISTS idx_usage_window_end
+          ON usage_window(canonical_end);
+
+        INSERT OR IGNORE INTO usage_window (
+          account_key, window_kind, canonical_end, window_start,
+          peak_percent, sample_count, closed, updated_at
+        )
+        SELECT
+          account_key,
+          window_kind,
+          canonical_end,
+          canonical_end - CASE WHEN window_kind = '5h' THEN 18000000 ELSE 604800000 END,
+          MAX(used_percent),
+          COUNT(*),
+          0,
+          0
+        FROM usage_window_sample
+        WHERE account_key <> 'unknown'
+        GROUP BY account_key, window_kind, canonical_end;
+      `)
+    }
+  },
+  {
+    // v23 — S2e: the four identity columns were read off the WRONG file.
+    //
+    // `UsageFetcher` learned an account's uuid / organization / billing type
+    // from `~/.claude.json` (v21) and stamped them onto whichever dir was
+    // active. But that file is SHARED — one copy for every account dir and for
+    // the terminal `claude` — and cli.js rewrites its `oauthAccount` only when
+    // it refetches the profile, so the block names whichever cli.js process
+    // refetched last. On a machine with two accounts the active dir routinely
+    // carries the other account's identity, and the other dir carries NULLs.
+    //
+    // So none of the four is trustworthy on any row, and there is no way to
+    // tell the right ones from the wrong ones. They are cleared. The ACTIVE dir
+    // is re-stamped at the next boot from its OWN credential (through
+    // `/api/oauth/profile`), and an inactive dir on the next refresh the user
+    // asks for — never on a timer, because reading one spends a refresh grant
+    // (ADR-071 §6). `identity_checked_at` is when that last succeeded, so a
+    // credential file newer than it means a re-login and a re-read.
+    //
+    // `email`, `subscription_type` and `organization` are LEFT ALONE: those
+    // come from cli.js's own login control response for that dir
+    // (`AccountManager.noteLogin`), which was always per-account and correct.
+    //
+    // THE MARKER. Every Claude ledger row written since the stale attribution
+    // began is keyed to the wrong subscription, and no row carries a dir id to
+    // repair by — only a time-bounded re-key against the account log is
+    // possible (`claude-account-identity.ts`). It runs once, at the first boot
+    // that can resolve the active dir, and `meta` is where "once" is recorded:
+    // a two-column key/value table, because a one-off marker does not deserve a
+    // schema of its own and the next one will not either.
+    version: 23,
+    up(db) {
+      db.exec(`
+        ALTER TABLE account ADD COLUMN identity_checked_at INTEGER;
+
+        UPDATE account SET
+          account_uuid      = NULL,
+          organization_uuid = NULL,
+          organization_name = NULL,
+          billing_type      = NULL;
+
+        CREATE TABLE IF NOT EXISTS meta (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO meta (key, value)
+          VALUES ('claude_identity_repair', 'pending');
+      `)
+    }
+  },
+  {
+    // v24 — ADR-071 §2: the context window a cold Codex line cannot recompute.
+    //
+    // Every other engine derives its context meter from something a history
+    // read can see again: opencode and pi from the last stored turn's prompt
+    // against a catalog window. Codex publishes neither half. The window size
+    // arrives ONLY on `thread/tokenUsage/updated` (`modelContextWindow`) — the
+    // model catalog carries none and `thread/read` returns no usage at all —
+    // and the consumption is that frame's `last.totalTokens`, which is the
+    // native context after compaction rather than a sum of the turns.
+    //
+    // So the two are RECORDED as they stream past, on the one row that already
+    // exists per session. Nullable: a session that predates this, or one that
+    // has never metered, simply has no reading, and `size 0` is how the status
+    // line already spells an unknown window.
+    version: 24,
+    up(db) {
+      db.exec(`
+        ALTER TABLE session_meta ADD COLUMN context_used INTEGER;
+        ALTER TABLE session_meta ADD COLUMN context_window INTEGER;
+      `)
+    }
+  },
+  {
+    // v25 — S3c: a window's LENGTH is data, not an inference from its kind.
+    //
+    // `usage-window-ledger.ts` derived a window's span from its kind (`5h` five
+    // hours, everything else a week) because Claude's kinds are named by the
+    // API and their lengths come with the names. ChatGPT's do not: the backend
+    // states `limit_window_seconds`, Codex carries it as `window_minutes`, and
+    // the app-server wire as `windowDurationMins`. The column keeps it, so the
+    // numerator is summed over the window the vendor actually described.
+    // Nullable: a Claude row states no duration and never will, and every row
+    // written before this has none.
+    //
+    // THE CHATGPT ROWS ARE DROPPED. Until now the kind came from the window's
+    // POSITION in the snapshot — `primary` was filed as `5h` and `secondary` as
+    // `7d` — so a plan whose only limit is weekly (the owner's, 2026-09-21) has
+    // its seven-day window stored as a five-hour one, summed over five hours of
+    // spend and drawn with a five-hour label. There is no way to re-kind those
+    // rows from SQL: the duration they were missing is exactly what would be
+    // needed. They are derived, local, a day old (ChatGPT samples exist only
+    // since S3a, 2026-09-21) and wrong, so they go and re-seed from the next
+    // reading. `usage_event` and the buckets are NOT touched — they are the
+    // record of what was spent, and their attribution was never in question.
+    //
+    // BOTH KEY SHAPES, because a versioned migration cannot be widened later.
+    // `persistChatgptSamples` files a reading under the vault's resolved
+    // identity and drops only `unknown`, so a stored credential with no
+    // workspace id resolves through `codexNativeIdentity()` and its samples are
+    // keyed `codex:openai:native` — mis-kinded exactly like the `chatgpt:` ones,
+    // and invisible to a `LIKE 'chatgpt:%'` sweep. No other vendor writes that
+    // key, so nothing else is caught by it.
+    version: 25,
+    up(db) {
+      db.exec(`
+        ALTER TABLE usage_window_sample ADD COLUMN window_minutes INTEGER;
+        ALTER TABLE usage_window ADD COLUMN window_minutes INTEGER;
+
+        DELETE FROM usage_window_sample
+          WHERE account_key LIKE 'chatgpt:%' OR account_key = 'codex:openai:native';
+        DELETE FROM usage_window
+          WHERE account_key LIKE 'chatgpt:%' OR account_key = 'codex:openai:native';
+      `)
+    }
+  },
+  {
+    // v26 — ADR-072: the usage hub's client state, and the other machines' rows.
+    //
+    // FOUR tables, and the split is the point.
+    //
+    // `usage_hub_config` holds the hub's URL, this device's name, and the Access
+    // service token's id AND SECRET. The secret is here rather than in
+    // `settings.json` or the vault for the reason `remote_config` gives two
+    // hundred lines above: `config:save-settings` is reachable from a remote
+    // client, so anything a settings file carries is remotely writable, and the
+    // vault is plaintext JSON at mode 0600 (ADR-072 §6, amended). Single row,
+    // `id = 1` by CHECK, like `remote_config` — there is one hub per machine.
+    //
+    // `cursor_rowid` is the high-water mark over `usage_event`'s hidden rowid.
+    // Not `id` (a random uuid) and not `ts` (the reconciler backfills, so it goes
+    // BACKWARDS): rowid is the only column that rises with every insert, and
+    // pruning deletes the OLDEST rows so the maximum is never reused.
+    //
+    // The `remote_*` tables are the OTHER machines' rows, pulled and cached so
+    // the combined view works offline. `remote_usage_bucket` and
+    // `remote_usage_window` each mirror their local twin plus a `device_id`,
+    // which joins the primary key — two machines legitimately hold the same
+    // hour, account, model and origin, and merging them here would be the double
+    // counting ADR-072 §2 exists to prevent. `remote_limits` is the exception: it
+    // keeps the LATEST reading per account key and window kind across all
+    // devices, so `device_id` is a column and not a key — it records which
+    // machine saw it, and a newer reading from another machine replaces it.
+    // `remote_device` is the machine list as `GET /v1/devices` answers it, which
+    // is the only place a peer's NAME can come from (the hub knows it; a bucket
+    // does not).
+    //
+    // No foreign keys to the local tables: a remote row is about an account this
+    // machine may never have held credentials for.
+    version: 26,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_hub_config (
+          id            INTEGER PRIMARY KEY CHECK (id = 1),
+          url           TEXT    NOT NULL DEFAULT '',
+          device_name   TEXT    NOT NULL DEFAULT '',
+          client_id     TEXT    NOT NULL DEFAULT '',
+          client_secret TEXT,
+          enabled       INTEGER NOT NULL DEFAULT 0,
+          cursor_rowid  INTEGER NOT NULL DEFAULT 0,
+          remote_rev    INTEGER NOT NULL DEFAULT 0,
+          remote_window_rev INTEGER NOT NULL DEFAULT 0,
+          remote_epoch  INTEGER,
+          last_push_at  INTEGER,
+          last_pull_at  INTEGER,
+          last_error    TEXT,
+          updated_at    INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_usage_bucket (
+          device_id                 TEXT    NOT NULL,
+          hour_utc                  INTEGER NOT NULL,
+          account_key               TEXT    NOT NULL,
+          billing_type              TEXT    NOT NULL,
+          engine_id                 TEXT    NOT NULL,
+          vendor_id                 TEXT    NOT NULL,
+          model_id                  TEXT    NOT NULL,
+          origin                    TEXT    NOT NULL,
+          input_tokens              INTEGER NOT NULL DEFAULT 0,
+          output_tokens             INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens        INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens     INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens         INTEGER NOT NULL DEFAULT 0,
+          api_cost_usd              REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd           REAL    NOT NULL DEFAULT 0,
+          unbilled_api_cost_usd     REAL    NOT NULL DEFAULT 0,
+          unknown_api_cost_count    INTEGER NOT NULL DEFAULT 0,
+          unknown_billed_cost_count INTEGER NOT NULL DEFAULT 0,
+          request_count             INTEGER NOT NULL DEFAULT 0,
+          source                    TEXT    NOT NULL DEFAULT 'rollup',
+          rev                       INTEGER NOT NULL,
+          PRIMARY KEY (device_id, hour_utc, account_key, billing_type,
+                       engine_id, vendor_id, model_id, origin)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_bucket_hour
+          ON remote_usage_bucket(hour_utc);
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_bucket_device
+          ON remote_usage_bucket(device_id);
+
+        CREATE TABLE IF NOT EXISTS remote_usage_window (
+          device_id          TEXT    NOT NULL,
+          account_key        TEXT    NOT NULL,
+          window_kind        TEXT    NOT NULL,
+          canonical_end      INTEGER NOT NULL,
+          window_start       INTEGER NOT NULL,
+          window_minutes     INTEGER,
+          peak_percent       REAL    NOT NULL DEFAULT 0,
+          api_cost_usd       REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd    REAL    NOT NULL DEFAULT 0,
+          unknown_cost_count INTEGER NOT NULL DEFAULT 0,
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          sample_count       INTEGER NOT NULL DEFAULT 0,
+          closed             INTEGER NOT NULL DEFAULT 0,
+          updated_at         INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (device_id, account_key, window_kind, canonical_end)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_window_end
+          ON remote_usage_window(canonical_end);
+
+        CREATE TABLE IF NOT EXISTS remote_limits (
+          account_key    TEXT    NOT NULL,
+          window_kind    TEXT    NOT NULL,
+          device_id      TEXT    NOT NULL,
+          label_masked   TEXT,
+          vendor_id      TEXT    NOT NULL,
+          plan           TEXT,
+          window_minutes INTEGER,
+          used_percent   REAL    NOT NULL DEFAULT 0,
+          resets_at      TEXT,
+          observed_at    INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_key, window_kind)
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_device (
+          device_id    TEXT PRIMARY KEY,
+          device_name  TEXT    NOT NULL DEFAULT '',
+          os           TEXT    NOT NULL DEFAULT 'unknown',
+          app_version  TEXT    NOT NULL DEFAULT 'unknown',
+          last_push_at INTEGER NOT NULL DEFAULT 0,
+          retired      INTEGER NOT NULL DEFAULT 0
+        );
+      `)
+    }
+  },
+  {
+    // v27 — S6: the hub's account names, and one re-evaluation of the ledger.
+    //
+    // `remote_account` is `GET /v1/accounts` cached, the fifth of the
+    // `remote_*` tables and the only one that is not about a device: it is the
+    // NAME behind an account key, which no bucket carries and which the limit
+    // relay can only supply for an account that has a rate-limit meter. An API
+    // key has none, so without this a key only another machine spends on could
+    // be shown as nothing but its own last four characters.
+    //
+    // The cursor reset is ADR-072 §2's new rule applied to the history already
+    // on disk (owner, 2026-09-22): attribution decides what is pushed, not the
+    // instant sync was enabled, so the whole local ledger is re-read once under
+    // that rule. It costs one pass over rows the hub already holds — ingest
+    // deduplicates on `message_id` and counts them as duplicates — and on a
+    // machine with ~60,000 rows, most of them `unknown`, the few thousand that
+    // are attributed drain in two or three passes of 50 batches each.
+    version: 27,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_account (
+          account_key  TEXT PRIMARY KEY,
+          vendor_id    TEXT NOT NULL,
+          label_masked TEXT,
+          last_seen_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        UPDATE usage_hub_config SET cursor_rowid = 0;
+      `)
+    }
   }
 ]
 
@@ -746,12 +1552,23 @@ interface SessionMetaRow {
   engine_id: string
   vendor_id: string | null
   model_id: string | null
+  context_used: number | null
+  context_window: number | null
   updated_at: number
 }
 
 function rowToMeta(row: SessionMetaRow): SessionMeta {
   const engineId: EngineId =
-    row.engine_id === 'opencode' || row.engine_id === 'pi' ? row.engine_id : 'claude'
+    row.engine_id === 'opencode' || row.engine_id === 'pi' || row.engine_id === 'codex'
+      ? row.engine_id
+      : 'claude'
+  // Spread only when read: this map is also the renderer's `sessionEngines`
+  // payload, and a session that never metered should not carry two null keys
+  // into it (nor round-trip them back through `saveSessionConfig`).
+  const context = {
+    ...(row.context_used != null ? { contextUsed: row.context_used } : {}),
+    ...(row.context_window != null ? { contextWindow: row.context_window } : {})
+  }
   if (row.model_id != null) {
     return {
       engineId,
@@ -761,10 +1578,11 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
         // have no persisted vendor, so fall back to the engine's historical default.
         vendorId: row.vendor_id ?? engineMeta(engineId).defaultVendorId,
         modelId: row.model_id
-      }
+      },
+      ...context
     }
   }
-  return { engineId }
+  return { engineId, ...context }
 }
 
 // ---------------------------------------------------------------------------
@@ -782,24 +1600,193 @@ export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   return row ? rowToMeta(row) : undefined
 }
 
+/** Explicit accepted native choices, independent of client-projected session_meta deletion. */
+export function getCodexSessionOverrides(sessionId: string, db: Db = getDb()): unknown {
+  const row = db
+    .prepare('SELECT settings_json FROM codex_session_overrides WHERE session_id = ?')
+    .get(sessionId) as { settings_json: string } | undefined
+  if (!row) return undefined
+  try {
+    return JSON.parse(row.settings_json)
+  } catch {
+    throw new Error('Saved Codex session overrides are invalid')
+  }
+}
+
+export function setCodexSessionOverrides(
+  sessionId: string,
+  settings: import('../../shared/codex-types').CodexSettings,
+  db: Db = getDb()
+): void {
+  const parsed = parseCodexSettings(settings)
+  db.prepare(
+    `INSERT INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
+  ).run(sessionId, JSON.stringify(parsed), Date.now())
+}
+
+export function ensureCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)'
+  ).run(sessionId, '{}', Date.now())
+}
+
+export function hasCodexSessionOverrides(sessionId: string, db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM codex_session_overrides WHERE session_id = ?').get(sessionId) !==
+    undefined
+  )
+}
+
+export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_session_overrides WHERE session_id = ?').run(sessionId)
+}
+
+// ---------------------------------------------------------------------------
+// Codex lineage cache (v16 table, generalised in v17) — see that migration's
+// comment for the why.
+// ---------------------------------------------------------------------------
+
+/** One registered branch: the forked thread and the thread it was cut from. */
+export interface CodexFork {
+  threadId: string
+  forkedFromId: string | null
+}
+
+/**
+ * One cached thread: its lineage, and the native `updatedAt` that lineage was
+ * read at.
+ *
+ * `forkedFromId === null` is a root, a thread whose source cannot be learned,
+ * or an id the binary has twice refused — see the v17 migration. `verifiedAt`
+ * is what makes the launch scan incremental: a listed thread whose `updatedAt`
+ * still equals it needs no `thread/read` at all. `null` means the row has never
+ * been verified (a v16 row, or a confirmed-gone id).
+ */
+export interface CodexLineage extends CodexFork {
+  verifiedAt: number | null
+}
+
+/**
+ * Record a `thread/fork` result. First registration wins — a later resume of
+ * the same branch must not rewrite its lineage or duplicate the row.
+ *
+ * The row it writes is UNVERIFIED (`verified_at` null): ClaudeUI learned this
+ * lineage from the fork call, not from a `thread/read`, so the next scan reads
+ * the thread once and fills in the `updatedAt` that stops it reading it again.
+ */
+export function registerCodexFork(
+  threadId: string,
+  forkedFromId: string | null,
+  db: Db = getDb()
+): void {
+  if (!threadId) return
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+  ).run(threadId, forkedFromId, Date.now())
+}
+
+/**
+ * Record what a `thread/read` said about one thread — the LINEAGE SCAN's only
+ * writer.
+ *
+ * Unlike {@link registerCodexFork} this REPLACES what the row held: the read is
+ * the authority (a fork registered at mint time carries no `verifiedAt`, and a
+ * thread the binary has twice refused becomes `(null, null)` — a tombstone that
+ * is not a branch, is not listed, and is never read again unless the native
+ * listing carries it once more).
+ */
+export function recordCodexLineage(
+  threadId: string,
+  forkedFromId: string | null,
+  verifiedAt: number | null,
+  db: Db = getDb()
+): void {
+  if (!threadId) return
+  db.prepare(
+    `INSERT INTO codex_forks (thread_id, forked_from_id, created_at, verified_at, lineage_checked_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(thread_id) DO UPDATE SET
+       forked_from_id     = excluded.forked_from_id,
+       verified_at        = excluded.verified_at,
+       lineage_checked_at = excluded.lineage_checked_at`
+  ).run(threadId, forkedFromId, Date.now(), verifiedAt, Date.now())
+}
+
+/**
+ * Every cached BRANCH, oldest first: the rows the sidebar's unlisted-fork read
+ * and every delete plan are built from.
+ *
+ * Rows with no lineage are excluded here rather than at the call sites, because
+ * "not a branch of anything" is the one thing a root, an unknowable source and
+ * a tombstone have in common, and no reader of this function wants any of them.
+ */
+export function listCodexForks(db: Db = getDb()): CodexFork[] {
+  return (
+    db
+      .prepare(
+        `SELECT thread_id, forked_from_id FROM codex_forks
+         WHERE forked_from_id IS NOT NULL AND forked_from_id <> thread_id
+         ORDER BY created_at, thread_id`
+      )
+      .all() as Array<{ thread_id: string; forked_from_id: string | null }>
+  ).map((row) => ({ threadId: row.thread_id, forkedFromId: row.forked_from_id }))
+}
+
+/** Every cached thread, branch or not — the scan's "what do I already know?". */
+export function listCodexLineage(db: Db = getDb()): CodexLineage[] {
+  return (
+    db
+      .prepare(
+        'SELECT thread_id, forked_from_id, verified_at FROM codex_forks ORDER BY created_at, thread_id'
+      )
+      .all() as Array<{
+      thread_id: string
+      forked_from_id: string | null
+      verified_at: number | null
+    }>
+  ).map((row) => ({
+    threadId: row.thread_id,
+    forkedFromId: row.forked_from_id,
+    verifiedAt: row.verified_at
+  }))
+}
+
+/** Forget one thread entirely — for a thread ClaudeUI has just deleted. */
+export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
+}
+
 /**
  * Insert or replace session metadata for a session ID.
+ *
+ * The engine and the model are REPLACED — the caller that writes them always
+ * knows the whole answer. The two context columns (v24) are MERGED instead:
+ * they are written by the metering path and by nothing else, so a model write
+ * from the sidebar's adoption pass or from the renderer's config round-trip
+ * must leave the session's last context reading where it is. The cost of that
+ * is that a reading cannot be cleared back to NULL, which nothing needs.
  */
 export function setSessionMeta(sessionId: string, meta: SessionMeta): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO session_meta (session_id, engine_id, vendor_id, model_id, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO session_meta
+       (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
-       engine_id  = excluded.engine_id,
-       vendor_id  = excluded.vendor_id,
-       model_id   = excluded.model_id,
-       updated_at = excluded.updated_at`
+       engine_id      = excluded.engine_id,
+       vendor_id      = excluded.vendor_id,
+       model_id       = excluded.model_id,
+       context_used   = COALESCE(excluded.context_used, session_meta.context_used),
+       context_window = COALESCE(excluded.context_window, session_meta.context_window),
+       updated_at     = excluded.updated_at`
   ).run(
     sessionId,
     meta.engineId,
     meta.model?.vendorId ?? null,
     meta.model?.modelId ?? null,
+    meta.contextUsed ?? null,
+    meta.contextWindow ?? null,
     Date.now()
   )
 }
@@ -837,14 +1824,28 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
 
   if (existing) {
     db.prepare(
-      `INSERT INTO session_meta (session_id, engine_id, vendor_id, model_id, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO session_meta
+         (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
-         engine_id  = excluded.engine_id,
-         vendor_id  = excluded.vendor_id,
-         model_id   = excluded.model_id,
-         updated_at = excluded.updated_at`
-    ).run(newId, existing.engine_id, existing.vendor_id, existing.model_id, Date.now())
+         engine_id      = excluded.engine_id,
+         vendor_id      = excluded.vendor_id,
+         model_id       = excluded.model_id,
+         context_used   = COALESCE(excluded.context_used, session_meta.context_used),
+         context_window = COALESCE(excluded.context_window, session_meta.context_window),
+         updated_at     = excluded.updated_at`
+      // The rekey CARRIES the context reading: it is the same session under a
+      // new id, and dropping it would blank the meter of a session that has
+      // already metered a turn.
+    ).run(
+      newId,
+      existing.engine_id,
+      existing.vendor_id,
+      existing.model_id,
+      existing.context_used,
+      existing.context_window,
+      Date.now()
+    )
     db.prepare('DELETE FROM session_meta WHERE session_id = ?').run(oldId)
   } else if (fallback) {
     setSessionMeta(newId, fallback)
@@ -860,7 +1861,7 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
 /**
  * Import session metadata from a legacy sessionEngines record (from sessions.json).
  * Only runs if the session_meta table is empty — ensures a one-time migration.
- * Codex/unknown engineIds are clamped to 'claude', matching the Phase-1 clamp.
+ * Recognized engine IDs are preserved. Unknown legacy IDs retain the existing clamp.
  *
  * Call this after the first DB open, before any reads.
  */
@@ -880,9 +1881,12 @@ export function importSessionEnginesOnce(
   )
 
   for (const [sessionId, entry] of entries) {
-    // Clamp unknown/codex engineIds to 'claude'
+    // Do not infer recovery of previously clamped rows from model names.
     const engineId: EngineId =
-      entry.engineId === 'claude' || entry.engineId === 'opencode' || entry.engineId === 'pi'
+      entry.engineId === 'claude' ||
+      entry.engineId === 'opencode' ||
+      entry.engineId === 'pi' ||
+      entry.engineId === 'codex'
         ? (entry.engineId as EngineId)
         : 'claude'
 
@@ -909,6 +1913,11 @@ interface AccountRow {
   subscription_type: string | null
   organization: string | null
   created_at: number
+  account_uuid: string | null
+  organization_uuid: string | null
+  organization_name: string | null
+  billing_type: string | null
+  identity_checked_at: number | null
 }
 
 function rowToAccountInfo(row: AccountRow): AccountInfo {
@@ -917,7 +1926,12 @@ function rowToAccountInfo(row: AccountRow): AccountInfo {
     email: row.email,
     subscriptionType: row.subscription_type,
     organization: row.organization,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    accountUuid: row.account_uuid,
+    organizationUuid: row.organization_uuid,
+    organizationName: row.organization_name,
+    billingType: (row.billing_type as BillingType | null) ?? null,
+    identityCheckedAt: row.identity_checked_at
   }
 }
 
@@ -926,6 +1940,20 @@ export function getAllAccounts(): AccountInfo[] {
   const db = getDb()
   const rows = db.prepare('SELECT * FROM account ORDER BY created_at ASC').all() as AccountRow[]
   return rows.map(rowToAccountInfo)
+}
+
+/**
+ * One account row by its local id, or null.
+ *
+ * A targeted read rather than a scan of {@link getAllAccounts}, because the
+ * usage poll asks for the ACTIVE dir's row on every pass — it is where the
+ * login-captured `organization` display name lives, and the profile endpoint
+ * does not return one (S2e).
+ */
+export function getAccount(id: string): AccountInfo | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM account WHERE id = ?').get(id) as AccountRow | undefined
+  return row ? rowToAccountInfo(row) : null
 }
 
 /** Insert or replace account metadata. Does NOT touch credentials. */
@@ -939,6 +1967,72 @@ export function upsertAccount(info: AccountInfo): void {
        subscription_type = excluded.subscription_type,
        organization      = excluded.organization`
   ).run(info.id, info.email, info.subscriptionType, info.organization, info.createdAt)
+}
+
+/**
+ * Record what an account's credentials actually name (ADR-071 §6, S2e).
+ *
+ * The identity comes from a `/api/oauth/profile` read of THAT dir's own
+ * credential — never from the shared `~/.claude.json`, which names whichever
+ * cli.js process refetched last (migration v23 says what that cost). It is
+ * written while the account is active, and on demand for a stored one, so the
+ * limits provider can key a reading without making the account active.
+ *
+ * `identity_checked_at` is stamped with it: a credentials file newer than this
+ * instant means a re-login, which is the one thing that invalidates the four.
+ * A no-op when the id names no row: only a local multi-account dir has one.
+ */
+export function updateAccountIdentity(
+  id: string,
+  identity: {
+    accountUuid: string
+    organizationUuid?: string | undefined
+    organizationName?: string | undefined
+    billingType?: BillingType | undefined
+  },
+  checkedAt: number = Date.now()
+): void {
+  const db = getDb()
+  db.prepare(
+    `UPDATE account
+        SET account_uuid        = ?,
+            organization_uuid   = ?,
+            organization_name   = ?,
+            billing_type        = ?,
+            identity_checked_at = ?
+      WHERE id = ?`
+  ).run(
+    identity.accountUuid,
+    identity.organizationUuid ?? null,
+    identity.organizationName ?? null,
+    identity.billingType ?? null,
+    checkedAt,
+    id
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Key/value marker table (migration v23)
+// ---------------------------------------------------------------------------
+
+/** One durable marker, or null when it was never written. */
+export function getMeta(key: string): string | null {
+  const db = getDb()
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+    { value: string } | undefined
+  return row?.value ?? null
+}
+
+/** Write (or overwrite) one durable marker. */
+export function setMeta(key: string, value: string): void {
+  const db = getDb()
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value)
+}
+
+/** Forget one durable marker. Nothing in production does; tests and repairs may. */
+export function deleteMeta(key: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM meta WHERE key = ?').run(key)
 }
 
 /** Delete account metadata row. Credentials directory removal is handled by AccountManager. */
@@ -992,6 +2086,13 @@ interface UsageEventDbRow {
   session_id: string | null
   message_id: string
   source: string
+  account_key: string
+  account_label: string | null
+  billing_type: string
+  origin: string
+  parent_routing_id: string | null
+  api_cost_usd: number | null
+  billed_cost_usd: number | null
 }
 
 function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
@@ -1012,7 +2113,61 @@ function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
     engineCostUsd: row.engine_cost_usd,
     sessionId: row.session_id,
     messageId: row.message_id,
-    source: row.source as 'live' | 'backfill'
+    source: row.source as 'live' | 'backfill',
+    accountKey: row.account_key,
+    accountLabel: row.account_label,
+    // Both are stored strings, so a row written by a newer build (or hand-
+    // edited) can carry a value this build has no name for. cost-rule.ts's
+    // `default` branch is the conservative fallback for exactly that.
+    billingType: row.billing_type as BillingType,
+    origin: row.origin as UsageOrigin,
+    parentRoutingId: row.parent_routing_id,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The row-written notifier (ADR-072 §7)
+//
+// Until ADR-072 nothing fired after a ledger write, so the hub client had no way
+// to learn that a turn had landed short of polling the table. Module-level, like
+// `onSecurestorageEnvChange`: it is one fact about the STORE, every writer goes
+// through the two functions below, and a subscriber must outlive any single one
+// of them.
+//
+// It fires ONCE PER CALL that actually inserted a row, not once per row: the
+// subscriber debounces to a push a minute, so a batch of 300 backfilled turns
+// has nothing to gain from 300 notifications. A call whose every row was a
+// duplicate (`ON CONFLICT DO NOTHING`) fires nothing at all — there is no new
+// spend to push.
+// ---------------------------------------------------------------------------
+
+type UsageEventWrittenListener = () => void
+
+const usageEventWrittenListeners = new Set<UsageEventWrittenListener>()
+
+/** Be told when a ledger write actually inserted something. Returns the unsubscribe. */
+export function onUsageEventWritten(listener: UsageEventWrittenListener): () => void {
+  usageEventWrittenListeners.add(listener)
+  return () => {
+    usageEventWrittenListeners.delete(listener)
+  }
+}
+
+/** Drop every subscriber. Tests only — production keeps them for the process's life. */
+export function resetUsageEventWrittenListeners(): void {
+  usageEventWrittenListeners.clear()
+}
+
+function notifyUsageEventWritten(): void {
+  for (const listener of usageEventWrittenListeners) {
+    try {
+      listener()
+    } catch {
+      // A listener that throws must not fail the write it is only observing —
+      // the same rule `recordUsageEvent` already follows for the write itself.
+    }
   }
 }
 
@@ -1022,18 +2177,16 @@ const INSERT_USAGE_EVENT_SQL = `
     model_id, input_tokens, output_tokens,
     cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
     equiv_cost_usd, engine_cost_usd,
-    session_id, message_id, source
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    session_id, message_id, source,
+    account_key, account_label, billing_type, origin, parent_routing_id,
+    api_cost_usd, billed_cost_usd
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(message_id) DO NOTHING
 `
 
-/**
- * Insert a single usage event. Idempotent on message_id — duplicate inserts
- * (live turn + reconciler for the same turn) are silently dropped.
- */
-export function insertUsageEvent(event: UsageEventRow): void {
-  const db = getDb()
-  db.prepare(INSERT_USAGE_EVENT_SQL).run(
+/** The bound parameters for {@link INSERT_USAGE_EVENT_SQL}, in column order. */
+function usageEventParams(event: UsageEventInsert): unknown[] {
+  return [
     event.id,
     event.ts,
     event.engineId,
@@ -1050,49 +2203,51 @@ export function insertUsageEvent(event: UsageEventRow): void {
     event.engineCostUsd ?? null,
     event.sessionId ?? null,
     event.messageId,
-    event.source
-  )
+    event.source,
+    // The three NOT NULL v18 columns mirror their SQL defaults here rather
+    // than relying on them, so one statement covers every writer.
+    event.accountKey ?? UNKNOWN_ACCOUNT_KEY,
+    event.accountLabel ?? null,
+    event.billingType ?? 'unknown',
+    event.origin ?? 'session',
+    event.parentRoutingId ?? null,
+    event.apiCostUsd ?? null,
+    event.billedCostUsd ?? null
+  ]
+}
+
+/**
+ * Insert a single usage event. Idempotent on message_id — duplicate inserts
+ * (live turn + reconciler for the same turn) are silently dropped.
+ */
+export function insertUsageEvent(event: UsageEventInsert): void {
+  const db = getDb()
+  const inserted = db.prepare(INSERT_USAGE_EVENT_SQL).run(...usageEventParams(event)).changes
+  if (inserted > 0) notifyUsageEventWritten()
 }
 
 /**
  * Batch-insert usage events. Each event is inserted idempotently; the batch
  * runs in a single transaction for efficiency.
  */
-export function insertUsageEvents(events: UsageEventRow[]): void {
+export function insertUsageEvents(events: UsageEventInsert[]): void {
   if (events.length === 0) return
   const db = getDb()
   const stmt = db.prepare(INSERT_USAGE_EVENT_SQL)
-  const insertOne = (event: UsageEventRow): void => {
-    stmt.run(
-      event.id,
-      event.ts,
-      event.engineId,
-      event.vendorId,
-      event.accountId ?? null,
-      event.accountUuid ?? null,
-      event.modelId,
-      event.inputTokens,
-      event.outputTokens,
-      event.cacheWriteTokens,
-      event.cacheWrite1hTokens,
-      event.cacheReadTokens,
-      event.equivCostUsd ?? null,
-      event.engineCostUsd ?? null,
-      event.sessionId ?? null,
-      event.messageId,
-      event.source
-    )
-  }
   // Wrap in a manual BEGIN/COMMIT for bulk efficiency. This is the same pattern
   // the reconciler will use in Pass 2 (bulk JSONL backfill).
+  let inserted = 0
   db.prepare('BEGIN').run()
   try {
-    for (const event of events) insertOne(event)
+    for (const event of events) inserted += stmt.run(...usageEventParams(event)).changes
     db.prepare('COMMIT').run()
   } catch (err) {
     db.prepare('ROLLBACK').run()
     throw err
   }
+  // After the COMMIT, so a subscriber that reads the table straight away sees
+  // the rows it is being told about.
+  if (inserted > 0) notifyUsageEventWritten()
 }
 
 /** Retrieve a single usage event by message_id (used in tests). */
@@ -1108,6 +2263,11 @@ export function getUsageEventByMessageId(messageId: string): UsageEventRow | und
  * This is the source for the SQL-backed dashboard aggregation (Pass 2): the
  * block-grouping walk consumes a chronologically-sorted list, exactly like the
  * old JSONL scan did. Optionally filter by engineId.
+ *
+ * EVERY origin, dispatched turns included (ADR-071 §1): delegated work spends
+ * the same account and the same rate-limit window as a session's own turn, and
+ * the dashboard counts it. A caller that wants only one kind filters on
+ * `origin` itself — there is no second, narrower reader to pick by accident.
  */
 export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageEventRow[] {
   const db = getDb()
@@ -1118,6 +2278,142 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
     : (db
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
         .all(cutoffTs) as UsageEventDbRow[])
+  return rows.map(rowToUsageEvent)
+}
+
+// ---------------------------------------------------------------------------
+// The hub cursor's reader (ADR-072 §2)
+//
+// `rowid`, and nothing else, because the hub's high-water mark has to be
+// MONOTONIC: `id` is a random uuid and `ts` moves backwards every time the
+// reconciler backfills a turn from a transcript. The three functions below are
+// the only place in the app that names `usage_event`'s implicit rowid; every
+// other reader is `ts`-keyed and stays that way.
+// ---------------------------------------------------------------------------
+
+/** A ledger row with the cursor value that orders it. */
+export interface UsageEventCursorRow extends UsageEventRow {
+  /** SQLite's implicit rowid — the hub's high-water mark, never displayed. */
+  rowid: number
+}
+
+/**
+ * The next `limit` rows after `rowid`, in rowid order.
+ *
+ * `unknown` rows are RETURNED, not filtered, even though ADR-072 §2 forbids
+ * pushing them: the caller advances its cursor past whatever it read, and a row
+ * the query hid would be a rowid the cursor could never pass. The skip is the
+ * caller's, applied to the payload; the cursor moves either way.
+ */
+export function readUsageEventsAfterRowid(rowid: number, limit: number): UsageEventCursorRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT rowid AS rowid, * FROM usage_event WHERE rowid > ? ORDER BY rowid ASC LIMIT ?')
+    .all(rowid, limit) as Array<UsageEventDbRow & { rowid: number }>
+  return rows.map((row) => ({ ...rowToUsageEvent(row), rowid: row.rowid }))
+}
+
+/**
+ * The highest rowid in the ledger, or 0 when it is empty.
+ *
+ * Enabling sync USED to set the hub cursor to this (owner, 2026-09-21: start
+ * fresh); the 2026-09-22 ruling in ADR-072 §2 replaced that with "every
+ * attributed row is pushed, however old", so nothing seeds a cursor from it any
+ * more and it is left as the plain ceiling over the ledger that it is.
+ */
+export function maxUsageEventRowid(): number {
+  const db = getDb()
+  const row = db.prepare('SELECT MAX(rowid) AS max_rowid FROM usage_event').get() as
+    { max_rowid: number | null } | undefined
+  return row?.max_rowid ?? 0
+}
+
+/** How many PUSHABLE rows sit past the cursor — attributed ones only (ADR-072 §2). */
+export function countUsageEventsAfterRowid(rowid: number): number {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM usage_event WHERE rowid > ? AND account_key <> ?')
+    .get(rowid, UNKNOWN_ACCOUNT_KEY) as { n: number } | undefined
+  return row?.n ?? 0
+}
+
+/**
+ * The timestamp of the OLDEST ledger row, or null when the ledger is empty.
+ *
+ * `POST /v1/devices/self/resync` sends it, and the 90-day prune keeps moving it
+ * forward — so a resync repairs at most the last 90 days on the hub and older
+ * rows there are left alone. That is the designed bound (ADR-072 §2), not a
+ * shortfall.
+ */
+export function oldestUsageEventTs(): number | null {
+  const db = getDb()
+  const row = db.prepare('SELECT MIN(ts) AS min_ts FROM usage_event').get() as
+    { min_ts: number | null } | undefined
+  return row?.min_ts ?? null
+}
+
+/**
+ * The newest label each account key was last written under.
+ *
+ * `usage_bucket` carries no label — it is keyed by the machine-independent
+ * account key and nothing else (ADR-071 §1), so the dashboard has to name its
+ * accounts from somewhere. This is the second source it tries, after the limits
+ * providers: a key this machine no longer holds credentials for still has the
+ * email or the `<vendor> key …abcd` that the turns which spent it recorded.
+ *
+ * NEWEST, not any: a label is display-only and can change (an account renamed,
+ * an organization added), and the latest one is what a person would recognise.
+ * A key whose rows all carry a null label is absent rather than present-and-
+ * empty, so a caller falls through to its own fallback instead of showing a
+ * blank name. Bounded by `usage_event`'s 90-day retention, and served by
+ * `idx_usage_event_account_key_ts`.
+ */
+export function latestAccountLabels(): Map<string, string> {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT e.account_key AS account_key, e.account_label AS account_label
+         FROM usage_event e
+         JOIN (SELECT account_key, MAX(ts) AS ts
+                 FROM usage_event
+                WHERE account_label IS NOT NULL
+                GROUP BY account_key) newest
+           ON newest.account_key = e.account_key AND newest.ts = e.ts
+        WHERE e.account_label IS NOT NULL`
+    )
+    .all() as Array<{ account_key: string; account_label: string }>
+  const labels = new Map<string, string>()
+  // Two turns of one account can share the newest ts; the first of a tie wins,
+  // as it does for a window sample.
+  for (const row of rows) {
+    if (!labels.has(row.account_key)) labels.set(row.account_key, row.account_label)
+  }
+  return labels
+}
+
+/**
+ * Every ledger row a Codex thread is answerable for: its own turns, plus the
+ * turns of the children it spawned (ADR-071 §2, S1e).
+ *
+ * A child files its row under its OWN native thread id, so `session_id` cannot
+ * find it from the root — `parent_routing_id` is the join, and for Codex the
+ * routing id, the sidebar session id and the native thread id are the same
+ * string (`adoptThread`), which is what makes one parameter enough for both
+ * halves. Served by `idx_usage_event_session` and `idx_usage_event_parent_routing`.
+ *
+ * Rows of EVERY origin that matches come back, dispatch included: the caller
+ * decides what belongs in a sum and what is only a breakdown row.
+ */
+export function usageEventsForCodexThread(threadId: string): UsageEventRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_event
+        WHERE engine_id = 'codex'
+          AND (session_id = ? OR (origin = 'child' AND parent_routing_id = ?))
+        ORDER BY ts ASC`
+    )
+    .all(threadId, threadId) as UsageEventDbRow[]
   return rows.map(rowToUsageEvent)
 }
 
@@ -1139,6 +2435,9 @@ interface WindowSampleDbRow {
   account_uuid: string
   used_percent: number
   canonical_end: number
+  account_key: string
+  window_kind: string
+  window_minutes: number | null
 }
 
 function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
@@ -1147,7 +2446,10 @@ function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
     ts: row.ts,
     accountUuid: row.account_uuid,
     usedPercent: row.used_percent,
-    canonicalEnd: row.canonical_end
+    canonicalEnd: row.canonical_end,
+    accountKey: row.account_key,
+    windowKind: row.window_kind,
+    windowMinutes: row.window_minutes
   }
 }
 
@@ -1159,9 +2461,49 @@ function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
 export function recordWindowSample(sample: WindowSampleRow): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO usage_window_sample (id, ts, account_uuid, used_percent, canonical_end)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(sample.id, sample.ts, sample.accountUuid, sample.usedPercent, sample.canonicalEnd)
+    `INSERT INTO usage_window_sample
+       (id, ts, account_uuid, used_percent, canonical_end, account_key, window_kind, window_minutes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    sample.id,
+    sample.ts,
+    sample.accountUuid,
+    sample.usedPercent,
+    sample.canonicalEnd,
+    sample.accountKey,
+    sample.windowKind,
+    sample.windowMinutes
+  )
+}
+
+/**
+ * The NEWEST sample of every window kind this account key has one for.
+ *
+ * What an INACTIVE account's limits are answered from when the caller may not
+ * spend a refresh grant on it (ADR-071 §6): the last thing we saw, with its own
+ * `ts` so the reader can say how old it is. `unknown` is a real key here — the
+ * bucket every pre-v21 row landed in — so callers that mean "this account" must
+ * not pass it.
+ */
+export function latestWindowSamples(accountKey: string): WindowSampleRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_window_sample s
+        WHERE s.account_key = ?
+          AND s.ts = (SELECT MAX(t.ts) FROM usage_window_sample t
+                       WHERE t.account_key = s.account_key AND t.window_kind = s.window_kind)
+        ORDER BY s.window_kind`
+    )
+    .all(accountKey) as WindowSampleDbRow[]
+  // Two samples of one kind can share the newest ts (a poll that wrote both
+  // halves of a window in the same millisecond); one row per kind is the
+  // contract, so the first of a tie wins.
+  const newest = new Map<string, WindowSampleRow>()
+  for (const row of rows) {
+    if (!newest.has(row.window_kind)) newest.set(row.window_kind, rowToWindowSample(row))
+  }
+  return [...newest.values()]
 }
 
 /**
@@ -1176,11 +2518,21 @@ export function recordWindowSample(sample: WindowSampleRow): void {
  * projection then silently falls back to the in-memory ring forever. Taking the
  * newest `limit` guarantees the current window is always represented; reversing
  * restores the ascending contract callers expect.
+ *
+ * FIVE-HOUR SAMPLES ONLY. The table held nothing else until v21; it now holds
+ * the weekly and per-model series too, and this `limit` is a budget — sharing it
+ * across four kinds would quarter the 5-hour history the projection regresses
+ * over, on exactly the accounts (Max, with scoped weeklies) that have the most
+ * of it. The projection means the 5-hour window, so it says so.
  */
 export function getWindowSamples(accountUuid: string, limit = 100): WindowSampleRow[] {
   const db = getDb()
   const rows = db
-    .prepare('SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts DESC LIMIT ?')
+    .prepare(
+      `SELECT * FROM usage_window_sample
+        WHERE account_uuid = ? AND window_kind = '5h'
+        ORDER BY ts DESC LIMIT ?`
+    )
     .all(accountUuid, limit) as WindowSampleDbRow[]
   // Reverse the DESC page back to ascending ts for consumers.
   return rows.reverse().map(rowToWindowSample)
@@ -1195,7 +2547,7 @@ export function getWindowSamples(accountUuid: string, limit = 100): WindowSample
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 // usage_event is read only at a 7-day lookback (block-usage's getUsageEventsSince
-// callers) and older days live durably in daily_usage, so 90d is a very
+// callers) and older hours live durably in usage_bucket, so 90d is a very
 // conservative floor that keeps well over a week of margin for the reconciler.
 const USAGE_EVENT_RETENTION_DAYS = 90
 // usage_window_sample is read as the newest-N per account for the ACTIVE (a few
@@ -1210,6 +2562,10 @@ const WINDOW_SAMPLE_RETENTION_DAYS = 30
  * survive. A bounded periodic sweep — run once per DB open, never per-insert.
  * Returns the delete counts for diagnostics/tests. Idempotent (a second call
  * with the same clock deletes nothing).
+ *
+ * `usage_bucket` is NEVER pruned: it is the durable history the 90-day event
+ * retention exists to make affordable (ADR-071 §1), and an hour's bucket cannot
+ * be rebuilt once its events are gone.
  */
 export function pruneUsageTables(
   now: number = Date.now(),
@@ -1224,294 +2580,723 @@ export function pruneUsageTables(
 }
 
 // ---------------------------------------------------------------------------
-// Daily usage rollup repository (Phase 7 Pass 2 — Full SQL)
-// Durable per-(date, engine, vendor, model) rollup for the 30-day chart. Recent
-// days are recomputed from usage_event (source 'rollup', REPLACE); older days
-// are seeded once from the legacy daily JSON files (source 'seed', never
-// recomputed — their JSONL is gone). NEVER expose the raw db.
+// Usage bucket repository (ADR-071 §1 — hourly buckets, kept forever)
+//
+// `usage_bucket` is the durable half of the metering store: `usage_event` is
+// pruned at 90 days, so a bucket is what a chart still has after that. One row
+// per (hour, account, billing type, engine, vendor, model, origin), recomputed
+// from the ledger for the recent hours and never touched again once the rollup
+// window has passed them by (see BlockUsageService.rollupUsageBucketsFromDb).
+//
+// Hourly and in UTC, because a bucket outlives the machine that wrote it:
+// ADR-072's hub holds this same table from several machines, and only a UTC
+// hour can be grouped into the local day of whoever is looking.
+//
+// NEVER expose the raw db.
 // ---------------------------------------------------------------------------
 
-interface DailyUsageDbRow {
-  date: string
+/** One hourly usage bucket. */
+export interface UsageBucketRow {
+  /** Start of the hour, in ms since the epoch, floored in UTC. */
+  hourUtc: number
+  accountKey: string
+  billingType: BillingType
+  engineId: string
+  vendorId: string
+  modelId: string
+  origin: UsageOrigin
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  /** The 1h-TTL SUBSET of cacheWriteTokens — not additive with it. */
+  cacheWrite1hTokens: number
+  cacheReadTokens: number
+  /** Sum of the KNOWN `api_cost_usd` values in the hour. */
+  apiCostUsd: number
+  /** Sum of the KNOWN `billed_cost_usd` values in the hour. */
+  billedCostUsd: number
+  /**
+   * Sum of `api_cost_usd` over the hour's rows that recorded NO bill — the
+   * `api` half of the per-row `billed ?? api` rule, so that
+   * `billedCostUsd + unbilledApiCostUsd` is the hour's Σ(billed ?? api).
+   * A row with neither figure is in `unknownApiCostCount` alone.
+   */
+  unbilledApiCostUsd: number
+  /** How many of `requestCount` turns had no API-equivalent cost at all. */
+  unknownApiCostCount: number
+  /** How many of `requestCount` turns had no known bill. */
+  unknownBilledCostCount: number
+  requestCount: number
+  /** 'rollup' — recomputed from usage_event; 'seed' — migrated from daily_usage. */
+  source: 'rollup' | 'seed'
+  /** Monotonic revision, stamped by the write. ADR-072 pulls "since rev". */
+  rev: number
+}
+
+/** A bucket as a WRITER hands it over — the store issues the `rev`. */
+export type UsageBucketWrite = Omit<UsageBucketRow, 'rev'>
+
+interface UsageBucketDbRow {
+  hour_utc: number
+  account_key: string
+  billing_type: string
   engine_id: string
   vendor_id: string
   model_id: string
+  origin: string
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_write_1h_tokens: number
+  cache_read_tokens: number
+  api_cost_usd: number
+  billed_cost_usd: number
+  unbilled_api_cost_usd: number
+  unknown_api_cost_count: number
+  unknown_billed_cost_count: number
+  request_count: number
+  source: string
+  rev: number
+}
+
+function rowToUsageBucket(row: UsageBucketDbRow): UsageBucketRow {
+  return {
+    hourUtc: row.hour_utc,
+    accountKey: row.account_key,
+    // Both are stored strings and can carry a value this build has no name
+    // for — the cost rule's `default` branch is the fallback, as for a row.
+    billingType: row.billing_type as BillingType,
+    engineId: row.engine_id,
+    vendorId: row.vendor_id,
+    modelId: row.model_id,
+    origin: row.origin as UsageOrigin,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    cacheWrite1hTokens: row.cache_write_1h_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd,
+    unbilledApiCostUsd: row.unbilled_api_cost_usd,
+    unknownApiCostCount: row.unknown_api_cost_count,
+    unknownBilledCostCount: row.unknown_billed_cost_count,
+    requestCount: row.request_count,
+    source: row.source as 'rollup' | 'seed',
+    rev: row.rev
+  }
+}
+
+const UPSERT_USAGE_BUCKET_SQL = `
+  INSERT INTO usage_bucket (
+    hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+    input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+    cache_read_tokens, api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+    unknown_api_cost_count, unknown_billed_cost_count,
+    request_count, source, rev
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin)
+  DO UPDATE SET
+    input_tokens              = excluded.input_tokens,
+    output_tokens             = excluded.output_tokens,
+    cache_write_tokens        = excluded.cache_write_tokens,
+    cache_write_1h_tokens     = excluded.cache_write_1h_tokens,
+    cache_read_tokens         = excluded.cache_read_tokens,
+    api_cost_usd              = excluded.api_cost_usd,
+    billed_cost_usd           = excluded.billed_cost_usd,
+    unbilled_api_cost_usd     = excluded.unbilled_api_cost_usd,
+    unknown_api_cost_count    = excluded.unknown_api_cost_count,
+    unknown_billed_cost_count = excluded.unknown_billed_cost_count,
+    request_count             = excluded.request_count,
+    source                    = excluded.source,
+    rev                       = excluded.rev
+`
+
+/**
+ * The next revision number, from the one-row counter, consumed inside the
+ * writing transaction.
+ *
+ * A COUNTER, not `MAX(rev) + 1` over the buckets themselves. One process owns
+ * this database, so either would be race-free, and the MAX is the smaller
+ * mechanism — but it is not monotonic: delete every row (the seed cleanup can,
+ * on a database whose buckets are all seeds) and the maximum falls back to
+ * zero, so the next write REUSES a revision a puller has already seen and its
+ * "everything since rev N" silently skips those rows. Monotonicity is the whole
+ * contract (ADR-072 §3), and a counter is the only thing that keeps it across a
+ * delete.
+ */
+function nextUsageBucketRev(db: SqliteDatabase): number {
+  const row = db.prepare('SELECT next_rev FROM usage_bucket_rev WHERE id = 1').get() as
+    { next_rev: number } | undefined
+  const rev = row?.next_rev ?? 1
+  db.prepare('INSERT OR REPLACE INTO usage_bucket_rev (id, next_rev) VALUES (1, ?)').run(rev + 1)
+  return rev
+}
+
+/**
+ * Replace a set of buckets, all under ONE fresh `rev`, in a single transaction.
+ * Returns the rev they were written under (0 when there was nothing to write).
+ */
+export function upsertUsageBuckets(rows: UsageBucketWrite[]): number {
+  if (rows.length === 0) return 0
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    const rev = nextUsageBucketRev(db)
+    const stmt = db.prepare(UPSERT_USAGE_BUCKET_SQL)
+    for (const r of rows) {
+      stmt.run(
+        r.hourUtc,
+        r.accountKey,
+        r.billingType,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.origin,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheWrite1hTokens,
+        r.cacheReadTokens,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unbilledApiCostUsd,
+        r.unknownApiCostCount,
+        r.unknownBilledCostCount,
+        r.requestCount,
+        r.source,
+        rev
+      )
+    }
+    db.prepare('COMMIT').run()
+    return rev
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Buckets at or after `sinceHourUtc`, oldest hour first (the chart's source).
+ *
+ * Bounded on purpose: buckets are hourly and kept forever, so an all-time read
+ * grows without limit behind a chart that shows a fixed window. `idx_usage_
+ * bucket_hour` serves the range. Pass 0 for everything.
+ */
+export function getUsageBucketsSince(sinceHourUtc: number): UsageBucketRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM usage_bucket WHERE hour_utc >= ? ORDER BY hour_utc ASC')
+    .all(sinceHourUtc) as UsageBucketDbRow[]
+  return rows.map(rowToUsageBucket)
+}
+
+/**
+ * Drop the SEED buckets sitting at the given hours.
+ *
+ * A seed bucket is a whole day of the retired `daily_usage` table parked at
+ * midday UTC (migration v20). The rollup recomputes whole LOCAL DAYS from the
+ * ledger, so the moment it covers a day, that day's seed is a second, coarser
+ * copy of the same spend — and the chart would add the two together. The rollup
+ * passes the midday instant of each day it has just rebuilt; only `source =
+ * 'seed'` rows are touched, so a rollup bucket that happens to sit at midday is
+ * safe.
+ */
+export function deleteSeedUsageBuckets(hourUtcs: number[]): void {
+  if (hourUtcs.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare("DELETE FROM usage_bucket WHERE source = 'seed' AND hour_utc = ?")
+  db.prepare('BEGIN').run()
+  try {
+    for (const hour of hourUtcs) stmt.run(hour)
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Window-value repository (ADR-071 §7)
+//
+// The SQL half of `usage-window-ledger.ts`, which owns the RULE: what a window
+// spans, which windows a recompute touches, when one closes, and what the
+// derived figures are. Nothing here decides any of that — these are the four
+// statements the rule needs, kept beside every other repository because `getDb`
+// is module-private. `UsageWindowRow` itself lives in `shared/types.ts`: the
+// dashboard reads these rows over IPC, and the renderer may not import `core/`.
+// ---------------------------------------------------------------------------
+
+interface UsageWindowDbRow {
+  account_key: string
+  window_kind: string
+  canonical_end: number
+  window_start: number
+  peak_percent: number
+  api_cost_usd: number
+  billed_cost_usd: number
+  unknown_cost_count: number
   input_tokens: number
   output_tokens: number
   cache_write_tokens: number
   cache_read_tokens: number
-  cost_usd: number
-  request_count: number
-  peak_api_percent: number
-  source: string
+  sample_count: number
+  closed: number
+  updated_at: number
+  window_minutes: number | null
 }
 
-function rowToDailyUsage(row: DailyUsageDbRow): DailyUsageRow {
+function rowToUsageWindow(row: UsageWindowDbRow): UsageWindowRow {
   return {
-    date: row.date,
-    engineId: row.engine_id,
-    vendorId: row.vendor_id,
-    modelId: row.model_id,
+    accountKey: row.account_key,
+    windowKind: row.window_kind,
+    canonicalEnd: row.canonical_end,
+    windowStart: row.window_start,
+    windowMinutes: row.window_minutes,
+    peakPercent: row.peak_percent,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd,
+    unknownCostCount: row.unknown_cost_count,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     cacheWriteTokens: row.cache_write_tokens,
     cacheReadTokens: row.cache_read_tokens,
-    costUsd: row.cost_usd,
-    requestCount: row.request_count,
-    peakApiPercent: row.peak_api_percent,
-    source: row.source as 'rollup' | 'seed'
+    sampleCount: row.sample_count,
+    closed: row.closed !== 0,
+    updatedAt: row.updated_at
   }
 }
 
-const UPSERT_DAILY_USAGE_SQL = `
-  INSERT INTO daily_usage (
-    date, engine_id, vendor_id, model_id,
-    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    cost_usd, request_count, peak_api_percent, source
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(date, engine_id, vendor_id, model_id) DO UPDATE SET
-    input_tokens      = excluded.input_tokens,
-    output_tokens     = excluded.output_tokens,
-    cache_write_tokens = excluded.cache_write_tokens,
-    cache_read_tokens = excluded.cache_read_tokens,
-    cost_usd          = excluded.cost_usd,
-    request_count     = excluded.request_count,
-    peak_api_percent  = excluded.peak_api_percent,
-    source            = excluded.source
-`
-
-/** Upsert (replace) a set of daily_usage rows in one transaction. */
-export function upsertDailyUsage(rows: DailyUsageRow[]): void {
-  if (rows.length === 0) return
-  const db = getDb()
-  const stmt = db.prepare(UPSERT_DAILY_USAGE_SQL)
-  db.prepare('BEGIN').run()
-  try {
-    for (const r of rows) {
-      stmt.run(
-        r.date,
-        r.engineId,
-        r.vendorId,
-        r.modelId,
-        r.inputTokens,
-        r.outputTokens,
-        r.cacheWriteTokens,
-        r.cacheReadTokens,
-        r.costUsd,
-        r.requestCount,
-        r.peakApiPercent,
-        r.source
-      )
-    }
-    db.prepare('COMMIT').run()
-  } catch (err) {
-    db.prepare('ROLLBACK').run()
-    throw err
-  }
+/** The identity of a window, plus what its samples say about it. */
+export interface WindowSampleGroup {
+  accountKey: string
+  windowKind: string
+  canonicalEnd: number
+  peakPercent: number
+  sampleCount: number
+  /**
+   * The length the samples of this window state, or null when none does.
+   * `MAX` rather than a pick: SQLite's aggregate skips NULLs, so a window
+   * sampled once before v25 and once after knows its length from the newer row.
+   */
+  windowMinutes: number | null
 }
 
 /**
- * Seed daily_usage rows ONLY for (date, engine, vendor, model) keys not already
- * present (idempotent). Used by the one-time JSON-file import — never clobbers a
- * rollup row. INSERT OR IGNORE on the composite PK.
+ * Every window the samples since `sinceTs` name, with the peak each one saw.
+ *
+ * `unknown` is excluded for the reason migration v22 gives: it is one bucket
+ * shared by every account whose identity was never captured, so a peak over it
+ * belongs to no account.
  */
-export function seedDailyUsageIfAbsent(rows: DailyUsageRow[]): void {
-  if (rows.length === 0) return
-  const db = getDb()
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO daily_usage (
-      date, engine_id, vendor_id, model_id,
-      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-      cost_usd, request_count, peak_api_percent, source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-  db.prepare('BEGIN').run()
-  try {
-    for (const r of rows) {
-      stmt.run(
-        r.date,
-        r.engineId,
-        r.vendorId,
-        r.modelId,
-        r.inputTokens,
-        r.outputTokens,
-        r.cacheWriteTokens,
-        r.cacheReadTokens,
-        r.costUsd,
-        r.requestCount,
-        r.peakApiPercent,
-        r.source
-      )
-    }
-    db.prepare('COMMIT').run()
-  } catch (err) {
-    db.prepare('ROLLBACK').run()
-    throw err
-  }
-}
-
-/** Delete all daily_usage rows for a given date (used before re-rolling a day). */
-export function deleteDailyUsageForDate(date: string): void {
-  const db = getDb()
-  db.prepare('DELETE FROM daily_usage WHERE date = ?').run(date)
-}
-
-/** All daily_usage rows ordered by date asc (the chart's source). */
-export function getAllDailyUsage(): DailyUsageRow[] {
-  const db = getDb()
-  const rows = db.prepare('SELECT * FROM daily_usage ORDER BY date ASC').all() as DailyUsageDbRow[]
-  return rows.map(rowToDailyUsage)
-}
-
-/** Whether the daily_usage table has any rows (gates the one-time seed). */
-export function hasDailyUsage(): boolean {
-  const db = getDb()
-  return (db.prepare('SELECT COUNT(*) as n FROM daily_usage').get() as { n: number }).n > 0
-}
-
-// ---------------------------------------------------------------------------
-// Dispatched-usage repository (ADR-033 M4-B — cross-engine dispatch)
-// One row per completed/failed dispatched-agent turn, attributed to the
-// DISPATCHING session. See the v6 migration comment above for why this table
-// exists (dispatched turns are invisible to ADR-011's JSONL scan).
-// ---------------------------------------------------------------------------
-
-/** One recorded dispatched-agent turn. */
-export interface DispatchedUsageRow {
-  id: number
-  ts: number
-  fromRoutingId: string
-  fromEngine: string
-  targetEngine: string
-  targetModel: string
-  targetSessionId: string | null
-  toolUseId: string | null
-  totalTokens: number | null
-  costUsd: number | null
-  durationMs: number | null
-}
-
-interface DispatchedUsageDbRow {
-  id: number
-  ts: number
-  from_routing_id: string
-  from_engine: string
-  target_engine: string
-  target_model: string
-  target_session_id: string | null
-  tool_use_id: string | null
-  total_tokens: number | null
-  cost_usd: number | null
-  duration_ms: number | null
-}
-
-function rowToDispatchedUsage(row: DispatchedUsageDbRow): DispatchedUsageRow {
-  return {
-    id: row.id,
-    ts: row.ts,
-    fromRoutingId: row.from_routing_id,
-    fromEngine: row.from_engine,
-    targetEngine: row.target_engine,
-    targetModel: row.target_model,
-    targetSessionId: row.target_session_id,
-    toolUseId: row.tool_use_id,
-    totalTokens: row.total_tokens,
-    costUsd: row.cost_usd,
-    durationMs: row.duration_ms
-  }
-}
-
-/** Insert one dispatched-usage row (`id` is auto-assigned by SQLite). */
-export function insertDispatchedUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
-  const db = getDb()
-  db.prepare(
-    `INSERT INTO dispatched_usage (
-       ts, from_routing_id, from_engine, target_engine, target_model,
-       target_session_id, tool_use_id, total_tokens, cost_usd, duration_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    row.ts,
-    row.fromRoutingId,
-    row.fromEngine,
-    row.targetEngine,
-    row.targetModel,
-    row.targetSessionId ?? null,
-    row.toolUseId ?? null,
-    row.totalTokens ?? null,
-    row.costUsd ?? null,
-    row.durationMs ?? null
-  )
-}
-
-/** All dispatched-usage rows since `sinceTs` (default: all-time), newest first. Test/debug use. */
-export function getDispatchedUsageSince(sinceTs = 0): DispatchedUsageRow[] {
-  const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM dispatched_usage WHERE ts >= ? ORDER BY ts DESC')
-    .all(sinceTs) as DispatchedUsageDbRow[]
-  return rows.map(rowToDispatchedUsage)
-}
-
-interface DispatchedUsageSummaryDbRow {
-  target_engine: string
-  target_model: string
-  dispatches: number
-  totalTokens: number | null
-  costUsd: number | null
-}
-
-/**
- * Aggregate dispatched_usage by (target_engine, target_model) since `sinceTs`
- * (default: all-time). NULL total_tokens/cost_usd (best-effort captures, e.g.
- * a timed-out turn) coalesce to 0 so a single unknown-usage row never poisons
- * the whole aggregate.
- */
-export function dispatchedUsageSummary(sinceTs = 0): DispatchedUsageSummary[] {
+export function windowSampleGroups(sinceTs: number): WindowSampleGroup[] {
   const db = getDb()
   const rows = db
     .prepare(
-      `SELECT
-         target_engine,
-         target_model,
-         COUNT(*) as dispatches,
-         SUM(COALESCE(total_tokens, 0)) as totalTokens,
-         SUM(COALESCE(cost_usd, 0)) as costUsd
-       FROM dispatched_usage
-       WHERE ts >= ?
-       GROUP BY target_engine, target_model
-       ORDER BY costUsd DESC`
+      `SELECT account_key, window_kind, canonical_end,
+              MAX(used_percent) AS peak_percent,
+              COUNT(*) AS sample_count,
+              MAX(window_minutes) AS window_minutes
+         FROM usage_window_sample
+        WHERE account_key <> 'unknown' AND ts >= ?
+        GROUP BY account_key, window_kind, canonical_end`
     )
-    .all(sinceTs) as DispatchedUsageSummaryDbRow[]
+    .all(sinceTs) as Array<{
+    account_key: string
+    window_kind: string
+    canonical_end: number
+    peak_percent: number
+    sample_count: number
+    window_minutes: number | null
+  }>
   return rows.map((r) => ({
-    targetEngine: r.target_engine,
-    targetModel: r.target_model,
-    dispatches: r.dispatches,
-    totalTokens: r.totalTokens ?? 0,
-    costUsd: r.costUsd ?? 0
+    accountKey: r.account_key,
+    windowKind: r.window_kind,
+    canonicalEnd: r.canonical_end,
+    peakPercent: r.peak_percent,
+    sampleCount: r.sample_count,
+    windowMinutes: r.window_minutes
+  }))
+}
+
+/**
+ * Create rows for windows that have none, leaving every existing row alone.
+ *
+ * `OR IGNORE` is the whole point: a window already in the table keeps the sums
+ * it has, and a CLOSED one is not resurrected by a late sample.
+ */
+export function insertMissingUsageWindows(
+  windows: ReadonlyArray<
+    Pick<
+      UsageWindowRow,
+      'accountKey' | 'windowKind' | 'canonicalEnd' | 'windowStart' | 'windowMinutes'
+    >
+  >
+): number {
+  if (windows.length === 0) return 0
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO usage_window
+       (account_key, window_kind, canonical_end, window_start, window_minutes)
+     VALUES (?, ?, ?, ?, ?)`
+  )
+  let inserted = 0
+  db.prepare('BEGIN').run()
+  try {
+    for (const w of windows) {
+      inserted += stmt.run(
+        w.accountKey,
+        w.windowKind,
+        w.canonicalEnd,
+        w.windowStart,
+        w.windowMinutes
+      ).changes
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+  return inserted
+}
+
+/** Every window still open — the set a recompute is allowed to touch. */
+export function getOpenUsageWindows(): UsageWindowRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM usage_window WHERE closed = 0 ORDER BY canonical_end ASC')
+    .all() as UsageWindowDbRow[]
+  return rows.map(rowToUsageWindow)
+}
+
+/** Windows matching the filter, newest end first. Closed windows included — they ARE the history. */
+export function listUsageWindows(
+  opts: { accountKey?: string; kind?: string; sinceTs?: number } = {}
+): UsageWindowRow[] {
+  const db = getDb()
+  const clauses: string[] = ['canonical_end >= ?']
+  const params: Array<string | number> = [opts.sinceTs ?? 0]
+  if (opts.accountKey !== undefined) {
+    clauses.push('account_key = ?')
+    params.push(opts.accountKey)
+  }
+  if (opts.kind !== undefined) {
+    clauses.push('window_kind = ?')
+    params.push(opts.kind)
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_window
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY canonical_end DESC, account_key ASC, window_kind ASC`
+    )
+    .all(...params) as UsageWindowDbRow[]
+  return rows.map(rowToUsageWindow)
+}
+
+/** Replace the value rows a recompute has just rebuilt. */
+export function upsertUsageWindows(rows: ReadonlyArray<UsageWindowRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO usage_window (
+       account_key, window_kind, canonical_end, window_start, peak_percent,
+       api_cost_usd, billed_cost_usd, unknown_cost_count,
+       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+       sample_count, closed, updated_at, window_minutes
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_key, window_kind, canonical_end) DO UPDATE SET
+       window_start       = excluded.window_start,
+       window_minutes     = excluded.window_minutes,
+       peak_percent       = excluded.peak_percent,
+       api_cost_usd       = excluded.api_cost_usd,
+       billed_cost_usd    = excluded.billed_cost_usd,
+       unknown_cost_count = excluded.unknown_cost_count,
+       input_tokens       = excluded.input_tokens,
+       output_tokens      = excluded.output_tokens,
+       cache_write_tokens = excluded.cache_write_tokens,
+       cache_read_tokens  = excluded.cache_read_tokens,
+       sample_count       = excluded.sample_count,
+       closed             = excluded.closed,
+       updated_at         = excluded.updated_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.accountKey,
+        r.windowKind,
+        r.canonicalEnd,
+        r.windowStart,
+        r.peakPercent,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unknownCostCount,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.sampleCount,
+        r.closed ? 1 : 0,
+        r.updatedAt,
+        r.windowMinutes
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cost and token columns of one account's turns, for a half-open `[startTs, endTs)` span. */
+export interface LedgerCostRow {
+  apiCostUsd: number | null
+  billedCostUsd: number | null
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+}
+
+/**
+ * One account's ledger rows inside a window, ALL origins (ADR-071 §1): a
+ * dispatched turn and a subagent's turn spend the same subscription as the
+ * session's own, so all three count toward what the window delivered.
+ *
+ * HALF-OPEN on purpose. `canonical_end` is the next window's start, so a row
+ * exactly at it belongs to that window and to this one it would be a double
+ * count.
+ *
+ * ROWS, NOT `SUM()`. A SQL sum skips a NULL silently, so it cannot tell "no
+ * turns" from "no turn could be priced", and it would absorb a non-finite REAL
+ * as if it were a figure. The caller adds the finite values and COUNTS the rest
+ * (ADR-030), which needs the rows one at a time.
+ *
+ * `cache_write_1h_tokens` is deliberately absent: it is the 1h-TTL SUBSET of
+ * `cache_write_tokens`, so summing both would count those tokens twice.
+ */
+export function getLedgerCostRows(
+  accountKey: string,
+  startTs: number,
+  endTs: number
+): LedgerCostRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT api_cost_usd, billed_cost_usd,
+              input_tokens, output_tokens, cache_write_tokens, cache_read_tokens
+         FROM usage_event
+        WHERE account_key = ? AND ts >= ? AND ts < ?`
+    )
+    .all(accountKey, startTs, endTs) as Array<{
+    api_cost_usd: number | null
+    billed_cost_usd: number | null
+    input_tokens: number
+    output_tokens: number
+    cache_write_tokens: number
+    cache_read_tokens: number
+  }>
+  return rows.map((r) => ({
+    apiCostUsd: r.api_cost_usd,
+    billedCostUsd: r.billed_cost_usd,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    cacheReadTokens: r.cache_read_tokens
   }))
 }
 
 // ---------------------------------------------------------------------------
-// Slice C — cross-engine dispatched cost in the dispatching session's own
-// cost breakdown (TopBar tooltip). Distinct from dispatchedUsageSummary above
-// (a GLOBAL all-sessions rollup, e.g. for a future usage dashboard) — this is
-// scoped to ONE dispatching session, for BaseSession.seedDispatchedCosts()'s
-// durability-across-reloads seed.
+// The one-shot Claude identity re-key (S2e)
+//
+// The SQL half of `claude-account-identity.ts`, which owns the RULE — which
+// rows moved to the wrong account, how far back, and when the repair may run.
+// Nothing here decides any of that; it is the four statements the rule needs,
+// in one transaction, because a half-applied re-key would leave the ledger and
+// the buckets disagreeing about the same hours.
 // ---------------------------------------------------------------------------
 
-interface DispatchedCostByRoutingDbRow {
-  target_engine: string
-  target_model: string
-  costUsd: number | null
+/** What the rule hands over: where the rows are, and where they belong. */
+export interface ClaudeIdentityRepairPlan {
+  /** The account key the rows were wrongly written under. */
+  staleKey: string
+  /** The account they actually belong to. */
+  accountKey: string
+  accountLabel: string | null
+  accountUuid: string
+  billingType: BillingType
+  /** Rows at or after this instant move; earlier ones predate the mistake. */
+  since: number
+  /** `since` floored to its hour — the first bucket the span covers. */
+  bucketSinceHourUtc: number
+  /**
+   * The first hour a bucket may be DELETED at: the rollup's own reach. Deleting
+   * an hour it will never rebuild would simply lose that hour's spend, so a
+   * span older than the rollup's window keeps its (mis-keyed) buckets and the
+   * caller reports how many were left behind.
+   */
+  bucketDeleteFromHourUtc: number
+}
+
+export interface ClaudeIdentityRepairCounts {
+  events: number
+  samples: number
+  windows: number
+  buckets: number
+  bucketsLeftBehind: number
 }
 
 /**
+ * Move one account's rows onto another key, for a time span, atomically.
+ *
+ * `usage_event` and `usage_window_sample` are UPDATED — they are the record of
+ * what happened and only their attribution was wrong. `usage_window` and
+ * `usage_bucket` are DELETED instead, because both are DERIVED: the next
+ * `recomputeUsageWindows` re-seeds a window from the re-keyed samples, and the
+ * next rollup rebuilds an hour from the re-keyed ledger. Updating a
+ * `usage_window` row's key would also collide with the primary key whenever the
+ * correct account already owns that window.
+ */
+export function repairClaudeAccountKey(plan: ClaudeIdentityRepairPlan): ClaudeIdentityRepairCounts {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    // ENGINE-FILTERED, unlike the three below: `usage_event` is the one table
+    // holding other engines' rows, and only Claude's attribution was read off
+    // the shared file.
+    const events = db
+      .prepare(
+        `UPDATE usage_event
+            SET account_key  = ?,
+                account_label = ?,
+                account_uuid  = ?,
+                billing_type  = ?
+          WHERE engine_id = 'claude' AND account_key = ? AND ts >= ?`
+      )
+      .run(
+        plan.accountKey,
+        plan.accountLabel,
+        plan.accountUuid,
+        plan.billingType,
+        plan.staleKey,
+        plan.since
+      ).changes
+
+    const samples = db
+      .prepare(
+        `UPDATE usage_window_sample
+            SET account_key = ?, account_uuid = ?
+          WHERE account_key = ? AND ts >= ?`
+      )
+      .run(plan.accountKey, plan.accountUuid, plan.staleKey, plan.since).changes
+
+    const windows = db
+      .prepare('DELETE FROM usage_window WHERE account_key = ? AND canonical_end >= ?')
+      .run(plan.staleKey, plan.since).changes
+
+    const leftBehind = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM usage_bucket
+          WHERE account_key = ? AND hour_utc >= ? AND hour_utc < ?`
+      )
+      .get(plan.staleKey, plan.bucketSinceHourUtc, plan.bucketDeleteFromHourUtc) as { n: number }
+
+    const buckets = db
+      .prepare('DELETE FROM usage_bucket WHERE account_key = ? AND hour_utc >= ?')
+      .run(plan.staleKey, plan.bucketDeleteFromHourUtc).changes
+
+    db.prepare('COMMIT').run()
+    return { events, samples, windows, buckets, bucketsLeftBehind: leftBehind.n }
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatched-turn readers (ADR-033 M4-B, on ADR-071 §1's ledger)
+//
+// `dispatched_usage` is gone (migration v20). A dispatched turn is a
+// `usage_event` row with `origin = 'dispatch'` and the dispatching session in
+// `parent_routing_id` — the same two facts the old table's `from_routing_id`
+// and its separateness carried, plus the token split, the account, the billing
+// type and both costs it had nowhere to put.
+//
+// Both readers keep the shapes their callers already consume (the Delegated
+// section over IPC, and the per-session dispatched-cost breakdown), so nothing
+// above them changed. What changed is the money: a dispatched turn's cost is
+// now whatever the ONE cost rule says for its billing type, like every other
+// row, instead of a figure the dispatcher resolved and stored on its own.
+// ---------------------------------------------------------------------------
+
+/**
+ * A dispatched row's target model as the dispatcher ENCODED it, rebuilt from
+ * the vendor and model the ledger stores separately.
+ *
+ * `dispatchModelRef` split it on the way in (`engineMeta.decodeModelValue`),
+ * and the callers of both readers key on the encoded form — the session
+ * breakdown merges these rows with the LIVE ones `addDispatchedCost` records
+ * under exactly that string, so a decoded id here would split one target into
+ * two rows after a resume.
+ *
+ * The round trip is exact because the WRITE side canonicalises first
+ * (`canonicalDispatchModel`): opencode and pi decode a bare id to their default
+ * vendor, so an uncanonicalised `gpt-5-codex` would come back out of here as
+ * `opencode/gpt-5-codex` and be the very second row this function exists to
+ * prevent. A row written before that canonicalisation shipped — or by an engine
+ * whose encoding changed — can still differ, and the live half is what moves in
+ * that case, not this.
+ *
+ * `ENGINE_META` rather than `engineMeta()`, because an engine id this build has
+ * never heard of must read back verbatim, not throw inside a DB read.
+ */
+function dispatchTargetModel(engineId: string, vendorId: string, modelId: string): string {
+  const meta = ENGINE_META[engineId as keyof typeof ENGINE_META]
+  if (!meta) return modelId
+  return meta.encodeModelValue({ engineId: engineId as EngineId, vendorId, modelId })
+}
+
+/** The ledger columns both dispatched-turn readers need. */
+interface DispatchLedgerDbRow {
+  engine_id: string
+  vendor_id: string
+  model_id: string
+  billing_type: string
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
+  api_cost_usd: number | null
+  billed_cost_usd: number | null
+}
+
+/** The display cost of one dispatched row, or null when nothing could price it. */
+function dispatchRowCostUsd(row: DispatchLedgerDbRow): number | null {
+  return displayCostFromRow({
+    billingType: row.billing_type as BillingType,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd
+  })
+}
+
+const DISPATCH_LEDGER_COLUMNS = `engine_id, vendor_id, model_id, billing_type,
+  input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+  api_cost_usd, billed_cost_usd`
+
+// ---------------------------------------------------------------------------
+// Slice C — cross-engine dispatched cost in the dispatching session's own
+// cost breakdown (TopBar tooltip). Scoped to ONE dispatching session, for
+// BaseSession.seedDispatchedCosts()'s durability-across-reloads seed.
+// ---------------------------------------------------------------------------
+
+/**
  * Per-(targetEngine, targetModel) cost totals for ONE dispatching session,
- * NULL-cost rows excluded (a timed-out/errored turn recorded no real spend —
- * see the v6 migration comment; including it would just add a spurious $0
- * row group). Feeds BaseSession.seedDispatchedCosts() on session construction/
- * resume so a reloaded session's dispatched-cost breakdown survives instead of
- * resetting to zero (parity with Slice B's costBaseUsd seeding).
+ * UNPRICED turns excluded — a turn that recorded no resolvable cost adds
+ * nothing, and a target whose every turn was unpriced gets no row at all
+ * rather than a spurious $0 group. Feeds BaseSession.seedDispatchedCosts() on
+ * session construction/resume so a reloaded session's dispatched-cost
+ * breakdown survives instead of resetting to zero (parity with Slice B's
+ * costBaseUsd seeding).
  */
 export function dispatchedCostsByRouting(
   fromRoutingId: string
@@ -1519,35 +3304,35 @@ export function dispatchedCostsByRouting(
   const db = getDb()
   const rows = db
     .prepare(
-      `SELECT
-         target_engine,
-         target_model,
-         SUM(cost_usd) as costUsd
-       FROM dispatched_usage
-       WHERE from_routing_id = ? AND cost_usd IS NOT NULL
-       GROUP BY target_engine, target_model`
+      `SELECT ${DISPATCH_LEDGER_COLUMNS}
+       FROM usage_event
+       WHERE origin = 'dispatch' AND parent_routing_id = ?`
     )
-    .all(fromRoutingId) as DispatchedCostByRoutingDbRow[]
-  return rows.map((r) => ({
-    targetEngine: r.target_engine,
-    targetModel: r.target_model,
-    costUsd: r.costUsd ?? 0
-  }))
+    .all(fromRoutingId) as DispatchLedgerDbRow[]
+
+  const byTarget = new Map<string, { targetEngine: string; targetModel: string; costUsd: number }>()
+  for (const row of rows) {
+    const costUsd = dispatchRowCostUsd(row)
+    if (costUsd === null) continue
+    const targetModel = dispatchTargetModel(row.engine_id, row.vendor_id, row.model_id)
+    const key = `${row.engine_id}|${targetModel}`
+    const agg = byTarget.get(key)
+    if (agg) agg.costUsd += costUsd
+    else byTarget.set(key, { targetEngine: row.engine_id, targetModel, costUsd })
+  }
+  return [...byTarget.values()]
 }
 
 /**
- * Carry dispatched_usage rows from oldRoutingId to newRoutingId (used on
- * session rekey — SessionManager.rekey() — mirroring renameSessionMeta's
- * role for session_meta). Without this, a dispatch recorded under a
- * pre-rekey routingId (e.g. a fresh session's temporary id, before the sdk
- * session UUID arrives) becomes unreachable from seedDispatchedCosts() on a
- * later resume, which looks up by the STABLE post-rekey id. No-op (not an
- * error) when oldRoutingId has no rows — most rekeys happen before any
- * dispatch occurs.
+ * The same rename for `usage_event.parent_routing_id` (ADR-071 §1). A `child`
+ * or `dispatch` row names the session that spawned the work, and a subagent
+ * turn can finish while the session is still on its renderer-minted temporary
+ * id — so without this the row keeps pointing at an id that no longer exists
+ * and its spend can never be traced back to the session that caused it.
  */
-export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string): void {
+export function renameUsageEventParent(oldRoutingId: string, newRoutingId: string): void {
   const db = getDb()
-  db.prepare('UPDATE dispatched_usage SET from_routing_id = ? WHERE from_routing_id = ?').run(
+  db.prepare('UPDATE usage_event SET parent_routing_id = ? WHERE parent_routing_id = ?').run(
     newRoutingId,
     oldRoutingId
   )
@@ -2376,4 +4161,584 @@ export function pruneAuditLog(now: number = Date.now(), retentionDays?: number):
   }
   const cutoff = now - days * MS_PER_DAY
   return db.prepare('DELETE FROM audit_log WHERE ts < ?').run(cutoff).changes
+}
+
+// ---------------------------------------------------------------------------
+// The usage hub (ADR-072) — this device's client state, and the other machines'
+// rows.
+//
+// NEVER expose `client_secret` past the one caller that needs it.
+// `getHubConfigRow` returns it because exactly one does — the request signer in
+// `usage-hub/config.ts`, which hands it straight to a header and returns it to
+// nothing. Every read that reaches an IPC channel goes through `getHubConfig()`
+// there, which answers `hasSecret: boolean`. Same discipline as `remote_config`'s
+// password hash, and for the same reason: a remote client can write settings, so
+// the credential is in the database.
+// ---------------------------------------------------------------------------
+
+/** The `usage_hub_config` row as stored, secret included. */
+export interface HubConfigRow {
+  url: string
+  deviceName: string
+  clientId: string
+  /** The Access service-token secret. Never crosses an IPC boundary. */
+  clientSecret: string | null
+  enabled: boolean
+  /** High-water mark over `usage_event`'s rowid (ADR-072 §2). */
+  cursorRowid: number
+  /** Highest bucket `rev` pulled from the hub. */
+  remoteRev: number
+  /** Highest window `rev` pulled from the hub — its own counter, not the buckets'. */
+  remoteWindowRev: number
+  /** The hub's bucket-rebuild generation; a change truncates the remote tables. */
+  remoteEpoch: number | null
+  lastPushAt: number | null
+  lastPullAt: number | null
+  lastError: string | null
+  updatedAt: number
+}
+
+interface HubConfigDbRow {
+  url: string
+  device_name: string
+  client_id: string
+  client_secret: string | null
+  enabled: number
+  cursor_rowid: number
+  remote_rev: number
+  remote_window_rev: number
+  remote_epoch: number | null
+  last_push_at: number | null
+  last_pull_at: number | null
+  last_error: string | null
+  updated_at: number
+}
+
+/** The stored hub row, or null when sync has never been configured on this machine. */
+export function getHubConfigRow(): HubConfigRow | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM usage_hub_config WHERE id = 1').get() as
+    HubConfigDbRow | undefined
+  if (!row) return null
+  return {
+    url: row.url,
+    deviceName: row.device_name,
+    clientId: row.client_id,
+    clientSecret: row.client_secret,
+    enabled: row.enabled !== 0,
+    cursorRowid: row.cursor_rowid,
+    remoteRev: row.remote_rev,
+    remoteWindowRev: row.remote_window_rev,
+    remoteEpoch: row.remote_epoch,
+    lastPushAt: row.last_push_at,
+    lastPullAt: row.last_pull_at,
+    lastError: row.last_error,
+    updatedAt: row.updated_at
+  }
+}
+
+/**
+ * The columns a patch may name, mapped to their SQL names.
+ *
+ * A table, not string interpolation of the caller's keys: this is the one place
+ * a column name reaches an UPDATE statement, and a map means an unknown key is
+ * ignored rather than concatenated.
+ */
+const HUB_CONFIG_COLUMNS: Record<string, string> = {
+  url: 'url',
+  deviceName: 'device_name',
+  clientId: 'client_id',
+  clientSecret: 'client_secret',
+  enabled: 'enabled',
+  cursorRowid: 'cursor_rowid',
+  remoteRev: 'remote_rev',
+  remoteWindowRev: 'remote_window_rev',
+  remoteEpoch: 'remote_epoch',
+  lastPushAt: 'last_push_at',
+  lastPullAt: 'last_pull_at',
+  lastError: 'last_error'
+}
+
+/**
+ * Create or update the single hub row, touching only the fields the patch names.
+ *
+ * A patch, not a whole row, because the writers are unrelated: the settings
+ * channel writes the URL and the name, the push loop the cursor, the pull loop
+ * the rev and the epoch. Each must be able to write its own field without
+ * restating — or accidentally reverting — another's.
+ */
+export function upsertHubConfig(patch: Partial<HubConfigRow>, now: number = Date.now()): void {
+  const db = getDb()
+  const columns: string[] = []
+  const params: unknown[] = []
+  for (const [key, column] of Object.entries(HUB_CONFIG_COLUMNS)) {
+    if (!(key in patch)) continue
+    const value = patch[key as keyof HubConfigRow]
+    if (value === undefined) continue
+    columns.push(column)
+    params.push(typeof value === 'boolean' ? (value ? 1 : 0) : value)
+  }
+  db.prepare('INSERT OR IGNORE INTO usage_hub_config (id, updated_at) VALUES (1, ?)').run(now)
+  if (columns.length === 0) return
+  const assignments = columns.map((column) => `${column} = ?`).join(', ')
+  db.prepare(`UPDATE usage_hub_config SET ${assignments}, updated_at = ? WHERE id = 1`).run(
+    ...params,
+    now
+  )
+}
+
+/**
+ * Forget the hub: the row, the secret with it, and every cached remote row.
+ *
+ * One transaction, because a half-forgotten hub is the worst of the three
+ * states — other machines' rows still on screen with no credential left to
+ * refresh them.
+ */
+export function deleteHubConfig(): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM usage_hub_config WHERE id = 1').run()
+    db.prepare('DELETE FROM remote_usage_bucket').run()
+    db.prepare('DELETE FROM remote_usage_window').run()
+    db.prepare('DELETE FROM remote_limits').run()
+    db.prepare('DELETE FROM remote_device').run()
+    db.prepare('DELETE FROM remote_account').run()
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Drop every cached remote row, leaving the config alone.
+ *
+ * What a changed hub `epoch` triggers: a bucket rebuild on the hub can REMOVE an
+ * hour outright, and "everything since rev N" has no way to say that something
+ * is gone (ADR-072 §3). The only correct answer is to forget and pull from zero.
+ */
+export function truncateHubRemoteTables(): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_usage_bucket').run()
+    db.prepare('DELETE FROM remote_usage_window').run()
+    db.prepare('DELETE FROM remote_limits').run()
+    // The device list and the account list are both pulled whole on every pass,
+    // so dropping them costs one request each and keeps "forget the cache"
+    // meaning all of it.
+    db.prepare('DELETE FROM remote_device').run()
+    db.prepare('DELETE FROM remote_account').run()
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** One other machine's hourly bucket — {@link UsageBucketRow} plus whose it is. */
+export interface RemoteUsageBucketRow extends UsageBucketRow {
+  deviceId: string
+}
+
+/** One other machine's window-value row — {@link UsageWindowRow} plus whose it is. */
+export interface RemoteUsageWindowRow extends UsageWindowRow {
+  deviceId: string
+}
+
+/** The latest limit reading for one account key and window kind, from whichever machine saw it. */
+export interface RemoteLimitRow {
+  accountKey: string
+  windowKind: string
+  deviceId: string
+  /**
+   * The label as the HUB returned it — masked for a device caller (ADR-072 §6).
+   * A machine that holds a credential for the key shows its own full label
+   * instead; this is the fallback for an account only another machine uses.
+   */
+  labelMasked: string | null
+  vendorId: string
+  plan: string | null
+  windowMinutes: number | null
+  usedPercent: number
+  resetsAt: string | null
+  observedAt: number
+}
+
+/** Store a page of pulled buckets, replacing any row already held for the same key. */
+export function upsertRemoteUsageBuckets(rows: ReadonlyArray<RemoteUsageBucketRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_usage_bucket (
+       device_id, hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+       input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
+       api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+       unknown_api_cost_count, unknown_billed_cost_count, request_count, source, rev
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(device_id, hour_utc, account_key, billing_type, engine_id, vendor_id,
+                 model_id, origin)
+     DO UPDATE SET
+       input_tokens              = excluded.input_tokens,
+       output_tokens             = excluded.output_tokens,
+       cache_write_tokens        = excluded.cache_write_tokens,
+       cache_write_1h_tokens     = excluded.cache_write_1h_tokens,
+       cache_read_tokens         = excluded.cache_read_tokens,
+       api_cost_usd              = excluded.api_cost_usd,
+       billed_cost_usd           = excluded.billed_cost_usd,
+       unbilled_api_cost_usd     = excluded.unbilled_api_cost_usd,
+       unknown_api_cost_count    = excluded.unknown_api_cost_count,
+       unknown_billed_cost_count = excluded.unknown_billed_cost_count,
+       request_count             = excluded.request_count,
+       source                    = excluded.source,
+       rev                       = excluded.rev`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.deviceId,
+        r.hourUtc,
+        r.accountKey,
+        r.billingType,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.origin,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheWrite1hTokens,
+        r.cacheReadTokens,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unbilledApiCostUsd,
+        r.unknownApiCostCount,
+        r.unknownBilledCostCount,
+        r.requestCount,
+        r.source,
+        r.rev
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** Store pulled window-value rows, replacing what was held for the same window. */
+export function upsertRemoteUsageWindows(rows: ReadonlyArray<RemoteUsageWindowRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_usage_window (
+       device_id, account_key, window_kind, canonical_end, window_start, window_minutes,
+       peak_percent, api_cost_usd, billed_cost_usd, unknown_cost_count,
+       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+       sample_count, closed, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(device_id, account_key, window_kind, canonical_end) DO UPDATE SET
+       window_start       = excluded.window_start,
+       window_minutes     = excluded.window_minutes,
+       peak_percent       = excluded.peak_percent,
+       api_cost_usd       = excluded.api_cost_usd,
+       billed_cost_usd    = excluded.billed_cost_usd,
+       unknown_cost_count = excluded.unknown_cost_count,
+       input_tokens       = excluded.input_tokens,
+       output_tokens      = excluded.output_tokens,
+       cache_write_tokens = excluded.cache_write_tokens,
+       cache_read_tokens  = excluded.cache_read_tokens,
+       sample_count       = excluded.sample_count,
+       closed             = excluded.closed,
+       updated_at         = excluded.updated_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.deviceId,
+        r.accountKey,
+        r.windowKind,
+        r.canonicalEnd,
+        r.windowStart,
+        r.windowMinutes,
+        r.peakPercent,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unknownCostCount,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.sampleCount,
+        r.closed ? 1 : 0,
+        r.updatedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Store the hub's latest reading per account key and window kind.
+ *
+ * Keyed WITHOUT the device: this table answers "what is the account at", which is
+ * one number however many machines watched it, and `device_id` records which one
+ * saw it last. A reading OLDER than the stored one is dropped rather than
+ * written, so two pulls landing out of order cannot move a meter backwards.
+ */
+export function upsertRemoteLimits(rows: ReadonlyArray<RemoteLimitRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_limits (
+       account_key, window_kind, device_id, label_masked, vendor_id, plan,
+       window_minutes, used_percent, resets_at, observed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_key, window_kind) DO UPDATE SET
+       device_id      = excluded.device_id,
+       label_masked   = excluded.label_masked,
+       vendor_id      = excluded.vendor_id,
+       plan           = excluded.plan,
+       window_minutes = excluded.window_minutes,
+       used_percent   = excluded.used_percent,
+       resets_at      = excluded.resets_at,
+       observed_at    = excluded.observed_at
+     WHERE excluded.observed_at >= remote_limits.observed_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.accountKey,
+        r.windowKind,
+        r.deviceId,
+        r.labelMasked,
+        r.vendorId,
+        r.plan,
+        r.windowMinutes,
+        r.usedPercent,
+        r.resetsAt,
+        r.observedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * The cached remote buckets at or after `sinceHourUtc`, oldest hour first.
+ *
+ * The twin of {@link getUsageBucketsSince}, and bounded for the same reason.
+ * S5c's combined scope folds these in beside the local ones through the same
+ * code; S5a needs it so "the calling device's own rows are never stored" is
+ * asserted against the table rather than inferred.
+ */
+export function getRemoteUsageBucketsSince(sinceHourUtc: number): RemoteUsageBucketRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_usage_bucket WHERE hour_utc >= ? ORDER BY hour_utc ASC')
+    .all(sinceHourUtc) as Array<UsageBucketDbRow & { device_id: string }>
+  return rows.map((row) => ({ ...rowToUsageBucket(row), deviceId: row.device_id }))
+}
+
+/**
+ * The cached remote window-value rows matching the filter, newest end first.
+ *
+ * The twin of {@link listUsageWindows} and takes the same three filters, because
+ * S5c's combined Plan value tab asks the two tables the same question and then
+ * prefers the hub's answer per window (ADR-072 §4). `device_id` rides along: a
+ * window the hub has rolled up over every machine still arrives attributed to
+ * whichever device last touched it, and a reader that has two rows for one
+ * window needs something to choose by.
+ */
+export function getRemoteUsageWindows(
+  opts: { accountKey?: string; kind?: string; sinceTs?: number } = {}
+): RemoteUsageWindowRow[] {
+  const db = getDb()
+  const clauses: string[] = ['canonical_end >= ?']
+  const params: Array<string | number> = [opts.sinceTs ?? 0]
+  if (opts.accountKey !== undefined) {
+    clauses.push('account_key = ?')
+    params.push(opts.accountKey)
+  }
+  if (opts.kind !== undefined) {
+    clauses.push('window_kind = ?')
+    params.push(opts.kind)
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM remote_usage_window
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY canonical_end DESC, account_key ASC, window_kind ASC`
+    )
+    .all(...params) as Array<UsageWindowDbRow & { device_id: string }>
+  return rows.map((row) => ({ ...rowToUsageWindow(row), deviceId: row.device_id }))
+}
+
+/**
+ * Every relayed limit reading, newest observation first.
+ *
+ * One row per account key and window kind — the table is keyed that way — so
+ * this is "what the hub last heard about every account", which is what ADR-072
+ * §4's relay is: a machine where an account is not active shows the reading
+ * another machine already paid a refresh grant for.
+ */
+export function listRemoteLimits(): RemoteLimitRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM remote_limits
+        ORDER BY observed_at DESC, account_key ASC, window_kind ASC`
+    )
+    .all() as Array<{
+    account_key: string
+    window_kind: string
+    device_id: string
+    label_masked: string | null
+    vendor_id: string
+    plan: string | null
+    window_minutes: number | null
+    used_percent: number
+    resets_at: string | null
+    observed_at: number
+  }>
+  return rows.map((row) => ({
+    accountKey: row.account_key,
+    windowKind: row.window_kind,
+    deviceId: row.device_id,
+    labelMasked: row.label_masked,
+    vendorId: row.vendor_id,
+    plan: row.plan,
+    windowMinutes: row.window_minutes,
+    usedPercent: row.used_percent,
+    resetsAt: row.resets_at,
+    observedAt: row.observed_at
+  }))
+}
+
+/** One other machine, as `GET /v1/devices` described it (ADR-072 §6). */
+export interface RemoteDeviceRow {
+  deviceId: string
+  deviceName: string
+  os: string
+  appVersion: string
+  /** When the hub last accepted a write from that device. */
+  lastPushAt: number
+  retired: boolean
+}
+
+/**
+ * Replace the cached machine list with what the hub just answered.
+ *
+ * REPLACE, not upsert: `GET /v1/devices` returns the whole list every time, so a
+ * merge would keep a device the hub no longer knows about — and the only reason
+ * a device disappears from that answer is that the owner removed it.
+ */
+export function replaceRemoteDevices(rows: ReadonlyArray<RemoteDeviceRow>): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_device').run()
+    const stmt = db.prepare(
+      `INSERT INTO remote_device
+         (device_id, device_name, os, app_version, last_push_at, retired)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    for (const r of rows) {
+      stmt.run(r.deviceId, r.deviceName, r.os, r.appVersion, r.lastPushAt, r.retired ? 1 : 0)
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cached machine list, most recently pushed first. */
+export function listRemoteDevices(): RemoteDeviceRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_device ORDER BY last_push_at DESC, device_id ASC')
+    .all() as Array<{
+    device_id: string
+    device_name: string
+    os: string
+    app_version: string
+    last_push_at: number
+    retired: number
+  }>
+  return rows.map((row) => ({
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    os: row.os,
+    appVersion: row.app_version,
+    lastPushAt: row.last_push_at,
+    retired: row.retired !== 0
+  }))
+}
+
+/** One account the hub has seen, as `GET /v1/accounts` described it (ADR-072 §6). */
+export interface RemoteAccountRow {
+  accountKey: string
+  vendorId: string
+  /** Masked by the hub for a device caller; null when the hub was never told a label. */
+  labelMasked: string | null
+  /** The newest instant the hub saw the account on any row, in milliseconds. */
+  lastSeenAt: number
+}
+
+/**
+ * Replace the cached account list with what the hub just answered.
+ *
+ * REPLACE, like the machine list and for the same reason: the route is not
+ * paged, so the answer IS the list, and a merge would keep naming an account
+ * the hub has forgotten. Unlike the machine list this one keeps THIS machine's
+ * accounts too — an account is not a per-device fact, and the dashboard prefers
+ * a locally read label over anything from here anyway.
+ */
+export function replaceRemoteAccounts(rows: ReadonlyArray<RemoteAccountRow>): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_account').run()
+    const stmt = db.prepare(
+      `INSERT INTO remote_account (account_key, vendor_id, label_masked, last_seen_at)
+       VALUES (?, ?, ?, ?)`
+    )
+    for (const r of rows) {
+      stmt.run(r.accountKey, r.vendorId, r.labelMasked, r.lastSeenAt)
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cached account list, most recently seen first. */
+export function listRemoteAccounts(): RemoteAccountRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_account ORDER BY last_seen_at DESC, account_key ASC')
+    .all() as Array<{
+    account_key: string
+    vendor_id: string
+    label_masked: string | null
+    last_seen_at: number
+  }>
+  return rows.map((row) => ({
+    accountKey: row.account_key,
+    vendorId: row.vendor_id,
+    labelMasked: row.label_masked,
+    lastSeenAt: row.last_seen_at
+  }))
 }

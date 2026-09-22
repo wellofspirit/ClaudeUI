@@ -53,7 +53,7 @@ vi.mock('../model-discovery', async () => {
   }
 })
 vi.mock('../../services/pi-session-list', () => ({
-  loadPiSessionHistory: vi.fn(async () => []),
+  loadPiSessionHistory: vi.fn(async () => ({ messages: [], statusLine: null })),
   findPiSessionFile: vi.fn(() => null)
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))
@@ -74,7 +74,14 @@ vi.mock('../PiBridgeHost', () => ({
   writeSubagentExtension: vi.fn()
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
-  piAuthProvider: { probe: vi.fn(async () => ({})), buildPiAccountRef: vi.fn(() => null) }
+  piAuthProvider: {
+    probe: vi.fn(async () => ({})),
+    buildPiAccountRef: vi.fn(() => null),
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `pi:${vendorId}:native`,
+      accountLabel: vendorId
+    }))
+  }
 }))
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,

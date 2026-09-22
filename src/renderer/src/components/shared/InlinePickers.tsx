@@ -4,6 +4,7 @@
  * adaptive-thinking support) consistent wherever the user picks a model.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSessionStore } from '../../stores/session-store'
 import {
   EFFORT_LEVELS,
   THINKING_MODES,
@@ -12,6 +13,12 @@ import {
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import {
+  accountDisplayName,
+  SIGN_IN_PROVIDER_LABEL,
+  signInProviderFor,
+  type ProviderAuthView
+} from '../../utils/sign-in-provider'
 import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
 import { useAnchoredMenu } from './use-anchored-menu'
@@ -19,6 +26,10 @@ import { useEscapeLayer } from './use-escape-layer'
 
 export interface ModelDisplay {
   value: string
+  /** See `ModelInfo.resolvedModel` — the concrete id `value` resolves to.
+   *  Rides through on the `...m` spread that builds these rows; read by
+   *  `dedupeResolvedModels`. Claude rows only. */
+  resolvedModel?: string
   displayName: string
   description?: string
   shortName: string
@@ -60,11 +71,25 @@ export function unsupportedTooltip(level: EffortLevel): string {
 export const ADAPTIVE_UNSUPPORTED_TOOLTIP =
   'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
 
-/** Derive groups from a flat model list by (engineId, vendorId) pairing. Shared with MobileConfigSheet's ModelPage. */
-export function deriveModelGroups(
-  models: ModelDisplay[]
-): Array<{ key: string; label: string; items: ModelDisplay[] }> {
-  const groupMap = new Map<string, { label: string; items: ModelDisplay[] }>()
+/**
+ * Derive groups from a flat model list by (engineId, vendorId) pairing. Shared
+ * with MobileConfigSheet's ModelPage.
+ *
+ * The defaulted `engineId`/`vendorId` come back out on the group because the
+ * pair is not only the key: it is also what decides which sign-in (if any)
+ * backs the group ({@link signInProviderFor}), and re-parsing it out of the
+ * string key in two components is how the two would drift.
+ */
+export interface ModelGroup {
+  key: string
+  label: string
+  engineId: EngineId
+  vendorId: VendorId
+  items: ModelDisplay[]
+}
+
+export function deriveModelGroups(models: ModelDisplay[]): ModelGroup[] {
+  const groupMap = new Map<string, Omit<ModelGroup, 'key'>>()
   for (const m of models) {
     const engineId = m.engineId ?? 'claude'
     const vendorId = m.vendorId ?? 'anthropic'
@@ -73,11 +98,28 @@ export function deriveModelGroups(
       // Build a human label: "Claude · Anthropic" or "opencode · <vendorName>"
       const vendorLabel = vendorId.charAt(0).toUpperCase() + vendorId.slice(1)
       const engineLabel = engineMeta(engineId).label
-      groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, items: [] })
+      groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, engineId, vendorId, items: [] })
     }
     groupMap.get(key)!.items.push(m)
   }
   return Array.from(groupMap.entries()).map(([key, g]) => ({ key, ...g }))
+}
+
+/**
+ * The group's Sign in item, or null. `'unknown'` renders as today: the picker
+ * must never call a provider signed-out on the strength of a read that has not
+ * happened.
+ *
+ * Shared with MobileConfigSheet's ModelPage so the two surfaces cannot disagree
+ * about which groups are gated.
+ */
+export function groupSignIn(
+  group: Pick<ModelGroup, 'engineId' | 'vendorId'>,
+  providerAuth: ProviderAuthView
+): { providerId: 'anthropic' | 'chatgpt'; label: string } | null {
+  const resolved = signInProviderFor(group.engineId, group.vendorId, providerAuth)
+  if (!resolved || resolved.state !== 'unauthenticated') return null
+  return { providerId: resolved.providerId, label: SIGN_IN_PROVIDER_LABEL[resolved.providerId] }
 }
 
 export function EnginePicker({
@@ -93,6 +135,9 @@ export function EnginePicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
   const selected = engineMeta(selectedEngineId)
+  const codexAvailable = useSessionStore((state) =>
+    state.availableModels.some((model) => model.engineId === 'codex')
+  )
 
   return (
     <div className="relative" ref={ref} data-testid="EnginePicker">
@@ -126,26 +171,28 @@ export function EnginePicker({
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-36 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {Object.values(ENGINE_META).map((meta) => (
-            <button
-              key={meta.id}
-              type="button"
-              data-testid="EnginePicker.option"
-              data-engine={meta.id}
-              onClick={() => {
-                onSelectEngine(meta.id)
-                setOpen(false)
-              }}
-              className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
-                meta.id === selectedEngineId
-                  ? 'text-text-primary bg-bg-hover'
-                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-              }`}
-            >
-              <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
-              {meta.label}
-            </button>
-          ))}
+          {Object.values(ENGINE_META)
+            .filter((meta) => meta.id !== 'codex' || codexAvailable)
+            .map((meta) => (
+              <button
+                key={meta.id}
+                type="button"
+                data-testid="EnginePicker.option"
+                data-engine={meta.id}
+                onClick={() => {
+                  onSelectEngine(meta.id)
+                  setOpen(false)
+                }}
+                className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
+                  meta.id === selectedEngineId
+                    ? 'text-text-primary bg-bg-hover'
+                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                }`}
+              >
+                <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
+                {meta.label}
+              </button>
+            ))}
         </div>
       )}
     </div>
@@ -192,6 +239,12 @@ export function ModelPicker({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
+
+  // The picker reads the auth VIEW, never IPC (ADR-068 §3, Slice 6): every
+  // call site — composer, settings, automation form — then gets the same
+  // gating without four props to keep in sync.
+  const providerAuth = useSessionStore((state) => state.providerAuth)
+  const openSignIn = useSessionStore((state) => state.openSignIn)
 
   // BOTH VARIANTS: an open menu is the top Escape layer, so the key closes the
   // menu and stops there instead of falling through to the sheet or dialog
@@ -329,48 +382,71 @@ export function ModelPicker({
               </button>
             </div>
           )}
-          {displayedGroups.map((group) => (
-            <div key={group.key}>
-              {isGrouped && (
-                <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
-                  {group.label}
-                </div>
-              )}
-              {group.items.map((m) => (
-                <button
-                  key={m.value}
-                  data-testid="ModelPicker.option"
-                  data-value={m.value}
-                  onClick={() => {
-                    onSelectModel(m.value)
-                    setOpen(false)
-                  }}
-                  className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
-                    m.value === selectedModel.value
-                      ? 'text-text-primary bg-bg-hover'
-                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-[12px]">{m.shortName}</span>
-                    {m.free && (
-                      <span
-                        data-testid="ModelPicker.freeBadge"
-                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
-                      >
-                        Free
+          {displayedGroups.map((group) => {
+            const signIn = groupSignIn(group, providerAuth)
+            return (
+              <div key={group.key}>
+                {isGrouped && (
+                  <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
+                    {group.label}
+                  </div>
+                )}
+                {signIn && (
+                  <button
+                    type="button"
+                    data-testid="ModelPicker.signIn"
+                    data-id={signIn.providerId}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openSignIn({ providerId: signIn.providerId, mode: 'reauth' })
+                      setOpen(false)
+                    }}
+                    className="w-full flex items-center px-3 py-1.5 text-[12px] text-accent hover:bg-bg-hover transition-colors cursor-pointer text-left"
+                  >
+                    Sign in to {signIn.label}
+                  </button>
+                )}
+                {group.items.map((m) => (
+                  <button
+                    key={m.value}
+                    data-testid="ModelPicker.option"
+                    data-value={m.value}
+                    onClick={() => {
+                      onSelectModel(m.value)
+                      setOpen(false)
+                    }}
+                    // Dimmed, NOT disabled: picking a model and then signing in is
+                    // a legitimate order, and a picker that refuses the click
+                    // leaves the user nowhere.
+                    className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                      signIn ? 'opacity-60 ' : ''
+                    }${
+                      m.value === selectedModel.value
+                        ? 'text-text-primary bg-bg-hover'
+                        : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[12px]">{m.shortName}</span>
+                      {m.free && (
+                        <span
+                          data-testid="ModelPicker.freeBadge"
+                          className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                        >
+                          Free
+                        </span>
+                      )}
+                    </span>
+                    {m.description && (
+                      <span className="text-text-muted text-[10px]">
+                        {m.description.split('·')[1]?.trim()}
                       </span>
                     )}
-                  </span>
-                  {m.description && (
-                    <span className="text-text-muted text-[10px]">
-                      {m.description.split('·')[1]?.trim()}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          ))}
+                  </button>
+                ))}
+              </div>
+            )
+          })}
           {trailingOption && (
             <button
               data-testid="ModelPicker.option"
@@ -394,22 +470,40 @@ export function ModelPicker({
   )
 }
 
+/**
+ * `nativeOptions` REPLACES the fixed Claude ladder rather than merging with it:
+ * an engine that publishes its own reasoning tiers (Codex's model catalog, via
+ * `capabilities.reasoning.nativeEffort`) has no low/medium/high/xhigh/max axis
+ * to grey out, and showing five inapplicable rows next to two real ones reads
+ * as five broken options.
+ */
 export function EffortPicker({
   effort,
   allowedEffortLevels,
+  nativeOptions,
   supported,
   onSelectEffort
 }: {
   effort: string
   allowedEffortLevels: readonly EffortLevel[]
+  nativeOptions?: ReadonlyArray<{ value: string; description: string }>
   supported: boolean
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
 }): React.JSX.Element | null {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
   if (!supported) return null
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
+  const options: Array<{ value: string; label: string; detail?: string; enabled: boolean }> =
+    nativeOptions?.length
+      ? nativeOptions.map((option) => ({
+          value: option.value,
+          label: option.value,
+          detail: option.description,
+          enabled: true
+        }))
+      : EFFORT_LEVELS.map((level) => ({ value: level, label: level, enabled: allowed.has(level) }))
 
   return (
     <div className="relative" ref={ref} data-testid="EffortPicker">
@@ -435,37 +529,195 @@ export function EffortPicker({
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-28 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {EFFORT_LEVELS.map((level) => {
-            const enabled = allowed.has(level)
+        <div
+          className={`absolute bottom-full mb-1 left-0 ${nativeOptions?.length ? 'w-48' : 'w-28'} bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20`}
+        >
+          {options.map(({ value, label, detail, enabled }) => {
             return (
               <button
-                key={level}
+                key={value}
                 data-testid="EffortPicker.option"
-                data-value={level}
+                data-value={value}
                 disabled={!enabled}
-                title={enabled ? undefined : unsupportedTooltip(level)}
+                title={enabled ? detail : unsupportedTooltip(value as EffortLevel)}
                 onClick={() => {
                   if (enabled) {
-                    onSelectEffort(level)
+                    onSelectEffort(value)
                     setOpen(false)
                   }
                 }}
-                className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left capitalize ${
+                className={`w-full flex flex-col items-start px-3 py-1.5 text-[12px] transition-colors text-left capitalize ${
                   !enabled
                     ? 'text-text-muted opacity-40 cursor-not-allowed'
-                    : level === effort
+                    : value === effort
                       ? 'text-text-primary bg-bg-hover cursor-pointer'
                       : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer'
                 }`}
               >
-                {level}
+                <span>{label}</span>
+                {detail && (
+                  <span className="text-[10px] text-text-muted normal-case leading-tight">
+                    {detail}
+                  </span>
+                )}
               </button>
             )
           })}
         </div>
       )}
     </div>
+  )
+}
+
+/** One stored subscription account, as the pickers render it (ADR-068 §2). */
+export interface AccountChoice {
+  id: string
+  email?: string
+  planType?: string
+}
+
+/**
+ * The per-session ChatGPT account picker (ADR-068 §2), in the same visual
+ * grammar as {@link EffortPicker}.
+ *
+ * "Follow active account" is FIRST and is a real choice, not the absence of one:
+ * a session that follows active carries the same account id as one pinned to it,
+ * so the trigger has to say which of the two it is. Hence `pinned === null` is
+ * rendered as `Active · <email>` rather than just the email.
+ *
+ * `onOpen` re-reads the list when the menu is opened, so an account added or
+ * removed in Settings since this input bar mounted is offered (or gone) without
+ * this component knowing anything about the settings surface.
+ */
+export function AccountPicker({
+  accounts,
+  activeAccountId,
+  pinned,
+  onSelectAccount,
+  onAddAccount,
+  onOpen
+}: {
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinned: string | null
+  onSelectAccount: (accountId: string | null) => void
+  onAddAccount: () => void
+  onOpen?: () => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+  const active = accounts.find((account) => account.id === activeAccountId)
+  const current = pinned === null ? undefined : accounts.find((account) => account.id === pinned)
+  const trigger =
+    pinned === null
+      ? `Active · ${accountDisplayName(active?.email)}`
+      : accountDisplayName(current?.email)
+
+  return (
+    <div className="relative" ref={ref} data-testid="AccountPicker">
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          if (!open) onOpen?.()
+          setOpen(!open)
+        }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer max-w-[180px]"
+        title="ChatGPT account for this session"
+        data-testid="AccountPicker.trigger"
+      >
+        <span className="truncate">{trigger}</span>
+        <ChevronIcon open={open} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-60 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          <AccountOption
+            testId="AccountPicker.option"
+            dataValue="__active__"
+            selected={pinned === null}
+            label="Follow active account"
+            detail={active ? accountDisplayName(active.email) : undefined}
+            onClick={() => {
+              onSelectAccount(null)
+              setOpen(false)
+            }}
+          />
+          {accounts.map((account) => (
+            <AccountOption
+              key={account.id}
+              testId="AccountPicker.option"
+              dataValue={account.id}
+              selected={pinned === account.id}
+              label={accountDisplayName(account.email)}
+              detail={account.planType}
+              onClick={() => {
+                onSelectAccount(account.id)
+                setOpen(false)
+              }}
+            />
+          ))}
+          <button
+            data-testid="AccountPicker.add"
+            onClick={() => {
+              onAddAccount()
+              setOpen(false)
+            }}
+            className="w-full flex items-center px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors text-left cursor-pointer border-t border-border"
+          >
+            Add account…
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AccountOption({
+  testId,
+  dataValue,
+  selected,
+  label,
+  detail,
+  onClick
+}: {
+  testId: string
+  dataValue: string
+  selected: boolean
+  label: string
+  detail?: string
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      data-testid={testId}
+      data-value={dataValue}
+      aria-checked={selected}
+      role="menuitemradio"
+      onClick={onClick}
+      className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-[12px] transition-colors text-left cursor-pointer ${
+        selected
+          ? 'text-text-primary bg-bg-hover'
+          : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+      }`}
+    >
+      <span className="min-w-0 flex flex-col items-start">
+        <span className="truncate">{label}</span>
+        {detail && <span className="text-[10px] text-text-muted leading-tight">{detail}</span>}
+      </span>
+      {selected && (
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          className="shrink-0"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      )}
+    </button>
   )
 }
 

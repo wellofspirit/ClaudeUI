@@ -19,9 +19,12 @@ import {
   EffortPicker,
   ThinkingPicker,
   ReasoningPicker,
+  AccountPicker,
+  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 import { MobileConfigSheet } from './MobileConfigSheet'
+import { formatCostOrUnknown } from '../../../utils/cost'
 
 export type { ModelDisplay }
 
@@ -33,7 +36,7 @@ const DEFAULT_STATUS_LINE: StatusLineData = {
   totalOutputTokens: 0,
   cachedTokens: 0,
   totalTokens: 0,
-  contextWindowSize: 0,
+  contextWindow: { used: 0, size: 0 },
   usedPercentage: 0,
   remainingPercentage: 100
 }
@@ -94,8 +97,26 @@ export interface InputBoxViewProps {
   engineLocked: boolean
   showEnginePicker: boolean
   effort: string
+  /** Engine-native effort tiers (Codex's model catalog) in place of the fixed Claude ladder. */
+  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
+  /**
+   * The per-session ChatGPT account picker (ADR-068 §2). Shown only when the
+   * engine declares `auth.perSessionAccount`, the provider's Per-session
+   * accounts toggle is on, AND at least two accounts are stored — a picker with
+   * one option is a control that cannot be used.
+   */
+  showAccountPicker?: boolean
+  accounts?: readonly AccountChoice[]
+  /** The globally ACTIVE account, described under "Follow active account". */
+  activeAccountId?: string | null
+  /** This session's pin, or null when it follows the active account. */
+  pinnedAccountId?: string | null
+  onSelectAccount?: (accountId: string | null) => void
+  onAddAccount?: () => void
+  /** Re-read the account list (the picker calls it as its menu opens). */
+  onAccountMenuOpen?: () => void
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
   /** Show/hide the thinking-mode picker. Gated on capabilities.reasoning.thinking. */
@@ -127,7 +148,7 @@ export interface InputBoxViewProps {
   onSelectMode?: (mode: PermissionMode) => void
   onSelectModel: (value: string) => void
   onSelectEngine: (engineId: EngineId) => void
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
   /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
   reasoningVariants?: string[]
@@ -155,12 +176,13 @@ function StatusLine({
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
 
-  // Strip the cost placeholder when the engine doesn't report cost, and the
-  // context-usage placeholders when the model has no known context window
-  // (contextWindow === 0 — the meter would be meaningless).
+  // Strip the cost placeholder when the engine doesn't report cost. An
+  // unavailable context meter renders as the SAME em-dash `interpolateTemplate`
+  // uses for a null percentage: stripping the placeholder left a bare `%` in
+  // the default template, a third spelling of "unknown" that read as a bug.
   let template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
   if (!showContextMeter) {
-    template = template.replace(/\{used\}/g, '').replace(/\{remaining\}/g, '')
+    template = template.replace(/\{used\}/g, '–').replace(/\{remaining\}/g, '–')
   }
 
   // usedPercentage/remainingPercentage are computed in the main process (live:
@@ -170,6 +192,7 @@ function StatusLine({
   // the main-computed value stays reactive without duplicating window logic here.
   return (
     <div
+      data-testid="InputBox.statusLine"
       className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}
     >
       {interpolateTemplate(template, data)}
@@ -409,24 +432,23 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-function formatCost(usd: number): string {
-  if (usd < 0.01) return '$' + usd.toFixed(4)
-  return '$' + usd.toFixed(2)
-}
-
 function interpolateTemplate(template: string, data: StatusLineData): string {
-  return template
-    .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
-    .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
-    .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
-    .replace(/\{total\}/g, formatTokens(data.totalTokens))
-    .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
-    .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
-    .replace(
-      /\{remaining\}/g,
-      data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
-    )
-    .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  return (
+    template
+      .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
+      .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
+      .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
+      .replace(/\{total\}/g, formatTokens(data.totalTokens))
+      // null = unpriced/unknown, which renders as the word rather than a
+      // fabricated "$0.00" (see SessionStatus.totalCostUsd).
+      .replace(/\{cost\}/g, formatCostOrUnknown(data.totalCostUsd))
+      .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
+      .replace(
+        /\{remaining\}/g,
+        data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
+      )
+      .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +523,8 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           {/* Mode tab */}
           {permissionMode !== 'default' && (
             <div
+              data-testid="InputBox.modeTab"
+              data-mode={permissionMode}
               className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
                 permissionMode === 'acceptEdits'
                   ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
@@ -587,6 +611,14 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effort={props.effort}
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
+                  nativeEffortOptions={props.nativeEffortOptions}
+                  showAccountPicker={props.showAccountPicker ?? false}
+                  accounts={props.accounts ?? []}
+                  activeAccountId={props.activeAccountId ?? null}
+                  pinnedAccountId={props.pinnedAccountId ?? null}
+                  onSelectAccount={props.onSelectAccount ?? (() => {})}
+                  onAddAccount={props.onAddAccount ?? (() => {})}
+                  onAccountMenuOpen={props.onAccountMenuOpen}
                   onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
@@ -627,9 +659,20 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   <EffortPicker
                     effort={props.effort}
                     allowedEffortLevels={props.allowedEffortLevels}
+                    nativeOptions={props.nativeEffortOptions}
                     supported={props.effortSupported}
                     onSelectEffort={props.onSelectEffort}
                   />
+                  {props.showAccountPicker && (
+                    <AccountPicker
+                      accounts={props.accounts ?? []}
+                      activeAccountId={props.activeAccountId ?? null}
+                      pinned={props.pinnedAccountId ?? null}
+                      onSelectAccount={props.onSelectAccount ?? (() => {})}
+                      onAddAccount={props.onAddAccount ?? (() => {})}
+                      onOpen={props.onAccountMenuOpen}
+                    />
+                  )}
                 </>
               )}
               <SandboxPill

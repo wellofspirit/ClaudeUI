@@ -5,18 +5,29 @@
  * One row per provider IDENTITY, whatever store backs it: the shared vault, the
  * Claude account, opencode's catalog + auth.json, pi's auth.json + models.json.
  * The rows come from `provider-registry:list` (phase 6a) and this component
- * renders them and nothing else — it derives no state, reads no store directly,
- * and every edit happens in the Manage sheet.
+ * renders them and nothing else — it derives no state beyond the rows it is
+ * given, and every edit happens in the Manage sheet.
  *
  * IT RE-READS AFTER EVERY WRITE. The registry publishes no change event, so a
  * write is only visible once `listProviderRegistry()` is called again; that is
  * also the moment a row can DISAPPEAR (turning a native pi provider off removes
  * it), which is why the sheet is closed here rather than by itself.
  *
- * ANTHROPIC IS NOT MANAGED HERE. Its row's action navigates to Models &
- * providers › Accounts: sign-in, account switching and the endpoint override
- * are already whole surfaces of their own, and a sheet with a link in it would
- * be a detour, not a home.
+ * THE SNAPSHOT LIVES IN THE STORE (`providerRegistry`, F12), not in this
+ * component. A write is not the only moment the registry changes: the Manage
+ * sheet's "+ Add account" hands over to the ONE sign-in dialog, and that
+ * dialog's `closeSignIn` refreshes the store — with a local copy here, the
+ * still-open sheet kept rendering the accounts from before the sign-in until
+ * the next write (Remove was one, which is why removing a row made the other
+ * appear). Reading the store field instead makes every refresher, wherever it
+ * lives, land on these rows. Only the ERROR is local: keeping the previous rows
+ * on a failed re-read is this card's own behaviour.
+ *
+ * NO PROVIDER'S ACCOUNTS ARE MANAGED HERE (F14). The Anthropic row's action
+ * navigates to Models & providers › Accounts, and since every provider's stored
+ * accounts live on that one page, the Manage sheet's own Accounts card became a
+ * link to the same place — which is why `navigate` is threaded into the sheet
+ * rather than kept for the Anthropic row.
  *
  * ONE DEGRADED CASE (owner ruling 2, 2026-09-08): the opencode BINARY is
  * missing. A stopped server is not degraded — catalog discovery starts one — so
@@ -32,6 +43,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
 import type { SharedProviderRouteDiagnosis } from '../../../../shared/shared-provider'
@@ -46,8 +58,18 @@ const LIST = 'ProviderList'
 /** The `settings:add-provider` header action — see `SettingsGroup.action`. */
 const ADD_EVENT = 'settings:add-provider'
 
-/** Chip order, and the order the ENABLED FOR group reads in. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/** What the card renders from when the very first read failed. */
+const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalled: true }
+
+/**
+ * Chip order, and the order the ENABLED FOR group reads in.
+ *
+ * Codex is LAST and is not a shared-provider route: the ChatGPT subscription
+ * reaches it by vault injection (ADR-068 §1), and the registry says so on that
+ * row alone. Before F14 the row chipped `opencode · pi` and read as "this
+ * subscription is not available to Codex".
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 /**
  * Why an enabled, credentialed route still surfaces nothing — appended to the
@@ -80,8 +102,16 @@ export function ProviderList({
   navigate?: (target: SettingsTarget) => void
 }): React.JSX.Element {
   /** null until the first read resolves — the card shows one loading row. */
-  const [snapshot, setSnapshot] = useState<ProviderRegistrySnapshot | null>(null)
+  const stored = useSessionStore((s) => s.providerRegistry)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * A first read that FAILED, with nothing in the store to fall back on. The
+   * card then renders empty with its error row rather than sitting on the
+   * loading row forever; it is a flag rather than a second snapshot so there is
+   * still exactly one copy of the registry in the renderer.
+   */
+  const [failedEmpty, setFailedEmpty] = useState(false)
+  const snapshot = stored ?? (failedEmpty ? EMPTY_SNAPSHOT : null)
   /** The provider whose Manage sheet is open. */
   const [openId, setOpenId] = useState<string | null>(null)
   /**
@@ -99,12 +129,19 @@ export function ProviderList({
   const reload = useCallback(async (): Promise<ProviderRegistrySnapshot | null> => {
     try {
       const next = await window.api.listProviderRegistry()
-      setSnapshot(next)
       setError(null)
+      // The store is where the snapshot lives (see the header), and the same
+      // call keeps the composer's hint and the model picker's Sign in item
+      // (ADR-068 §3, Slice 6) from going stale behind an open settings dialog.
+      // The read is handed over rather than repeated: `provider-registry:list`
+      // can start an opencode server to enumerate its catalog.
+      await useSessionStore.getState().refreshProviderAuth(next)
       return next
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      setSnapshot((current) => current ?? { entries: [], opencodeInstalled: true })
+      // The store keeps whatever it last resolved, so the rows the user is
+      // looking at survive; this only covers a FIRST read that never landed.
+      setFailedEmpty(true)
       return null
     }
   }, [])
@@ -148,7 +185,7 @@ export function ProviderList({
   // an Add sheet whose catalog fills in a moment later.
   const addSheet = adding && (
     <ProviderAddSheet
-      snapshot={snapshot ?? { entries: [], opencodeInstalled: true }}
+      snapshot={snapshot ?? EMPTY_SNAPSHOT}
       focusId={adding.focusId}
       onClose={() => setAdding(null)}
       onAdded={handleAdded}
@@ -182,7 +219,17 @@ export function ProviderList({
           dataId={entry.id}
           label={entry.name}
           labelBadge={
-            <CredentialChip credential={entry.credential} testid={`${LIST}.credential`} />
+            <CredentialChip
+              credential={entry.credential}
+              // A subscription with several accounts: the COUNT is what the row
+              // has to say, and "Connected" would hide that there are others.
+              label={
+                (entry.accounts?.list.length ?? 0) > 1
+                  ? `${entry.accounts!.list.length} accounts`
+                  : undefined
+              }
+              testid={`${LIST}.credential`}
+            />
           }
           description={describe(entry)}
         >
@@ -228,12 +275,9 @@ export function ProviderList({
         <ProviderSheet
           entry={open}
           opencodeInstalled={opencodeInstalled}
+          navigate={navigate}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
-          onAddProvider={(focusId) => {
-            setOpenId(null)
-            setAdding({ focusId: focusId ?? null })
-          }}
         />
       )}
 

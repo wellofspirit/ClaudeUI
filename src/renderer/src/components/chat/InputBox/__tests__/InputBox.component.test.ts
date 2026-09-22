@@ -20,8 +20,9 @@ import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
-import type { QueuedItem } from '../../../../../../shared/types'
+import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
+import { resolveCodexCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
@@ -415,6 +416,15 @@ describe('InputBox FC — rendered', () => {
       record('session:cancel', ...args)
       return null
     })
+    // ADR-068 §2 — the per-session ChatGPT pin and the account list behind it.
+    app.bridge.ipcMain.handle('session:set-account', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-account', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('provider-account:list', (_e: unknown, ...args: unknown[]) => {
+      record('provider-account:list', ...args)
+      return { ok: true, data: useSessionStore.getState().providerAccounts }
+    })
     app.bridge.ipcMain.handle('session:get-models', () => [])
     app.bridge.ipcMain.handle('session:get-engine-models', () => [
       { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
@@ -451,6 +461,289 @@ describe('InputBox FC — rendered', () => {
     render(createElement(InputBox))
   }
 
+  it.each([false, true])(
+    'does not turn a native catalog preview into a requested model, explicit=%s',
+    async (explicit) => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: 'codex',
+            selectedModel: 'native-preview',
+            codexModelExplicit: explicit,
+            sdkActive: false,
+            isHistorical: false,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              sessionId: null,
+              engineId: 'codex',
+              capabilities: resolveCodexCapabilities()
+            }
+          }
+        },
+        availableModels: [
+          {
+            value: 'native-preview',
+            displayName: 'Native preview',
+            description: '',
+            engineId: 'codex'
+          }
+        ]
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+      expect(viewProps.selectedModel.shortName).toBe(explicit ? 'Native preview' : 'Native default')
+      // The pill's "initialize without a prompt" button is gone; a real send is
+      // now the only spawn trigger, and it must resolve the model the same way.
+      await act(async () => {
+        useSessionStore.getState().setDraftText('go')
+      })
+      await act(async () => {
+        await viewProps.onSend()
+      })
+      expect(ipcCalls['session:create'][0][5]).toBe(explicit ? 'native-preview' : undefined)
+      expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+      expect(ipcCalls['session:create'][0][9]).toBe('codex')
+    }
+  )
+
+  it('says Native default whenever the codex spawn omits the model', async () => {
+    // The sticky codex pick is gone from the catalog, so `createNewSession`
+    // seeded an EMPTY selectedModel and left `codexModelExplicit` true. The
+    // pill read the first catalog entry ("GPT-6-Astra") while the request
+    // carried no model at all — two copies of the rule, two answers, and Codex
+    // silently ran its own configured default.
+    useSessionStore.setState((state) => ({
+      lastSelectedModelByEngine: { codex: 'gpt-5.9-vanished' },
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: '',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Native default')
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+    expect(ipcCalls['session:create'][0][5]).toBeUndefined()
+    expect(ipcCalls['session:create'][0][9]).toBe('codex')
+  })
+
+  it('previews the sticky codex pick only while the catalog still offers it', () => {
+    // Welcome screen: no session holds the pick, so the pill must answer for
+    // the session `createNewSession` is about to seed — which marks a sticky
+    // model explicit, and drops it when the catalog no longer lists it.
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'codex',
+      lastSelectedModelByEngine: { codex: 'gpt-5.9-vanished' },
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Native default')
+  })
+
+  it('previews the CONFIGURED codex default on the welcome screen (Slice 5b)', () => {
+    // Same rule as the sticky pick above, one rung lower: with no session and no
+    // sticky model, the pill must answer for what `createNewSession` will seed —
+    // `codexConfig.defaultModel`, which is an EXPLICIT choice (ADR-059), so the
+    // pill names it instead of reading "Native default".
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'codex',
+      lastSelectedModelByEngine: {},
+      codexDefaultModel: 'gpt-5.6-codex-mini',
+      codexDefaultModelConfigured: true,
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' },
+        {
+          value: 'gpt-5.6-codex-mini',
+          displayName: 'GPT-5.6-Codex-mini',
+          description: '',
+          engineId: 'codex'
+        }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('GPT-5.6-Codex-mini')
+  })
+
+  it('sends the configured codex effort with the spawn, and nothing when it is blank', async () => {
+    const spawn = async (): Promise<void> => {
+      await act(async () => {
+        useSessionStore.getState().setDraftText('go')
+      })
+      await act(async () => {
+        await viewProps.onSend()
+      })
+    }
+    useSessionStore.setState((state) => ({
+      codexDefaultModel: 'gpt-5.6-codex',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh',
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        { value: 'gpt-5.6-codex', displayName: 'GPT-5.6-Codex', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await spawn()
+    expect(ipcCalls['session:create'][0][5]).toBe('gpt-5.6-codex')
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+  })
+
+  it('keeps the configured effort PAIRED with the configured model — a different pick runs its own tier', async () => {
+    // The Default-models pane offers only the tiers the configured model
+    // publishes, so `defaultEffort` is a statement about THAT model. A session
+    // the user steered onto another model must not carry it:
+    // `CodexSession.validateEffort` would refuse the start for a mismatch the
+    // user never chose.
+    useSessionStore.setState((state) => ({
+      codexDefaultModel: 'gpt-5.6-codex',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh',
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex-mini',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        {
+          value: 'gpt-5.6-codex',
+          displayName: 'GPT-5.6-Codex',
+          description: '',
+          engineId: 'codex'
+        },
+        {
+          value: 'gpt-5.6-codex-mini',
+          displayName: 'GPT-5.6-Codex-mini',
+          description: '',
+          engineId: 'codex'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+    expect(ipcCalls['session:create'][0][5]).toBe('gpt-5.6-codex-mini')
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+  })
+
+  it('codex shortName is the display name, not the native description sentence', () => {
+    // Codex's catalog ships a marketing sentence in `description`; only
+    // claude/opencode/pi discovery follow the "Name · detail" convention the
+    // picker's shortName split assumes.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        {
+          value: 'gpt-5.6-codex',
+          displayName: 'GPT-5.6-Codex',
+          description: 'Our most capable model for complex, demanding work.',
+          engineId: 'codex'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('GPT-5.6-Codex')
+    expect(viewProps.models[0].shortName).toBe('GPT-5.6-Codex')
+  })
+
+  it('keeps the "Name · detail" shortName split for non-codex engines', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' }
+      },
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default (recommended)',
+          description: 'Opus 4.7 with 1M context · Most capable for complex work'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Opus 4.7 with 1M context')
+  })
+
   it('renders and passes props to View', () => {
     renderFC()
     expect(viewProps).toBeDefined()
@@ -481,6 +774,64 @@ describe('InputBox FC — rendered', () => {
 
     // markSdkActive called — sdkActive is now true in store
     expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+  })
+
+  // The pre-spawn mode pick has no event to carry it: `changePermissionMode`
+  // writes it into this client's replica and the spawn reads it back off the
+  // session. Pin the whole path — pick, then send — so a regression that drops
+  // the local write shows up as a session spawned in the wrong mode, which is
+  // the part that actually matters.
+  it('onSend carries a pre-spawn permission-mode pick into createSession', async () => {
+    useSessionStore.getState().changePermissionMode(FC_ROUTE, 'plan')
+    useSessionStore.getState().setDraftText('hello world')
+
+    renderFC()
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    // args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
+    expect(ipcCalls['session:create'][0][4]).toBe('plan')
+  })
+
+  it('onSend clears the draft when the engine rekeys the session mid-send', async () => {
+    // Codex reports its stable session id on `thread/start`, which lands while
+    // `sendPrompt` is still awaiting `turn/start` — so the rekey retires
+    // FC_ROUTE before handleSend's continuation runs. Guarding on the captured
+    // (now dead) id left the sent prompt sitting in the textarea.
+    const REKEYED = 'codex-stable-1'
+    app.bridge.ipcMain.handle('session:send', (_e: unknown, ...args: unknown[]) => {
+      if (!ipcCalls['session:send']) ipcCalls['session:send'] = []
+      ipcCalls['session:send'].push(args)
+      seed.rekey(FC_ROUTE, REKEYED)
+      return null
+    })
+
+    useSessionStore.getState().setDraftText('hello world')
+    useSessionStore.getState().addDraftAttachments(FC_ROUTE, [
+      {
+        id: 'att-1',
+        fileName: 'shot.png',
+        fileType: 'image',
+        mediaType: 'image/png',
+        base64Data: 'AAAA',
+        previewUrl: 'blob:shot'
+      }
+    ])
+
+    renderFC()
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // The rekey landed, and the send targeted the id that was live when it was issued.
+    expect(useSessionStore.getState().activeSessionId).toBe(REKEYED)
+    expect(ipcCalls['session:send'][0][0]).toBe(FC_ROUTE)
+    expect(useSessionStore.getState().sessions[FC_ROUTE]).toBeUndefined()
+
+    const settled = useSessionStore.getState().sessions[REKEYED]
+    expect(settled.draftText).toBe('')
+    expect(settled.draftAttachments).toEqual([])
   })
 
   it('onSend with /btw prefix: calls askSideQuestion IPC and setBtwQuestion in store', async () => {
@@ -605,6 +956,54 @@ describe('InputBox FC — rendered', () => {
     )
   })
 
+  // R1b — a reopened opencode/pi session whose model the discovered catalog
+  // does not (yet) hold used to read as the CONFIGURED default: a model the
+  // session never ran and the resume will not spawn.
+  const OPENCODE_CATALOG: ModelInfo[] = [
+    {
+      value: 'anthropic/claude-x',
+      displayName: 'Claude X',
+      description: '',
+      engineId: 'opencode',
+      vendorId: 'anthropic'
+    }
+  ]
+
+  it('an active opencode session names an absent model as unavailable, not as the default', () => {
+    useSessionStore.setState((state) => ({
+      opencodeDefaultModel: 'anthropic/claude-x',
+      opencodeDefaultModelConfigured: true,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'opencode',
+          selectedModel: 'alicloud/qwen-x'
+        }
+      },
+      availableModels: OPENCODE_CATALOG
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    expect(viewProps.selectedModel.shortName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).not.toBe('Claude X')
+  })
+
+  it('the welcome screen with the same catalog still names the configured default', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'anthropic/claude-x',
+      opencodeDefaultModelConfigured: true,
+      availableModels: OPENCODE_CATALOG
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    expect(viewProps.selectedModel.displayName).toBe('Claude X')
+  })
+
   it('hides engine selection as soon as backend initialization starts', () => {
     useSessionStore.setState((state) => ({
       sessions: {
@@ -685,11 +1084,12 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.showEnginePicker).toBe(false)
   })
 
-  it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
+  it('opencode session with an unavailable model says so, and never names a Claude one', async () => {
     // Regression: when the session's selectedModel isn't in availableModels (e.g.
-    // its provider was disabled), the displayed model must fall back to a model of
-    // the SESSION's engine — never the global models[0] (a Claude entry), which
-    // is how an opencode session used to surface a Claude model in the picker.
+    // its provider was disabled), the pill must never fall through to the global
+    // models[0] (a Claude entry), which is how an opencode session used to
+    // surface a Claude model in the picker. On an ACTIVE session it now names no
+    // substitute at all (R1b) — the row says the catalog cannot place it.
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
@@ -715,7 +1115,7 @@ describe('InputBox FC — rendered', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.value).toBe('qwen-sandbox/qwen3.6:27b')
+    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
@@ -898,6 +1298,435 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
 
+  function codexSession(capabilities = resolveCodexCapabilities()): void {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'native',
+          codexModelExplicit: true,
+          permissionMode: 'acceptEdits',
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            engineId: 'codex',
+            sessionId: 'thread',
+            capabilities
+          }
+        }
+      },
+      availableModels: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it('gives a codex session the shared mode picker and its real permission mode', () => {
+    codexSession()
+    renderFC()
+    expect(viewProps.showModePicker).toBe(true)
+    expect(viewProps.permissionMode).toBe('acceptEdits')
+    expect(viewProps.autoAvailable).toBe(true)
+    expect(viewProps.canPlan).toBe(true)
+  })
+
+  it('offers native effort for codex and applies it over IPC without a respawn', async () => {
+    codexSession(
+      resolveCodexCapabilities({
+        nativeEffortOptions: [
+          { value: 'high', description: 'High' },
+          { value: 'ultra', description: 'Native ultra' }
+        ]
+      })
+    )
+    // A thread id alone is not a live backend — a disconnected session keeps
+    // one (ADR-045) and its pick is stored, not pushed (F15). This case is the
+    // LIVE one, so the session is marked active.
+    act(() => {
+      useSessionStore.getState().markSdkActive(FC_ROUTE)
+    })
+    renderFC()
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.nativeEffortOptions).toEqual([
+      { value: 'high', description: 'High' },
+      { value: 'ultra', description: 'Native ultra' }
+    ])
+    await act(async () => {
+      await viewProps.onSelectEffort('ultra')
+    })
+    expect(ipcCalls['session:set-effort']).toEqual([[FC_ROUTE, 'ultra']])
+    expect(ipcCalls['session:cancel']).toBeUndefined()
+  })
+
+  it('pre-turn native effort is the model’s own default, not the first catalog tier', () => {
+    const nativeEffortOptions = [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ]
+    codexSession(resolveCodexCapabilities({ nativeEffortOptions }))
+    useSessionStore.setState({
+      availableModels: [
+        {
+          value: 'native',
+          displayName: 'Native',
+          description: '',
+          engineId: 'codex',
+          nativeEffortOptions,
+          nativeDefaultEffort: 'high'
+        }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    // No turn has acknowledged an effort yet, so the catalog's `high` default
+    // shows — picking the first option would claim `low` the engine never said.
+    expect(viewProps.effort).toBe('high')
+  })
+
+  it('lets the acknowledged native effort override the model default', () => {
+    const nativeEffortOptions = [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ]
+    codexSession(resolveCodexCapabilities({ nativeEffortOptions }))
+    useSessionStore.setState((state) => ({
+      availableModels: [
+        {
+          value: 'native',
+          displayName: 'Native',
+          description: '',
+          engineId: 'codex',
+          nativeEffortOptions,
+          nativeDefaultEffort: 'high'
+        }
+      ],
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            codex: {
+              modelProvider: 'openai',
+              reasoningEffort: 'low',
+              effortOptions: nativeEffortOptions,
+              pinnedAccountId: null
+            }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.effort).toBe('low')
+  })
+  // -------------------------------------------------------------------------
+  // F11 — a native tier picked BEFORE the session spawns
+  // -------------------------------------------------------------------------
+
+  const CODEX_TIERS = [
+    { value: 'minimal', description: 'Minimal' },
+    { value: 'low', description: 'Low' },
+    { value: 'medium', description: 'Medium' },
+    { value: 'high', description: 'High' },
+    { value: 'xhigh', description: 'Extra high' }
+  ]
+
+  const astraRow = {
+    value: 'gpt-6-astra',
+    displayName: 'GPT-6-Astra',
+    description: '',
+    engineId: 'codex' as const,
+    nativeEffortOptions: CODEX_TIERS,
+    nativeDefaultEffort: 'medium'
+  }
+
+  /** Publishes only two of astra's five tiers. */
+  const miniRow = {
+    value: 'gpt-6-astra-mini',
+    displayName: 'GPT-6-Astra-mini',
+    description: '',
+    engineId: 'codex' as const,
+    nativeEffortOptions: [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ],
+    nativeDefaultEffort: 'low'
+  }
+
+  /** A codex session with a catalog row but no backend thread yet. */
+  function freshCodexSession(model = 'gpt-6-astra', models: ModelInfo[] = [astraRow]): void {
+    const row = models.find((m) => m.value === model)
+    // The FC re-fetches the catalog on mount; without this the harness's empty
+    // claude-only group would wipe `availableModels` mid-test and the codex
+    // catalog row (the tiers this slice is about) would vanish.
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'codex', vendorId: 'openai', vendorName: 'OpenAI', models }
+    ])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: model,
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities(row)
+          }
+        }
+      },
+      availableModels: models
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  async function sendFC(): Promise<void> {
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+  }
+
+  it('carries a native tier picked BEFORE the spawn into session:create', async () => {
+    // Pre-spawn there is no thread for `session:set-effort` to update: the main
+    // handler finds no live session and drops the pick silently, so the pill
+    // stayed on the model's catalog default and the spawn carried nothing.
+    freshCodexSession()
+    renderFC()
+    expect(viewProps.effort).toBe('medium')
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(viewProps.effort).toBe('high')
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('high')
+  })
+
+  it('lets a pre-spawn pick beat the configured default for the same model', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    freshCodexSession()
+    renderFC()
+    await act(async () => {
+      await viewProps.onSelectEffort('minimal')
+    })
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('minimal')
+  })
+
+  it('drops a stored tier the selected model does not publish and spawns with the configured default', async () => {
+    // A tier off another engine's ladder (a persisted config, or a session
+    // switched onto codex): the catalog row never published it, so
+    // `CodexSession.validateEffort` would refuse the thread start.
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    freshCodexSession()
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'max' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+  })
+
+  it('coerces a pre-spawn pick against the model the user switches to', async () => {
+    freshCodexSession('gpt-6-astra', [astraRow, miniRow])
+    renderFC()
+    // `high` is published by both rows — the switch must keep it.
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra-mini')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    expect(viewProps.effort).toBe('high')
+    // `minimal` is astra-only: switching to the mini row must clear it rather
+    // than carry a tier the new model never published into the spawn.
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra')
+    })
+    await act(async () => {
+      await viewProps.onSelectEffort('minimal')
+    })
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra-mini')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBeNull()
+    expect(viewProps.effort).toBe('low')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+  })
+
+  // -------------------------------------------------------------------------
+  // F15 — a native tier picked on a session with NO live process
+  // -------------------------------------------------------------------------
+
+  /**
+   * A codex session with a native thread id and no process behind it: loaded
+   * from the sidebar (`isHistorical`), or left over from a host that died
+   * (ADR-045 projects `disconnected` as idle + `sdkActive: false`). Both take
+   * the live setter today, which finds no session on the host and drops the
+   * pick — the pre-F11 bug, one lifecycle stage later.
+   */
+  function coldCodexSession(
+    kind: 'historical' | 'disconnected',
+    opts: { model?: string; models?: ModelInfo[]; acknowledged?: string } = {}
+  ): void {
+    const models = opts.models ?? [astraRow]
+    const model = opts.model ?? 'gpt-6-astra'
+    const row = models.find((m) => m.value === model)
+    // Same reason as `freshCodexSession`: the mount-time refetch would
+    // otherwise wipe the catalog row this slice is about.
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'codex', vendorId: 'openai', vendorName: 'OpenAI', models }
+    ])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: model,
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: kind === 'historical',
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: 'thread-1',
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities(row),
+            // A disconnected session keeps the last ACKNOWLEDGED tier: the
+            // reducer replaces the status with `{ ...status, state: 'idle' }`,
+            // codex block included.
+            ...(opts.acknowledged
+              ? {
+                  codex: {
+                    modelProvider: 'openai',
+                    reasoningEffort: opts.acknowledged,
+                    effortOptions: row?.nativeEffortOptions ?? [],
+                    pinnedAccountId: null
+                  }
+                }
+              : {})
+          }
+        }
+      },
+      availableModels: models
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it('carries a tier picked on a HISTORICAL codex session into the resume', async () => {
+    coldCodexSession('historical')
+    renderFC()
+    expect(viewProps.effort).toBe('medium')
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(viewProps.effort).toBe('high')
+    // No process on the host, so the live setter would drop it: the store is
+    // the only place the pick can live until the resume reads it.
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('high')
+    // ...and it is a RESUME: the thread id goes with it.
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('carries a tier picked on a DISCONNECTED codex session into the resume', async () => {
+    coldCodexSession('disconnected', { acknowledged: 'low' })
+    renderFC()
+    // The last tier the dead thread acknowledged.
+    expect(viewProps.effort).toBe('low')
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    // Nothing can refresh that acknowledgement while the process is gone, so
+    // the pill must show the tier the resume will carry.
+    expect(viewProps.effort).toBe('xhigh')
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('a LIVE codex session applies the pick over IPC and mirrors it into the store', async () => {
+    coldCodexSession('disconnected', { acknowledged: 'low' })
+    act(() => {
+      useSessionStore.getState().markSdkActive(FC_ROUTE)
+    })
+    renderFC()
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(ipcCalls['session:set-effort']).toEqual([[FC_ROUTE, 'high']])
+    // The store mirrors every pick, so a later respawn of this session carries
+    // it too; the pill still waits for the thread's acknowledgement.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    expect(viewProps.effort).toBe('low')
+  })
+
+  it('a resume with no pick carries no effort, configured default or not', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    coldCodexSession('historical')
+    renderFC()
+    await sendFC()
+    // `CodexSession.start` folds an explicit effort OVER the thread's
+    // remembered tier, so re-sending the CONFIGURED default would undo a live
+    // `thread/settings/update` the user made.
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('drops a pick the resumed session’s model does not publish', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra-mini',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'high'
+    })
+    coldCodexSession('historical', { model: 'gpt-6-astra-mini', models: [astraRow, miniRow] })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'xhigh' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendFC()
+    // `xhigh` is astra-only — `CodexSession.validateEffort` would refuse the
+    // thread start — and a resume never falls back to the configured default.
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+  })
+
   it('derives capability props from selectedModel: sonnet-4-5 → no adaptive, no effort', () => {
     useSessionStore.setState((state) => ({
       sessions: {
@@ -1068,6 +1897,163 @@ describe('InputBox FC — rendered', () => {
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
     expect(session.effort).toBe('high') // xhigh coerced to model's default
   })
+
+  // -------------------------------------------------------------------------
+  // Slice 2b guard 6 — the per-session ChatGPT account picker (ADR-068 §2)
+  // -------------------------------------------------------------------------
+
+  /** What `provider-account:list('chatgpt')` answers in these tests. */
+  function accountList(
+    over: Partial<import('../../../../../../shared/shared-provider').SharedProviderAccountList> = {}
+  ): import('../../../../../../shared/shared-provider').SharedProviderAccountList {
+    return {
+      activeId: 'acct-a',
+      perSession: true,
+      accounts: [
+        {
+          id: 'acct-a',
+          email: 'a@example.test',
+          planType: 'pro',
+          expiresAt: 0,
+          needsReauth: false
+        },
+        {
+          id: 'acct-b',
+          email: 'b@example.test',
+          planType: 'plus',
+          expiresAt: 0,
+          needsReauth: false
+        }
+      ],
+      ...over
+    }
+  }
+
+  async function withAccounts(
+    list: ReturnType<typeof accountList> | null,
+    pinnedAccountId: string | null = null
+  ): Promise<void> {
+    codexSession()
+    useSessionStore.setState((state) => ({
+      providerAccounts: list,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            codex: {
+              modelProvider: 'openai',
+              reasoningEffort: null,
+              effortOptions: [],
+              pinnedAccountId
+            }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    await act(async () => {
+      renderFC()
+    })
+  }
+
+  it('shows the picker only with the capability, the toggle on, and two accounts', async () => {
+    await withAccounts(accountList())
+    expect(viewProps.showAccountPicker).toBe(true)
+
+    // The per-provider toggle is off: one active account for everything.
+    await withAccounts(accountList({ perSession: false }))
+    expect(viewProps.showAccountPicker).toBe(false)
+
+    // Only one account stored — there is nothing to choose between.
+    await withAccounts(accountList({ accounts: [accountList().accounts[0]] }))
+    expect(viewProps.showAccountPicker).toBe(false)
+
+    // Nothing read yet: hidden rather than guessing.
+    await withAccounts(null)
+    expect(viewProps.showAccountPicker).toBe(false)
+  })
+
+  it('hides the picker on an engine without perSessionAccount', async () => {
+    useSessionStore.setState({ providerAccounts: accountList() })
+    mirrorStoreIntoReplica()
+    await act(async () => {
+      renderFC()
+    })
+    // A Claude session: `capabilities.auth.perSessionAccount` is false.
+    expect(viewProps.showAccountPicker).toBe(false)
+  })
+
+  it('reports the current choice, which follow-active cannot be derived from', async () => {
+    await withAccounts(accountList(), null)
+    expect(viewProps.pinnedAccountId).toBe(null)
+    expect(viewProps.activeAccountId).toBe('acct-a')
+    expect(viewProps.accounts?.map((a) => a.id)).toEqual(['acct-a', 'acct-b'])
+
+    await withAccounts(accountList(), 'acct-b')
+    expect(viewProps.pinnedAccountId).toBe('acct-b')
+  })
+
+  it('sends session:set-account with the id, and null for follow-active', async () => {
+    await withAccounts(accountList())
+
+    await act(async () => {
+      await viewProps.onSelectAccount?.('acct-b')
+    })
+    await act(async () => {
+      await viewProps.onSelectAccount?.(null)
+    })
+
+    expect(ipcCalls['session:set-account']).toEqual([
+      [FC_ROUTE, 'acct-b'],
+      [FC_ROUTE, null]
+    ])
+  })
+
+  it('surfaces a REFUSED pin on the session instead of an unhandled rejection', async () => {
+    // Codex can refuse the re-injection outright (a managed workspace policy, a
+    // token it will not parse — "failed to set external auth: invalid ID token
+    // format"). That message is the only thing the user can act on, and before
+    // this it reached nothing but the renderer console as an unhandled rejection.
+    await withAccounts(accountList())
+    const refusal = 'failed to set external auth: invalid ID token format'
+    app.bridge.ipcMain.handle('session:set-account', () => {
+      throw new Error(refusal)
+    })
+
+    await act(async () => {
+      await expect(viewProps.onSelectAccount?.('acct-b')).resolves.toBeUndefined()
+    })
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toContain(refusal)
+  })
+
+  it('a pin that is accepted adds no error row', async () => {
+    await withAccounts(accountList())
+    await act(async () => {
+      await viewProps.onSelectAccount?.('acct-b')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors).toEqual([])
+  })
+
+  it('reads the account list on mount and opens Settings for "Add account…"', async () => {
+    const opened: unknown[] = []
+    const listener = (event: Event): void => {
+      opened.push((event as CustomEvent).detail)
+    }
+    window.addEventListener('open-settings', listener)
+    try {
+      await withAccounts(accountList())
+      expect(ipcCalls['provider-account:list']).toEqual([['chatgpt']])
+      act(() => {
+        viewProps.onAddAccount?.()
+      })
+      expect(opened).toEqual([{ page: 'models', group: 'providers' }])
+    } finally {
+      window.removeEventListener('open-settings', listener)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1173,6 +2159,63 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     setBillingType('free')
     renderFC()
     expect(viewProps.showCostInStatusLine).toBe(false)
+  })
+
+  // S1e — Codex's context window never reaches the model catalog: it arrives
+  // on a usage frame, and on a cold reopen from `session_meta` through the
+  // history status line. So the line is the meter's second source.
+  /** A session whose engine publishes no context window — Codex's shape. */
+  function setWindowlessCapabilities(): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          status: {
+            ...session.status,
+            capabilities: { ...session.status.capabilities, contextWindow: 0 }
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+  }
+
+  it('a status line that knows the window shows the meter even when capabilities say 0', () => {
+    setWindowlessCapabilities()
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          statusLine: {
+            totalCostUsd: 1.5,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 10,
+            totalOutputTokens: 2,
+            cachedTokens: 0,
+            totalTokens: 12,
+            contextWindow: { used: 4000, size: 272_000 },
+            usedPercentage: 1.47,
+            remainingPercentage: 98.53
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(true)
+  })
+
+  it('no status line and no catalog window leaves the meter off', () => {
+    setWindowlessCapabilities()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(false)
   })
 })
 
@@ -1443,7 +2486,9 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
     expect(viewProps.adaptiveSupported).toBe(false)
     expect(viewProps.effortSupported).toBe(false)
     expect(viewProps.allowedEffortLevels).toEqual([])
-    expect(viewProps.selectedModel.displayName).toBe('Select a model')
+    // Nothing to place the session's model against, so the pill names the raw
+    // value rather than a substitute (R1b — the Codex arm's rule).
+    expect(viewProps.selectedModel.displayName).toBe('openai-codex/gpt-5.6-luna')
   })
 
   it('discovered pi model with supportsEffort: effort picker shows exactly low/medium/high, no adaptive', () => {
@@ -1478,40 +2523,59 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
     expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high'])
   })
 
-  it('unavailable selectedModel falls back to the configured piDefaultModel, not the first pi model', () => {
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        [PI_ROUTE]: {
-          ...state.sessions[PI_ROUTE],
-          selectedEngineId: 'pi',
-          selectedModel: 'openai-codex/stale-model' // not in availableModels below
-        }
-      },
+  const PI_CATALOG: ModelInfo[] = [
+    {
+      value: 'openai-codex/gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna (first in list)',
+      description: '',
+      engineId: 'pi',
+      vendorId: 'openai-codex'
+    },
+    {
+      value: 'anthropic/claude-sonnet-5',
+      displayName: 'Claude Sonnet 5 (configured default)',
+      description: '',
+      engineId: 'pi',
+      vendorId: 'anthropic'
+    }
+  ]
+
+  it('welcome screen: the configured piDefaultModel wins over the first pi model', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'pi',
       piDefaultModel: 'anthropic/claude-sonnet-5',
-      availableModels: [
-        {
-          value: 'openai-codex/gpt-5.6-luna',
-          displayName: 'GPT-5.6 Luna (first in list)',
-          description: '',
-          engineId: 'pi',
-          vendorId: 'openai-codex'
-        },
-        {
-          value: 'anthropic/claude-sonnet-5',
-          displayName: 'Claude Sonnet 5 (configured default)',
-          description: '',
-          engineId: 'pi',
-          vendorId: 'anthropic'
-        }
-      ]
-    }))
+      availableModels: PI_CATALOG
+    })
     mirrorStoreIntoReplica()
 
     renderFC()
 
     expect(viewProps.selectedModel.value).toBe('anthropic/claude-sonnet-5')
     expect(viewProps.selectedModel.displayName).toBe('Claude Sonnet 5 (configured default)')
+  })
+
+  it('an ACTIVE session with an unavailable model names neither default nor first (R1b)', () => {
+    // The default belongs to a session yet to be created. This one already has
+    // a model — substituting would name something it never ran.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai-codex/stale-model' // not in PI_CATALOG
+        }
+      },
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      availableModels: PI_CATALOG
+    }))
+    mirrorStoreIntoReplica()
+
+    renderFC()
+
+    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.engineId).toBe('pi')
   })
 
   it('claude session with empty catalog keeps the "Default" wording (unchanged behavior)', () => {

@@ -3098,8 +3098,9 @@ export class RemoteServer {
       // coalesced value), a tail is lossy by contract. The EVENT lane below is
       // never dropped.
       newClient.unsubscribeStream = addStreamSubscriber(connectionId, (frame) => {
-        if (this.streamCongested(ws, newClient)) return
+        if (this.streamCongested(ws, newClient)) return false
         this.sendTo(ws, frame)
+        return true
       })
       // ARM-ON-AUTH (ADR-054 decision 2) — this is what kills the double
       // ceremony: a login that IS a presence proof arms what its tier would

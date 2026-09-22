@@ -47,6 +47,8 @@
  */
 
 import { accountState, buildClaudeAccountRef } from '../host'
+import { CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
+import { credentialSync } from '../auth/vault/CredentialSync'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { readOpencodeCredentialTypes } from '../opencode/auth-store'
@@ -54,6 +56,7 @@ import { discoverOpencodeProviderCatalog } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { loadEngineConfig } from '../services/ui-config'
 import type {
+  ProviderAccounts,
   ProviderCredential,
   ProviderEngineFacts,
   ProviderEntry,
@@ -104,6 +107,15 @@ export interface ProviderRegistrySources {
   /** `accountState()` — the FILE-based accounts (ADR-015). Null in a headless boot. */
   accounts: AccountsState | null
   /**
+   * The ChatGPT vault's accounts (ADR-068 §2) — `credentialSync.getStatus()`
+   * reduced to what a row may show, plus the definition's per-session flag.
+   *
+   * Optional because it is the ONE source that is not a store every boot has:
+   * absent (or null) is "no account list to project", and the row then reads
+   * exactly as it did before accounts existed.
+   */
+  chatgptAccounts?: ProviderAccounts | null
+  /**
    * `buildClaudeAccountRef()` — the probe-cached Claude sign-in, and the primary
    * signal for the Anthropic row. Null when no host auth is wired (headless).
    */
@@ -148,18 +160,44 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
   // one itself and releases it — so there is deliberately no "server down" branch.
   const opencodeInstalled = opencodeServerManager.isBinaryAvailable()
   const accounts = accountState()
-  const [statuses, opencodeCatalog, opencodeCredentialKinds, piVendors, piAuthOptions] =
-    await Promise.all([
-      sharedProviderService.listStatuses(),
-      opencodeInstalled ? discoverOpencodeProviderCatalog() : null,
-      opencodeInstalled ? readOpencodeCredentialTypes() : {},
-      // pi is optional: a missing binary or auth file already degrades to {}.
-      piAuthProvider.probe(),
-      piAuthProvider.listVendorAuthOptions()
-    ])
-  return buildProviderRegistry({
-    definitions: sharedProviderService.listDefinitions(),
+  const [
     statuses,
+    opencodeCatalog,
+    opencodeCredentialKinds,
+    piVendors,
+    piAuthOptions,
+    vaultStatus
+  ] = await Promise.all([
+    sharedProviderService.listStatuses(),
+    opencodeInstalled ? discoverOpencodeProviderCatalog() : null,
+    opencodeInstalled ? readOpencodeCredentialTypes() : {},
+    // pi is optional: a missing binary or auth file already degrades to {}.
+    piAuthProvider.probe(),
+    piAuthProvider.listVendorAuthOptions(),
+    // Never token material: getStatus() is the redacted snapshot (ADR-068 §2).
+    credentialSync.getStatus()
+  ])
+  const definitions = sharedProviderService.listDefinitions()
+  return buildProviderRegistry({
+    definitions,
+    statuses,
+    chatgptAccounts: {
+      activeId: vaultStatus.activeId,
+      perSession:
+        definitions.find((definition) => definition.id === CHATGPT_PROVIDER_ID)?.accounts
+          ?.perSession === true,
+      // `needsReauth` rides along because a stored account IS the credential
+      // (`sharedCredential`): without it a revoked refresh token still reads
+      // `connected` everywhere downstream. It is a boolean the vault already
+      // publishes through `getStatus()`, never token material.
+      list: vaultStatus.accounts.map(({ id, email, accountId, planType, needsReauth }) => ({
+        id,
+        ...(email ? { email } : {}),
+        ...(accountId ? { accountId } : {}),
+        ...(planType ? { planType } : {}),
+        ...(needsReauth ? { needsReauth: true } : {})
+      }))
+    },
     opencodeCatalog,
     opencodeCredentialKinds,
     opencodeModelAllowlist: loadEngineConfig('opencode').opencodeConfig?.modelAllowlist ?? {},
@@ -263,14 +301,29 @@ function sharedEntry(
       ...(native ? { native: true } : {})
     }
   }
+  // The vault's account list belongs to the provider whose vault it is. Today
+  // that is ChatGPT's; a second subscription provider would bring its own source
+  // rather than borrow this one.
+  const chatgptSubscription =
+    definition.id === CHATGPT_PROVIDER_ID && definition.kind === 'subscription'
+  const accounts = chatgptSubscription ? (sources.chatgptAccounts ?? undefined) : undefined
+  // Codex is not a ROUTE — it is fed by vault injection (ADR-068 §1), so it can
+  // never appear in `HARNESSES` and the loop above will never produce it. Say it
+  // here instead: without the chip the row lists `opencode · pi` and reads as
+  // "this subscription is not available to Codex", which is the opposite of the
+  // truth. `enabled` is whether there is an ACTIVE account, because that is the
+  // one Codex is injected with; a stored-but-inactive account reaches no
+  // process.
+  if (chatgptSubscription) engines.codex = { enabled: accounts?.activeId != null }
   return {
     id: definition.id,
     name: definition.name,
     origin: 'shared',
-    credential: sharedCredential(definition, status),
+    credential: sharedCredential(definition, status, accounts),
     engines,
+    ...(accounts ? { accounts } : {}),
     ...sharedPiBuiltinId(definition),
-    ...sharedDetail(definition),
+    ...sharedDetail(definition, accounts),
     ...sharedDiagnosis(status)
   }
 }
@@ -416,8 +469,13 @@ function engineCounts(
  */
 function sharedCredential(
   definition: SharedProviderDefinition,
-  status: SharedProviderStatus | undefined
+  status: SharedProviderStatus | undefined,
+  accounts?: ProviderAccounts
 ): ProviderCredential {
+  // A stored account IS the credential (ADR-068 §2), and it is the one signal
+  // that cannot be stale: the status read resolves the ACTIVE account, so a
+  // provider mid-switch must not flicker through "Not connected".
+  if (accounts && accounts.list.length > 0) return 'connected'
   if (!status?.connected) return 'none'
   return definition.kind === 'subscription' ? 'connected' : 'api-key'
 }
@@ -440,7 +498,18 @@ function piCredential(status: VendorAuthMap[string]): ProviderCredential {
   return status.billingType === 'subscription' ? 'connected' : 'api-key'
 }
 
-function sharedDetail(definition: SharedProviderDefinition): { detail?: string } {
+function sharedDetail(
+  definition: SharedProviderDefinition,
+  accounts?: ProviderAccounts
+): { detail?: string } {
+  // With more than one account the COUNT is the useful line — which of them the
+  // engines are currently on is the question the row has to answer. One account
+  // says nothing the ordinary subscription line does not.
+  if (accounts && accounts.list.length > 1) {
+    const active = accounts.list.find((account) => account.id === accounts.activeId)
+    const label = active?.email ?? active?.accountId
+    return detail(`${accounts.list.length} accounts`, label ? `${label} active` : undefined)
+  }
   if (definition.kind === 'custom') {
     const defaultModel = HARNESSES.map((harness) => definition.routes[harness].defaultModel).find(
       Boolean

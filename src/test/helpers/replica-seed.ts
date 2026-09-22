@@ -23,6 +23,7 @@
  * harness — two counters would manufacture gaps and trip resync detection.
  */
 
+import { itemAppendFrame, itemStreamKey } from '../../core/shared/sync/item-stream'
 import { SyncClient } from '../../core/shared/sync/sync-client'
 import {
   getSyncClient,
@@ -34,11 +35,9 @@ import {
   patchLocalSession,
   patchLocalApp,
   getReplicaState,
-  getReplicaAux,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
 import { isVolatileStream, volatileFlavorOf } from '../../core/shared/sync/channels'
-import { streamFrameFrom } from '../../core/shared/sync/stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
@@ -118,26 +117,61 @@ export function advanceSeqTo(value: number): void {
  * no seq. Which FRAME it becomes is the channel's flavor, exactly as in
  * `SyncCore.process`:
  *
- *  - `text-stream` (S1) → `{streamId, turnId, offset, chunk}`. Building it from
- *    the REPLICA's own state is the same computation core does against canonical
- *    — the offsets agree because a test has only one state.
+ *  - `item-stream` → a genuine item append built from the replica's active item;
  *  - `pass-through` (S2, the tails) → `{type:'stream-ev', channel, args}`, the
  *    emission verbatim, dispatched back into the per-channel listeners.
  */
 export function emitSync(channel: string, args: unknown[]): void {
   const c = client()
+  if (channel === 'session:stream' || channel === 'session:subagent-stream') {
+    throw new Error(`Obsolete transcript test channel rejected: ${channel}`)
+  }
   if (isVolatileStream(channel)) {
+    if (volatileFlavorOf(channel) === 'item-stream') {
+      const frame = itemAppendFrame(getReplicaState(), String(args[0]), args[1], seq)
+      if (frame) c.receiveItemStreamFrame(frame)
+      return
+    }
     if (volatileFlavorOf(channel) === 'pass-through') {
       c.receiveStreamEvent({ type: 'stream-ev', channel, args })
       return
     }
-    const frame = streamFrameFrom(getReplicaState(), getReplicaAux(), channel, args)
-    // No frame ⇒ a malformed delta, or a session the replica has never met —
-    // the same honest no-op core applies.
-    if (frame) c.receiveStreamFrame(frame)
-    return
+    throw new Error(`Unsupported volatile test channel: ${channel}`)
   }
   c.receiveEvent({ seq: ++seq, channel, args })
+}
+
+function emitFixtureItemDelta(
+  routingId: string,
+  kind: 'text' | 'thinking',
+  chunk: string,
+  ownerToolUseId?: string
+): void {
+  const messageId = ownerToolUseId
+    ? `fixture-${routingId}-${ownerToolUseId}-${kind}`
+    : `fixture-${routingId}-assistant-${kind}`
+  const target = {
+    messageId,
+    blockIndex: 0,
+    kind,
+    ...(ownerToolUseId ? { ownerToolUseId } : {})
+  }
+  const active = getReplicaState().sessions[routingId]?.itemStreams[itemStreamKey(target)]
+  if (!active) {
+    emitSync('session:item-open', [
+      routingId,
+      {
+        target,
+        message: {
+          id: messageId,
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: kind, text: '' }]
+        }
+      }
+    ])
+  }
+  emitSync('session:item-delta', [routingId, { target, chunk }])
 }
 
 /**
@@ -184,8 +218,8 @@ export function mirrorStoreIntoReplica(): void {
       {
         cwd: s.cwd,
         messages: s.messages,
-        streamingText: s.streamingText,
-        streamingThinking: s.streamingThinking,
+        itemStreams: s.itemStreams,
+        itemStreamRevision: s.itemStreamRevision,
         status: s.status,
         pendingApprovals: s.pendingApprovals,
         todos: s.todos,
@@ -195,8 +229,6 @@ export function mirrorStoreIntoReplica(): void {
         activeTasks: s.activeTasks,
         taskProgressMap: s.taskProgressMap,
         subagentMessages: s.subagentMessages,
-        subagentStreamingText: s.subagentStreamingText,
-        subagentStreamingThinking: s.subagentStreamingThinking,
         permissionMode: s.permissionMode,
         effort: s.effort,
         thinkingMode: s.thinkingMode,
@@ -206,6 +238,7 @@ export function mirrorStoreIntoReplica(): void {
         sdkActive: s.sdkActive,
         selectedEngineId: s.selectedEngineId,
         selectedModel: s.selectedModel,
+        ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
         seeded: true
       },
       { create: true }
@@ -242,11 +275,10 @@ export const seed = {
   message: (routingId: string, message: ChatMessage) =>
     emitSync('session:message', [routingId, message]),
 
-  streamText: (routingId: string, text: string) =>
-    emitSync('session:stream', [routingId, { type: 'text', text }]),
+  streamText: (routingId: string, text: string) => emitFixtureItemDelta(routingId, 'text', text),
 
   streamThinking: (routingId: string, text: string) =>
-    emitSync('session:stream', [routingId, { type: 'thinking', text }]),
+    emitFixtureItemDelta(routingId, 'thinking', text),
 
   status: (routingId: string, status: SessionStatus) =>
     emitSync('session:status', [routingId, status]),
@@ -313,10 +345,10 @@ export const seed = {
     emitSync('session:subagent-message-batch', [routingId, { toolUseId, messages }]),
 
   subagentStreamText: (routingId: string, toolUseId: string, text: string) =>
-    emitSync('session:subagent-stream', [routingId, { type: 'text', toolUseId, text }]),
+    emitFixtureItemDelta(routingId, 'text', text, toolUseId),
 
   subagentStreamThinking: (routingId: string, toolUseId: string, text: string) =>
-    emitSync('session:subagent-stream', [routingId, { type: 'thinking', toolUseId, text }]),
+    emitFixtureItemDelta(routingId, 'thinking', text, toolUseId),
 
   subagentToolResult: (
     routingId: string,

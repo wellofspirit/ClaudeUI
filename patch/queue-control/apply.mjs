@@ -11,6 +11,10 @@
  *                      event when a queued_command attachment is consumed by
  *                      submitMessage, so the UI knows the steer was picked up.
  *
+ *   Part A3 (cli.js): the SAME notification on the between-turns drain, which
+ *                      runs a queued command as the next turn's prompt without
+ *                      ever building an attachment (so A2 cannot see it).
+ *
  *   Part B (sdk.mjs): dequeueMessage() method on the query object.
  *
  * The native steer mechanism (sendPrompt → messageChannel → stdin → queuePush)
@@ -52,6 +56,7 @@ console.log(`Read ${cliPath} (${(src.length / 1024 / 1024).toFixed(1)} MB)`)
 
 const PATCH_A1_MARKER = '/*PATCHED:queue-control-dequeue*/'
 const PATCH_A2_MARKER = '/*PATCHED:queue-control-consumed*/'
+const PATCH_A3_MARKER = '/*PATCHED:queue-control-drained*/'
 
 // ---------------------------------------------------------------------------
 // Chunked-bundle helpers (2.1.261+)
@@ -635,21 +640,187 @@ if (!skipA2) {
   } // end legacy else-if shapes
 }
 
+// =====================================================================
+// Part A3: queued_command_consumed on the BETWEEN-TURNS drain
+// =====================================================================
+//
+// A2 only covers ONE of the two ways cli.js takes an item off its queue.
+//
+//   1. Mid-turn absorption (`consume(..., {reason:"absorbed_mid_turn"})`) —
+//      the running query folds the queued command into the turn as a
+//      `queued_command` ATTACHMENT, which flows through the outbound
+//      normalizer A2 patches. This is the path that works.
+//
+//   2. The between-turns drain in the headless streaming loop —
+//        while(!$s()&&(V=dn?U.dequeue(ud):fr())){ … }
+//      pops the command and runs it as the NEXT TURN'S PROMPT. No
+//      `queued_command` attachment is ever built (the turn-start attachment
+//      builder is called with an EMPTY queued-command list: `Xne(At,O,…,[],…)`),
+//      so A2 never fires and ClaudeUI's QueuedMessageCard stays "queued" for
+//      the whole response.
+//
+// Path 2 is reached whenever cli.js is between turns while ClaudeUI still
+// considers the session busy — most visibly when a background subagent is
+// streaming: the main turn's `result` already landed (cli.js idle, `gt=!1`),
+// but the subagent's `stream_event`s keep ClaudeSession.isProcessing true, so
+// the user's send is QUEUED, pushed into cli.js's queue, and the queue
+// subscriber fires the drain immediately.
+//
+// The emitted shape is byte-identical to A2's, because cli.js builds the
+// attachment from the same two command fields (`yEe`: `prompt: <cmd>.value`,
+// `source_uuid: <cmd>.uuid`) — so the ClaudeUI handler needs no change.
+//
+// Emitted per command in the drained batch (not once for the coalesced
+// `_f(cn)` merge), so N queued items produce N notifications and each one
+// correlates against its own queue item. An uncorrelated notification (an
+// ordinary never-queued send, which also travels this drain) is a no-op:
+// `SessionQueue.consumeByText` matches only `state === 'queued'` items.
+
+const skipA3 = src.includes(PATCH_A3_MARKER)
+if (skipA3) {
+  console.log('Part A3 already applied. Skipping.')
+}
+
+if (!skipA3) {
+  console.log('\n=== Part A3: queued_command_consumed on the between-turns drain ===')
+
+  const chunkIndexA3 = buildChunkIndex(src)
+  const dispatchMatchA3 = anchorRe.exec(src)
+  if (!dispatchMatchA3) {
+    console.error('ERROR: Cannot re-locate the control-request fallback for the A3 chunk check.')
+    process.exit(1)
+  }
+  const headlessChunkA3 = chunkName(chunkIndexA3, dispatchMatchA3.index)
+
+  // --- Names: read them off the drain loop's OWN replay emitter -------------
+  // The drain already tells the host about the extra commands it coalesced
+  // into one turn, under `if(w.replayUserMessages&&cn.length>1)`:
+  //
+  //   for(let pe of cn)if(pe.uuid&&pe.uuid!==V.uuid){
+  //     let _e=cN(pe.origin);
+  //     Ct.enqueue({type:"user",message:{role:"user",content:pe.value},
+  //       session_id:K(),parent_tool_use_id:null,uuid:pe.uuid,isReplay:!0,…})}
+  //
+  // That single statement hands us everything the injection needs — the
+  // drained batch (`cn`), the outbound queue (`Ct` = `transport.outbound`) and
+  // the session-id getter (`K`) — and, because it sits inside the very loop
+  // body we inject into, every captured name is in scope by construction.
+  //
+  // `Ct.enqueue` is the DIRECT-to-stdout path: unlike the query generator's
+  // yields it does not pass through the outbound normalizer, whose
+  // `case"system"` arm drops every subtype outside its whitelist. It is the
+  // same path `task_notification` / `control_request_progress` / `bridge_state`
+  // take, all of which reach ClaudeUI today.
+  const replayRe = new RegExp(
+    `for\\(let (${V}) of (${V})\\)if\\(\\1\\.uuid&&\\1\\.uuid!==${V}\\.uuid\\)` +
+      `\\{let ${V}=${V}\\(\\1\\.origin\\);(${V})\\.enqueue\\(\\{type:"user",` +
+      `message:\\{role:"user",content:\\1\\.value\\},session_id:(${V})\\(\\),` +
+      `parent_tool_use_id:null,uuid:\\1\\.uuid,isReplay:!0`
+  )
+  const replayMatch = replayRe.exec(src)
+  if (!replayMatch) {
+    console.error(
+      "ERROR: Cannot find the drain loop's coalesced-command replay emitter — the source of " +
+        'the batch/outbound/session-id names A3 injects.'
+    )
+    process.exit(1)
+  }
+  if (replayRe.exec(src.slice(replayMatch.index + 1))) {
+    console.error('ERROR: drain-loop replay emitter matched more than once. Aborting.')
+    process.exit(1)
+  }
+  const batchVar = replayMatch[2]
+  const outboundVar = replayMatch[3]
+  const sessionFn = replayMatch[4]
+  const replayChunk = chunkName(chunkIndexA3, replayMatch.index)
+  if (replayChunk !== headlessChunkA3) {
+    console.error(
+      `ERROR: drain-loop replay emitter is in ${replayChunk}, not the headless chunk ` +
+        `${headlessChunkA3}. Aborting rather than patching a loop ClaudeUI does not drive.`
+    )
+    process.exit(1)
+  }
+  console.log(
+    `Found drain-loop replay emitter at char ${replayMatch.index} in ${replayChunk} ` +
+      `(batch=${batchVar}, outbound=${outboundVar}, session-id=${sessionFn})`
+  )
+
+  // --- Injection point: after BOTH cancel-pending filters ------------------
+  // The drain re-filters `cn` twice against `consumeCancelPending` and can
+  // `continue` past the turn entirely. The first statement that runs only once
+  // the batch is final and the turn is committed is the user-message-uuid
+  // stamp:
+  //
+  //   let Kr=ICt(cn);mr=Kr===void 0?void 0:{userMessageUuid:Kr,anchor:ct.at(-1)};
+  //
+  // `userMessageUuid:<x>,anchor:` appears exactly once in the bundle. Pinning
+  // the argument to the captured batch name is what keeps this on the drain
+  // loop rather than any other stamp site.
+  const batchVarEsc = batchVar.replace(/\$/g, '\\$')
+  const drainAnchorRe = new RegExp(
+    `let (${V})=${V}\\(${batchVarEsc}\\);${V}=\\1===void 0\\?void 0:\\{userMessageUuid:\\1,anchor:`
+  )
+  const drainAnchorMatch = drainAnchorRe.exec(src)
+  if (!drainAnchorMatch) {
+    console.error("ERROR: Cannot find the drain loop's user-message-uuid stamp (A3 anchor).")
+    process.exit(1)
+  }
+  if (drainAnchorRe.exec(src.slice(drainAnchorMatch.index + 1))) {
+    console.error('ERROR: drain-loop user-message-uuid stamp matched more than once. Aborting.')
+    process.exit(1)
+  }
+  // Same scope as the captured names: the stamp has to follow the replay
+  // emitter inside the same loop body. A match further away would name a
+  // batch/outbound pair that does not exist at the injection point (the
+  // 2.1.241 misbind class — applies clean, throws or emits nothing at runtime).
+  const A3_MAX_SPAN = 4000
+  if (
+    drainAnchorMatch.index <= replayMatch.index ||
+    drainAnchorMatch.index - replayMatch.index > A3_MAX_SPAN
+  ) {
+    console.error(
+      `ERROR: A3 anchor at ${drainAnchorMatch.index} is not within ${A3_MAX_SPAN} chars after ` +
+        `the replay emitter at ${replayMatch.index} — not the same loop body. Aborting.`
+    )
+    process.exit(1)
+  }
+  console.log(`A3 injection point at char ${drainAnchorMatch.index}`)
+
+  // `mode==="prompt"` mirrors cli.js's own attachment filter (`vfs` =
+  // {"prompt","task-notification"}), minus task-notification — those are the
+  // wake-router's internal agent deliveries, never a ClaudeUI queue item.
+  // isMeta is deliberately NOT filtered, for the same reason A2 does not
+  // filter forwarded-intent commands: a spurious notification is a no-op,
+  // a missing one strands a queue card.
+  const injectionA3 =
+    PATCH_A3_MARKER +
+    `for(let q6 of ${batchVar})if(q6.mode==="prompt")` +
+    `${outboundVar}.enqueue({type:"system",subtype:"queued_command_consumed",` +
+    `prompt:q6.value,source_uuid:q6.uuid,session_id:${sessionFn}(),` +
+    `uuid:globalThis.crypto.randomUUID()});`
+
+  src = src.slice(0, drainAnchorMatch.index) + injectionA3 + src.slice(drainAnchorMatch.index)
+
+  console.log('Injected queued_command_consumed ahead of the drained turn')
+}
+
 // ---------------------------------------------------------------------------
 // Write and verify cli.js
 // ---------------------------------------------------------------------------
 
-if (!skipA1 || !skipA2) {
+if (!skipA1 || !skipA2 || !skipA3) {
   writeFileSync(cliPath, src)
   console.log(`\nPatch applied to ${cliPath}`)
 
   const verify = readFileSync(cliPath, 'utf-8')
   const a1Ok = verify.includes(PATCH_A1_MARKER)
   const a2Ok = verify.includes(PATCH_A2_MARKER)
+  const a3Ok = verify.includes(PATCH_A3_MARKER)
   console.log(`  ${a1Ok ? 'OK' : 'MISSING'} Part A1 marker (dequeue_message)`)
-  console.log(`  ${a2Ok ? 'OK' : 'MISSING'} Part A2 marker (queued_command_consumed)`)
+  console.log(`  ${a2Ok ? 'OK' : 'MISSING'} Part A2 marker (queued_command_consumed, mid-turn)`)
+  console.log(`  ${a3Ok ? 'OK' : 'MISSING'} Part A3 marker (queued_command_consumed, drain)`)
 
-  if (!a1Ok || !a2Ok) {
+  if (!a1Ok || !a2Ok || !a3Ok) {
     console.error('\nVerification FAILED.')
     process.exit(1)
   }

@@ -392,6 +392,296 @@ describe('CredentialSync route policy', () => {
     }
   })
 
+  // ── Device code (ADR-068 §3, Slice 7) ─────────────────────────────────────
+
+  it('beginDeviceCodeLogin delegates to the vault and returns only the three display fields', async () => {
+    const { vault } = makeFakeVault(null)
+    const start = vi.fn(async () => ({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 999
+    }))
+    vault.beginDeviceCodeLogin = start
+    const sync = new CredentialSync({ vault })
+    await expect(sync.beginDeviceCodeLogin()).resolves.toEqual({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 999
+    })
+    expect(start).toHaveBeenCalled()
+  })
+
+  it('beginDeviceCodeLogin throws when the vault has no device-code support', async () => {
+    // makeFakeVault does not implement the optional beginDeviceCodeLogin.
+    const { vault } = makeFakeVault(null)
+    const sync = new CredentialSync({ vault })
+    await expect(sync.beginDeviceCodeLogin()).rejects.toThrow(/does not support device-code login/)
+  })
+
+  it('a DEVICE-CODE completion runs the same tail: vault upsert, both engines fed, watchers armed', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = 6_000_000
+      vi.setSystemTime(now)
+      const cred: VaultCredential = {
+        type: 'oauth',
+        access: 'device-acc',
+        refresh: 'device-ref',
+        expires: now + 3_600_000
+      }
+      const { vault, state } = makeFakeVault(null)
+      // The vault completes whichever flow is live — for a device login that is
+      // the poll, and CredentialSync must not care which it was.
+      vault.beginDeviceCodeLogin = vi.fn(async () => ({
+        verificationUrl: 'https://issuer.test/codex/device',
+        userCode: 'ABCD-1234',
+        expiresAt: now + 900_000
+      }))
+      vault.completeLogin = vi.fn(async () => {
+        state.current = cred
+        return cred
+      })
+      const pi = fakeFeedTarget()
+      const opencode = fakeFeedTarget()
+      const sync = new CredentialSync({ vault })
+      sync.configure({ pi: pi.target, opencode: opencode.target })
+
+      await sync.beginDeviceCodeLogin()
+      const result = await sync.completeLogin()
+
+      expect(result).toBe(cred)
+      expect(vault.completeLogin).toHaveBeenCalled()
+      expect(pi.feed).toHaveBeenCalled()
+      expect(opencode.feed).toHaveBeenCalled()
+      sync.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a DEVICE-CODE completion that lost its generation is dropped, not vended', async () => {
+    const { vault } = makeFakeVault(null)
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'device-acc',
+      refresh: 'device-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const pi = fakeFeedTarget()
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    // Disconnect (which bumps the generation) lands while the poll is still out.
+    vault.completeLogin = vi.fn(async () => {
+      await sync.disconnectChatgpt()
+      return cred
+    })
+    await expect(sync.completeLogin()).rejects.toThrow(/login was cancelled/)
+    expect(pi.feed).not.toHaveBeenCalled()
+    expect(opencode.feed).not.toHaveBeenCalled()
+  })
+
+  // ── The resolution signal (ADR-070 §2) ────────────────────────────────────
+
+  it('rings onCredentialStored ONCE per login path, and never for a cancelled one', async () => {
+    // The emit this feeds is `provider:auth-resolved`, the one thing in the app
+    // that means "this provider works now". If any of the three login paths
+    // missed it, a sign-in taken that way would leave every owed-sign-in surface
+    // lit; if a CANCELLED login rang it, the app would clear a sign-in that is
+    // still owed. The callback is injected rather than imported so this file
+    // stays free of the service graph.
+    const cred = (access: string): VaultCredential => ({
+      type: 'oauth',
+      access,
+      refresh: `${access}-ref`,
+      expires: Date.now() + 3_600_000
+    })
+
+    // 1. desktop loopback
+    {
+      const { vault, state } = makeFakeVault(null)
+      vault.completeLogin = vi.fn(async () => {
+        state.current = cred('loopback')
+        return state.current
+      })
+      const onCredentialStored = vi.fn()
+      const sync = new CredentialSync({ vault, onCredentialStored })
+      await sync.completeLogin()
+      expect(onCredentialStored).toHaveBeenCalledTimes(1)
+      sync.stop()
+    }
+
+    // 2. ADR-057 paste-back
+    {
+      const { vault } = makeFakeVault(null)
+      vault.completeLoginFromPastedInput = vi.fn(async () => cred('pasted'))
+      const onCredentialStored = vi.fn()
+      const sync = new CredentialSync({ vault, onCredentialStored })
+      await sync.completeLogin('http://localhost:1455/auth/callback?code=c&state=s')
+      expect(onCredentialStored).toHaveBeenCalledTimes(1)
+      sync.stop()
+    }
+
+    // 3. Slice-7 device code — same tail, so the same one ring.
+    {
+      const { vault, state } = makeFakeVault(null)
+      vault.beginDeviceCodeLogin = vi.fn(async () => ({
+        verificationUrl: 'https://issuer.test/codex/device',
+        userCode: 'ABCD-1234',
+        expiresAt: Date.now() + 900_000
+      }))
+      vault.completeLogin = vi.fn(async () => {
+        state.current = cred('device')
+        return state.current
+      })
+      const onCredentialStored = vi.fn()
+      const sync = new CredentialSync({ vault, onCredentialStored })
+      await sync.beginDeviceCodeLogin()
+      await sync.completeLogin()
+      expect(onCredentialStored).toHaveBeenCalledTimes(1)
+      sync.stop()
+    }
+
+    // 4. cancelled mid-exchange: no resolution to report.
+    {
+      const { vault } = makeFakeVault(null)
+      const onCredentialStored = vi.fn()
+      const sync = new CredentialSync({ vault, onCredentialStored })
+      vault.completeLogin = vi.fn(async () => {
+        await sync.disconnectChatgpt()
+        return cred('raced')
+      })
+      await expect(sync.completeLogin()).rejects.toThrow(/login was cancelled/)
+      expect(onCredentialStored).not.toHaveBeenCalled()
+    }
+
+    // 5. wired LATE through configure(), like the boot seam does.
+    {
+      const { vault, state } = makeFakeVault(null)
+      vault.completeLogin = vi.fn(async () => {
+        state.current = cred('late')
+        return state.current
+      })
+      const onCredentialStored = vi.fn()
+      const sync = new CredentialSync({ vault })
+      sync.configure({ onCredentialStored })
+      await sync.completeLogin()
+      expect(onCredentialStored).toHaveBeenCalledTimes(1)
+      sync.stop()
+    }
+  })
+
+  /**
+   * GUARD — the signal names WHICH account was stored, in the vault-account
+   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * is the same `key` this hands over). Without it, adding ChatGPT account B
+   * announced "chatgpt works now" and the reducer cleared every session broken
+   * on account A.
+   */
+  it('rings onCredentialStored with the VAULT account id the credential landed on', async () => {
+    const other: VaultCredential = {
+      type: 'oauth',
+      access: 'a',
+      refresh: 'a-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const added: VaultCredential = {
+      type: 'oauth',
+      access: 'b',
+      refresh: 'b-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const { vault, state } = makeFakeVault(other)
+    // An accounts-capable vault holding A (active) and the B this login adds.
+    vault.listAccounts = vi.fn(async () => [
+      { id: 'acct-a', credential: other, addedAt: 1 },
+      { id: 'acct-b', credential: added, addedAt: 2 }
+    ])
+    vault.getActiveAccountId = vi.fn(async () => 'acct-a')
+    vault.completeLogin = vi.fn(async () => {
+      state.current = added
+      return added
+    })
+    const onCredentialStored = vi.fn()
+    const sync = new CredentialSync({ vault, onCredentialStored })
+
+    await sync.completeLogin()
+
+    expect(onCredentialStored).toHaveBeenCalledWith('acct-b')
+    sync.stop()
+  })
+
+  it('names NO account for a vault that has none — the internal slot key stays internal', async () => {
+    // With no named accounts the credential lives under a placeholder key. That
+    // key is bookkeeping, not an account: it must not travel on a replicated
+    // event as if it identified one, and there is nothing to disambiguate anyway.
+    const stored: VaultCredential = {
+      type: 'oauth',
+      access: 'solo',
+      refresh: 'solo-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const { vault, state } = makeFakeVault(null)
+    vault.completeLogin = vi.fn(async () => {
+      state.current = stored
+      return stored
+    })
+    const onCredentialStored = vi.fn()
+    const sync = new CredentialSync({ vault, onCredentialStored })
+
+    await sync.completeLogin()
+
+    expect(onCredentialStored).toHaveBeenCalledTimes(1)
+    expect(onCredentialStored).toHaveBeenCalledWith(undefined)
+    sync.stop()
+  })
+
+  it('a THROWING onCredentialStored still returns the stored credential', async () => {
+    // The credential is stored and vended before the listener rings, so letting a
+    // listener throw would report a login that genuinely succeeded as a failure —
+    // telling the user their working credential is broken, which is the exact
+    // failure mode ADR-070 exists to remove.
+    const stored: VaultCredential = {
+      type: 'oauth',
+      access: 'kept',
+      refresh: 'kept-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const { vault, state } = makeFakeVault(null)
+    vault.completeLogin = vi.fn(async () => {
+      state.current = stored
+      return stored
+    })
+    const pi = fakeFeedTarget()
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({
+      vault,
+      onCredentialStored: () => {
+        throw new Error('the emit blew up')
+      }
+    })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    await expect(sync.completeLogin()).resolves.toBe(stored)
+    // And the tail that runs BEFORE the listener is untouched by its failure.
+    expect(pi.feed).toHaveBeenCalled()
+    expect(opencode.feed).toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('cancelLogin cancels whichever flow the vault holds, device code included', async () => {
+    const { vault } = makeFakeVault(null)
+    vault.beginDeviceCodeLogin = vi.fn(async () => ({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 1
+    }))
+    const sync = new CredentialSync({ vault })
+    await sync.beginDeviceCodeLogin()
+    sync.cancelLogin()
+    expect(vault.cancelLogin).toHaveBeenCalled()
+  })
+
   it('completeLogin(pastedInput) throws when the vault has no paste support', async () => {
     // makeFakeVault does not implement the optional completeLoginFromPastedInput.
     const { vault } = makeFakeVault(null)
@@ -768,7 +1058,12 @@ describe('CredentialSync.disconnectChatgpt', () => {
     expect(pi.remove).toHaveBeenCalledWith('openai-codex')
     expect(opencode.remove).toHaveBeenCalledWith('openai')
     expect(sync.needsReauth).toBe(false)
-    await expect(sync.getStatus()).resolves.toEqual({ connected: false, needsReauth: false })
+    await expect(sync.getStatus()).resolves.toEqual({
+      connected: false,
+      needsReauth: false,
+      accounts: [],
+      activeId: null
+    })
   })
 })
 
@@ -780,7 +1075,9 @@ describe('CredentialSync.getStatus', () => {
   it('not connected when the vault is empty', async () => {
     const sync = new CredentialSync({ vault: makeFakeVault(null).vault })
     const status = await sync.getStatus()
-    expect(status).toEqual({ connected: false, needsReauth: false })
+    // A vault with no ACCOUNT support (this fake) reports the plural fields
+    // empty rather than omitting them — one shape for every caller.
+    expect(status).toEqual({ connected: false, needsReauth: false, accounts: [], activeId: null })
   })
 
   it('connected, with email/accountId/expiresAt from the vault credential', async () => {
@@ -799,7 +1096,9 @@ describe('CredentialSync.getStatus', () => {
       email: 'user@example.com',
       accountId: 'acct-1',
       expiresAt: 999_999,
-      needsReauth: false
+      needsReauth: false,
+      accounts: [],
+      activeId: null
     })
   })
 
@@ -807,7 +1106,13 @@ describe('CredentialSync.getStatus', () => {
     const cred: VaultCredential = { type: 'oauth', access: 'acc', refresh: 'ref', expires: 42 }
     const sync = new CredentialSync({ vault: makeFakeVault(cred).vault })
     const status = await sync.getStatus()
-    expect(status).toEqual({ connected: true, expiresAt: 42, needsReauth: false })
+    expect(status).toEqual({
+      connected: true,
+      expiresAt: 42,
+      needsReauth: false,
+      accounts: [],
+      activeId: null
+    })
     expect('email' in status).toBe(false)
     expect('accountId' in status).toBe(false)
   })

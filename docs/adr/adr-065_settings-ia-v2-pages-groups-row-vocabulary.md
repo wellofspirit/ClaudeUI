@@ -1,6 +1,6 @@
 # ADR-065 — Settings IA v2: pages, groups, and one row vocabulary
 
-**Status:** **Implemented** (2026-09-08) — the seven phases below landed on branch `settings-v2`; see § As built for what the implementation changed about this decision.
+**Status:** **Implemented** (2026-09-08); amended by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (ChatGPT row gains accounts + a Codex route; Codex engine page curated; Codex segments on judge / Default models / Dispatch) — the seven phases below landed on branch `settings-v2`; see § As built for what the implementation changed about this decision.
 **Supersedes:** the "scope tabs" settings IA described in `docs/architecture/persistence.md` § Settings & config (Common / Claude / opencode / pi tabs over 43 sections)
 **Relates to:** ADR-023 (auto mode), ADR-027 (test data attributes), ADR-033 (cross-engine dispatch), ADR-036 (unified auth vault), ADR-048 (mobile surface pattern)
 
@@ -188,7 +188,9 @@ it, each carried by the phase that found it.
    Add-sheet candidate, not a row (the live walk showed 230 "Not connected" rows before that
    filter). The three old surfaces (`SharedProviders`, `PiVendors`, `VendorOpencodeSection`) and
    `ModelAllowlistDialog` are deleted rather than re-homed, so the fallback in § Providers was
-   not needed.
+   not needed. **Amended 2026-09-16 (F14):** a subscription's stored ACCOUNTS are not managed in
+   the Manage sheet — every provider's accounts live on Models & providers › Accounts as one
+   per-provider group each, and the sheet carries one link row to that page.
 
 5. **The phone is tabs = RAIL GROUPS and pages = ACCORDIONS**, not the page list with drill-in
    this ADR predicted (phase 5; recorded as an amendment on ADR-048). Several pages may be open

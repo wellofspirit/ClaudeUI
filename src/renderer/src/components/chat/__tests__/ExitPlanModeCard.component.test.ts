@@ -571,3 +571,163 @@ describe('ExitPlanModeCard FC', () => {
     unmount()
   })
 })
+
+/**
+ * F20 — the Codex plan item. It has NO approval gate on the wire (the core
+ * emits it as an ordinary thread item and the turn ends), so the same four
+ * options become a MODE SWITCH plus a prompt, the way the Codex TUI's own
+ * follow-up works. Claude's approval path above is untouched and its tests run
+ * unchanged.
+ */
+describe('ExitPlanModeCard FC — Codex plan item (no approval)', () => {
+  const ROUTE_CX = 'codex-plan-session'
+  let app: TestApp
+  const ipcCalls: Record<string, unknown[][]> = {}
+  const lastCall = (channel: string): unknown[] | undefined => ipcCalls[channel]?.at(-1)
+
+  beforeEach(async () => {
+    Object.keys(ipcCalls).forEach((k) => delete ipcCalls[k])
+    vi.mocked(waitForModeChange).mockResolvedValue(undefined)
+    app = await bootTestApp()
+    for (const ch of [
+      'session:approval-response',
+      'session:cancel',
+      'session:create',
+      'session:send',
+      'session:get-session-log-path',
+      'session:set-permission-mode',
+      'session:clear-conversation'
+    ]) {
+      ipcCalls[ch] = []
+      app.bridge.ipcMain.handle(ch, (_evt: unknown, ...args: unknown[]) => {
+        ipcCalls[ch].push(args)
+        return ch === 'session:get-session-log-path' ? '/logs/session.jsonl' : undefined
+      })
+    }
+    resetFactoryCounter()
+    useSessionStore.setState({ activeSessionId: ROUTE_CX, sessions: {}, recentSessionIds: [] })
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().createNewSession(ROUTE_CX, '/workspace')
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE_CX]: {
+          ...state.sessions[ROUTE_CX],
+          status: { ...state.sessions[ROUTE_CX].status, engineId: 'codex' as const }
+        }
+      }
+    }))
+  })
+
+  afterEach(() => {
+    app.teardown()
+  })
+
+  const codexBlock = { ...block, toolName: 'plan', toolUseId: 'codex:["t","turn","turn-plan"]' }
+  const renderCodex = (isLatest = true): ReturnType<typeof render> =>
+    render(React.createElement(ExitPlanModeCard, { block: codexBlock, view: planView, isLatest }))
+
+  it('offers the four options on the LATEST assistant message', () => {
+    const { unmount } = renderCodex()
+    expect(viewProps.hasApproval).toBe(true)
+    expect(viewProps.planContent).toBe(planText)
+    unmount()
+  })
+
+  it('offers NOTHING on an older plan, which would implement a stale one', () => {
+    const { unmount } = renderCodex(false)
+    expect(viewProps.hasApproval).toBe(false)
+    unmount()
+  })
+
+  it('offers nothing on a non-Codex engine with no approval', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE_CX]: {
+          ...state.sessions[ROUTE_CX],
+          status: { ...state.sessions[ROUTE_CX].status, engineId: 'claude' as const }
+        }
+      }
+    }))
+    const { unmount } = renderCodex()
+    expect(viewProps.hasApproval).toBe(false)
+    unmount()
+  })
+
+  it('continueAutoEdit switches to acceptEdits and sends "Implement the plan."', async () => {
+    const { unmount } = renderCodex()
+    await act(async () => {
+      await viewProps.onContinueAutoEdit()
+    })
+    expect(lastCall('session:set-permission-mode')).toEqual([ROUTE_CX, 'acceptEdits'])
+    expect(lastCall('session:send')).toEqual(
+      expect.arrayContaining([ROUTE_CX, 'Implement the plan.'])
+    )
+    // Nothing was approved or denied: there was no approval.
+    expect(ipcCalls['session:approval-response']).toHaveLength(0)
+    unmount()
+  })
+
+  it('continueManual switches to default and sends the same prompt', async () => {
+    const { unmount } = renderCodex()
+    await act(async () => {
+      await viewProps.onContinueManual()
+    })
+    expect(lastCall('session:set-permission-mode')).toEqual([ROUTE_CX, 'default'])
+    expect(lastCall('session:send')).toEqual(
+      expect.arrayContaining([ROUTE_CX, 'Implement the plan.'])
+    )
+    unmount()
+  })
+
+  it('startFresh respawns in acceptEdits with the plan, and denies no approval', async () => {
+    const { unmount } = renderCodex()
+    await act(async () => {
+      await viewProps.onStartFresh()
+    })
+    expect(ipcCalls['session:approval-response']).toHaveLength(0)
+    expect(lastCall('session:cancel')).toEqual([ROUTE_CX])
+    expect((lastCall('session:create') as unknown[])[4]).toBe('acceptEdits')
+    expect((lastCall('session:send') as unknown[])[1]).toContain('Implement the following plan:')
+    unmount()
+  })
+
+  it('keepPlanning sends the feedback as the next prompt and leaves the mode alone', async () => {
+    const { unmount } = renderCodex()
+    act(() => {
+      viewProps.onFeedbackChange('use a worktree instead')
+    })
+    await act(async () => {
+      await viewProps.onKeepPlanning()
+    })
+    expect(lastCall('session:send')).toEqual(
+      expect.arrayContaining([ROUTE_CX, 'use a worktree instead'])
+    )
+    expect(ipcCalls['session:set-permission-mode']).toHaveLength(0)
+    expect(ipcCalls['session:approval-response']).toHaveLength(0)
+    unmount()
+  })
+
+  it('keepPlanning with empty feedback sends nothing', async () => {
+    const { unmount } = renderCodex()
+    await act(async () => {
+      await viewProps.onKeepPlanning()
+    })
+    expect(ipcCalls['session:send']).toHaveLength(0)
+    unmount()
+  })
+
+  it('opens the plan panel with a NULL approval id', async () => {
+    const { unmount } = renderCodex()
+    act(() => {
+      viewProps.onOpenPlanPanel()
+    })
+    expect(useSessionStore.getState().sessions[ROUTE_CX].planReview).toEqual({
+      planContent: planText,
+      approvalRequestId: null,
+      comments: []
+    })
+    unmount()
+  })
+})

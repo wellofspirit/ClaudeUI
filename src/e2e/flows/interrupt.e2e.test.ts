@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
 import { createSdkStub } from '@test/stubs/sdk-stub'
@@ -69,13 +70,15 @@ describe('E2E: interrupt', () => {
     )
 
     // Streaming in progress
-    app.emit('session:stream', routingId, { type: 'text', text: 'thinking hard...' })
+    const interrupted = emitItemDelta(app, routingId, 'thinking hard...', { open: true })
     expect(useSessionStore.getState().sessions[routingId].status.state).toBe('running')
 
     // User clicks stop
     await app.api.interruptSession(routingId)
 
     expect(interruptCalls).toEqual([routingId])
+
+    sealItem(app, routingId, interrupted, 'thinking hard...')
 
     // Main process would now yield no further stream events and emit status idle
     app.emit(
