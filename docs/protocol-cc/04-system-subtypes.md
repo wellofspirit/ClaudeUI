@@ -66,7 +66,7 @@ mid-session model switch leaves it stale.
 
 **Gate:** Always.
 
-**Ordering:** First `system` message *of a session start*, but **not** the first message with a
+**Ordering:** First `system` message _of a session start_, but **not** the first message with a
 `session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
 Consumer uses this to resolve temp routingId → real session UUID.
 
