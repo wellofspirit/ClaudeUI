@@ -44,6 +44,17 @@
  * verification (the headers stand in for it), no owner sign-in, no `/dash`
  * routes, no R2 archive, and the whole store dies with the process.
  *
+ * Thin in one way worth naming, because it is visible on the wire: this computes
+ * no window ledger. The real hub owns that rollup — a window's numerator is EVERY
+ * machine's turns, which is why the hub can compute it and a machine cannot — and
+ * it answers the literal `deviceId: 'hub'` for every window row, since the row
+ * belongs to no one machine. Here a window exists only if `--seed` stated it, and
+ * it keeps whatever `deviceId` the file gave it: a fake that rewrote the field
+ * would hide which of the two a client's merge is actually reading. The real hub
+ * also sends a browser sign-in two fields a machine never sees (an account label
+ * in full, a machine's service-token id); this has no owner caller, so it sends
+ * neither to anybody.
+ *
  * ## Flags
  *
  *   --port <n>             listen port (0, the default, picks a free one)
@@ -300,7 +311,9 @@ function maskLabel(label: string | null): string | null {
   const dot = domain.lastIndexOf('.')
   const host = dot > 0 ? domain.slice(0, dot) : domain
   const tld = dot > 0 ? domain.slice(dot) : ''
-  return `${user[0]}•••@${host[0]}•••${tld}`
+  // `slice`, not `[0]`: a label ending in `@` has no host at all, and a masked
+  // label must never read `undefined`. The Worker's `src/mask.ts` does the same.
+  return `${user.slice(0, 1)}•••@${host.slice(0, 1)}•••${tld}`
 }
 
 // ---------------------------------------------------------------------------
@@ -588,9 +601,10 @@ async function handle(request: Request): Promise<Response> {
     // The window ledger is the hub's own rollup in the real thing (ADR-072 §4),
     // and a fake that invented numbers would let a wrong merge look right
     // against figures nothing produced. So nothing is DERIVED here: the page is
-    // empty unless `--seed` stated the rows outright. It carries the `rev`
-    // envelope either way, because the client's paging loop is real and has to
-    // terminate against it.
+    // empty unless `--seed` stated the rows outright, and a seeded row keeps the
+    // `deviceId` it was given, where the real hub answers the literal `hub`. It
+    // carries the `rev` envelope either way, because the client's paging loop is
+    // real and has to terminate against it.
     const since = Number(url.searchParams.get('since') ?? 0)
     const exclude = url.searchParams.get('exclude_device') ?? ''
     const page = seededWindows

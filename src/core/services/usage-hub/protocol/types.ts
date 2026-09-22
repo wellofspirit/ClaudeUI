@@ -262,6 +262,12 @@ export interface PullBucketsResponse extends HubEpochEnvelope {
 
 /** One window-value row of another machine — ADR-071 §7's `usage_window` plus whose it is. */
 export interface RemoteWindow {
+  /**
+   * The hub's own aggregate rows carry the literal `hub`, because their numerator
+   * is EVERY machine's turns: a window's value cannot be computed on one machine.
+   * A client's merge keys on `(accountKey, windowKind, canonicalEnd)` and
+   * discards this, but it must be non-empty — a window without it is dropped.
+   */
   deviceId: string
   accountKey: string
   windowKind: string
@@ -328,6 +334,12 @@ export interface RemoteLimitReading {
   usedPercent: number
   resetsAt: string | null
   observedAt: number
+  /**
+   * The label in full — OWNER ONLY, and absent for a device caller rather than
+   * null, so a device cannot tell "the hub withheld it" from "there is none".
+   * The hub's dashboard reads it; nothing on the wire to a machine carries it.
+   */
+  accountLabel?: string | null
 }
 
 export interface PullLimitsResponse extends HubEpochEnvelope {
@@ -360,6 +372,12 @@ export interface HubDevice {
   lastPushAt: number
   /** The owner marked it retired from the hub dashboard; the machine list stops flagging it. */
   retired: boolean
+  /**
+   * The Access service token this machine last pushed under — OWNER ONLY, and
+   * absent for a device caller. It is how the hub's dashboard says which token is
+   * which machine; a machine is never told another machine's credential.
+   */
+  clientId?: string
 }
 
 export interface PullDevicesQuery {

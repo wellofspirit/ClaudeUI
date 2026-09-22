@@ -339,7 +339,11 @@ function decodeLimitReading(source: unknown): RemoteLimitReading | null {
     windowMinutes: nullableNum(source.windowMinutes),
     usedPercent: num(source.usedPercent),
     resetsAt: nullableStr(source.resetsAt),
-    observedAt: num(source.observedAt)
+    observedAt: num(source.observedAt),
+    // Owner only, and passed through only when the hub SENT it: a key added with
+    // a null value would make the device answers differ from their fixtures, and
+    // the fixtures are the contract.
+    ...('accountLabel' in source ? { accountLabel: nullableStr(source.accountLabel) } : {})
   }
 }
 
@@ -372,7 +376,9 @@ function decodeDevice(source: unknown): HubDevice | null {
     os: str(source.os, 'unknown'),
     appVersion: str(source.appVersion, 'unknown'),
     lastPushAt: num(source.lastPushAt),
-    retired: bool(source.retired)
+    retired: bool(source.retired),
+    // As with a reading's full label: owner only, and only when it was sent.
+    ...('clientId' in source ? { clientId: str(source.clientId) } : {})
   }
 }
 
