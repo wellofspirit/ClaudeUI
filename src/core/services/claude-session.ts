@@ -1278,9 +1278,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {
+    const reportedId = msg.tool_use_id || ''
+    const toolUseId = this.resolveTaskOwner(reportedId) || ''
+    // A resumed run's clock is reported against the SendMessage call, whose
+    // tool_name is "SendMessage". The row it lands on is the Agent call's, so
+    // the name is withheld and the reducer's merge keeps the origin's; only the
+    // elapsed time is this run's to report (ADR-073).
+    const aliased = toolUseId !== reportedId
     this.send('session:task-progress', {
-      toolUseId: this.resolveTaskOwner(msg.tool_use_id || '') || '',
-      toolName: msg.tool_name || '',
+      toolUseId,
+      ...(aliased ? {} : { toolName: msg.tool_name || '' }),
       parentToolUseId: this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined) ?? null,
       elapsedTimeSeconds: msg.elapsed_time_seconds || 0
     })
@@ -2784,7 +2791,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     if (taskId) {
-      const matchedToolUseId = this.taskIdMap.get(taskId) || null
+      // Same resolution order as handleTaskNotification: the agent's origin
+      // call owns every renderer key, and after a resume taskIdMap holds the
+      // latest RUN's id, which no card is keyed by (ADR-073).
+      const matchedToolUseId = this.originByTaskId.get(taskId) || this.taskIdMap.get(taskId) || null
       if (matchedToolUseId) {
         this.markBackgroundDone(matchedToolUseId)
         this.taskIdMap.delete(taskId)
@@ -2796,7 +2806,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         status,
         outputFile,
         summary,
-        usage
+        usage,
+        ...(matchedToolUseId
+          ? { runIndex: this.runCountByOrigin.get(matchedToolUseId) ?? 1 }
+          : undefined)
       }
       this.send('session:task-notification', notification)
     }

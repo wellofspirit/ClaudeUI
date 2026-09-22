@@ -50,7 +50,7 @@ export interface AgentRoster {
   totalCount: number
 }
 
-interface ScannedEntry {
+export interface ScannedEntry {
   toolUseId: string
   kind: 'agent' | 'shell'
   name: string
@@ -62,6 +62,23 @@ interface ScannedEntry {
 }
 
 const EMPTY: AgentRoster = { agents: [], shells: [], runningCount: 0, totalCount: 0 }
+
+/**
+ * The transcript walk, shared across every mounted surface. The pill, the tab
+ * and the panel all call the hook, and a `useMemo` inside it is per component —
+ * so without this a streaming delta would walk the transcript three times. The
+ * cache is keyed by the message array's identity (the store replaces it on
+ * every change), so it invalidates exactly when the walk would have re-run.
+ */
+const scanCache = new WeakMap<ChatMessage[], { engineId: EngineId; entries: ScannedEntry[] }>()
+
+export function scanTranscriptCached(messages: ChatMessage[], engineId: EngineId): ScannedEntry[] {
+  const hit = scanCache.get(messages)
+  if (hit && hit.engineId === engineId) return hit.entries
+  const entries = scanTranscript(messages, engineId)
+  scanCache.set(messages, { engineId, entries })
+  return entries
+}
 
 /**
  * One pass over the transcript: every task/background-shell tool_use block, and
@@ -162,9 +179,10 @@ export function useAgentRoster(): AgentRoster {
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const isHistorical = useActiveSession((s) => s.isHistorical)
 
-  // The transcript walk — deliberately NOT dependent on the live maps.
+  // The transcript walk — deliberately NOT dependent on the live maps, and
+  // shared with the other surfaces through scanTranscriptCached.
   const scanned = useMemo(
-    () => (messages ? scanTranscript(messages, engineId ?? 'claude') : []),
+    () => (messages ? scanTranscriptCached(messages, engineId ?? 'claude') : []),
     [messages, engineId]
   )
 

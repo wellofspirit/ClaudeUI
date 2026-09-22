@@ -11,7 +11,7 @@ import React from 'react'
 import { render, act } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useAgentRoster, type AgentRoster } from '../useAgentRoster'
+import { useAgentRoster, scanTranscriptCached, type AgentRoster } from '../useAgentRoster'
 import type { ChatMessage } from '../../../../shared/types'
 
 const ROUTE = 'route-roster'
@@ -208,5 +208,19 @@ describe('useAgentRoster', () => {
     await renderProbe()
     expect(seen?.agents[0].isRunning).toBe(false)
     expect(seen?.runningCount).toBe(0)
+  })
+  it('walks the transcript once per message array, however many surfaces ask', async () => {
+    const messages = [
+      assistantWithTool('m1', 'tu-1', 'Agent', { description: 'one', subagent_type: 'Explore' })
+    ]
+    const first = scanTranscriptCached(messages, 'claude')
+    expect(first).toHaveLength(1)
+    // Same array identity → the very same result, no second walk.
+    expect(scanTranscriptCached(messages, 'claude')).toBe(first)
+    // A different engine reads the same blocks through a different tool map.
+    expect(scanTranscriptCached(messages, 'opencode')).not.toBe(first)
+    // A new array (what the store produces on every change) is a new walk.
+    expect(scanTranscriptCached([...messages], 'claude')).not.toBe(first)
+    expect(scanTranscriptCached([...messages], 'claude')).toEqual(first)
   })
 })

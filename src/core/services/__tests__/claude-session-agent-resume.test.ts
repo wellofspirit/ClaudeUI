@@ -132,6 +132,29 @@ const taskNotification = (
   summary: ''
 })
 
+/** The elapsed-clock message cli.js emits for a long tool call (the Agent, or the SendMessage). */
+const toolProgress = (
+  toolUseId: string,
+  toolName: string,
+  elapsed: number
+): Record<string, unknown> => ({
+  type: 'tool_progress',
+  tool_use_id: toolUseId,
+  tool_name: toolName,
+  parent_tool_use_id: null,
+  elapsed_time_seconds: elapsed
+})
+
+/** The pre-2.1.241 shape: a user-role message carrying <task-notification> XML. */
+const xmlNotification = (taskId: string, status = 'completed'): Record<string, unknown> => ({
+  type: 'user',
+  uuid: `u-xml-${taskId}-${status}`,
+  message: {
+    role: 'user',
+    content: `<task-notification><task-id>${taskId}</task-id><status>${status}</status><summary>done again</summary></task-notification>`
+  }
+})
+
 /** A message from the child agent, parented to whichever run reported it. */
 const childMessage = (parentToolUseId: string, text: string): Record<string, unknown> => ({
   type: 'assistant',
@@ -173,6 +196,9 @@ const startedEvents = (sent: Array<[string, string, unknown]>): TaskStartedData[
 
 const notifications = (sent: Array<[string, string, unknown]>): TaskNotification[] =>
   sent.filter(([c]) => c === 'session:task-notification').map(([, , d]) => d as TaskNotification)
+
+const progressEvents = (sent: Array<[string, string, unknown]>): Array<Record<string, unknown>> =>
+  sent.filter(([c]) => c === 'session:task-progress').map(([, , d]) => d as Record<string, unknown>)
 
 describe('ClaudeSession — a resumed agent keeps its identity', () => {
   it('arms the second run under the ORIGIN tool_use id, not the SendMessage call', async () => {
@@ -282,5 +308,40 @@ describe('ClaudeSession — a resumed agent keeps its identity', () => {
     const started = startedEvents(sent)
     expect(started[1]).toMatchObject({ toolUseId: OTHER_ORIGIN, taskId: OTHER_TASK, runIndex: 1 })
     expect(started[2]).toMatchObject({ toolUseId: ORIGIN, runIndex: 2 })
+  })
+  it("reports a resumed run's clock against the origin without renaming the row", async () => {
+    const sent = await runWire('routing-resume-clock', [
+      taskStarted(ORIGIN),
+      toolProgress(ORIGIN, 'Agent', 5),
+      taskNotification(ORIGIN),
+      taskStarted(RUN2),
+      toolProgress(RUN2, 'SendMessage', 3)
+    ])
+    const progress = progressEvents(sent)
+    expect(progress).toHaveLength(2)
+    // Run 1: the Agent call's own clock, name and all.
+    expect(progress[0]).toMatchObject({
+      toolUseId: ORIGIN,
+      toolName: 'Agent',
+      elapsedTimeSeconds: 5
+    })
+    // Run 2: the clock is the SendMessage call's, the row is still the Agent's —
+    // so the name is withheld and the reducer's merge keeps "Agent".
+    expect(progress[1]).toMatchObject({ toolUseId: ORIGIN, elapsedTimeSeconds: 3 })
+    expect(progress[1]).not.toHaveProperty('toolName')
+  })
+
+  it('resolves the legacy <task-notification> XML path through the origin too', async () => {
+    const sent = await runWire('routing-resume-xml', [
+      taskStarted(ORIGIN),
+      taskNotification(ORIGIN),
+      taskStarted(RUN2),
+      xmlNotification(TASK_ID)
+    ])
+    const ended = notifications(sent)
+    expect(ended).toHaveLength(2)
+    // Before the fix this read taskIdMap alone, which after the resume held the
+    // SendMessage id — a notification no card is keyed by.
+    expect(ended[1]).toMatchObject({ taskId: TASK_ID, toolUseId: ORIGIN, runIndex: 2 })
   })
 })
