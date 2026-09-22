@@ -15,10 +15,10 @@
  * half (→ core) and a "registration" half (stays in main). That is not
  * achievable: in `registerSessionIpc` the two are INTERLEAVED — the manager is
  * built, ~100 channels register, then `gitWatchRegistry.init()` /
- * `startProjectsWatcher()` / `startConfigWatcher()` / `seedCanonicalAppState()` /
- * `usageFetcher.startPolling()` run, then nine more channels register. Splitting
- * on that axis would REORDER side effects, which is exactly what the stage's
- * behaviour-equivalence requirement forbids.
+ * `startProjectsWatcher()` / `startConfigWatcher()` / `seedCanonicalAppState()`
+ * run, then nine more channels register. Splitting on that axis would REORDER
+ * side effects, which is exactly what the stage's behaviour-equivalence
+ * requirement forbids.
  *
  * So the split is on the other axis. The registrar bodies move to `src/core`
  * WHOLE and IN ORDER — nothing moves relative to anything else, so ordering is

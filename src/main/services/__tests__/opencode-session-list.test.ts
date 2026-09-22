@@ -17,7 +17,9 @@ const {
   mockListMessages,
   mockDeleteSession,
   mockReadRows,
-  mockDeleteSessionFiles
+  mockDeleteSessionFiles,
+  mockWarmCache,
+  mockBuildAccountRef
 } = vi.hoisted(() => ({
   mockAcquire: vi.fn(),
   mockRelease: vi.fn(),
@@ -25,7 +27,9 @@ const {
   mockListMessages: vi.fn(),
   mockDeleteSession: vi.fn(),
   mockReadRows: vi.fn(),
-  mockDeleteSessionFiles: vi.fn()
+  mockDeleteSessionFiles: vi.fn(),
+  mockWarmCache: vi.fn(),
+  mockBuildAccountRef: vi.fn()
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
@@ -35,7 +39,17 @@ vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: MockOp
 vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
-vi.mock('../../../core/services/db', () => ({ readOpencodeSessionRows: mockReadRows }))
+vi.mock('../../../core/services/db', () => ({
+  readOpencodeSessionRows: mockReadRows,
+  // The history load merges durable dispatched-cost rows into its status line.
+  dispatchedCostsByRouting: () => []
+}))
+// The status line prices history under the vendor's billing type; the real
+// provider would spawn/read opencode's own auth.json on the machine running
+// the suite. No account ref → 'unknown', which is what these tests assume.
+vi.mock('../../../core/auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: { buildAccountRef: mockBuildAccountRef, warmCache: mockWarmCache }
+}))
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: mockDeleteSessionFiles
 }))
@@ -70,6 +84,8 @@ beforeEach(() => {
   mockDeleteSession.mockReset()
   mockReadRows.mockReset()
   mockDeleteSessionFiles.mockReset().mockResolvedValue(undefined)
+  mockWarmCache.mockReset().mockResolvedValue(undefined)
+  mockBuildAccountRef.mockReset().mockReturnValue(null)
   MockOpencodeClient.mockReset().mockImplementation(function () {
     return { listMessages: mockListMessages, deleteSession: mockDeleteSession }
   })
@@ -155,15 +171,115 @@ describe('loadOpencodeSessionHistory (HTTP, global-by-id)', () => {
         parts: [{ type: 'text', text: 's' }]
       }
     ])
-    const msgs = await loadOpencodeSessionHistory('ses_a')
-    expect(msgs.map((m) => m.id)).toEqual(['m1', 'm2'])
-    expect(msgs[0].role).toBe('user')
+    const { messages } = await loadOpencodeSessionHistory('ses_a')
+    expect(messages.map((m) => m.id)).toEqual(['m1', 'm2'])
+    expect(messages[0].role).toBe('user')
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted')
   })
 
-  it('returns [] (never throws) on error', async () => {
+  it('returns no messages and no status line (never throws) on error', async () => {
     mockListMessages.mockRejectedValueOnce(new Error('boom'))
-    expect(await loadOpencodeSessionHistory('ses_a')).toEqual([])
+    expect(await loadOpencodeSessionHistory('ses_a')).toEqual({ messages: [], statusLine: null })
+  })
+
+  // S1d — the line the reopened session paints before anything spawns.
+  it('builds the status line AFTER warming the auth probe, so the bill is resolved', async () => {
+    // The probe is what turns `unknown` into `subscription`; building the line
+    // before it lands would report a null bill for a covered session.
+    mockWarmCache.mockImplementation(async () => {
+      mockBuildAccountRef.mockReturnValue({ billingType: 'subscription' })
+    })
+    mockListMessages.mockResolvedValue([
+      { info: { id: 'm1', role: 'user', time: { created: 1 } }, parts: [] },
+      {
+        info: {
+          id: 'm2',
+          role: 'assistant',
+          cost: 0,
+          providerID: 'anthropic',
+          modelID: 'claude-sonnet-4-6',
+          tokens: { input: 1_000_000, output: 0 },
+          time: { created: 2, completed: 3 }
+        },
+        parts: [{ type: 'text', text: 'hello' }]
+      }
+    ])
+
+    const { statusLine } = await loadOpencodeSessionHistory('ses_a')
+    expect(mockWarmCache).toHaveBeenCalled()
+    expect(statusLine?.billedCostUsd).toBe(0)
+    expect(statusLine?.totalCostUsd).toBeCloseTo(3, 10)
+  })
+
+  it('still returns the transcript and a line when the probe rejects', async () => {
+    mockWarmCache.mockRejectedValue(new Error('opencode is down'))
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'm1',
+          role: 'assistant',
+          cost: 0.5,
+          providerID: 'anthropic',
+          modelID: 'claude-sonnet-4-6',
+          tokens: { input: 10, output: 10 },
+          time: { created: 2, completed: 3 }
+        },
+        parts: [{ type: 'text', text: 'hello' }]
+      }
+    ])
+
+    const { messages, statusLine } = await loadOpencodeSessionHistory('ses_a')
+    expect(messages.map((m) => m.id)).toEqual(['m1'])
+    expect(statusLine).not.toBeNull()
+  })
+
+  it('has no status line to paint when the session stored no messages', async () => {
+    mockListMessages.mockResolvedValue([])
+    expect(await loadOpencodeSessionHistory('ses_a')).toEqual({
+      messages: [],
+      statusLine: null,
+      lastModel: null
+    })
+  })
+
+  // R1b — a session opencode created on its own has no model persisted on our
+  // side, so the transcript's last assistant message is where the reopened
+  // session's model comes from.
+  it('names the model the LAST assistant message answered on', async () => {
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'm1',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-old',
+          time: { created: 1, completed: 2 }
+        },
+        parts: []
+      },
+      {
+        info: {
+          id: 'm2',
+          role: 'assistant',
+          providerID: 'alicloud',
+          modelID: 'qwen-x',
+          time: { created: 3, completed: 4 }
+        },
+        parts: []
+      }
+    ])
+
+    const { lastModel } = await loadOpencodeSessionHistory('ses_a')
+    expect(lastModel).toEqual({ engineId: 'opencode', vendorId: 'alicloud', modelId: 'qwen-x' })
+  })
+
+  it('names no model when the transcript has no assistant message', async () => {
+    mockListMessages.mockResolvedValue([
+      { info: { id: 'm1', role: 'user', time: { created: 1 } }, parts: [] }
+    ])
+
+    const { lastModel } = await loadOpencodeSessionHistory('ses_a')
+    expect(lastModel).toBeNull()
   })
 })
 

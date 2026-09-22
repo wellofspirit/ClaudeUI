@@ -1,0 +1,692 @@
+/**
+ * @vitest-environment node
+ *
+ * The window-value ledger (ADR-071 §7): what a recompute touches, what it sums,
+ * when a window closes, and what the reader derives.
+ *
+ * DB is isolated per test via an os.homedir() redirect to a temp dir (the db
+ * singleton opens ~/.claude/ui/operational.db lazily; better-sqlite3 is the
+ * node:sqlite stub) — the same harness `block-usage-bucket-rollup.test.ts` uses.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as fs from 'fs'
+import * as nodePath from 'path'
+import * as nodeOs from 'os'
+
+let TEMP_HOME = ''
+
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
+
+beforeEach(() => {
+  TEMP_HOME = fs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'window-ledger-'))
+  fs.mkdirSync(nodePath.join(TEMP_HOME, '.claude', 'ui'), { recursive: true })
+})
+
+afterEach(() => {
+  if (TEMP_HOME && fs.existsSync(TEMP_HOME)) {
+    fs.rmSync(TEMP_HOME, { recursive: true, force: true })
+  }
+  vi.clearAllMocks()
+})
+
+type DbModule = typeof import('../../../core/services/db')
+type LedgerModule = typeof import('../../../core/services/usage-window-ledger')
+type UsageEventInsert = import('../../../core/services/db').UsageEventInsert
+type WindowSampleRow = import('../../../core/services/db').WindowSampleRow
+
+const HOUR = 60 * 60 * 1000
+const FIVE_HOURS = 5 * HOUR
+const SEVEN_DAYS = 7 * 24 * HOUR
+
+/** A fixed 5-hour window end, far enough in the past that the app's clock is irrelevant. */
+const END = new Date('2026-06-15T12:00:00.000Z').getTime()
+const START = END - FIVE_HOURS
+
+const ACCOUNT_A = 'anthropic:org-a:acct-a'
+const ACCOUNT_B = 'anthropic:org-b:acct-b'
+/** A ChatGPT subscription — the vendor that states each window's length (S3c). */
+const CHATGPT_A = 'chatgpt:w-a:user-a'
+
+async function fresh(): Promise<{ db: DbModule; ledger: LedgerModule }> {
+  vi.resetModules()
+  // `vi.resetModules()` hands back a fresh `sqlite-driver` too, and the seam has
+  // no default engine — install the driver right where the fresh `db` is
+  // imported, exactly as the bucket-rollup suite does.
+  const driverSeam = await import('../../../core/services/sqlite-driver')
+  const { betterSqlite3Driver } =
+    await import('../../../core/services/sqlite/better-sqlite3-driver')
+  driverSeam.setSqliteDriver(betterSqlite3Driver())
+  const db = await import('../../../core/services/db')
+  const ledger = await import('../../../core/services/usage-window-ledger')
+  return { db, ledger }
+}
+
+let sampleSeq = 0
+function sample(
+  accountKey: string,
+  ts: number,
+  usedPercent: number,
+  canonicalEnd = END,
+  windowKind = '5h',
+  windowMinutes: number | null = null
+): WindowSampleRow {
+  sampleSeq += 1
+  return {
+    id: `ws-${sampleSeq}`,
+    ts,
+    accountUuid: `uuid-${accountKey}`,
+    usedPercent,
+    canonicalEnd,
+    accountKey,
+    windowKind,
+    windowMinutes
+  }
+}
+
+let eventSeq = 0
+function event(
+  accountKey: string,
+  ts: number,
+  overrides: Partial<UsageEventInsert> = {}
+): UsageEventInsert {
+  eventSeq += 1
+  const id = `e-${eventSeq}`
+  return {
+    id,
+    ts,
+    engineId: 'claude',
+    vendorId: 'anthropic',
+    accountId: null,
+    accountUuid: null,
+    modelId: 'claude-opus-4-8',
+    inputTokens: 10,
+    outputTokens: 20,
+    cacheWriteTokens: 30,
+    cacheWrite1hTokens: 5,
+    cacheReadTokens: 40,
+    equivCostUsd: 1,
+    engineCostUsd: null,
+    sessionId: 's1',
+    messageId: id,
+    source: 'live',
+    accountKey,
+    billingType: 'subscription',
+    origin: 'session',
+    apiCostUsd: 1,
+    billedCostUsd: 0,
+    ...overrides
+  }
+}
+
+describe('recomputeUsageWindows', () => {
+  it('materializes a window from its samples and sums only its own account', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 20))
+      db.recordWindowSample(sample(ACCOUNT_A, START + 2 * HOUR, 44.5))
+      db.recordWindowSample(sample(ACCOUNT_B, START + HOUR, 90))
+      db.insertUsageEvents([
+        event(ACCOUNT_A, START + HOUR, { apiCostUsd: 2 }),
+        event(ACCOUNT_A, START + 2 * HOUR, { apiCostUsd: 3 }),
+        // Same window, another account — must not land in A's numerator.
+        event(ACCOUNT_B, START + HOUR, { apiCostUsd: 100 })
+      ])
+
+      expect(ledger.recomputeUsageWindows(START + 3 * HOUR)).toBe(2)
+
+      const a = db.listUsageWindows({ accountKey: ACCOUNT_A })
+      expect(a).toHaveLength(1)
+      expect(a[0]).toMatchObject({
+        windowKind: '5h',
+        canonicalEnd: END,
+        windowStart: START,
+        peakPercent: 44.5,
+        apiCostUsd: 5,
+        billedCostUsd: 0,
+        unknownCostCount: 0,
+        inputTokens: 20,
+        outputTokens: 40,
+        cacheWriteTokens: 60,
+        cacheReadTokens: 80,
+        sampleCount: 2,
+        closed: false
+      })
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_B })[0].apiCostUsd).toBe(100)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('excludes a row exactly at canonical_end and includes one at window_start', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([
+        // The boundary is half-open: `canonical_end` is the NEXT window's start,
+        // so a turn at that instant belongs there, not here.
+        event(ACCOUNT_A, START, { apiCostUsd: 7 }),
+        event(ACCOUNT_A, END, { apiCostUsd: 11 }),
+        event(ACCOUNT_A, START - 1, { apiCostUsd: 13 })
+      ])
+
+      ledger.recomputeUsageWindows(START + 3 * HOUR)
+
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0].apiCostUsd).toBe(7)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('counts a row nothing could value instead of adding it as zero', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([
+        event(ACCOUNT_A, START + HOUR, { apiCostUsd: 4 }),
+        // An unpriced model under a subscription: no equivalent, so no value.
+        event(ACCOUNT_A, START + 2 * HOUR, { apiCostUsd: null, billedCostUsd: 0 })
+      ])
+
+      ledger.recomputeUsageWindows(START + 3 * HOUR)
+
+      const row = db.listUsageWindows({ accountKey: ACCOUNT_A })[0]
+      expect(row.apiCostUsd).toBe(4)
+      expect(row.unknownCostCount).toBe(1)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('sums the API-equivalent, not what an apiKey turn was charged', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([
+        event(ACCOUNT_A, START + HOUR, {
+          billingType: 'apiKey',
+          apiCostUsd: 2,
+          billedCostUsd: 3.5
+        })
+      ])
+
+      ledger.recomputeUsageWindows(START + 3 * HOUR)
+
+      const row = db.listUsageWindows({ accountKey: ACCOUNT_A })[0]
+      // The window answers what the plan DELIVERED — list-price dollars — not
+      // what the work cost. The bill is its own column.
+      expect(row.apiCostUsd).toBe(2)
+      expect(row.billedCostUsd).toBe(3.5)
+      expect(row.unknownCostCount).toBe(0)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('counts an unpriced turn against the API sum even when its bill is known', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([
+        event(ACCOUNT_A, START + HOUR, {
+          billingType: 'apiKey',
+          apiCostUsd: 2,
+          billedCostUsd: 1
+        }),
+        // A gateway charged for a model our table has no price for: the bill is
+        // known, the equivalent is not. `unknown_cost_count` qualifies the API
+        // sum, which is the one that is short.
+        event(ACCOUNT_A, START + 2 * HOUR, {
+          billingType: 'apiKey',
+          apiCostUsd: null,
+          billedCostUsd: 4
+        })
+      ])
+
+      ledger.recomputeUsageWindows(START + 3 * HOUR)
+
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0]).toMatchObject({
+        apiCostUsd: 2,
+        billedCostUsd: 5,
+        unknownCostCount: 1
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('keeps a window open through the grace period and picks up a late row', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 6 })])
+
+      // An hour past the end. A turn reaches the ledger later than it happened
+      // — the reconciler ticks every ten minutes, and a session the app was not
+      // watching is reconciled on the next start — so the window is still open.
+      ledger.recomputeUsageWindows(END + HOUR)
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0]).toMatchObject({
+        closed: false,
+        apiCostUsd: 6
+      })
+
+      db.insertUsageEvents([event(ACCOUNT_A, START + 2 * HOUR, { apiCostUsd: 4 })])
+      ledger.recomputeUsageWindows(END + 2 * HOUR)
+
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0]).toMatchObject({
+        closed: false,
+        apiCostUsd: 10
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('closes a window once the grace has passed, and never touches it again', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 30))
+      db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 6 })])
+
+      // 25 hours past the end: beyond the grace, and this pass summed it — final.
+      ledger.recomputeUsageWindows(END + 25 * HOUR)
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0]).toMatchObject({
+        closed: true,
+        apiCostUsd: 6
+      })
+
+      // A turn that arrives after that, and a reading that would have raised the
+      // peak: neither may move the row.
+      db.insertUsageEvents([event(ACCOUNT_A, START + 2 * HOUR, { apiCostUsd: 99 })])
+      db.recordWindowSample(sample(ACCOUNT_A, END + 26 * HOUR, 95))
+      expect(ledger.recomputeUsageWindows(END + 27 * HOUR)).toBe(0)
+
+      expect(db.listUsageWindows({ accountKey: ACCOUNT_A })[0]).toMatchObject({
+        closed: true,
+        apiCostUsd: 6,
+        peakPercent: 30
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('keeps the highest peak ever seen when older samples have been pruned', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 61))
+      ledger.recomputeUsageWindows(START + 2 * HOUR)
+      expect(db.listUsageWindows({})[0].peakPercent).toBe(61)
+
+      // The 61% sample is gone (30-day retention); the only reading left is
+      // lower. The peak is what was OBSERVED, not what is still on disk.
+      db.pruneUsageTables(START + HOUR + 31 * 24 * HOUR)
+      db.recordWindowSample(sample(ACCOUNT_A, START + 2 * HOUR, 12))
+
+      ledger.recomputeUsageWindows(START + 3 * HOUR)
+
+      expect(db.listUsageWindows({})[0].peakPercent).toBe(61)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('spans a week for a scoped weekly, whose kind states its length', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      const weeklyEnd = END + SEVEN_DAYS
+      db.recordWindowSample(sample(ACCOUNT_A, END, 40, weeklyEnd, '7d:fable'))
+      db.insertUsageEvents([
+        event(ACCOUNT_A, weeklyEnd - SEVEN_DAYS, { apiCostUsd: 1 }),
+        event(ACCOUNT_A, weeklyEnd - SEVEN_DAYS - 1, { apiCostUsd: 50 })
+      ])
+
+      ledger.recomputeUsageWindows(END + HOUR)
+
+      const row = db.listUsageWindows({ kind: '7d:fable' })[0]
+      expect(row.windowStart).toBe(weeklyEnd - SEVEN_DAYS)
+      expect(row.apiCostUsd).toBe(1)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  /**
+   * S3c — the span comes from `window_minutes` when the reading carried one.
+   * A ChatGPT plan states the length of each window it reports, and a weekly
+   * one arrives in the `primary` slot, which used to make it a `5h` row summed
+   * over five hours of spend.
+   */
+  it('spans the stated duration, not the one its position implied', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      const weeklyEnd = END + SEVEN_DAYS
+      // What a weekly-only ChatGPT plan now writes: kind `7d`, minutes 10,080.
+      db.recordWindowSample(sample(CHATGPT_A, END, 63, weeklyEnd, '7d', 10_080))
+      db.insertUsageEvents([
+        event(CHATGPT_A, weeklyEnd - SEVEN_DAYS, { apiCostUsd: 9 }),
+        // Inside the week but outside the five hours the old rule would have used.
+        event(CHATGPT_A, weeklyEnd - 3 * 24 * HOUR, { apiCostUsd: 4 }),
+        event(CHATGPT_A, weeklyEnd - SEVEN_DAYS - 1, { apiCostUsd: 50 })
+      ])
+
+      ledger.recomputeUsageWindows(END + HOUR)
+
+      const row = db.listUsageWindows({ accountKey: CHATGPT_A })[0]
+      expect(row).toMatchObject({
+        windowKind: '7d',
+        windowStart: weeklyEnd - SEVEN_DAYS,
+        windowMinutes: 10_080,
+        apiCostUsd: 13,
+        peakPercent: 63
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('spans an hour for an hourly window', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(CHATGPT_A, END - HOUR, 20, END, '1h', 60))
+      db.insertUsageEvents([
+        event(CHATGPT_A, END - HOUR, { apiCostUsd: 2 }),
+        event(CHATGPT_A, END - HOUR - 1, { apiCostUsd: 30 })
+      ])
+
+      ledger.recomputeUsageWindows(END)
+
+      const row = db.listUsageWindows({ accountKey: CHATGPT_A })[0]
+      expect(row.windowStart).toBe(END - HOUR)
+      expect(row.apiCostUsd).toBe(2)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  /**
+   * S3c — no length, no numerator. A window the vendor described only by
+   * position is a real reading and is kept as a sample, but there is no
+   * interval to sum it over, so materialising it would mean picking a span at
+   * random and publishing the result as a plan's value.
+   */
+  it('never materializes a window whose length nothing states', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(CHATGPT_A, END - HOUR, 55, END, 'primary', null))
+      db.insertUsageEvents([event(CHATGPT_A, END - HOUR, { apiCostUsd: 8 })])
+
+      expect(ledger.recomputeUsageWindows(END)).toBe(0)
+      expect(db.listUsageWindows({})).toHaveLength(0)
+      // The reading itself is not lost.
+      expect(db.latestWindowSamples(CHATGPT_A)).toMatchObject([
+        { windowKind: 'primary', usedPercent: 55, windowMinutes: null }
+      ])
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('ignores the shared `unknown` account key', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample('unknown', START + HOUR, 77))
+
+      expect(ledger.recomputeUsageWindows(START + 2 * HOUR)).toBe(0)
+      expect(db.listUsageWindows({})).toHaveLength(0)
+    } finally {
+      db.closeDb()
+    }
+  })
+})
+
+describe('usageWindowSummary', () => {
+  it('derives the rate and the implied full window, and flags the bias', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 25))
+      db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 5 })])
+      ledger.recomputeUsageWindows(START + 2 * HOUR)
+
+      const [row] = ledger.usageWindowSummary({ accountKey: ACCOUNT_A })
+
+      expect(row.usdPerPercent).toBeCloseTo(0.2, 10)
+      expect(row.impliedFullWindowUsd).toBeCloseTo(20, 10)
+      // The percent is the account's global utilization; the dollars are only
+      // what this machine saw. Every row says so.
+      expect(row.biased).toBe(true)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('reports no derived figure below the 5% noise floor, keeping the real sums', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 4.9))
+      db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 5 })])
+      ledger.recomputeUsageWindows(START + 2 * HOUR)
+
+      const [row] = ledger.usageWindowSummary({})
+
+      expect(row.usdPerPercent).toBeNull()
+      expect(row.impliedFullWindowUsd).toBeNull()
+      // The floor is a READ rule: the row keeps its facts.
+      expect(row).toMatchObject({ peakPercent: 4.9, apiCostUsd: 5 })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('returns closed windows too — they are the durable history', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 50))
+      db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 9 })])
+      ledger.recomputeUsageWindows(END + 25 * HOUR)
+
+      // The samples behind it are pruned at 30 days; the window row is not.
+      expect(ledger.usageWindowSummary({})).toHaveLength(1)
+      expect(ledger.usageWindowSummary({})[0].closed).toBe(true)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('filters by account, kind and end', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 50))
+      db.recordWindowSample(sample(ACCOUNT_B, START + HOUR, 50))
+      db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 50, END + SEVEN_DAYS, '7d'))
+      ledger.recomputeUsageWindows(START + 2 * HOUR)
+
+      expect(ledger.usageWindowSummary({ accountKey: ACCOUNT_A })).toHaveLength(2)
+      expect(ledger.usageWindowSummary({ kind: '5h' })).toHaveLength(2)
+      expect(ledger.usageWindowSummary({ sinceTs: END + 1 })).toHaveLength(1)
+    } finally {
+      db.closeDb()
+    }
+  })
+})
+
+describe('the trigger', () => {
+  it('a usage rebuild recomputes the windows, from the same clock as the bucket rollup', async () => {
+    const { db } = await fresh()
+    const bu = await import('../../../core/services/block-usage')
+    try {
+      const now = Date.now()
+      db.recordWindowSample(sample(ACCOUNT_A, now - 1_000, 33, now + HOUR))
+      db.insertUsageEvents([event(ACCOUNT_A, now - 1_000, { apiCostUsd: 8 })])
+
+      const service = new bu.BlockUsageService()
+      await (
+        service as unknown as { rebuildFromEntries(entries: never[]): Promise<unknown> }
+      ).rebuildFromEntries([])
+
+      // No listener, no timer: "usage moved" is the only trigger, and it is
+      // where the hourly rollup already runs.
+      expect(db.listUsageWindows({})).toMatchObject([
+        { accountKey: ACCOUNT_A, canonicalEnd: now + HOUR, apiCostUsd: 8, closed: false }
+      ])
+    } finally {
+      db.closeDb()
+    }
+  })
+})
+
+describe('usageWindowSummary — the combined scope (ADR-072 §4)', () => {
+  /** One cached remote window row, as the hub's rollup answers it. */
+  function remoteWindow(
+    overrides: Partial<import('../../../core/services/db').RemoteUsageWindowRow> = {}
+  ): import('../../../core/services/db').RemoteUsageWindowRow {
+    return {
+      deviceId: 'dev-peer',
+      accountKey: ACCOUNT_A,
+      windowKind: '5h',
+      canonicalEnd: END,
+      windowStart: START,
+      windowMinutes: null,
+      peakPercent: 80,
+      apiCostUsd: 40,
+      billedCostUsd: 0,
+      unknownCostCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      sampleCount: 9,
+      closed: true,
+      updatedAt: END + HOUR,
+      ...overrides
+    }
+  }
+
+  /** A local window worth $10 at a 50% peak, materialised the normal way. */
+  function seedLocalWindow(db: DbModule, ledger: LedgerModule): void {
+    db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 50))
+    db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 10 })])
+    ledger.recomputeUsageWindows(END + 3 * HOUR)
+  }
+
+  it('prefers the hub’s row for a window it holds, and keeps the bias flag', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([remoteWindow()])
+
+    const local = ledger.usageWindowSummary({ sinceTs: 0 })
+    const combined = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    // ONE row either way — the hub's is a better answer to the same window, not
+    // a second window.
+    expect(local).toHaveLength(1)
+    expect(combined).toHaveLength(1)
+    expect(local[0].apiCostUsd).toBeCloseTo(10, 6)
+    // The hub sums the numerator over every device, which is the half of
+    // ADR-071 §7's bias this closes.
+    expect(combined[0].apiCostUsd).toBeCloseTo(40, 6)
+    expect(combined[0].peakPercent).toBe(80)
+    expect(combined[0].sampleCount).toBe(9)
+    // Derived from the hub's figures, by the same rule.
+    expect(combined[0].usdPerPercent).toBeCloseTo(0.5, 6)
+    expect(combined[0].impliedFullWindowUsd).toBeCloseTo(50, 6)
+    // The claude.ai half is not closed by anything, so the flag stays.
+    expect(combined[0].biased).toBe(true)
+    // And no device id leaks into the row a surface reads.
+    expect('deviceId' in combined[0]).toBe(false)
+  })
+
+  it('adds a window only another machine has, in end order with the local ones', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ accountKey: ACCOUNT_B, canonicalEnd: END + HOUR, apiCostUsd: 7 })
+    ])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    expect(rows).toHaveLength(2)
+    // Newest end first, as `listUsageWindows` orders its own.
+    expect(rows.map((r) => [r.accountKey, r.canonicalEnd])).toEqual([
+      [ACCOUNT_B, END + HOUR],
+      [ACCOUNT_A, END]
+    ])
+  })
+
+  it('leaves the local rows untouched under the default scope', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([remoteWindow(), remoteWindow({ accountKey: ACCOUNT_B })])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0 })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].accountKey).toBe(ACCOUNT_A)
+    expect(rows[0].apiCostUsd).toBeCloseTo(10, 6)
+  })
+
+  it('takes the last-touched of two devices’ rows for one window', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ deviceId: 'dev-old', apiCostUsd: 20, updatedAt: END }),
+      remoteWindow({ deviceId: 'dev-new', apiCostUsd: 55, updatedAt: END + 2 * HOUR })
+    ])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    // A rollup only ever grows, so the newest is the most complete.
+    expect(rows).toHaveLength(1)
+    expect(rows[0].apiCostUsd).toBeCloseTo(55, 6)
+  })
+
+  it('honours the account and kind filters on the remote rows too', async () => {
+    const { db, ledger } = await fresh()
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ accountKey: ACCOUNT_A, windowKind: '5h' }),
+      remoteWindow({ accountKey: ACCOUNT_B, windowKind: '5h' }),
+      remoteWindow({ accountKey: ACCOUNT_A, windowKind: '7d', canonicalEnd: END + HOUR })
+    ])
+
+    expect(
+      ledger.usageWindowSummary({ sinceTs: 0, scope: 'all', accountKey: ACCOUNT_A }).length
+    ).toBe(2)
+    expect(ledger.usageWindowSummary({ sinceTs: 0, scope: 'all', kind: '7d' }).length).toBe(1)
+    // The window-end bound applies to them as well.
+    expect(ledger.usageWindowSummary({ sinceTs: END + 2 * HOUR, scope: 'all' })).toEqual([])
+  })
+})
+
+describe('sanitizeUsageWindowQuery', () => {
+  it('keeps the three fields and drops everything else', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      expect(
+        ledger.sanitizeUsageWindowQuery({
+          accountKey: 'a',
+          kind: '5h',
+          sinceTs: 12,
+          closed: false,
+          extra: 'x'
+        })
+      ).toEqual({ accountKey: 'a', kind: '5h', sinceTs: 12 })
+      expect(ledger.sanitizeUsageWindowQuery({ accountKey: 1, sinceTs: NaN })).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery(undefined)).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery('nope')).toEqual({})
+      // The scope: only `all` is worth carrying, and junk is dropped rather
+      // than echoed back (S5c).
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'all' })).toEqual({ scope: 'all' })
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'local' })).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'everything' })).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 1 })).toEqual({})
+    } finally {
+      db.closeDb()
+    }
+  })
+})

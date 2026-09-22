@@ -27,6 +27,9 @@ import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateL
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { RateLimitWindow } from './protocol/v2/RateLimitWindow'
 import { emitEvent } from '../services/sync-host'
+import { recordLimitSamples, type LimitSampleWindow } from '../services/window-samples'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { windowKindsForReading } from '../../shared/window-kind'
 
 /**
  * `resetsAt` is a unix timestamp in SECONDS.
@@ -40,16 +43,39 @@ import { emitEvent } from '../services/sync-host'
  *
  * Multiplying by 1000 is therefore the whole conversion; ClaudeUI's `RateWindow`
  * carries ISO 8601 because `formatResetTime` and every Claude usage row already do.
+ *
+ * `windowDurationMins` is KEPT (S3c). It is the only trusted statement of how
+ * long the window lasts — the ChatGPT backend's `limit_window_seconds`, through
+ * Codex's `window_minutes` — and dropping it is what left a weekly-only plan
+ * filed under the five-hour kind. Non-positive or non-finite is no statement at
+ * all and travels as null.
  */
 export function rateWindow(window: RateLimitWindow | null | undefined): RateWindow | null {
   if (!window || typeof window.usedPercent !== 'number') return null
   const seconds = window.resetsAt
+  const minutes = window.windowDurationMins
   return {
     usedPercent: window.usedPercent,
     resetsAt:
       typeof seconds === 'number' && Number.isFinite(seconds)
         ? new Date(seconds * 1000).toISOString()
-        : null
+        : null,
+    windowMinutes:
+      typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : null
+  }
+}
+
+/**
+ * One observed window as the sample writer takes it, under the kind the whole
+ * reading resolved it to (S3c) — the DURATION's kind, never the slot's, and
+ * `windowKindsForReading` keeps the two slots distinct when they share a length.
+ */
+function sampleWindow(kind: string, window: RateWindow): LimitSampleWindow {
+  return {
+    kind,
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    windowMinutes: window.windowMinutes ?? null
   }
 }
 
@@ -98,6 +124,16 @@ export interface ChatgptRateLimitDeps {
   read: (accountIds: ReadonlyArray<string>) => Promise<Map<string, GetAccountRateLimitsResponse>>
   /** Tells clients the map moved. No payload: they re-query. */
   changed: () => void
+  /**
+   * Keep the reading (ADR-071 §6). Takes the VAULT account id and the windows
+   * THIS snapshot carried — not the merged entry — so a sparse push records what
+   * was actually observed rather than re-recording a window nobody just read.
+   *
+   * Injected because resolving the vault id to ADR-071 §3's account key is async
+   * and touches the vault, neither of which belongs inside a synchronous fold;
+   * it also keeps this class's unit tests free of a database.
+   */
+  persist: (vaultAccountId: string, windows: LimitSampleWindow[]) => void
   now: () => number
 }
 
@@ -125,8 +161,10 @@ export class ChatgptRateLimitStore {
     identity: { email?: string; planType?: string } = {}
   ): void {
     const previous = this.limits[vaultAccountId]
-    const primary = rateWindow(snapshot.primary) ?? previous?.primary ?? null
-    const secondary = rateWindow(snapshot.secondary) ?? previous?.secondary ?? null
+    const observedPrimary = rateWindow(snapshot.primary)
+    const observedSecondary = rateWindow(snapshot.secondary)
+    const primary = observedPrimary ?? previous?.primary ?? null
+    const secondary = observedSecondary ?? previous?.secondary ?? null
     // Same sparse rule as the windows: only a snapshot that actually says the
     // account HAS credits replaces what the last full read established.
     const credits = snapshot.credits?.hasCredits
@@ -143,6 +181,20 @@ export class ChatgptRateLimitStore {
       fetchedAt: this.deps.now()
     }
     this.limits[vaultAccountId] = entry
+
+    // The OBSERVED windows, not the merged ones: a sample says "this is what the
+    // account read at this instant", and re-recording a window this push did not
+    // carry would restate an old reading under a new timestamp.
+    //
+    // The KINDS, though, come from the MERGED pair: a sparse push that carries
+    // only one slot must file it under the same kind the full read did, and the
+    // collision rule (two slots of one length) can only be seen with both.
+    const kinds = windowKindsForReading({ primary, secondary })
+    const observed: LimitSampleWindow[] = []
+    if (observedPrimary) observed.push(sampleWindow(kinds.primary, observedPrimary))
+    if (observedSecondary) observed.push(sampleWindow(kinds.secondary, observedSecondary))
+    if (observed.length) this.deps.persist(vaultAccountId, observed)
+
     this.deps.changed()
   }
 
@@ -211,6 +263,48 @@ export const chatgptRateLimits = new ChatgptRateLimitStore({
       service.dispose()
     }
   },
-  changed: () => emitEvent('usage:chatgpt-limits-changed', []),
+  changed: () => {
+    emitEvent('usage:chatgpt-limits-changed', [])
+    // ADR-071 §6's channel, beside ADR-068's: `usage:limits` answers for every
+    // vendor, so a client watching limits across vendors must not have to know
+    // which vendor's nudge to listen for.
+    emitEvent('usage:limits-changed', [])
+  },
+  persist: (vaultAccountId, windows) => {
+    void persistChatgptSamples(vaultAccountId, windows)
+  },
   now: () => Date.now()
 })
+
+/**
+ * Keep one ChatGPT reading under ADR-071 §3's account key.
+ *
+ * The key is resolved from the VAULT (async, and it reads credentials), which is
+ * why this is not inside `record()`. Best-effort: a sample nobody could key is
+ * dropped rather than filed under `unknown`, where it would be indistinguishable
+ * from every other account's.
+ */
+async function persistChatgptSamples(
+  vaultAccountId: string,
+  windows: LimitSampleWindow[]
+): Promise<void> {
+  try {
+    const { accountKey, accountLabel } = await credentialSync.accountIdentity(vaultAccountId)
+    if (accountKey === UNKNOWN_ACCOUNT_KEY) return
+    // The plan comes from the entry `record()` has just folded in, which is the
+    // merged one — a sparse push carries no `planType` and must not un-name the
+    // plan the last full read established. Label and plan are display-only here:
+    // the SAMPLE stores neither, and they exist for the hub relay (ADR-072 §4),
+    // where a machine that does not hold this credential still has to say whose
+    // meter it is looking at.
+    recordLimitSamples({
+      accountKey,
+      accountLabel,
+      vendorId: 'openai',
+      plan: chatgptRateLimits.snapshot()[vaultAccountId]?.planType ?? null,
+      windows
+    })
+  } catch {
+    /* advisory */
+  }
+}

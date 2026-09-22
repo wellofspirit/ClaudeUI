@@ -124,9 +124,19 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/ui-config')>()),
   loadEngineConfig: () => ({})
 }))
+/**
+ * The usage ledger (ADR-071 §4). Mocked at the recorder, not at the database:
+ * what these tests measure is the ROW a turn produces — its tokens, its
+ * account and its `message_id` — and the DB's own dedup is `db-metering`'s
+ * subject, not this suite's.
+ */
+const usageRows = vi.hoisted(() => vi.fn())
+/** `session_meta` writes, so the persisted context reading (db v24) is observable. */
+const sessionMetaWrites = vi.hoisted(() => vi.fn())
+vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: usageRows }))
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
-  setSessionMeta: vi.fn(),
+  setSessionMeta: sessionMetaWrites,
   registerCodexFork: (threadId: string, forkedFromId: string) =>
     void forks.set(threadId, forkedFromId),
   getCodexSessionOverrides: (id: string) => overrides.get(id),
@@ -143,6 +153,8 @@ afterEach(() => {
   sessions.forEach((session) => session.dispose())
   sessions.length = 0
   events.mockClear()
+  usageRows.mockClear()
+  sessionMetaWrites.mockClear()
   rateLimitStore.record.mockClear()
   overrides.clear()
   forks.clear()
@@ -2913,6 +2925,61 @@ describe('Codex native children', () => {
     expect(meters.at(-1)!.contextWindow.used).toBe(110)
   })
 
+  // S1e: the window size is on this frame and nowhere else — not in the
+  // catalog, not in `thread/read` — so a cold reopen can only paint a meter
+  // from what the live session wrote down.
+  it('persists the root context reading on session_meta without losing the model', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
+    })
+    const settingsWrite = sessionMetaWrites.mock.calls.at(-1)
+    f.notify('thread/tokenUsage/updated', {
+      threadId: 'root',
+      turnId: 'turn',
+      tokenUsage: {
+        total: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          outputTokens: 10,
+          cacheWriteInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        last: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          outputTokens: 10,
+          cacheWriteInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        modelContextWindow: 272_000
+      }
+    })
+
+    expect(settingsWrite).toEqual([
+      'root',
+      {
+        engineId: 'codex',
+        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' }
+      }
+    ])
+    // The model rides along: `setSessionMeta` REPLACES it, so a context-only
+    // write would blank what the settings frame just recorded.
+    expect(sessionMetaWrites.mock.calls.at(-1)).toEqual([
+      'root',
+      {
+        engineId: 'codex',
+        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+        contextUsed: 110,
+        contextWindow: 272_000
+      }
+    ])
+  })
+
   it('prices the turn at the API-rate equivalent, with cached and written input split out', async () => {
     const f = fixture()
     await f.session.run('hello')
@@ -2954,6 +3021,11 @@ describe('Codex native children', () => {
     expect(meters.at(-1)!.equivalentCostUsd).toBeCloseTo(1.302, 6)
     const lines = sent('session:status-line') as Array<{ totalCostUsd: number | null }>
     expect(lines.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
+    // ADR-071 §2 added a billed figure and an unpriced count for the engines
+    // that separate the two (opencode, pi). A Codex status line carries
+    // neither, and the tooltip reads their absence as "no such distinction".
+    expect(lines.at(-1)!).not.toHaveProperty('billedCostUsd')
+    expect(lines.at(-1)!).not.toHaveProperty('unknownCostMessages')
     // `session:status` is only re-emitted when something about the session
     // changes, so it carries the cost from the next emission onward — the
     // TopBar reads it only as the pre-status-line fallback.
@@ -5271,5 +5343,183 @@ describe('Codex item stream lifecycle', () => {
         .getMessages()
         .some((m) => m.content.some((b) => b.type === 'text' && b.text === 'before close'))
     ).toBe(true)
+  })
+})
+
+describe('a Codex turn writes the usage ledger', () => {
+  /** A cumulative `thread/tokenUsage/updated` for one thread (ADR-071 §4). */
+  const usage = (
+    f: ReturnType<typeof fixture>,
+    threadId: string,
+    total: Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number }>
+  ): void => {
+    const input = total.input ?? 0
+    const output = total.output ?? 0
+    const breakdown = {
+      inputTokens: input,
+      cachedInputTokens: total.cacheRead ?? 0,
+      cacheWriteInputTokens: total.cacheWrite ?? 0,
+      outputTokens: output,
+      reasoningOutputTokens: 0,
+      totalTokens: input + output
+    }
+    f.notify('thread/tokenUsage/updated', {
+      threadId,
+      tokenUsage: { total: breakdown, last: breakdown, modelContextWindow: 1000 }
+    })
+  }
+  const ended = (
+    f: ReturnType<typeof fixture>,
+    threadId: string,
+    turnId: string,
+    status = 'completed'
+  ): void => f.notify('turn/completed', { threadId, turn: { id: turnId, status, items: [] } })
+  /** The `collabAgentToolCall` that binds a spawned child thread to its card. */
+  const spawnChild = (f: ReturnType<typeof fixture>, child = 'child'): void =>
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'collab-1',
+        type: 'collabAgentToolCall',
+        tool: 'spawnAgent',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: [child],
+        prompt: 'survey the tests',
+        model: 'native',
+        reasoningEffort: 'ultra',
+        agentsStates: { [child]: { status: 'running', message: null } }
+      }
+    })
+  /** A vault behind the session, naming ONE ChatGPT subscription. */
+  function authSource(): CodexAuthSource {
+    return {
+      injectionTokenFor: vi.fn(async () => ({
+        accessToken: 'fake-access-jwt',
+        chatgptAccountId: 'ws-fixture',
+        chatgptPlanType: 'pro',
+        vaultAccountId: 'acct-fixture'
+      })),
+      getStatus: vi.fn(async () => ({
+        accounts: [{ id: 'acct-fixture', accountId: 'ws-fixture' }]
+      })),
+      accountIdentity: vi.fn(async () => ({
+        accountKey: 'chatgpt:ws-fixture:user-fixture',
+        accountLabel: 'owner@example.test (pro)'
+      }))
+    }
+  }
+
+  it('records one row per root turn, on the account and subscription that ran it', async () => {
+    const source = authSource()
+    const f = fixture({}, codexAuthHook({ source }), source)
+    const base = f.request.getMockImplementation()!
+    f.request.mockImplementation((async (method: string, params?: unknown) =>
+      method === 'account/read'
+        ? { account: { type: 'chatgpt', email: 'owner@example.test', planType: 'pro' } }
+        : base(method, params)) as typeof base)
+    await f.session.run('hello')
+
+    usage(f, 'root', { input: 1000, output: 50, cacheRead: 600, cacheWrite: 200 })
+    ended(f, 'root', 'turn')
+
+    expect(usageRows).toHaveBeenCalledTimes(1)
+    expect(usageRows.mock.calls[0]![0]).toEqual({
+      engineId: 'codex',
+      vendorId: 'openai',
+      accountId: 'acct-fixture',
+      accountUuid: null,
+      modelId: 'native',
+      // Codex NESTS: the base rate applies to the prompt less both subsets.
+      tokens: { input: 200, output: 50, cacheWrite: 200, cacheWrite1h: 0, cacheRead: 600 },
+      engineCostUsd: null,
+      engineCostIsEquivalent: false,
+      sessionId: 'root',
+      messageId: 'codex:root:turn',
+      source: 'live',
+      accountKey: 'chatgpt:ws-fixture:user-fixture',
+      accountLabel: 'owner@example.test (pro)',
+      billingType: 'subscription',
+      origin: 'session',
+      parentRoutingId: null
+    })
+  })
+
+  it('gives a child thread its own row, its own baseline and the parent’s routing id', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawnChild(f)
+
+    usage(f, 'root', { input: 100, output: 10 })
+    usage(f, 'child', { input: 40, output: 4 })
+    usage(f, 'child', { input: 60, output: 6 })
+    ended(f, 'child', 'child-turn')
+    ended(f, 'root', 'turn')
+
+    const rows = usageRows.mock.calls.map(([row]) => row)
+    expect(rows).toEqual([
+      expect.objectContaining({
+        origin: 'child',
+        sessionId: 'child',
+        messageId: 'codex:child:child-turn',
+        parentRoutingId: 'temporary',
+        tokens: { input: 60, output: 6, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+      }),
+      expect.objectContaining({
+        origin: 'session',
+        sessionId: 'root',
+        messageId: 'codex:root:turn',
+        parentRoutingId: null,
+        tokens: { input: 100, output: 10, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+      })
+    ])
+    // A session with no vault behind it runs on Codex's own sign-in.
+    expect(rows[0]).toMatchObject({ accountKey: 'codex:openai:native', billingType: 'unknown' })
+  })
+
+  it('writes nothing for a resumed thread’s replay and charges the next turn alone', async () => {
+    const f = fixture({ resumeSessionId: 'root' })
+    await f.session.run('hello')
+
+    // The replay the app-server sends on a resume: the thread's whole history,
+    // stamped with the LAST COMPLETED turn's id (S0 case 2).
+    usage(f, 'root', { input: 900, output: 90 })
+    expect(usageRows).not.toHaveBeenCalled()
+    usage(f, 'root', { input: 1000, output: 100 })
+    ended(f, 'root', 'turn')
+
+    expect(usageRows).toHaveBeenCalledTimes(1)
+    expect(usageRows.mock.calls[0]![0]).toMatchObject({
+      tokens: { input: 100, output: 10, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
+  })
+
+  it('records a turn that was INTERRUPTED after it had moved tokens', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    usage(f, 'root', { input: 30, output: 3 })
+    ended(f, 'root', 'turn', 'interrupted')
+    expect(usageRows).toHaveBeenCalledTimes(1)
+    expect(usageRows.mock.calls[0]![0]).toMatchObject({ messageId: 'codex:root:turn' })
+  })
+
+  it('does not call the recorder twice when one turn ends twice', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    usage(f, 'root', { input: 30, output: 3 })
+    ended(f, 'root', 'turn')
+    // The authoritative replay of a turn already ended — and a frame after it,
+    // which belongs to whatever runs next, never to this row.
+    usage(f, 'root', { input: 45, output: 5 })
+    ended(f, 'root', 'turn')
+    expect(usageRows).toHaveBeenCalledTimes(1)
+  })
+
+  it('writes no row for a turn that moved nothing', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    ended(f, 'root', 'turn')
+    expect(usageRows).not.toHaveBeenCalled()
   })
 })

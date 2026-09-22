@@ -48,6 +48,13 @@ import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { readAccountLimits } from '../services/usage-provider'
+import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -58,7 +65,7 @@ import type {
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
+import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
@@ -81,6 +88,7 @@ import {
 import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
+import { usageHubCommands } from './usage-hub-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -1066,23 +1074,61 @@ export function registerRemoteHandlers(
     }
   })
 
+  /**
+   * ADR-071 §6 — every account's limits, across vendors. `refresh` decides
+   * whether a stored Claude account's credentials are read at all: without it
+   * the answer comes from the last persisted reading and spends no refresh
+   * grant (the owner's rule). Per-account failures travel as `state`, so one
+   * account needing a sign-in cannot blank the rest.
+   */
+  handleRemote({
+    channel: 'usage:limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      return readAccountLimits({ refresh: !!refresh })
+    }
+  })
+
+  /**
+   * ADR-071 §7 — the window-value ledger. Read-only: one row per limit window
+   * with the peak percent, what the ledger saw inside it, and the two derived
+   * figures. Closed windows are in the answer and are most of it — the samples
+   * behind them are pruned at 30 days, these rows are not.
+   */
+  handleRemote({
+    channel: 'usage:windows',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return usageWindowSummary(sanitizeUsageWindowQuery(opts))
+    }
+  })
+
+  /**
+   * ADR-071 §8 — the dashboard's one read: the ledger's hourly buckets over a
+   * range, grouped provider → account → model, with both costs, the unknown
+   * counts and a per-local-day series. Read-only, and the dashboard built on it
+   * is not desktop-only.
+   */
+  handleRemote({
+    channel: 'usage:dashboard',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
+    }
+  })
+
   handleRemote({
     channel: 'usage:set-account-filter',
     capability: 'config',
     kind: 'command',
     handler: async (account: string | null) => {
       blockUsageService.setAccountFilter(account)
-    }
-  })
-
-  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
-  // (targetEngine, targetModel). Read-only DB aggregate — safe over remote.
-  handleRemote({
-    channel: 'usage:fetch-dispatched',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => {
-      return dispatchedUsageSummary()
     }
   })
 
@@ -1488,6 +1534,18 @@ export function registerRemoteHandlers(
   // different one). Absent (tests, remote-disabled harnesses) the channels still
   // register and throw — the channel SET must not depend on runtime config.
   for (const cmd of ideCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The usage hub (ADR-072 §7)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop transport spreads. Remote on purpose:
+  // the combined dashboard the hub feeds is not desktop-only, and neither is the
+  // settings group that configures it. `capability: 'config'`, like the rest of
+  // the metering surface — and no shape here can return the device secret.
+  for (const cmd of usageHubCommands()) {
     handleRemote(cmd)
   }
 

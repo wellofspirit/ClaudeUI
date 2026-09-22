@@ -96,6 +96,7 @@ import { codexBinaryAvailable } from '../codex/codex-locate'
 import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
+import { codexDisjointTokens } from '../codex/usage-ledger'
 import type { CodexMappedEvent } from '../codex/event-mapper'
 import { unwrapShellCommand } from '../codex/command-text'
 import {
@@ -111,7 +112,10 @@ import type { TokenUsageBreakdown } from '../codex/protocol/v2/TokenUsageBreakdo
 import type { ThreadTokenUsage } from '../codex/protocol/v2/ThreadTokenUsage'
 import type { CommandExecutionRequestApprovalParams } from '../codex/protocol/v2/CommandExecutionRequestApprovalParams'
 import { equivalentCostUsd } from '../../shared/pricing'
-import { engineMeta } from '../../shared/engine-meta'
+import type { ResolvedCosts } from '../../shared/cost-rule'
+import { opencodeMessageCosts } from '../opencode/message-cost'
+import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
+import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
   CanUseTool,
@@ -124,10 +128,26 @@ import type {
   SdkToolExtra
 } from '../sdk'
 import { logger } from './logger'
-import { insertDispatchedUsage } from './db'
-import type { DispatchedUsageRow } from './db'
+// The ADR-071 §1 ledger half of a dispatched turn. Every one of these modules
+// is ALREADY in this file's transitive import graph (`assistant-message` ->
+// `session-history` -> `block-usage` -> `usage-fetcher` -> `claude-session`,
+// which imports this module back), so naming them directly adds no import
+// edge that was not there — and nothing below is touched at module-init time,
+// only from a turn's own code path.
+import { recordUsageEvent } from './usage-recorder'
+import type { UsageTurnEvent, UsageTurnTokens } from './usage-recorder'
+import { usageFetcher } from './usage-fetcher'
+import { activeClaudeAttribution } from './usage-windows'
+import { buildClaudeAccountRef } from '../host'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
+import { piAuthProvider } from '../auth/PiAuthProvider'
+import { credentialSync } from '../auth/vault/CredentialSync'
+import { codexNativeIdentity } from '../auth/account-identity'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 import type {
   ApprovalDecision,
+  BillingType,
   ChatMessage,
   DispatchConfig,
   EngineConfig,
@@ -481,16 +501,59 @@ export interface DispatcherDeps {
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
   /**
-   * Persist one dispatched-agent-turn usage row (ADR-033 M4-B). Defaults to
-   * the real `insertDispatchedUsage` (db.ts) — tests inject a spy instead of
-   * exercising the (in-memory-under-vitest, but still real) operational DB.
-   * Called for 'completed'/'failed' outcomes only, never for a turn stopped
-   * before it produced any usage (see the call sites).
+   * Persist the ledger row for one dispatched-agent turn (ADR-071 §1).
+   * Defaults to the real `recordUsageEvent` (usage-recorder.ts) — tests inject
+   * a spy, both to stay off the (in-memory-under-vitest, but still real)
+   * operational DB and to prove that a throwing ledger write cannot reach the
+   * dispatch flow. Called for 'completed'/'failed' outcomes only, never for a
+   * turn stopped before it produced any usage (see the call sites).
    */
-  recordDispatchedUsage?: (row: Omit<DispatchedUsageRow, 'id'>) => void
+  recordUsageEvent?: (event: UsageTurnEvent) => void
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
+
+/** The account a dispatched turn ran under, as a ledger row records it. */
+interface DispatchTurnAccount {
+  accountKey: string
+  accountLabel: string | null
+  billingType: BillingType
+}
+
+/**
+ * What a target hands {@link CrossEngineDispatcher.safeRecordUsage}: one
+ * dispatched turn, as the ledger records it (ADR-071 §1).
+ *
+ * This used to be `dispatched_usage`'s row plus the ledger's extras. ADR-071
+ * §1 retired that table, and with it the four fields only its columns wanted — a
+ * duration, a turn total beside the split, the dispatching engine, and a cost
+ * the dispatcher resolved for itself. The ledger derives a turn's costs from
+ * the raw inputs below, by the same rule every other row follows.
+ *
+ * The last four are optional: a give-up path that knows nothing about the turn
+ * still records it, and a missing split records zeros rather than an invented
+ * figure.
+ */
+interface DispatchedTurnRecord {
+  /** When the turn ended — the dispatcher's clock, not the target's. */
+  ts: number
+  /** The DISPATCHING session, the ledger's `parent_routing_id`. */
+  fromRoutingId: string
+  targetEngine: string
+  /** The target model as the engine ENCODES it (`<vendor>/<model>` or bare). */
+  targetModel: string
+  targetSessionId: string | null
+  /** The dispatching tool_use id, part of the ledger's dedup key. */
+  toolUseId: string | null
+  /** The turn's tokens. Absent means UNKNOWN, not zero — see safeRecordUsage. */
+  tokens?: UsageTurnTokens
+  /** Absent means the target could not name its account (`UNKNOWN_ACCOUNT_KEY`). */
+  account?: DispatchTurnAccount
+  /** The engine's OWN cost figure for the turn, raw. Null when it reported none. */
+  engineCostUsd?: number | null
+  /** See `CostInputsForRow.engineCostIsEquivalent`. Defaults to false. */
+  engineCostIsEquivalent?: boolean
+}
 
 /** Reserved requestId prefix routing approvals to the dispatcher (ADR-033). */
 export const XENG_REQUEST_PREFIX = 'xeng:'
@@ -782,6 +845,13 @@ interface OpencodeTargetEntry {
    *  the per-dispatch cost cap). Never decreases; reset only by creating a
    *  fresh target (a new session_id). */
   cumulativeCostUsd: number
+  /** Turns whose cost the rule could not resolve, and which
+   *  `cumulativeCostUsd` therefore does NOT include. Two causes: a model with
+   *  no known price, and a failed turn whose stored message could not be read
+   *  back at all. Reported on the turn itself (the first cause only — the
+   *  second returns an error text already) and again when the cap rejects a
+   *  continuation, so the spent figure is never read as complete (ADR-030). */
+  unpricedTurns: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B). A fresh Set at every turn start, populated by the streaming tap
    *  (`collectToolUseIds` — a Set, not a counter, because the tap re-emits the
@@ -837,6 +907,14 @@ interface ClaudeTargetEntry {
   busy: boolean
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
+  /**
+   * The Claude account this target's turns are billed to (ADR-071 §3),
+   * resolved ONCE at creation. A dispatched cli.js process reads the app's
+   * credentials when it is spawned and holds them for its whole life, so
+   * re-reading the app's active account per turn could only misattribute a
+   * turn the target was already running when the user switched accounts.
+   */
+  account: DispatchTurnAccount
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
   /**
@@ -933,6 +1011,10 @@ interface PiTargetEntry {
   busy: boolean
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
+  /** Turns whose cost the rule could not resolve — see the opencode target's
+   *  field of the same name. On this target only a non-finite figure from pi
+   *  gets here; there is no message-read-back path to fail. */
+  unpricedTurns: number
   /**
    * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
    * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
@@ -960,6 +1042,17 @@ interface PiTargetEntry {
    *  MESSAGE (a multi-tool-call turn can have several), so this accumulates
    *  across them; reset to 0 at the start of every turn. */
   turnTotalTokens: number
+  /** The same accumulation as `turnTotalTokens`, kept SPLIT for the ledger row
+   *  (ADR-071 §1) — pi's `usage` output carries the breakdown the total throws
+   *  away, and `usage_event` has a column per part. Reset with it. */
+  turnTokens: UsageTurnTokens
+  /** The turn's reasoning tokens, kept beside `turnTokens` because the ledger
+   *  has no column for them (they are billed as output) but `piCostInputs`
+   *  prices them — the same fold `PiSession` makes for its own turns. */
+  turnReasoningTokens: number
+  /** pi's OWN figure for the turn in flight (the delta `applyPiTurnCost` was
+   *  handed), for the ledger row. Null until that runs. Reset per turn. */
+  turnEngineCostUsd: number | null
   /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
    *  turns (its `totalCostUsd` is the cumulative baseline `lastReportedTotalCostUsd`
    *  is diffed against; `currentMessageId` is message-scoped bookkeeping that
@@ -1070,6 +1163,14 @@ interface CodexTargetEntry {
   autonomyMode: string
   /** Resolved native model id (`thread/start`'s echo), fixed for the target's life. */
   model: string
+  /**
+   * The subscription this target's turns are billed to (ADR-071 §3), resolved
+   * ONCE at creation. Unlike opencode and pi — whose credential is read per
+   * turn off a file — a Codex target's account is decided when its thread is
+   * opened: the host it lands on IS one identity (ADR-069 §2), and a later
+   * vault change cannot move a thread that is already running.
+   */
+  account: DispatchTurnAccount
   /** True while a turn is being driven — same busy-reject rationale as pi. */
   busy: boolean
   /** The turn CURRENTLY in flight, once its id is known; null when idle. */
@@ -1346,6 +1447,305 @@ function storedMessageTotalTokens(info: StoredMessage['info'] | undefined): numb
 }
 
 /**
+ * An opencode dispatch turn's costs, from the stored assistant message the turn
+ * ended on — the same rule, from the same module, that an opencode session's
+ * own headline follows (ADR-071 §2). `dispatch.maxCostUsd` and the dispatching
+ * session's breakdown both count `displayCostUsd`: the list-price equivalent
+ * under a subscription, the billed figure under an API key (a gateway's margin
+ * is real spend), zero for a free vendor, and `null` when the model has no
+ * known price — which the cap cannot count at all (ADR-030: never pretend it
+ * is armed). `opencodeCostInputs` owns the disjoint-token mapping, the
+ * zero-token short circuit and the billing lookup; the only thing left here is
+ * which model the turn ran on.
+ *
+ * The vendor/model pair is the one the turn was DISPATCHED with, which is also
+ * the pair `promptAsync` sent and the one the usage row records as
+ * `targetModel`.
+ *
+ * The CLAUDE and CODEX targets deliberately do not route through the rule,
+ * because both already hand the cap exactly what it would return.
+ * `codexTurnCostUsd` derives a list-price equivalent from the turn's own tokens
+ * for every billing type (ADR-066: a ChatGPT-subscription charge is unknowable
+ * from here) and yields `null` for an unpriced model; cli.js's
+ * `total_cost_usd` is likewise an API-equivalent whatever plan is behind it
+ * (ADR-034). Feeding either through a billing type we would have to infer could
+ * only make those two figures worse.
+ */
+function opencodeTurnCost(model: string, info: StoredMessage['info'] | undefined): ResolvedCosts {
+  const { providerID, modelID } = parseModelString(model)
+  return opencodeMessageCosts(providerID, modelID, info?.tokens, info?.cost ?? null)
+}
+
+/**
+ * A pi dispatch turn's costs from the per-turn delta of pi's own cumulative
+ * figure — again the rule an ordinary pi turn follows, from the same module.
+ * pi prices from its own catalog whatever credential is behind it, so that
+ * figure IS the list-price equivalent, and `piCostInputs` takes it as one.
+ *
+ * The turn's tokens go in with it. pi reporting `0` on a turn that really
+ * moved tokens (an unpriced model in pi's own catalog) would otherwise be a
+ * known zero the cap counts as free while the ledger prices the same tokens
+ * off our table — one turn, two answers. `piCostInputs` only reaches for the
+ * tokens when pi reported no positive charge, so a real figure still wins.
+ * `reasoning` is folded in there, as output, exactly as it is for a pi
+ * session's own messages.
+ *
+ * A turn whose tokens were never observed passes `undefined` and pi's figure
+ * stands alone: a reported `0` stays a known zero, and the one way a pi turn
+ * ends up unpriced is a non-finite figure (`usage.cost.total` arriving as
+ * something the mapper's `+=` turns into NaN), which `resolveCosts` refuses to
+ * count — the right answer.
+ */
+function piTurnCost(
+  model: string,
+  tokens: PiCostTokens | undefined,
+  engineCostUsd: number
+): ResolvedCosts {
+  const { vendorId, modelId } = engineMeta('pi').decodeModelValue(model)
+  return piMessageCosts(vendorId, modelId, tokens, engineCostUsd)
+}
+
+// ── Who a dispatched turn is billed to (ADR-071 §1 / §3) ────────────────────
+// One helper per target, each reading the SAME source that engine's own
+// sessions read, so a turn's row names the same account whether the work was
+// dispatched or typed by a human.
+//
+// WHEN each is read follows what can actually change under the target. The
+// opencode and pi helpers run PER TURN, off a credential file a sign-in can
+// rewrite between turns while the target process keeps serving. The Codex and
+// Claude helpers run ONCE at target creation (`CodexTargetEntry.account`,
+// `ClaudeTargetEntry.account`), because those targets hold their credential
+// from the moment they start: a Codex thread is pinned to the host it landed
+// on (ADR-069 §2), and a dispatched cli.js process reads the app's
+// credentials at spawn and never again.
+
+/** The `unknown` account — a target that cannot name the account it ran under. */
+const UNKNOWN_DISPATCH_ACCOUNT: DispatchTurnAccount = {
+  accountKey: UNKNOWN_ACCOUNT_KEY,
+  accountLabel: null,
+  billingType: 'unknown'
+}
+
+/** An opencode target's account, off opencode's own `auth.json` and auth probe. */
+function opencodeDispatchAccount(model: string): DispatchTurnAccount {
+  const { providerID } = parseModelString(model)
+  return {
+    ...opencodeAuthProvider.accountIdentity(providerID),
+    billingType: opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown'
+  }
+}
+
+/** A pi target's account, off pi's own `auth.json` and auth probe. */
+function piDispatchAccount(model: string): DispatchTurnAccount {
+  const { vendorId } = engineMeta('pi').decodeModelValue(model)
+  return {
+    ...piAuthProvider.accountIdentity(vendorId),
+    billingType: piAuthProvider.buildPiAccountRef(vendorId)?.billingType ?? 'unknown'
+  }
+}
+
+/**
+ * A Claude target's account: the one ClaudeUI itself is signed in as, since a
+ * dispatched cli.js process inherits the app's active credential.
+ *
+ * The key and the label come from `activeClaudeAttribution`, the same rule
+ * ADR-011's time-based attribution puts a TRANSCRIPT row through — run here
+ * over the live active account instead of a log lookup, because the turn is
+ * happening now and the log only records changes. Both halves of
+ * `anthropic:<org>:<account>` or neither: that guard lives in the rule.
+ *
+ * The billing type is the ACTIVE ACCOUNT's, which `UsageFetcher` resolves
+ * from `oauthAccount.billingType` — the only signal that tells a `usage_based`
+ * OAuth account (billed per token, so its turns really do cost money) apart
+ * from a plan. `ClaudeAuthProvider`'s probe-cached ref through the host seam
+ * stays as the fallback for the window before the profile has been read at
+ * all: for an OAuth account it can only ever answer `subscription` or
+ * `unknown`, so reading it first would record a `usage_based` account's spend
+ * as covered.
+ */
+function claudeDispatchAccount(): DispatchTurnAccount {
+  // The same helper the usage fetcher and the limits provider attribute the
+  // live account with, so a dispatched turn, a session's own turn and a limits
+  // reading cannot disagree about the key, the label or the billing type.
+  const attribution = activeClaudeAttribution(
+    usageFetcher.getActiveAccount(),
+    buildClaudeAccountRef()?.billingType
+  )
+  return {
+    accountKey: attribution.accountKey,
+    accountLabel: attribution.accountLabel,
+    billingType: attribution.billingType
+  }
+}
+
+// ── A dispatched turn's tokens, in the ledger's disjoint shape ──────────────
+
+/** A fresh per-turn accumulator (the pi target sums its `usage` outputs). */
+function zeroDispatchTokens(): UsageTurnTokens {
+  return { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+}
+
+/**
+ * An opencode turn's split from the stored assistant message. opencode's
+ * `info.tokens` is ALREADY disjoint (its `session.ts` subtracts cache reads
+ * and writes from input) and `reasoning` sits beside `output` rather than
+ * inside it — the same mapping `opencodeCostInputs` makes, so the ledger's
+ * `api_cost_usd` matches what the cap counted.
+ */
+function opencodeDispatchTokens(info: StoredMessage['info'] | undefined): UsageTurnTokens {
+  const tokens = info?.tokens
+  return {
+    input: tokens?.input ?? 0,
+    output: (tokens?.output ?? 0) + (tokens?.reasoning ?? 0),
+    cacheWrite: tokens?.cache?.write ?? 0,
+    // opencode publishes one cache-write rate; the 5m/1h TTL split is
+    // Anthropic's, and nothing in `info.tokens` carries it.
+    cacheWrite1h: 0,
+    cacheRead: tokens?.cache?.read ?? 0
+  }
+}
+
+// ── A dispatched turn as a ledger row (ADR-071 §1) ─────────────────────────
+
+/**
+ * The vendor/model split of a recorded row's `targetModel`, parsed the way the
+ * TARGET engine encodes it (`engineMeta(...).decodeModelValue`): a bare model
+ * id under a fixed vendor on Claude and Codex, `<vendor>/<model>` split on the
+ * first slash on opencode and pi. An engine id this build does not know —
+ * impossible from the call sites, which all pass a literal or an `EngineId` —
+ * yields an `unknown` vendor rather than throwing inside a usage write.
+ */
+/**
+ * The CANONICAL spelling of a target model value, for the one engine that
+ * accepts more than one spelling of the same model.
+ *
+ * opencode and pi encode a model as `<vendor>/<model>` but decode a bare id by
+ * supplying their default vendor, so `gpt-5-codex` and `opencode/gpt-5-codex`
+ * name the same model while being different strings. That string is a KEY in
+ * four places — the per-target cap, `ctx.addDispatchedCost`'s live breakdown
+ * (`<engine>:<model>`), the notification text, and the ledger row, which
+ * stores the decoded halves and whose reader re-encodes them. Canonicalising
+ * once, here, is what makes the round trip exact: without it a session that
+ * dispatched under a bare id shows the target twice after a reload, once per
+ * spelling.
+ *
+ * It is wire-neutral. Every engine-facing call decodes the value again
+ * (`parseModelString` for opencode, `decodeModelValue` before pi's
+ * `set_model`), and decode is what both spellings already agreed on. Claude
+ * and Codex encode a bare id, so for them this is the identity.
+ *
+ * `ENGINE_META` rather than `engineMeta()`: an unregistered engine must read
+ * back verbatim, not throw inside a dispatch.
+ */
+function canonicalDispatchModel(engine: string, model: string): string {
+  const meta = ENGINE_META[engine as keyof typeof ENGINE_META]
+  if (!meta) return model
+  return meta.encodeModelValue(meta.decodeModelValue(model))
+}
+
+function dispatchModelRef(
+  targetEngine: string,
+  targetModel: string
+): { vendorId: string; modelId: string } {
+  const meta = ENGINE_META[targetEngine as EngineId]
+  if (!meta) return { vendorId: 'unknown', modelId: targetModel }
+  const ref = meta.decodeModelValue(targetModel)
+  return { vendorId: ref.vendorId, modelId: ref.modelId }
+}
+
+/**
+ * The ledger's dedup key for a dispatched turn: `dispatch:<who>:<ts>:<seq>`.
+ *
+ * ONE ROW PER TURN, not per dispatch call. The tool_use id alone looked like
+ * the natural key — it is minted by the caller model for this `dispatch_agent`
+ * call — but a single call can run SEVERAL turns against the same target (a
+ * continuation passes the same `sessionId`, and the model can reissue the same
+ * tool call), and every one of them spends. Collapsing them onto one
+ * `message_id` would hand the UNIQUE constraint every turn after the first to
+ * drop, silently, while the cap counted them.
+ *
+ * So the id names the turn, not the call: whoever we can identify (the
+ * tool_use id, else the target session, else nothing), the turn's timestamp,
+ * and a per-dispatcher sequence number that separates two turns landing in the
+ * same millisecond. It is deliberately NOT stable across app restarts — the
+ * ledger's dedup exists to stop ONE write being replayed, and a dispatched
+ * turn is written exactly once, live, by the process that ran it.
+ */
+function dispatchMessageId(row: DispatchedTurnRecord, seq: number): string {
+  const who = row.toolUseId ?? row.targetSessionId ?? 'unknown'
+  return `dispatch:${who}:${row.ts}:${seq}`
+}
+
+/**
+ * One dispatched turn as the ledger records it.
+ *
+ * `origin: 'dispatch'` and `parentRoutingId` are what make the row findable as
+ * delegated work — they are how the Delegated section and a session's own
+ * dispatched-cost breakdown find it. The costs are derived by `rowCosts`
+ * inside the recorder, from the same inputs every other writer hands it, so a
+ * dispatched row is priced by exactly the rule a session's own row is.
+ *
+ * A MISSING TOKEN SPLIT RECORDS ZEROS. Several give-up paths know a turn
+ * happened and nothing else (a refused prompt, a history read that failed),
+ * and there is no "unknown" the token columns can hold. A reader must
+ * therefore not treat a zero split as a free turn: `api_cost_usd` is where a
+ * turn's worth lives, and it is null — not zero — when nothing could price it.
+ */
+function dispatchLedgerEvent(row: DispatchedTurnRecord, seq: number): UsageTurnEvent {
+  const { vendorId, modelId } = dispatchModelRef(row.targetEngine, row.targetModel)
+  const account = row.account ?? UNKNOWN_DISPATCH_ACCOUNT
+  return {
+    // The dispatcher's clock at the turn's end, not the write's — see
+    // UsageTurnEvent.ts.
+    ts: row.ts,
+    engineId: row.targetEngine,
+    vendorId,
+    // A dispatch target is not one of the app's own sessions, so neither
+    // local-account column applies; `accountKey` is the identity (ADR-071 §3).
+    accountId: null,
+    accountUuid: null,
+    modelId,
+    tokens: {
+      input: row.tokens?.input ?? 0,
+      output: row.tokens?.output ?? 0,
+      cacheWrite: row.tokens?.cacheWrite ?? 0,
+      // Only the Claude target reports the 1h-TTL cache-write SUBSET (cli.js's
+      // `usage.cache_creation.ephemeral_1h_input_tokens`, billed at 2× input);
+      // opencode, pi and Codex publish one cache-write rate and report none.
+      cacheWrite1h: row.tokens?.cacheWrite1h ?? 0,
+      cacheRead: row.tokens?.cacheRead ?? 0
+    },
+    engineCostUsd: row.engineCostUsd ?? null,
+    sessionId: row.targetSessionId,
+    messageId: dispatchMessageId(row, seq),
+    source: 'live',
+    accountKey: account.accountKey,
+    accountLabel: account.accountLabel,
+    billingType: account.billingType,
+    origin: 'dispatch',
+    parentRoutingId: row.fromRoutingId,
+    engineCostIsEquivalent: row.engineCostIsEquivalent ?? false
+  }
+}
+
+/**
+ * The line a turn's tool result carries when the cap is configured but this
+ * turn's cost could not be resolved (ADR-030 / ADR-071 §2): the dispatching
+ * model is told the limit is not counting, instead of being left to assume a
+ * silent zero was a real one.
+ */
+function cannotCountNote(model: string): string {
+  return `\n\n[dispatch cost cap cannot count this turn: ${model} has no known price]`
+}
+
+/** Appended to a cap rejection whose spent figure is missing `n` turns. */
+function unpricedSuffix(n: number): string {
+  return n > 0
+    ? ` ${n} turn(s) on this session could not be counted and are not in that figure.`
+    : ''
+}
+
+/**
  * Piggybacks the existing per-dispatch heartbeat (ADR-033 M3): feeds
  * TaskCard's elapsed-time display via the engine-neutral subagent/task
  * pipeline. No-ops when `ctx.toolUseId` is unset (never fail a dispatch over
@@ -1617,7 +2017,14 @@ export class CrossEngineDispatcher {
   private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly attachCodexTarget: AttachCodexTargetFn
   private readonly codexVaultAccounts: boolean
-  private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
+  private readonly recordLedgerEvent: (event: UsageTurnEvent) => void
+
+  /**
+   * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
+   * in {@link dispatchMessageId}, so two turns that land in the same
+   * millisecond are still two rows.
+   */
+  private ledgerSeq = 0
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
@@ -1663,7 +2070,7 @@ export class CrossEngineDispatcher {
     this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
     this.codexVaultAccounts = deps.codexVaultAccounts ?? false
     this.now = deps.now ?? Date.now
-    this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
+    this.recordLedgerEvent = deps.recordUsageEvent ?? recordUsageEvent
   }
 
   /** For tests: current in-flight dispatch count. */
@@ -1672,20 +2079,25 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Record one dispatched-usage row, ISOLATING failures (ADR-033 M4-B): the
-   * default `recordDispatchedUsage` is a real better-sqlite3 insert — if it
-   * throws (locked DB, disk error), the exception must never propagate into
-   * the dispatch flow, where `dispatch()`'s catch would report a COMPLETED
-   * turn back to the caller model as `Dispatch failed: …`. Usage accounting
-   * is best-effort by design; the turn result is not.
+   * Record one dispatched turn in the ledger (ADR-071 §1) — the only record of
+   * it there now is. `dispatched_usage` was a second, poorer copy: no token
+   * split, no account, no billing type, one cost the dispatcher resolved on
+   * its own. Its readers moved to `origin = 'dispatch'` and migration v20
+   * dropped the table.
+   *
+   * FAILURES ARE ISOLATED (ADR-033 M4-B). The default is a real DB write — if
+   * it throws (locked DB, disk error), the exception must never propagate into
+   * the dispatch flow, where `dispatch()`'s catch would report a COMPLETED turn
+   * back to the caller model as `Dispatch failed: …`. Usage accounting is
+   * best-effort by design; the turn result is not.
    */
-  private safeRecordUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
+  private safeRecordUsage(row: DispatchedTurnRecord): void {
     try {
-      this.recordDispatchedUsage(row)
+      this.recordLedgerEvent(dispatchLedgerEvent(row, ++this.ledgerSeq))
     } catch (err) {
       logger.warn(
         'CrossEngineDispatcher',
-        `recordDispatchedUsage failed (usage row dropped): ${err instanceof Error ? err.message : String(err)}`
+        `dispatched usage_event failed (ledger row dropped): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   }
@@ -1964,8 +2376,8 @@ export class CrossEngineDispatcher {
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
-    const model = req.model ?? dispatchCfg?.defaultModel
-    if (!model) {
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into opencode. Ask the user to set ' +
           'Engines › opencode › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
@@ -1973,12 +2385,15 @@ export class CrossEngineDispatcher {
       )
     }
     const allowed = dispatchCfg?.allowedModels
-    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+    if (allowed && allowed.length > 0 && !allowed.includes(requestedModel)) {
       return errorResult(
-        `Model "${model}" is not in the user-configured allowlist for opencode dispatch. ` +
+        `Model "${requestedModel}" is not in the user-configured allowlist for opencode dispatch. ` +
           `Allowed models: ${allowed.join(', ')}`
       )
     }
+    // Everything below keys on the CANONICAL spelling — the allowlist is
+    // checked against what the user actually wrote, and nothing else is.
+    const model = canonicalDispatchModel(req.engine, requestedModel)
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: OpencodeTargetEntry
@@ -2022,7 +2437,8 @@ export class CrossEngineDispatcher {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.',
+            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.' +
+            unpricedSuffix(existing.unpricedTurns),
           existing.sessionId
         )
       }
@@ -2179,14 +2595,12 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: req.engine,
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: null,
-            costUsd: null,
-            durationMs: this.now() - turnStartedAt
+            account: opencodeDispatchAccount(model),
+            engineCostIsEquivalent: false
           })
         }
         return errorResult(text, entry.sessionId)
@@ -2212,14 +2626,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: this.now() - turnStartedAt
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
@@ -2236,12 +2648,20 @@ export class CrossEngineDispatcher {
         // the dispatching session's breakdown exactly like the `info.error`
         // path's does. Purely additive: a failed read leaves the row's numbers
         // null rather than failing an already-failed turn twice.
-        let errTotalTokens = 0
-        let errTurnCostUsd = 0
+        //
+        // Null until a message is actually read back: a failed read is not a
+        // free turn, and neither is a turn on a model we cannot price.
+        let errTurnCostUsd: number | null = null
+        // The LEDGER half of the same recovery (ADR-071 §1) — the turn's token
+        // split and opencode's own charge, both left unset when the read fails
+        // so the row says "unknown" rather than "nothing".
+        let errTokens: UsageTurnTokens | undefined
+        let errEngineCostUsd: number | null = null
         try {
           const info = lastAssistantMessage(await entry.client.listMessages(entry.sessionId))?.info
-          errTotalTokens = storedMessageTotalTokens(info)
-          errTurnCostUsd = info?.cost ?? 0
+          errTurnCostUsd = opencodeTurnCost(model, info).displayCostUsd
+          errTokens = opencodeDispatchTokens(info)
+          errEngineCostUsd = info?.cost ?? null
         } catch (err) {
           logger.debug(
             'CrossEngineDispatcher',
@@ -2257,18 +2677,19 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
-          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
-          durationMs: this.now() - turnStartedAt
+          ...(errTokens ? { tokens: errTokens } : {}),
+          engineCostUsd: errEngineCostUsd,
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
-        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
-          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+        if (errTurnCostUsd === null) entry.unpricedTurns++
+        else {
           entry.cumulativeCostUsd += errTurnCostUsd
+          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
         }
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId)
       }
@@ -2287,14 +2708,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: this.now() - turnStartedAt
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
@@ -2325,23 +2744,23 @@ export class CrossEngineDispatcher {
         // it into the cap + Slice-C breakdown. Mirrors the Claude failed-subtype
         // path; without it a target whose turns keep erroring spends real tokens
         // that never count toward maxCostUsd or the dispatching session's cost.
-        const errTotalTokens = storedMessageTotalTokens(finalMessage?.info)
-        const errTurnCostUsd = finalMessage?.info.cost ?? 0
+        const errTurnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: req.engine,
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
-          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
-          durationMs: this.now() - turnStartedAt
+          tokens: opencodeDispatchTokens(finalMessage?.info),
+          engineCostUsd: finalMessage?.info.cost ?? null,
+          account: opencodeDispatchAccount(model),
+          engineCostIsEquivalent: false
         })
-        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
-          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+        if (errTurnCostUsd === null) entry.unpricedTurns++
+        else {
           entry.cumulativeCostUsd += errTurnCostUsd
+          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
         }
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
@@ -2359,21 +2778,28 @@ export class CrossEngineDispatcher {
       // — each turn creates a new message id) cumulative snapshot, same shape
       // event-mapper.ts reads for OpencodeSession's own metering.
       const totalTokens = storedMessageTotalTokens(finalMessage?.info)
-      const turnCostUsd = finalMessage?.info.cost ?? 0
+      // `info.cost` alone is what let a subscription-authenticated target spend
+      // past the cap forever (ADR-071 §2) — see opencodeTurnCost.
+      const turnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
       const durationMs = this.now() - turnStartedAt
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
       const maxCostUsd = dispatchCfg?.maxCostUsd
       const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd
+      entry.cumulativeCostUsd += turnCostUsd ?? 0
       let outText = finalText
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+      if (turnCostUsd === null) {
+        // An unpriced turn can never trip the cap, so say so on the turn
+        // itself rather than let a silent zero read as a counted turn.
+        entry.unpricedTurns++
+        if (maxCostUsd !== undefined) outText += cannotCountNote(model)
+      } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
       // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+      if (turnCostUsd !== null && turnCostUsd > 0) {
         ctx.addDispatchedCost?.(req.engine, model, turnCostUsd)
       }
 
@@ -2385,14 +2811,16 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: req.engine,
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens,
-        costUsd: turnCostUsd,
-        durationMs
+        tokens: opencodeDispatchTokens(finalMessage?.info),
+        // opencode reports what it CHARGED, not an equivalent — the ledger's
+        // cost rule treats it as a bill (ADR-071 §1).
+        engineCostUsd: finalMessage?.info.cost ?? null,
+        account: opencodeDispatchAccount(model),
+        engineCostIsEquivalent: false
       })
       return { text: outText, sessionId: entry.sessionId }
     } finally {
@@ -2426,7 +2854,14 @@ export class CrossEngineDispatcher {
     rec.targetCount++
 
     try {
-      const session = await rec.client.createSession({ title: 'xeng-dispatch' })
+      // The title is load-bearing, not cosmetic: this is a real top-level
+      // opencode session, so `usage-reconciler.ts` would otherwise import every
+      // assistant message under it a SECOND time, as an ordinary `origin:
+      // 'session'` row beside the `dispatch` row this dispatcher writes. It
+      // skips sessions carrying this exact title — see the constant's doc.
+      const session = await rec.client.createSession({
+        title: OPENCODE_DISPATCH_SESSION_TITLE
+      })
       // Inherit the dispatcher's autonomy mode, plus a structural recursion
       // guard: the target can never call the dispatch tool back (ADR-033 §4).
       const ruleset: PermissionRule[] = [
@@ -2452,6 +2887,7 @@ export class CrossEngineDispatcher {
         accumulators: new Map(),
         activeStreamItems: new Map(),
         cumulativeCostUsd: 0,
+        unpricedTurns: 0,
         turnToolUseIds: new Set()
       }
       this.targets.set(session.id, entry)
@@ -3165,14 +3601,12 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: 'claude',
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: null,
-            costUsd: null,
-            durationMs: null
+            account: entry.account,
+            engineCostIsEquivalent: true
           })
         }
         return errorResult(text, entry.sessionId ?? '')
@@ -3193,14 +3627,12 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'claude',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
-          durationMs: null
+          account: entry.account,
+          engineCostIsEquivalent: true
         })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
       }
@@ -3218,10 +3650,35 @@ export class CrossEngineDispatcher {
       // DB record, and Slice C fold-in below all consume the same delta.
       // Math.max(0, …) guards against a pathological backwards total.
       const usageFields = result.usage as
-        { input_tokens?: number; output_tokens?: number } | undefined
+        | {
+            input_tokens?: number
+            output_tokens?: number
+            cache_creation_input_tokens?: number
+            cache_read_input_tokens?: number
+            cache_creation?: { ephemeral_1h_input_tokens?: number }
+          }
+        | undefined
       const totalTokens = usageFields
         ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
         : 0
+      // The LEDGER's split (ADR-071 §1). Anthropic's `usage` is disjoint —
+      // `input_tokens` already excludes both cache figures — so the fields map
+      // straight onto the ledger's shape. `totalTokens` above deliberately
+      // stays input+output: it is what the task notification shows.
+      //
+      // `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL SUBSET of
+      // `cache_creation_input_tokens`, billed at 2× input rather than 1.25×;
+      // block-usage reads it off the transcripts for exactly this reason, and
+      // dropping it here would underprice every dispatched Claude turn that
+      // used the 1h cache. An older cli.js omits the breakdown, which the
+      // recorder reads as all-5m — the same fallback block-usage makes.
+      const turnTokens: UsageTurnTokens = {
+        input: usageFields?.input_tokens ?? 0,
+        output: usageFields?.output_tokens ?? 0,
+        cacheWrite: usageFields?.cache_creation_input_tokens ?? 0,
+        cacheWrite1h: usageFields?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+        cacheRead: usageFields?.cache_read_input_tokens ?? 0
+      }
       const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
       const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
       entry.lastReportedTotalCostUsd = reportedTotalCostUsd
@@ -3247,14 +3704,16 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'claude',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens,
-          costUsd: turnCostUsd,
-          durationMs
+          tokens: turnTokens,
+          engineCostUsd: turnCostUsd,
+          account: entry.account,
+          // cli.js's `total_cost_usd` is an API-EQUIVALENT whatever plan is
+          // behind it (ADR-034), so the ledger must not read it as a bill.
+          engineCostIsEquivalent: true
         })
         // Slice C — fold-in parity with the DB record above: this row IS
         // included by seedDispatchedCosts() on reload, so the live breakdown
@@ -3296,14 +3755,14 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: 'claude',
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens,
-        costUsd: turnCostUsd,
-        durationMs
+        tokens: turnTokens,
+        engineCostUsd: turnCostUsd,
+        account: entry.account,
+        engineCostIsEquivalent: true
       })
       return {
         text: outText,
@@ -3431,6 +3890,7 @@ export class CrossEngineDispatcher {
       abortController,
       busy: false,
       ctx,
+      account: claudeDispatchAccount(),
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
@@ -3637,15 +4097,50 @@ export class CrossEngineDispatcher {
    * it or how that turn ended (see event-mapper.ts's `PiMapperState.
    * totalCostUsd` doc) — so it already reflects whatever the abandoned turn
    * actually spent by the time the caller reads it. Returns the turn's own
-   * delta (>= 0) for the caller to fold into a usage row.
+   * resolved cost for the caller to fold into a usage row, or null when the
+   * rule could not price it.
    */
   private accountPiNonSuccessCost(
     entry: PiTargetEntry,
     ctx: DispatchContext,
     model: string
-  ): number {
-    const turnCostUsd = Math.max(0, entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd)
+  ): number | null {
+    const rawTurnCostUsd = Math.max(
+      0,
+      entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd
+    )
     entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
+    return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
+  }
+
+  /**
+   * Put one pi turn's raw delta through the cost rule (`piTurnCost`) and fold
+   * the result into the cap + the dispatching session's breakdown. The single
+   * place the pi target counts spend, so the rule is stated once for all four
+   * of its outcomes. Returns what was counted, or null when the turn was
+   * unpriced — which is recorded on the entry instead and never added as a
+   * silent zero.
+   */
+  private applyPiTurnCost(
+    entry: PiTargetEntry,
+    ctx: DispatchContext,
+    model: string,
+    rawTurnCostUsd: number
+  ): number | null {
+    // Keep pi's RAW figure for the ledger row: it is a list-price equivalent
+    // (pi prices from its own catalog whatever the credential — S1b), and it
+    // knows long-context tiers our table does not, so a row that dropped it
+    // would price the turn worse than pi already did.
+    entry.turnEngineCostUsd = rawTurnCostUsd
+    const turnCostUsd = piTurnCost(
+      model,
+      { ...entry.turnTokens, reasoning: entry.turnReasoningTokens },
+      rawTurnCostUsd
+    ).displayCostUsd
+    if (turnCostUsd === null) {
+      entry.unpricedTurns++
+      return null
+    }
     entry.cumulativeCostUsd += turnCostUsd
     if (turnCostUsd > 0) {
       ctx.addDispatchedCost?.('pi', model, turnCostUsd)
@@ -3679,7 +4174,7 @@ export class CrossEngineDispatcher {
     entry: PiTargetEntry,
     ctx: DispatchContext,
     model: string
-  ): Promise<number> {
+  ): Promise<number | null> {
     let totalCostUsd = entry.mapperState.totalCostUsd
     try {
       const statsResp = await entry.client.request<PiGetSessionStatsData>(
@@ -3695,13 +4190,9 @@ export class CrossEngineDispatcher {
         `pi get_session_stats cost reconciliation failed (falling back to streamed cost): ${err instanceof Error ? err.message : String(err)}`
       )
     }
-    const turnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
+    const rawTurnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
     entry.lastReportedTotalCostUsd = totalCostUsd
-    entry.cumulativeCostUsd += turnCostUsd
-    if (turnCostUsd > 0) {
-      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
-    }
-    return turnCostUsd
+    return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
   }
 
   // ── pi direction (M4c) ────────────────────────────────────────────────────
@@ -3727,8 +4218,8 @@ export class CrossEngineDispatcher {
     // allowlist UNENFORCEABLE (we'd never know the actual model until AFTER
     // spawn). Requiring a model keeps the allowlist honest, matching Claude.
     const dispatchCfg = this.deps.loadEngineConfig('pi').dispatch
-    const model = req.model ?? dispatchCfg?.defaultModel
-    if (!model) {
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into pi. Ask the user to set ' +
           'Engines › pi › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
@@ -3736,12 +4227,14 @@ export class CrossEngineDispatcher {
       )
     }
     const allowed = dispatchCfg?.allowedModels
-    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+    if (allowed && allowed.length > 0 && !allowed.includes(requestedModel)) {
       return errorResult(
-        `Model "${model}" is not in the user-configured allowlist for pi dispatch. ` +
+        `Model "${requestedModel}" is not in the user-configured allowlist for pi dispatch. ` +
           `Allowed models: ${allowed.join(', ')}`
       )
     }
+    // Canonical from here on — see canonicalDispatchModel.
+    const model = canonicalDispatchModel('pi', requestedModel)
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: PiTargetEntry
@@ -3769,7 +4262,8 @@ export class CrossEngineDispatcher {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.',
+            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.' +
+            unpricedSuffix(existing.unpricedTurns),
           req.sessionId
         )
       }
@@ -3788,6 +4282,9 @@ export class CrossEngineDispatcher {
     entry.busy = true
     entry.turnToolUseIds = new Set()
     entry.turnTotalTokens = 0
+    entry.turnTokens = zeroDispatchTokens()
+    entry.turnReasoningTokens = 0
+    entry.turnEngineCostUsd = null
     const turnStartedAt = this.now()
     entry.lastActivityAt = turnStartedAt
 
@@ -3881,10 +4378,14 @@ export class CrossEngineDispatcher {
         // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
         // usage row for either, and a follow-up RPC to a target the user just
         // asked to stop would be pure latency for no observable benefit.
-        const turnCostUsd =
-          winner.kind === 'timeout'
-            ? await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
-            : this.accountPiNonSuccessCost(entry, ctx, model)
+        // Called for the ACCOUNTING, not for a figure: both fold the turn's
+        // spend into the cap and the dispatching session's breakdown, and the
+        // ledger row prices the split itself.
+        if (winner.kind === 'timeout') {
+          await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+        } else {
+          this.accountPiNonSuccessCost(entry, ctx, model)
+        }
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
@@ -3905,14 +4406,14 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: 'pi',
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
-            costUsd: turnCostUsd > 0 ? turnCostUsd : null,
-            durationMs: null
+            tokens: entry.turnTokens,
+            engineCostUsd: entry.turnEngineCostUsd,
+            account: piDispatchAccount(model),
+            engineCostIsEquivalent: true
           })
         }
         return errorResult(text, entry.sessionId ?? '')
@@ -3931,7 +4432,7 @@ export class CrossEngineDispatcher {
         // message_end streamed back, in which case entry.mapperState.
         // totalCostUsd is still the pre-turn value even though pi's backend
         // may have genuinely spent something.
-        const turnCostUsd = await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+        await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
         emitDispatchNotification(
           ctx,
           entry.sessionId ?? '',
@@ -3941,21 +4442,21 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'pi',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
-          costUsd: turnCostUsd > 0 ? turnCostUsd : null,
-          durationMs: null
+          tokens: entry.turnTokens,
+          engineCostUsd: entry.turnEngineCostUsd,
+          account: piDispatchAccount(model),
+          engineCostIsEquivalent: true
         })
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
       }
 
       // ── Success ────────────────────────────────────────────────────────
       const { outcome } = winner
-      const turnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
+      const rawTurnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
       entry.lastReportedTotalCostUsd = outcome.totalCostUsd
 
       // get_last_assistant_text — simpler + more reliable than accumulating
@@ -3977,18 +4478,17 @@ export class CrossEngineDispatcher {
       }
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      // applyPiTurnCost does the fold into the cap AND the dispatching
+      // session's breakdown (Slice C), so the cap state is read before it.
       const maxCostUsd = dispatchCfg?.maxCostUsd
       const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd
+      const turnCostUsd = this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
       let outText = finalText
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+      if (turnCostUsd === null) {
+        if (maxCostUsd !== undefined) outText += cannotCountNote(model)
+      } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-      }
-
-      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
-        ctx.addDispatchedCost?.('pi', model, turnCostUsd)
       }
 
       emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
@@ -3999,14 +4499,16 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: 'pi',
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens: entry.turnTotalTokens,
-        costUsd: turnCostUsd,
-        durationMs: outcome.durationMs
+        tokens: entry.turnTokens,
+        // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
+        // read it as money that left a wallet.
+        engineCostUsd: entry.turnEngineCostUsd,
+        account: piDispatchAccount(model),
+        engineCostIsEquivalent: true
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
@@ -4042,10 +4544,14 @@ export class CrossEngineDispatcher {
       autonomyMode: ctx.autonomyMode,
       busy: false,
       cumulativeCostUsd: 0,
+      unpricedTurns: 0,
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
       turnToolUseIds: new Set(),
       turnTotalTokens: 0,
+      turnTokens: zeroDispatchTokens(),
+      turnReasoningTokens: 0,
+      turnEngineCostUsd: null,
       mapperState: createPiMapperState(),
       model,
       settled: null,
@@ -4197,6 +4703,27 @@ export class CrossEngineDispatcher {
       // not just the eventual "Dispatched turn failed" summary.
     }
 
+    // ACCOUNTING IS NOT STREAMING, so it runs ABOVE the tool_use gate below:
+    // the cap and the ledger row need this turn's tokens even for a dispatch
+    // with no caller tool_use to stream chunks to, and a gated accumulator
+    // would report such a turn as a zero split and a countable zero cost.
+    // `usage` is still never a visible chunk — the return here is what keeps
+    // it out of the stream, exactly as the switch's own `case` did.
+    if (out.kind === 'usage') {
+      entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
+      // The split the ledger row needs, accumulated beside the total across
+      // the turn's several assistant messages. The four fields pi reports
+      // are the four `PiSession` records for its OWN turns — `reasoning` is
+      // deliberately not folded into `output` here, for parity with it, and
+      // is carried separately for the price lookup, which does fold it.
+      entry.turnTokens.input += out.tokens.input
+      entry.turnTokens.output += out.tokens.output
+      entry.turnTokens.cacheWrite += out.tokens.cacheWrite
+      entry.turnTokens.cacheRead += out.tokens.cacheRead
+      entry.turnReasoningTokens += out.tokens.reasoning ?? 0
+      return
+    }
+
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
@@ -4238,9 +4765,6 @@ export class CrossEngineDispatcher {
           result: out.result,
           isError: out.isError
         })
-        break
-      case 'usage':
-        entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
         break
       case 'error':
         entry.ctx.emit('session:subagent-message', {
@@ -4505,14 +5029,16 @@ export class CrossEngineDispatcher {
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
-            fromEngine: ctx.fromEngine,
             targetEngine: 'codex',
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: usage.totalTokens,
-            costUsd: usage.costUsd,
-            durationMs: null
+            ...(usage.tokens ? { tokens: usage.tokens } : {}),
+            account: entry.account,
+            // codexTurnCostUsd is OUR table's equivalent, not a charge
+            // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+            // so the ledger derives the API cost from the split above.
+            engineCostIsEquivalent: true
           })
         }
         return errorResult(text, entry.sessionId ?? '')
@@ -4534,14 +5060,16 @@ export class CrossEngineDispatcher {
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
-          fromEngine: ctx.fromEngine,
           targetEngine: 'codex',
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: usage.totalTokens,
-          costUsd: usage.costUsd,
-          durationMs: null
+          ...(usage.tokens ? { tokens: usage.tokens } : {}),
+          account: entry.account,
+          // codexTurnCostUsd is OUR table's equivalent, not a charge
+          // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+          // so the ledger derives the API cost from the split above.
+          engineCostIsEquivalent: true
         })
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
       }
@@ -4565,14 +5093,16 @@ export class CrossEngineDispatcher {
       this.safeRecordUsage({
         ts: this.now(),
         fromRoutingId: ctx.fromRoutingId,
-        fromEngine: ctx.fromEngine,
         targetEngine: 'codex',
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        totalTokens: usage.totalTokens,
-        costUsd: usage.costUsd,
-        durationMs: outcome.durationMs
+        ...(usage.tokens ? { tokens: usage.tokens } : {}),
+        account: entry.account,
+        // codexTurnCostUsd is OUR table's equivalent, not a charge
+        // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+        // so the ledger derives the API cost from the split above.
+        engineCostIsEquivalent: true
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
@@ -4634,8 +5164,8 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Close this turn's token/cost accounting and return the two numbers a usage
-   * row carries. Shared by EVERY outcome (success, error, timeout, stop) — a
+   * Close this turn's token/cost accounting and return what the turn spent.
+   * Shared by EVERY outcome (success, error, timeout, stop) — a
    * turn that spent real tokens before dying still counts toward the cap and
    * the dispatching session's own breakdown, exactly like a successful one.
    *
@@ -4647,25 +5177,71 @@ export class CrossEngineDispatcher {
    * The USD figure is the API-rate EQUIVALENT, never a charge: a
    * ChatGPT-subscription turn's true cost is unknowable from here (ADR-066), so
    * this is the same number Codex's own status line shows. A model with no
-   * published price yields `null` — which is what `DispatchedUsageRow.costUsd`
-   * being nullable MEANS ("unknown"). It is deliberately not coerced to 0 in
-   * the row: 0 would read as a free turn. `ctx.addDispatchedCost` does take
+   * published price yields `null`, which means UNKNOWN and is deliberately not
+   * coerced to 0: the cap must not count a guess, and a 0 reads as a free
+   * turn. The ledger row prices the SPLIT rather than taking this figure, by
+   * the same rule as every other row. `ctx.addDispatchedCost` does take
    * `?? 0`, because its signature is a plain number with no "unknown" and a
    * guessed price would be worse than a missing one.
    */
   private accountCodexTurn(
     entry: CodexTargetEntry,
     ctx: DispatchContext
-  ): { totalTokens: number | null; costUsd: number | null } {
+  ): { totalTokens: number | null; tokens?: UsageTurnTokens } {
     const delta = codexUsageDelta(entry.usageTotal, entry.usageBaseline)
     entry.usageBaseline = entry.usageTotal
-    if (!delta) return { totalTokens: null, costUsd: null }
+    // No frame has been seen for this thread at all — the turn's tokens are
+    // UNKNOWN, which is why the split is left off the ledger row entirely
+    // rather than recorded as four zeros.
+    if (!delta) return { totalTokens: null }
     const costUsd = codexTurnCostUsd(entry.model, delta)
     if (costUsd !== null && costUsd > 0) {
       entry.cumulativeCostUsd += costUsd
       ctx.addDispatchedCost?.('codex', entry.model, costUsd)
     }
-    return { totalTokens: delta.totalTokens > 0 ? delta.totalTokens : null, costUsd }
+    return {
+      totalTokens: delta.totalTokens > 0 ? delta.totalTokens : null,
+      // A Codex turn's split is `CodexSession`'s own mapping, imported rather
+      // than restated: the row's priced API cost then cannot drift from the
+      // figure `codexTurnCostUsd` just put through the cap.
+      tokens: codexDisjointTokens(delta)
+    }
+  }
+
+  /**
+   * Which ChatGPT subscription a Codex target's turns are billed to (ADR-071
+   * §3) — the SAME account the thread is attached under, so the ledger agrees
+   * with who actually pays: the caller's pin when it has one, the vault's
+   * active account otherwise (ADR-068 §2).
+   *
+   * Without vault accounts (`codexVaultAccounts` false — every unit test, and
+   * any build that does not own Codex's credentials) the vault is not read at
+   * all and the answer is `codex:openai:native`: Codex signed in on its own,
+   * which is exactly what ADR-071 §3's native key means.
+   *
+   * The billing type is `subscription` only when the identity really is a
+   * ChatGPT one. A native sign-in is NOT assumed to be an API key: Codex's own
+   * login is usually a ChatGPT plan too, and calling it `apiKey` would put an
+   * API-equivalent figure into `billed_cost_usd` as though money had moved
+   * (ADR-030 — unknown is never dressed up as a fact).
+   */
+  private async codexDispatchAccount(ctx: DispatchContext): Promise<DispatchTurnAccount> {
+    if (!this.codexVaultAccounts) return { ...codexNativeIdentity(), billingType: 'unknown' }
+    try {
+      const identity = await credentialSync.accountIdentity(ctx.chatgptAccountId ?? null)
+      return {
+        ...identity,
+        billingType: identity.accountKey.startsWith('chatgpt:') ? 'subscription' : 'unknown'
+      }
+    } catch (err) {
+      // Never fail a dispatch over an attribution read (and never log what it
+      // was reading) — an unattributed row is the honest fallback.
+      logger.debug(
+        'CrossEngineDispatcher',
+        `codex account identity unavailable: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return UNKNOWN_DISPATCH_ACCOUNT
+    }
   }
 
   /**
@@ -4721,6 +5297,8 @@ export class CrossEngineDispatcher {
       ctx,
       autonomyMode: ctx.autonomyMode,
       model: '',
+      // Replaced below, once the account behind the host is known.
+      account: UNKNOWN_DISPATCH_ACCOUNT,
       busy: false,
       turnId: null,
       turnStarted: Promise.resolve(null),
@@ -4743,6 +5321,7 @@ export class CrossEngineDispatcher {
     // A dispatch target bills the same subscription the caller runs on: the
     // caller's PIN when it has one, the ACTIVE account otherwise (ADR-068 §2).
     // Which is also which HOST it lands on, since a host IS one identity.
+    entry.account = await this.codexDispatchAccount(ctx)
     entry.connection = await this.attachCodexTarget({
       cwd: ctx.cwd,
       label: 'dispatch-target',

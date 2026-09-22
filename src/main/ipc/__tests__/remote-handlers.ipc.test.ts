@@ -109,7 +109,7 @@ vi.mock('../../../core/services/session-watcher', () => ({
 
 vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: vi.fn(async () => []),
-  loadOpencodeSessionHistory: vi.fn(async () => [])
+  loadOpencodeSessionHistory: vi.fn(async () => ({ messages: [], statusLine: null }))
 }))
 
 // NB: pi-session-list is a lightweight fs reader whose `piAgentDir` export is
@@ -1462,7 +1462,6 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'stream:watch',
   'usage:fetch',
   'usage:fetch-block',
-  'usage:fetch-dispatched',
   'usage:set-account-filter'
 ] as const
 
@@ -1848,6 +1847,22 @@ const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
+/**
+ * The usage hub's six channels (ADR-072 §7).
+ *
+ * Restated here rather than imported from `usage-hub-commands.ts`, like every
+ * other family in this file: a pin that imported the list it is pinning would
+ * pass whatever the source said.
+ */
+const USAGE_HUB_CHANNELS = [
+  'usage-hub:status',
+  'usage-hub:configure',
+  'usage-hub:set-secret',
+  'usage-hub:sync-now',
+  'usage-hub:resync',
+  'usage-hub:forget'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1910,7 +1925,21 @@ describe('remote surface parity (phase 1 port)', () => {
         'codex:recompile-rules',
         'session:codex-approval',
         // Read-only: what deleting a Codex session would remove (slice G).
-        'session:codex-delete-plan'
+        'session:codex-delete-plan',
+        // ADR-071 §6: every account's limits, for every vendor. `config` and a
+        // query, like the two usage reads beside it — and the remote client has
+        // to reach it, because the dashboard built on it is not desktop-only.
+        'usage:limits',
+        // ADR-071 §7: the window-value ledger, read-only, for the same dashboard.
+        'usage:windows',
+        // ADR-071 §8: the dashboard's own read over the ledger's buckets.
+        'usage:dashboard',
+        // ADR-072 §7: the usage hub's six channels, declared once in
+        // `usage-hub-commands.ts` and spread by both transports. Remote because
+        // the combined dashboard and the settings group that configures it are
+        // not desktop-only — and no shape among them can return the device
+        // secret, which is why a write-only `set-secret` command is safe here.
+        ...USAGE_HUB_CHANNELS
       ].sort()
     )
   })

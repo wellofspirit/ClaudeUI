@@ -7,8 +7,8 @@
  * bar can be 320px while the cluster wants 852px. The fix is to drop children
  * in tiers rather than to hope they fit.
  *
- * MEASURED, not chosen. `src/layout/TopBar.layout.test.tsx` renders this bar in
- * real Chromium under the app's own compiled CSS; at `uiFontScale` 1, on
+ * MEASURED, not chosen. A one-off Chromium harness (since removed) rendered this
+ * bar under the app's own compiled CSS; at `uiFontScale` 1, on
  * win32, with EVERY GATE SATISFIED and deliberately worst-case content (a
  * 26-char worktree name, a branch that truncates at its 100px cap with
  * ↑888↓999, ±99999 lines):
@@ -43,8 +43,8 @@
  * CONTENT box, so the bar's own padding (13px, or 148px for the macOS traffic
  * lights) is already subtracted from these numbers.
  *
- * They live in their own module, not on `TopBar`, so the layout test can read
- * the SHIPPED strings and parse its thresholds out of them. A test that
+ * They live in their own module, not on `TopBar`, so a measuring harness can read
+ * the SHIPPED strings and parse the thresholds out of them. A test that
  * re-typed 1000 and 768 would pass a bar that had quietly moved to 900.
  *
  * Written out as whole class names because Tailwind extracts class names from
@@ -68,8 +68,8 @@ export const TIER1_HIDE = '@max-[1000px]/bar:hidden'
  * second rule beside it: `useIsMobile` is `window.innerWidth < 768`, the bar
  * spans the window on a phone, and `uiFontScale` only ever divides that width
  * (its range is 1–1.5), so every mobile viewport is inside this tier by
- * construction. `TopBar.layout.test.tsx` pins the relation rather than
- * trusting the comment.
+ * construction; the constant below states that equality rather than a comment
+ * asserting it.
  */
 export const TIER2_HIDE = '@max-[768px]/bar:hidden'
 /**

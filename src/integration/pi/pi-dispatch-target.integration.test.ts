@@ -16,11 +16,11 @@
  * this file proves the seam is real" rationale.
  *
  * The opencode-direction deps (serverManager/makeClient) are stubbed (never
- * touched dispatching engine:'pi') and `recordDispatchedUsage` is a no-op
- * (avoids depending on Electron's `app` for a userData path in this
- * non-Electron vitest context — the default `insertDispatchedUsage` would
- * only ever no-op-and-log there anyway, per `safeRecordUsage`'s contract, but
- * a no-op keeps this test's failure surface to exactly what it's testing).
+ * touched dispatching engine:'pi') and `recordUsageEvent` is a no-op (avoids
+ * depending on Electron's `app` for a userData path in this non-Electron
+ * vitest context — the real recorder would only ever no-op-and-log there
+ * anyway, per `safeRecordUsage`'s contract, but a no-op keeps this test's
+ * failure surface to exactly what it's testing).
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real openai-codex credential in
  * ~/.pi/agent/auth.json (read-only — never written here). Same
@@ -103,7 +103,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         loadEngineConfig: () => ({
           dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
         }),
-        recordDispatchedUsage: () => {}
+        recordUsageEvent: () => {}
         // spawnPiTarget intentionally OMITTED — exercises the REAL
         // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
       })

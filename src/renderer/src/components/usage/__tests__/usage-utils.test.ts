@@ -1,12 +1,21 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
+  PROVIDER_OVERFLOW_COLOR,
+  PROVIDER_SERIES_COLORS,
+  buildProviderColorMap,
+  buildSeriesColorMap,
+  formatReset,
+  formatResetRelative,
+  meterSeverity,
   formatTokenCount,
   formatCost,
   sumTokens,
   shortModelName,
   formatTime,
   formatShortDate,
+  formatHourLabel,
   formatDuration,
+  rangeWords,
   getModelColor
 } from '../usage-utils'
 
@@ -174,6 +183,32 @@ describe('formatShortDate', () => {
   })
 })
 
+describe('rangeWords', () => {
+  it('spells a day range as its duration', () => {
+    expect(rangeWords('7d')).toBe('last 7 days')
+    expect(rangeWords('30d')).toBe('last 30 days')
+    expect(rangeWords('90d')).toBe('last 90 days')
+  })
+
+  it('leaves today as the word it already is', () => {
+    expect(rangeWords('today')).toBe('today')
+  })
+})
+
+describe('formatHourLabel', () => {
+  // LOCAL components throughout: the label is the viewer's clock, so a UTC
+  // literal would assert a different hour in every timezone the suite runs in.
+  it('prints the local clock hour, zero-padded', () => {
+    expect(formatHourLabel(new Date(2026, 8, 21, 9, 0, 0, 0).getTime())).toBe('09:00')
+    expect(formatHourLabel(new Date(2026, 8, 21, 23, 0, 0, 0).getTime())).toBe('23:00')
+    expect(formatHourLabel(new Date(2026, 8, 21, 0, 0, 0, 0).getTime())).toBe('00:00')
+  })
+
+  it('names the hour a mid-hour instant falls in', () => {
+    expect(formatHourLabel(new Date(2026, 8, 21, 14, 59, 59, 999).getTime())).toBe('14:00')
+  })
+})
+
 describe('formatDuration', () => {
   it('formats minutes only', () => {
     expect(formatDuration(5 * 60_000)).toBe('5m')
@@ -233,5 +268,137 @@ describe('getModelColor', () => {
     const c1 = getModelColor('test-model-xyz')
     const c2 = getModelColor('test-model-xyz')
     expect(c1).toBe(c2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The dashboard's palette and meter vocabulary (ADR-071 §8)
+// ---------------------------------------------------------------------------
+
+describe('buildProviderColorMap', () => {
+  it('pins anthropic to the first slot and openai to the second, whatever the input order', () => {
+    const map = buildProviderColorMap(['openrouter', 'openai', 'anthropic'])
+    expect(map.get('anthropic')).toBe(PROVIDER_SERIES_COLORS[0])
+    expect(map.get('openai')).toBe(PROVIDER_SERIES_COLORS[1])
+    expect(map.get('openrouter')).toBe(PROVIDER_SERIES_COLORS[2])
+  })
+
+  it('gives an unpinned provider the same colour whether or not a pinned one is present', () => {
+    // A filter that drops Anthropic must not repaint OpenRouter.
+    const withPinned = buildProviderColorMap(['anthropic', 'openai', 'openrouter'])
+    const withoutOne = buildProviderColorMap(['anthropic', 'openrouter'])
+    expect(withoutOne.get('anthropic')).toBe(withPinned.get('anthropic'))
+    // Slots close up when a provider genuinely leaves the data, which is the
+    // documented behaviour: the map is rebuilt from what the range returned.
+    expect(withoutOne.get('openrouter')).toBe(PROVIDER_SERIES_COLORS[1])
+  })
+
+  it('folds providers past the validated five into one neutral rather than inventing a hue', () => {
+    const map = buildProviderColorMap(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+    expect(map.get('e')).toBe(PROVIDER_SERIES_COLORS[4])
+    expect(map.get('f')).toBe(PROVIDER_OVERFLOW_COLOR)
+    expect(map.get('g')).toBe(PROVIDER_OVERFLOW_COLOR)
+  })
+})
+
+describe('meterSeverity', () => {
+  it('grades at 70 and 90', () => {
+    expect(meterSeverity(0)).toBe('ok')
+    expect(meterSeverity(69.9)).toBe('ok')
+    expect(meterSeverity(70)).toBe('warn')
+    expect(meterSeverity(89.9)).toBe('warn')
+    expect(meterSeverity(90)).toBe('crit')
+    expect(meterSeverity(100)).toBe('crit')
+  })
+})
+
+describe('formatResetRelative', () => {
+  const now = Date.parse('2026-09-21T12:00:00.000Z')
+
+  it('counts forward to the reset', () => {
+    expect(formatResetRelative('2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('says now for a window that has already turned over', () => {
+    expect(formatResetRelative('2026-09-21T11:00:00.000Z', now)).toBe('now')
+  })
+
+  it('draws a dash rather than a guess when there is no reset to show', () => {
+    expect(formatResetRelative(null, now)).toBe('—')
+    expect(formatResetRelative('not a date', now)).toBe('—')
+  })
+})
+
+describe('formatReset', () => {
+  const now = Date.parse('2026-09-21T12:00:00.000Z')
+
+  it('counts a 5-hour window down, because that wait is actionable', () => {
+    expect(formatReset('5h', '2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('names the weekday and clock time for a weekly window', () => {
+    // Built from LOCAL parts so the expectation holds in any timezone.
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('7d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('7d:fable', at.toISOString(), now)).toBe('Thu 09:00')
+  })
+
+  it('pads a single-digit hour and minute', () => {
+    const at = new Date(2026, 8, 21, 7, 5, 0)
+    expect(formatReset('7d', at.toISOString(), now)).toBe('Mon 07:05')
+  })
+
+  it('draws a dash rather than a guess when there is no reset to show', () => {
+    expect(formatReset('7d', null, now)).toBe('—')
+    expect(formatReset('5h', 'not a date', now)).toBe('—')
+  })
+
+  /**
+   * S3c — the form is chosen by the window's LENGTH, not by the `7d` prefix. A
+   * ChatGPT plan can report any duration, and its weekly window used to arrive
+   * kinded `5h`, which drew "in 28h 55m" for a window a week long.
+   */
+  it('decides by length, so a multi-day window gets the weekday form', () => {
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('3d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('1d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('23h', '2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('believes the stated minutes over the kind', () => {
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('5h', at.toISOString(), now, 10_080)).toBe('Thu 09:00')
+  })
+
+  it('counts down a window whose length nothing states', () => {
+    expect(formatReset('primary', '2026-09-21T13:48:00.000Z', now, null)).toBe('in 1h 48m')
+  })
+})
+
+describe('buildSeriesColorMap', () => {
+  it('gives the same id the same slot however the caller ordered the list', () => {
+    const byRank = buildSeriesColorMap(['opus', 'gpt-6', 'sonnet'])
+    // The dashboard re-sorts by spend on every range change; the colours must
+    // not follow it (ADR-071 §8 — a filter never repaints the survivors).
+    const reRanked = buildSeriesColorMap(['sonnet', 'opus', 'gpt-6'])
+    for (const id of ['opus', 'gpt-6', 'sonnet']) {
+      expect(reRanked.get(id)).toBe(byRank.get(id))
+    }
+    expect(new Set(byRank.values()).size).toBe(3)
+  })
+
+  it('shares the overflow neutral past the five validated slots', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+    const map = buildSeriesColorMap(ids)
+    expect(ids.slice(0, 5).map((id) => map.get(id))).toEqual([...PROVIDER_SERIES_COLORS])
+    expect(map.get('f')).toBe(PROVIDER_OVERFLOW_COLOR)
+    expect(map.get('g')).toBe(PROVIDER_OVERFLOW_COLOR)
+  })
+
+  it('does not spend two slots on a repeated id', () => {
+    const map = buildSeriesColorMap(['b', 'a', 'b', 'a'])
+    expect(map.size).toBe(2)
+    expect(map.get('a')).toBe(PROVIDER_SERIES_COLORS[0])
+    expect(map.get('b')).toBe(PROVIDER_SERIES_COLORS[1])
   })
 })

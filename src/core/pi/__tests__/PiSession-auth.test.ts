@@ -104,7 +104,7 @@ vi.mock('../model-discovery', async () => {
   return { ...actual, getPiModelCatalog: vi.fn().mockResolvedValue([]) }
 })
 vi.mock('../../services/pi-session-list', () => ({
-  loadPiSessionHistory: vi.fn().mockResolvedValue([]),
+  loadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
   findPiSessionFile: vi.fn().mockReturnValue(null)
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))
@@ -127,7 +127,11 @@ vi.mock('../PiBridgeHost', () => ({
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: {
     probe: vi.fn().mockResolvedValue({}),
-    buildPiAccountRef: vi.fn().mockReturnValue(null)
+    buildPiAccountRef: vi.fn().mockReturnValue(null),
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `pi:${vendorId}:native`,
+      accountLabel: vendorId
+    }))
   }
 }))
 vi.mock('node:fs', () => ({ existsSync: vi.fn().mockReturnValue(false) }))

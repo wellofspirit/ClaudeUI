@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
+  ModelRef,
   SessionInfo,
   WorktreeInfo
 } from '../../../../shared/types'
@@ -18,6 +19,35 @@ type SidebarSessionData = {
   cwd: string
   isWatching: boolean
   firstUserText?: string
+}
+
+/**
+ * Seed `sessionEngines` for a session reopened from another engine's own store,
+ * before `loadHistoricalSession` reads it back.
+ *
+ * `model` comes from the transcript's last assistant message because a session
+ * that engine created on its own has nothing persisted here, and without it the
+ * composer's pill names the configured default — a model the session never ran
+ * and the resume will not spawn. A model already persisted for this routing id
+ * is the user's own last pick in this session and always wins.
+ */
+function seedHistoricalEngine(
+  routingId: string,
+  engineId: 'opencode' | 'pi',
+  lastModel: ModelRef | null | undefined
+): void {
+  const state = useSessionStore.getState()
+  const existing = state.sessionEngines[routingId]
+  const sessionEngines = {
+    ...state.sessionEngines,
+    [routingId]: {
+      ...existing,
+      engineId,
+      ...(!existing?.model && lastModel ? { model: lastModel } : {})
+    }
+  }
+  useSessionStore.setState({ sessionEngines })
+  window.api.saveSessionConfig({ sessionEngines })
 }
 
 function isCodexSession(sessionId: string): boolean {
@@ -315,22 +345,20 @@ export function Sidebar({
     // engineId:'opencode' so loadHistoricalSession sets selectedEngineId, which
     // InputBox uses to pass routingId as resumeSessionId on the first createSession.
     if (info.engineId === 'opencode') {
-      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
-      // engine. Preserve any persisted model (from the DB) — overwriting it would
-      // wipe the session's remembered model so it'd reopen on the engine default.
-      const storeState = useSessionStore.getState()
-      const sessionEngines = {
-        ...storeState.sessionEngines,
-        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'opencode' as const }
-      }
-      useSessionStore.setState({ sessionEngines })
-      window.api.saveSessionConfig({ sessionEngines })
-      // Best-effort history load (returns [] if opencode is down) — paints the
+      // Best-effort history load (empty if opencode is down) — paints the
       // transcript immediately rather than waiting for the first new prompt.
-      const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      // The status line rides along, so the cost and token figures appear with
+      // it instead of only after the first new turn (S1d), and so does the
+      // model the transcript last answered on.
+      const { messages, statusLine, lastModel } = await window.api
+        .loadOpencodeHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
       // A newer click superseded this one while history loaded — discard.
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
+      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
+      // engine (and model) — it is the one that restores both onto the session.
+      seedHistoricalEngine(routingId, 'opencode', lastModel)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)
@@ -345,16 +373,12 @@ export function Sidebar({
     // messages), exactly like Claude. No extra sessionEngines/resumeSessionId
     // wiring is needed here beyond seeding engineId, same as the opencode branch.
     if (info.engineId === 'pi') {
-      const storeState = useSessionStore.getState()
-      const sessionEngines = {
-        ...storeState.sessionEngines,
-        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'pi' as const }
-      }
-      useSessionStore.setState({ sessionEngines })
-      window.api.saveSessionConfig({ sessionEngines })
-      const messages = await window.api.loadPiHistory(info.sessionId).catch(() => [])
+      const { messages, statusLine, lastModel } = await window.api
+        .loadPiHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
+      seedHistoricalEngine(routingId, 'pi', lastModel)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)

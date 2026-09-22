@@ -1,0 +1,29 @@
+{
+  "epoch": 3,
+  "readings": [
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "windowKind": "5h",
+      "labelMasked": "s•••@e•••.com",
+      "vendorId": "anthropic",
+      "plan": "max_20x",
+      "windowMinutes": 300,
+      "usedPercent": 41.75,
+      "resetsAt": "2026-09-21T08:00:00.000Z",
+      "observedAt": 1758414000000
+    },
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "accountKey": "apikey:openai:3f9b2c7d81a4e605",
+      "windowKind": "7d",
+      "labelMasked": "…e605",
+      "vendorId": "openai",
+      "plan": null,
+      "windowMinutes": 10080,
+      "usedPercent": 3.5,
+      "resetsAt": null,
+      "observedAt": 1758413000000
+    }
+  ]
+}

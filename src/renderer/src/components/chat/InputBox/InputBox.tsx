@@ -296,7 +296,8 @@ export function InputBox(): React.JSX.Element {
   // against the UNDEDUPED `models`, so a session pinned to a collapsed row is
   // still resolvable.
   const pickerModels = useMemo(
-    () => dedupeResolvedModels(filterModelsForEngine(models, effectiveEngineId), selectedModelValue),
+    () =>
+      dedupeResolvedModels(filterModelsForEngine(models, effectiveEngineId), selectedModelValue),
     [models, effectiveEngineId, selectedModelValue]
   )
   // Memoized so its identity is stable across renders (it feeds several
@@ -354,9 +355,26 @@ export function InputBox(): React.JSX.Element {
       return sameEngine[0] ?? unset
     }
     if (engine === 'opencode' || engine === 'pi') {
-      // The SAME resolver the store seeds sessions with, so the pill shows what
-      // will actually spawn. `null` = the user's configured default is gone:
-      // show the unset row rather than a substitute whose capabilities differ.
+      // An ACTIVE session holds its own model, and the configured default is
+      // not it: on a reopened session whose model the discovered catalog
+      // momentarily lacks (an alicloud provider that has not answered yet),
+      // substituting the default names a model the session never ran and the
+      // resume will not spawn. Say the catalog cannot place it instead —
+      // exactly as the Codex arm above does.
+      if (activeSessionId && selectedModelValue) {
+        return sameEngine.length > 0
+          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
+          : {
+              ...unset,
+              value: selectedModelValue,
+              displayName: selectedModelValue,
+              shortName: selectedModelValue
+            }
+      }
+      // Welcome screen: the SAME resolver the store seeds sessions with, so
+      // the pill shows what will actually spawn. `null` = the user's
+      // configured default is gone: show the unset row rather than a
+      // substitute whose capabilities differ.
       const resolved = resolveEngineDefaultModel(engine, models, engineDefaults)
       if (resolved === null) return unset
       const m = sameEngine.find((mm) => mm.value === resolved)
@@ -1244,7 +1262,12 @@ export function InputBox(): React.JSX.Element {
       showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}
       showModelPicker={true}
       showCostInStatusLine={effectiveEngineId !== 'codex' && billingType !== 'free'}
-      showContextMeter={capabilities.contextWindow > 0}
+      showContextMeter={
+        // Codex's window is never in the catalog — it arrives on a usage frame,
+        // and (S1e) from `session_meta` on a cold reopen — so the status line
+        // is the second source the meter can come from.
+        capabilities.contextWindow > 0 || (statusLine?.contextWindow.size ?? 0) > 0
+      }
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}

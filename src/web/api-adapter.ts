@@ -615,8 +615,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage:set-account-filter', account) as ReturnType<
         ClaudeAPI['setUsageAccountFilter']
       >,
-    fetchDispatchedUsage: () =>
-      connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
+    fetchAccountLimits: (refresh) =>
+      connection.invoke('usage:limits', refresh ?? false) as ReturnType<
+        ClaudeAPI['fetchAccountLimits']
+      >,
+    fetchUsageWindows: (query) =>
+      connection.invoke('usage:windows', query ?? {}) as ReturnType<ClaudeAPI['fetchUsageWindows']>,
+    fetchUsageDashboard: (range, scope) =>
+      connection.invoke('usage:dashboard', { range, scope }) as ReturnType<
+        ClaudeAPI['fetchUsageDashboard']
+      >,
+    usageHubStatus: () =>
+      connection.invoke('usage-hub:status') as ReturnType<ClaudeAPI['usageHubStatus']>,
+    configureUsageHub: (input) =>
+      connection.invoke('usage-hub:configure', input) as ReturnType<ClaudeAPI['configureUsageHub']>,
+    setUsageHubSecret: (secret) =>
+      connection.invoke('usage-hub:set-secret', secret) as ReturnType<
+        ClaudeAPI['setUsageHubSecret']
+      >,
+    syncUsageHubNow: () =>
+      connection.invoke('usage-hub:sync-now') as ReturnType<ClaudeAPI['syncUsageHubNow']>,
+    resyncUsageHub: () =>
+      connection.invoke('usage-hub:resync') as ReturnType<ClaudeAPI['resyncUsageHub']>,
+    forgetUsageHub: () =>
+      connection.invoke('usage-hub:forget') as ReturnType<ClaudeAPI['forgetUsageHub']>,
 
     // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
     // its own browser for these calls: it returns `manualUrl` on the state and

@@ -1,0 +1,23 @@
+{
+  "epoch": 3,
+  "accounts": [
+    {
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "vendorId": "anthropic",
+      "labelMasked": "s•••@e•••.com",
+      "lastSeenAt": 1758414000000
+    },
+    {
+      "accountKey": "apikey:openai:3f9b2c7d81a4e605",
+      "vendorId": "openai",
+      "labelMasked": "…e605",
+      "lastSeenAt": 1758413000000
+    },
+    {
+      "accountKey": "google:acct-7b31e9",
+      "vendorId": "google",
+      "labelMasked": null,
+      "lastSeenAt": 1758410400000
+    }
+  ]
+}

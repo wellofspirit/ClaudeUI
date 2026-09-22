@@ -1,20 +1,24 @@
 /**
  * @vitest-environment node
  *
- * Phase 9b — opencode-pricing.ts unit tests.
+ * opencode-pricing.ts unit tests — ADR-071 §5, the models.dev source.
  *
  * Tests:
- *  1. refreshPrices maps a fake getConfigProviders payload to PricingEntry[] +
- *     calls registerSupplementalPricing so equivalentCostUsd resolves the model.
- *  2. persisted-file round-trip: refreshPrices writes to disk; loadPersistedPrices
- *     reads it back and registers prices without a server.
- *  3. registerSupplementalPricing integration via the refreshPrices path.
- *  4. Best-effort: server failures return { count: 0 } without throwing.
+ *  1. refreshPrices maps a fake models.dev payload to PricingEntry[] + calls
+ *     registerSupplementalPricing so equivalentCostUsd resolves the model.
+ *  2. Zero-priced models are KEPT (on models.dev a 0 means free) and malformed
+ *     entries are skipped without taking their neighbours with them.
+ *  3. A failed fetch, a non-200, an oversized body and an empty result all leave
+ *     the persisted file and the registered table untouched.
+ *  4. persisted-file round-trip through loadPersistedPrices.
+ *  5. refreshPricesIfStale: missing / fresh / stale file, and the env gate.
  *
  * Isolation: the SUT's PRICES_FILE is a module-level const derived from
  * os.homedir() at import time. We mock 'os' so homedir() resolves to a per-run
  * temp dir — these tests must NEVER touch the developer's real
  * ~/.claude/ui/opencode-prices.json (refreshPrices persists on every call).
+ *
+ * Network: global fetch is stubbed in every test. Nothing here reaches models.dev.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
@@ -26,17 +30,16 @@ import * as path from 'path'
 // Hoisted mocks — must be at top level so vi.hoisted runs before any imports
 // ---------------------------------------------------------------------------
 
-const { mockAcquire, mockRelease, mockGetConfigProviders, TEMP_HOME } = vi.hoisted(() => {
+const { TEMP_HOME, renameFailure } = vi.hoisted(() => {
   // Hoisted code runs before ESM imports resolve, so use process.getBuiltinModule
   // (Node 22.3+) to reach the REAL fs/os/path for the temp-dir setup.
   const realFs = process.getBuiltinModule('fs')
   const realOs = process.getBuiltinModule('os')
   const realPath = process.getBuiltinModule('path')
   return {
-    mockAcquire: vi.fn(),
-    mockRelease: vi.fn(),
-    mockGetConfigProviders: vi.fn(),
-    TEMP_HOME: realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'opencode-prices-test-'))
+    TEMP_HOME: realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'opencode-prices-test-')),
+    // Set by the atomic-persist test to make the rename half of the write fail.
+    renameFailure: { error: null as Error | null }
   }
 })
 
@@ -51,116 +54,123 @@ vi.mock('os', async (importOriginal) => {
   }
 })
 
-vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
-}))
-
-vi.mock('../../../core/opencode/OpencodeClient', () => ({
-  OpencodeClient: class {
-    getConfigProviders() {
-      return mockGetConfigProviders()
-    }
+// A pass-through 'fs' whose renameSync can be made to fail. ESM namespaces are
+// not configurable, so vi.spyOn cannot reach the rename inside write-json-atomic;
+// this is the only way to exercise the failure half of the atomic write.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
+  const renameSync: typeof actual.renameSync = (from, to) => {
+    if (renameFailure.error) throw renameFailure.error
+    return actual.renameSync(from, to)
   }
-}))
-
-vi.mock('../../../core/services/persisted-sessions-dir', () => ({
-  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions-pricing-test'
-}))
+  return { ...actual, renameSync, default: { ...actual, renameSync } }
+})
 
 // ---------------------------------------------------------------------------
-// Shared fake providers payload
+// Shared fake models.dev payload
 // ---------------------------------------------------------------------------
 
-const fakePaidProvider = {
-  id: 'openai',
-  name: 'OpenAI',
-  source: 'env' as const,
-  env: [],
-  options: {},
-  models: {
-    'gpt-4o-test': {
-      id: 'gpt-4o-test',
-      providerID: 'openai',
-      api: { id: 'openai', url: '', npm: '' },
-      name: 'GPT-4o Test',
-      family: 'gpt-4o',
-      capabilities: {
-        temperature: true,
-        reasoning: false,
-        attachment: false,
-        toolcall: true,
-        input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false }
+/** Mirrors https://models.dev/api.json: { [providerId]: { id, name, models } }. */
+const fakeCatalog: Record<string, unknown> = {
+  openai: {
+    id: 'openai',
+    name: 'OpenAI',
+    env: ['OPENAI_API_KEY'],
+    models: {
+      'gpt-4o-test': {
+        id: 'gpt-4o-test',
+        name: 'GPT-4o Test',
+        cost: { input: 2.5, output: 10, cache_read: 1.25, cache_write: 2.5 }
       },
-      cost: { input: 2.5, output: 10.0, cache: { read: 1.25, write: 2.5 } }
-    },
-    'free-tier-llm-v1': {
-      id: 'free-tier-llm-v1',
-      providerID: 'openai',
-      api: { id: 'openai', url: '', npm: '' },
-      name: 'Free Tier LLM',
-      family: 'free',
-      capabilities: {
-        temperature: true,
-        reasoning: false,
-        attachment: false,
-        toolcall: false,
-        input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false }
+      // No cache rates published — both cache rates must fall back to `input`.
+      'gpt-nano-test': {
+        id: 'gpt-nano-test',
+        name: 'GPT Nano Test',
+        cost: { input: 3, output: 12 }
       },
-      cost: { input: 0, output: 0 } // free model — 0 is a valid real cost
+      // A free tier. On models.dev a 0 is a real, known price.
+      'free-tier-llm-v1': {
+        id: 'free-tier-llm-v1',
+        name: 'Free Tier LLM',
+        cost: { input: 0, output: 0 }
+      }
+    }
+  },
+  local: {
+    id: 'local',
+    name: 'Local',
+    models: {
+      // No cost field at all — skipped.
+      'llama-3': { id: 'llama-3', name: 'Llama 3' }
     }
   }
 }
 
-const fakeNoCostProvider = {
-  id: 'local',
-  name: 'Local',
-  source: 'env' as const,
-  env: [],
-  options: {},
-  models: {
-    'llama-3': {
-      id: 'llama-3',
-      providerID: 'local',
-      api: { id: 'local', url: '', npm: '' },
-      name: 'Llama 3',
-      family: 'llama',
-      capabilities: {
-        temperature: true,
-        reasoning: false,
-        attachment: false,
-        toolcall: false,
-        input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false }
-      }
-      // No cost field — should be skipped
-    }
-  }
+/** A minimal stand-in for the parts of Response the SUT touches. */
+function jsonResponse(
+  body: unknown,
+  opts: { status?: number; contentLength?: string; raw?: string } = {}
+): Response {
+  const text = opts.raw ?? JSON.stringify(body)
+  const headers = new Headers()
+  if (opts.contentLength !== undefined) headers.set('content-length', opts.contentLength)
+  return {
+    ok: (opts.status ?? 200) >= 200 && (opts.status ?? 200) < 300,
+    status: opts.status ?? 200,
+    headers,
+    text: async () => text
+  } as unknown as Response
+}
+
+/** Leftover atomic-write temp files in a directory (there must never be any). */
+function tempFilesIn(dir: string): string[] {
+  if (!fs.existsSync(dir)) return []
+  return fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'))
+}
+
+const oneMTokIn = {
+  inputTokens: 1_000_000,
+  outputTokens: 0,
+  cacheWriteTokens: 0,
+  cacheWrite1hTokens: 0,
+  cacheReadTokens: 0
 }
 
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
 
-import { refreshPrices, loadPersistedPrices } from '../../../core/services/opencode-pricing'
+import {
+  refreshPrices,
+  refreshPricesIfStale,
+  loadPersistedPrices
+} from '../../../core/services/opencode-pricing'
 import { equivalentCostUsd, registerSupplementalPricing } from '../../../shared/pricing'
 
 /** The SUT's PRICES_FILE, resolved under the mocked (temp) homedir. */
 const PRICES_PATH = path.join(TEMP_HOME, '.claude', 'ui', 'opencode-prices.json')
 
+const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>()
+
 beforeEach(() => {
-  mockAcquire.mockResolvedValue({ baseUrl: 'http://localhost:9999', authHeader: 'Bearer test' })
-  mockRelease.mockReturnValue(undefined)
-  mockGetConfigProviders.mockResolvedValue({
-    providers: [fakePaidProvider, fakeNoCostProvider]
-  })
+  fetchMock.mockReset()
+  fetchMock.mockImplementation(async () => jsonResponse(fakeCatalog))
+  vi.stubGlobal('fetch', fetchMock)
+  // Empty, not deleted: stubEnv restores whatever the developer's shell had.
+  vi.stubEnv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '')
+  fs.rmSync(PRICES_PATH, { force: true })
+  // Reset the SUT's "is the persisted file usable" flag, which a corrupt-file
+  // test leaves false and refreshPricesIfStale reads. With no file present this
+  // registers nothing and just sets the flag back to true.
+  loadPersistedPrices()
 })
 
 afterEach(() => {
   // Clear supplemental pricing so we don't pollute other test suites
   registerSupplementalPricing([])
-  vi.clearAllMocks()
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
+  renameFailure.error = null
 })
 
 afterAll(() => {
@@ -173,89 +183,224 @@ afterAll(() => {
 })
 
 // ---------------------------------------------------------------------------
-// refreshPrices — mapping and count
+// refreshPrices — mapping
 // ---------------------------------------------------------------------------
 
-describe('opencode-pricing: refreshPrices', () => {
-  it('returns count=1 (models with a non-zero cost) and a refreshedAt timestamp', async () => {
+describe('opencode-pricing: refreshPrices mapping', () => {
+  it('fetches models.dev once, with a timeout signal', async () => {
+    await refreshPrices()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://models.dev/api.json')
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('returns the priced-model count and a refreshedAt timestamp', async () => {
     const result = await refreshPrices()
-    // gpt-4o-test has non-zero cost; free-tier-llm-v1 is $0/$0 (filtered — see
-    // isZeroCost); llama-3 has no cost field at all → 1 entry
-    expect(result.count).toBe(1)
-    expect(typeof result.refreshedAt).toBe('number')
+    // 3 openai models carry a cost; llama-3 has none → 3 entries
+    expect(result.count).toBe(3)
     expect(result.refreshedAt).toBeGreaterThan(0)
   })
 
-  it('maps paid model to correct rates via equivalentCostUsd', async () => {
+  it('maps input/output rates via equivalentCostUsd', async () => {
     await refreshPrices()
-    const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeCloseTo(2.5)
+    expect(equivalentCostUsd('openai', 'gpt-4o-test', oneMTokIn)).toBeCloseTo(2.5)
+    expect(
+      equivalentCostUsd('openai', 'gpt-4o-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        outputTokens: 1e6
+      })
+    ).toBeCloseTo(10)
   })
 
-  it('skips a $0/$0 model (cost.input=0, cost.output=0) — produces NO entry', async () => {
+  it('maps published cache_read / cache_write rates', async () => {
     await refreshPrices()
-    // free-tier-llm-v1 has cost {input:0, output:0} — a $0 list price carries no
-    // estimation signal (see isZeroCost) so it must not be registered at all;
-    // equivalentCostUsd falls through to null, not a poisoned 0.
-    const cost = equivalentCostUsd('openai', 'free-tier-llm-v1', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeNull()
+    expect(
+      equivalentCostUsd('openai', 'gpt-4o-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        cacheWriteTokens: 1e6
+      })
+    ).toBeCloseTo(2.5)
+    expect(
+      equivalentCostUsd('openai', 'gpt-4o-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        cacheReadTokens: 1e6
+      })
+    ).toBeCloseTo(1.25)
   })
 
-  it('skips models without a cost field (llama-3 → not registered)', async () => {
+  it('falls back to the input rate when no cache rates are published', async () => {
     await refreshPrices()
-    const cost = equivalentCostUsd('local', 'llama-3', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeNull()
+    // gpt-nano-test has input 3 and no cache_read/cache_write — both cache rates
+    // must be 3, not 0: an unpublished discount is no discount.
+    expect(
+      equivalentCostUsd('openai', 'gpt-nano-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        cacheWriteTokens: 1e6
+      })
+    ).toBeCloseTo(3)
+    expect(
+      equivalentCostUsd('openai', 'gpt-nano-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        cacheWrite1hTokens: 1e6,
+        cacheWriteTokens: 1e6
+      })
+    ).toBeCloseTo(3)
+    expect(
+      equivalentCostUsd('openai', 'gpt-nano-test', {
+        ...oneMTokIn,
+        inputTokens: 0,
+        cacheReadTokens: 1e6
+      })
+    ).toBeCloseTo(3)
   })
 
-  it('maps cache fields correctly', async () => {
+  it('keeps a zero-priced model and resolves it to exactly 0, not null', async () => {
     await refreshPrices()
-    // gpt-4o-test: cache.read=1.25, cache.write=2.5
-    const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheWriteTokens: 1_000_000,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeCloseTo(2.5) // cacheWritePerMTok = cache.write = 2.5
+    // On models.dev a 0 list price means the model is free — a known 0.
+    expect(equivalentCostUsd('openai', 'free-tier-llm-v1', oneMTokIn)).toBe(0)
   })
 
-  it('acquires and releases the opencode server', async () => {
+  it('skips a model with no cost field', async () => {
     await refreshPrices()
-    expect(mockAcquire).toHaveBeenCalledOnce()
-    expect(mockRelease).toHaveBeenCalledOnce()
+    expect(equivalentCostUsd('local', 'llama-3', oneMTokIn)).toBeNull()
   })
 
-  it('releases server even when getConfigProviders throws', async () => {
-    mockGetConfigProviders.mockRejectedValue(new Error('network error'))
+  it('skips a malformed provider or model without losing its neighbours', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        broken: null,
+        alsoBroken: { id: 'alsoBroken', models: 'not-an-object' },
+        arrayModels: { id: 'arrayModels', models: [] },
+        partly: {
+          id: 'partly',
+          models: {
+            'bad-cost-shape': { id: 'bad-cost-shape', cost: 'free' },
+            'string-rates': { id: 'string-rates', cost: { input: '1', output: '2' } },
+            'nan-rate': { id: 'nan-rate', cost: { input: Number.NaN, output: 2 } },
+            'missing-output': { id: 'missing-output', cost: { input: 1 } },
+            'good-model': { id: 'good-model', cost: { input: 4, output: 8 } }
+          }
+        }
+      })
+    )
+    const result = await refreshPrices()
+    expect(result.count).toBe(1)
+    expect(equivalentCostUsd('partly', 'good-model', oneMTokIn)).toBeCloseTo(4)
+    expect(equivalentCostUsd('partly', 'bad-cost-shape', oneMTokIn)).toBeNull()
+    expect(equivalentCostUsd('partly', 'string-rates', oneMTokIn)).toBeNull()
+  })
+
+  it('lower-cases the model id so lookups match case-insensitively', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        vendorx: {
+          id: 'vendorx',
+          models: { 'Mixed-Case-Model': { cost: { input: 5, output: 5 } } }
+        }
+      })
+    )
+    await refreshPrices()
+    expect(equivalentCostUsd('vendorx', 'Mixed-Case-Model', oneMTokIn)).toBeCloseTo(5)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// refreshPrices — failures never destroy good prices
+// ---------------------------------------------------------------------------
+
+describe('opencode-pricing: refreshPrices failure modes', () => {
+  /** Seed a good persisted file + registered table, and return the file bytes. */
+  async function seedGoodPrices(): Promise<Buffer> {
+    await refreshPrices()
+    return fs.readFileSync(PRICES_PATH)
+  }
+
+  function expectPricesIntact(before: Buffer): void {
+    expect(fs.readFileSync(PRICES_PATH).equals(before)).toBe(true)
+    expect(equivalentCostUsd('openai', 'gpt-4o-test', oneMTokIn)).toBeCloseTo(2.5)
+  }
+
+  it('a thrown fetch leaves the file and the table intact, and returns count 0', async () => {
+    const before = await seedGoodPrices()
+    fetchMock.mockRejectedValue(new Error('network down'))
+
     const result = await refreshPrices()
     expect(result.count).toBe(0)
-    expect(mockRelease).toHaveBeenCalledOnce()
+    expectPricesIntact(before)
   })
 
-  it('best-effort: acquire failure → { count: 0 } without throwing', async () => {
-    mockAcquire.mockRejectedValue(new Error('binary not found'))
+  it('a non-200 leaves the file and the table intact', async () => {
+    const before = await seedGoodPrices()
+    fetchMock.mockResolvedValue(jsonResponse({}, { status: 503 }))
+
+    expect((await refreshPrices()).count).toBe(0)
+    expectPricesIntact(before)
+  })
+
+  it('a body over 32 MB is refused before it is parsed', async () => {
+    const before = await seedGoodPrices()
+    fetchMock.mockResolvedValue(
+      jsonResponse(null, { raw: 'x'.repeat(32 * 1024 * 1024 + 1), contentLength: undefined })
+    )
+
+    expect((await refreshPrices()).count).toBe(0)
+    expectPricesIntact(before)
+  })
+
+  it('a declared content-length over 32 MB is refused without reading the body', async () => {
+    const before = await seedGoodPrices()
+    const text = vi.fn(async () => JSON.stringify(fakeCatalog))
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-length': String(64 * 1024 * 1024) }),
+      text
+    } as unknown as Response)
+
+    expect((await refreshPrices()).count).toBe(0)
+    expect(text).not.toHaveBeenCalled()
+    expectPricesIntact(before)
+  })
+
+  it('unparseable JSON leaves the file and the table intact', async () => {
+    const before = await seedGoodPrices()
+    fetchMock.mockResolvedValue(jsonResponse(null, { raw: '{not json' }))
+
+    expect((await refreshPrices()).count).toBe(0)
+    expectPricesIntact(before)
+  })
+
+  it('an empty catalog leaves the file and the table intact', async () => {
+    const before = await seedGoodPrices()
+    fetchMock.mockResolvedValue(jsonResponse({}))
+
+    expect((await refreshPrices()).count).toBe(0)
+    expectPricesIntact(before)
+  })
+
+  it('a failed rename leaves the previous file byte-identical (atomic persist)', async () => {
+    const before = await seedGoodPrices()
+    // A DIFFERENT catalog, so a non-atomic write would be visible on disk.
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        vendorx: { id: 'vendorx', models: { 'other-model': { cost: { input: 42, output: 84 } } } }
+      })
+    )
+    renameFailure.error = new Error('EPERM')
+
+    // The in-memory table still takes the fresh prices; only the disk copy is
+    // left behind, and it is left COMPLETE rather than torn.
     const result = await refreshPrices()
-    expect(result.count).toBe(0)
-    expect(typeof result.refreshedAt).toBe('number')
+    expect(result.count).toBe(1)
+    expect(equivalentCostUsd('vendorx', 'other-model', oneMTokIn)).toBeCloseTo(42)
+    expect(fs.readFileSync(PRICES_PATH).equals(before)).toBe(true)
+    expect(tempFilesIn(path.dirname(PRICES_PATH))).toEqual([])
   })
 })
 
@@ -264,16 +409,22 @@ describe('opencode-pricing: refreshPrices', () => {
 // ---------------------------------------------------------------------------
 
 describe('opencode-pricing: persisted-file round-trip', () => {
-  beforeEach(() => {
-    // Isolate from the refreshPrices tests above (they persist to the same file).
-    fs.rmSync(PRICES_PATH, { force: true })
-  })
-
   it('sanity: the prices file under test lives under os.tmpdir(), not the real home', () => {
     expect(PRICES_PATH.startsWith(os.tmpdir())).toBe(true)
   })
 
-  it('loadPersistedPrices registers entries from a hand-written JSON file', () => {
+  it('persists compactly — no pretty-printing for ~7,400 entries', async () => {
+    await refreshPrices()
+    const raw = fs.readFileSync(PRICES_PATH, 'utf-8')
+    expect(raw.includes('\n')).toBe(false)
+  })
+
+  it('leaves no temp file behind after a successful write', async () => {
+    await refreshPrices()
+    expect(tempFilesIn(path.dirname(PRICES_PATH))).toEqual([])
+  })
+
+  it('registers entries from a hand-written JSON file', () => {
     const entries = [
       {
         vendorId: 'test-vendor',
@@ -290,16 +441,9 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
     fs.writeFileSync(PRICES_PATH, JSON.stringify(entries), 'utf-8')
 
-    loadPersistedPrices()
+    expect(loadPersistedPrices()).toBe(true)
 
-    const cost = equivalentCostUsd('test-vendor', 'my-model-x1', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeCloseTo(7.0)
+    expect(equivalentCostUsd('test-vendor', 'my-model-x1', oneMTokIn)).toBeCloseTo(7)
   })
 
   it('refreshPrices → loadPersistedPrices full round-trip (write then re-read from disk)', async () => {
@@ -308,67 +452,106 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     registerSupplementalPricing([])
     loadPersistedPrices()
 
-    const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(cost).toBeCloseTo(2.5)
+    expect(equivalentCostUsd('openai', 'gpt-4o-test', oneMTokIn)).toBeCloseTo(2.5)
+    // The free tier survives the round trip as a known 0.
+    expect(equivalentCostUsd('openai', 'free-tier-llm-v1', oneMTokIn)).toBe(0)
   })
 
-  it('loadPersistedPrices is a no-op when the file does not exist', () => {
-    // Should not throw even when the prices file is absent
-    expect(() => loadPersistedPrices()).not.toThrow()
+  it('reports a missing file as nothing-to-fix rather than a problem', () => {
+    expect(loadPersistedPrices()).toBe(true)
   })
 
-  it('self-heals a poisoned persisted file — drops a $0/$0 entry on load, keeps a paid entry', () => {
-    const poisoned = [
-      {
-        vendorId: 'openai',
-        match: 'poisoned-zero-cost-model',
-        pricing: {
-          inputPerMTok: 0,
-          outputPerMTok: 0,
-          cacheWritePerMTok: 0,
-          cacheWrite1hPerMTok: 0,
-          cacheReadPerMTok: 0
-        }
-      },
-      {
-        vendorId: 'openai',
-        match: 'legit-paid-model',
-        pricing: {
-          inputPerMTok: 2.5,
-          outputPerMTok: 10,
-          cacheWritePerMTok: 2.5,
-          cacheWrite1hPerMTok: 2.5,
-          cacheReadPerMTok: 1.25
-        }
-      }
-    ]
+  it('reports a corrupt file as unusable, without throwing', () => {
     fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
-    fs.writeFileSync(PRICES_PATH, JSON.stringify(poisoned), 'utf-8')
+    fs.writeFileSync(PRICES_PATH, '{ not json', 'utf-8')
+    expect(loadPersistedPrices()).toBe(false)
+  })
 
-    loadPersistedPrices()
+  it('reports a file that is not an entry array as unusable', () => {
+    fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
+    fs.writeFileSync(PRICES_PATH, '{"providers":[]}', 'utf-8')
+    expect(loadPersistedPrices()).toBe(false)
+  })
 
-    const zeroCost = equivalentCostUsd('openai', 'poisoned-zero-cost-model', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(zeroCost).toBeNull()
+  it('reports an empty entry array as unusable — it prices nothing', () => {
+    fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
+    fs.writeFileSync(PRICES_PATH, '[]', 'utf-8')
+    expect(loadPersistedPrices()).toBe(false)
+  })
+})
 
-    const paidCost = equivalentCostUsd('openai', 'legit-paid-model', {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0
-    })
-    expect(paidCost).toBeCloseTo(2.5)
+// ---------------------------------------------------------------------------
+// refreshPricesIfStale
+// ---------------------------------------------------------------------------
+
+describe('opencode-pricing: refreshPricesIfStale', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000
+
+  it('fetches when no catalog has ever been persisted', async () => {
+    await refreshPricesIfStale()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fs.existsSync(PRICES_PATH)).toBe(true)
+  })
+
+  it('does not fetch when the persisted catalog is fresh', async () => {
+    await refreshPrices()
+    fetchMock.mockClear()
+
+    await refreshPricesIfStale()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fetches when the persisted catalog is older than maxAgeMs', async () => {
+    await refreshPrices()
+    fetchMock.mockClear()
+    const old = new Date(Date.now() - DAY_MS - 60_000)
+    fs.utimesSync(PRICES_PATH, old, old)
+
+    await refreshPricesIfStale()
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('honours a caller-supplied max age', async () => {
+    await refreshPrices()
+    fetchMock.mockClear()
+
+    await refreshPricesIfStale(0)
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('refetches a truncated file even though its mtime is fresh', async () => {
+    // The exact failure atomic persist is there to prevent, arriving from
+    // somewhere else (a disk that filled up under another writer, say). Without
+    // the read-side check this file looks fresh and the app runs a day unpriced.
+    fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
+    fs.writeFileSync(PRICES_PATH, '[{"vendorId":"openai","match":"gpt-4o-te', 'utf-8')
+    expect(loadPersistedPrices()).toBe(false)
+    fetchMock.mockClear()
+
+    await refreshPricesIfStale()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    // And the refetch repairs the file.
+    expect(loadPersistedPrices()).toBe(true)
+  })
+
+  // The gate reads cli.js's boolean-env semantics (envFlag), so only the values
+  // cli.js treats as ON disable the fetch — `0` and `false` mean the user turned
+  // it OFF, not that they set it.
+  it.each(['1', 'true', 'TRUE', 'yes', 'on'])('does nothing when the flag is %s', async (value) => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', value)
+    await refreshPricesIfStale()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fs.existsSync(PRICES_PATH)).toBe(false)
+  })
+
+  it.each(['0', 'false', ''])('still fetches when the flag is "%s"', async (value) => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', value)
+    await refreshPricesIfStale()
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('never throws when the fetch fails', async () => {
+    fetchMock.mockRejectedValue(new Error('offline'))
+    await expect(refreshPricesIfStale()).resolves.toBeUndefined()
   })
 })

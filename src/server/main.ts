@@ -54,6 +54,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
 import {
+  setHostAppVersion,
   setHostAuth,
   setHostIsPackaged,
   setHostOAuthLoopback,
@@ -144,9 +145,29 @@ function resolveAppPath(): string {
   return fromSource
 }
 
+/**
+ * The build this server is, for the usage hub's per-device facts (ADR-072 §5).
+ *
+ * There is no `app.getVersion()` here and no version baked into the bundle, so
+ * it comes from the `package.json` beside the resolved app path when there is
+ * one — which is the repository root for a `bun src/server/main.ts` run and the
+ * distribution directory when one ships a manifest. Absent, the push says
+ * `unknown`, which is honest: the alternative is inventing a number.
+ */
+function resolveServerVersion(): string {
+  try {
+    const manifest = path.join(resolveAppPath(), 'package.json')
+    const parsed = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as { version?: unknown }
+    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 /** Wire every host adapter the headless deployment needs. */
 function installHostAdapters(): void {
   setHostPaths({ getAppPath: resolveAppPath })
+  setHostAppVersion(resolveServerVersion())
 
   // A deployed server is not a dev build, so background usage/analytics writes
   // are ON. The desktop's dev-mode skip exists to stop a dev instance fighting
@@ -384,6 +405,9 @@ async function main(): Promise<void> {
     if (stopping) return
     stopping = true
     codexAuthProvider.dispose()
+    // The usage hub's timers (ADR-072 §7) before anything slower: a push in
+    // flight is idempotent on the hub, so nothing waits on it.
+    core.usageHubClient.stop()
     core.sessionManager.forEach((session) => {
       if (session.engineId === 'codex') session.dispose()
     })

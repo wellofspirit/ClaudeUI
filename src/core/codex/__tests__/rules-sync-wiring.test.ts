@@ -10,7 +10,9 @@
  *
  * Everything else these three entry points drag in is mocked away too: the four
  * engine session classes, the settings store, and the whole `startCoreServices`
- * service graph. The trigger is the subject; the graph is not.
+ * service graph — the usage poller included, because it is the one service in
+ * that graph that WRITES outside the repo. The trigger is the subject; the
+ * graph is not.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -105,6 +107,16 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn() }
+}))
+// `startCoreServices` starts the real usage poll, whose first tick reads
+// `~/.claude.json` and APPENDS to the account log — fire-and-forget, so it
+// lands after this file's last assertion has passed. Against a developer's
+// real home that record re-attributes every Claude turn after it (incident,
+// 2026-09-21); the test-home redirect in `src/test/setup/*` now contains the
+// damage, and this mock stops the write happening at all. The rule file, not
+// the metering graph, is what this file is about.
+vi.mock('../../services/usage-fetcher', () => ({
+  usageFetcher: { startPolling: vi.fn(), stopPolling: vi.fn(), setSessionGetter: vi.fn() }
 }))
 vi.mock('../../auth/vault/CredentialSync', () => ({
   // `configure` is how the boot seam wires the ACTIVE-account switch onto the

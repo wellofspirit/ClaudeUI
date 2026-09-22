@@ -30,7 +30,7 @@
 import { app, dialog, ipcMain, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { installDesktopTransport } from './ipc/desktop-transport'
-import { startCoreServices } from '../core/boot/core-services'
+import { startCoreServices, type CoreServices } from '../core/boot/core-services'
 import type { RemoteConfigPatch } from '../core/boot/host-anchor'
 import { RemoteServer } from '../core/services/remote-server'
 import { RemoteDispatcher } from '../core/services/remote-dispatcher'
@@ -59,6 +59,8 @@ export interface CoreBoot {
   remoteServer: RemoteServer
   remoteDispatcher: RemoteDispatcher
   automationManager: AutomationManager
+  /** The usage hub client (ADR-072 §7) — stopped by the before-quit teardown. */
+  usageHubClient: CoreServices['usageHubClient']
 }
 
 export interface BootCoreOptions {
@@ -230,6 +232,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     sessionManager: core.sessionManager,
     remoteServer: core.remoteServer,
     remoteDispatcher: core.remoteDispatcher,
-    automationManager: core.automationManager
+    automationManager: core.automationManager,
+    usageHubClient: core.usageHubClient
   }
 }

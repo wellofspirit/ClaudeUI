@@ -31,14 +31,17 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { insertUsageEvents, type UsageEventRow } from './db'
+import { insertUsageEvents, type UsageEventInsert } from './db'
 import { blockUsageService } from './block-usage'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { backfillAttribution, claudeTranscriptRow } from './usage-recorder'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { logger } from './logger'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { listOpencodeSessionsGlobal } from './opencode-session-list'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
+import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 
 /** How often the periodic reconcile runs. */
 const RECONCILE_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
@@ -51,7 +54,7 @@ class UsageReconciler {
    * Start periodic reconciliation. The startup reconcile + recalc is driven by
    * session.ipc (reconcileAll().finally(recalculate)); here the PERIODIC tick
    * reconciles then refreshes the dashboard so out-of-tool usage (esp. opencode,
-   * which block-usage's JSONL scan never sees) rolls into daily_usage + the
+   * which block-usage's JSONL scan never sees) rolls into usage_bucket + the
    * per-engine breakdown. recalculate() is concurrency-guarded internally.
    */
   start(): void {
@@ -93,41 +96,12 @@ class UsageReconciler {
       const entries = await blockUsageService.getClaudeEntriesForReconcile()
       if (entries.length === 0) return
 
-      const rows: UsageEventRow[] = []
+      const rows: UsageEventInsert[] = []
       for (const e of entries) {
         if (!e.messageId) continue // dedup key required; skip if missing
-        const equiv = equivalentCostUsd('anthropic', e.model, {
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          // The live stream / JSONL ParsedEntry does not split the 1h cache TTL
-          // out separately here (block-usage already priced it into costUsd via
-          // calculateCostFromTokens). For the equiv_cost column we treat all
-          // cache writes as 5m; engine_cost carries block-usage's exact figure.
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens
-        })
-        rows.push({
-          id: uuid(),
-          ts: e.timestamp,
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          accountId: null,
-          accountUuid: e.accountUuid,
-          modelId: e.model,
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens,
-          // equiv_cost from the pricing table when priced; otherwise fall back to
-          // block-usage's calculateCostFromTokens value (e.costUsd).
-          equivCostUsd: equiv ?? e.costUsd,
-          engineCostUsd: e.costUsd,
-          sessionId: null,
-          messageId: e.messageId,
-          source: 'backfill'
-        })
+        // The SAME builder block-usage's inline upsert uses — the two race for
+        // one message_id, so they must not be able to disagree about the row.
+        rows.push(claudeTranscriptRow({ entry: e, account: e.account, sessionId: null }))
       }
 
       insertUsageEvents(rows)
@@ -166,8 +140,21 @@ class UsageReconciler {
       acquired = true
       const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
 
-      const rows: UsageEventRow[] = []
+      // Warm the billing-type source while we hold the server anyway, so the
+      // rows below can say how each vendor was billed instead of 'unknown'.
+      // A cached probe costs nothing; a failed one degrades to {}.
+      await opencodeAuthProvider.probe().catch(() => ({}))
+
+      const rows: UsageEventInsert[] = []
       for (const session of sessions) {
+        // A dispatch target IS a real top-level opencode session, so it turns
+        // up here like any other — and every one of its assistant messages is
+        // already a `usage_event` row with `origin: 'dispatch'`, written by
+        // the dispatcher (ADR-071 §1). Importing them again under opencode's
+        // own message ids would be a second, independently-keyed copy of the
+        // same spend that no dedup could ever collapse. The title is the only
+        // marker opencode gives us — see OPENCODE_DISPATCH_SESSION_TITLE.
+        if (session.title === OPENCODE_DISPATCH_SESSION_TITLE) continue
         const messages = await client.listMessages(session.sessionId).catch(() => [])
         for (const m of messages) {
           const row = this.opencodeMessageToRow(m.info, session.sessionId)
@@ -197,7 +184,7 @@ class UsageReconciler {
   private opencodeMessageToRow(
     info: Record<string, unknown> | undefined,
     sessionId: string
-  ): UsageEventRow | null {
+  ): UsageEventInsert | null {
     if (!info) return null
     const role = info.role as string | undefined
     if (role !== 'assistant') return null
@@ -254,7 +241,18 @@ class UsageReconciler {
       engineCostUsd: engineCost,
       sessionId,
       messageId,
-      source: 'backfill'
+      source: 'backfill',
+      // The account and the billing type come from opencode's own stored
+      // credential, so a terminal run lands on the same account key as one
+      // this app drove (ADR-071 §3).
+      ...backfillAttribution({
+        ...opencodeAuthProvider.accountIdentity(providerID),
+        billingType: opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown',
+        equivCostUsd: equiv,
+        engineCostUsd: engineCost,
+        // opencode's `info.cost` is what it charged, not an equivalent.
+        engineCostIsEquivalent: false
+      })
     }
   }
 }

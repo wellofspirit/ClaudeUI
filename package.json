@@ -1,6 +1,6 @@
 {
   "name": "claudui",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "Daniel Liu <wellofspirit@gmail.com>",
@@ -54,7 +54,6 @@
     "test:component": "vitest run --project component",
     "test:e2e": "vitest run --project e2e",
     "test:integration": "vitest run --project integration",
-    "test:layout": "vitest run --project layout",
     "test:git": "vitest run --project git",
     "test:git:changed": "vitest run --project git --changed",
     "test:ci": "vitest run --project unit --project component --project e2e --project git",

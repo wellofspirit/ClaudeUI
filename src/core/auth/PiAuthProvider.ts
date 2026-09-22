@@ -33,6 +33,8 @@ import type {
   VendorDeviceCodeStart,
   VendorDeviceCodeStatus
 } from '../../shared/types'
+import type { AccountIdentity } from '../../shared/account-key'
+import { AuthFileIdentityCache } from './account-identity'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { PI_API_KEY_VENDOR_IDS, PI_SUBSCRIPTION_VENDOR_IDS } from './pi-vendor-ids'
 import {
@@ -135,6 +137,18 @@ export class PiAuthProvider implements EngineAuthProvider {
    * see {@link deviceCodeStart}. Single-flight: a second start replaces it.
    */
   private deviceWait: DeviceCodeWait | undefined
+
+  /**
+   * ADR-071 §3 account identity, off pi's own auth.json, cached on that file's
+   * mtime. Independent of `lastProbe`: a row must be attributable whether or
+   * not probe() has run.
+   *
+   * Built on FIRST USE, not in a field initializer: the singleton at the foot
+   * of this file is constructed while this module is still evaluating, and
+   * reaching into another module's bindings at that moment couples the two
+   * files' initialization order for no gain.
+   */
+  private identityCache: AuthFileIdentityCache | null = null
 
   async probe(): Promise<VendorAuthMap> {
     const map = this.computeVendorMap()
@@ -412,6 +426,25 @@ export class PiAuthProvider implements EngineAuthProvider {
       authState: entry.authState,
       label: entry.label
     }
+  }
+
+  /**
+   * Which ACCOUNT this vendor's turns run under (ADR-071 §3), off pi's own
+   * auth.json — the opencode method's twin, with `pi:<vendor>:native` as the
+   * fallback. pi does not persist an `accountId` on its oauth entries, so the
+   * ChatGPT subscription id is read out of the access token's own
+   * `chatgpt_account_id` claim instead; the key that comes out is the same one
+   * opencode and Codex derive for that subscription.
+   *
+   * Returns the key and the label and nothing else: no token, no key material.
+   */
+  accountIdentity(vendorId: string): AccountIdentity {
+    this.identityCache ??= new AuthFileIdentityCache(
+      'pi',
+      resolvePiAuthJsonPath,
+      PI_CODEX_VENDOR_ID
+    )
+    return this.identityCache.identity(vendorId)
   }
 }
 

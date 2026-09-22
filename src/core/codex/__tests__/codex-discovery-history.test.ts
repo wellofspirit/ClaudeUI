@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   meta: vi.fn(() => ({}) as Record<string, { engineId: string }>),
   dispose: vi.fn(),
+  /** S1e: `session_meta` by session id, so a cold read sees a persisted window. */
+  sessionMeta: new Map<string, unknown>(),
+  /** S1e: the ledger rows `usageEventsForCodexThread` answers with, by thread id. */
+  usage: new Map<string, unknown[]>(),
   /**
    * The lineage cache (db v17), as a map so the tests can seed and inspect it:
    * thread id -> [lineage or null, the native `updatedAt` it was verified at].
@@ -43,8 +47,10 @@ vi.mock('../CodexService', () => ({
 }))
 vi.mock('../../services/db', () => ({
   setSessionMeta: vi.fn(),
-  getSessionMeta: () => undefined,
+  getSessionMeta: (sessionId: string) => mocks.sessionMeta.get(sessionId),
   allSessionMeta: () => mocks.meta(),
+  usageEventsForCodexThread: (threadId: string) => mocks.usage.get(threadId) ?? [],
+  dispatchedCostsByRouting: () => [],
   ensureCodexSessionOverrides: vi.fn(),
   recordCodexLineage: (threadId: string, forkedFromId: string | null, verifiedAt: number | null) =>
     void mocks.forks.set(threadId, [forkedFromId, verifiedAt]),
@@ -66,8 +72,41 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.available = true
   mocks.forks.clear()
+  mocks.sessionMeta.clear()
+  mocks.usage.clear()
   mocks.config.mockResolvedValue({ model_provider: 'openai', model: 'native' })
 })
+
+/** One ledger row, in the shape `usageEventsForCodexThread` hands back. */
+function usageRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'row',
+    ts: 1,
+    engineId: 'codex',
+    vendorId: 'openai',
+    accountId: null,
+    accountUuid: null,
+    modelId: 'native',
+    inputTokens: 1000,
+    outputTokens: 200,
+    cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: 300,
+    equivCostUsd: 0.5,
+    engineCostUsd: null,
+    sessionId: 'root',
+    messageId: 'codex:["root","one"]',
+    source: 'live',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'unknown',
+    origin: 'session',
+    parentRoutingId: null,
+    apiCostUsd: 0.5,
+    billedCostUsd: null,
+    ...overrides
+  }
+}
 
 it('does not seed models for an unavailable installation', async () => {
   mocks.available = false
@@ -122,6 +161,10 @@ it('keeps thread/turn/item IDs stable and marks interrupted history incomplete',
       { id: 'two', status: 'interrupted', startedAt: 2, items: [command] }
     ]
   })
+  // S1e: the cold line is built from the ledger and the persisted window, so a
+  // reopened thread paints its Cost tile without resuming anything.
+  mocks.usage.set('root', [usageRow()])
+  mocks.sessionMeta.set('root', { engineId: 'codex', contextUsed: 4000, contextWindow: 8000 })
   const history = await loadCodexHistory('root')
   expect(history.messages).toHaveLength(2)
   expect(new Set(history.messages.map((message) => message.id)).size).toBe(2)
@@ -131,7 +174,28 @@ it('keeps thread/turn/item IDs stable and marks interrupted history incomplete',
     )
   ).toBe(true)
   expect(history.warnings[0]).toContain('unresolved work')
-  expect(history.statusLine).toBeNull()
+  expect(history.statusLine).toMatchObject({
+    totalCostUsd: 0.5,
+    // The nested prompt figure: 1000 fresh + 300 cache read.
+    totalInputTokens: 1300,
+    totalOutputTokens: 200,
+    cachedTokens: 300,
+    totalTokens: 1500,
+    contextWindow: { used: 4000, size: 8000 },
+    usedPercentage: 50,
+    modelCosts: [{ engineId: 'codex', modelId: 'native', costUsd: 0.5 }]
+  })
+})
+
+it('leaves a thread that never metered without a status line', async () => {
+  mocks.history.mockResolvedValue({
+    id: 'root',
+    modelProvider: 'openai',
+    name: null,
+    createdAt: 1,
+    turns: []
+  })
+  expect((await loadCodexHistory('root')).statusLine).toBeNull()
 })
 
 it('truncates a forked seed at the anchor turn and refuses an anchor it cannot find', async () => {

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 2,
+  "deviceId": "9f1c7a42-3b18-4d55-9e0a-6c21f4b8ad30",
+  "deviceName": "workshop",
+  "appVersion": "3.3.0",
+  "os": "win32",
+  "events": [
+    {
+      "messageId": "msg_01j8q4v7d2kf",
+      "ts": 1758412800000,
+      "engineId": "claude",
+      "vendorId": "anthropic",
+      "modelId": "claude-opus-5",
+      "inputTokens": 18422,
+      "outputTokens": 1204,
+      "cacheWriteTokens": 6100,
+      "cacheWrite1hTokens": 0,
+      "cacheReadTokens": 92800,
+      "apiCostUsd": 0.4231,
+      "billedCostUsd": 0,
+      "billingType": "subscription",
+      "origin": "session",
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "accountLabel": "someone@example.com"
+    },
+    {
+      "messageId": "msg_01j8q5r0h9xw",
+      "ts": 1758413460000,
+      "engineId": "codex",
+      "vendorId": "openai",
+      "modelId": "gpt-5.6-sol",
+      "inputTokens": 7310,
+      "outputTokens": 880,
+      "cacheWriteTokens": 0,
+      "cacheWrite1hTokens": 0,
+      "cacheReadTokens": 4200,
+      "apiCostUsd": 0.0472,
+      "billedCostUsd": 0,
+      "billingType": "subscription",
+      "origin": "dispatch",
+      "accountKey": "chatgpt:plus:user-7a41e9",
+      "accountLabel": "someone.else@example.com"
+    },
+    {
+      "messageId": "msg_01j8q6t3n5bz",
+      "ts": 1758414120000,
+      "engineId": "opencode",
+      "vendorId": "openai",
+      "modelId": "some-unlisted-model",
+      "inputTokens": 2048,
+      "outputTokens": 512,
+      "cacheWriteTokens": 0,
+      "cacheWrite1hTokens": 0,
+      "cacheReadTokens": 0,
+      "apiCostUsd": null,
+      "billedCostUsd": 0.0188,
+      "billingType": "apiKey",
+      "origin": "session",
+      "accountKey": "apikey:openai:3f9b2c7d81a4e605",
+      "accountLabel": "openai key …e605"
+    }
+  ]
+}

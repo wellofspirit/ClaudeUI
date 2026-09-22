@@ -341,13 +341,13 @@ export abstract class BaseSession implements ISession {
    * later reopen/resume will construct the session object with (a fresh
    * session's temporary pre-rekey id naturally has zero rows; SessionManager.
    * rekey() carries any dispatch already recorded under it forward via
-   * renameDispatchedUsage, so the eventual stable id sees them here).
+   * renameUsageEventParent, so the eventual stable id sees them here).
    *
    * Best-effort: called bare from session-construction paths (ClaudeSession's
    * constructor, OpencodeSession's replayStoredHistory) — a DB open/query
    * failure must never break session creation over a cosmetic feature, so
    * failures are swallowed and logged (same pattern as SessionManager.rekey's
-   * renameDispatchedUsage call).
+   * renameUsageEventParent call).
    */
   protected seedDispatchedCosts(): void {
     try {

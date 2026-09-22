@@ -12,9 +12,13 @@
 /** Shown in place of a figure whose USD value the engine could not determine. */
 export const COST_UNKNOWN = 'unknown'
 
-/** `$1.23` at a cent or more, `$0.0012` below it (sub-cent turns are common). */
+/**
+ * `$1.23` at a cent or more, `$0.0012` below it (sub-cent turns are common).
+ * An exact zero is `$0.00`: four decimals there read as a tiny charge, and a
+ * known zero is the one figure that must not look like one.
+ */
 export function formatCostUsd(usd: number): string {
-  return `$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)}`
+  return `$${usd > 0 && usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)}`
 }
 
 /** {@link formatCostUsd}, with null rendered as {@link COST_UNKNOWN}. */

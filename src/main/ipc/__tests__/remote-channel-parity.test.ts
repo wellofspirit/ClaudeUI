@@ -119,7 +119,10 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/remote-view-commands.ts',
   // ADR-066 — the native-Codex family (settings, approvals, the login
   // ceremony), spread by both transports from one declaration.
-  'src/core/ipc/codex-commands.ts'
+  'src/core/ipc/codex-commands.ts',
+  // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
+  // transports (`registerSessionIpc` on the desktop side).
+  'src/core/ipc/usage-hub-commands.ts'
 ]
 
 /**

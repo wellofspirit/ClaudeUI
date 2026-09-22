@@ -1,0 +1,13 @@
+{
+  "epoch": 3,
+  "device": {
+    "deviceId": "9f1c7a42-3b18-4d55-9e0a-6c21f4b8ad30",
+    "deviceName": "workshop",
+    "os": "win32",
+    "appVersion": "3.3.0",
+    "lastPushAt": 1758414180000,
+    "retired": false,
+    "clientId": "bb5bea7c91d4402f8e6a35c0d17f93c1.access",
+    "firstClientId": "bb5bea7c91d4402f8e6a35c0d17f93c1.access"
+  }
+}

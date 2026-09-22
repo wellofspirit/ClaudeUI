@@ -22,7 +22,7 @@ interface ExtraUsage {
 }
 
 interface AccountUsage {
-  fiveHour: RateWindow
+  fiveHour: RateWindow | null
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
@@ -35,7 +35,7 @@ interface AccountUsage {
 
 function defaultUsage(): AccountUsage {
   return {
-    fiveHour: { usedPercent: 0, resetsAt: null },
+    fiveHour: null,
     sevenDay: null,
     sevenDaySonnet: null,
     sevenDayOpus: null,
@@ -112,7 +112,9 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
   const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
 
   return {
-    fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
+    // No five_hour in the payload is no five-hour window (S3c) — the API-key,
+    // Bedrock and Vertex case. It used to default to a 0 % window.
+    fiveHour,
     sevenDay: parseWindow('seven_day'),
     sevenDaySonnet: parseWindow('seven_day_sonnet'),
     sevenDayOpus: parseWindow('seven_day_opus'),
@@ -211,8 +213,8 @@ describe('parseResponse', () => {
     }
 
     const result = parseResponse(data)
-    expect(result.fiveHour.usedPercent).toBe(45.5)
-    expect(result.fiveHour.resetsAt).toBe('2025-01-15T20:00:00Z')
+    expect(result.fiveHour!.usedPercent).toBe(45.5)
+    expect(result.fiveHour!.resetsAt).toBe('2025-01-15T20:00:00Z')
     expect(result.sevenDay!.usedPercent).toBe(30.2)
     expect(result.sevenDaySonnet!.usedPercent).toBe(15.0)
     expect(result.sevenDaySonnet!.resetsAt).toBeNull()
@@ -220,10 +222,9 @@ describe('parseResponse', () => {
     expect(result.error).toBeNull()
   })
 
-  it('defaults fiveHour to 0% when missing', () => {
+  it('reports no five-hour window when the payload has none', () => {
     const result = parseResponse({})
-    expect(result.fiveHour.usedPercent).toBe(0)
-    expect(result.fiveHour.resetsAt).toBeNull()
+    expect(result.fiveHour).toBeNull()
   })
 
   it('returns null for missing optional windows', () => {
@@ -269,7 +270,7 @@ describe('parseResponse', () => {
       five_hour: { utilization: 'high' },
       seven_day: { utilization: null }
     })
-    expect(result.fiveHour.usedPercent).toBe(0) // fallback
+    expect(result.fiveHour).toBeNull() // not a 0 % window
     expect(result.sevenDay).toBeNull()
   })
 })
@@ -303,8 +304,8 @@ describe('parseResponse — structured get_usage shape', () => {
         seven_day_opus: null
       })
     )
-    expect(result.fiveHour.usedPercent).toBe(5)
-    expect(result.fiveHour.resetsAt).toBe('2026-06-22T11:59:59Z')
+    expect(result.fiveHour!.usedPercent).toBe(5)
+    expect(result.fiveHour!.resetsAt).toBe('2026-06-22T11:59:59Z')
     expect(result.sevenDay!.usedPercent).toBe(32)
     expect(result.sevenDaySonnet!.usedPercent).toBe(8)
     expect(result.sevenDayOpus).toBeNull()
@@ -328,17 +329,16 @@ describe('parseResponse — structured get_usage shape', () => {
     expect(result.extraUsage!.monthlyLimit).toBe(20000)
   })
 
-  it('defaults to 0% (without crashing) when rate_limits is null — API-key / 3P sessions', () => {
+  it('reports no windows at all when rate_limits is null — API-key / 3P sessions', () => {
     const result = parseResponse(structured(null))
-    expect(result.fiveHour.usedPercent).toBe(0)
-    expect(result.fiveHour.resetsAt).toBeNull()
+    expect(result.fiveHour).toBeNull()
     expect(result.sevenDay).toBeNull()
     expect(result.planName).toBe('team')
   })
 
   it('utilization stays 0-100 verbatim (no fraction conversion)', () => {
     const result = parseResponse(structured({ five_hour: { utilization: 50, resets_at: null } }))
-    expect(result.fiveHour.usedPercent).toBe(50) // not 5000, not 0.5
+    expect(result.fiveHour!.usedPercent).toBe(50) // not 5000, not 0.5
   })
 })
 
@@ -460,8 +460,8 @@ describe('updateFromRateLimitEvent', () => {
     })
 
     expect(result).not.toBeNull()
-    expect(result!.fiveHour.usedPercent).toBe(75)
-    expect(result!.fiveHour.resetsAt).toBeTruthy()
+    expect(result!.fiveHour!.usedPercent).toBe(75)
+    expect(result!.fiveHour!.resetsAt).toBeTruthy()
   })
 
   it('updates sevenDay window', () => {
@@ -501,7 +501,7 @@ describe('updateFromRateLimitEvent', () => {
       rateLimitType: 'five_hour'
     })
 
-    expect(result!.fiveHour.usedPercent).toBe(80)
+    expect(result!.fiveHour!.usedPercent).toBe(80)
     expect(result!.sevenDay!.usedPercent).toBe(20) // preserved
   })
 
@@ -512,7 +512,7 @@ describe('updateFromRateLimitEvent', () => {
       resetsAt: 1705350000
     })
 
-    expect(result!.fiveHour.resetsAt).toContain('2024-01-15')
+    expect(result!.fiveHour!.resetsAt).toContain('2024-01-15')
   })
 })
 
@@ -524,7 +524,7 @@ describe('updateFromHeaderUtilization', () => {
     })
 
     expect(result).not.toBeNull()
-    expect(result!.fiveHour.usedPercent).toBe(60)
+    expect(result!.fiveHour!.usedPercent).toBe(60)
     expect(result!.sevenDay!.usedPercent).toBe(30)
   })
 
@@ -539,7 +539,7 @@ describe('updateFromHeaderUtilization', () => {
     })
 
     expect(result).not.toBeNull()
-    expect(result!.fiveHour.usedPercent).toBe(50)
+    expect(result!.fiveHour!.usedPercent).toBe(50)
     expect(result!.sevenDay).toBeNull()
   })
 

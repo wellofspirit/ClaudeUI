@@ -1,0 +1,52 @@
+{
+  "epoch": 3,
+  "rev": 184,
+  "buckets": [
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "rev": 183,
+      "hourUtc": 1758409200000,
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "billingType": "subscription",
+      "engineId": "claude",
+      "vendorId": "anthropic",
+      "modelId": "claude-opus-5",
+      "origin": "session",
+      "inputTokens": 52100,
+      "outputTokens": 3980,
+      "cacheWriteTokens": 14200,
+      "cacheWrite1hTokens": 0,
+      "cacheReadTokens": 210400,
+      "apiCostUsd": 1.2094,
+      "billedCostUsd": 0,
+      "unbilledApiCostUsd": 1.2094,
+      "unknownApiCostCount": 0,
+      "unknownBilledCostCount": 4,
+      "requestCount": 12,
+      "source": "rollup"
+    },
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "rev": 184,
+      "hourUtc": 1758412800000,
+      "accountKey": "chatgpt:plus:user-7a41e9",
+      "billingType": "subscription",
+      "engineId": "codex",
+      "vendorId": "openai",
+      "modelId": "gpt-5.6-sol",
+      "origin": "dispatch",
+      "inputTokens": 9120,
+      "outputTokens": 1130,
+      "cacheWriteTokens": 0,
+      "cacheWrite1hTokens": 0,
+      "cacheReadTokens": 6400,
+      "apiCostUsd": 0.0611,
+      "billedCostUsd": 0,
+      "unbilledApiCostUsd": 0.0611,
+      "unknownApiCostCount": 0,
+      "unknownBilledCostCount": 2,
+      "requestCount": 3,
+      "source": "rollup"
+    }
+  ]
+}

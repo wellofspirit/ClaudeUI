@@ -956,6 +956,54 @@ describe('InputBox FC — rendered', () => {
     )
   })
 
+  // R1b — a reopened opencode/pi session whose model the discovered catalog
+  // does not (yet) hold used to read as the CONFIGURED default: a model the
+  // session never ran and the resume will not spawn.
+  const OPENCODE_CATALOG: ModelInfo[] = [
+    {
+      value: 'anthropic/claude-x',
+      displayName: 'Claude X',
+      description: '',
+      engineId: 'opencode',
+      vendorId: 'anthropic'
+    }
+  ]
+
+  it('an active opencode session names an absent model as unavailable, not as the default', () => {
+    useSessionStore.setState((state) => ({
+      opencodeDefaultModel: 'anthropic/claude-x',
+      opencodeDefaultModelConfigured: true,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'opencode',
+          selectedModel: 'alicloud/qwen-x'
+        }
+      },
+      availableModels: OPENCODE_CATALOG
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    expect(viewProps.selectedModel.shortName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).not.toBe('Claude X')
+  })
+
+  it('the welcome screen with the same catalog still names the configured default', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'anthropic/claude-x',
+      opencodeDefaultModelConfigured: true,
+      availableModels: OPENCODE_CATALOG
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    expect(viewProps.selectedModel.displayName).toBe('Claude X')
+  })
+
   it('hides engine selection as soon as backend initialization starts', () => {
     useSessionStore.setState((state) => ({
       sessions: {
@@ -1036,11 +1084,12 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.showEnginePicker).toBe(false)
   })
 
-  it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
+  it('opencode session with an unavailable model says so, and never names a Claude one', async () => {
     // Regression: when the session's selectedModel isn't in availableModels (e.g.
-    // its provider was disabled), the displayed model must fall back to a model of
-    // the SESSION's engine — never the global models[0] (a Claude entry), which
-    // is how an opencode session used to surface a Claude model in the picker.
+    // its provider was disabled), the pill must never fall through to the global
+    // models[0] (a Claude entry), which is how an opencode session used to
+    // surface a Claude model in the picker. On an ACTIVE session it now names no
+    // substitute at all (R1b) — the row says the catalog cannot place it.
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
@@ -1066,7 +1115,7 @@ describe('InputBox FC — rendered', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.value).toBe('qwen-sandbox/qwen3.6:27b')
+    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
@@ -2111,6 +2160,63 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     renderFC()
     expect(viewProps.showCostInStatusLine).toBe(false)
   })
+
+  // S1e — Codex's context window never reaches the model catalog: it arrives
+  // on a usage frame, and on a cold reopen from `session_meta` through the
+  // history status line. So the line is the meter's second source.
+  /** A session whose engine publishes no context window — Codex's shape. */
+  function setWindowlessCapabilities(): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          status: {
+            ...session.status,
+            capabilities: { ...session.status.capabilities, contextWindow: 0 }
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+  }
+
+  it('a status line that knows the window shows the meter even when capabilities say 0', () => {
+    setWindowlessCapabilities()
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          statusLine: {
+            totalCostUsd: 1.5,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 10,
+            totalOutputTokens: 2,
+            cachedTokens: 0,
+            totalTokens: 12,
+            contextWindow: { used: 4000, size: 272_000 },
+            usedPercentage: 1.47,
+            remainingPercentage: 98.53
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(true)
+  })
+
+  it('no status line and no catalog window leaves the meter off', () => {
+    setWindowlessCapabilities()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -2380,7 +2486,9 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
     expect(viewProps.adaptiveSupported).toBe(false)
     expect(viewProps.effortSupported).toBe(false)
     expect(viewProps.allowedEffortLevels).toEqual([])
-    expect(viewProps.selectedModel.displayName).toBe('Select a model')
+    // Nothing to place the session's model against, so the pill names the raw
+    // value rather than a substitute (R1b — the Codex arm's rule).
+    expect(viewProps.selectedModel.displayName).toBe('openai-codex/gpt-5.6-luna')
   })
 
   it('discovered pi model with supportsEffort: effort picker shows exactly low/medium/high, no adaptive', () => {
@@ -2415,40 +2523,59 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
     expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high'])
   })
 
-  it('unavailable selectedModel falls back to the configured piDefaultModel, not the first pi model', () => {
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        [PI_ROUTE]: {
-          ...state.sessions[PI_ROUTE],
-          selectedEngineId: 'pi',
-          selectedModel: 'openai-codex/stale-model' // not in availableModels below
-        }
-      },
+  const PI_CATALOG: ModelInfo[] = [
+    {
+      value: 'openai-codex/gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna (first in list)',
+      description: '',
+      engineId: 'pi',
+      vendorId: 'openai-codex'
+    },
+    {
+      value: 'anthropic/claude-sonnet-5',
+      displayName: 'Claude Sonnet 5 (configured default)',
+      description: '',
+      engineId: 'pi',
+      vendorId: 'anthropic'
+    }
+  ]
+
+  it('welcome screen: the configured piDefaultModel wins over the first pi model', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'pi',
       piDefaultModel: 'anthropic/claude-sonnet-5',
-      availableModels: [
-        {
-          value: 'openai-codex/gpt-5.6-luna',
-          displayName: 'GPT-5.6 Luna (first in list)',
-          description: '',
-          engineId: 'pi',
-          vendorId: 'openai-codex'
-        },
-        {
-          value: 'anthropic/claude-sonnet-5',
-          displayName: 'Claude Sonnet 5 (configured default)',
-          description: '',
-          engineId: 'pi',
-          vendorId: 'anthropic'
-        }
-      ]
-    }))
+      availableModels: PI_CATALOG
+    })
     mirrorStoreIntoReplica()
 
     renderFC()
 
     expect(viewProps.selectedModel.value).toBe('anthropic/claude-sonnet-5')
     expect(viewProps.selectedModel.displayName).toBe('Claude Sonnet 5 (configured default)')
+  })
+
+  it('an ACTIVE session with an unavailable model names neither default nor first (R1b)', () => {
+    // The default belongs to a session yet to be created. This one already has
+    // a model — substituting would name something it never ran.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai-codex/stale-model' // not in PI_CATALOG
+        }
+      },
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      availableModels: PI_CATALOG
+    }))
+    mirrorStoreIntoReplica()
+
+    renderFC()
+
+    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.engineId).toBe('pi')
   })
 
   it('claude session with empty catalog keeps the "Default" wording (unchanged behavior)', () => {

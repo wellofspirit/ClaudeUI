@@ -25,8 +25,11 @@ import {
   clearRemotePassword,
   setLastServeRecord,
   clearLastServeRecord,
+  insertUsageEvent,
+  usageEventsForCodexThread,
   MIGRATIONS,
   type Migration,
+  type UsageEventInsert,
   type Db
 } from '../../../core/services/db'
 import {
@@ -184,7 +187,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v16)', () => {
+  it('applies the real production migration set (v1–v25)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -202,7 +205,28 @@ describe('migration framework — user_version guard', () => {
       //      re-probing every session_meta id the native list omits
       // v17: codex_forks becomes a LINEAGE CACHE (roots too), so the delete
       //      plan is a cache read instead of a sweep
-      expect(userVersion(db)).toBe(17)
+      // v18: usage_event gains ADR-071's account, billing-type, origin and
+      //      two derived cost columns
+      // v19: the dispatched turns already on disk become usage_event rows
+      //      (origin 'dispatch'), so the ledger holds delegated work too
+      // v20: usage_bucket (hourly, UTC, kept forever) replaces daily_usage, and
+      //      dispatched_usage is dropped — the ledger is the only store
+      // v21: an account remembers the identity it was active under, and a window
+      //      sample names its account key and its window kind
+      // v22: usage_window — one row per limit window, with what the ledger saw
+      //      spent inside it
+      // v23: the identity columns are cleared (they came from the SHARED
+      //      ~/.claude.json), and `meta` arms the one-shot re-key
+      // v24: session_meta remembers a Codex thread's last context reading, the
+      //      one figure a cold status line cannot recompute
+      // v25: a limit window's LENGTH becomes a column, and the ChatGPT rows
+      //      that were kinded by position are dropped so they re-seed
+      // v26: the usage hub's client state, and the cached rows of the other
+      //      machines it syncs with (ADR-072)
+      // v27: remote_account — the hub's names for the account keys — and the
+      //      one-time cursor reset that re-reads the ledger under the
+      //      attribution rule (ADR-072 §2, amended)
+      expect(userVersion(db)).toBe(27)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -217,12 +241,20 @@ describe('migration framework — user_version guard', () => {
       // usage_window_sample must exist (Phase 7 v4 migration).
       const wsRows = db.prepare('SELECT * FROM usage_window_sample').all()
       expect(wsRows).toEqual([])
-      // daily_usage must exist (Phase 7 v5 migration — Full SQL).
-      const duRows = db.prepare('SELECT * FROM daily_usage').all()
-      expect(duRows).toEqual([])
-      // dispatched_usage must exist (ADR-033 M4-B v6 migration).
-      const dispatchedRows = db.prepare('SELECT * FROM dispatched_usage').all()
-      expect(dispatchedRows).toEqual([])
+      // usage_bucket must exist and be empty (ADR-071 v20 migration), with the
+      // revision counter beside it.
+      const bucketRows = db.prepare('SELECT * FROM usage_bucket').all()
+      expect(bucketRows).toEqual([])
+      expect(db.prepare('SELECT next_rev FROM usage_bucket_rev WHERE id = 1').get()).toEqual({
+        next_rev: 2
+      })
+      // The two tables v20 retired are gone — v5's daily_usage and v6's
+      // dispatched_usage (ADR-071 §1: the ledger is the only store).
+      for (const table of ['daily_usage', 'dispatched_usage']) {
+        expect(
+          db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+        ).toBeUndefined()
+      }
       // remote_config must exist (Phase 1 remote-auth v7 migration).
       const remoteRows = db.prepare('SELECT * FROM remote_config').all()
       expect(remoteRows).toEqual([])
@@ -283,7 +315,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(17)
+      expect(userVersion(db)).toBe(27)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -427,7 +459,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(17)
+      expect(userVersion(db)).toBe(27)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -798,6 +830,36 @@ describe('session_meta CRUD', () => {
     expect(() => deleteSessionMeta('never-existed')).not.toThrow()
   })
 
+  // v24 — the two context columns are MERGED, not replaced: only the metering
+  // path writes them, and every other writer (the sidebar's adoption pass, the
+  // renderer's config round-trip) must leave a session's reading alone.
+  it('a model-only write keeps the persisted Codex context reading', () => {
+    setSessionMeta('codex-thread', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+      contextUsed: 4000,
+      contextWindow: 272_000
+    })
+    setSessionMeta('codex-thread', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' }
+    })
+    expect(getSessionMeta('codex-thread')).toEqual({
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' },
+      contextUsed: 4000,
+      contextWindow: 272_000
+    })
+  })
+
+  it('a session that never metered carries neither context key', () => {
+    setSessionMeta('plain', { engineId: 'claude' })
+    const meta = getSessionMeta('plain')
+    expect(meta).toEqual({ engineId: 'claude' })
+    expect('contextUsed' in meta!).toBe(false)
+    expect('contextWindow' in meta!).toBe(false)
+  })
+
   it('allSessionMeta returns all entries', () => {
     setSessionMeta('s1', { engineId: 'claude' })
     setSessionMeta('s2', {
@@ -809,6 +871,72 @@ describe('session_meta CRUD', () => {
     expect(all['s1'].engineId).toBe('claude')
     expect(all['s2'].engineId).toBe('opencode')
     expect(all['s2'].model?.modelId).toBe('gpt-4o')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// usageEventsForCodexThread — the cold status line's ledger read (S1e)
+// ---------------------------------------------------------------------------
+
+describe('usageEventsForCodexThread', () => {
+  function codexRow(overrides: Partial<UsageEventInsert>): UsageEventInsert {
+    return {
+      id: 'evt_' + Math.random().toString(36).slice(2),
+      ts: 1,
+      engineId: 'codex',
+      vendorId: 'openai',
+      accountId: null,
+      accountUuid: null,
+      modelId: 'gpt-5.6-luna',
+      inputTokens: 10,
+      outputTokens: 1,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0,
+      equivCostUsd: null,
+      engineCostUsd: null,
+      sessionId: 'root',
+      messageId: 'msg_' + Math.random().toString(36).slice(2),
+      source: 'live',
+      origin: 'session',
+      ...overrides
+    }
+  }
+
+  it('joins a root to its children by parent_routing_id and excludes strangers', () => {
+    // A child files its row under its OWN thread id, so only the parent link
+    // can find it from the root.
+    insertUsageEvent(codexRow({ ts: 2, messageId: 'own' }))
+    insertUsageEvent(
+      codexRow({
+        ts: 1,
+        messageId: 'child',
+        sessionId: 'kid',
+        origin: 'child',
+        parentRoutingId: 'root'
+      })
+    )
+    // Another root's child, another root's own turn, and a non-Codex row.
+    insertUsageEvent(
+      codexRow({
+        messageId: 'other-child',
+        sessionId: 'kid2',
+        origin: 'child',
+        parentRoutingId: 'other'
+      })
+    )
+    insertUsageEvent(codexRow({ messageId: 'other-own', sessionId: 'other' }))
+    insertUsageEvent(codexRow({ messageId: 'not-codex', engineId: 'opencode' }))
+
+    // Ascending by ts, so a caller walking the rows sees the session's order.
+    expect(usageEventsForCodexThread('root').map((row) => row.messageId)).toEqual(['child', 'own'])
+  })
+
+  it('returns a dispatch row filed under this thread — the caller decides', () => {
+    insertUsageEvent(
+      codexRow({ messageId: 'target', origin: 'dispatch', parentRoutingId: 'some-claude-session' })
+    )
+    expect(usageEventsForCodexThread('root').map((row) => row.origin)).toEqual(['dispatch'])
   })
 })
 
@@ -850,6 +978,20 @@ describe('renameSessionMeta', () => {
     const meta = getSessionMeta('canonical-session-id')
     expect(meta?.engineId).toBe('claude')
     expect(meta?.model?.modelId).toBe('claude-opus-4-8')
+  })
+
+  it('carries the context reading across a rekey', () => {
+    setSessionMeta('tmp-codex', {
+      engineId: 'codex',
+      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+      contextUsed: 1234,
+      contextWindow: 272_000
+    })
+    renameSessionMeta('tmp-codex', 'thread-id')
+    expect(getSessionMeta('thread-id')).toMatchObject({
+      contextUsed: 1234,
+      contextWindow: 272_000
+    })
   })
 
   it('falls back to default claude entry when oldId has no entry', () => {

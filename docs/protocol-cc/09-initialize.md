@@ -177,6 +177,7 @@ Always exactly once, by us, immediately after spawn and before (or concurrent wi
   `claude-opus-5[1m]` **and carry an identical `description`**, so a picker that labels rows from
   the description renders them as two indistinguishable entries (ClaudeUI collapses them on
   `resolvedModel` — `dedupeResolvedModels`).
+
 - **`output_style`** — active style. Affects formatting / verbosity.
 - **`available_output_styles`** — enumerated styles. Can be changed via `apply_flag_settings` control subtype.
 - **`account`** — authenticated principal. `apiProvider` discriminates API vendor.

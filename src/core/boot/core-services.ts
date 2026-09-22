@@ -54,10 +54,13 @@ import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
+import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
+import { usageFetcher } from '../services/usage-fetcher'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -81,6 +84,12 @@ export interface CoreServices {
   vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
+  /**
+   * The usage hub client (ADR-072 §7). Handed back so each host can stop it on
+   * the way out: it holds a ten-minute interval and a retry timer, and a
+   * half-finished push at exit is a push the cursor never advanced over.
+   */
+  usageHubClient: typeof usageHubClient
 }
 
 export interface CoreServicesOptions {
@@ -131,6 +140,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   const { remoteAccessDisabled, authDeps, notifier, autostart, hostActor, afterSessionGraph } =
     options
 
+  // Prices BEFORE sessions: `equivalentCostUsd` must resolve non-built-in
+  // models from the first recalc, on every host. No network here: this reads
+  // the persisted ~/.claude/ui/opencode-prices.json if present. The daily top-up
+  // from models.dev (ADR-071 §5) runs in the background, never throws, and
+  // leaves the loaded prices in place if the fetch fails. This used to live in
+  // the desktop's main only, so the headless server priced nothing it had not
+  // built in (metering S2d).
+  loadPersistedPrices()
+  void refreshPricesIfStale()
+
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
   const sessionManager = registerSessionIpc(authDeps)
@@ -158,6 +177,27 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
   afterSessionGraph?.(sessionManager)
+
+  // THE USAGE POLL STARTS HERE, AND NOT ONE LINE EARLIER.
+  //
+  // It used to run inside `registerSessionIpc`, which is ~25 lines above — and
+  // the hook that just returned is where the desktop runs `accountManager
+  // .init()`, hence `applyActive()`, hence `setSecurestorageEnv({ dir })`. So
+  // the poll was starting BEFORE the app knew which credential directory was
+  // active, and two things followed (S2e round 2):
+  //
+  //  - the first `trackActiveAccount()` saw no dir, took the single-account
+  //    path, and settled the one-shot identity repair as done before it ran;
+  //  - the account-switch listener `startPolling` subscribes was already
+  //    attached when the boot-time apply fired, so every launch spent a second
+  //    pointless `fetch()` on a "switch" that was just the app starting.
+  //
+  // The contract, for anything added here later: nothing may resolve an account
+  // IDENTITY, or subscribe to the switch that changes it, before this line.
+  // `setIntervalSecs` stays in `registerSessionIpc` — it only configures the
+  // timer and is where the settings are read. A host that wires no hook (the
+  // headless `claudeui-server`) reaches this line just the same.
+  usageFetcher.startPolling()
 
   // ACTIVE-account switch -> the Codex sessions that follow it (ADR-069 §4).
   // Here rather than in `register-auth-providers.ts` (which wires the two engine
@@ -197,6 +237,21 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
       ])
   })
+
+  // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
+  //
+  // Its first pass pushes limit READINGS, and a reading is filed under the
+  // account key `credentialSync` resolves — so starting it above this line would
+  // let the first push go out under whatever identity the vault had not yet
+  // reconciled. It is also the last of the three background loops to start, for
+  // the same reason `usageFetcher.startPolling()` is where it is: nothing here
+  // may resolve an account identity before that line.
+  //
+  // `start()` is a no-op when no hub is configured, which is every machine until
+  // someone pastes a URL and a token into Settings. It reads the `enabled` flag
+  // out of the database itself rather than taking it as an option, so the one
+  // answer serves both hosts and a `usage-hub:configure` can re-arm it in place.
+  usageHubClient.start()
 
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
   // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either
@@ -346,6 +401,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     tailscaleManager,
     automationManager,
     vscodeWebService,
-    hostAnchor
+    hostAnchor,
+    usageHubClient
   }
 }

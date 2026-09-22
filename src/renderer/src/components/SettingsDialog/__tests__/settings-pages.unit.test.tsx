@@ -111,7 +111,8 @@ describe('PAGES structure', () => {
       ],
       dispatch: ['concurrency', 'into', 'limits'],
       mockups: ['network'],
-      remote: ['follow', 'server', 'access', 'security', 'links'],
+      // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
+      remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
       claude: ['sandbox', 'proxy'],
       opencode: [
         'session',
@@ -388,7 +389,8 @@ describe('inventory guard', () => {
       'sandboxCrossLink',
       'otherEnginePermissions',
       'versions',
-      'codexNativeAccount'
+      'codexNativeAccount',
+      'usageHub'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())

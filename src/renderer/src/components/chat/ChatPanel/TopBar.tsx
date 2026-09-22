@@ -32,6 +32,7 @@ import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
 import { COST_UNKNOWN, formatCostOrUnknown, formatCostUsd } from '../../../utils/cost'
 import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
+import { displayCwd } from '../../../../../shared/display-path'
 import {
   ideUnavailableReason,
   isIdeUnavailableError,
@@ -211,6 +212,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const billingType = useActiveSession((s) => s.status.account?.billingType)
   const canUseMcp = useActiveSession((s) => s.status.capabilities.canUseMcp)
   const capSkills = useActiveSession((s) => s.status.capabilities.skills)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -601,6 +603,21 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the tooltip can say so instead of printing a fabricated $0.00.
   const cost: number | null = statusLine ? statusLine.totalCostUsd : fallbackCost
   const costUnknown = cost === null
+  // ADR-071 §2: the engines that separate the two costs send what was BILLED
+  // beside the headline. Undefined means the engine does not make the
+  // distinction (Claude, Codex) — then the tooltip says nothing extra.
+  const billedCostUsd = statusLine?.billedCostUsd
+  // A ZERO bill is said in words on the label, never as a figure: `$0.0000` in
+  // a row of its own read as a tiny charge, and as one more model line. The
+  // Billed row is for the one case words cannot carry: a real amount that is
+  // only part of the headline (a session that mixed a plan with an API key).
+  const showBilledCost =
+    typeof billedCostUsd === 'number' && billedCostUsd > 0 && billedCostUsd !== cost
+  const costCovered = billedCostUsd === 0 && cost !== null && cost > 0
+  // Covered claims a figure was covered; with an unknown headline there is no
+  // figure, but that nothing was billed is still known and worth saying.
+  const nothingBilled = billedCostUsd === 0 && cost === null
+  const unpricedMessages = statusLine?.unknownCostMessages ?? 0
   const totalDurationMs = statusLine?.totalDurationMs ?? 0
   const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
   const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
@@ -624,9 +641,17 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the dispatched spend is real money and the row says the rest is unknown,
   // rather than silently reporting the dispatched part as the whole total.
   const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // A known zero on a FREE vendor is an answer, not an absence: without this
+  // the tile vanishes and a free session looks exactly like one nothing is
+  // known about. The billing type comes off the session, never from the
+  // figure — a known zero on any other billing type stays hidden, because an
+  // empty session also totals a known 0 (`totalCosts` docblock) and must not
+  // grow a `$0.00` tile before its first turn.
+  const costFree = billingType === 'free' && cost === 0
   // Show the Cost tile when there is something to say: a real figure, a
-  // dispatched figure, or an explicit "we could not price this".
-  const showCost = cost === null || cost > 0 || hasDispatchedCost
+  // dispatched figure, a free vendor's zero, or an explicit "we could not
+  // price this".
+  const showCost = cost === null || cost > 0 || hasDispatchedCost || costFree
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -849,14 +874,14 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                       <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
                         {cwd && (
                           <button
-                            onClick={() => handleCopy(cwd, 'cwd')}
+                            onClick={() => handleCopy(displayCwd(cwd), 'cwd')}
                             className="w-full text-left cursor-default group/row"
                           >
                             <div className="text-[10px] text-text-muted mb-0.5">
                               Working Directory
                             </div>
                             <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                              {copiedField === 'cwd' ? 'Copied!' : cwd}
+                              {copiedField === 'cwd' ? 'Copied!' : displayCwd(cwd)}
                             </div>
                           </button>
                         )}
@@ -875,13 +900,45 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                           <div className="flex gap-4">
                             {showCost && (
                               <div>
-                                <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
+                                <div className="text-[10px] text-text-muted mb-0.5">
+                                  Cost
+                                  {costCovered && (
+                                    <span data-testid="TopBar.costCovered">
+                                      {' '}
+                                      · covered by subscription
+                                    </span>
+                                  )}
+                                  {nothingBilled && (
+                                    <span data-testid="TopBar.costNothingBilled">
+                                      {' '}
+                                      · nothing billed
+                                    </span>
+                                  )}
+                                  {costFree && <span data-testid="TopBar.costFree"> · free</span>}
+                                  {unpricedMessages > 0 && (
+                                    <span data-testid="TopBar.costUnpriced">
+                                      {' '}
+                                      · {unpricedMessages} unpriced
+                                    </span>
+                                  )}
+                                </div>
                                 <div
                                   data-testid="TopBar.cost"
                                   className="text-[11px] text-text-secondary font-mono"
                                 >
                                   {formatCostOrUnknown(cost)}
                                 </div>
+                                {showBilledCost && (
+                                  <div
+                                    data-testid="TopBar.billedCost"
+                                    className="mt-0.5 pb-0.5 mb-0.5 flex items-center justify-between gap-3 border-b border-border/50"
+                                  >
+                                    <span className="text-[10px] text-text-muted">Billed</span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {formatCostOrUnknown(billedCostUsd)}
+                                    </span>
+                                  </div>
+                                )}
                                 {showCostBreakdown && (
                                   <div
                                     data-testid="TopBar.costBreakdown"

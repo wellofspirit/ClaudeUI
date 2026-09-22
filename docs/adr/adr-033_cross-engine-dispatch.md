@@ -3,6 +3,7 @@
 **Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034; M1's
 synchronous opencode turn transport superseded by the 2026-09-01 amendment below; that amendment's
 per-direction liveness split superseded by the 2026-09-18 amendment below)
+**Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §1–§2 moves dispatched usage into `usage_event` and gates `dispatch.maxCostUsd` on the API-equivalent cost for every target.
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 

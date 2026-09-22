@@ -11,8 +11,12 @@
 
 import { v4 as uuid } from 'uuid'
 import { insertUsageEvent } from './db'
-import type { UsageEventRow } from './db'
+import type { UsageEventInsert } from './db'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { resolveCosts } from '../../shared/cost-rule'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import type { ClaudeAccountAttribution } from './usage-windows'
+import type { BillingType, UsageOrigin } from '../../shared/types'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -33,6 +37,13 @@ export interface UsageTurnTokens {
 
 /** One completed turn handed to the recorder. */
 export interface UsageTurnEvent {
+  /**
+   * When the turn was recorded. Defaults to now, which is what a LIVE caller
+   * means. A caller whose own clock already stopped on the turn (the
+   * dispatcher, which times the target's turn) passes that instant instead, so
+   * the row says when the turn happened.
+   */
+  ts?: number
   engineId: string
   vendorId: string
   /** Local account identifier (e.g. "default" or a UUID). Nullable. */
@@ -47,6 +58,249 @@ export interface UsageTurnEvent {
   /** Stable per-message id from the engine — the dedup key. */
   messageId: string
   source: 'live' | 'backfill'
+  // -- ADR-071 attribution. All REQUIRED: a caller that cannot establish one
+  // of these says so with `UNKNOWN_ACCOUNT_KEY` / `'unknown'` / `null`, which
+  // is a statement. An optional field would let a new engine's recorder write
+  // unattributed rows by forgetting, which is not.
+  /** The account the turn ran under (ADR-071 §3), from the engine's auth provider. */
+  accountKey: string
+  /** Display label for that account. Null when there is nothing to show. */
+  accountLabel: string | null
+  /** How the vendor was billed WHEN THE TURN RAN — it can change between turns. */
+  billingType: BillingType
+  /** Session's own turn, a subagent's, or dispatched work. */
+  origin: UsageOrigin
+  /** The spawning or dispatching session, for 'child' and 'dispatch' rows; else null. */
+  parentRoutingId: string | null
+  /** See {@link CostInputsForRow.engineCostIsEquivalent}. */
+  engineCostIsEquivalent: boolean
+}
+
+// ---------------------------------------------------------------------------
+// The two derived costs (ADR-071 §1) — one implementation, two callers
+// ---------------------------------------------------------------------------
+
+/** What the derived costs are computed from, whoever is writing the row. */
+export interface CostInputsForRow {
+  billingType: BillingType
+  /** List-price figure for the turn's tokens, or null when the model is unpriced. */
+  equivCostUsd: number | null
+  /** The engine's own figure for the turn, or null when it reported none. */
+  engineCostUsd: number | null
+  /**
+   * True when the engine's own figure is an API-EQUIVALENT rather than money
+   * charged. A flag rather than an engine id because the property belongs to
+   * the FIGURE, not to the engine that produced it.
+   *
+   * cli.js reports an equivalent whatever the plan (ADR-034), and so does pi
+   * (its catalog prices long-context tiers our table does not — S1b). A row
+   * from either that took `engine_cost_usd` as a bill would record money that
+   * never left a wallet. opencode reports what it actually charged, so its
+   * figure is a bill and this is false.
+   */
+  engineCostIsEquivalent: boolean
+}
+
+/**
+ * The row's `api_cost_usd` and `billed_cost_usd`. Every writer — live recorder
+ * and every backfill path — goes through here, so the rule exists once.
+ *
+ * When the engine's figure is a CHARGE, cost-rule.ts owns the whole decision.
+ * When it is another EQUIVALENT, there is no billed figure on the row at all:
+ * the better of the two equivalents is the API cost, and the billing type
+ * alone says what was paid.
+ */
+export function rowCosts(input: CostInputsForRow): {
+  apiCostUsd: number | null
+  billedCostUsd: number | null
+} {
+  if (!input.engineCostIsEquivalent) {
+    const costs = resolveCosts({
+      billingType: input.billingType,
+      equivCostUsd: input.equivCostUsd,
+      engineCostUsd: input.engineCostUsd
+    })
+    return { apiCostUsd: costs.apiCostUsd, billedCostUsd: costs.billedCostUsd }
+  }
+  return equivalentOnlyCosts(
+    input.billingType,
+    preciseEquivalent(input.equivCostUsd, input.engineCostUsd)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Backfill attribution
+// ---------------------------------------------------------------------------
+
+/** Exactly the ADR-071 columns a backfilled row has to fill. */
+export type BackfillAttribution = Required<
+  Pick<
+    UsageEventInsert,
+    | 'accountKey'
+    | 'accountLabel'
+    | 'billingType'
+    | 'origin'
+    | 'parentRoutingId'
+    | 'apiCostUsd'
+    | 'billedCostUsd'
+  >
+>
+
+/**
+ * The ADR-071 attribution for a row REBUILT from a transcript or an engine's
+ * own store, rather than observed as it happened. Every backfill path attaches
+ * this, so the two Claude builders and the opencode one cannot drift apart on
+ * what a row means.
+ *
+ * `origin` is always `'session'`: no backfill source distinguishes a subagent's
+ * turn from the session's own — a Claude JSONL entry and an opencode message
+ * look the same either way — and guessing would be worse than saying nothing.
+ */
+export function backfillAttribution(
+  input: CostInputsForRow & {
+    accountKey?: string
+    accountLabel?: string | null
+  }
+): BackfillAttribution {
+  const costs = rowCosts(input)
+  return {
+    accountKey: input.accountKey ?? UNKNOWN_ACCOUNT_KEY,
+    accountLabel: input.accountLabel ?? null,
+    billingType: input.billingType,
+    origin: 'session',
+    parentRoutingId: null,
+    apiCostUsd: costs.apiCostUsd,
+    billedCostUsd: costs.billedCostUsd
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The Claude transcript row — one builder, two callers
+// ---------------------------------------------------------------------------
+
+/**
+ * The transcript fields a Claude backfill row is built from — structurally
+ * block-usage's `ParsedEntry`, restated here so this module does not import
+ * from a module that imports it.
+ */
+export interface ClaudeTranscriptEntry {
+  timestamp: number
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  costUsd: number
+  messageId: string
+  sessionId: string | null
+}
+
+/**
+ * One Claude JSONL entry as a `usage_event` row.
+ *
+ * TWO paths reach this: the reconciler's Claude builder and block-usage's own
+ * inline upsert. They race for the same `message_id`, so whichever wins the
+ * dedup has to store the same thing — which is only guaranteed if there is one
+ * builder, not two that look alike. The one difference the callers keep is the
+ * session id: the reconciler has none to give (it reads entries that were
+ * already flattened), block-usage derives one from the file path.
+ *
+ * `engineCostIsEquivalent` is true: cli.js reports a list price, never a bill.
+ */
+export function claudeTranscriptRow(params: {
+  entry: ClaudeTranscriptEntry
+  account: ClaudeAccountAttribution
+  sessionId: string | null
+}): UsageEventInsert {
+  const { entry, account, sessionId } = params
+  const equiv = equivalentCostUsd('anthropic', entry.model, {
+    inputTokens: entry.inputTokens,
+    outputTokens: entry.outputTokens,
+    // The JSONL ParsedEntry does not split the 1h cache TTL out separately
+    // (block-usage already priced it into costUsd via calculateCostFromTokens),
+    // so for equiv_cost every cache write counts as 5m and engine_cost carries
+    // block-usage's exact figure.
+    cacheWriteTokens: entry.cacheCreationTokens,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: entry.cacheReadTokens
+  })
+  return {
+    id: uuid(),
+    ts: entry.timestamp,
+    engineId: 'claude',
+    vendorId: 'anthropic',
+    accountId: null,
+    accountUuid: account.accountUuid,
+    modelId: entry.model,
+    inputTokens: entry.inputTokens,
+    outputTokens: entry.outputTokens,
+    cacheWriteTokens: entry.cacheCreationTokens,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: entry.cacheReadTokens,
+    // equiv_cost from the pricing table when priced; otherwise fall back to
+    // block-usage's calculateCostFromTokens value (entry.costUsd).
+    equivCostUsd: equiv ?? entry.costUsd,
+    engineCostUsd: entry.costUsd,
+    sessionId,
+    messageId: entry.messageId,
+    source: 'backfill',
+    // A transcript names no account of its own, so the attribution is ADR-011's
+    // time-based one, resolved from the account log (S2a2). An entry older than
+    // the log's first record, or one whose record predates ADR-071 §3, stays in
+    // the `unknown` bucket rather than guessing.
+    ...backfillAttribution({
+      accountKey: account.accountKey,
+      accountLabel: account.accountLabel,
+      billingType: account.billingType,
+      equivCostUsd: equiv ?? entry.costUsd,
+      engineCostUsd: entry.costUsd,
+      engineCostIsEquivalent: true
+    })
+  }
+}
+
+/**
+ * The better of two list-price figures for the same turn.
+ *
+ * On a Claude row both are equivalents and they disagree: `engine_cost_usd` is
+ * block-usage's own calculation, which prices the 1h cache tier, and
+ * `equiv_cost_usd` is the table figure, which treats every cache write as 5m.
+ * Prefer the precise one when there is one — the same choice
+ * `selectRowCostUsd` makes today, so a row's API cost equals what the
+ * dashboard already shows for it.
+ */
+function preciseEquivalent(
+  equivCostUsd: number | null,
+  engineCostUsd: number | null
+): number | null {
+  // resolveCosts under `unknown` already normalizes both inputs (NaN and
+  // ±Infinity become null) and returns the engine figure ONLY when it is
+  // positive — exactly the test above. Reusing it keeps that guard in one file.
+  const normalized = resolveCosts({ billingType: 'unknown', equivCostUsd, engineCostUsd })
+  return normalized.billedCostUsd ?? normalized.apiCostUsd
+}
+
+/**
+ * The two costs when NOTHING on the row is a record of money charged.
+ *
+ * There is no billed figure to read, so the billing type alone decides: an API
+ * key was charged list price, a subscription and a free tier were charged
+ * nothing, and an unknown plan is unknown — null, never a zero that a total
+ * would silently absorb (ADR-030).
+ */
+function equivalentOnlyCosts(
+  billingType: BillingType,
+  apiCostUsd: number | null
+): { apiCostUsd: number | null; billedCostUsd: number | null } {
+  switch (billingType) {
+    case 'apiKey':
+      return { apiCostUsd, billedCostUsd: apiCostUsd }
+    case 'subscription':
+    case 'free':
+      return { apiCostUsd, billedCostUsd: 0 }
+    default:
+      return { apiCostUsd, billedCostUsd: null }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,9 +322,18 @@ export function recordUsageEvent(event: UsageTurnEvent): void {
       cacheReadTokens: event.tokens.cacheRead
     })
 
-    const row: UsageEventRow = {
+    // The two derived costs, resolved ONCE here from the raw inputs below,
+    // through the same function every backfill path uses (ADR-071 §1).
+    const costs = rowCosts({
+      billingType: event.billingType,
+      equivCostUsd: equivCost,
+      engineCostUsd: event.engineCostUsd,
+      engineCostIsEquivalent: event.engineCostIsEquivalent
+    })
+
+    const row: UsageEventInsert = {
       id: uuid(),
-      ts: Date.now(),
+      ts: event.ts ?? Date.now(),
       engineId: event.engineId,
       vendorId: event.vendorId,
       accountId: event.accountId,
@@ -85,7 +348,16 @@ export function recordUsageEvent(event: UsageTurnEvent): void {
       engineCostUsd: event.engineCostUsd,
       sessionId: event.sessionId,
       messageId: event.messageId,
-      source: event.source
+      source: event.source,
+      // All seven, always — the optional half of UsageEventInsert exists for
+      // old test fixtures, not for a caller here to skip attribution.
+      accountKey: event.accountKey,
+      accountLabel: event.accountLabel,
+      billingType: event.billingType,
+      origin: event.origin,
+      parentRoutingId: event.parentRoutingId,
+      apiCostUsd: costs.apiCostUsd,
+      billedCostUsd: costs.billedCostUsd
     }
 
     insertUsageEvent(row)

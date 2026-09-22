@@ -1,22 +1,29 @@
 /**
  * @vitest-environment node
  *
- * Tests for the ADR-033 M4-B dispatched_usage migration (v6) + repo:
- *   - migration creates the table (queryable, empty)
- *   - insertDispatchedUsage round-trip (getDispatchedUsageSince)
- *   - dispatchedUsageSummary aggregation by (targetEngine, targetModel)
- *   - NULL total_tokens/cost_usd (best-effort captures) coalesce to 0 in the summary
+ * The dispatched-turn readers, on ADR-071 §1's ledger.
+ *
+ * `dispatched_usage` is gone (migration v20): a dispatched turn is a
+ * `usage_event` row with `origin = 'dispatch'` and the dispatching session in
+ * `parent_routing_id`. These are the same behaviours the old table's tests
+ * pinned, re-stated against the ledger:
+ *   - dispatchedCostsByRouting is scoped to one dispatching session, and an
+ *     UNPRICED turn adds nothing to its total
+ *   - renameUsageEventParent moves a session's rows on rekey
+ *
+ * The all-sessions `dispatchedUsageSummary` rollup went with `usage:fetch-dispatched`
+ * in S2f: the dashboard reads the ledger through `usage:dashboard` now, and the
+ * Delegated section it backed no longer exists.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import {
   runMigrations,
   closeDb,
-  insertDispatchedUsage,
-  getDispatchedUsageSince,
-  dispatchedUsageSummary,
+  insertUsageEvent,
   dispatchedCostsByRouting,
-  renameDispatchedUsage,
+  renameUsageEventParent,
+  type UsageEventInsert,
   type Db
 } from '../../../core/services/db'
 
@@ -27,293 +34,57 @@ function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
 
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
+let nextId = 0
+
+/**
+ * One dispatched turn as `safeRecordUsage` writes it: `origin 'dispatch'`, the
+ * dispatching session in `parentRoutingId`, and the target's vendor and model
+ * split apart (the reader re-encodes them).
+ */
+function dispatchRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
+  nextId += 1
+  return {
+    id: `row-${nextId}`,
+    ts: 1000,
+    engineId: 'opencode',
+    vendorId: 'openai',
+    accountId: null,
+    accountUuid: null,
+    modelId: 'gpt-5',
+    inputTokens: 300,
+    outputTokens: 100,
+    cacheWriteTokens: 50,
+    cacheWrite1hTokens: 50,
+    cacheReadTokens: 50,
+    equivCostUsd: 0.1,
+    engineCostUsd: 0.1,
+    sessionId: 'oc-sess-1',
+    messageId: `dispatch:toolu_${nextId}:1000:${nextId}`,
+    source: 'live',
+    accountKey: 'openai:key:abc',
+    accountLabel: 'openai key …abcd',
+    billingType: 'apiKey',
+    origin: 'dispatch',
+    parentRoutingId: 'routing-A',
+    apiCostUsd: 0.1,
+    billedCostUsd: 0.1,
+    ...overrides
+  }
 }
 
-describe('DB migration — v6 dispatched_usage', () => {
-  it('applies all migrations and reaches the latest user_version', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v17 (codex_forks
-      // generalised into the Codex lineage cache ADR-066 plans deletes from).
-      expect(userVersion(db)).toBe(17)
-    } finally {
-      db.close()
-    }
-  })
-
-  it('dispatched_usage table exists and is empty after migration', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      const rows = db.prepare('SELECT * FROM dispatched_usage').all()
-      expect(rows).toEqual([])
-    } finally {
-      db.close()
-    }
-  })
-})
-
-describe('insertDispatchedUsage / getDispatchedUsageSince', () => {
-  it('round-trips a fully-populated row', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'routing-1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: 'oc-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 500,
-      costUsd: 0.01,
-      durationMs: 2000
-    })
-
-    const rows = getDispatchedUsageSince(0)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({
-      ts: 1000,
-      fromRoutingId: 'routing-1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: 'oc-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 500,
-      costUsd: 0.01,
-      durationMs: 2000
-    })
-    expect(rows[0].id).toEqual(expect.any(Number))
-  })
-
-  it('round-trips a row with best-effort (null) usage fields', () => {
-    insertDispatchedUsage({
-      ts: 2000,
-      fromRoutingId: 'routing-2',
-      fromEngine: 'opencode',
-      targetEngine: 'claude',
-      targetModel: 'haiku',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: null,
-      costUsd: null,
-      durationMs: null
-    })
-
-    const rows = getDispatchedUsageSince(0)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].totalTokens).toBeNull()
-    expect(rows[0].costUsd).toBeNull()
-    expect(rows[0].durationMs).toBeNull()
-    expect(rows[0].targetSessionId).toBeNull()
-    expect(rows[0].toolUseId).toBeNull()
-  })
-
-  it('getDispatchedUsageSince filters by ts and orders newest first', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 10,
-      costUsd: 0.001,
-      durationMs: 100
-    })
-    insertDispatchedUsage({
-      ts: 3000,
-      fromRoutingId: 'r2',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 20,
-      costUsd: 0.002,
-      durationMs: 200
-    })
-
-    expect(getDispatchedUsageSince(0).map((r) => r.fromRoutingId)).toEqual(['r2', 'r1'])
-    expect(getDispatchedUsageSince(2000).map((r) => r.fromRoutingId)).toEqual(['r2'])
-  })
-})
-
-describe('dispatchedUsageSummary', () => {
-  it('aggregates dispatches/tokens/cost per (targetEngine, targetModel)', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.01,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 1500,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 200,
-      costUsd: 0.02,
-      durationMs: 700
-    })
-    insertDispatchedUsage({
-      ts: 2000,
-      fromRoutingId: 'r2',
-      fromEngine: 'opencode',
-      targetEngine: 'claude',
-      targetModel: 'haiku',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 50,
-      costUsd: 0.005,
-      durationMs: 300
-    })
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary).toHaveLength(2)
-
-    const gpt5 = summary.find((s) => s.targetModel === 'openai/gpt-5')
-    expect(gpt5).toMatchObject({
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      dispatches: 2,
-      totalTokens: 300
-    })
-    expect(gpt5?.costUsd).toBeCloseTo(0.03, 6)
-
-    const haiku = summary.find((s) => s.targetModel === 'haiku')
-    expect(haiku).toMatchObject({
-      targetEngine: 'claude',
-      targetModel: 'haiku',
-      dispatches: 1,
-      totalTokens: 50
-    })
-    expect(haiku?.costUsd).toBeCloseTo(0.005, 6)
-  })
-
-  it('NULL total_tokens/cost_usd coalesce to 0 — one unknown-usage row never poisons the aggregate', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.01,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 1500,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: null,
-      costUsd: null,
-      durationMs: null
-    })
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary).toHaveLength(1)
-    expect(summary[0].dispatches).toBe(2)
-    expect(summary[0].totalTokens).toBe(100)
-    expect(summary[0].costUsd).toBeCloseTo(0.01, 6)
-  })
-
-  it('respects sinceTs, excluding rows before the cutoff', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.01,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 5000,
-      fromRoutingId: 'r1',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'm1',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.01,
-      durationMs: 500
-    })
-
-    expect(dispatchedUsageSummary(4000)[0].dispatches).toBe(1)
-    expect(dispatchedUsageSummary(0)[0].dispatches).toBe(2)
-  })
-
-  it('returns an empty array when there are no rows', () => {
-    expect(dispatchedUsageSummary(0)).toEqual([])
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Slice C — dispatchedCostsByRouting / renameDispatchedUsage
-// ---------------------------------------------------------------------------
+/** A session's own turn — never delegated work, whatever else it looks like. */
+function sessionRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
+  return dispatchRow({ origin: 'session', parentRoutingId: null, ...overrides })
+}
 
 describe('dispatchedCostsByRouting', () => {
   it('aggregates cost per (targetEngine, targetModel) for ONE dispatching session', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'routing-A',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.1,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 1500,
-      fromRoutingId: 'routing-A',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.05,
-      durationMs: 500
-    })
+    insertUsageEvent(dispatchRow({ apiCostUsd: 0.1, billedCostUsd: 0.1 }))
+    insertUsageEvent(dispatchRow({ ts: 1500, apiCostUsd: 0.05, billedCostUsd: 0.05 }))
     // A different dispatching session — must NOT be included.
-    insertDispatchedUsage({
-      ts: 1600,
-      fromRoutingId: 'routing-B',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 999,
-      costUsd: 9.99,
-      durationMs: 500
-    })
+    insertUsageEvent(
+      dispatchRow({ parentRoutingId: 'routing-B', apiCostUsd: 9.99, billedCostUsd: 9.99 })
+    )
 
     const rows = dispatchedCostsByRouting('routing-A')
     expect(rows).toHaveLength(1)
@@ -321,63 +92,32 @@ describe('dispatchedCostsByRouting', () => {
     expect(rows[0].costUsd).toBeCloseTo(0.15, 10)
   })
 
-  it('excludes NULL-cost rows (a timed-out/errored turn recorded no real spend)', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'routing-C',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.2,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 2000,
-      fromRoutingId: 'routing-C',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: null,
-      costUsd: null,
-      durationMs: null
-    })
+  it('excludes an unpriced turn (a timed-out turn recorded no resolvable spend)', () => {
+    insertUsageEvent(dispatchRow({ apiCostUsd: 0.2, billedCostUsd: 0.2 }))
+    insertUsageEvent(
+      dispatchRow({ ts: 2000, apiCostUsd: null, billedCostUsd: null, billingType: 'unknown' })
+    )
 
-    const rows = dispatchedCostsByRouting('routing-C')
-    expect(rows).toEqual([{ targetEngine: 'opencode', targetModel: 'openai/gpt-5', costUsd: 0.2 }])
+    expect(dispatchedCostsByRouting('routing-A')).toEqual([
+      { targetEngine: 'opencode', targetModel: 'openai/gpt-5', costUsd: 0.2 }
+    ])
+  })
+
+  it('a target whose every turn was unpriced gets no row at all', () => {
+    insertUsageEvent(dispatchRow({ apiCostUsd: null, billedCostUsd: null, billingType: 'unknown' }))
+    expect(dispatchedCostsByRouting('routing-A')).toEqual([])
+  })
+
+  it('ignores the dispatching session own turns', () => {
+    insertUsageEvent(sessionRow({ parentRoutingId: 'routing-A', apiCostUsd: 3 }))
+    expect(dispatchedCostsByRouting('routing-A')).toEqual([])
   })
 
   it('returns separate rows per distinct targetModel', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'routing-D',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.1,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 1500,
-      fromRoutingId: 'routing-D',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5-codex',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.2,
-      durationMs: 500
-    })
+    insertUsageEvent(dispatchRow({ apiCostUsd: 0.1, billedCostUsd: 0.1 }))
+    insertUsageEvent(dispatchRow({ modelId: 'gpt-5-codex', apiCostUsd: 0.2, billedCostUsd: 0.2 }))
 
-    const rows = dispatchedCostsByRouting('routing-D')
+    const rows = dispatchedCostsByRouting('routing-A')
     expect(rows).toHaveLength(2)
     const byModel = new Map(rows.map((r) => [r.targetModel, r.costUsd]))
     expect(byModel.get('openai/gpt-5')).toBeCloseTo(0.1, 10)
@@ -387,72 +127,94 @@ describe('dispatchedCostsByRouting', () => {
   it('returns an empty array for a routingId with no dispatched rows', () => {
     expect(dispatchedCostsByRouting('routing-none')).toEqual([])
   })
+
+  it('round-trips a model the dispatcher canonicalised from a slash-less config', () => {
+    // `gpt-5-codex` under opencode decodes to vendor 'opencode', which the
+    // dispatcher canonicalises to 'opencode/gpt-5-codex' BEFORE anything keys
+    // on it — so the reader's re-encode is the same string the live breakdown
+    // (`addDispatchedCost`) used, and a reloaded session shows one row, not
+    // two.
+    insertUsageEvent(
+      dispatchRow({
+        engineId: 'opencode',
+        vendorId: 'opencode',
+        modelId: 'gpt-5-codex',
+        apiCostUsd: 0.1,
+        billedCostUsd: 0.1
+      })
+    )
+    expect(dispatchedCostsByRouting('routing-A')).toEqual([
+      { targetEngine: 'opencode', targetModel: 'opencode/gpt-5-codex', costUsd: 0.1 }
+    ])
+  })
+
+  it('reads an engine this build does not know without throwing', () => {
+    // `engineMeta()` throws on an unregistered id; a stored row must not be
+    // able to take a DB read down with it.
+    insertUsageEvent(
+      dispatchRow({
+        engineId: 'ghost-engine',
+        modelId: 'ghostly/m',
+        apiCostUsd: 0.3,
+        billedCostUsd: 0.3
+      })
+    )
+    expect(dispatchedCostsByRouting('routing-A')).toEqual([
+      { targetEngine: 'ghost-engine', targetModel: 'ghostly/m', costUsd: 0.3 }
+    ])
+  })
 })
 
-describe('renameDispatchedUsage', () => {
+describe('renameUsageEventParent — a rekey carries the dispatched rows', () => {
   it('moves rows from oldRoutingId to newRoutingId', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'tmp-routing',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: 'oc-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 100,
-      costUsd: 0.1,
-      durationMs: 500
-    })
-
-    renameDispatchedUsage('tmp-routing', 'canonical-session-id')
-
-    expect(getDispatchedUsageSince(0).filter((r) => r.fromRoutingId === 'tmp-routing')).toEqual([])
-    const moved = getDispatchedUsageSince(0).filter(
-      (r) => r.fromRoutingId === 'canonical-session-id'
+    insertUsageEvent(
+      dispatchRow({ parentRoutingId: 'tmp-routing', apiCostUsd: 0.1, billedCostUsd: 0.1 })
     )
-    expect(moved).toHaveLength(1)
-    expect(moved[0]).toMatchObject({ targetModel: 'openai/gpt-5', costUsd: 0.1 })
 
-    // seedDispatchedCosts()'s db query must find it under the NEW id.
+    renameUsageEventParent('tmp-routing', 'canonical-session-id')
+
+    expect(dispatchedCostsByRouting('tmp-routing')).toEqual([])
+    // seedDispatchedCosts()'s query must find it under the NEW id.
     expect(dispatchedCostsByRouting('canonical-session-id')).toEqual([
       { targetEngine: 'opencode', targetModel: 'openai/gpt-5', costUsd: 0.1 }
     ])
   })
 
   it('is a no-op (does not throw) when oldRoutingId has no rows', () => {
-    expect(() => renameDispatchedUsage('missing-old', 'new-id')).not.toThrow()
+    expect(() => renameUsageEventParent('missing-old', 'new-id')).not.toThrow()
     expect(dispatchedCostsByRouting('new-id')).toEqual([])
   })
 
   it('moves ALL rows for oldRoutingId, preserving multiple entries', () => {
-    insertDispatchedUsage({
-      ts: 1000,
-      fromRoutingId: 'multi-old',
-      fromEngine: 'claude',
-      targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 100,
-      costUsd: 0.1,
-      durationMs: 500
-    })
-    insertDispatchedUsage({
-      ts: 1500,
-      fromRoutingId: 'multi-old',
-      fromEngine: 'claude',
-      targetEngine: 'claude',
-      targetModel: 'haiku',
-      targetSessionId: null,
-      toolUseId: null,
-      totalTokens: 50,
-      costUsd: 0.05,
-      durationMs: 300
-    })
+    insertUsageEvent(dispatchRow({ parentRoutingId: 'multi-old', apiCostUsd: 0.1 }))
+    insertUsageEvent(
+      dispatchRow({
+        parentRoutingId: 'multi-old',
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        modelId: 'haiku',
+        apiCostUsd: 0.05
+      })
+    )
 
-    renameDispatchedUsage('multi-old', 'multi-new')
+    renameUsageEventParent('multi-old', 'multi-new')
 
-    const rows = getDispatchedUsageSince(0).filter((r) => r.fromRoutingId === 'multi-new')
-    expect(rows).toHaveLength(2)
+    expect(dispatchedCostsByRouting('multi-new')).toHaveLength(2)
+  })
+})
+
+describe('migration v20 — the old table is gone', () => {
+  it('dispatched_usage no longer exists after migration', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get('dispatched_usage')
+      ).toBeUndefined()
+    } finally {
+      db.close()
+    }
   })
 })

@@ -57,6 +57,8 @@ import {
   type VaultCredential
 } from './codex-oauth'
 import type { DeviceCodeStart } from './codex-device-code'
+import { chatgptAccountIdentity, codexNativeIdentity } from '../account-identity'
+import type { AccountIdentity } from '../../../shared/account-key'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -804,6 +806,36 @@ export class CredentialSync {
   }
 
   /**
+   * The ADR-071 §3 account key and label for one vault account — what a usage
+   * row stores so spend through Codex lands on the same subscription as spend
+   * through opencode or pi.
+   *
+   * `null` means the active account. An account whose credential is gone, or
+   * whose credential never learned a workspace id, is Codex signed in on its
+   * own as far as metering is concerned: the native key, not a half key.
+   *
+   * CREDENTIAL BOUNDARY: this is a member of the token-free half of the class,
+   * beside `getStatus()`. It reads the credential to name the account and
+   * returns only `{ accountKey, accountLabel }` — an identity, never token
+   * material. The claim reading is
+   * {@link import('../account-identity').chatgptAccountIdentity}, the same
+   * function an engine's `auth.json` goes through, so one token cannot resolve
+   * to two keys.
+   */
+  async accountIdentity(vaultAccountId: string | null): Promise<AccountIdentity> {
+    const key = vaultAccountId ?? (await this.readActiveKey())
+    const cred = await this.loadForKey(key)
+    if (!cred?.accountId) return codexNativeIdentity()
+    return chatgptAccountIdentity({
+      accountId: cred.accountId,
+      accessToken: cred.access,
+      // A credential stored before S2a2 has no `userId`; the access token it
+      // holds carries the same claim, and the next refresh persists it.
+      stored: { userId: cred.userId, email: cred.email, planType: cred.planType }
+    })
+  }
+
+  /**
    * **The one method on this class that returns TOKEN MATERIAL.** Everything
    * else here is deliberately token-free (`getStatus`, and the
    * `provider-account:*` commands built on it); this exists because Codex is fed
@@ -1091,12 +1123,13 @@ export class CredentialSync {
     runtime.retryCount = 0
     runtime.needsReauth = false
     // Shared with the login path via buildVaultCredential — identical expires
-    // math + carry-forward of the prior accountId/email/planType when a refresh
-    // response's JWTs omit the profile claims.
+    // math + carry-forward of the prior accountId/email/planType/userId when a
+    // refresh response's JWTs omit the profile claims.
     const next = buildVaultCredential(tokens, this.now, {
       accountId: cred.accountId,
       email: cred.email,
-      planType: cred.planType
+      planType: cred.planType,
+      userId: cred.userId
     })
     if (!this.isCurrent(generation)) return
     await this.persistForKey(key, next)

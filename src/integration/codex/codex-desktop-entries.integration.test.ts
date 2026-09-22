@@ -108,7 +108,7 @@ vi.mock('../../core/services/db', async (importOriginal) => {
   persistence.close = () => db.close()
   return {
     dispatchedCostsByRouting: () => [],
-    insertDispatchedUsage: vi.fn(),
+    insertUsageEvent: vi.fn(),
     setSessionMeta: (id: string, meta: unknown) => void sessionMeta.set(id, meta),
     getSessionMeta: (id: string) => sessionMeta.get(id),
     allSessionMeta: () => Object.fromEntries(sessionMeta),

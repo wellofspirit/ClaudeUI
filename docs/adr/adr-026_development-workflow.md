@@ -1,6 +1,6 @@
 # ADR-026 — Development workflow: main model orchestrates, sub-agent implements, review every line
 
-**Status:** Accepted (amended 2026-09-17: driver-specific delegation: Fable uses Opus, GPT-6 uses GPT-5.6 Sol for implementation and verification; the main model orchestrates, reviews and commits. The separate-verifier requirement from 2026-09-16 remains.)
+**Status:** Accepted (amended 2026-09-17: driver-specific delegation: Fable uses Opus, GPT-6 uses GPT-5.6 Sol for implementation and verification; the main model orchestrates, reviews and commits. The separate-verifier requirement from 2026-09-16 remains. Amended 2026-09-21: gates and guard checks may be delegated, and a diff the main model cannot hold gets a fresh reviewer before the commit.)
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
 **Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
@@ -88,6 +88,28 @@ the main model commits only after the review loop and the real-build verificatio
 the build, review the code, delegate the end-to-end verification, review the proof, commit. It does
 not implement (beyond docs, specs and trivial edits) and it does not drive the app by hand any more:
 the verifier drives, the main model judges the screenshots.
+
+### Delegated testing and the fresh reviewer (Daniel, 2026-09-21)
+
+Both rules come from the metering arc (ADR-071), where one orchestrator session ran more than twenty
+slices and its context was the scarce resource.
+
+- **Gates and guard checks may go to the delegate** (Opus for Fable; GPT-5.6 Sol for GPT-6): the
+  full gate run of step 7, and step 5's proof that a new test fails against the pre-fix code. The
+  delegate reports exact command output, not a verdict. The main model still runs `bun run typecheck`
+  itself before it records "gates green" anywhere, and re-runs at least one guard check per slice. A
+  tree was once handed over as green with five typecheck errors in it.
+- **A diff the main model cannot hold gets a fresh reviewer before the commit.** Step 5 has no
+  exemption for context pressure. When the diff is too large to read in full (about 20 files was the
+  threshold in practice), a fresh agent of the delegate model, with no part in the implementation,
+  reads it line by line against a written checklist and reports findings. The main model reads every
+  finding and every hunk it flags, then rules. In that arc the fresh reviewer found defects in three
+  slices that the implementer and the main model had both missed: a rekey that skipped a column, a
+  bucket rule that understated partly-billed hours, and an unguarded token refresh that two
+  overlapping reads could replay.
+- **Long arcs keep a handoff document** current after every slice, and every pending instruction to
+  an agent goes into the written spec, never only into a `SendMessage`. A session can end while an
+  agent is mid-task, and the spec is what the next session resumes from.
 
 ### Parallelism
 

@@ -43,10 +43,17 @@ import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { readAccountLimits } from '../services/usage-provider'
+import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
+import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
@@ -92,6 +99,7 @@ import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
+import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -391,9 +399,11 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch',
   'usage:fetch-block',
   'usage:chatgpt-limits',
+  'usage:limits',
+  'usage:windows',
+  'usage:dashboard',
   'usage:set-account-filter',
   'usage:refresh-prices',
-  'usage:fetch-dispatched',
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
@@ -459,7 +469,7 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS])
+  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS, ...USAGE_HUB_CHANNELS])
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -1614,11 +1624,13 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     // Fall back to the service session (spawns lazily on first call)
     return serviceSession.getUsage()
   })
-  // Apply saved refresh interval before starting
+  // Apply the saved refresh interval. The poll ITSELF is started by
+  // `startCoreServices`, after the host's `afterSessionGraph` hook has applied
+  // the active credential dir — see the comment there. Setting the interval
+  // here is safe and has to stay here: this is where the settings are read.
   if (typeof savedSettings.usageRefreshSecs === 'number') {
     usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
   }
-  usageFetcher.startPolling()
 
   // Block usage analytics — watches JSONL files for changes (no polling).
   // Full scan on startup, then event-driven recalculation on file changes.
@@ -1629,10 +1641,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
     // holds out-of-tool Claude + opencode usage before the first dashboard
     // emission (no flash of missing per-engine/opencode data). recalculate() is
-    // itself self-sufficient for the Claude dashboard — it seeds daily_usage from
-    // the legacy JSON files, self-upserts its freshly-parsed JSONL into
-    // usage_event, then reads SQL-sourced blocks + daily — so even if reconcile
-    // is slow/fails, the Claude blocks + history are never empty.
+    // itself self-sufficient for the Claude dashboard — it self-upserts its
+    // freshly-parsed JSONL into usage_event, then reads SQL-sourced blocks and
+    // the hourly buckets it rolls up — so even if reconcile is slow/fails, the
+    // Claude blocks + history are never empty.
     //
     // Lazy import: usage-reconciler statically imports block-usage →
     // usage-fetcher → claude-session, so a static import from this module (which
@@ -1693,23 +1705,61 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     }
   })
 
+  /**
+   * ADR-071 §6 — every account's limits, across vendors. `refresh` decides
+   * whether a stored Claude account's credentials are read at all: without it
+   * the answer comes from the last persisted reading and spends no refresh
+   * grant (the owner's rule). Per-account failures travel as `state`, so one
+   * account needing a sign-in cannot blank the rest.
+   */
+  handleIpc({
+    channel: 'usage:limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      return readAccountLimits({ refresh: !!refresh })
+    }
+  })
+
+  /**
+   * ADR-071 §7 — the window-value ledger. Read-only: one row per limit window
+   * with the peak percent, what the ledger saw inside it, and the two derived
+   * figures. Closed windows are in the answer and are most of it — the samples
+   * behind them are pruned at 30 days, these rows are not.
+   */
+  handleIpc({
+    channel: 'usage:windows',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return usageWindowSummary(sanitizeUsageWindowQuery(opts))
+    }
+  })
+
+  /**
+   * ADR-071 §8 — the dashboard's one read: the ledger's hourly buckets over a
+   * range, grouped provider → account → model, with both costs, the unknown
+   * counts and a per-local-day series. Dispatched work is inside every total
+   * and reported again as a sub-total (owner ruling).
+   */
+  handleIpc({
+    channel: 'usage:dashboard',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
+    }
+  })
+
   handleIpc({
     channel: 'usage:set-account-filter',
     capability: 'config',
     kind: 'command',
     handler: async (account: string | null) => {
       blockUsageService.setAccountFilter(account)
-    }
-  })
-
-  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
-  // (targetEngine, targetModel). Backs UsageView's "Delegated" section.
-  handleIpc({
-    channel: 'usage:fetch-dispatched',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => {
-      return dispatchedUsageSummary()
     }
   })
 
@@ -1730,6 +1780,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async () => accountState()
   })
   for (const cmd of authCommands(authDeps)) {
+    handleIpc(cmd)
+  }
+
+  // The usage hub (ADR-072 §7), from the same shared declarations the remote
+  // transport spreads. Not inline like the `usage:*` family above: six channels,
+  // one of them a credential write, and one declaration is what keeps the
+  // capability and the sanitiser identical on both transports.
+  for (const cmd of usageHubCommands()) {
     handleIpc(cmd)
   }
 

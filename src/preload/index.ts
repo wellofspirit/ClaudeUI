@@ -367,8 +367,19 @@ const api: ClaudeAPI = {
   setUsageAccountFilter: (account: string | null) =>
     ipcRenderer.invoke('usage:set-account-filter', account),
 
-  // Cross-engine dispatched usage (ADR-033 M4-B)
-  fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
+  // The metering dashboard (ADR-071 §6/§7/§8)
+  fetchAccountLimits: (refresh?: boolean) => ipcRenderer.invoke('usage:limits', refresh ?? false),
+  fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
+  fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
+
+  // The usage hub (ADR-072). `setUsageHubSecret` is write-only — no channel here
+  // reads a device credential back.
+  usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
+  configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
+  setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),
+  syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
+  resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
+  forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
 
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),

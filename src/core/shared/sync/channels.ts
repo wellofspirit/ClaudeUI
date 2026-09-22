@@ -405,6 +405,18 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
   },
+  'usage:limits-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-071 §6: an account limits reading moved, for ANY vendor — the same bare nudge as `usage:chatgpt-limits-changed` beside it, and for the same reason: the readings are read through `usage:limits`, which takes a `refresh` flag a fan-out payload could not carry. No snapshot field.'
+  },
+  'usage-hub:changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: "ADR-072 §7: the usage hub client's state moved — the same bare nudge as the two usage channels above it. Replicated because a phone looking at the dashboard has to learn that another machine's rows arrived, and PAYLOAD-FREE because `usage-hub:status` is the one shape and it must never carry the device credential a fan-out would copy. No snapshot field."
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     ring: true,

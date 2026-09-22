@@ -533,7 +533,8 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
 
   it('sizes the opaque `default` alias from its resolvedModel', () => {
     expect(
-      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' }).contextWindow
+      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })
+        .contextWindow
     ).toBe(ONE_M)
   })
 

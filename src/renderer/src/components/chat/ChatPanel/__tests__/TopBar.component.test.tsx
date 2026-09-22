@@ -22,7 +22,13 @@ import { TopBar } from '../TopBar'
 import { TIER1_HIDE, TIER1_ROW_HIDE, TIER2_HIDE, TIER2_ROW_HIDE } from '../top-bar-tiers'
 import { useEscapeLayer } from '../../../shared/use-escape-layer'
 import { SidebarContext } from '../../../SessionView'
-import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
+import type {
+  AccountRef,
+  BillingType,
+  GitStatusData,
+  SessionStatus,
+  StatusLineData
+} from '../../../../../../shared/types'
 import type { IdeAvailability } from '../../../../../../shared/remote-protocol'
 import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
@@ -61,6 +67,29 @@ function makeStatusLine(overrides: Partial<StatusLineData> = {}): StatusLineData
     turnStartedAtMs: null,
     ...overrides
   }
+}
+
+function makeAccount(billingType: BillingType): AccountRef {
+  return {
+    engineId: 'opencode',
+    vendorId: 'alicloud',
+    billingType,
+    authState: 'authenticated'
+  }
+}
+
+/** An opencode session on a vendor that charges nothing. */
+function makeFreeStatus(): SessionStatus {
+  return {
+    state: 'idle',
+    sessionId: null,
+    model: null,
+    cwd: '/d/repo',
+    totalCostUsd: 0,
+    engineId: 'opencode',
+    capabilities: resolveClaudeCapabilities('default'),
+    account: makeAccount('free')
+  } as SessionStatus
 }
 
 describe('TopBar — Session time / API time', () => {
@@ -395,7 +424,7 @@ describe('TopBar — unknown (unpriced) cost', () => {
     unmount()
   })
 
-  it('renders $0.0000 for a KNOWN zero cost (free model), never the placeholder', () => {
+  it('renders $0.00 for a KNOWN zero cost (free model), never the placeholder', () => {
     // A zero with a dispatched row present, so the Cost tile is rendered at all
     // — the "cost is 0 and nothing was dispatched" case still hides, as before.
     seed.statusLine(
@@ -412,7 +441,8 @@ describe('TopBar — unknown (unpriced) cost', () => {
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
 
     const cell = screen.getByTestId('TopBar.cost')
-    expect(cell).toHaveTextContent('$0.0000')
+    expect(cell).toHaveTextContent('$0.00')
+    expect(cell.textContent).not.toContain('$0.0000')
     expect(cell.textContent).not.toContain('unknown')
     unmount()
   })
@@ -456,6 +486,149 @@ describe('TopBar — unknown (unpriced) cost', () => {
     // folded in as zero, it is named as unknown.
     expect(total).toHaveTextContent('$0.31 + unknown')
 
+    unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Two costs (ADR-071 §2): an engine that can tell what a turn was WORTH from
+// what it CHARGED sends both, and the tooltip has to say which figure is which
+// — otherwise a subscription session reads as money spent. Claude and Codex
+// send neither field, and for them the block must look exactly as it did.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — billed cost and coverage', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('names the cost as covered under a subscription, and shows no figure for a zero bill', () => {
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 12.4, billedCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$12.40')
+    expect(screen.getByTestId('TopBar.costCovered')).toHaveTextContent('covered by subscription')
+    // The label carries the zero bill; a `$0.0000` row read as a tiny charge.
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costNothingBilled')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costUnpriced')).toBeNull()
+    unmount()
+  })
+
+  it('says nothing extra when the billed figure IS the headline (an API key)', () => {
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0.42, billedCostUsd: 0.42 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$0.42')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    unmount()
+  })
+
+  it('shows the Billed row for a real amount that is only part of the headline', () => {
+    // A session that ran some turns on a plan and some on an API key: the
+    // headline is what all of it was worth, the row is what was actually paid.
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 5, billedCostUsd: 1.25 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$5.00')
+    expect(screen.getByTestId('TopBar.billedCost')).toHaveTextContent('$1.25')
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costNothingBilled')).toBeNull()
+    unmount()
+  })
+
+  it('counts the messages it could not price instead of hiding them', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({ totalCostUsd: 3, billedCostUsd: 0, unknownCostMessages: 2 })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.costUnpriced')).toHaveTextContent('2 unpriced')
+    unmount()
+  })
+
+  it('an engine that sends neither field renders the block unchanged', () => {
+    // Claude and Codex status lines: no billedCostUsd, no unknownCostMessages.
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 1.5 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$1.50')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costUnpriced')).toBeNull()
+    unmount()
+  })
+
+  it('an unknown headline with a zero bill says nothing was billed', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({ totalCostUsd: null, billedCostUsd: 0, unknownCostMessages: 1 })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('unknown')
+    expect(screen.getByTestId('TopBar.costNothingBilled')).toHaveTextContent('nothing billed')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    // "covered by subscription" claims a real figure was covered; an unknown
+    // headline has no figure to cover.
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.getByTestId('TopBar.costUnpriced')).toHaveTextContent('1 unpriced')
+    unmount()
+  })
+
+  // A free vendor's zero is a KNOWN figure, and `resolveCosts` returns it as
+  // one. Hiding the tile made a free session indistinguishable from a session
+  // nothing is known about, so the zero is now said out loud — but only when
+  // the session's own billing type says free, never inferred from the figure.
+  it('shows a free vendor\'s known zero as "$0.00 · free" instead of hiding the tile', () => {
+    seed.status(ROUTE, makeFreeStatus())
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    // An exact zero is `$0.00`, never the four-decimal sub-cent form that
+    // reads as a tiny charge.
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$0.00')
+    expect(screen.getByTestId('TopBar.costFree')).toHaveTextContent('free')
+    unmount()
+  })
+
+  it('still hides a known zero on a subscription vendor (the empty session)', () => {
+    // The regression this guards: an empty session totals a known 0 too, and
+    // must not grow a `$0.00` tile before its first turn.
+    seed.status(ROUTE, { ...makeFreeStatus(), account: makeAccount('subscription') })
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.queryByTestId('TopBar.cost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costFree')).toBeNull()
     unmount()
   })
 })
@@ -837,7 +1010,7 @@ describe('TopBar — mobile entry points', () => {
     // at all times and CSS picks one — jsdom has no layout and therefore no
     // opinion about which. What a jsdom test can still pin is that the ⋯ is
     // gated by tier 2's exact complement rather than by a device check that
-    // has come back: `TopBar.layout.test.tsx` measures which one is visible.
+    // has come back; which one is visible is a fact about geometry jsdom cannot see.
     expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.permissions').className).toContain(TIER2_HIDE)
@@ -1135,7 +1308,7 @@ describe('TopBar — terminal toggle button', () => {
     renderTopBar(true)
     // No longer `!isMobileCtx`: the button is in the DOM and tier 2 hides it,
     // and a phone is inside tier 2 by construction (T2 === MOBILE_BREAKPOINT —
-    // pinned in `TopBar.layout.test.tsx`, which also measures the 390px bar).
+    // stated in `top-bar-tiers.ts`).
     expect(screen.getByTestId('TopBar.terminal').className).toContain(TIER2_HIDE)
     expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
   })

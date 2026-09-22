@@ -57,16 +57,23 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
   store: ChatgptRateLimitStore
   changed: ReturnType<typeof vi.fn>
   read: ReturnType<typeof vi.fn>
+  persist: ReturnType<typeof vi.fn>
 } {
   const changed = vi.fn()
+  const persist = vi.fn()
   const read = vi.fn(async () => new Map<string, GetAccountRateLimitsResponse>())
   return {
     changed,
+    persist,
     read: read as ReturnType<typeof vi.fn>,
     store: new ChatgptRateLimitStore({
       accounts: async () => [],
       read: read as unknown as ChatgptRateLimitDeps['read'],
       changed,
+      // ADR-071 §6 persists every reading. Injected, so this suite stays
+      // DB-free — the real dep resolves the vault's account key and writes a
+      // usage_window_sample.
+      persist,
       now: () => 1_700_000_000_000,
       ...over
     })
@@ -79,13 +86,14 @@ describe('resetsAt is unix SECONDS', () => {
     // vector, and nowhere near the epoch a millisecond reading would produce.
     expect(
       rateWindow({ usedPercent: 42, windowDurationMins: 300, resetsAt: 1_735_693_200 })
-    ).toEqual({ usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z' })
+    ).toEqual({ usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 300 })
   })
 
   it('keeps a percentage with no reset time, and drops a missing window entirely', () => {
     expect(rateWindow({ usedPercent: 3, windowDurationMins: null, resetsAt: null })).toEqual({
       usedPercent: 3,
-      resetsAt: null
+      resetsAt: null,
+      windowMinutes: null
     })
     expect(rateWindow(null)).toBeNull()
     expect(rateWindow(undefined)).toBeNull()
@@ -102,12 +110,52 @@ describe('the per-account rate-limit map', () => {
       'acct-a': {
         email: 'a@example.test',
         planType: 'pro',
-        primary: { usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z' },
-        secondary: { usedPercent: 7, resetsAt: '2025-01-04T14:13:20.000Z' },
+        primary: { usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 300 },
+        secondary: {
+          usedPercent: 7,
+          resetsAt: '2025-01-04T14:13:20.000Z',
+          windowMinutes: 10_080
+        },
         fetchedAt: 1_700_000_000_000
       }
     })
     expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the two windows the reading carried, under the vault account id', () => {
+    const { store: limits, persist } = store()
+
+    limits.record('acct-a', snapshot())
+
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledWith('acct-a', [
+      { kind: '5h', usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 300 },
+      { kind: '7d', usedPercent: 7, resetsAt: '2025-01-04T14:13:20.000Z', windowMinutes: 10_080 }
+    ])
+  })
+
+  it('a sparse push persists only the window it carried', () => {
+    // The merged ENTRY still shows both windows (the sparse rule below), but a
+    // sample is an observation: the weekly window was not read this time, so
+    // recording it again would date an old number to now.
+    const { store: limits, persist } = store()
+    limits.record('acct-a', snapshot())
+    persist.mockClear()
+
+    limits.record('acct-a', snapshot({ secondary: null }))
+
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledWith('acct-a', [
+      { kind: '5h', usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 300 }
+    ])
+  })
+
+  it('persists nothing for a reading with no windows at all', () => {
+    const { store: limits, persist } = store()
+
+    limits.record('acct-credits', noWindows())
+
+    expect(persist).not.toHaveBeenCalled()
   })
 
   it('a SPARSE update does not erase a window the last full read established', () => {
@@ -119,7 +167,11 @@ describe('the per-account rate-limit map', () => {
     limits.record('acct-a', snapshot({ secondary: null }))
 
     const entry = limits.snapshot()['acct-a']
-    expect(entry.secondary).toEqual({ usedPercent: 7, resetsAt: '2025-01-04T14:13:20.000Z' })
+    expect(entry.secondary).toEqual({
+      usedPercent: 7,
+      resetsAt: '2025-01-04T14:13:20.000Z',
+      windowMinutes: 10_080
+    })
     expect(entry.email).toBe('a@example.test')
   })
 
@@ -152,7 +204,7 @@ describe('the per-account rate-limit map', () => {
     expect(all['acct-b']).toMatchObject({
       email: 'b@example.test',
       planType: 'plus',
-      primary: { usedPercent: 90, resetsAt: null }
+      primary: { usedPercent: 90, resetsAt: null, windowMinutes: 300 }
     })
     expect(changed).toHaveBeenCalled()
   })
@@ -198,6 +250,129 @@ describe('the per-account rate-limit map', () => {
     await limits.refresh()
 
     expect(Object.keys(limits.snapshot())).toEqual(['acct-a'])
+  })
+})
+
+/**
+ * S3c — the kind comes from the DURATION the backend states, never from the
+ * slot the window arrived in.
+ *
+ * The owner's ChatGPT plan has ONE limit and it is weekly, so the backend sends
+ * it as `primary`. Filing `primary` as `5h` stored that weekly window as a
+ * five-hour one: the meter said `5-Hour` and reset in 28 hours, and the value
+ * ledger summed a week of spend over five hours.
+ */
+describe('a window is kinded by its length', () => {
+  it('a weekly-only plan samples its lone primary window as 7d', () => {
+    const { store: limits, persist } = store()
+
+    limits.record(
+      'acct-weekly',
+      snapshot({
+        primary: { usedPercent: 63, windowDurationMins: 10_080, resetsAt: 1_735_693_200 },
+        secondary: null
+      })
+    )
+
+    expect(persist).toHaveBeenCalledWith('acct-weekly', [
+      { kind: '7d', usedPercent: 63, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 10_080 }
+    ])
+  })
+
+  it('an hourly window is its own kind, not the nearest familiar one', () => {
+    const { store: limits, persist } = store()
+
+    limits.record(
+      'acct-hourly',
+      snapshot({
+        primary: { usedPercent: 5, windowDurationMins: 60, resetsAt: 1_735_693_200 },
+        secondary: null
+      })
+    )
+
+    expect(persist.mock.calls[0][1]).toEqual([
+      { kind: '1h', usedPercent: 5, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 60 }
+    ])
+  })
+
+  /**
+   * Round 2 — two slots, one length. The kind is the sample's identity, so
+   * filing both under `7d` would make one slot's reading dedup the other's
+   * away and give the value ledger one window where the plan has two.
+   */
+  it('keeps two same-length slots apart by suffixing the secondary', () => {
+    const { store: limits, persist } = store()
+
+    limits.record(
+      'acct-twin',
+      snapshot({
+        primary: { usedPercent: 63, windowDurationMins: 10_080, resetsAt: 1_735_693_200 },
+        secondary: { usedPercent: 12, windowDurationMins: 10_080, resetsAt: 1_736_000_000 }
+      })
+    )
+
+    expect(persist.mock.calls[0][1]).toEqual([
+      { kind: '7d', usedPercent: 63, resetsAt: '2025-01-01T01:00:00.000Z', windowMinutes: 10_080 },
+      {
+        kind: '7d:secondary',
+        usedPercent: 12,
+        resetsAt: '2025-01-04T14:13:20.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  /**
+   * The kinds come from the MERGED reading, not from what one push carried:
+   * a sparse update that mentions only the secondary must keep filing it under
+   * the kind the full read gave it, or the series splits in two.
+   */
+  it('a sparse push keeps the kind the full read established', () => {
+    const { store: limits, persist } = store()
+    const twin = snapshot({
+      primary: { usedPercent: 63, windowDurationMins: 10_080, resetsAt: 1_735_693_200 },
+      secondary: { usedPercent: 12, windowDurationMins: 10_080, resetsAt: 1_736_000_000 }
+    })
+    limits.record('acct-twin', twin)
+    persist.mockClear()
+
+    limits.record('acct-twin', { ...twin, primary: null } as RateLimitSnapshot)
+
+    expect(persist.mock.calls[0][1]).toEqual([
+      {
+        kind: '7d:secondary',
+        usedPercent: 12,
+        resetsAt: '2025-01-04T14:13:20.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  it('a window with no stated duration keeps its slot name and no minutes', () => {
+    const { store: limits, persist } = store()
+
+    limits.record(
+      'acct-mystery',
+      snapshot({
+        primary: { usedPercent: 11, windowDurationMins: null, resetsAt: 1_735_693_200 },
+        secondary: { usedPercent: 22, windowDurationMins: 0, resetsAt: 1_736_000_000 }
+      })
+    )
+
+    expect(persist.mock.calls[0][1]).toEqual([
+      {
+        kind: 'primary',
+        usedPercent: 11,
+        resetsAt: '2025-01-01T01:00:00.000Z',
+        windowMinutes: null
+      },
+      {
+        kind: 'secondary',
+        usedPercent: 22,
+        resetsAt: '2025-01-04T14:13:20.000Z',
+        windowMinutes: null
+      }
+    ])
   })
 })
 
