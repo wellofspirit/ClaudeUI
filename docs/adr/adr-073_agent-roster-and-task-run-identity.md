@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Proposed (2026-09-21). Drafted from the owner's rulings of 2026-09-21 and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -81,9 +81,12 @@ so the renderer's tool_use-id keying is untouched everywhere.
   `runIndex`, and registers an alias `runToolUseId → originToolUseId`.
 - Item streams and subagent messages arriving under an aliased id are re-owned to the origin before
   they are sent, so run 2 streams live into the card that spawned the agent.
-- `task_updated` and `task_notification` resolve through the alias; their `toolUseId` is always the
-  origin. A non-terminal `task_updated` for a known task id re-arms `activeTasks` (the terminal-only
-  filter in `handleTaskUpdated` stays as it is for the states it already handles).
+- `task_updated` and `task_notification` resolve through the origin; their `toolUseId` is always
+  the origin's. A non-terminal `task_updated` does **not** re-arm `activeTasks`: the probe showed
+  `task_started` is re-emitted on every resume, so that second path is redundant — and not harmless,
+  because `task_updated` is a patch diff that fires on transitions this code does not enumerate, and
+  a non-terminal patch arriving after a notification (or out of order) would strand a finished card
+  as running. The authoritative signal is handled; the speculative one is not.
 - The renderer reads the **last** notification for a tool_use id, never the first, and keeps
   `runIndex` so a card can say "resumed ×2".
 
@@ -147,6 +150,29 @@ a `task_progress` tick does not re-scan a long transcript once per agent per tic
 - `TaskProgress` carries the wire's `usage` and `last_tool_name` through to the store.
 - `deriveTaskState()` is extracted from `TaskCard`/`TaskEntry` **first**; the resume fix and the
   roster then read one predicate instead of three copies.
+
+### 4. As built
+
+What the implementation found that the design above did not know, recorded here because the kickoff
+spec that first held it did not ship (the ADR and the protocol doc are the durable record):
+
+- `system/task_progress` had **no handler at all** — what the session consumed was the unrelated
+  `tool_progress` message, which carries the elapsed clock and nothing else. Both now feed
+  `session:task-progress`, each with the half of the row it knows (usage and last tool; the clock),
+  and the reducer **merges** rather than replaces, so a usage tick cannot blank the clock. A resumed
+  run's `tool_progress` is reported against the SendMessage call, so its `tool_name` is withheld and
+  the origin's is kept.
+- The legacy user-message `<task-notification>` XML path, kept for pre-2.1.241 binaries, resolves
+  through the origin exactly as the system-message path does.
+- `deriveTaskState` settles a **foreground** task on a terminal notification too (ADR-040 calls it
+  authoritative; the old foreground branch ignored it and left such a task running forever), and
+  takes `isError` from the notification whenever there is one — the panel's `TaskEntry` previously
+  missed a failed async-launched agent.
+- `stopTask` checks origins as well as `taskIdMap`; before, a resumed agent's Stop found no task id,
+  fell through to `interrupt()` and aborted the whole turn.
+- The transcript walk behind `useAgentRoster` is cached by message-array identity and shared by the
+  three surfaces, so a streaming delta walks the transcript once, not once per surface.
+- `AgentPill` measured 81.6px; tier 1 moved 1000 → 1100 (see §2).
 
 ## Consequences
 
