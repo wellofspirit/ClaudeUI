@@ -39,21 +39,15 @@
 // @vitest-environment node
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { locatePiBinary } from '../../core/pi/pi-locate'
 import { PiRpcClient } from '../../core/pi/PiRpcClient'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
-const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
-const ROOT = join(__dirname, '..', '..', '..')
 const MODEL = { provider: 'openai-codex', modelId: 'gpt-5.6-luna' }
-
-function findBinary(): string | null {
-  const candidate = join(ROOT, 'vendor', 'pi-cli', BINARY_NAME)
-  return existsSync(candidate) ? candidate : null
-}
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
 function hasCodexCredentials(): boolean {
@@ -67,7 +61,7 @@ function hasCodexCredentials(): boolean {
   }
 }
 
-const BINARY_MISSING = !findBinary()
+const BINARY_MISSING = !locatePiBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
 function sha256(filePath: string): string {
@@ -104,7 +98,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
     let secondUserIndex: number
 
     beforeAll(async () => {
-      const binary = findBinary()!
+      const binary = locatePiBinary()!
       tmpDir = mkdtempSync(join(tmpdir(), 'pi-fork-integration-'))
 
       sourceClient = new PiRpcClient(binary, {
@@ -186,7 +180,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
     it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
       'fork {entryId} on a resumed source — drops the second turn, creates a new file, source stays byte-unchanged',
       async () => {
-        const binary = findBinary()!
+        const binary = locatePiBinary()!
         const client = new PiRpcClient(binary, {
           cwd: tmpDir,
           args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
@@ -233,7 +227,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
     it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
       'clone-latest sentinel path: `clone` alone on a resumed source — keeps everything, creates a new file, source stays byte-unchanged',
       async () => {
-        const binary = findBinary()!
+        const binary = locatePiBinary()!
         const client = new PiRpcClient(binary, {
           cwd: tmpDir,
           args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
