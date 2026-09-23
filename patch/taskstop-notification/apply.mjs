@@ -223,11 +223,20 @@ function stoppedHelper(text) {
     .slice(Math.max(0, anchor - 500), anchor)
     .match(new RegExp(`let ${V}=await (${V})\\(${V},\\{taskRegistry:`))
   if (!call) return ''
+  // Minified names are only scope-unique: the macOS 2.1.280 build defines an
+  // unrelated `async function rme(` as well. Pick the definition by content
+  // (it destructures taskRegistry from its options arg) and require exactly one.
   const signature = `async function ${call[1]}(`
-  const start = text.indexOf(signature)
-  if (start < 0 || text.indexOf(signature, start + 1) !== -1) return ''
-  const end = text.indexOf('async function ', start + signature.length)
-  return end < 0 ? '' : text.slice(start, end)
+  const bodies = []
+  for (let i = text.indexOf(signature); i >= 0; i = text.indexOf(signature, i + 1)) {
+    const end = text.indexOf('async function ', i + signature.length)
+    if (end < 0) continue
+    const body = text.slice(i, end)
+    if (new RegExp(`^async function ${V}\\(${V},${V}\\)\\{let\\{taskRegistry:`).test(body)) {
+      bodies.push(body)
+    }
+  }
+  return bodies.length === 1 ? bodies[0] : ''
 }
 
 if (src.includes(patchBMarker)) {
