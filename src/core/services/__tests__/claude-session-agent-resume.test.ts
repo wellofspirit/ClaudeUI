@@ -342,6 +342,27 @@ describe('ClaudeSession — a resumed agent keeps its identity', () => {
     expect(progress[1]).not.toHaveProperty('toolName')
   })
 
+  it("reads the XML path's usage in 2.1.280's element form, not as zeros", async () => {
+    const sent = await runWire('routing-xml-usage', [
+      taskStarted(ORIGIN),
+      {
+        type: 'user',
+        uuid: 'u-xml-usage',
+        message: {
+          role: 'user',
+          content:
+            `<task-notification><task-id>${TASK_ID}</task-id><status>completed</status>` +
+            '<usage><subagent_tokens>22020</subagent_tokens><tool_uses>2</tool_uses>' +
+            '<duration_ms>1191</duration_ms></usage></task-notification>'
+        }
+      }
+    ])
+    expect(notifications(sent)[0]).toMatchObject({
+      toolUseId: ORIGIN,
+      usage: { totalTokens: 22020, toolUses: 2, durationMs: 1191 }
+    })
+  })
+
   it('resolves the legacy <task-notification> XML path through the origin too', async () => {
     const sent = await runWire('routing-resume-xml', [
       taskStarted(ORIGIN),

@@ -50,6 +50,12 @@ export interface AgentLifecycle extends AgentIdentity {
    * reaps it if the session is resumed.
    */
   unfinished: Set<string>
+  /**
+   * The run each terminal event ends (1-based, the live counter's numbering),
+   * keyed by the event object the caller passed in — so a reader can stamp
+   * `runIndex` on the notification it built from that event.
+   */
+  closedRun: Map<TranscriptTerminal, number>
 }
 
 export function emptyAgentIdentity(): AgentIdentity {
@@ -96,14 +102,24 @@ export type TranscriptAgentEvent = TranscriptToolResult | TranscriptTerminal
  * are invisible here.)
  */
 export function foldAgentIdentity(events: Iterable<TranscriptAgentEvent>): AgentLifecycle {
-  const identity: AgentLifecycle = { ...emptyAgentIdentity(), unfinished: new Set() }
+  const identity: AgentLifecycle = {
+    ...emptyAgentIdentity(),
+    unfinished: new Set(),
+    closedRun: new Map()
+  }
   /** task id → the tool_use id of the run most recently started. */
   const currentRun = new Map<string, string>()
+  /** A run's tool_use id → its 1-based index. cli.js's own restarts reuse the id, as live. */
+  const runIndexOf = new Map<string, number>()
   for (const event of events) {
     if (event.kind === 'terminal') {
+      const current = currentRun.get(event.taskId)
+      const ends = event.runToolUseId ?? current
+      const index = ends !== undefined ? runIndexOf.get(ends) : undefined
+      if (index !== undefined) identity.closedRun.set(event, index)
       // A notification for an EARLIER run (consumed by the parent after the
       // next run began) must not close the current one.
-      if (event.runToolUseId && currentRun.get(event.taskId) !== event.runToolUseId) continue
+      if (event.runToolUseId && current !== event.runToolUseId) continue
       identity.unfinished.delete(event.taskId)
       continue
     }
@@ -116,7 +132,9 @@ export function foldAgentIdentity(events: Iterable<TranscriptAgentEvent>): Agent
       // than invent one.
       if (origin && toolUseId !== origin && !identity.runAliases.has(toolUseId)) {
         identity.runAliases.set(toolUseId, origin)
-        identity.runCounts.set(origin, (identity.runCounts.get(origin) ?? 1) + 1)
+        const runs = (identity.runCounts.get(origin) ?? 1) + 1
+        identity.runCounts.set(origin, runs)
+        runIndexOf.set(toolUseId, runs)
         currentRun.set(resumed, toolUseId)
         identity.unfinished.add(resumed)
       }
@@ -126,6 +144,7 @@ export function foldAgentIdentity(events: Iterable<TranscriptAgentEvent>): Agent
     if (agentId && !identity.origins.has(agentId)) {
       identity.origins.set(agentId, toolUseId)
       identity.runCounts.set(toolUseId, 1)
+      runIndexOf.set(toolUseId, 1)
       currentRun.set(agentId, toolUseId)
       if (isAsyncLaunch(text, structured)) identity.unfinished.add(agentId)
     }

@@ -23,7 +23,13 @@ import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { extractToolResultContent } from './tool-result-content'
-import { agentIdOf, foldAgentIdentity, type TranscriptAgentEvent } from './agent-identity'
+import {
+  agentIdOf,
+  foldAgentIdentity,
+  type TranscriptAgentEvent,
+  type TranscriptTerminal
+} from './agent-identity'
+import { parseTaskNotificationXml, type ParsedTaskNotification } from './task-notification-xml'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -745,45 +751,6 @@ export function fallbackBlockText(block: Record<string, unknown>): string {
   return `Switched models${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`
 }
 
-/**
- * Parse task-notification XML from JSONL content strings.
- * Returns null if no task notification found.
- */
-function parseTaskNotificationXml(
-  text: string
-): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
-  const match = text.match(/<task-notification>([\s\S]*?)<\/task-notification>/)
-  if (!match) return null
-
-  const xml = match[1]
-  const get = (tag: string): string => {
-    const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))
-    return m ? m[1].trim() : ''
-  }
-
-  const taskId = get('task-id')
-  const status = get('status') as 'completed' | 'failed' | 'stopped'
-  const summary = get('summary')
-
-  // Parse usage block if present
-  const usageStr = get('usage')
-  let usage: TaskNotification['usage'] | undefined
-  if (usageStr) {
-    const getNum = (key: string): number => {
-      const m = usageStr.match(new RegExp(`${key}:\\s*(\\d+)`))
-      return m ? Number(m[1]) : 0
-    }
-    usage = {
-      totalTokens: getNum('total_tokens'),
-      toolUses: getNum('tool_uses'),
-      durationMs: getNum('duration_ms')
-    }
-  }
-
-  if (!taskId || !status) return null
-  return { taskId, status, summary, usage }
-}
-
 /** Parse CLI command XML into structured data */
 function parseCliCommand(
   text: string
@@ -814,19 +781,13 @@ function parseCliCommand(
   return null
 }
 
-/** Extract <output-file> path from task-notification XML */
-function extractOutputFile(text: string): string {
-  const m = text.match(/<output-file>([\s\S]*?)<\/output-file>/)
-  return m ? m[1].trim() : ''
-}
-
-/** The `<tool-use-id>` of the run a `<task-notification>` ends; the reap on --resume has none. */
-function extractRunToolUseId(text: string): string | undefined {
-  const m = text.match(/<tool-use-id>([\s\S]*?)<\/tool-use-id>/)
-  return m ? m[1].trim() || undefined : undefined
-}
-
 const UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
+
+/** A `<task-notification>` the loader shows: one that names a task AND a known status. */
+function readTaskNotification(text: string): ParsedTaskNotification | null {
+  const notif = parseTaskNotificationXml(text)
+  return notif?.status ? notif : null
+}
 
 /**
  * Rehydrate user-attachment blocks from a `type:'user'` transcript line's array
@@ -964,17 +925,33 @@ export async function loadSessionHistory(
     // Spawns, resumes and terminal events, in transcript order — folded at the
     // end to find agents whose last run never ended (ADR-073 §5).
     const agentEvents: TranscriptAgentEvent[] = []
-    const pushNotification = (
-      notif: Omit<TaskNotification, 'toolUseId' | 'outputFile'>,
-      text: string
-    ): void => {
-      const toolUseId = agentIdToToolUseId[notif.taskId] || null
-      taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
-      agentEvents.push({
+    // cli.js writes every notification twice with identical text — the
+    // queue-operation `enqueue`, then the user message when the parent
+    // consumes it. One entry per notification; the enqueue alone still counts
+    // (a notification queued as the session died is never consumed).
+    const seenNotifications = new Set<string>()
+    // Each entry with the terminal event it came from: the run it ends is only
+    // known once the whole transcript has been folded.
+    const unstamped: Array<[TaskNotification, TranscriptTerminal]> = []
+    const pushNotification = (notif: ParsedTaskNotification): void => {
+      if (seenNotifications.has(notif.raw)) return
+      seenNotifications.add(notif.raw)
+      const entry: TaskNotification = {
+        taskId: notif.taskId,
+        toolUseId: agentIdToToolUseId[notif.taskId] || null,
+        status: notif.status ?? 'completed',
+        outputFile: notif.outputFile,
+        summary: notif.summary,
+        ...(notif.usage ? { usage: notif.usage } : {})
+      }
+      const event: TranscriptTerminal = {
         kind: 'terminal',
         taskId: notif.taskId,
-        runToolUseId: extractRunToolUseId(text)
-      })
+        runToolUseId: notif.runToolUseId
+      }
+      taskNotifications.push(entry)
+      agentEvents.push(event)
+      unstamped.push([entry, event])
     }
     /** Set once the anchor line has been READ — every LATER line is dropped. */
     let pastAnchor = false
@@ -1045,9 +1022,9 @@ export async function loadSessionHistory(
           if (isString) {
             const text = content as string
             // Task notification
-            const notif = parseTaskNotificationXml(text)
+            const notif = readTaskNotification(text)
             if (notif) {
-              pushNotification(notif, text)
+              pushNotification(notif)
               return
             }
             // CLI commands — parse and emit as cli_command block
@@ -1090,9 +1067,9 @@ export async function loadSessionHistory(
             const attachments = extractAttachmentBlocks(content)
 
             // Check if text is actually a task notification
-            const notif = text ? parseTaskNotificationXml(text) : null
+            const notif = text ? readTaskNotification(text) : null
             if (notif) {
-              pushNotification(notif, text)
+              pushNotification(notif)
             } else if (
               text &&
               (text.startsWith('<command-name>') || text.startsWith('<local-command'))
@@ -1274,8 +1251,8 @@ export async function loadSessionHistory(
           // Task notifications can appear as queue-operation entries
           const content = obj.content as string | undefined
           if (content) {
-            const notif = parseTaskNotificationXml(content)
-            if (notif) pushNotification(notif, content)
+            const notif = readTaskNotification(content)
+            if (notif) pushNotification(notif)
           }
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
@@ -1308,6 +1285,13 @@ export async function loadSessionHistory(
       // CLI elsewhere is still running (session-watcher), where the agent may
       // well be working. A live resume replaces it with cli.js's own reap.
       const lifecycle = foldAgentIdentity(agentEvents)
+      // The run each notification ends, numbered as the live session numbers
+      // them — so a reopened session still says "resumed ×N", and a live
+      // resume's events fold into these entries instead of beside them.
+      for (const [entry, event] of unstamped) {
+        const runIndex = lifecycle.closedRun.get(event)
+        if (runIndex !== undefined && entry.toolUseId) entry.runIndex = runIndex
+      }
       for (const taskId of lifecycle.unfinished) {
         const origin = lifecycle.origins.get(taskId)
         if (!origin) continue
@@ -1564,7 +1548,7 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
               if (textBlock) text = textBlock.text as string
             }
             const attachments = isArray ? extractAttachmentBlocks(content) : []
-            const isNotif = text ? parseTaskNotificationXml(text) !== null : false
+            const isNotif = text ? readTaskNotification(text) !== null : false
             if (!isNotif && (text || attachments.length > 0)) {
               // Attachments before text — see the main parser for rationale.
               messages.push({

@@ -155,6 +155,15 @@ describe('foldAgentIdentity — runs the transcript never closes', () => {
     expect(foldAgentIdentity([spawn, resume, ended()]).unfinished.size).toBe(0)
   })
 
+  it('names the run each terminal event ends, the way the live session numbers them', () => {
+    const first = ended(ORIGIN)
+    const second = ended(RESUME_1)
+    const lateFirst = ended(ORIGIN) // run 1's copy consumed after run 2 began
+    const reap = ended()
+    const { closedRun } = foldAgentIdentity([spawn, first, resume, lateFirst, second, reap])
+    expect([first, lateFirst, second, reap].map((e) => closedRun.get(e))).toEqual([1, 1, 2, 2])
+  })
+
   it('a foreground spawn ends with its own result', () => {
     const foreground = {
       kind: 'result',

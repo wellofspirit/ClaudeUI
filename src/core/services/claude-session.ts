@@ -23,6 +23,7 @@ import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
+import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
@@ -2807,25 +2808,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     msg: Record<string, unknown>,
     content: string
   ): Promise<void> {
-    const taskId = this.extractXmlTag(content, 'task-id')
-    const status = this.extractXmlTag(content, 'status') || 'completed'
-    const summary = this.extractXmlTag(content, 'summary') || ''
+    const parsed = parseTaskNotificationXml(content)
+    const taskId = parsed?.taskId
+    const status = parsed?.status ?? 'completed'
+    const summary = parsed?.summary ?? ''
     const outputFile = ''
-
-    // Extract <usage> block if present (background agents include this on completion)
-    const usageBlock = this.extractXmlTag(content, 'usage')
-    let usage: { totalTokens: number; toolUses: number; durationMs: number } | undefined
-    if (usageBlock) {
-      const getNum = (key: string): number => {
-        const m = usageBlock.match(new RegExp(`${key}:\\s*(\\d+)`))
-        return m ? Number(m[1]) : 0
-      }
-      usage = {
-        totalTokens: getNum('total_tokens'),
-        toolUses: getNum('tool_uses'),
-        durationMs: getNum('duration_ms')
-      }
-    }
+    const usage = parsed?.usage
 
     if (taskId) {
       // Same resolution order as handleTaskNotification: the agent's origin
@@ -2861,12 +2849,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     this.upsertMessage(chatMsg)
     this.send('session:message', chatMsg)
-  }
-
-  private extractXmlTag(xml: string, tag: string): string | null {
-    const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)
-    const match = xml.match(re)
-    return match ? match[1].trim() : null
   }
 
   private detectTaskMapping(toolUseId: string, resultText: string): void {

@@ -28,6 +28,7 @@ vi.mock('os', async (importOriginal) => {
 })
 
 import { loadSessionHistory } from '../../../core/services/session-history'
+import type { TaskNotification as TaskNotificationEntry } from '../../../shared/types'
 
 const PROJECT_KEY = 'test-project-unfinished'
 const SESSION_ID = '11111111-2222-3333-4444-555555555555'
@@ -124,13 +125,13 @@ describe('loadSessionHistory — agents the transcript never closes', () => {
 
   it('leaves an agent that reported back alone', async () => {
     expect(await statusesFor([...SPAWN, notification('completed', ORIGIN)])).toEqual([
-      ['completed', undefined]
+      ['completed', 1]
     ])
   })
 
   it('marks a resumed run that never ended, with its run index', async () => {
     expect(await statusesFor([...SPAWN, notification('completed', ORIGIN), ...RESUMED])).toEqual([
-      ['completed', undefined],
+      ['completed', 1],
       ['unfinished', 2]
     ])
   })
@@ -141,6 +142,78 @@ describe('loadSessionHistory — agents the transcript never closes', () => {
   })
 
   it('the --resume reap closes the run it interrupted', async () => {
-    expect(await statusesFor([...SPAWN, notification('stopped')])).toEqual([['stopped', undefined]])
+    expect(await statusesFor([...SPAWN, notification('stopped')])).toEqual([['stopped', 1]])
+  })
+})
+
+/**
+ * One entry per notification, with its real usage (2.1.280 transcript shape).
+ *
+ * cli.js writes each `<task-notification>` twice with identical text — the
+ * queue-operation `enqueue`, then the user message when the parent consumes it
+ * — and its `<usage>` is child elements, not the old `total_tokens: N` lines.
+ * Pre-fix a reopened session showed two entries for one finish, each reading
+ * "0 tokens · 0 tools · 0ms".
+ */
+describe('loadSessionHistory — task notifications as 2.1.280 writes them', () => {
+  const xml = (runToolUseId: string, result: string, tokens: number): string =>
+    `<task-notification>\n<task-id>${AGENT}</task-id>\n<tool-use-id>${runToolUseId}</tool-use-id>\n` +
+    `<output-file>/tmp/tasks/${AGENT}.output</output-file>\n<status>completed</status>\n` +
+    `<summary>Agent "regression done" finished</summary>\n<note>…</note>\n<result>${result}</result>\n` +
+    `<usage><subagent_tokens>${tokens}</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1191</duration_ms></usage>\n` +
+    `</task-notification>`
+  const enqueued = (text: string): object => ({
+    type: 'queue-operation',
+    operation: 'enqueue',
+    timestamp: TS,
+    content: text
+  })
+  let consumedLines = 0
+  const consumed = (text: string): object => ({
+    type: 'user',
+    userType: 'external',
+    origin: { kind: 'task-notification' },
+    message: { role: 'user', content: text },
+    uuid: `consumed-${++consumedLines}`,
+    timestamp: TS
+  })
+
+  async function entriesFor(lines: object[]): Promise<TaskNotificationEntry[]> {
+    writeTranscript(lines)
+    const { taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    return taskNotifications.filter((n) => n.toolUseId === ORIGIN)
+  }
+
+  it('keeps one entry for the enqueued and the consumed copy, with its real usage', async () => {
+    const done = xml(ORIGIN, 'ONE', 22020)
+    const entries = await entriesFor([...SPAWN, enqueued(done), consumed(done)])
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      status: 'completed',
+      runIndex: 1,
+      usage: { totalTokens: 22020, toolUses: 0, durationMs: 1191 }
+    })
+  })
+
+  it('still loads a notification that was queued but never consumed', async () => {
+    const entries = await entriesFor([...SPAWN, enqueued(xml(ORIGIN, 'ONE', 22020))])
+    expect(entries.map((e) => e.status)).toEqual(['completed'])
+  })
+
+  it('numbers a resumed agent’s runs as the live session does', async () => {
+    const run1 = xml(ORIGIN, 'ONE', 22020)
+    const run2 = xml(RESUME, 'TWO', 23700)
+    const entries = await entriesFor([
+      ...SPAWN,
+      enqueued(run1),
+      consumed(run1),
+      ...RESUMED,
+      enqueued(run2),
+      consumed(run2)
+    ])
+    expect(entries.map((e) => [e.runIndex, e.usage?.totalTokens])).toEqual([
+      [1, 22020],
+      [2, 23700]
+    ])
   })
 })
