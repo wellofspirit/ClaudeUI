@@ -11,6 +11,7 @@ import type {
   ConfigurableHarnessId,
   SharedProviderAccountList,
   SharedProviderAccountStatus,
+  SharedProviderCuration,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -1561,6 +1562,8 @@ interface SharedProviderAPI {
    * `keep` names the engine whose key wins; omitted, both must hold the same key.
    */
   adoptSharedProviderNativeKey(id: string, keep?: ConfigurableHarnessId): Promise<void>
+  /** One model list for every engine, or one each (ADR-074 §3); projected while linked. */
+  setSharedProviderCuration(id: string, curation: SharedProviderCuration): Promise<void>
   syncSharedProvider(id: string): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(

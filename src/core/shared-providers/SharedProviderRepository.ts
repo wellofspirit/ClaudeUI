@@ -124,7 +124,9 @@ function normalizeChatgpt(value: SharedProviderDefinition): SharedProviderDefini
     },
     // The account policy is the user's (ADR-068 §2); the native route mapping
     // above is not. Absent stays absent — the flag exists once it is turned on.
-    ...(value.accounts ? { accounts: { perSession: value.accounts.perSession === true } } : {})
+    ...(value.accounts ? { accounts: { perSession: value.accounts.perSession === true } } : {}),
+    // So is the model list (ADR-074 §3) — validated by the caller, carried as is.
+    ...(value.curation ? { curation: value.curation } : {})
   }
 }
 
@@ -154,6 +156,8 @@ function validateDefinition(provider: SharedProviderDefinition): void {
     throw new Error('Invalid shared provider protocol')
   if (provider.accounts !== undefined && !isAccountsPolicy(provider.accounts))
     throw new Error('Invalid shared provider accounts policy')
+  if (provider.curation !== undefined && !isCuration(provider.curation))
+    throw new Error('Invalid shared provider curation')
   if (
     provider.kind === 'custom' &&
     (!PROTOCOLS.has(provider.protocol ?? '') ||
@@ -169,6 +173,19 @@ function validateDefinition(provider: SharedProviderDefinition): void {
     (provider.protocol !== undefined || provider.baseUrl !== undefined || provider.models.length)
   )
     throw new Error('Catalog providers take no protocol, baseUrl or models')
+}
+
+/** `{ linked: boolean, models?: string[] }`, the ids non-empty and unique — ADR-074 §3. */
+function isCuration(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const { linked, models } = value as { linked?: unknown; models?: unknown }
+  if (typeof linked !== 'boolean') return false
+  if (models === undefined) return true
+  return (
+    Array.isArray(models) &&
+    models.every((id) => typeof id === 'string' && id.length > 0) &&
+    new Set(models).size === models.length
+  )
 }
 
 /** `{ perSession: boolean }` and nothing else — ADR-068 §2. */

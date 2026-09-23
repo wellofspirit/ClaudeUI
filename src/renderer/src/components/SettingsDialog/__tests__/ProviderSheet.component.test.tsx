@@ -871,7 +871,33 @@ describe('MODELS IN THE PICKER — any engine', () => {
     expect(models).toHaveTextContent('pi reports no models for this provider')
   })
 
+  it('a shared provider both engines curate shows ONE list, marked per engine (ADR-074 §3)', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol'])
+    ])
+    await openSheet('chatgpt')
+    await screen.findAllByTestId('ProviderSheet.curationLink.option')
+    expect(screen.queryByTestId('ProviderSheet.curationTabs')).toBeNull()
+    const sol = screen
+      .getAllByTestId('ProviderSheet.models.row')
+      .find((el) => el.dataset.id === 'gpt-5.6-sol')!
+    expect(
+      within(sol)
+        .getAllByTestId('ProviderSheet.modelMark')
+        .map((el) => [el.dataset.id, el.dataset.available])
+    ).toEqual([
+      ['opencode', 'false'],
+      ['pi', 'true']
+    ])
+  })
+
   it('“Curate models ›” on the pi row opens the pi tab', async () => {
+    // Tabs exist only when the lists are split (ADR-074 §3); linked, there is
+    // one shared list and no tab to open.
+    definitions = [{ ...chatgptDefinition, curation: { linked: false } }, customDefinition]
     app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
       { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
     ])

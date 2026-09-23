@@ -559,6 +559,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'shared-provider:adopt-native',
     args: ['openrouter', 'pi']
   },
+  {
+    method: 'setSharedProviderCuration',
+    channel: 'shared-provider:set-curation',
+    args: ['openrouter', { linked: true, models: ['a/b'] }]
+  },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
   {

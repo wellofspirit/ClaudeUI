@@ -14,7 +14,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SharedProviderDefinition } from '../../../shared/shared-provider'
-import { SharedProviderService, type NativeKeyAdoptionDeps } from '../SharedProviderService'
+import {
+  SharedProviderService,
+  type NativeKeyAdoptionDeps,
+  type SharedProviderServiceDeps
+} from '../SharedProviderService'
 import type { PiSharedProviderAdapter } from '../PiSharedProviderAdapter'
 import type { OpencodeSharedProviderAdapter } from '../OpencodeSharedProviderAdapter'
 import { authJsonApiKeyReader } from '../native-api-keys'
@@ -68,7 +72,8 @@ function writeAuth(file: string, entries: Record<string, unknown>): void {
 
 function setup(
   definitions: SharedProviderDefinition[] = [chatgpt()],
-  native: Partial<NativeKeyAdoptionDeps> = {}
+  native: Partial<NativeKeyAdoptionDeps> = {},
+  writeModelAllowlist?: SharedProviderServiceDeps['writeModelAllowlist']
 ) {
   const records = new Map(definitions.map((d) => [d.id, structuredClone(d)]))
   const credentials = new Map<string, { type: 'api_key'; key: string }>()
@@ -132,7 +137,8 @@ function setup(
       opencode: authJsonApiKeyReader(() => opencodeAuth, 'api'),
       loadCatalogs,
       ...native
-    }
+    },
+    writeModelAllowlist
   })
   return { service, records, credentials, vended, pi, opencode, loadCatalogs }
 }
@@ -362,5 +368,85 @@ describe('adoptNativeKeys (boot)', () => {
     expect(credentials.size).toBe(0)
     expect(records.has('openrouter')).toBe(false)
     expect(logs.lines.join('\n')).toMatch(/adopting the openrouter key failed: read-only disk/)
+  })
+})
+
+describe('setCuration — one list, projected into each engine (ADR-074 §3)', () => {
+  const customDef = (): SharedProviderDefinition => ({
+    id: 'local-api',
+    name: 'Local',
+    kind: 'custom',
+    protocol: 'openai-responses',
+    baseUrl: 'https://api.test/v1',
+    managed: true,
+    models: [
+      { id: 'big', harnessOverrides: { opencode: { id: 'oc-big' }, pi: { id: 'pi-big' } } },
+      { id: 'small' }
+    ],
+    routes: { pi: { enabled: true, providerId: 'local-pi' }, opencode: { enabled: true } }
+  })
+
+  function withWriter(definitions: SharedProviderDefinition[]) {
+    const writes: Array<[string, string, string[] | null]> = []
+    const base = setup(
+      definitions,
+      {},
+      (engine, providerId, models) => void writes.push([engine, providerId, models])
+    )
+    return { ...base, writes }
+  }
+
+  it('linked writes both engines, each in its own provider and model ids', async () => {
+    const { service, writes, records } = withWriter([chatgpt(), customDef()])
+    await service.setCuration('local-api', { linked: true, models: ['big', 'small'] })
+    expect(records.get('local-api')?.curation).toEqual({ linked: true, models: ['big', 'small'] })
+    expect(writes).toEqual([
+      ['pi', 'local-pi', ['pi-big', 'small']],
+      ['opencode', 'local-api', ['oc-big', 'small']]
+    ])
+  })
+
+  it('linked on All clears both allowlists (null), ChatGPT under openai-codex / openai', async () => {
+    const { service, writes } = withWriter([chatgpt()])
+    await service.setCuration('chatgpt', { linked: true })
+    expect(writes).toEqual([
+      ['pi', 'openai-codex', null],
+      ['opencode', 'openai', null]
+    ])
+  })
+
+  it('unlinking records the flag and writes nothing', async () => {
+    const { service, writes, records } = withWriter([chatgpt(), customDef()])
+    await service.setCuration('local-api', { linked: false, models: ['big'] })
+    expect(records.get('local-api')?.curation).toEqual({ linked: false })
+    expect(writes).toEqual([])
+  })
+
+  it('skips a disabled route, and projects to it the moment it is enabled', async () => {
+    const def = customDef()
+    def.routes.pi.enabled = false
+    def.curation = { linked: true, models: ['big'] }
+    const { service, writes } = withWriter([chatgpt(), def])
+    await service.setCuration('local-api', { linked: true, models: ['big'] })
+    expect(writes).toEqual([['opencode', 'local-api', ['oc-big']]])
+    writes.length = 0
+    await service.setRouteEnabled('local-api', 'pi', true)
+    expect(writes).toEqual([['pi', 'local-pi', ['pi-big']]])
+  })
+
+  it('enabling a route while UNLINKED projects nothing', async () => {
+    const def = customDef()
+    def.routes.pi.enabled = false
+    def.curation = { linked: false }
+    const { service, writes } = withWriter([chatgpt(), def])
+    await service.setRouteEnabled('local-api', 'pi', true)
+    expect(writes).toEqual([])
+  })
+
+  it('refuses a payload with no record', async () => {
+    const { service } = withWriter([chatgpt(), customDef()])
+    await expect(service.setCuration('local-api', null as never)).rejects.toThrow(
+      /Invalid curation/
+    )
   })
 })

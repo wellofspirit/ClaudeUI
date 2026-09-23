@@ -3,9 +3,12 @@ import type { CredentialSync } from '../auth/vault/CredentialSync'
 import { readOpencodeNativeConfig, writeOpencodeNativeConfig } from '../opencode/opencode-config'
 import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
 import { logger } from '../services/logger'
+import { setProviderModelAllowlist } from '../services/provider-model-allowlist'
+import { curationForEngine } from '../../shared/provider-curation'
 import {
   validateSharedProviderId,
   type ConfigurableHarnessId,
+  type SharedProviderCuration,
   type SharedProviderDefinition,
   type SharedProviderModel,
   type SharedProviderRouteDiagnosis,
@@ -73,6 +76,8 @@ export interface SharedProviderServiceDeps {
   defaults?: SharedProviderDefaultTargets
   getChatgptModels?: () => Promise<SharedProviderModel[]>
   nativeKeys?: NativeKeyAdoptionDeps
+  /** The slice-5 allowlist writer (`models:set-provider-allowlist`'s). Injected for tests. */
+  writeModelAllowlist?: (engine: Route, providerId: string, models: string[] | null) => void
 }
 
 /** Serializes shared-provider RMW across definitions, vault credentials, and native routes. */
@@ -80,11 +85,15 @@ export class SharedProviderService {
   private readonly repository: Repository
   private readonly defaults: SharedProviderDefaultTargets
   private readonly routeErrors = new Map<string, Partial<Record<Route, string>>>()
+  private readonly writeModelAllowlist: NonNullable<
+    SharedProviderServiceDeps['writeModelAllowlist']
+  >
   private mutation = Promise.resolve()
 
   constructor(private readonly deps: SharedProviderServiceDeps) {
     this.repository = deps.repository ?? new SharedProviderRepository()
     this.defaults = deps.defaults ?? productionDefaultTargets()
+    this.writeModelAllowlist = deps.writeModelAllowlist ?? setProviderModelAllowlist
   }
 
   listDefinitions(): SharedProviderDefinition[] {
@@ -227,6 +236,8 @@ export class SharedProviderService {
         if (definition.id === 'chatgpt')
           await this.syncChatgpt(await this.withCatalogModels(definition))
         else await this.vendRouteCredential(definition, route)
+        // A linked list reaches the engine the moment its route does (ADR-074 §3).
+        if (definition.curation?.linked) this.projectCuration(definition, route)
         this.applyDefault(
           definition.id === 'chatgpt' ? await this.withCatalogModels(definition) : definition,
           route,
@@ -252,6 +263,27 @@ export class SharedProviderService {
         throw new Error('Per-session accounts are only supported for subscription providers')
       }
       this.repository.save({ ...definition, accounts: { perSession: enabled } })
+    })
+  }
+
+  /**
+   * Persist the provider-level model list and, while it is LINKED, project it
+   * into every enabled engine's allowlist under that engine's ids (ADR-074 §3) —
+   * through the same writer `models:set-provider-allowlist` uses. Unlinking only
+   * records the flag: both engines already hold the list the link projected, and
+   * from then on each engine's own list is edited per engine.
+   */
+  async setCuration(id: string, curation: SharedProviderCuration): Promise<void> {
+    await this.enqueue(async () => {
+      const previous = this.requireDefinition(id)
+      // A wire payload: the repository checks `models`, this checks there is a record.
+      if (!curation || typeof curation.linked !== 'boolean') throw new Error('Invalid curation')
+      const record: SharedProviderCuration = curation.linked
+        ? { linked: true, ...(curation.models ? { models: curation.models } : {}) }
+        : { linked: false }
+      const definition = { ...previous, curation: record }
+      this.repository.save(definition)
+      if (record.linked) this.projectCuration(definition)
     })
   }
 
@@ -616,6 +648,20 @@ export class SharedProviderService {
           `${other.name} already delivers to ${route}'s "${nativeId}" provider; turn its ${route} route off first`
         )
       }
+    }
+  }
+
+  /** Write a linked list into `only`, or every enabled route, in each engine's own ids. */
+  private projectCuration(definition: SharedProviderDefinition, only?: Route): void {
+    const curation = definition.curation
+    if (!curation?.linked) return
+    for (const route of only ? [only] : routes) {
+      if (!definition.routes[route].enabled) continue
+      this.writeModelAllowlist(
+        route,
+        routeNativeId(definition, route),
+        curationForEngine(definition, curation, route)
+      )
     }
   }
 

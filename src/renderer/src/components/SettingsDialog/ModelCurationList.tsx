@@ -301,7 +301,8 @@ export function ModelCurationList({
   onSortChange,
   filterTestid,
   locked,
-  allMode = false
+  allMode = false,
+  rowMarks
 }: {
   /** `${SHEET}.models` — every part below is namespaced under it (ADR-027). */
   testid: string
@@ -330,6 +331,11 @@ export function ModelCurationList({
   locked?: Readonly<Record<string, string>>
   /** The provider is on "All models": rows render checked-but-soft. */
   allMode?: boolean
+  /**
+   * Trailing marks on a row — the shared list's per-engine availability
+   * (`oc` / `pi`, ADR-074 §3). Absent in a single engine's list.
+   */
+  rowMarks?: (model: CurationModel) => React.ReactNode
 }): React.JSX.Element {
   /**
    * Disclosure state, keyed by the filter it was formed under: a filter change
@@ -558,6 +564,7 @@ export function ModelCurationList({
             {`In use: ${lock}. Change that setting first.`}
           </span>
         )}
+        {rowMarks?.(model)}
         {date && <span className="shrink-0 text-[11px] leading-4 text-text-muted">{date}</span>}
       </button>
     )

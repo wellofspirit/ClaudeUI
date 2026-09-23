@@ -146,3 +146,26 @@ describe('SharedProviderRepository — catalog kind (ADR-074 §6)', () => {
     expect(() => repo.save({ ...catalog, kind: 'mystery' as never })).toThrow(/kind/)
   })
 })
+
+describe('SharedProviderRepository — curation record (ADR-074 §3)', () => {
+  it('round-trips a curation record, and keeps it on ChatGPT through normalisation', () => {
+    const repo = new SharedProviderRepository()
+    repo.save({ ...provider, curation: { linked: true, models: ['m'] } })
+    expect(repo.get('local-api')?.curation).toEqual({ linked: true, models: ['m'] })
+    const chatgpt = repo.get('chatgpt')!
+    repo.save({ ...chatgpt, curation: { linked: false } })
+    expect(new SharedProviderRepository().get('chatgpt')?.curation).toEqual({ linked: false })
+  })
+
+  it('rejects a malformed record', () => {
+    const repo = new SharedProviderRepository()
+    for (const curation of [
+      { linked: 'yes' },
+      { linked: true, models: 'm' },
+      { linked: true, models: ['m', 'm'] },
+      { linked: true, models: [''] }
+    ]) {
+      expect(() => repo.save({ ...provider, curation: curation as never })).toThrow(/curation/)
+    }
+  })
+})

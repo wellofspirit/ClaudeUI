@@ -539,6 +539,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-route',
       'shared-provider:set-key',
       'shared-provider:adopt-native',
+      'shared-provider:set-curation',
       'shared-provider:sync',
       'shared-provider:disconnect',
       'shared-provider:set-default'
@@ -1725,6 +1726,7 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'shared-provider:disconnect',
   'shared-provider:remove',
   'shared-provider:save',
+  'shared-provider:set-curation',
   'shared-provider:set-default',
   'shared-provider:set-key',
   'shared-provider:set-route',

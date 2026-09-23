@@ -84,6 +84,7 @@ import {
   type CurationAdapter,
   type CurationSummary
 } from './ModelCuration'
+import { LinkedModelCuration } from './LinkedModelCuration'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
@@ -1126,16 +1127,31 @@ export function ProviderSheet({
                 />
               ))}
             >
-              <ModelCuration
-                testid={SHEET}
-                providerName={entry.name}
-                adapters={curationAdapters}
-                engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
-                onEngineChange={setCurationEngine}
-                filterRef={filterRef}
-                onSummary={onSummary}
-                onWrote={onWrote}
-              />
+              {/* A shared provider both engines curate gets one list, split on request (ADR-074 §3). */}
+              {definition && curationAdapters.length === 2 ? (
+                <LinkedModelCuration
+                  testid={SHEET}
+                  providerName={entry.name}
+                  definition={definition}
+                  adapters={curationAdapters}
+                  engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
+                  onEngineChange={setCurationEngine}
+                  filterRef={filterRef}
+                  onSummary={onSummary}
+                  onWrote={onWrote}
+                />
+              ) : (
+                <ModelCuration
+                  testid={SHEET}
+                  providerName={entry.name}
+                  adapters={curationAdapters}
+                  engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
+                  onEngineChange={setCurationEngine}
+                  filterRef={filterRef}
+                  onSummary={onSummary}
+                  onWrote={onWrote}
+                />
+              )}
             </SheetGroup>
           </div>
         )}

@@ -348,6 +348,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('shared-provider:set-route', id, harness, enabled),
     setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
     adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+    setSharedProviderCuration: (id, curation) =>
+      unwrap('shared-provider:set-curation', id, curation),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>

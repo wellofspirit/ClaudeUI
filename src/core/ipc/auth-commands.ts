@@ -72,6 +72,7 @@ import type {
 import type {
   ConfigurableHarnessId,
   SharedProviderAccountList,
+  SharedProviderCuration,
   SharedProviderDefinition
 } from '../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
@@ -484,6 +485,16 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
           throw new Error(`Unknown engine: ${String(keep)}`)
         await sharedProviderService.adoptNativeKey(id, opt(keep))
       })
+    },
+    {
+      // ADR-074 §3 — one model list per provider, projected into each enabled
+      // engine's allowlist while linked. Shape-checked by the repository on save.
+      channel: 'shared-provider:set-curation',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, curation: SharedProviderCuration) =>
+        sharedProviderService.setCuration(id, curation)
+      )
     },
     {
       channel: 'shared-provider:sync',

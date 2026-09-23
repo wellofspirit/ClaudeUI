@@ -93,7 +93,25 @@ export interface SharedProviderDefinition {
    * accounts. Meaningless on a custom provider, which holds one API key.
    */
   accounts?: { perSession: boolean }
+  /**
+   * One model list for every engine, or one per engine (ADR-074 §3). Absent:
+   * derived from the engines' own lists by `effectiveCuration` — linked iff
+   * they agree — so an existing install needs no migration write.
+   */
+  curation?: SharedProviderCuration
   managed: true
+}
+
+/**
+ * The provider-level model list. `models` are CANONICAL ids — the definition's
+ * own model ids for a custom provider, the bare ids both engines share for
+ * ChatGPT and a catalog provider — and absent means All models. While `linked`
+ * it is the source of truth, projected into each enabled engine's allowlist
+ * under that engine's ids; unlinked, each engine's own list is.
+ */
+export interface SharedProviderCuration {
+  linked: boolean
+  models?: string[]
 }
 
 /**
