@@ -72,10 +72,19 @@ vi.mock('../../../main/services/account-manager', () => ({
 vi.mock('../../../main/auth/ClaudeAuthProvider', () => ({
   claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
 }))
+// The transcript read is agent-identity.test.ts's to cover; here only the seam
+// matters — what a resumed session knows before the first wire message.
+const { mockReadAgentIdentity } = vi.hoisted(() => ({ mockReadAgentIdentity: vi.fn() }))
+vi.mock('../agent-identity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../agent-identity')>()
+  return { ...actual, readAgentIdentity: mockReadAgentIdentity }
+})
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../claude-session'
 import type { BrowserWindow } from 'electron'
+import { foldAgentIdentity, emptyAgentIdentity } from '../agent-identity'
+import type { EngineSpawnOptions } from '../../providers/ISession'
 
 const TASK_ID = 'aec60e185d4e7eb6d'
 const ORIGIN = 'toolu_01Csp3qXWBaAwGXecbmcZepT' // the Agent call
@@ -172,6 +181,7 @@ const liveSessions: ClaudeSession[] = []
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockReadAgentIdentity.mockResolvedValue(emptyAgentIdentity())
 })
 
 afterEach(() => {
@@ -181,11 +191,12 @@ afterEach(() => {
 
 async function runWire(
   routingId: string,
-  wire: Array<Record<string, unknown>>
+  wire: Array<Record<string, unknown>>,
+  opts: EngineSpawnOptions = {}
 ): Promise<Array<[string, string, unknown]>> {
   mockQuery.mockImplementation(() => makeFakeQueryHandle(wire))
   const { win, sent } = makeWin()
-  const session = new ClaudeSession(routingId, win, '/tmp/proj')
+  const session = new ClaudeSession(routingId, win, '/tmp/proj', opts)
   liveSessions.push(session)
   await session.run('go')
   return sent
@@ -343,5 +354,107 @@ describe('ClaudeSession — a resumed agent keeps its identity', () => {
     // Before the fix this read taskIdMap alone, which after the resume held the
     // SendMessage id — a notification no card is keyed by.
     expect(ended[1]).toMatchObject({ taskId: TASK_ID, toolUseId: ORIGIN, runIndex: 2 })
+  })
+})
+
+/**
+ * The parent PROCESS goes; the agents stay (ADR-073 §5).
+ *
+ * Probed against 2.1.280 (`scripts/probe-agent-resume.mjs` and the §4.5
+ * kill-and-resume sequence): after the parent cli.js is killed and the session
+ * --resumes, cli.js reaps each agent that was mid-run with a terminal event
+ * carrying the task id and NO tool_use_id — ahead of system/init — and a later
+ * SendMessage{to: <agent id>} restarts the agent under the SendMessage call's
+ * id while its completed messages still hang off the ORIGINAL Agent call.
+ *
+ * Before the fix, cancel() cleared the identity maps and a new session started
+ * with none: the reap reached no card (a `run_in_background` agent read
+ * "running" forever) and the resume armed a SendMessage card nothing renders
+ * as a task (the agent's own card read "complete" while it worked).
+ */
+describe('ClaudeSession — agent identity survives the process', () => {
+  const RESUME_SID = 'sess-resumed-0001'
+  const RUN3 = 'toolu_01ResumeAfterRespawnxxxxx'
+
+  /** cli.js's reap of an orphaned agent on --resume: task id only. */
+  const reap = (taskId = TASK_ID): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: taskId,
+    status: 'stopped',
+    output_file: '',
+    summary: ''
+  })
+
+  /** What the resume target's transcript says: spawned by ORIGIN, resumed once by RUN2. */
+  const seededIdentity = (): ReturnType<typeof foldAgentIdentity> =>
+    foldAgentIdentity([
+      { toolUseId: ORIGIN, text: `agentId: ${TASK_ID}` },
+      { toolUseId: RUN2, text: '', structured: { resumedAgentId: TASK_ID } }
+    ])
+
+  it('reaps an orphaned agent onto its origin card in a resumed session', async () => {
+    // Resolve late: the seed must be in before the reap is handled, however
+    // slow the transcript read is.
+    mockReadAgentIdentity.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(seededIdentity()), 20))
+    )
+    const sent = await runWire('routing-respawn-reap', [reap()], {
+      resumeSessionId: RESUME_SID
+    })
+
+    expect(mockReadAgentIdentity).toHaveBeenCalledWith(expect.stringContaining(RESUME_SID))
+    expect(notifications(sent)).toEqual([
+      expect.objectContaining({
+        taskId: TASK_ID,
+        toolUseId: ORIGIN,
+        status: 'stopped',
+        runIndex: 2
+      })
+    ])
+  })
+
+  it('re-arms the origin card when SendMessage resumes the agent in a resumed session', async () => {
+    mockReadAgentIdentity.mockResolvedValue(seededIdentity())
+    const sent = await runWire(
+      'routing-respawn-resume',
+      [reap(), taskStarted(RUN3), childMessage(ORIGIN, 'THREE'), taskNotification(RUN3)],
+      { resumeSessionId: RESUME_SID }
+    )
+
+    expect(startedEvents(sent)).toEqual([
+      expect.objectContaining({ toolUseId: ORIGIN, runToolUseId: RUN3, runIndex: 3 })
+    ])
+    const ended = notifications(sent)
+    expect(ended.map((n) => [n.toolUseId, n.runIndex])).toEqual([
+      [ORIGIN, 2],
+      [ORIGIN, 3]
+    ])
+  })
+
+  it('keeps agent identity across cancel() for the same object’s next run', async () => {
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-cancel-respawn', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    mockQuery.mockImplementationOnce(() => makeFakeQueryHandle([taskStarted(ORIGIN)]))
+    await session.run('go')
+    session.cancel() // the user's Stop / kill — the next send --resumes
+
+    mockQuery.mockImplementationOnce(() => makeFakeQueryHandle([reap(), taskStarted(RUN2)]))
+    await session.run('again')
+
+    expect(notifications(sent)).toEqual([
+      expect.objectContaining({ toolUseId: ORIGIN, status: 'stopped', runIndex: 1 })
+    ])
+    expect(startedEvents(sent).map((s) => [s.toolUseId, s.runToolUseId, s.runIndex])).toEqual([
+      [ORIGIN, undefined, 1],
+      [ORIGIN, RUN2, 2]
+    ])
+  })
+
+  it('does not read a transcript for a session that resumes nothing', async () => {
+    await runWire('routing-fresh', [taskStarted(ORIGIN)])
+    expect(mockReadAgentIdentity).not.toHaveBeenCalled()
   })
 })

@@ -22,6 +22,7 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
+import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
 import { classifyApiError } from './api-error'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
@@ -167,7 +168,6 @@ class MessageChannel<T> {
   }
 }
 
-const AGENT_ID_RE = /(?:agentId|agent_id):\s*(\S+)/
 const TASK_ID_RE = /task_id:\s*(\S+)/
 const BG_CMD_ID_RE = /Command running in background with ID:\s*([\w-]+)/
 const OUTPUT_FILE_RE = /Output is being written to:\s*(.+)/
@@ -251,11 +251,24 @@ export class ClaudeSession extends BaseSession {
    *
    * `originByTaskId` is NOT evicted on a terminal notification — that eviction
    * is what made run 2 unattributable and the card read "complete" while the
-   * agent was working. It is cleared with the session.
+   * agent was working.
+   *
+   * Nor is any of it cleared when the PROCESS goes (ADR-073 §5): an agent
+   * outlives the cli.js process that spawned it — a `--resume` reaps it by
+   * task id alone and a `SendMessage` resumes it — so its identity belongs to
+   * the conversation. `cancel()` keeps the maps for this object's next run();
+   * a new object resuming a transcript seeds them from it (`identitySeed`).
    */
   private originByTaskId = new Map<string, string>() // taskId → origin toolUseId
   private runAliasByToolUseId = new Map<string, string>() // a run's toolUseId → origin
   private runCountByOrigin = new Map<string, number>() // origin toolUseId → runs started
+  /**
+   * The resume target's agent identity, read at construction and merged in
+   * before the first wire message is handled — the reap of an orphaned agent
+   * arrives ahead of `system/init`, so it cannot wait for anything later.
+   * Null once merged, or for a session that resumes nothing.
+   */
+  private identitySeed: Promise<AgentIdentity> | null = null
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -406,6 +419,13 @@ export class ClaudeSession extends BaseSession {
         this.transcriptPathFor(this.resumeSessionId),
         true
       )
+    }
+
+    // The agents this conversation already spawned (ADR-073 §5). Forks too,
+    // unlike the cost seed: an agent spawned before the anchor is resumable
+    // from the fork, and an id the fork never reaches is simply never looked up.
+    if (this.resumeSessionId) {
+      this.identitySeed = readAgentIdentity(this.transcriptPathFor(this.resumeSessionId))
     }
   }
 
@@ -954,6 +974,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
+        // Here, not in run(): waiting in the message loop delays only this
+        // process's first message and cannot reorder concurrent run() calls.
+        if (this.identitySeed) await this.mergeIdentitySeed()
         await this.dispatchMessage(message as SDKMessage, stderrChunks)
       }
     } catch (err) {
@@ -2985,11 +3008,31 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     })
     this.backgroundPollers.clear()
     this.backgroundFilePaths.clear()
-    // Agent identity is per-session: origins are deliberately never evicted on
-    // a terminal notification (ADR-073), so this is where they go.
-    this.originByTaskId.clear()
-    this.runAliasByToolUseId.clear()
-    this.runCountByOrigin.clear()
+    // Agent identity is deliberately NOT cleared here: this runs on cancel(),
+    // and the next run() --resumes the same conversation, whose agents cli.js
+    // will reap or resume by task id (ADR-073 §5).
+  }
+
+  /**
+   * Fold the resume target's agent identity into the live maps. Anything the
+   * live wire already taught this object wins — the seed only fills gaps.
+   */
+  private async mergeIdentitySeed(): Promise<void> {
+    const seed = this.identitySeed
+    this.identitySeed = null
+    if (!seed) return
+    const identity = await seed
+    for (const [taskId, origin] of identity.origins) {
+      if (!this.originByTaskId.has(taskId)) this.originByTaskId.set(taskId, origin)
+    }
+    for (const [runToolUseId, origin] of identity.runAliases) {
+      if (!this.runAliasByToolUseId.has(runToolUseId)) {
+        this.runAliasByToolUseId.set(runToolUseId, origin)
+      }
+    }
+    for (const [origin, runs] of identity.runCounts) {
+      if (!this.runCountByOrigin.has(origin)) this.runCountByOrigin.set(origin, runs)
+    }
   }
 
   /** Upsert a message into the in-memory history (same dedup as the renderer). */

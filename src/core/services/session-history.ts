@@ -23,6 +23,7 @@ import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { extractToolResultContent } from './tool-result-content'
+import { agentIdOf } from './agent-identity'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -1105,9 +1106,9 @@ export async function loadSessionHistory(
                 const { text: resultText, images } = extractToolResultContent(block.content)
 
                 // Extract agentId from Task tool results for mapping
-                const agentMatch = resultText.match(/(?:agentId|agent_id):\s*(\S+)/)
-                if (agentMatch) {
-                  agentIdToToolUseId[agentMatch[1]] = block.tool_use_id
+                const agentId = agentIdOf(resultText)
+                if (agentId) {
+                  agentIdToToolUseId[agentId] = block.tool_use_id
                 }
 
                 // Find last assistant message with matching tool_use
