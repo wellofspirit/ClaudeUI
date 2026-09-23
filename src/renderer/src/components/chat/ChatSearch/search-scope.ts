@@ -10,7 +10,9 @@ const ANCHOR_ATTR = 'data-search-anchor'
 
 /**
  * Wraps content a tool RETURNED (its output), as opposed to its input or
- * header. Skipped by search when "Exclude tool output" is on.
+ * header. Skipped by search when "Exclude tool output" is on. Every renderer
+ * that shows tool results must spread it — see ADR-075 for the input/output
+ * rule and its edge cases.
  */
 export const TOOL_OUTPUT_SCOPE = { [SCOPE_ATTR]: TOOL_OUTPUT } as const
 export const TOOL_OUTPUT_SELECTOR = `[${SCOPE_ATTR}="${TOOL_OUTPUT}"]`
