@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
@@ -361,6 +361,9 @@ describe('InputBox FC — rendered', () => {
 
   // Track IPC calls
   const ipcCalls: Record<string, unknown[][]> = {}
+  /** What `session:get-engine-models` answers — the FC's mount fetch REPLACES
+   *  `availableModels` with it, so a test that needs Claude rows sets both. */
+  let fcClaudeModels: ModelInfo[] = []
 
   let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
 
@@ -426,8 +429,9 @@ describe('InputBox FC — rendered', () => {
       return { ok: true, data: useSessionStore.getState().providerAccounts }
     })
     app.bridge.ipcMain.handle('session:get-models', () => [])
+    fcClaudeModels = []
     app.bridge.ipcMain.handle('session:get-engine-models', () => [
-      { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
+      { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: fcClaudeModels }
     ])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
@@ -440,13 +444,17 @@ describe('InputBox FC — rendered', () => {
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
     // Prepare store: create a session and make it active
-    useSessionStore.setState({
+    useSessionStore.setState((state) => ({
       activeSessionId: null,
       sessions: {},
       recentSessionIds: [],
       lastSelectedEngineId: 'claude',
-      availableModels: []
-    })
+      availableModels: [],
+      // The Claude-defaults tests below write these; none may leak forward.
+      claudeDefaultModel: '',
+      claudeDefaultModelConfigured: false,
+      settings: { ...state.settings, modelEffortDefaults: {} }
+    }))
     mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: FC_ROUTE })
@@ -742,6 +750,108 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
     expect(viewProps.selectedModel.shortName).toBe('Opus 4.7 with 1M context')
+  })
+
+  // ── Claude defaults (ADR-074 §8) ──────────────────────────────────────
+
+  const claudeRow = (value: string, resolvedModel: string, displayName = value): ModelInfo => ({
+    value,
+    resolvedModel,
+    displayName,
+    description: '',
+    engineId: 'claude',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+  })
+
+  async function sendDraft(): Promise<void> {
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+  }
+
+  it('reads the effort default of the model an alias RESOLVES to, not the baked alias table', async () => {
+    // The Default models table keys `opus` by what cli.js says it resolves to
+    // (`claude-opus-5`); the old lookup keyed it `claude-opus-5-5` from the
+    // alias table and never found the row the user set.
+    fcClaudeModels = [claudeRow('opus', 'claude-opus-5[1m]')]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-5': 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][5]).toBe('opus')
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+  })
+
+  it('an UNCONFIGURED Claude default still spawns an empty model exactly as before', async () => {
+    useSessionStore.setState((state) => ({
+      claudeDefaultModel: '',
+      claudeDefaultModelConfigured: false,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: '' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendDraft()
+    expect(ipcCalls['session:create']).toHaveLength(1)
+  })
+
+  it('refuses to spawn Claude on the empty model an orphaned CONFIGURED default seeds', async () => {
+    // cli.js would otherwise start on its own default — the silent substitute
+    // ADR-059 forbids.
+    fcClaudeModels = [claudeRow('default', 'claude-opus-5[1m]')]
+    useSessionStore.setState((state) => ({
+      claudeDefaultModel: 'claude-opus-4-7',
+      claudeDefaultModelConfigured: true,
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: '' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Select model')
+    await sendDraft()
+    expect(ipcCalls['session:create']).toBeUndefined()
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors.join(' ')).toMatch(
+      /No model selected/
+    )
+  })
+
+  it('previews the CONFIGURED Claude default on the welcome screen, and the first row when unset', async () => {
+    const models = [
+      claudeRow('default', 'claude-opus-5[1m]', 'Default (recommended)'),
+      claudeRow('sonnet', 'claude-sonnet-5', 'Sonnet 5')
+    ]
+    fcClaudeModels = models
+    useSessionStore.setState({ activeSessionId: null, availableModels: models })
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.selectedModel.value).toBe('default')
+    cleanup()
+
+    useSessionStore.setState({
+      claudeDefaultModel: 'sonnet',
+      claudeDefaultModelConfigured: true
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.selectedModel.value).toBe('sonnet')
   })
 
   it('renders and passes props to View', () => {

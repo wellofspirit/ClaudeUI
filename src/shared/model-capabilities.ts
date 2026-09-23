@@ -85,6 +85,26 @@ export function canonicalizeModelValue(value: string | undefined | null): string
 }
 
 /**
+ * The `modelEffortDefaults` key for a Claude picker row (ADR-074 §8) — the ONE
+ * rule both the settings table that writes the key and the composer that reads
+ * it at spawn use, so the row a user edits is the row a session reads.
+ *
+ * The concrete model cli.js says the row resolves to wins (`default` →
+ * `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku` target loses its
+ * date). `canonicalizeModelValue`'s baked alias table is only the fallback, for
+ * a row without `resolvedModel` — it cannot follow an account whose `opus` or
+ * `default` resolves somewhere else, and has no answer for `default` at all.
+ */
+export function claudeEffortKey(
+  model: { value: string; resolvedModel?: string } | undefined | null
+): string {
+  if (!model) return ''
+  const resolved = normaliseModelId(model.resolvedModel)
+  if (resolved.startsWith('claude-')) return resolved
+  return canonicalizeModelValue(model.value)
+}
+
+/**
  * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
  * Note: haiku is excluded by name elsewhere (it never supports `max`).
  */

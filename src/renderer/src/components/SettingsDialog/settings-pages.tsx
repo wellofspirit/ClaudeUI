@@ -512,7 +512,9 @@ export const PAGES: SettingsPage[] = [
         id: 'defaults',
         label: 'Default models',
         // Three engines, three answers: Claude's effort defaults are ClaudeUI's
-        // own settings.json (no tag) and apply to the next SESSION; opencode's
+        // own settings.json (no tag) and apply to the next SESSION — its default
+        // model is `engines/claude.json`, named on that row's key line rather
+        // than the card, which would mislabel the effort table; opencode's
         // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
         // pi's settings.json, read at session start.
         storage: (engine) =>

@@ -181,6 +181,13 @@ export interface EngineDefaultModels {
    */
   codexDefaultModel: string
   codexDefaultModelConfigured: boolean
+  /**
+   * `engines/claude.json#claudeConfig.defaultModel`, or '' when unset (ADR-074
+   * §8). Unset is Claude's own `default` alias — exactly today's behaviour — so
+   * the flag, not the string, is what switches the Claude branch on.
+   */
+  claudeDefaultModel: string
+  claudeDefaultModelConfigured: boolean
 }
 
 /** Narrow a store snapshot to the default-model inputs. */
@@ -191,6 +198,8 @@ export function engineDefaultModels(state: {
   piDefaultModelConfigured: boolean
   codexDefaultModel: string
   codexDefaultModelConfigured: boolean
+  claudeDefaultModel: string
+  claudeDefaultModelConfigured: boolean
 }): EngineDefaultModels {
   return {
     opencodeDefaultModel: state.opencodeDefaultModel,
@@ -198,7 +207,9 @@ export function engineDefaultModels(state: {
     piDefaultModel: state.piDefaultModel,
     piDefaultModelConfigured: state.piDefaultModelConfigured,
     codexDefaultModel: state.codexDefaultModel,
-    codexDefaultModelConfigured: state.codexDefaultModelConfigured
+    codexDefaultModelConfigured: state.codexDefaultModelConfigured,
+    claudeDefaultModel: state.claudeDefaultModel,
+    claudeDefaultModelConfigured: state.claudeDefaultModelConfigured
   }
 }
 
@@ -270,6 +281,17 @@ export function resolveEngineDefaultModel(
       engineMeta(engineId).defaultModelValue(defaults.piDefaultModel)
     )
   }
+  if (engineId === 'claude' && defaults.claudeDefaultModelConfigured) {
+    // The opencode/pi rule (ADR-059): a CONFIGURED default the live Claude list
+    // no longer offers is null — unset picker plus banner — never `default`. An
+    // empty list has not been fetched yet, so the value passes through. With
+    // nothing configured the branch is skipped and the answer is today's.
+    const claude = models.filter((model) => isModelForEngine(model, 'claude'))
+    if (claude.length === 0) return defaults.claudeDefaultModel
+    return claude.some((model) => model.value === defaults.claudeDefaultModel)
+      ? defaults.claudeDefaultModel
+      : null
+  }
   return engineMeta(engineId).defaultModelValue()
 }
 
@@ -339,6 +361,7 @@ function configuredDefaultModelOf(
     const hasCatalog = models.some((model) => isModelForEngine(model, 'codex'))
     return hasCatalog && defaults.codexDefaultModelConfigured ? defaults.codexDefaultModel : ''
   }
+  if (engineId === 'claude') return defaults.claudeDefaultModel
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
@@ -350,6 +373,12 @@ function configuredDefaultModelOf(
 export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
   if (engineId === 'codex' && !model)
     return 'No Codex models were discovered. Check installation and native account/model settings.'
+  // Claude's default lives on Models & providers, not on its engine page.
+  if (engineId === 'claude')
+    return (
+      `The configured Claude default model "${model}" is no longer offered by this account. ` +
+      'Pick a model in the picker, or change it in Settings → Models & providers → Default models.'
+    )
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
     `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
@@ -674,7 +703,10 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     // native `model` win (ADR-068 §6).
     codexDefaultModel: codexEngineConfig?.codexConfig?.defaultModel || '',
     codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
-    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || ''
+    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || '',
+    // No builtin fallback either: blank is Claude's own `default` alias.
+    claudeDefaultModel: loadedEngineConfig?.claudeConfig?.defaultModel || '',
+    claudeDefaultModelConfigured: !!loadedEngineConfig?.claudeConfig?.defaultModel
   })
   // Who is signed in, for the picker/composer entry points (ADR-068 §3). NOT in
   // the Promise.all above: `provider-registry:list` is a slow read (it can start
@@ -1266,6 +1298,11 @@ export interface SessionState {
   /** The Codex twin of {@link opencodeDefaultModelConfigured}. There is no builtin
    *  constant behind it, so this is simply "the key is non-empty". */
   codexDefaultModelConfigured: boolean
+  /** Configurable Claude default model (engines/claude.json `claudeConfig.defaultModel`,
+   *  ADR-074 §8). '' = Claude's own `default` alias, the pre-ADR behaviour. */
+  claudeDefaultModel: string
+  /** The Claude twin of {@link opencodeDefaultModelConfigured}: "the key is non-empty". */
+  claudeDefaultModelConfigured: boolean
   /** Configurable Codex reasoning tier (engines/codex.json `codexConfig.defaultEffort`).
    *  A NATIVE tier value from the model catalog, not an {@link EffortLevel}; '' = the
    *  model's own default. */
@@ -1396,6 +1433,8 @@ export interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Update the configurable Claude default model (mirrors claudeConfig.defaultModel). */
+  setClaudeDefaultModel: (model: string) => void
   /** Update the configurable Codex session defaults (mirrors codexConfig, ADR-068 §6). */
   setCodexDefaults: (defaults: { model?: string; effort?: string }) => void
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
@@ -1695,6 +1734,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   piDefaultModelConfigured: false,
   codexDefaultModel: '',
   codexDefaultModelConfigured: false,
+  claudeDefaultModel: '',
+  claudeDefaultModelConfigured: false,
   codexDefaultEffort: '',
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
@@ -2010,6 +2051,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPiDefaultModel: (model) =>
     set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
+
+  setClaudeDefaultModel: (model) =>
+    set({ claudeDefaultModel: model, claudeDefaultModelConfigured: !!model }),
 
   // One action for both keys, because the settings pane writes them into one
   // `codexConfig` block and a partial update must not reset the other half.

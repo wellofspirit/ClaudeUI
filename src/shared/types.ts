@@ -735,6 +735,24 @@ export interface EngineConfig {
   piConfig?: PiConfig
   /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
   codexConfig?: CodexEngineConfig
+  /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
+  claudeConfig?: ClaudeEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN defaults for Claude sessions — NOT `~/.claude/settings.json`.
+ *
+ * cli.js reads `model` from its own settings, and so does the terminal `claude`;
+ * writing there would change the terminal's default as a side effect. ClaudeUI
+ * passes a session's model itself, so its default lives here and reaches only
+ * sessions started from ClaudeUI (ADR-074 §8). Blank means "Claude's own
+ * `default` alias", today's behaviour. A value here IS an explicit choice
+ * (ADR-059): one the live model list no longer offers banners rather than
+ * silently starting on something else.
+ */
+export interface ClaudeEngineConfig {
+  /** A Claude picker value from `supportedModels()` (`opus`, `claude-fable-5-1`, …). */
+  defaultModel?: string
 }
 
 /**

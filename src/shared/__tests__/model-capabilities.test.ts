@@ -16,6 +16,7 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
+  claudeEffortKey,
   resolveContextWindow,
   resolveClaudeCapabilities,
   claudeModelCapabilities,
@@ -329,7 +330,7 @@ describe('canonicalizeModelValue', () => {
     expect(canonicalizeModelValue('claude-opus-4-8')).toBe('claude-opus-4-8')
     expect(canonicalizeModelValue('claude-opus-4-7-20260101')).toBe('claude-opus-4-7')
     // Fable's picker value carries the [1m] context suffix — it must normalise
-    // to the bare id used as the modelEffortDefaults key / EFFORT_MODELS row.
+    // to the bare id used as the modelEffortDefaults key (`claudeEffortKey`).
     expect(canonicalizeModelValue('claude-fable-5[1m]')).toBe('claude-fable-5')
   })
   it('leaves the `default` alias unmapped — its target depends on user config', () => {
@@ -339,6 +340,34 @@ describe('canonicalizeModelValue', () => {
     expect(canonicalizeModelValue('')).toBe('')
     expect(canonicalizeModelValue(undefined)).toBe('')
     expect(canonicalizeModelValue(null)).toBe('')
+  })
+})
+
+describe('claudeEffortKey (ADR-074 §8)', () => {
+  it('keys an alias by the model cli.js says it resolves to', () => {
+    expect(claudeEffortKey({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })).toBe(
+      'claude-opus-5'
+    )
+    // The baked table would say claude-opus-5-5; the account says otherwise.
+    expect(claudeEffortKey({ value: 'opus', resolvedModel: 'claude-opus-5[1m]' })).toBe(
+      'claude-opus-5'
+    )
+  })
+  it('drops a date suffix on the resolved target', () => {
+    expect(claudeEffortKey({ value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' })).toBe(
+      'claude-haiku-4-5'
+    )
+  })
+  it('falls back to canonicalizeModelValue without a usable resolvedModel', () => {
+    expect(claudeEffortKey({ value: 'sonnet' })).toBe('claude-sonnet-5')
+    expect(claudeEffortKey({ value: 'claude-fable-5-1[1m]' })).toBe('claude-fable-5-1')
+    // A non-Claude target is not a key; the value's rule answers instead.
+    expect(claudeEffortKey({ value: 'opus', resolvedModel: 'gw-opus' })).toBe('claude-opus-5-5')
+    expect(claudeEffortKey({ value: 'default' })).toBe('default')
+  })
+  it('is empty for no row', () => {
+    expect(claudeEffortKey(undefined)).toBe('')
+    expect(claudeEffortKey(null)).toBe('')
   })
 })
 

@@ -18,9 +18,6 @@ import type {
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
-  supportedEffortLevels,
-  defaultEffort,
-  type EffortLevel,
   type AutonomyMode,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
@@ -58,6 +55,7 @@ import { ProviderList } from './ProviderList'
 import { CredentialChip } from './ProviderSheet'
 import { ChatgptAccountsSetting } from './ChatgptAccountsSetting'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
+import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
@@ -327,73 +325,6 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         initialTab="user"
       />
     </>
-  )
-}
-
-// ── Per-model effort default config ──────────────────────────────────
-
-const EFFORT_LEVEL_LABEL: Record<EffortLevel, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max'
-}
-
-const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'claude-sonnet-5', label: 'Sonnet 5' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
-  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { id: 'claude-fable-5', label: 'Fable 5' }
-]
-
-/**
- * One row per Claude model, on the ADR-065 vocabulary: the display name is the
- * label, the canonical model id is the config key under it (11px mono, not the
- * old 10px `text-muted/50` at the right edge), and the effort levels are a
- * `SelectField`.
- *
- * `modified` is passed in rather than derived from `current`: the phase-1
- * `appDefault` helper excludes `modelEffortDefaults` because it is object-valued,
- * so "changed from default" for THIS row means its key is present in that
- * object — which only the caller holding the whole object can answer.
- */
-function ModelEffortRow({
-  modelId,
-  modelLabel,
-  current,
-  modified,
-  onChange
-}: {
-  modelId: string
-  modelLabel: string
-  current: EffortLevel | undefined
-  modified: boolean
-  onChange: (next: EffortLevel | undefined) => void
-}): React.JSX.Element {
-  const levels = supportedEffortLevels(modelId)
-  const fallback = defaultEffort(modelId)
-  return (
-    <SettingRow
-      testid="ModelEffortRow"
-      dataId={modelId}
-      label={modelLabel}
-      keyText={modelId}
-      modified={modified}
-      onReset={() => onChange(undefined)}
-    >
-      <SelectField
-        testid="ModelEffortRow.effort"
-        dataId={modelId}
-        value={current ?? ''}
-        onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
-        options={[
-          { value: '', label: `Default (${EFFORT_LEVEL_LABEL[fallback]})` },
-          ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
-        ]}
-      />
-    </SettingRow>
   )
 }
 
@@ -3366,7 +3297,7 @@ export const SECTIONS: Section[] = [
   },
   {
     id: 'effortDefaults',
-    label: 'Default effort',
+    label: 'Claude defaults',
     icon: (
       <svg
         width="14"
@@ -3382,33 +3313,22 @@ export const SECTIONS: Section[] = [
       </svg>
     ),
     items: [
-      ...EFFORT_MODELS.map((m) => ({
-        key: `effortDefault_${m.id}`,
-        label: `Default effort · ${m.label}`,
-        keywords: `effort default ${m.label} ${m.id} reasoning thinking`,
-        render: (s: AppSettings, u: (p: Partial<AppSettings>) => void) => (
-          <ModelEffortRow
-            modelId={m.id}
-            modelLabel={m.label}
-            current={s.modelEffortDefaults?.[m.id]}
-            modified={m.id in (s.modelEffortDefaults ?? {})}
-            onChange={(next) => {
-              const map = { ...(s.modelEffortDefaults ?? {}) }
-              if (next === undefined) delete map[m.id]
-              else map[m.id] = next
-              u({ modelEffortDefaults: map })
-            }}
-          />
-        )
-      })),
       {
-        key: 'effortDefaultsFooter',
-        label: 'Effort defaults info',
-        keywords: 'effort default fallback per-session',
-        render: () => (
-          <SettingRow
-            testid="EffortDefaultsNote"
-            description="Applied when a new session starts on the matching model or one of its aliases (picking opus uses the Opus 4.8 row); the per-session effort chip always wins."
+        // ONE item since ADR-074 §8: the rows are built from Claude's live model
+        // list inside the component, so they cannot be items of their own. The
+        // keywords carry the old per-model rows' terms.
+        key: 'claudeDefaults',
+        label: 'Claude default model & starting effort',
+        keywords:
+          'default model start new sessions effort default reasoning thinking per-model claude opus sonnet haiku fable alias picked as',
+        render: (s, u, e, ue, v, _uv, ctx) => (
+          <ClaudeDefaultsSection
+            settings={s}
+            update={u}
+            engineConfig={e}
+            updateEngineConfig={ue}
+            vendorConfig={v}
+            navigate={ctx?.navigate}
           />
         )
       }
