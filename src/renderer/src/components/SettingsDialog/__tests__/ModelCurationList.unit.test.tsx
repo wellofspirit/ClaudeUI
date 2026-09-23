@@ -3,7 +3,7 @@
  * filterable list (settings-v2 follow-up G, owner-approved mockup `0a41c623`).
  *
  * The component writes nothing itself: `onSet` is its ONE output, and the
- * caller (`OpencodeModelCuration`) owns the orphan guard and the IPC. So what
+ * caller (`ModelCuration`) owns the orphan guard and the IPC. So what
  * is guarded here is the part a screenshot cannot check — WHICH set every
  * affordance produces, and WHICH models each filter leaves visible:
  *
@@ -122,10 +122,14 @@ beforeEach(() => {
 
 function Harness({
   models,
-  initialSelected = []
+  initialSelected = [],
+  locked,
+  allMode
 }: {
   models: CurationModel[]
   initialSelected?: string[]
+  locked?: Record<string, string>
+  allMode?: boolean
 }): React.JSX.Element {
   const [selected, setSelected] = useState(initialSelected)
   const [filter, setFilter] = useState('')
@@ -144,6 +148,7 @@ function Harness({
         onSet={onSet}
         filter={filter}
         facets={facets}
+        locked={locked}
       />
       <ModelCurationList
         testid="T"
@@ -157,6 +162,8 @@ function Harness({
         onFacetsChange={setFacets}
         sort={sort}
         onSortChange={setSort}
+        locked={locked}
+        allMode={allMode}
       />
     </>
   )
@@ -527,4 +534,77 @@ it('never writes on its own — mount, search, sort and expand are all reads', (
   fireEvent.click(byId('sort', 'name'))
   fireEvent.click(byId('showMore', 'deepseek'))
   expect(onSet).not.toHaveBeenCalled()
+})
+
+// ── Locks and All mode (ADR-074 §2) ──────────────────────────────────
+
+describe('locked and allMode', () => {
+  const LOCKED = {
+    'moonshotai/kimi-k3': 'Default model for pi — Models & providers › Default models › pi'
+  }
+
+  it('a locked row shows where the setting lives and cannot be unticked', () => {
+    render(<Harness models={CATALOG} initialSelected={SELECTED} locked={LOCKED} />)
+    expect(byId('lock', 'moonshotai/kimi-k3')).toHaveAttribute(
+      'title',
+      'Default model for pi — Models & providers › Default models › pi. Change that setting first.'
+    )
+    expect(byId('row', 'moonshotai/kimi-k3')).toHaveAttribute('data-locked', 'true')
+    // Picked by hand, not by All models.
+    expect(byId('row', 'moonshotai/kimi-k3')).not.toHaveAttribute('data-soft')
+    fireEvent.click(byId('row', 'moonshotai/kimi-k3'))
+    expect(sets).toEqual([])
+    // Unlocked rows still toggle.
+    fireEvent.click(byId('row', 'deepseek/v4-flash-0731'))
+    expect(sets).toEqual([['moonshotai/kimi-k3']])
+  })
+
+  it('the vendor box and Clear leave a locked model picked', () => {
+    render(
+      <Harness
+        models={CATALOG}
+        initialSelected={['moonshotai/kimi-k3', 'moonshotai/kimi-k2', 'deepseek/v4-pro']}
+        locked={LOCKED}
+      />
+    )
+    fireEvent.click(byId('groupToggle', 'moonshotai'))
+    expect(sets.at(-1)).toEqual(['moonshotai/kimi-k3', 'deepseek/v4-pro'])
+    fireEvent.click(screen.getByTestId('T.clearShown'))
+    expect(sets.at(-1)).toEqual(['moonshotai/kimi-k3'])
+    // Nothing left that Clear may take.
+    expect(screen.getByTestId('T.clearShown')).toBeDisabled()
+  })
+
+  it('a vendor box that would change nothing reports nothing', () => {
+    // Every Moonshot model is picked AND locked: clearing the vendor leaves both.
+    render(
+      <Harness
+        models={CATALOG}
+        initialSelected={['moonshotai/kimi-k3', 'moonshotai/kimi-k2']}
+        locked={{ ...LOCKED, 'moonshotai/kimi-k2': 'Dispatch default for pi' }}
+      />
+    )
+    fireEvent.click(byId('groupToggle', 'moonshotai'))
+    expect(sets).toEqual([])
+  })
+
+  it('the lock reason describes the row for assistive tech, not only on hover', () => {
+    render(<Harness models={CATALOG} initialSelected={SELECTED} locked={LOCKED} />)
+    const described = byId('row', 'moonshotai/kimi-k3').getAttribute('aria-describedby')!
+    expect(document.getElementById(described)).toHaveTextContent(
+      'In use: Default model for pi — Models & providers › Default models › pi. Change that setting first.'
+    )
+    expect(byId('row', 'deepseek/v4-flash-0731')).not.toHaveAttribute('aria-describedby')
+  })
+
+  it('allMode renders every picked row as checked, and a toggle still reports the next list', () => {
+    const all = CATALOG.map((m) => m.id)
+    render(<Harness models={CATALOG} initialSelected={all} allMode />)
+    for (const row of part('row')) {
+      expect(row).toHaveAttribute('aria-checked', 'true')
+      expect(row).toHaveAttribute('data-soft', 'true')
+    }
+    fireEvent.click(byId('row', 'moonshotai/kimi-k2'))
+    expect(sets).toEqual([all.filter((id) => id !== 'moonshotai/kimi-k2')])
+  })
 })

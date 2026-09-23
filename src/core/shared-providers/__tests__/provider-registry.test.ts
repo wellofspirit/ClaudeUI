@@ -144,8 +144,9 @@ describe('dedupe — a shared definition owns the native row it routes to', () =
     )
     expect(snapshot.entries.map((entry) => entry.id)).toEqual(['anthropic', 'chatgpt'])
     expect(byId(snapshot, 'chatgpt').engines).toEqual({
-      pi: { enabled: true, modelCount: 4, native: true },
-      opencode: { enabled: true, modelCount: 300, native: true },
+      // The id each engine's catalog and allowlist key the provider by.
+      pi: { enabled: true, providerId: 'openai-codex', modelCount: 4, native: true },
+      opencode: { enabled: true, providerId: 'openai', modelCount: 300, native: true },
       // Injection, not a route — and no account is stored here.
       codex: { enabled: false }
     })
@@ -434,6 +435,7 @@ describe('engine facts', () => {
     )
     expect(byId(snapshot, 'opencode:openrouter').engines.opencode).toEqual({
       enabled: true,
+      providerId: 'openrouter',
       modelCount: 300,
       native: true
     })
@@ -469,7 +471,11 @@ describe('engine facts', () => {
     // `[]` is a curated NOTHING, not "all".
     expect(byId(snapshot, 'pi:xai').engines.pi).toMatchObject({ modelCount: 0, curated: true })
     // Before ADR-074 §1 the list was global and this row read "0 models shown".
-    expect(byId(snapshot, 'pi:mistral').engines.pi).toEqual({ enabled: true, native: true })
+    expect(byId(snapshot, 'pi:mistral').engines.pi).toEqual({
+      enabled: true,
+      providerId: 'mistral',
+      native: true
+    })
   })
 
   it('pi: a shared route with no allowlist key keeps its own count, uncurated', () => {
@@ -491,7 +497,11 @@ describe('engine facts', () => {
         piAuthOptions: { groq: [] }
       })
     )
-    expect(byId(snapshot, 'pi:groq').engines.pi).toEqual({ enabled: true, native: true })
+    expect(byId(snapshot, 'pi:groq').engines.pi).toEqual({
+      enabled: true,
+      providerId: 'groq',
+      native: true
+    })
   })
 
   it('pi: a vendor outside pi’s built-in catalog is flagged as a custom provider', () => {
@@ -691,7 +701,11 @@ describe('opencode not installed', () => {
     expect(snapshot.entries.map((entry) => entry.id)).toEqual(['anthropic', 'chatgpt', 'pi:groq'])
     // The shared row still describes its opencode route — the definition says it
     // is on; only the engine's own catalog is unavailable.
-    expect(byId(snapshot, 'chatgpt').engines.opencode).toEqual({ enabled: true, modelCount: 6 })
+    expect(byId(snapshot, 'chatgpt').engines.opencode).toEqual({
+      enabled: true,
+      providerId: 'openai',
+      modelCount: 6
+    })
   })
 
   it('an EMPTY catalog is installed-but-empty, not missing', () => {

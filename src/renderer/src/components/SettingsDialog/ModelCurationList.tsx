@@ -32,9 +32,16 @@
  *  · previews (`ROW_PREVIEW`, `GROUP_HEADERS_PREVIEW`) exist only when NO
  *    filter is active. Once the user has narrowed, hiding matches behind
  *    "Show more" would hide the very thing they searched for.
+ *
+ * TWO OPTIONAL MARKINGS (ADR-074 §2). `locked` names models some setting still
+ * uses (the orphan guard, shown before the click rather than after): a locked
+ * row cannot be unticked while picked, and a vendor box or Clear leaves it
+ * picked. `allMode` says the provider is on "All models" — every row reads as
+ * picked, softly, because nothing is picked individually; the caller decides
+ * what an edit from there means.
  */
 
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { ChevronIcon } from '../shared/ChevronIcon'
 import { Button } from './settings-controls'
 
@@ -143,6 +150,16 @@ const union = (selected: string[], add: string[]): string[] => {
   return [...selected, ...add.filter((id) => !have.has(id))]
 }
 
+/** `selected` without `drop`, except the locked ones — a lock outlives any bulk clear. */
+const withoutUnlocked = (
+  selected: string[],
+  drop: readonly string[],
+  locked: Readonly<Record<string, string>> | undefined
+): string[] => {
+  const dropping = new Set(drop.filter((id) => locked?.[id] === undefined))
+  return selected.filter((id) => !dropping.has(id))
+}
+
 // ── Bulk actions (rendered in the row's TITLE line, not in this subtree) ─────
 
 /**
@@ -157,7 +174,8 @@ export function ModelCurationActions({
   selected,
   onSet,
   filter,
-  facets
+  facets,
+  locked
 }: {
   testid: string
   models: CurationModel[]
@@ -165,11 +183,14 @@ export function ModelCurationActions({
   onSet: (next: string[]) => void
   filter: string
   facets: CurationFacet[]
+  /** Models that stay picked through Clear (see the header). */
+  locked?: Readonly<Record<string, string>>
 }): React.JSX.Element {
   const shown = visibleModels(models, selected, filter, facets)
   const shownIds = shown.map((model) => model.id)
   const selectedSet = new Set(selected)
   const selectedShown = shownIds.filter((id) => selectedSet.has(id)).length
+  const clearable = shownIds.filter((id) => selectedSet.has(id) && locked?.[id] === undefined)
 
   return (
     <span className="shrink-0 flex items-center gap-3">
@@ -184,11 +205,8 @@ export function ModelCurationActions({
       <Button
         variant="link"
         testid={`${testid}.clearShown`}
-        disabled={selectedShown === 0}
-        onClick={() => {
-          const drop = new Set(shownIds)
-          onSet(selected.filter((id) => !drop.has(id)))
-        }}
+        disabled={clearable.length === 0}
+        onClick={() => onSet(withoutUnlocked(selected, shownIds, locked))}
       >
         Clear
       </Button>
@@ -203,14 +221,18 @@ export function ModelCurationActions({
  * a filled one: a half-selected vendor must not read as a selected vendor at a
  * glance, which is the whole reason the state exists.
  */
-function CheckBox({ state }: { state: 'on' | 'mixed' | 'off' }): React.JSX.Element {
+function CheckBox({ state }: { state: 'on' | 'soft' | 'mixed' | 'off' }): React.JSX.Element {
   return (
     <span
       className={`w-3.5 h-3.5 shrink-0 rounded-[3px] border flex items-center justify-center ${
-        state === 'on' ? 'bg-accent border-accent' : 'border-border-bright'
+        state === 'on'
+          ? 'bg-accent border-accent'
+          : state === 'soft'
+            ? 'bg-accent/35 border-transparent'
+            : 'border-border-bright'
       }`}
     >
-      {state === 'on' && (
+      {(state === 'on' || state === 'soft') && (
         <svg
           width="9"
           height="9"
@@ -277,7 +299,9 @@ export function ModelCurationList({
   onFacetsChange,
   sort,
   onSortChange,
-  filterTestid
+  filterTestid,
+  locked,
+  allMode = false
 }: {
   /** `${SHEET}.models` — every part below is namespaced under it (ADR-027). */
   testid: string
@@ -302,6 +326,10 @@ export function ModelCurationList({
    * not ours to rename.
    */
   filterTestid?: string
+  /** Model id → where the setting that uses it lives (the lock's tooltip). */
+  locked?: Readonly<Record<string, string>>
+  /** The provider is on "All models": rows render checked-but-soft. */
+  allMode?: boolean
 }): React.JSX.Element {
   /**
    * Disclosure state, keyed by the filter it was formed under: a filter change
@@ -314,6 +342,7 @@ export function ModelCurationList({
     key: filterKey,
     map: {}
   })
+  const idBase = useId()
   /** Which groups the user asked past `ROW_PREVIEW` for. */
   const [showAllRows, setShowAllRows] = useState<Record<string, boolean>>({})
   /** Whether the vendor list is past `GROUP_HEADERS_PREVIEW`. */
@@ -380,8 +409,14 @@ export function ModelCurationList({
 
   // ── Writes ─────────────────────────────────────────────────────────────────
 
-  const toggleModel = (id: string): void =>
-    onSet(selectedSet.has(id) ? selected.filter((value) => value !== id) : [...selected, id])
+  const toggleModel = (id: string): void => {
+    if (selectedSet.has(id)) {
+      // A lock is the orphan guard made visible: refused here, before the click
+      // could reach a writer that would refuse it anyway.
+      if (locked?.[id] !== undefined) return
+      onSet(selected.filter((value) => value !== id))
+    } else onSet([...selected, id])
+  }
 
   const groupState = (group: Group): 'on' | 'mixed' | 'off' => {
     if (group.shown.length === 0) return 'off'
@@ -391,10 +426,11 @@ export function ModelCurationList({
 
   const toggleGroup = (group: Group): void => {
     const ids = group.shown.map((model) => model.id)
-    if (groupState(group) === 'on') {
-      const drop = new Set(ids)
-      onSet(selected.filter((id) => !drop.has(id)))
-    } else onSet(union(selected, ids))
+    const next =
+      groupState(group) === 'on' ? withoutUnlocked(selected, ids, locked) : union(selected, ids)
+    // A vendor whose shown models are all locked changes nothing — and "nothing"
+    // must not reach the writer, which on All models would read it as an edit.
+    if (next.length !== selected.length) onSet(next)
   }
 
   const toggleFacet = (facet: CurationFacet): void =>
@@ -473,9 +509,13 @@ export function ModelCurationList({
     )
   }
 
+  /** A DOM id for a row's lock reason, unique per list instance. */
+  const lockId = (modelId: string): string => `${idBase}-lock-${modelId.replace(/[^\w-]/g, '_')}`
+
   function modelRow(model: CurationModel): React.JSX.Element {
     const on = selectedSet.has(model.id)
     const date = formatReleaseDate(model.releaseDate)
+    const lock = locked?.[model.id]
     return (
       <button
         key={model.id}
@@ -484,10 +524,15 @@ export function ModelCurationList({
         aria-checked={on}
         data-testid={`${testid}.row`}
         data-id={model.id}
+        data-locked={lock !== undefined ? 'true' : undefined}
+        // The lock's reason is announced, not only hovered.
+        aria-describedby={lock !== undefined ? lockId(model.id) : undefined}
+        // Checked because the provider is on All models, not picked by hand.
+        data-soft={on && allMode ? 'true' : undefined}
         onClick={() => toggleModel(model.id)}
         className="w-full flex items-center gap-2.5 px-3.5 py-[7px] text-left hover:bg-bg-hover/40 transition-colors cursor-default"
       >
-        <CheckBox state={on ? 'on' : 'off'} />
+        <CheckBox state={on ? (allMode ? 'soft' : 'on') : 'off'} />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2 text-[13px] leading-[18px] text-text-primary">
             <span className="min-w-0 truncate">{displayName(model)}</span>
@@ -497,6 +542,22 @@ export function ModelCurationList({
             {model.id}
           </span>
         </span>
+        {lock !== undefined && (
+          <span
+            data-testid={`${testid}.lock`}
+            data-id={model.id}
+            title={`${lock}. Change that setting first.`}
+            className="shrink-0 text-[11px] leading-4 text-text-muted cursor-help"
+          >
+            In use
+          </span>
+        )}
+        {lock !== undefined && (
+          // `hidden` keeps it out of the row's NAME; `aria-describedby` still reads it.
+          <span id={lockId(model.id)} hidden>
+            {`In use: ${lock}. Change that setting first.`}
+          </span>
+        )}
         {date && <span className="shrink-0 text-[11px] leading-4 text-text-muted">{date}</span>}
       </button>
     )

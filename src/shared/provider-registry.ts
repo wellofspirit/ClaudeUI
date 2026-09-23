@@ -55,6 +55,13 @@ export interface ProviderEngineFacts {
   curated?: boolean
   /** The engine's OWN store holds an entry for this provider (not only ClaudeUI's). */
   native?: boolean
+  /**
+   * The id this engine's catalog and model allowlist key the provider by —
+   * `openai` for ChatGPT in opencode, `openai-codex` in pi, the native id on a
+   * native row. Set for opencode and pi only; a disabled shared route owns no
+   * native entry, so it has none.
+   */
+  providerId?: string
 }
 
 export interface ProviderEntry {

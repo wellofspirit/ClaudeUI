@@ -372,6 +372,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     writePiNativeText: async () => {},
     readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
     patchPiModels: async () => {},
+    setProviderModelAllowlist: (engine, providerId, models) =>
+      unwrap('models:set-provider-allowlist', engine, providerId, models),
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

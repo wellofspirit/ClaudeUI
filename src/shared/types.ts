@@ -574,8 +574,12 @@ export interface OpencodeConfigSettings {
    *   - key absent  → show ALL of that provider's models (legacy / externally-authed
    *                   providers keep working unchanged).
    *   - key present → show ONLY the listed model ids (an empty array → none). The
-   *                   "Add provider" flow always writes a key, so a newly-added
-   *                   provider never auto-floods the picker.
+   *                   "Add provider" flow writes `[]` for a catalog over 50
+   *                   models, so a newly-added gateway never floods the picker.
+   *
+   * READ-ONLY on this object (ADR-074 §2): `config:load-opencode-settings`
+   * reports it, `config:save-opencode-settings` ignores it, and its one writer
+   * is `models:set-provider-allowlist` (`setProviderModelAllowlist`).
    */
   modelAllowlist?: Record<string, string[]>
 }
@@ -1491,6 +1495,15 @@ interface SessionAPI {
   readPiModelsRaw(): Promise<PiModelsRaw>
   /** Apply leaf patches to pi's models.json; refuses projection-owned provider entries. */
   patchPiModels(patches: RawConfigPatch[]): Promise<void>
+  /**
+   * One provider's ClaudeUI model allowlist (ADR-074 §2): `null` deletes the key
+   * (All models, including ones added later), a list sets it (`[]` → none).
+   */
+  setProviderModelAllowlist(
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,

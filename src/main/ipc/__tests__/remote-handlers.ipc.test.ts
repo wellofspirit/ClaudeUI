@@ -1687,6 +1687,13 @@ const S1B_SWEEP_CHANNELS = [
 const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
 
 /**
+ * ADR-074 §2 — one provider's model allowlist, for opencode or pi: the Manage
+ * sheet's curation writer. `config`, like the settings saves it narrows, and
+ * reachable remotely for the same reason — curation is engine configuration.
+ */
+const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
+
+/**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
  * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
@@ -1906,6 +1913,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
         ...TRUST_LIST_CHANNELS,
+        ...MODEL_ALLOWLIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
@@ -1949,7 +1957,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS].map(
+    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS, ...MODEL_ALLOWLIST_CHANNELS].map(
       (c) => [c, commandRegistry.declaration(c)?.capability] as const
     )
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))

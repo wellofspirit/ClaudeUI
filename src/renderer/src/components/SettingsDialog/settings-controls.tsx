@@ -391,6 +391,7 @@ export function Segmented<T extends string>({
           // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
           data-testid={optionTestid ?? `${root}.option`}
           data-id={opt.value}
+          aria-pressed={value === opt.value}
           disabled={disabled || opt.disabled}
           onClick={() => onChange(opt.value)}
           className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default disabled:opacity-40 ${

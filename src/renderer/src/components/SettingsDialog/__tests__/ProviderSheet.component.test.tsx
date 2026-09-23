@@ -36,8 +36,8 @@ const chatgpt: ProviderEntry = {
   origin: 'shared',
   credential: 'connected',
   engines: {
-    opencode: { enabled: true, native: true },
-    pi: { enabled: true, native: true },
+    opencode: { enabled: true, native: true, providerId: 'openai' },
+    pi: { enabled: true, native: true, providerId: 'openai-codex' },
     // Fed by vault injection, not by a route (ADR-068 §1) — F14 projects it.
     codex: { enabled: true }
   },
@@ -51,7 +51,7 @@ const custom: ProviderEntry = {
   name: 'Ollama',
   origin: 'shared',
   credential: 'api-key',
-  engines: { opencode: { enabled: false }, pi: { enabled: true } },
+  engines: { opencode: { enabled: false }, pi: { enabled: true, providerId: 'ollama-local' } },
   detail: 'http://localhost:11434'
 }
 
@@ -60,7 +60,15 @@ const openrouter: ProviderEntry = {
   name: 'OpenRouter',
   origin: 'opencode-native',
   credential: 'api-key',
-  engines: { opencode: { enabled: true, modelCount: 2, curated: true, native: true } },
+  engines: {
+    opencode: {
+      enabled: true,
+      modelCount: 2,
+      curated: true,
+      native: true,
+      providerId: 'openrouter'
+    }
+  },
   detail: '2 of 300 models shown in the picker',
   opencodeRemoveKind: 'credential'
 }
@@ -70,7 +78,7 @@ const groq: ProviderEntry = {
   name: 'groq',
   origin: 'pi-native',
   credential: 'api-key',
-  engines: { pi: { enabled: true, native: true } },
+  engines: { pi: { enabled: true, native: true, providerId: 'groq' } },
   piKind: 'builtin',
   piBuiltinId: 'groq'
 }
@@ -80,7 +88,7 @@ const piCustom: ProviderEntry = {
   name: 'my-endpoint',
   origin: 'pi-native',
   credential: 'api-key',
-  engines: { pi: { enabled: true, native: true } },
+  engines: { pi: { enabled: true, native: true, providerId: 'my-endpoint' } },
   detail: 'Custom pi provider',
   piKind: 'custom'
 }
@@ -186,6 +194,7 @@ beforeEach(async () => {
   app.bridge.ipcMain.handle('shared-provider:models', async () => sharedModels)
   app.bridge.ipcMain.handle('pi:binary-path', async () => '/opt/pi/bin/pi')
   app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [])
+  app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [])
   app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
   app.bridge.ipcMain.handle('session:get-engine-models', async () => [])
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
@@ -203,6 +212,7 @@ beforeEach(async () => {
   stub('session:set-opencode-provider-disabled')
   stub('session:remove-opencode-provider')
   stub('config:save-opencode-settings')
+  stub('models:set-provider-allowlist')
   api.vendorAuthSetKey.mockClear()
   api.vendorAuthRemove.mockClear()
   api.patchPiModels.mockClear()
@@ -608,6 +618,8 @@ describe('MODELS IN THE PICKER', () => {
     screen
       .getAllByTestId('ProviderSheet.models.groupToggle')
       .find((el) => el.dataset.id === prefix)!
+  const mode = (id: 'all' | 'pick'): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.curationMode.option').find((el) => el.dataset.id === id)!
 
   beforeEach(() => {
     app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => models)
@@ -616,21 +628,21 @@ describe('MODELS IN THE PICKER', () => {
     }))
   })
 
-  it('curates through the opencode allowlist, one row at a time', async () => {
+  it('curates through the ONE allowlist writer, one row at a time', async () => {
     await openSheet('opencode:openrouter')
     expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')
     expect(row('openai/gpt-5-6-sol')).toHaveAttribute('aria-checked', 'false')
 
     await click(row('openai/gpt-5-6-sol'))
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
+    // The whole-settings save is not how curation writes any more.
+    expect(sent('config:save-opencode-settings')).toEqual([])
   })
 
   it('groups by vendor prefix, and a vendor checkbox writes the whole group', async () => {
@@ -644,26 +656,61 @@ describe('MODELS IN THE PICKER', () => {
     expect(groupToggle('openai')).toHaveAttribute('data-state', 'mixed')
 
     await click(groupToggle('openai'))
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
   })
 
-  it('an ABSENT allowlist means all of them, and the first de-selection writes the list', async () => {
+  it('an ABSENT allowlist is All models; unticking one switches to Only, with Undo', async () => {
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
     await openSheet('opencode:openrouter')
+    expect(mode('all')).toHaveAttribute('aria-pressed', 'true')
     for (const model of models) expect(row(model.id)).toHaveAttribute('aria-checked', 'true')
 
     await click(row('moonshotai/kimi-k3'))
-    expect(sent('config:save-opencode-settings')).toEqual([
-      [{ modelAllowlist: { openrouter: ['openai/gpt-5-6-luna', 'openai/gpt-5-6-sol'] } }]
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']]
     ])
+    expect(mode('pick')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('ProviderSheet.curationToast')).toHaveTextContent(
+      'Switched to Only the ones I pick — everything but this model is picked.'
+    )
+
+    await click(screen.getByTestId('ProviderSheet.curationUndo'))
+    // Undo restores ALL — the key is deleted, not rewritten as today's catalog.
+    expect(sent('models:set-provider-allowlist').at(-1)).toEqual(['opencode', 'openrouter', null])
+    expect(mode('all')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByTestId('ProviderSheet.curationToast')).not.toBeInTheDocument()
+  })
+
+  it('the header chip and the engine row say what the block says, not the registry', async () => {
+    // The registry fixture claims 2 curated models; one of the stored ids is gone
+    // from the catalog, so the block counts 1 — and so must everything else.
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gone'] }
+    }))
+    await openSheet('opencode:openrouter')
+    const chip = await screen.findByText('opencode · 1 of 3')
+    expect(chip).toHaveAttribute('data-testid', 'ProviderSheet.modelsEngine')
+    expect(engineRow('opencode')).toHaveTextContent('1 of 3 models reach the picker.')
+
+    await click(mode('all'))
+    expect(screen.getByTestId('ProviderSheet.modelsEngine')).toHaveTextContent('opencode · all 3')
+    expect(engineRow('opencode')).toHaveTextContent('3 models reach the picker.')
+  })
+
+  it('choosing All models with a selection deletes the key', async () => {
+    await openSheet('opencode:openrouter')
+    expect(mode('pick')).toHaveTextContent('Only the ones I pick · 2')
+    await click(mode('all'))
+    expect(sent('models:set-provider-allowlist')).toEqual([['opencode', 'openrouter', null]])
+    expect(screen.getByTestId('ProviderSheet.curationModeRow')).toHaveTextContent(
+      'Every model OpenRouter offers is shown, including ones added later.'
+    )
   })
 
   it('Select all acts on what the search narrowed to', async () => {
@@ -673,23 +720,17 @@ describe('MODELS IN THE PICKER', () => {
 
     await click(screen.getByTestId('ProviderSheet.models.selectAll'))
     // The model outside the search keeps its place in the list.
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
   })
 
-  it('refuses a de-selection that would orphan a configured model', async () => {
-    // No-silent-fallback (ADR-059): the reference would break far from here.
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      model: 'openrouter/moonshotai/kimi-k3',
-      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
-    }))
+  /** opencode reports Kimi K3 as discovered — the set a setting can name. */
+  const discoveredKimi = (): void => {
     app.bridge.ipcMain.handle('session:get-engine-models', async () => [
       {
         engineId: 'opencode',
@@ -706,18 +747,142 @@ describe('MODELS IN THE PICKER', () => {
         ]
       }
     ])
+  }
+
+  it('locks a model a setting uses, says where, and refuses to untick it', async () => {
+    // No-silent-fallback (ADR-059): the reference would break far from here.
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      model: 'openrouter/moonshotai/kimi-k3',
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
+    }))
+    discoveredKimi()
     await openSheet('opencode:openrouter')
-    await click(row('moonshotai/kimi-k3'))
-    expect(screen.getByTestId('ProviderSheet.modelsError')).toHaveTextContent(
-      'the opencode default model'
+    const lock = screen
+      .getAllByTestId('ProviderSheet.models.lock')
+      .find((el) => el.dataset.id === 'moonshotai/kimi-k3')!
+    expect(lock).toHaveAttribute(
+      'title',
+      'Default model for opencode — Models & providers › Default models › opencode. Change that setting first.'
     )
-    expect(sent('config:save-opencode-settings')).toEqual([])
+    await click(row('moonshotai/kimi-k3'))
+    expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')
+    // Clear takes every other picked model, and never the locked one.
+    await click(screen.getByTestId('ProviderSheet.models.clearShown'))
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['moonshotai/kimi-k3']]
+    ])
+  })
+
+  it('a pi default spelled the same does not lock an opencode model (scoped guard)', async () => {
+    // opencode and pi picker values share a namespace.
+    app.bridge.ipcMain.handle('config:load-engine-config', async (_e: unknown, id: unknown) =>
+      id === 'pi' ? { piConfig: { defaultModel: 'openrouter/moonshotai/kimi-k3' } } : {}
+    )
+    discoveredKimi()
+    await openSheet('opencode:openrouter')
+    expect(screen.queryAllByTestId('ProviderSheet.models.lock')).toEqual([])
+    await click(row('moonshotai/kimi-k3'))
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['openai/gpt-5-6-luna']]
+    ])
   })
 
   it('“Curate models ›” focuses the list’s search box', async () => {
     await openSheet('opencode:openrouter')
     await click(screen.getByTestId('ProviderSheet.curate'))
     expect(screen.getByTestId('ProviderSheet.modelFilter')).toHaveFocus()
+  })
+})
+
+// ── Curation for every engine (ADR-074 §2) ───────────────────────────
+
+describe('MODELS IN THE PICKER — any engine', () => {
+  const piGroup = (vendorId: string, ids: string[]) => ({
+    engineId: 'pi',
+    vendorId,
+    vendorName: vendorId,
+    models: ids.map((id) => ({
+      value: `${vendorId}/${id}`,
+      displayName: id,
+      description: '',
+      engineId: 'pi'
+    }))
+  })
+  const tabs = (): string[] =>
+    screen.queryAllByTestId('ProviderSheet.curationTab').map((el) => el.dataset.id!)
+  const tab = (engine: string): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.curationTab').find((el) => el.dataset.id === engine)!
+
+  it('a provider on both engines gets one tab each, keyed by each engine’s own id', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-6-sol'])
+    ])
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      modelAllowlist: { openai: ['gpt-5.6-luna'] }
+    }))
+    await openSheet('chatgpt')
+    expect(tabs()).toEqual(['opencode', 'pi'])
+    await screen.findByText('1 of 2')
+    expect(
+      screen
+        .getAllByTestId('ProviderSheet.curationTabCount')
+        .map((el) => [el.dataset.id, el.textContent])
+    ).toEqual([
+      ['opencode', '1 of 2'],
+      ['pi', 'all 3']
+    ])
+
+    await click(tab('pi'))
+    await click(
+      screen.getAllByTestId('ProviderSheet.models.row').find((el) => el.dataset.id === 'gpt-6-sol')!
+    )
+    // pi's id for ChatGPT is `openai-codex`, never the definition id.
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['pi', 'openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol']]
+    ])
+  })
+
+  it('a single-engine provider gets no tabs, and pi curation writes pi', async () => {
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('groq', ['llama-4', 'kimi'])
+    ])
+    await openSheet('pi:groq')
+    expect(tabs()).toEqual([])
+    await click(
+      screen
+        .getAllByTestId('ProviderSheet.curationMode.option')
+        .find((el) => el.dataset.id === 'pick')!
+    )
+    // A small catalog starts Only with everything picked.
+    expect(sent('models:set-provider-allowlist')).toEqual([['pi', 'groq', ['llama-4', 'kimi']]])
+  })
+
+  it('an empty pi catalog says why instead of listing nothing', async () => {
+    // pi reports OTHER providers, so this one has no usable credential.
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('groq', ['llama-4'])
+    ])
+    await openSheet('ollama-local')
+    const models = await screen.findByTestId('ProviderSheet.models')
+    expect(models).toHaveAttribute('data-id', 'empty')
+    expect(models).toHaveTextContent('pi reports no models for this provider')
+  })
+
+  it('“Curate models ›” on the pi row opens the pi tab', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna'])
+    ])
+    await openSheet('chatgpt')
+    await screen.findAllByTestId('ProviderSheet.curationTab')
+    await click(screen.getAllByTestId('ProviderSheet.curate').find((el) => el.dataset.id === 'pi')!)
+    expect(tab('pi')).toHaveAttribute('aria-selected', 'true')
   })
 })
 

@@ -113,6 +113,7 @@ import { generateAgent } from '../opencode/agent-generate'
 import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
 import { assertSafeIdSegment } from '../services/path-containment'
+import { setProviderModelAllowlist } from '../services/provider-model-allowlist'
 import type {
   EngineConfig,
   VendorConfig,
@@ -446,7 +447,8 @@ export function configCommands(
 
     // opencode engine-native settings — read/write opencode's OWN config file.
     // The load handler triggers the one-time migration from the private store when
-    // the opencode binary is available. modelAllowlist stays ClaudeUI-private.
+    // the opencode binary is available. modelAllowlist stays ClaudeUI-private: the
+    // load reports it (read-only), and only `models:set-provider-allowlist` writes it.
     {
       channel: 'config:load-opencode-settings',
       capability: 'config',
@@ -470,26 +472,43 @@ export function configCommands(
       capability: 'config',
       kind: 'command',
       handler: safeHandler(async (settings: OpencodeConfigSettings) => {
-        // Write the six native fields to opencode's own config file.
-        const { modelAllowlist, ...nativeFields } = settings
+        // Write the six native fields to opencode's own config file — and
+        // NOTHING else. `modelAllowlist` is dropped on the floor, never routed
+        // into `engines/opencode.json`: its one writer is
+        // `models:set-provider-allowlist` (ADR-074 §2). Settings panes save
+        // the whole object they loaded at mount, allowlist included, so honouring
+        // it here let a stale pane put back curation the Manage sheet had just
+        // changed.
+        const { modelAllowlist: _ignored, ...nativeFields } = settings
         writeOpencodeNativeConfig(nativeFields)
-        // Route modelAllowlist to the private EngineConfig, preserving autoMode/sandbox/proxy.
-        // The private opencodeConfig only holds modelAllowlist now (six native fields moved to disk).
-        const engCfg = loadEngineConfig('opencode')
-        const nextOpencodeConfig: OpencodeConfigSettings | undefined =
-          modelAllowlist !== undefined && Object.keys(modelAllowlist).length > 0
-            ? { modelAllowlist }
-            : engCfg.opencodeConfig?.modelAllowlist &&
-                Object.keys(engCfg.opencodeConfig.modelAllowlist).length > 0
-              ? { modelAllowlist: engCfg.opencodeConfig.modelAllowlist }
-              : undefined
-        saveEngineConfig('opencode', {
-          ...engCfg,
-          opencodeConfig: nextOpencodeConfig
-        })
         // Provider changes affect the discoverable model set.
         invalidateOpencodeModelCache()
       })
+    },
+
+    // One provider's model allowlist, for either engine (ADR-074 §2): `null`
+    // deletes the key (All models), a list sets it. The Manage sheet's curation
+    // writes through this and nothing else, so it can never clobber a sibling
+    // provider's list or any other field of the engine file.
+    {
+      channel: 'models:set-provider-allowlist',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(
+        async (engine: unknown, providerId: unknown, models: unknown): Promise<void> => {
+          if (engine !== 'opencode' && engine !== 'pi') {
+            throw new Error(`Invalid engine for a model allowlist: ${JSON.stringify(engine)}`)
+          }
+          assertSafeIdSegment(providerId, 'providerId')
+          if (
+            models !== null &&
+            !(Array.isArray(models) && models.every((id) => typeof id === 'string'))
+          ) {
+            throw new Error('Invalid model allowlist: expected null or an array of model ids')
+          }
+          setProviderModelAllowlist(engine, providerId, models as string[] | null)
+        }
+      )
     },
 
     // Raw (non-lossy) opencode config access for the schema-driven settings editor.

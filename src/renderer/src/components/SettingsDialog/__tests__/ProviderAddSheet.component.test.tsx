@@ -146,6 +146,7 @@ beforeEach(async () => {
   app.bridge.ipcMain.handle('session:get-engine-models', async () => [])
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
   stub('config:save-opencode-settings')
+  stub('models:set-provider-allowlist')
   stub('shared-provider:save')
   stub('shared-provider:set-key')
 
@@ -395,15 +396,53 @@ describe('the setup step', () => {
     expect(called('vendorAuthSetKey')).toEqual([['opencode', 'openai', 'sk-live']])
   })
 
-  it('seeds an EMPTY opencode allowlist so a 300-model provider cannot flood the picker', async () => {
+  /** A catalog of `n` models, for the anti-flood threshold (ADR-074 §2: over 50). */
+  const catalogOf = (n: number): Array<{ id: string; name: string }> =>
+    Array.from({ length: n }, (_, i) => ({ id: `m-${i}`, name: `Model ${i}` }))
+
+  it('seeds an EMPTY opencode allowlist for a catalog over 50, so it cannot flood the picker', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(300))
     await openAddSheet()
     await click(catalogRow('groq'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(sent('config:save-opencode-settings')).toEqual([[{ modelAllowlist: { groq: [] } }]])
+    expect(sent('models:set-provider-allowlist')).toEqual([['opencode', 'groq', []]])
+    expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+
+  it('leaves a catalog of 50 or fewer on All models — no key at all', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(50))
+    await openAddSheet()
+    await click(catalogRow('groq'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('models:set-provider-allowlist')).toEqual([])
+  })
+
+  it('seeds each engine by ITS OWN catalog size', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(3))
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      {
+        engineId: 'pi',
+        vendorId: 'openai',
+        vendorName: 'openai',
+        models: catalogOf(60).map((m) => ({
+          value: `openai/${m.id}`,
+          displayName: m.name,
+          description: '',
+          engineId: 'pi'
+        }))
+      }
+    ])
+    await openAddSheet()
+    await click(catalogRow('openai'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-live')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('models:set-provider-allowlist')).toEqual([['pi', 'openai', []]])
   })
 
   it('leaves an existing allowlist alone (re-keying must not wipe curation)', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(300))
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
       modelAllowlist: { groq: ['llama-4'] }
     }))
@@ -411,7 +450,7 @@ describe('the setup step', () => {
     await click(catalogRow('groq'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(sent('config:save-opencode-settings')).toEqual([])
+    expect(sent('models:set-provider-allowlist')).toEqual([])
   })
 
   it('writes nothing for a pi-only provider beyond pi’s own store', async () => {
@@ -420,6 +459,7 @@ describe('the setup step', () => {
     await typeInto('ProviderAddSheet.keyInput', 'sk-radius')
     await click(screen.getByTestId('ProviderAddSheet.save'))
     expect(called('vendorAuthSetKey')).toEqual([['pi', 'radius', 'sk-radius']])
+    expect(sent('models:set-provider-allowlist')).toEqual([])
     expect(sent('config:save-opencode-settings')).toEqual([])
   })
 

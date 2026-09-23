@@ -1390,7 +1390,10 @@ function OpencodeModelsSection(): React.JSX.Element {
   const update = (patch: Partial<OpencodeConfigSettings>): void => {
     const next: OpencodeConfigSettings = { ...cfg, ...patch }
     setCfg(next)
-    window.api.saveOpencodeSettings(next).catch(() => {})
+    // Never the allowlist loaded at mount: the Manage sheet on this same page may
+    // have curated since, and `models:set-provider-allowlist` is its only writer.
+    const { modelAllowlist: _stale, ...settings } = next
+    window.api.saveOpencodeSettings(settings).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
     // The RAW value, not the constant — an empty string is what tells the store
@@ -3839,7 +3842,7 @@ export const SECTIONS: Section[] = [
         label: 'Models & thinking',
         keywords:
           'pi model default provider openai-codex anthropic allowlist defaultModel reasoning effort',
-        render: () => <PiModelsSection />
+        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <PiModelsSection navigate={ctx?.navigate} />
       }
     ]
   },

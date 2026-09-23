@@ -52,6 +52,7 @@ import type {
 } from '../../../../shared/shared-provider'
 import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
+import { LARGE_CATALOG, opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
 import { CredentialChip, EngineChip } from './ProviderSheet'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
@@ -423,13 +424,13 @@ export function ProviderAddSheet({
           void run(async () => {
             for (const engine of engines)
               await window.api.vendorAuthSetKey(engine, step.candidate.id, key)
-            if (engines.includes('opencode')) await seedOpencodeAllowlist(step.candidate.id)
+            await seedLargeCatalogAllowlists(engines, step.candidate.id)
             await onAdded(registryIdFor(engines[0], step.candidate.id))
           })
         }
         onOAuthDone={() =>
           void run(async () => {
-            await seedOpencodeAllowlist(step.candidate.id)
+            await seedLargeCatalogAllowlists(['opencode'], step.candidate.id)
             await onAdded(`opencode:${step.candidate.id}`)
           })
         }
@@ -495,19 +496,34 @@ function registryIdFor(engine: ConfigurableHarnessId, providerId: string): strin
 }
 
 /**
- * Seed an EMPTY opencode allowlist for a freshly added provider — the
- * anti-flood rule `VendorOpencodeSection.finishAdd` carried. A provider that
- * already has one keeps it (re-adding a credential must not wipe curation).
+ * The anti-flood rule, per engine (ADR-074 §2): a freshly added provider whose
+ * catalog in an engine is over {@link LARGE_CATALOG} models starts on "Only the
+ * ones I pick" with nothing picked, so 300 OpenRouter models cannot land in the
+ * picker at once. A smaller one is left on All models (no key at all).
+ *
+ * A provider that already has a key keeps it — re-adding a credential must not
+ * wipe curation. A read that fails seeds nothing, and a write that fails is
+ * logged and skipped: a missing key is All models, which is the safe way to be
+ * wrong here.
  */
-async function seedOpencodeAllowlist(providerId: string): Promise<void> {
-  const settings = await window.api.loadOpencodeSettings().catch(() => null)
-  if (!settings) return
-  const allowlist = settings.modelAllowlist ?? {}
-  if (allowlist[providerId]) return
-  await window.api.saveOpencodeSettings({
-    ...settings,
-    modelAllowlist: { ...allowlist, [providerId]: [] }
-  })
+async function seedLargeCatalogAllowlists(
+  engines: readonly ConfigurableHarnessId[],
+  providerId: string
+): Promise<void> {
+  for (const engine of engines) {
+    const adapter =
+      engine === 'opencode' ? opencodeCurationAdapter(providerId) : piCurationAdapter(providerId)
+    const [catalog, current] = await Promise.all([
+      adapter.loadCatalog().catch(() => []),
+      adapter.loadSelection().catch(() => null)
+    ])
+    if (current !== undefined || catalog.length <= LARGE_CATALOG) continue
+    // The credential is already written: a failed seed must not fail the add.
+    // The provider then starts on All models, which curation can still change.
+    await adapter.save([]).catch((err: unknown) => {
+      console.warn(`[ProviderAddSheet] seeding ${engine} allowlist for ${providerId} failed:`, err)
+    })
+  }
 }
 
 // ── Step 2a: a catalog pick ──────────────────────────────────────────

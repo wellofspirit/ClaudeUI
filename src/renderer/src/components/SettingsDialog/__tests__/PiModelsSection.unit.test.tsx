@@ -11,10 +11,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, within, act } from '@testing-library/react'
 import { SECTIONS, PiDispatchIntoSection } from '../settings-sections'
 import { useSessionStore, PI_DEFAULT_MODEL } from '../../../stores/session-store'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
+import type { SettingsRenderContext } from '../settings-target'
+import { reloadEngineConfigObject } from '../use-engine-config'
 
 const loadEngineConfig = vi.fn(async (_engineId: string): Promise<EngineConfig> => ({}))
 const saveEngineConfig = vi.fn(async () => {})
@@ -69,7 +71,7 @@ function pickModel(field: HTMLElement, value: string): void {
   fireEvent.click(option!)
 }
 
-function modelsPane(): ReactElement {
+function modelsPane(ctx?: SettingsRenderContext): ReactElement {
   const item = SECTIONS.find((section) => section.id === 'pi-config-models')!.items.find(
     (item) => item.key === 'piModels'
   )!
@@ -79,12 +81,13 @@ function modelsPane(): ReactElement {
     {} as never,
     () => {},
     {} as never,
-    () => {}
+    () => {},
+    ctx
   )
 }
 
-function renderSection(): void {
-  render(modelsPane())
+function renderSection(ctx?: SettingsRenderContext): void {
+  render(modelsPane(ctx))
 }
 
 describe('pi session-default model (Models & thinking pane)', () => {
@@ -182,70 +185,92 @@ describe('pi session-default model (Models & thinking pane)', () => {
     expect(screen.getByTestId('PiDefaultModelSection.unknownWarning')).toBeInTheDocument()
   })
 
-  it('manages an explicit allowlist while preserving the latest engine config', async () => {
-    const latest: EngineConfig = {
-      dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'] },
-      piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
-    }
-    loadEngineConfig.mockResolvedValue(latest)
-    renderSection()
-    await screen.findByTestId('PiDefaultModelSection.defaultModel')
-
-    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
-    const rows = await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
-    fireEvent.click(rows[0])
-    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
-
-    // Unticking openai-codex's only model curates THAT provider to nothing;
-    // anthropic, still fully ticked, gets no key (ADR-074 §1).
-    await waitFor(() =>
-      expect(saveEngineConfig).toHaveBeenCalledWith('pi', {
-        ...latest,
-        piConfig: {
-          defaultModel: 'openai-codex/gpt-5.6-luna',
-          modelAllowlist: { 'openai-codex': [] }
-        }
-      })
-    )
-    expect(useSessionStore.getState().modelReloadNonce).toBeGreaterThan(0)
-  })
-
-  it('seeds from the per-provider record and omits a fully ticked provider on save', async () => {
+  // ADR-074 §2: curation moved into each provider's Manage sheet; this row
+  // only counts, and links there.
+  it('summarises per-provider curation and links to Providers', async () => {
     loadEngineConfig.mockResolvedValue({
       piConfig: { modelAllowlist: { 'openai-codex': [], groq: ['llama-4'] } }
     })
+    getPiModelCatalogGroups.mockResolvedValue([
+      group,
+      { ...group, vendorId: 'anthropic', vendorName: 'anthropic', models: [] }
+    ])
+    const navigate = vi.fn()
+    renderSection({ versionInfo: null, navigate })
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    const row = screen
+      .getAllByTestId('PiConfigPane.row')
+      .find((el) => el.dataset.id === 'piConfig.modelAllowlist')!
+    // groq is curated but signed out right now — it still counts, in both.
+    await waitFor(() =>
+      expect(row).toHaveTextContent(
+        'Curated per provider in Models & providers — 2 of 3 pi providers curated.'
+      )
+    )
+
+    // The render context's navigator, so the jump happens every time.
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.providersLink'))
+    expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'providers' })
+    expect(screen.queryByTestId('PiDefaultModelSection.manageModels')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ModelAllowlistDialog')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the open-settings event when rendered with no context', async () => {
     renderSection()
     await screen.findByTestId('PiDefaultModelSection.defaultModel')
-    expect(screen.getByTestId('PiDefaultModelSection.manageModels')).toHaveTextContent(
-      'Manage (2 providers curated)'
-    )
+    const opened = vi.fn()
+    window.addEventListener('open-settings', opened)
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.providersLink'))
+    window.removeEventListener('open-settings', opened)
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      page: 'models',
+      group: 'providers'
+    })
+  })
 
-    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
-    await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
-    // Absent key → ticked; `[]` → unticked.
-    expect(screen.getByTestId('ModelAllowlistDialog')).toHaveTextContent('1 selected')
-    fireEvent.click(
-      screen
-        .getAllByTestId('ModelAllowlistDialog.modelRow')
-        .find((row) => row.dataset.id === 'openai-codex/gpt-5.6-luna')!
-    )
-    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+  // The Manage sheet curates through its own leaf writer while this pane, on
+  // the same page, holds the whole engines/pi.json. Without the re-read its next
+  // save would put the pre-curation allowlist back.
+  it('a curation write outside the store is re-read before this pane saves again', async () => {
+    loadEngineConfig.mockResolvedValue({
+      piConfig: { modelAllowlist: { 'openai-codex': ['gpt-5.6-luna'] } }
+    })
+    renderSection()
+    const field = await screen.findByTestId('PiDefaultModelSection.defaultModel')
 
-    // Every catalog model of openai-codex and anthropic is ticked → neither
-    // has a key. groq is not in the catalog (signed out), so it keeps its own.
+    // The sheet sets openai-codex back to All models, then re-reads the store.
+    loadEngineConfig.mockResolvedValue({ piConfig: {} })
+    await act(async () => {
+      await reloadEngineConfigObject('pi')
+    })
+
+    pickModel(field, 'anthropic/claude-sonnet-5')
     await waitFor(() =>
-      expect(saveEngineConfig).toHaveBeenCalledWith('pi', {
-        piConfig: { modelAllowlist: { groq: ['llama-4'] } }
+      expect(saveEngineConfig).toHaveBeenLastCalledWith('pi', {
+        piConfig: { defaultModel: 'anthropic/claude-sonnet-5' }
       })
     )
   })
 
-  it('labels the Manage button "all" with no record or an empty one', async () => {
-    loadEngineConfig.mockResolvedValue({ piConfig: { modelAllowlist: {} } })
+  it('re-reads the picker models after a model reload (curation elsewhere)', async () => {
     renderSection()
     await screen.findByTestId('PiDefaultModelSection.defaultModel')
-    expect(screen.getByTestId('PiDefaultModelSection.manageModels')).toHaveTextContent(
-      'Manage (all)'
+    const reads = getEngineModels.mock.calls.length
+    const catalogReads = getPiModelCatalogGroups.mock.calls.length
+    act(() => useSessionStore.getState().reloadModels())
+    await waitFor(() => expect(getEngineModels.mock.calls.length).toBe(reads + 1))
+    expect(getPiModelCatalogGroups.mock.calls.length).toBe(catalogReads + 1)
+  })
+
+  it('counts nothing curated when there is no record', async () => {
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId('PiConfigPane.row')
+          .find((el) => el.dataset.id === 'piConfig.modelAllowlist')
+      ).toHaveTextContent('0 of 1 pi providers curated.')
     )
   })
 
@@ -282,32 +307,6 @@ describe('pi session-default model (Models & thinking pane)', () => {
       await screen.findByTestId('PiDefaultModelSection.excludedDefaultWarning')
     ).toBeInTheDocument()
     expect(screen.queryByTestId('PiDefaultModelSection.unknownWarning')).not.toBeInTheDocument()
-  })
-
-  it('keeps saving disabled when the unfiltered catalog fails to load', async () => {
-    getPiModelCatalogGroups.mockRejectedValueOnce(new Error('catalog unavailable'))
-    renderSection()
-    await screen.findByTestId('PiDefaultModelSection.defaultModel')
-    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
-
-    expect(await screen.findByTestId('ModelAllowlistDialog.error')).toHaveTextContent(
-      'catalog unavailable'
-    )
-    expect(screen.getByTestId('ModelAllowlistDialog.save')).toBeDisabled()
-  })
-
-  it('keeps the dialog open and reports a failed allowlist save', async () => {
-    saveEngineConfig.mockRejectedValueOnce(new Error('config write failed'))
-    renderSection()
-    await screen.findByTestId('PiDefaultModelSection.defaultModel')
-    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
-    await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
-    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
-
-    expect(await screen.findByTestId('ModelAllowlistDialog.error')).toHaveTextContent(
-      'config write failed'
-    )
-    expect(screen.getByTestId('ModelAllowlistDialog')).toBeInTheDocument()
   })
 
   // ── One config object per engine ───────────────────────────────────

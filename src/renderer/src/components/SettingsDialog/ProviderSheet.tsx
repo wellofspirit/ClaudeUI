@@ -48,12 +48,13 @@
  * mirroring the dialog's box formula separately would be two chances to get it
  * wrong.
  *
- * THE CURATION LIST IS ITS OWN COMPONENT. "Models in the picker" is a grouped,
- * filterable LIST (`ModelCurationList.tsx`, follow-up G, mockup `0a41c623`),
- * not the chip cloud the board drew: a chip carries only a display name, and a
- * gateway catalog of 358 models needs the vendor and the mono id on the line,
- * plus facets and a bulk action. The sheet keeps the reads, the orphan guard
- * and the one writer; the list is presentation and local UI state.
+ * THE CURATION BLOCK IS ITS OWN COMPONENT, FOR EVERY ENGINE. "Models in the
+ * picker" is `ModelCuration.tsx` (ADR-074 §2, mockup `7eeb6bff`): one tab per
+ * engine that curates this provider, an All models / Only the ones I pick
+ * choice, and the grouped, filterable list (`ModelCurationList.tsx`, follow-up
+ * G) under it. It owns the reads, the scoped orphan guard and its one writer
+ * (`models:set-provider-allowlist`); the sheet only says which engines can
+ * curate, under which id — the id the registry puts on each engine's facts.
  *
  * WHAT IT DOES NOT OWN. Three flows here are entry points into surfaces that
  * already exist and are deliberately not re-implemented: opencode's per-model
@@ -69,29 +70,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { engineMeta } from '../../../../shared/engine-meta'
-import { findModelReferences, formatModelReferences } from '../../../../shared/model-references'
 import type { ProviderCredential, ProviderEntry } from '../../../../shared/provider-registry'
 import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
   SharedProviderModel
 } from '../../../../shared/shared-provider'
-import type {
-  EngineConfig,
-  EngineId,
-  EngineModelGroup,
-  ModelInfo,
-  OpencodeCatalogModel,
-  OpencodeConfigSettings,
-  OpencodeProviderCatalogEntry
-} from '../../../../shared/types'
+import type { EngineId, OpencodeProviderCatalogEntry } from '../../../../shared/types'
 import { Button, SelectField, SettingRow, TextField, ToggleSwitch } from './settings-controls'
 import {
-  ModelCurationActions,
-  ModelCurationList,
-  type CurationFacet,
-  type CurationSort
-} from './ModelCurationList'
+  ModelCuration,
+  opencodeCurationAdapter,
+  piCurationAdapter,
+  curationCount,
+  type CuratedEngine,
+  type CurationAdapter,
+  type CurationSummary
+} from './ModelCuration'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import type { SettingsTarget } from './settings-target'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
@@ -175,9 +170,10 @@ export function EngineChip({
   enabled: boolean
   /**
    * Overrides the WORD, never the engine: `data-id` stays the `EngineId`, so
-   * nothing downstream has to parse prose. Its one caller is `SignInDialog`'s
-   * header, where the Claude chip names the PRODUCT the credential feeds
-   * ("Claude Code") beside a title that already says "Claude".
+   * nothing downstream has to parse prose. `SignInDialog`'s header uses it to
+   * name the PRODUCT the credential feeds ("Claude Code") beside a title that
+   * already says "Claude"; the sheet's "Models in the picker" header uses it to
+   * put each engine's curation count on its chip ("pi · 6 of 8").
    */
   label?: string
   testid: string
@@ -214,7 +210,7 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * One ENABLED-FOR row.
  *
  * Built from `SettingRow` + a bare switch rather than `SettingsToggle`, because
- * the opencode row carries a "Curate models" LINK beside its switch and
+ * a curating engine's row carries a "Curate models" LINK beside its switch, and
  * `SettingsToggle` makes the whole row a `<button>` — a link inside it would be
  * a button inside a button. One shape for all three rows keeps the testids
  * uniform: `ProviderSheet.engine` is the row, `ProviderSheet.engineToggle` the
@@ -237,7 +233,7 @@ function EngineRow({
   disabled?: boolean
   dimmed?: boolean
   onToggle: () => void
-  /** Rendered before the switch (the opencode row's "Curate models"). */
+  /** Rendered before the switch (a curating engine's "Curate models"). */
   leadingControl?: React.ReactNode
 }): React.JSX.Element {
   return (
@@ -327,8 +323,10 @@ export function ProviderSheet({
    * one account must not arm it on every other account's row too.
    */
   const [confirming, setConfirming] = useState<string | null>(null)
-  /** The provider's catalog size, reported up by the curation block. */
-  const [catalogTotal, setCatalogTotal] = useState<number | null>(null)
+  /** Each engine's curation count for this provider, reported up by the curation block. */
+  const [summaries, setSummaries] = useState<Partial<Record<CuratedEngine, CurationSummary>>>({})
+  /** The curation tab on show — lifted so an engine row's "Curate models ›" can pick it. */
+  const [curationEngine, setCurationEngine] = useState<CuratedEngine>('opencode')
   /**
    * The shared definition's own models — what a per-route DEFAULT can be. Only
    * a custom definition has any (a subscription's models come from the vendor),
@@ -355,6 +353,14 @@ export function ProviderSheet({
   const [opencodeEntry, setOpencodeEntry] = useState<OpencodeProviderCatalogEntry | null>(null)
   const filterRef = useRef<HTMLInputElement>(null)
   const modelsRef = useRef<HTMLDivElement>(null)
+  /** "Curate models ›"'s deferred focus, cancelled if the sheet closes first. */
+  const focusFrame = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current)
+    },
+    []
+  )
 
   const isShared = entry.origin === 'shared'
   const nativeId = nativeProviderId(entry)
@@ -613,29 +619,76 @@ export function ProviderSheet({
 
   const opencodeFacts = entry.engines.opencode
   const piFacts = entry.engines.pi
-  /** The id opencode's own catalog and allowlist key this provider by. */
-  const opencodeId =
-    entry.origin === 'opencode-native'
-      ? nativeId
-      : (definition?.routes.opencode.providerId ?? entry.id)
   /**
-   * Curation needs an entry in opencode's OWN store to read a catalog from —
-   * and, for a shared row, the definition that says WHICH id that entry has:
-   * curating under the definition id while the real one is `openai` would write
-   * an allowlist nothing reads.
+   * The engines that can curate this provider, each under the id ITS catalog
+   * and allowlist key the provider by — the registry's `providerId`, never the
+   * definition id: curating ChatGPT under `chatgpt` while opencode knows it as
+   * `openai` would write an allowlist nothing reads.
+   *
+   * opencode needs an entry in its OWN store to read a catalog from. pi's
+   * catalog is read inside the block, which says why when it is empty.
    */
-  const curatable =
-    opencodeInstalled &&
+  const curationAdapters: CurationAdapter[] = [
+    ...(opencodeInstalled &&
     opencodeFacts?.enabled === true &&
     opencodeFacts.native === true &&
-    (!isShared || shared.resolved)
+    opencodeFacts.providerId
+      ? [opencodeCurationAdapter(opencodeFacts.providerId)]
+      : []),
+    ...(piFacts?.enabled === true && piFacts.providerId
+      ? [piCurationAdapter(piFacts.providerId)]
+      : [])
+  ]
+  const curates = (engine: CuratedEngine): boolean =>
+    curationAdapters.some((adapter) => adapter.engine === engine)
+  const onSummary = useCallback(
+    (engine: CuratedEngine, summary: CurationSummary) =>
+      setSummaries((prev) =>
+        prev[engine]?.total === summary.total && prev[engine]?.picked === summary.picked
+          ? prev
+          : { ...prev, [engine]: summary }
+      ),
+    []
+  )
 
   function opencodeCount(): string {
-    if (opencodeFacts?.modelCount === undefined) return ''
-    if (opencodeFacts.curated && catalogTotal !== null) {
-      return ` ${opencodeFacts.modelCount} of ${catalogTotal} models reach the picker.`
+    // The curation block's own count once it has one — the registry's lags a
+    // write until the re-read, and counts ids the catalog may have dropped.
+    const summary = summaries.opencode
+    if (summary) {
+      return summary.picked === null
+        ? ` ${summary.total} models reach the picker.`
+        : ` ${summary.picked} of ${summary.total} models reach the picker.`
     }
+    if (opencodeFacts?.modelCount === undefined) return ''
     return ` ${opencodeFacts.modelCount} models reach the picker.`
+  }
+
+  /** "Curate models ›" on an engine row: that engine's tab, and its search box. */
+  function curateLink(engine: CuratedEngine): React.ReactNode {
+    if (!curates(engine)) return undefined
+    return (
+      <Button
+        variant="link"
+        testid={`${SHEET}.curate`}
+        dataId={engine}
+        onClick={() => {
+          setCurationEngine(engine)
+          // jsdom implements neither scrollIntoView nor layout.
+          modelsRef.current?.scrollIntoView?.({ block: 'start' })
+          filterRef.current?.focus()
+          // Switching FROM a tab with no list (an empty pi catalog) mounts the
+          // search box on the next render, so focus it again once it is there.
+          if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current)
+          focusFrame.current = requestAnimationFrame(() => {
+            focusFrame.current = null
+            filterRef.current?.focus()
+          })
+        }}
+      >
+        Curate models ›
+      </Button>
+    )
   }
 
   function opencodeRow(): React.JSX.Element {
@@ -662,21 +715,7 @@ export function ProviderSheet({
         description={`${lead}${opencodeCount()}`}
         checked={opencodeFacts.enabled}
         disabled={busy}
-        leadingControl={
-          curatable ? (
-            <Button
-              variant="link"
-              testid={`${SHEET}.curate`}
-              onClick={() => {
-                // jsdom implements neither scrollIntoView nor layout.
-                modelsRef.current?.scrollIntoView?.({ block: 'start' })
-                filterRef.current?.focus()
-              }}
-            >
-              Curate models ›
-            </Button>
-          ) : undefined
-        }
+        leadingControl={curateLink('opencode')}
         onToggle={() =>
           void run(() =>
             entry.origin === 'opencode-native'
@@ -700,6 +739,7 @@ export function ProviderSheet({
           description="Off stops vending this credential to pi; turning it back on re-delivers it."
           checked={on}
           disabled={busy}
+          leadingControl={curateLink('pi')}
           onToggle={() => void run(() => window.api.setSharedProviderRoute(entry.id, 'pi', !on))}
         />
       )
@@ -714,6 +754,7 @@ export function ProviderSheet({
           description="Off removes it from pi; turning it back on asks for the key again."
           checked
           disabled={busy}
+          leadingControl={curateLink('pi')}
           onToggle={() =>
             confirmThen('pi-off', () =>
               entry.piKind === 'custom'
@@ -1142,18 +1183,31 @@ export function ProviderSheet({
           {defaultModelRows()}
         </SheetGroup>
 
-        {curatable && (
+        {curationAdapters.length > 0 && (
           <div ref={modelsRef}>
             <SheetGroup
               testid={`${SHEET}.group`}
               id="models"
               label="Models in the picker"
-              trailing={<EngineChip engine="opencode" enabled testid={`${SHEET}.modelsEngine`} />}
+              trailing={curationAdapters.map(({ engine }) => (
+                // The block's count, not the registry's: the same words the tab says.
+                <EngineChip
+                  key={engine}
+                  engine={engine}
+                  enabled
+                  label={`${engineMeta(engine).label} · ${curationCount(summaries[engine] ?? null)}`}
+                  testid={`${SHEET}.modelsEngine`}
+                />
+              ))}
             >
-              <OpencodeModelCuration
-                providerId={opencodeId}
+              <ModelCuration
+                testid={SHEET}
+                providerName={entry.name}
+                adapters={curationAdapters}
+                engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
+                onEngineChange={setCurationEngine}
                 filterRef={filterRef}
-                onTotal={setCatalogTotal}
+                onSummary={onSummary}
                 onWrote={onWrote}
               />
             </SheetGroup>
@@ -1241,161 +1295,5 @@ export function ProviderSheet({
         />
       )}
     </>
-  )
-}
-
-// ── Model curation (opencode only this phase) ────────────────────────────────
-
-/**
- * Which of a provider's catalog models reach ClaudeUI's picker
- * (`opencodeConfig.modelAllowlist[providerId]`, the very list
- * `ModelAllowlistDialog` edits). Absent means "all of them", so an absent list
- * shows every row checked and the first de-selection writes an explicit list.
- *
- * Commits per change, as the row vocabulary requires — with the ORPHAN GUARD the
- * old dialog carries: hiding a model some setting still names would break that
- * setting with no way back from here, so a blocked edit is refused and says
- * which setting blocked it, rather than applied with a warning.
- *
- * The LIST itself is `ModelCurationList` (follow-up G, mockup `0a41c623`): a
- * chip cloud could not say which vendor a name came from, and 358 OpenRouter
- * models have to be reachable by search and by the vendor. This half owns the
- * reads, the guard and the write; search / facet / sort state is held here only
- * because the bulk actions render in the row's TITLE line, outside the list.
- */
-function OpencodeModelCuration({
-  providerId,
-  filterRef,
-  onTotal,
-  onWrote
-}: {
-  providerId: string
-  filterRef: React.RefObject<HTMLInputElement | null>
-  onTotal: (total: number) => void
-  onWrote: () => Promise<void>
-}): React.JSX.Element {
-  const [models, setModels] = useState<OpencodeCatalogModel[] | null>(null)
-  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
-  /** Discovered opencode models — the set an edit can actually make disappear. */
-  const [discovered, setDiscovered] = useState<ModelInfo[]>([])
-  /** Every engine's ClaudeUI config: a cross-engine dispatch default names these too. */
-  const [engineConfigs, setEngineConfigs] = useState<Partial<Record<EngineId, EngineConfig>>>({})
-  const [filter, setFilter] = useState('')
-  const [facets, setFacets] = useState<CurationFacet[]>([])
-  const [sort, setSort] = useState<CurationSort>('newest')
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .getOpencodeProviderModels(providerId)
-      .then((list) => {
-        if (cancelled) return
-        setModels(list)
-        onTotal(list.length)
-      })
-      .catch(() => {
-        if (!cancelled) setModels([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [providerId, onTotal])
-
-  useEffect(() => {
-    let cancelled = false
-    void Promise.all([
-      window.api.loadOpencodeSettings().catch(() => ({}) as OpencodeConfigSettings),
-      window.api.getEngineModels().catch((): EngineModelGroup[] => []),
-      Promise.all(
-        (['claude', 'opencode', 'pi'] as EngineId[]).map(
-          async (id) =>
-            [id, await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)] as const
-        )
-      )
-    ]).then(([settings, groups, configs]) => {
-      if (cancelled) return
-      setCfg(settings)
-      setDiscovered(groups.filter((g) => g.engineId === 'opencode').flatMap((g) => g.models))
-      setEngineConfigs(Object.fromEntries(configs))
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [providerId])
-
-  if (models === null || cfg === null) {
-    return <SettingRow testid={`${SHEET}.models`} dataId="loading" description="Loading models…" />
-  }
-
-  const allowlist = cfg.modelAllowlist ?? {}
-  const all = models.map((m) => m.id)
-  // Absent = "everything currently shown", the same reading the allowlist dialog
-  // seeds itself with — so every row must render checked.
-  const selected = allowlist[providerId] ?? all
-
-  const save = (next: string[]): void => {
-    // References are stored as picker VALUES, and only DISCOVERED models can be
-    // orphaned — a catalog id opencode never surfaced is not naming anything.
-    const kept = new Set(next.map((id) => `${providerId}/${id}`))
-    const removed = discovered
-      .filter((m) => m.vendorId === providerId && !kept.has(m.value))
-      .map((m) => m.value)
-    const refs = findModelReferences({ opencode: cfg, engines: engineConfigs }, removed)
-    if (refs.length > 0) {
-      setError(formatModelReferences(refs))
-      return
-    }
-    setError(null)
-    const updated: OpencodeConfigSettings = {
-      ...cfg,
-      modelAllowlist: { ...allowlist, [providerId]: next }
-    }
-    setCfg(updated)
-    window.api
-      .saveOpencodeSettings(updated)
-      .then(() => {
-        useSessionStore.getState().reloadModels()
-        return onWrote()
-      })
-      .catch((e: unknown) => setError(message(e)))
-  }
-
-  return (
-    <SettingRow
-      testid={`${SHEET}.models`}
-      dataId={providerId}
-      layout="stacked"
-      label="Shown in the picker"
-      description={`${selected.length} of ${models.length} selected. Nothing here changes what opencode itself can reach.`}
-      error={error ?? undefined}
-      errorTestid={`${SHEET}.modelsError`}
-      trailing={
-        <ModelCurationActions
-          testid={`${SHEET}.models`}
-          models={models}
-          selected={selected}
-          onSet={save}
-          filter={filter}
-          facets={facets}
-        />
-      }
-    >
-      <ModelCurationList
-        testid={`${SHEET}.models`}
-        filterTestid={`${SHEET}.modelFilter`}
-        models={models}
-        selected={selected}
-        onSet={save}
-        filterRef={filterRef}
-        total={models.length}
-        filter={filter}
-        onFilterChange={setFilter}
-        facets={facets}
-        onFacetsChange={setFacets}
-        sort={sort}
-        onSortChange={setSort}
-      />
-    </SettingRow>
   )
 }

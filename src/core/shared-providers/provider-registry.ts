@@ -293,6 +293,7 @@ function sharedEntry(
       harness === 'opencode' ? catalog.has(nativeId) : sources.piVendors[nativeId] !== undefined
     engines[harness] = {
       enabled: true,
+      providerId: nativeId,
       ...engineCounts(harness, nativeId, sources, {
         fallbackCount: status?.routes[harness].modelCount,
         catalogCount: catalog.get(nativeId)?.modelCount
@@ -358,7 +359,9 @@ function opencodeNativeEntry(
     credential: opencodeCredential(entry, sources.opencodeCredentialKinds),
     // `disabled_providers` is opencode's own veto: the provider is configured
     // but reaches no picker. Native by construction — this row IS the store entry.
-    engines: { opencode: { enabled: !entry.disabled, ...counts, native: true } },
+    engines: {
+      opencode: { enabled: !entry.disabled, providerId: entry.id, ...counts, native: true }
+    },
     // Carried, never re-derived: `removeKind` is what the remove channel must be
     // given, and it is non-null exactly when the provider can be removed at all.
     ...(entry.actions.removeKind ? { opencodeRemoveKind: entry.actions.removeKind } : {}),
@@ -387,7 +390,7 @@ function piNativeEntry(
     // pi has no per-provider veto: an entry in auth.json IS an enabled provider.
     // Turning the row off REMOVES it (owner ruling 1) — which is why there is no
     // disabled state to represent here.
-    engines: { pi: { enabled: true, ...counts, native: true } },
+    engines: { pi: { enabled: true, providerId: vendorId, ...counts, native: true } },
     // The SAME predicate as the detail line below, projected as a field so the
     // Manage sheet routes removal by data rather than by parsing prose.
     piKind: sources.piAuthOptions[vendorId] ? 'builtin' : 'custom',

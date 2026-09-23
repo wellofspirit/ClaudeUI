@@ -46,8 +46,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
-import type { SharedProviderRouteDiagnosis } from '../../../../shared/shared-provider'
 import { Button, SettingRow } from './settings-controls'
+import { diagnosisText } from './provider-diagnosis'
 import { CredentialChip, EngineChip, ProviderSheet } from './ProviderSheet'
 import { ProviderAddSheet } from './ProviderAddSheet'
 import type { SettingsTarget } from './settings-target'
@@ -70,25 +70,6 @@ const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalle
  * subscription is not available to Codex".
  */
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
-
-/**
- * Why an enabled, credentialed route still surfaces nothing — appended to the
- * row's own line. The wording is `SharedProviders`': each string names the CAUSE
- * first, so it stays legible truncated, and says where the fix is. A bare
- * "0 models" is what made this class of failure opaque.
- */
-function diagnosisText(diagnosis: SharedProviderRouteDiagnosis): string {
-  switch (diagnosis) {
-    case 'provider-disabled':
-      return 'Disabled in the engine — turn it back on below.'
-    case 'models-restricted':
-      return 'Every model is filtered out — adjust the model list below.'
-    case 'no-credential':
-      return 'pi reports no models for this provider — check its key, or its entry in ~/.pi/agent/models.json.'
-    case 'no-models-discovered':
-      return 'The engine reported no models — check it is installed and reachable.'
-  }
-}
 
 /** The row's one line: what the registry says, plus the diagnosis when there is one. */
 function describe(entry: ProviderEntry): string | undefined {
@@ -275,6 +256,9 @@ export function ProviderList({
 
       {open && (
         <ProviderSheet
+          // One sheet per provider: switching rows must remount, or provider
+          // A's loaded curation state renders under provider B's adapters.
+          key={open.id}
           entry={open}
           opencodeInstalled={opencodeInstalled}
           navigate={navigate}

@@ -484,6 +484,11 @@ const api: ClaudeAPI = {
   readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
   patchPiModels: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-models', patches),
+  setProviderModelAllowlist: (
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ) => unwrap('models:set-provider-allowlist', engine, providerId, models),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (
     name: string,
