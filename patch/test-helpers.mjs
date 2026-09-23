@@ -70,6 +70,13 @@ function buildArgs(options) {
   if (options.maxTurns != null) args.push('--max-turns', String(options.maxTurns))
   if (options.model) args.push('--model', options.model)
   if (options.permissionMode) args.push('--permission-mode', options.permissionMode)
+  // Opt-in: ClaudeUI always runs with `--permission-prompt-tool stdio` (args.ts
+  // passes it whenever canUseTool is set), which makes cli.js build a different
+  // permission wrapper than the no-prompt-tool default these tests otherwise
+  // exercise. See the can_use_tool responder in spawnQuery.
+  if (options.permissionPromptTool) {
+    args.push('--permission-prompt-tool', options.permissionPromptTool)
+  }
   if (options.allowDangerouslySkipPermissions) args.push('--allow-dangerously-skip-permissions')
   if (options.persistSession === false) args.push('--no-session-persistence')
   if (options.resume) args.push('--resume', options.resume)
@@ -168,6 +175,9 @@ function spawnQuery({ prompt, options, ac }) {
       writer({ type: 'control_request', request_id, request: { subtype, ...fields } })
     })
 
+  /** can_use_tool requests auto-denied under `permissionPromptTool: 'stdio'`. */
+  const canUseToolRequests = []
+
   // --- Message queue -------------------------------------------------------
   const queue = []
   let waiter = null
@@ -254,7 +264,29 @@ function spawnQuery({ prompt, options, ac }) {
       // Inbound control_request (can_use_tool, hooks, initialize, etc.) —
       // the test harness doesn't register handlers; drop them. Tests that
       // need these features should use the real SDK harness.
-      if (obj && obj.type === 'control_request') continue
+      //
+      // Exception: with `permissionPromptTool: 'stdio'` cli.js asks US about
+      // every escalated tool call and waits for the answer, so an unanswered
+      // can_use_tool would hang the turn. Deny it (same response shape as
+      // src/core/sdk/query.ts handleCanUseTool) and record it for the test.
+      if (obj && obj.type === 'control_request') {
+        if (options.permissionPromptTool === 'stdio' && obj.request?.subtype === 'can_use_tool') {
+          canUseToolRequests.push(obj.request)
+          writer({
+            type: 'control_response',
+            response: {
+              subtype: 'success',
+              request_id: obj.request_id,
+              response: {
+                behavior: 'deny',
+                message: 'Denied by the patch test harness.',
+                toolUseID: obj.request.tool_use_id
+              }
+            }
+          })
+        }
+        continue
+      }
 
       if (waiter) {
         const w = waiter
@@ -357,6 +389,7 @@ function spawnQuery({ prompt, options, ac }) {
       return controlRequest(subtype, fields, opts)
     },
 
+    canUseToolRequests,
     _writer: writer,
     _child: child
   }

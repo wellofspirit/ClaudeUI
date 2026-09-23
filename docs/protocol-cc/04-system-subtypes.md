@@ -911,9 +911,9 @@ Emitted when an MCP server confirms that a URL-mode elicitation is complete.
 
 `permission_denied` is emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
 
-`permission_allowed` is the symmetric frame for an **auto-mode classifier allow** and is **not upstream** — it is added by the `automode-verdict` patch. Stock cli.js emits nothing when the classifier clears an action, which left Claude the only engine ClaudeUI runs that showed a judge's verdict on a block but not on an allow. Same fields minus `message` (an allow has no rejection text), and only ever emitted with `decision_reason_type: "classifier"` — a rule/mode/fast-path allow carries a different or absent decision reason and is deliberately silent.
+`permission_allowed` is the symmetric frame for an **auto-mode classifier allow** and is **not upstream** — it is added by the `automode-verdict` patch. Stock cli.js emits nothing when the classifier clears an action, which left Claude the only engine ClaudeUI runs that showed a judge's verdict on a block but not on an allow. Same fields minus `message` (an allow has no rejection text), and only emitted when the decision carries cli.js's own `decisionReason.classifierAllowed === true`. The auto-mode permission check stamps that flag only on a `classifier` allow where the classifier ran and reached a verdict (`noVerdict !== true`, `classifierRan !== false`). A rule/mode/fast-path allow, a no-verdict allow and the "no classifier-relevant input" allow never carry it and are deliberately silent, as is a classifier block delivered as an allow under a tool's `onBlock: "flag"` policy.
 
-**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area).
+**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area). On 2.1.280 the emitter is the `emitPermissionDenied(n,e,s,r){…this.outbound.enqueue({…})}` method; see `patch/automode-verdict/README.md` for how to find it.
 
 ```jsonc
 {
@@ -923,12 +923,46 @@ Emitted when an MCP server confirms that a URL-mode elicitation is complete.
   "tool_use_id": "toolu_...",
   "agent_id": "...", // optional; subagent ID when decided inside a subagent
   "decision_reason_type": "rule", // optional; 'classifier'|'asyncAgent'|'mode'|'rule'|…
+  "decision_reason_code": "...", // optional, 2.1.280+; machine code, see below
   "decision_reason": "...", // optional human-readable reason
   "message": "...", // the rejection message returned to the model — DENIED ONLY
+  "no_verdict": true, // PATCHED; present only when the classifier reached no verdict
   "session_id": "...",
   "uuid": "..."
 }
 ```
+
+### Which permission wrapper an SDK host gets
+
+cli.js builds the permission function from `--permission-prompt-tool`. With `stdio` (and not `none`) it returns `createCanUseTool(…)` → the **stdio wrapper**, which emits `permission_denied` on its deny branch and raises `can_use_tool` control requests on its ask branch. With no prompt tool, or `none`, it builds a different inline wrapper that emits after resolving the ask itself. **An SDK host with a `canUseTool` callback passes `--permission-prompt-tool stdio`** (`src/core/sdk/args.ts`), so it gets the stdio wrapper; ClaudeUI always does. Earlier revisions of this section and of the patch README said the opposite. The distinction matters to anyone patching either wrapper: a test harness that never passes a prompt tool exercises only the other one.
+
+### `decision_reason_code` (2.1.280+)
+
+Upstream added a machine-readable code beside `decision_reason`. It is set for a few specific reasons and absent otherwise, including for every ordinary classifier verdict:
+
+| Code                             | When                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `classifier_transcript_too_long` | the classifier transcript exceeded its context window (`classifier` with `noVerdict`, or `other` / `safetyCheck` with the same reason) |
+| `outside_reads_blocked`          | `permissions.blockReadsOutsideWorkingDirectories` refused a read                                                                       |
+| `memory_paused`                  | memory access blocked by `/pause-memory`                                                                                               |
+
+For `subcommandResults` it is taken from the subcommands, with `outside_reads_blocked` taking precedence.
+
+### `no_verdict` (patched) and the non-verdict classifier outcomes
+
+`decision_reason_type: "classifier"` does **not** always mean the classifier judged the action. cli.js (2.1.268 and 2.1.280) builds all of the following with `type: "classifier"`:
+
+| Behavior | `noVerdict` | `decision_reason`                                                                                                                                        |
+| -------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| deny     | `true`      | an empty classifier action (the tool gave the classifier nothing to judge)                                                                               |
+| deny     | `true`      | `"Auto mode classifier transcript exceeded context window — …"`                                                                                          |
+| deny     | `true`      | a safeguard refusal of the classifier request                                                                                                            |
+| deny     | `true`      | (2.1.280) `"Auto mode unavailable — stopped after repeated responses with no safety verdict"`                                                            |
+| deny     | not set     | `"Classifier unavailable"` — cli.js itself tells this one apart by the exact string                                                                      |
+| allow    | `true`      | `"Delivered with a warning: the classifier request was refused by the safety safeguard"` / `"Delivered with a note: the classifier could not review it"` |
+| allow    | not set     | `"Tool declares no classifier-relevant input"` (the classifier never ran; its `classifierRan: false` is stripped before the decision leaves)             |
+
+Stock frames carry no `noVerdict`, so a host cannot tell "the judge blocked this" from "the judge was never reached". The `automode-verdict` patch adds `no_verdict: true` to **both** subtypes when `decisionReason.noVerdict === true` and omits the key otherwise. It never appears on `permission_allowed` in practice: the patch emits that frame only when `classifierAllowed` is set, so **neither allow row above is ever emitted**, with or without a flag. That leaves one row a consumer must recognise by its exact `decision_reason` string: the `"Classifier unavailable"` **deny**.
 
 ### Two emitters — only one is on the wire (probed 2.1.268, 2026-09-21)
 
@@ -941,8 +975,8 @@ Verify by instrumenting both with `process.stderr.write(...)` before assuming.
 
 ### `decision_reason` is not symmetric between allow and deny
 
-- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it) or `"Allowed by classifier"` (stage 2 did). Useful — they say which stage decided — but they are not model prose.
-- **Deny** reasons ARE model text, following the stage-2 grammar (§14 §2): `[Exact Rule Name]` optionally followed by one sentence. Observed live: `"[Create Unsafe Agents]"` with no sentence at all. A consumer must handle bracket-only, bracket-plus-sentence, and no-bracket (`fast` mode never asks for one).
+- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it), `"Allowed by classifier"` (stage 2 did), or `"Not flagged by the server-side auto mode classifier"`. Useful — they say which stage decided — but they are not model prose.
+- **Deny** reasons ARE model text, following the stage-2 grammar (§14 §2): `[Exact Rule Name]` optionally followed by one sentence. Observed live: `"[Create Unsafe Agents]"` with no sentence at all. A consumer must handle bracket-only, bracket-plus-sentence, and no-bracket (`fast` mode never asks for one). The content-free fallbacks are `"Blocked by classifier"` (category mode with no rule) and `"No reason provided"` (the model gave no `<reason>`).
 
 `cli.js`'s own rejection `message` restates the reason inline: _"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Create Unsafe Agents]. …"_ — so it is also the `tool_result` body, and a consumer that renders both will say the same thing twice.
 
