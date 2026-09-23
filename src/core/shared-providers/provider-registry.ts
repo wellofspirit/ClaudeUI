@@ -235,24 +235,36 @@ function anthropicEntry(
   accounts: AccountsState | null,
   claudeAccount: AccountRef | null
 ): ProviderEntry {
+  // File-based accounts count only while Multiple accounts is ON: with it off,
+  // cli.js reads the Keychain login and a leftover account list describes
+  // nobody Claude runs as.
+  const fileAccounts = accounts?.enabled ? accounts.accounts : []
   const active =
-    accounts?.accounts.find((account) => account.id === accounts.activeId) ??
-    accounts?.accounts[0] ??
-    null
-  const signedIn =
-    claudeAccount?.authState === 'authenticated' || (accounts?.accounts.length ?? 0) > 0
+    fileAccounts.find((account) => account.id === accounts?.activeId) ?? fileAccounts[0] ?? null
+  const probed = claudeAccount?.authState === 'authenticated'
+  const signedIn = probed || active !== null
+  // ONE source for both halves, so a label and a plan never describe two
+  // different accounts: the active file account while one exists (it is what
+  // spawns read), else the probe.
+  const label = active ? (active.email ?? undefined) : (claudeAccount?.label ?? undefined)
+  const plan = active
+    ? (active.subscriptionType ?? undefined)
+    : billingLabel(claudeAccount?.billingType)
+  const unknown = !signedIn && claudeAccount?.authState === 'unknown'
   return {
     id: 'anthropic',
     name: 'Anthropic',
     origin: 'anthropic',
     credential: signedIn ? 'signed-in' : 'none',
     engines: { claude: { enabled: true } },
-    ...(!signedIn && claudeAccount?.authState === 'unknown'
+    subscription: true,
+    ...(signedIn && (label || plan)
+      ? { identity: { ...(label ? { label } : {}), ...(plan ? { plan } : {}) } }
+      : {}),
+    ...(unknown ? { signInUnknown: true as const } : {}),
+    ...(unknown
       ? { detail: 'Sign-in status is checked when the first Claude session starts.' }
-      : detail(
-          claudeAccount?.label ?? active?.email ?? undefined,
-          active?.subscriptionType ?? billingLabel(claudeAccount?.billingType)
-        ))
+      : detail(label, plan))
   }
 }
 
@@ -321,6 +333,7 @@ function sharedEntry(
     origin: 'shared',
     credential: sharedCredential(definition, status, accounts),
     engines,
+    ...(definition.kind === 'subscription' ? { subscription: true as const } : {}),
     ...(accounts ? { accounts } : {}),
     ...sharedPiBuiltinId(definition),
     ...sharedDetail(definition, accounts),

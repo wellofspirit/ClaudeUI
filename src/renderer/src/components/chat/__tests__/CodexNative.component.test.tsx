@@ -106,7 +106,7 @@ describe('native controls', () => {
     expect(screen.queryByTestId('CodexAccount.deviceCode')).toBeNull()
   })
 
-  it('sends the shared-provider deep link', async () => {
+  it('sends the deep link to the ChatGPT subscription card (ADR-074 §7)', async () => {
     const opened = vi.fn()
     window.addEventListener('open-settings', opened)
     try {
@@ -117,7 +117,7 @@ describe('native controls', () => {
       expect(opened).toHaveBeenCalledOnce()
       expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
         page: 'models',
-        group: 'providers'
+        group: 'subscriptions'
       })
     } finally {
       window.removeEventListener('open-settings', opened)

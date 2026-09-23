@@ -8,8 +8,9 @@
  * two questions in three vocabularies, and none of them could say that one
  * credential can serve BOTH engines. This sheet asks those two questions once:
  *
- *   1. WHICH provider — a subscription, a models.dev catalog entry, or a custom
- *      OpenAI-compatible endpoint;
+ *   1. WHICH provider — a models.dev catalog entry, a custom OpenAI-compatible
+ *      endpoint, or an engine-owned sign-in (sign-in SUBSCRIPTIONS are not
+ *      added here: each has its own card, ADR-074 §7);
  *   2. WHICH engines get it — the footer's "Pick one, then choose which engines
  *      get it."
  *
@@ -27,11 +28,8 @@
  * WHERE EACH SAVE GOES — every one is an EXISTING writer, as in the Manage
  * sheet; this file introduces no channel of its own:
  *
- *  · subscription (ChatGPT)   → the same vault sign-in (pi's `openai-codex`,
- *                               ADR-036), but run in `SignInDialog` since
- *                               ADR-068 §3 — this row only opens it
- *  · subscription (Claude/pi) → nothing: pi's login is a terminal command, so the
- *                               row COPIES it (`pi:binary-path`)
+ *  · engine sign-in (Claude/pi) → nothing: pi's login is a terminal command, so
+ *                                 the row COPIES it (`pi:binary-path`)
  *  · catalog, API key         → `vendor-auth:set-key` once per selected engine
  *  · catalog, OAuth           → `vendor-auth:oauth-authorize` + `:oauth-callback`
  *  · custom endpoint          → `shared-provider:save` (+ `shared-provider:set-key`)
@@ -53,16 +51,13 @@ import type {
 import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import { LARGE_CATALOG, opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
-import { CredentialChip, EngineChip } from './ProviderSheet'
+import { EngineChip } from './ProviderSheet'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
-import { useSessionStore } from '../../stores/session-store'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderAddSheet'
 
-/** The shared vault's id for the ChatGPT subscription (`shared-providers/index.ts`). */
-const CHATGPT_ID = 'chatgpt'
 /** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
 const CODEX_VENDOR_ID = 'openai-codex'
 
@@ -84,8 +79,6 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 export interface ProviderAddSheetProps {
   /** What the user already HAS — this sheet offers the complement. */
   snapshot: ProviderRegistrySnapshot
-  /** Open straight on a subscription's sign-in (the Manage sheet's "Sign in"). */
-  focusId?: string | null
   onClose: () => void
   /**
    * A credential or definition was written. The argument is the registry row id
@@ -97,14 +90,10 @@ export interface ProviderAddSheetProps {
 
 export function ProviderAddSheet({
   snapshot,
-  focusId,
   onClose,
   onAdded
 }: ProviderAddSheetProps): React.JSX.Element {
-  // Seeded from the focus id (the Manage sheet's "Sign in" hands ChatGPT over):
-  // the sheet opens with that row the only one in view, and the box is right
-  // there to clear — a filter the user cannot see is a list that looks broken.
-  const [search, setSearch] = useState(focusId ?? '')
+  const [search, setSearch] = useState('')
   const [step, setStep] = useState<
     { kind: 'list' } | { kind: 'setup'; candidate: Candidate } | { kind: 'custom' }
   >({ kind: 'list' })
@@ -123,8 +112,6 @@ export function ProviderAddSheet({
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  /** ADR-068 §3 — the subscription row opens the one dialog, not a flow. */
-  const openSignIn = useSessionStore((s) => s.openSignIn)
 
   const { entries, opencodeInstalled } = snapshot
 
@@ -214,24 +201,10 @@ export function ProviderAddSheet({
   /** Nothing offers a catalog at all — the section is not rendered empty. */
   const hasCatalogSource = opencodeInstalled || Object.keys(piOptions).length > 0
 
-  const chatgptEntry = entries.find((entry) => entry.id === CHATGPT_ID) ?? null
-  const chatgptConnected = chatgptEntry?.credential === 'connected'
-  /**
-   * How many ChatGPT accounts the vault already holds (ADR-068 §2).
-   *
-   * The sign-in control is gated on this, not on `connected`: one stored account
-   * already makes the row connected, so hiding the flow there would leave the
-   * Manage sheet's "+ Add account" opening a sheet with nothing to click. This
-   * row IS the add-an-account flow — the same vault PKCE sign-in, relabelled.
-   */
-  const chatgptAccounts = chatgptEntry?.accounts?.list.length ?? 0
-
   const query = search.trim().toLowerCase()
   const matches = (...text: string[]): boolean =>
     !query || text.some((value) => value.toLowerCase().includes(query))
   const shownCandidates = candidates.filter((c) => matches(c.id, c.name))
-  // Gated per ROW, so a search that matches neither leaves no empty card behind.
-  const showChatgpt = chatgptEntry !== null && matches('chatgpt', 'codex', chatgptEntry.name)
   const showClaudeForPi = piCommand !== null && matches('claude', 'pro', 'max', 'pi')
 
   /** Run one write: report a rejection here rather than closing on a failure. */
@@ -273,65 +246,24 @@ export function ProviderAddSheet({
         className="w-full h-8 bg-bg-input border border-border rounded-md px-3 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
       />
 
-      {(showChatgpt || showClaudeForPi) && (
+      {/* Sign-in SUBSCRIPTIONS are not added here — each has its card under
+          Models & providers › Subscriptions (ADR-074 §7). What stays is an
+          ENGINE-OWNED sign-in: pi's own Claude login, which pi keeps and runs in
+          a terminal, so it belongs with the providers that engine owns. */}
+      {showClaudeForPi && (
         <div className="mt-4">
-          <SheetGroup testid={`${SHEET}.group`} id="subscriptions" label="Subscriptions">
-            {showChatgpt && chatgptEntry && (
-              <div>
-                <SettingRow
-                  testid={`${SHEET}.subscription`}
-                  dataId={CHATGPT_ID}
-                  label="ChatGPT · Codex"
-                  description="Sign in once in ClaudeUI; shared with pi and opencode."
-                >
-                  <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
-                  <EngineChip engine="opencode" enabled testid={`${SHEET}.engineChip`} />
-                  {chatgptConnected && (
-                    <CredentialChip
-                      credential="connected"
-                      // What is already there, so "Add another account" reads as
-                      // an addition rather than a re-login.
-                      label={chatgptAccounts > 1 ? `${chatgptAccounts} accounts` : undefined}
-                      testid={`${SHEET}.credential`}
-                    />
-                  )}
-                </SettingRow>
-                {(!chatgptConnected || chatgptAccounts > 0) && (
-                  <div className="px-3.5 pb-3 -mt-1">
-                    {/* ADR-068 §3: the flow itself lives in `SignInDialog`, so
-                        this is a button that opens it — `add` once there is an
-                        account to add to, `reauth` for the first sign-in. */}
-                    <Button
-                      variant="tinted"
-                      testid={`${SHEET}.chatgptSignIn`}
-                      dataId={CHATGPT_ID}
-                      disabled={busy}
-                      onClick={() =>
-                        openSignIn({
-                          providerId: 'chatgpt',
-                          mode: chatgptAccounts > 0 ? 'add' : 'reauth'
-                        })
-                      }
-                    >
-                      {chatgptAccounts > 0 ? 'Add another account' : 'Sign in'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-            {showClaudeForPi && (
-              <SettingRow
-                testid={`${SHEET}.subscription`}
-                dataId="claude-pi"
-                label="Claude Pro / Max for pi"
-                description="pi’s OAuth login runs in a terminal. Copies the command."
-              >
-                <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
-                <Button variant="link" testid={`${SHEET}.copyCommand`} onClick={copyCommand}>
-                  {copied ? 'Copied' : 'Copy command'}
-                </Button>
-              </SettingRow>
-            )}
+          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Engine sign-ins">
+            <SettingRow
+              testid={`${SHEET}.engineSignIn`}
+              dataId="claude-pi"
+              label="Claude Pro / Max for pi"
+              description="pi’s OAuth login runs in a terminal. Copies the command."
+            >
+              <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
+              <Button variant="link" testid={`${SHEET}.copyCommand`} onClick={copyCommand}>
+                {copied ? 'Copied' : 'Copy command'}
+              </Button>
+            </SettingRow>
           </SheetGroup>
         </div>
       )}

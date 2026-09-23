@@ -7,15 +7,12 @@
  * its models reach the picker (MODELS IN THE PICKER). Everything is built from
  * the row vocabulary — the sheet invents no control of its own.
  *
- * ON A SUBSCRIPTION THE FIRST QUESTION IS PLURAL (ADR-068 §2), AND IT IS
- * ANSWERED SOMEWHERE ELSE (F14). The vault holds N ChatGPT accounts with one
- * ACTIVE; every provider's stored accounts are managed on Models & providers ›
- * Accounts, beside Anthropic's, so the Credential group becomes ONE LINK row
- * naming the count and pointing there. Two homes for one list is what that move
- * removed. Disconnect still means the whole SET — it is a provider action, not
- * an account one — so it stays in this sheet's footer. A row with no account
- * list falls back to the single-credential rows: an empty Accounts card would
- * read as "no subscription".
+ * ON A SUBSCRIPTION THE FIRST QUESTION IS ANSWERED ON ITS CARD (ADR-074 §7).
+ * A subscription's credential is its ACCOUNTS, and those live on its
+ * Subscriptions card (`SubscriptionsSection`), so this sheet drops the
+ * Credential group entirely and is titled "<name> · engines & models".
+ * Disconnect still means the whole SET — a provider action, not an account one
+ * — so it stays in this sheet's footer.
  *
  * IT OWNS NO STATE OF RECORD. Every action routes to an EXISTING writer, and
  * after each write the sheet asks its parent to re-read `provider-registry:list`
@@ -88,7 +85,6 @@ import {
   type CurationSummary
 } from './ModelCuration'
 import { SheetFrame, SheetGroup } from './SheetFrame'
-import type { SettingsTarget } from './settings-target'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
 import { OpencodeProviderConfigModal } from './OpencodeProviders'
@@ -266,13 +262,6 @@ export interface ProviderSheetProps {
   entry: ProviderEntry
   /** The registry's one degraded case — no opencode binary (owner ruling 2). */
   opencodeInstalled: boolean
-  /**
-   * The render context's navigator, threaded through the list (F14): the
-   * Accounts row links to Models & providers › Accounts, where every provider's
-   * stored accounts live. Absent means the link renders as plain text rather
-   * than a dead button.
-   */
-  navigate?: (target: SettingsTarget) => void
   onClose: () => void
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
@@ -284,7 +273,6 @@ export interface ProviderSheetProps {
 export function ProviderSheet({
   entry,
   opencodeInstalled,
-  navigate,
   onClose,
   onWrote
 }: ProviderSheetProps): React.JSX.Element {
@@ -304,14 +292,6 @@ export function ProviderSheet({
     definition: SharedProviderDefinition | null
   }>({ resolved: false, definition: null })
   const definition = shared.definition
-  /**
-   * The ONE sign-in surface (ADR-068 §3). A subscription's sign-in used to be
-   * handed to the Add sheet, which rendered `VendorOAuthFlow` inline; now both
-   * the "Sign in" row and "+ Add account" open the dialog, so the Manage sheet
-   * carries no flow. `VendorOAuthFlow` stays for opencode-NATIVE vendor OAuth,
-   * which has no dialog driver.
-   */
-  const openSignIn = useSessionStore((s) => s.openSignIn)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** null = not editing; a string = the key being typed. Never pre-filled. */
@@ -516,6 +496,13 @@ export function ProviderSheet({
     isShared && definition?.kind === 'subscription' && entry.accounts?.list.length
       ? entry.accounts
       : undefined
+  /** A shared subscription with anything stored can be disconnected from the footer. */
+  const disconnectable =
+    isShared &&
+    entry.subscription === true &&
+    (accounts !== undefined || entry.credential === 'connected')
+  const disconnectLabel =
+    (accounts?.list.length ?? 0) > 1 ? 'Disconnect all accounts' : `Disconnect ${entry.name}`
 
   function credentialRows(): React.JSX.Element {
     if (isShared && !shared.resolved) {
@@ -563,43 +550,6 @@ export function ProviderSheet({
             />
           </div>
         </>
-      )
-    }
-    if (isShared && definition?.kind === 'subscription') {
-      return entry.credential === 'connected' ? (
-        <SettingRow
-          testid={`${SHEET}.credential`}
-          dataId="subscription"
-          label={`Connected as ${definition.name}`}
-          description="One sign-in, vended to each engine you enable below."
-        >
-          <Button
-            variant="danger"
-            testid={`${SHEET}.disconnect`}
-            disabled={busy}
-            onClick={() =>
-              confirmThen('disconnect', () => window.api.disconnectSharedProvider(entry.id))
-            }
-          >
-            {confirming === 'disconnect' ? 'Disconnect?' : 'Disconnect'}
-          </Button>
-        </SettingRow>
-      ) : (
-        <SettingRow
-          testid={`${SHEET}.credential`}
-          dataId="subscription"
-          label="Not connected"
-          description="One sign-in, vended to each engine you enable below."
-        >
-          <Button
-            variant="tinted"
-            testid={`${SHEET}.signIn`}
-            disabled={busy}
-            onClick={() => openSignIn({ providerId: 'chatgpt', mode: 'reauth' })}
-          >
-            Sign in
-          </Button>
-        </SettingRow>
       )
     }
     if (entry.origin === 'pi-native' && entry.credential === 'connected') {
@@ -1073,7 +1023,7 @@ export function ProviderSheet({
       <SheetFrame
         testid={SHEET}
         dataId={entry.id}
-        title={entry.name}
+        title={entry.subscription ? `${entry.name} · engines & models` : entry.name}
         titleExtras={
           <>
             <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
@@ -1092,9 +1042,9 @@ export function ProviderSheet({
             >
               {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
             </Button>
-            {/* With accounts, disconnecting is the whole SET — a per-account
-                Remove is above, on the account it names. */}
-            {accounts && (
+            {/* Disconnect is a provider action — the whole SET of accounts; a
+                per-account Remove is on the Subscriptions card. */}
+            {disconnectable && (
               <Button
                 variant="danger"
                 testid={`${SHEET}.disconnect`}
@@ -1103,9 +1053,7 @@ export function ProviderSheet({
                   confirmThen('disconnect', () => window.api.disconnectSharedProvider(entry.id))
                 }
               >
-                {confirming === 'disconnect'
-                  ? 'Disconnect all accounts?'
-                  : 'Disconnect all accounts'}
+                {confirming === 'disconnect' ? `${disconnectLabel}?` : disconnectLabel}
               </Button>
             )}
             {/* One error slot for every write on the sheet: the row that failed is
@@ -1123,31 +1071,9 @@ export function ProviderSheet({
           </>
         }
       >
-        {accounts ? (
-          <SheetGroup testid={`${SHEET}.group`} id="accounts" label="Accounts">
-            {/* The rows live on Models & providers › Accounts (F14), beside
-                Anthropic's — one page for every provider's accounts, rather
-                than one list on a page and another inside a sheet. */}
-            <SettingRow
-              testid={`${SHEET}.accountsLink`}
-              label={`${accounts.list.length} account${accounts.list.length === 1 ? '' : 's'} · managed on Accounts`}
-              description="Switching, removing and per-session pinning all live on the Accounts page."
-            >
-              <Button
-                variant="link"
-                testid={`${SHEET}.manageAccounts`}
-                disabled={!navigate}
-                onClick={() => {
-                  // Close first: the jump lands on the page BEHIND this sheet.
-                  onClose()
-                  navigate?.({ page: 'models', group: 'accounts' })
-                }}
-              >
-                Accounts ›
-              </Button>
-            </SettingRow>
-          </SheetGroup>
-        ) : (
+        {/* A subscription's credential IS its accounts, and they live on its
+            Subscriptions card (ADR-074 §7) — the sheet is engines and models. */}
+        {!entry.subscription && (
           <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
             {credentialRows()}
           </SheetGroup>

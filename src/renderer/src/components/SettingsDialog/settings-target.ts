@@ -67,7 +67,20 @@ export const groupKey = (page: SettingsPageId, group: string): string => `${page
 export function settingsTargetFromEvent(event: Event): SettingsTarget | undefined {
   const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
   if (!isSettingsPageId(detail?.page)) return undefined
-  return { page: detail.page, group: typeof detail.group === 'string' ? detail.group : undefined }
+  const group = typeof detail.group === 'string' ? detail.group : undefined
+  return {
+    page: detail.page,
+    group: group === undefined ? undefined : (GROUP_ALIASES[groupKey(detail.page, group)] ?? group)
+  }
+}
+
+/**
+ * Groups that moved, keyed `<page>/<old group>` → the group that replaced them,
+ * so a deep link written before the move still lands. Models & providers ›
+ * Accounts became Subscriptions (ADR-074 §7).
+ */
+const GROUP_ALIASES: Readonly<Record<string, string>> = {
+  'models/accounts': 'subscriptions'
 }
 
 /**

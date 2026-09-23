@@ -74,6 +74,26 @@ export interface ProviderEntry {
   /** One line under the name, e.g. `"2 of 300 models shown in the picker"`. */
   detail?: string
   /**
+   * A sign-in SUBSCRIPTION rather than an API provider (ADR-074 §7): the
+   * Anthropic row and every shared `kind: 'subscription'` definition. The
+   * renderer files these under Subscriptions and everything else under API
+   * providers — on this fact, never on ids.
+   */
+  subscription?: true
+  /**
+   * The Anthropic row only: who Claude is signed in as, when anything says so —
+   * the active file-based account while Multiple accounts is on, else the probed
+   * sign-in; label and plan always from the same one. Structured so the Subscriptions card can
+   * render the single-account row without parsing `detail`.
+   */
+  identity?: { label?: string; plan?: string }
+  /**
+   * The Anthropic row only: nothing has checked the Claude sign-in yet (the
+   * probe cache is empty until a Claude session starts), so neither "signed
+   * in" nor "not signed in" would be true.
+   */
+  signInUnknown?: true
+  /**
    * A shared SUBSCRIPTION row's stored accounts (ADR-068 §2): which one is
    * active, whether per-session pinning is on, and the list itself. Absent on
    * every other row — a provider holding one API key has no accounts to show,

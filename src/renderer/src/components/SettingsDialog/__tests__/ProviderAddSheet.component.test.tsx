@@ -26,7 +26,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { ProviderList } from '../ProviderList'
-import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -168,7 +167,7 @@ afterEach(() => {
 
 /** Render the list and open the Add sheet the way the group header does. */
 async function openAddSheet(): Promise<HTMLElement> {
-  render(<ProviderList navigate={vi.fn()} />)
+  render(<ProviderList />)
   await screen.findAllByTestId('ProviderList.row')
   await act(async () => {
     window.dispatchEvent(new CustomEvent('settings:add-provider'))
@@ -265,17 +264,29 @@ describe('the list', () => {
     await openAddSheet()
     await typeInto('ProviderAddSheet.search', 'gro')
     expect(catalogIds()).toEqual(['groq'])
-    expect(screen.queryAllByTestId('ProviderAddSheet.subscription')).toHaveLength(0)
+    expect(screen.queryAllByTestId('ProviderAddSheet.engineSignIn')).toHaveLength(0)
     // …and the section itself goes, rather than leaving an empty card.
     expect(
       screen.queryAllByTestId('ProviderAddSheet.group').map((el) => el.dataset.id)
-    ).not.toContain('subscriptions')
+    ).not.toContain('engine-sign-ins')
 
-    await typeInto('ProviderAddSheet.search', 'chatgpt')
+    await typeInto('ProviderAddSheet.search', 'claude')
     expect(catalogIds()).toEqual([])
     expect(
-      screen.getAllByTestId('ProviderAddSheet.subscription').map((el) => el.dataset.id)
-    ).toEqual(['chatgpt'])
+      screen.getAllByTestId('ProviderAddSheet.engineSignIn').map((el) => el.dataset.id)
+    ).toEqual(['claude-pi'])
+  })
+
+  // ADR-074 §7: a sign-in subscription has its own card, with its accounts; the
+  // Add sheet is for API providers and engine-owned sign-ins only.
+  it('offers no sign-in subscription — ChatGPT is added from its card', async () => {
+    await openAddSheet()
+    await typeInto('ProviderAddSheet.search', 'chatgpt')
+    expect(
+      screen.queryAllByTestId('ProviderAddSheet.group').map((el) => el.dataset.id)
+    ).not.toContain('subscriptions')
+    expect(screen.queryByTestId('ProviderAddSheet.chatgptSignIn')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderAddSheet')).not.toHaveTextContent('ChatGPT · Codex')
   })
 
   it('hides the catalog entirely when nothing offers one', async () => {
@@ -310,62 +321,6 @@ describe('the list', () => {
     await openAddSheet()
     await click(screen.getByTestId('ProviderAddSheet.copyCommand'))
     expect(writeText).toHaveBeenCalledWith('"/opt/pi/bin/pi"')
-  })
-
-  it('shows ChatGPT as Connected, with no sign-in, once it is', async () => {
-    snapshot = {
-      ...snapshot,
-      entries: [{ ...chatgptRow, credential: 'connected' }, piXai]
-    }
-    await openAddSheet()
-    const row = screen
-      .getAllByTestId('ProviderAddSheet.subscription')
-      .find((el) => el.dataset.id === 'chatgpt')!
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
-      'data-id',
-      'connected'
-    )
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
-  })
-
-  it('keeps the sign-in control once accounts exist, as "Add another account" (ADR-068 §2)', async () => {
-    // The Manage sheet's "+ Add account" hands over to THIS row. Hiding the flow
-    // the moment the first account lands made adding a second one impossible:
-    // one account already makes the row `connected`.
-    snapshot = {
-      ...snapshot,
-      entries: [
-        {
-          ...chatgptRow,
-          credential: 'connected' as const,
-          accounts: {
-            activeId: 'acc-1',
-            perSession: false,
-            list: [{ id: 'acc-1', email: 'daniel@example.com' }, { id: 'acc-2' }]
-          }
-        },
-        piXai
-      ]
-    }
-    await openAddSheet()
-    const row = screen
-      .getAllByTestId('ProviderAddSheet.subscription')
-      .find((el) => el.dataset.id === 'chatgpt')!
-    // Still connected, and the chip counts what is already there.
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
-      'data-id',
-      'connected'
-    )
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveTextContent('2 accounts')
-    // ADR-068 §3: a button that opens the ONE dialog, never a flow of its own.
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
-    const button = screen.getByTestId('ProviderAddSheet.chatgptSignIn')
-    expect(button).toHaveTextContent('Add another account')
-    fireEvent.click(button)
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'chatgpt',
-      mode: 'add'
-    })
   })
 })
 

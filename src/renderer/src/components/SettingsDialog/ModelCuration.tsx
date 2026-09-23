@@ -155,14 +155,20 @@ export interface CurationSummary {
   picked: number | null
 }
 
-function summarise(state: EngineState | undefined): CurationSummary | null {
-  if (!state?.catalog) return null
-  const ids = new Set(state.catalog.map((model) => model.id))
+/** A catalog and a selection as a count — the one derivation every count here uses. */
+export function summariseSelection(
+  catalog: readonly CurationModel[],
+  selection: readonly string[] | undefined
+): CurationSummary {
+  const ids = new Set(catalog.map((model) => model.id))
   return {
-    total: state.catalog.length,
-    picked:
-      state.selection === undefined ? null : state.selection.filter((id) => ids.has(id)).length
+    total: catalog.length,
+    picked: selection === undefined ? null : selection.filter((id) => ids.has(id)).length
   }
+}
+
+function summarise(state: EngineState | undefined): CurationSummary | null {
+  return state?.catalog ? summariseSelection(state.catalog, state.selection) : null
 }
 
 /** `n of m` / `all m` — the tab's count, and the group header's. */

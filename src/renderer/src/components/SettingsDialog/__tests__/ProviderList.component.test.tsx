@@ -4,9 +4,12 @@
  * The list is a pure projection of `provider-registry:list` onto the row
  * vocabulary, so what is pinned here is the projection: which rows appear and in
  * what order, what the credential badge and the engine chips say, what happens
- * to the opencode chips when opencode is not installed, and which of the two
- * things Manage does (a sheet for every provider, a NAVIGATION for Anthropic —
- * accounts already have a home).
+ * to the opencode chips when opencode is not installed, that Manage opens the
+ * sheet, and that SUBSCRIPTIONS are not listed at all (ADR-074 §7: they have
+ * their own cards above, filtered on the registry's `subscription` fact).
+ *
+ * The `chatgpt` fixture here is deliberately NOT flagged a subscription: it
+ * stands in for any shared row with routes, accounts and a diagnosis.
  *
  * The real container is booted so the read goes over the real channel: a list
  * whose contract with main drifted is exactly the failure this must catch.
@@ -28,7 +31,8 @@ const anthropic: ProviderEntry = {
   origin: 'anthropic',
   credential: 'signed-in',
   engines: { claude: { enabled: true } },
-  detail: 'Claude Max · dev@acme.com'
+  detail: 'Claude Max · dev@acme.com',
+  subscription: true
 }
 
 const chatgpt: ProviderEntry = {
@@ -93,10 +97,9 @@ afterEach(() => {
   app.teardown()
 })
 
-async function renderList(navigate = vi.fn()): Promise<{ navigate: ReturnType<typeof vi.fn> }> {
-  render(<ProviderList navigate={navigate} />)
+async function renderList(): Promise<void> {
+  render(<ProviderList />)
   await screen.findAllByTestId('ProviderList.row')
-  return { navigate }
 }
 
 describe('the rows', () => {
@@ -108,24 +111,37 @@ describe('the rows', () => {
     expect(screen.queryByTestId('ProviderList.loading')).not.toBeInTheDocument()
   })
 
-  it('renders one row per entry, in the registry’s order', async () => {
+  it('renders one row per API provider, in the registry’s order', async () => {
     await renderList()
     expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toEqual([
-      'anthropic',
       'chatgpt',
       'opencode:openrouter',
       'pi:ollama'
     ])
-    expect(row('anthropic')).toHaveTextContent('Anthropic')
-    expect(row('anthropic')).toHaveTextContent('Claude Max · dev@acme.com')
+    expect(row('opencode:openrouter')).toHaveTextContent('2 of 300 models shown in the picker')
+  })
+
+  it('leaves out every subscription — they have their own cards (ADR-074 §7)', async () => {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) => (e.id === 'chatgpt' ? { ...e, subscription: true } : e))
+    }
+    await renderList()
+    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toEqual([
+      'opencode:openrouter',
+      'pi:ollama'
+    ])
+    // Filtered on the FACT: an entry named like a subscription but not flagged
+    // one stays, and a flagged one goes whatever its id.
+    expect(screen.queryAllByTestId('ProviderList.manage').map((el) => el.dataset.id)).not.toContain(
+      'anthropic'
+    )
   })
 
   it('badges the credential by KIND, so the badge id is the state', async () => {
     await renderList()
     const badge = (id: string): HTMLElement =>
       within(row(id)).getByTestId('ProviderList.credential')
-    expect(badge('anthropic')).toHaveAttribute('data-id', 'signed-in')
-    expect(badge('anthropic')).toHaveTextContent('Signed in')
     expect(badge('chatgpt')).toHaveAttribute('data-id', 'connected')
     expect(badge('opencode:openrouter')).toHaveTextContent('API key')
   })
@@ -162,7 +178,6 @@ describe('the rows', () => {
       within(row(id))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id!)
-    expect(chips('anthropic')).toEqual(['claude'])
     expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
     expect(chips('pi:ollama')).toEqual(['pi'])
   })
@@ -279,7 +294,6 @@ describe('the rows', () => {
     })
     expect(await screen.findByTestId('ProviderList.error')).toHaveTextContent('registry exploded')
     expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toEqual([
-      'anthropic',
       'chatgpt',
       'opencode:openrouter',
       'pi:ollama'
@@ -299,17 +313,6 @@ describe('Manage', () => {
     const sheet = screen.getByTestId('ProviderSheet')
     expect(sheet).toHaveAttribute('data-id', 'opencode:openrouter')
     expect(sheet).toHaveTextContent('OpenRouter')
-  })
-
-  it('navigates to Accounts for Anthropic instead of opening a sheet', async () => {
-    // Sign-in, switching and the endpoint override are already whole surfaces;
-    // a sheet whose only content was a link would be a detour.
-    const { navigate } = await renderList()
-    await act(async () => {
-      fireEvent.click(manage('anthropic'))
-    })
-    expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
-    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
   })
 })
 
@@ -359,76 +362,6 @@ describe('the store’s provider-auth view', () => {
     })
     await vi.waitFor(() =>
       expect(useSessionStore.getState().providerAuth.chatgpt).toBe('unauthenticated')
-    )
-  })
-})
-
-/**
- * F12 — the sheet's "+ Add account" hands over to the ONE sign-in dialog
- * (ADR-068 §3), which is not a sheet write and so never reached this list's own
- * re-read. The dialog's close is the one moment every outcome passes through,
- * and the store already refreshes there; what was missing is that the refresh
- * had nowhere the LIST could read it from. The sheet is still open while all of
- * this happens, so a stale entry is a stale row the user is looking at.
- */
-describe('a sign-in completed from the sheet', () => {
-  const oneAccount = {
-    activeId: 'acc-1',
-    perSession: false,
-    list: [{ id: 'acc-1', email: 'daniel@example.com' }]
-  }
-  const twoAccounts = {
-    ...oneAccount,
-    list: [...oneAccount.list, { id: 'acc-2', email: 'work@example.com' }]
-  }
-  const withAccounts = (accounts: ProviderEntry['accounts']): ProviderRegistrySnapshot => ({
-    entries: [anthropic, { ...chatgpt, accounts }, openrouter, ollama],
-    opencodeInstalled: true
-  })
-
-  beforeEach(() => {
-    // The sheet only renders account rows for a SUBSCRIPTION definition; the
-    // file's default stub answers no definitions at all.
-    app.bridge.ipcMain.handle('shared-provider:list', async () => [
-      {
-        id: 'chatgpt',
-        name: 'ChatGPT',
-        kind: 'subscription',
-        models: [],
-        managed: true,
-        routes: { pi: { enabled: true }, opencode: { enabled: true } }
-      }
-    ])
-  })
-
-  it('reaches the open sheet when the dialog closes', async () => {
-    snapshot = withAccounts(oneAccount)
-    await renderList()
-    await act(async () => {
-      fireEvent.click(
-        screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
-      )
-    })
-    // Since F14 the sheet's Accounts card is one link row, and its COUNT is
-    // what goes stale — the rows themselves moved to the Accounts page.
-    expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('1 account')
-
-    // The dialog is opened from the Accounts page now; no sheet write happens.
-    await act(async () => {
-      useSessionStore.getState().openSignIn({ providerId: 'chatgpt', mode: 'add' })
-    })
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'chatgpt',
-      mode: 'add'
-    })
-
-    // The sign-in lands: the vault now holds two accounts.
-    snapshot = withAccounts(twoAccounts)
-    await act(async () => {
-      useSessionStore.getState().closeSignIn()
-    })
-    await vi.waitFor(() =>
-      expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('2 accounts')
     )
   })
 })

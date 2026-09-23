@@ -102,12 +102,13 @@ describe('PAGES structure', () => {
       advanced: ['logging', 'usage'],
       about: ['about'],
       models: [
-        // ONE providers group since 6c: the two engine-native groups and the
-        // shared vault's bridge folded into the list and its two sheets.
+        // ADR-074 §7: sign-in subscriptions first, then API providers — ONE
+        // providers group since 6c, now without the subscriptions — then the
+        // defaults. 'accounts' folded into the Subscriptions cards; 'anthropic'
+        // moved to Claude › Endpoint / Model mapping (ADR-074 §9).
+        'subscriptions',
         'providers',
-        'defaults',
-        // 'anthropic' moved to Claude › Endpoint / Model mapping (ADR-074 §9).
-        'accounts'
+        'defaults'
       ],
       dispatch: ['concurrency', 'into', 'limits'],
       mockups: ['network'],

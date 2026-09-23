@@ -1122,7 +1122,7 @@ export function InputBox(): React.JSX.Element {
   )
   const handleAddAccount = useCallback(() => {
     window.dispatchEvent(
-      new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
+      new CustomEvent('open-settings', { detail: { page: 'models', group: 'subscriptions' } })
     )
   }, [])
 

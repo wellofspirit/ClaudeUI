@@ -319,6 +319,71 @@ describe('credential per origin', () => {
     ).toBeUndefined()
   })
 
+  // ADR-074 §7: the renderer files rows under Subscriptions or API providers on
+  // this FACT, never on ids.
+  it('flags the Anthropic row and every subscription definition — and nothing else', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt, localCustom],
+        statuses: [status(), status({ id: 'ollama-local' })],
+        opencodeCatalog: [catalogEntry({ id: 'openrouter' })],
+        piVendors: { groq: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: { groq: [] }
+      })
+    )
+    const flagged = snapshot.entries.filter((e) => e.subscription).map((e) => e.id)
+    expect(flagged).toEqual(['anthropic', 'chatgpt'])
+    expect(byId(snapshot, 'ollama-local').subscription).toBeUndefined()
+    expect(byId(snapshot, 'opencode:openrouter').subscription).toBeUndefined()
+    expect(byId(snapshot, 'pi:groq').subscription).toBeUndefined()
+  })
+
+  it('anthropic: the signed-in identity, structured, from the probe first', () => {
+    expect(
+      byId(
+        buildProviderRegistry(sources({ claudeAccount: claudeRef(), accounts: accounts() })),
+        'anthropic'
+      ).identity
+    ).toEqual({ label: 'dev@acme.com', plan: 'max' })
+    // Not signed in: nothing to claim.
+    expect(
+      byId(buildProviderRegistry(sources({ claudeAccount: null })), 'anthropic').identity
+    ).toBeUndefined()
+  })
+
+  it('anthropic: with Multiple accounts OFF, leftover file accounts say nothing', () => {
+    // cli.js reads the Keychain login then; an old account list describes nobody.
+    const off = accounts({ enabled: false })
+    const signedOut = byId(
+      buildProviderRegistry(
+        sources({ accounts: off, claudeAccount: claudeRef({ authState: 'unauthenticated' }) })
+      ),
+      'anthropic'
+    )
+    expect(signedOut.credential).toBe('none')
+    expect(signedOut.identity).toBeUndefined()
+    // Signed in through the probe: label AND plan from the probe, never half each.
+    expect(
+      byId(
+        buildProviderRegistry(sources({ accounts: off, claudeAccount: claudeRef() })),
+        'anthropic'
+      ).identity
+    ).toEqual({ label: 'dev@acme.com', plan: 'Subscription' })
+  })
+
+  it('anthropic: an unchecked sign-in is flagged as unknown, not as signed out', () => {
+    const entry = byId(
+      buildProviderRegistry(sources({ claudeAccount: claudeRef({ authState: 'unknown' }) })),
+      'anthropic'
+    )
+    expect(entry.credential).toBe('none')
+    expect(entry.signInUnknown).toBe(true)
+    expect(
+      byId(buildProviderRegistry(sources({ claudeAccount: claudeRef() })), 'anthropic')
+        .signInUnknown
+    ).toBeUndefined()
+  })
+
   it('shared: connected for a subscription, api-key for a custom, none when the vault is empty', () => {
     const snapshot = buildProviderRegistry(
       sources({

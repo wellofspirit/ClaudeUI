@@ -7,7 +7,6 @@ import type {
   ClaudePermissions,
   ProxySettings,
   VoiceLanguageCode,
-  AccountsState,
   EngineId,
   EngineConfig,
   VendorConfig,
@@ -22,7 +21,6 @@ import {
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
-import { accountDisplayName } from '../../utils/sign-in-provider'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -52,8 +50,7 @@ import {
   RemoteServerSection
 } from './RemoteServerSettings'
 import { ProviderList } from './ProviderList'
-import { CredentialChip } from './ProviderSheet'
-import { ChatgptAccountsSetting } from './ChatgptAccountsSetting'
+import { SubscriptionsSection } from './SubscriptionsSection'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
@@ -325,148 +322,6 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         initialTab="user"
       />
     </>
-  )
-}
-
-// ── Accounts (multi-account support, ADR-015) ────────────────────────
-
-/**
- * The ANTHROPIC half of Models & providers › Accounts. Its ChatGPT neighbour is
- * `ChatgptAccountsSetting`; since F14 both providers' stored accounts live on
- * this one page, so this pane grew a provider heading (name + credential badge +
- * "+ Add account") and states its own switch RULE.
- *
- * The rule is stated per provider. Both DISCONNECT the sessions whose credential
- * changed and let each resume on its next message (Claude: `invalidateLiveSessions`
- * cancels every live Claude session, ADR-015 as built; Codex: a follower leaves
- * its host, ADR-069 §4); the difference is the ChatGPT-only per-session pin,
- * which a switch leaves alone.
- *
- * Switching and removing are writes this pane owns; ADDING is a sign-in, and
- * since ADR-068 §3 every sign-in runs in `SignInDialog` — the paste panel and
- * the outcome notice that used to live here are gone, along with the second copy
- * of the flow they implemented. `addAccount()` itself is unchanged; the dialog
- * is simply the thing that calls it now.
- */
-function AccountsSetting(): React.JSX.Element {
-  const accounts = useSessionStore((s) => s.accountsState)
-  const setAccounts = useSessionStore((s) => s.setAccountsState)
-  const openSignIn = useSessionStore((s) => s.openSignIn)
-  // The credential badge's word comes from the same read model the provider
-  // list badges from, so the two surfaces cannot disagree about one provider.
-  const registry = useSessionStore((s) => s.providerRegistry)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    void window.api.getAccounts().then(setAccounts)
-  }, [setAccounts])
-
-  const enabled = accounts?.enabled ?? false
-  const isMac = window.api.platform === 'darwin'
-  const entry = registry?.entries.find((candidate) => candidate.id === 'anthropic')
-
-  const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
-    setBusy(true)
-    try {
-      setAccounts(await fn())
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div data-testid="AccountsSetting" className="divide-y divide-border/55">
-      <SettingRow
-        testid="AccountsSetting.heading"
-        label="Anthropic"
-        labelBadge={
-          entry ? (
-            <CredentialChip credential={entry.credential} testid="AccountsSetting.credential" />
-          ) : undefined
-        }
-        description="The Claude subscription every Claude session runs under."
-      >
-        {enabled && (
-          <Button
-            testid="AccountsSetting.addAccount"
-            variant="tinted"
-            disabled={busy}
-            onClick={() => openSignIn({ providerId: 'anthropic', mode: 'add' })}
-          >
-            + Add account
-          </Button>
-        )}
-      </SettingRow>
-
-      <SettingsToggle
-        testid="AccountsSetting.multiAccount"
-        label="Multiple accounts"
-        checked={enabled}
-        onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
-        description="Hold several Claude subscriptions and switch between them; credentials are stored per account in plaintext files rather than the macOS Keychain."
-      />
-
-      {enabled && isMac && (
-        // A real row, not an 11px callout box: the warning colour rides on the
-        // row's background rather than on a type size ADR-065 retired.
-        <SettingRow
-          testid="AccountsSetting.keychainNotice"
-          className="bg-warning/10"
-          description="Multi-account mode uses file-based credentials, separate from your macOS Keychain login — you may need to sign in again for each account."
-        />
-      )}
-
-      {enabled &&
-        (accounts?.accounts ?? []).map((a) => {
-          const active = a.id === accounts?.activeId
-          return (
-            // `as="label"` rather than `as="button"`: the row carries a Remove
-            // BUTTON, and a button inside a button is invalid HTML (the same
-            // reason SettingRow's own Reset is a role="button" span). A click on
-            // an interactive descendant of a <label> does not activate the
-            // label's control, so Remove never doubles as "switch to this one".
-            <SettingRow
-              key={a.id}
-              as="label"
-              testid="AccountsSetting.accountRow"
-              dataId={a.id}
-              label={accountDisplayName(a.email)}
-              description={a.subscriptionType ?? undefined}
-              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
-              leading={
-                <input
-                  type="radio"
-                  name="claude-account"
-                  value={a.id}
-                  checked={active}
-                  disabled={busy}
-                  onChange={() => void run(() => window.api.switchAccount(a.id))}
-                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
-                />
-              }
-            >
-              <Button
-                testid="AccountsSetting.removeAccount"
-                dataId={a.id}
-                variant="danger"
-                disabled={busy}
-                onClick={() => void run(() => window.api.deleteAccount(a.id))}
-              >
-                Remove
-              </Button>
-            </SettingRow>
-          )
-        })}
-
-      {enabled && (
-        // ADR-015's switch semantics as built (`invalidateLiveSessions`), stated
-        // where the switch happens.
-        <SettingRow
-          testid="AccountsSetting.switchRule"
-          description="Switching disconnects every running Claude session; each resumes with the new account on its next message."
-        />
-      )}
-    </div>
   )
 }
 
@@ -2546,8 +2401,11 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    id: 'accounts',
-    label: 'Accounts',
+    // ADR-074 §7: one card per sign-in subscription, with its accounts, the
+    // engines it reaches and its options in one place. Replaced the Accounts
+    // section (Anthropic's and ChatGPT's account panes); their keywords live on.
+    id: 'subscriptions',
+    label: 'Subscriptions',
     icon: (
       <svg
         width="14"
@@ -2565,22 +2423,12 @@ export const SECTIONS: Section[] = [
       </svg>
     ),
     items: [
-      // One page for every provider's accounts (F14), in rail order: Anthropic
-      // first, ChatGPT second. Each group states its OWN switch rule — they are
-      // not the same rule (ADR-015 vs ADR-068 §2).
       {
-        key: 'multiAccount',
-        label: 'Anthropic accounts',
+        key: 'subscriptions',
+        label: 'Subscriptions',
         keywords:
-          'anthropic claude account login subscription switch multi keychain credentials sign in',
-        render: () => <AccountsSetting />
-      },
-      {
-        key: 'chatgptAccounts',
-        label: 'ChatGPT accounts',
-        keywords:
-          'chatgpt openai codex account login subscription switch active workspace organisation organization per-session pin credentials sign in',
-        render: () => <ChatgptAccountsSetting />
+          'subscription anthropic claude chatgpt openai codex account accounts login sign in switch active multi multiple keychain plaintext credentials workspace organisation organization per-session pin engines',
+        render: () => <SubscriptionsSection />
       }
     ]
   },
@@ -3291,10 +3139,10 @@ export const SECTIONS: Section[] = [
         // vault's own pane, opencode's `vendor-opencode` and pi's `vendor-pi`
         // were retired with 6c.
         key: 'sharedProviders',
-        label: 'Providers',
+        label: 'API providers',
         keywords:
-          'shared provider add chatgpt codex api key oauth credential subscription custom endpoint model pi opencode anthropic openrouter ollama',
-        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <ProviderList navigate={ctx?.navigate} />
+          'shared provider add api key oauth credential custom endpoint self-hosted model pi opencode openrouter ollama',
+        render: () => <ProviderList />
       }
     ]
   },

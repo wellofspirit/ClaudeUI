@@ -492,14 +492,24 @@ export const PAGES: SettingsPage[] = [
       'Which providers ClaudeUI can reach, and which model each engine starts a session with.',
     groups: [
       {
-        // ONE list over the three stores (ADR-065 § "Providers: one list"), so
-        // the 'Shared' badge is gone: the card is no longer the shared vault's
-        // pane, it is every provider ClaudeUI can reach, whichever store backs
-        // it. Phase 6c folded the two engine-native groups and the vault's own
-        // pane in — this group is now the whole provider surface, and the
-        // header action opens the Add sheet that replaced their three add flows.
+        // ADR-074 §7: sign-in subscriptions first, each a card with its
+        // accounts, the engines it reaches and its options. No header action:
+        // the only subscription ClaudeUI can add is ChatGPT, whose card is
+        // always here and signs in from its own body, and the Add sheet cannot
+        // be filtered to subscriptions — a "+ Add subscription" would open a
+        // sheet about API providers.
+        id: 'subscriptions',
+        label: 'Subscriptions',
+        items: itemsOf('subscriptions')
+      },
+      {
+        // ONE list over the three stores (ADR-065 § "Providers: one list"),
+        // minus the subscriptions above (ADR-074 §7): every API provider
+        // ClaudeUI can reach, whichever store backs it. The header action opens
+        // the Add sheet that replaced the three old add flows.
         id: 'providers',
-        label: 'Providers',
+        label: 'API providers',
+        note: 'Keys and self-hosted endpoints. Sign-in subscriptions are listed above.',
         action: {
           label: '+ Add provider',
           testid: 'ProviderList.add',
@@ -535,8 +545,7 @@ export const PAGES: SettingsPage[] = [
           // — not the `model` key on the Codex page, which is Codex's file.
           codex: itemsOf('codex-models')
         }
-      },
-      { id: 'accounts', label: 'Accounts', items: itemsOf('accounts') }
+      }
     ]
   },
   {
@@ -1079,7 +1088,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
   'codex-models': { page: 'models', group: 'defaults' },
-  accounts: { page: 'models', group: 'accounts' },
+  subscriptions: { page: 'models', group: 'subscriptions' },
 
   'dispatch-concurrency': { page: 'dispatch', group: 'concurrency' },
   'claude-dispatch': { page: 'dispatch', group: 'into' },

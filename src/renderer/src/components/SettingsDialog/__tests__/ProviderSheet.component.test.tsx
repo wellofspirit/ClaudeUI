@@ -20,13 +20,13 @@ import { render, screen, fireEvent, cleanup, act, within } from '@testing-librar
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
+import { SubscriptionsSection } from '../SubscriptionsSection'
 import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
 } from '../../../../../shared/provider-registry'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
-import type { SettingsTarget } from '../settings-target'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -35,6 +35,7 @@ const chatgpt: ProviderEntry = {
   name: 'ChatGPT',
   origin: 'shared',
   credential: 'connected',
+  subscription: true,
   engines: {
     opencode: { enabled: true, native: true, providerId: 'openai' },
     pi: { enabled: true, native: true, providerId: 'openai-codex' },
@@ -153,12 +154,8 @@ const api = {
 
 const called = (method: keyof typeof api): unknown[][] => api[method].mock.calls
 
-/** The render context's navigator — the Accounts link row's destination. */
-let navigate: ReturnType<typeof vi.fn<(target: SettingsTarget) => void>>
-
 beforeEach(async () => {
   app = await bootTestApp()
-  navigate = vi.fn()
   // The registry snapshot lives in the store (F12), which is a module singleton
   // outliving `teardown()` — a case must not open on the previous case's rows.
   useSessionStore.setState({ providerRegistry: null })
@@ -224,14 +221,24 @@ afterEach(() => {
   app.teardown()
 })
 
-/** Render the list and open one provider's sheet. */
+/**
+ * Render the page's two provider surfaces and open one provider's sheet — from
+ * its API-provider row, or, for a subscription (ADR-074 §7), from its card's
+ * Engines row, which is the only place its sheet opens from now.
+ */
 async function openSheet(id: string): Promise<HTMLElement> {
-  render(<ProviderList navigate={navigate} />)
-  await screen.findAllByTestId('ProviderList.row')
+  render(
+    <>
+      <SubscriptionsSection />
+      <ProviderList />
+    </>
+  )
+  const subscription = snapshot.entries.find((e) => e.id === id)?.subscription === true
+  const manage = subscription
+    ? await screen.findByTestId('SubscriptionsSection.manage')
+    : (await screen.findAllByTestId('ProviderList.manage')).find((el) => el.dataset.id === id)!
   await act(async () => {
-    fireEvent.click(
-      screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === id)!
-    )
+    fireEvent.click(manage)
   })
   return screen.getByTestId('ProviderSheet')
 }
@@ -406,9 +413,9 @@ describe('CREDENTIAL', () => {
     expect(credential).toHaveTextContent('API key')
   })
 
-  it('disconnects a subscription only on the second press', async () => {
-    const sheet = await openSheet('chatgpt')
-    expect(sheet).toHaveTextContent('Connected as ChatGPT')
+  it('disconnects a subscription from the footer, only on the second press', async () => {
+    await openSheet('chatgpt')
+    expect(screen.getByTestId('ProviderSheet.disconnect')).toHaveTextContent('Disconnect ChatGPT')
     await click(screen.getByTestId('ProviderSheet.disconnect'))
     expect(sent('shared-provider:disconnect')).toEqual([])
     await click(screen.getByTestId('ProviderSheet.disconnect'))
@@ -416,16 +423,14 @@ describe('CREDENTIAL', () => {
   })
 })
 
-// ── Accounts (ADR-068 §2, re-homed by F14) ───────────────────────────
+// ── A subscription's sheet (ADR-074 §7) ──────────────────────────────
 
 /**
- * Accounts are no longer MANAGED here. Every provider's stored accounts live on
- * Models & providers › Accounts (F14), so the sheet keeps exactly two things:
- * one link row that says how many accounts there are and where they are, and
- * the provider-wide "Disconnect all accounts" in the footer. The row-level
- * cases moved verbatim to `ChatgptAccountsSetting.component.test.tsx`.
+ * A subscription's credential is its ACCOUNTS, and they live on its
+ * Subscriptions card, so its Manage sheet is engines and models only. What the
+ * sheet keeps is the provider-wide Disconnect in the footer.
  */
-describe('ACCOUNTS', () => {
+describe('a subscription’s sheet', () => {
   const twoAccounts = {
     activeId: 'acc-1',
     perSession: false,
@@ -443,28 +448,19 @@ describe('ACCOUNTS', () => {
     }
   }
 
-  it('replaces the account rows with ONE link row naming the count', async () => {
+  it('has no Credential group, and is titled for what it holds', async () => {
     withAccounts(twoAccounts)
     const sheet = await openSheet('chatgpt')
-    const link = screen.getByTestId('ProviderSheet.accountsLink')
-    expect(link).toHaveTextContent('2 accounts')
-    expect(link).toHaveTextContent('managed on Accounts')
-    // Two homes for one list is exactly what F14 removed.
-    expect(screen.queryAllByTestId('ProviderSheet.account')).toEqual([])
-    expect(screen.queryByTestId('ProviderSheet.accountRemove')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('ProviderSheet.perSession')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('ProviderSheet.addAccount')).not.toBeInTheDocument()
-    expect(sheet).toHaveTextContent('Accounts')
-  })
-
-  it('the link navigates to Models & providers › Accounts', async () => {
-    withAccounts(twoAccounts)
-    await openSheet('chatgpt')
-    await click(screen.getByTestId('ProviderSheet.manageAccounts'))
-    expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
-    // The sheet closes with the jump: a page that changed BEHIND an open sheet
-    // is what the live drive showed, and it reads as a link that did nothing.
-    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+    const groups = within(sheet)
+      .getAllByTestId('ProviderSheet.group')
+      .map((el) => el.dataset.id)
+    expect(groups).not.toContain('credential')
+    expect(groups).not.toContain('accounts')
+    expect(within(sheet).queryByTestId('ProviderSheet.credential')).not.toBeInTheDocument()
+    expect(within(sheet).queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+    expect(sheet).toHaveTextContent('ChatGPT · engines & models')
+    // ENABLED FOR keeps its rows.
+    expect(groups).toContain('enabled')
   })
 
   it('disconnects EVERY account from the footer, on the second press', async () => {
@@ -478,12 +474,14 @@ describe('ACCOUNTS', () => {
     expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
   })
 
-  it('falls back to the single-credential row when the registry reports no accounts', async () => {
-    // A row from a build (or a boot) with no account list must not render an
-    // empty Accounts card that looks like "you have no subscription".
-    await openSheet('chatgpt')
-    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
-    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent('Connected')
+  it('an API provider still has its Credential group', async () => {
+    const sheet = await openSheet('ollama-local')
+    expect(
+      within(sheet)
+        .getAllByTestId('ProviderSheet.group')
+        .map((el) => el.dataset.id)
+    ).toContain('credential')
+    expect(within(sheet).queryByTestId('ProviderSheet.disconnect')).not.toBeInTheDocument()
   })
 })
 
@@ -824,9 +822,10 @@ describe('MODELS IN THE PICKER — any engine', () => {
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
       modelAllowlist: { openai: ['gpt-5.6-luna'] }
     }))
-    await openSheet('chatgpt')
+    const sheet = await openSheet('chatgpt')
     expect(tabs()).toEqual(['opencode', 'pi'])
-    await screen.findByText('1 of 2')
+    // Scoped: the subscription card's opencode pill says the same count.
+    await within(sheet).findByText('1 of 2')
     expect(
       screen
         .getAllByTestId('ProviderSheet.curationTabCount')
@@ -962,25 +961,6 @@ describe('the re-homed vault flows', () => {
   it('offers no endpoint editor for a subscription — ClaudeUI owns that definition', async () => {
     await openSheet('chatgpt')
     expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()
-  })
-
-  it('a disconnected subscription opens the sign-in dialog, not the Add sheet', async () => {
-    // One sign-in surface, and since ADR-068 §3 it is the dialog.
-    snapshot = {
-      ...snapshot,
-      entries: snapshot.entries.map((e) =>
-        e.id === 'chatgpt' ? { ...e, credential: 'none' as const } : e
-      )
-    }
-    await openSheet('chatgpt')
-    await click(screen.getByTestId('ProviderSheet.signIn'))
-
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'chatgpt',
-      mode: 'reauth'
-    })
-    expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
   })
 })
 

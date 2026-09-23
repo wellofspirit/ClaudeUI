@@ -23,11 +23,10 @@
  * lives, land on these rows. Only the ERROR is local: keeping the previous rows
  * on a failed re-read is this card's own behaviour.
  *
- * NO PROVIDER'S ACCOUNTS ARE MANAGED HERE (F14). The Anthropic row's action
- * navigates to Models & providers › Accounts, and since every provider's stored
- * accounts live on that one page, the Manage sheet's own Accounts card became a
- * link to the same place — which is why `navigate` is threaded into the sheet
- * rather than kept for the Anthropic row.
+ * SUBSCRIPTIONS ARE NOT LISTED HERE (ADR-074 §7). The Anthropic row and every
+ * sign-in subscription (`entry.subscription`) have their own cards under
+ * Models & providers › Subscriptions, with their accounts on them; this list is
+ * API providers — keys and self-hosted endpoints — only.
  *
  * ONE DEGRADED CASE (owner ruling 2, 2026-09-08): the opencode BINARY is
  * missing. A stopped server is not degraded — catalog discovery starts one — so
@@ -50,7 +49,6 @@ import { Button, SettingRow } from './settings-controls'
 import { diagnosisText } from './provider-diagnosis'
 import { CredentialChip, EngineChip, ProviderSheet } from './ProviderSheet'
 import { ProviderAddSheet } from './ProviderAddSheet'
-import type { SettingsTarget } from './settings-target'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const LIST = 'ProviderList'
@@ -78,12 +76,7 @@ function describe(entry: ProviderEntry): string | undefined {
   return text || undefined
 }
 
-export function ProviderList({
-  navigate
-}: {
-  /** The render context's navigator — the Anthropic row's Manage uses it. */
-  navigate?: (target: SettingsTarget) => void
-}): React.JSX.Element {
+export function ProviderList(): React.JSX.Element {
   /** null until the first read resolves — the card shows one loading row. */
   const stored = useSessionStore((s) => s.providerRegistry)
   const [error, setError] = useState<string | null>(null)
@@ -97,12 +90,8 @@ export function ProviderList({
   const snapshot = stored ?? (failedEmpty ? EMPTY_SNAPSHOT : null)
   /** The provider whose Manage sheet is open. */
   const [openId, setOpenId] = useState<string | null>(null)
-  /**
-   * The Add sheet, and the row it should open on (the Manage sheet's "Sign in"
-   * hands ChatGPT over). `null` = closed; a state object with `focusId: null` is
-   * the plain "+ Add provider" case, which is why this is not a bare string.
-   */
-  const [adding, setAdding] = useState<{ focusId: string | null } | null>(null)
+  /** Whether the Add sheet is open. */
+  const [adding, setAdding] = useState(false)
 
   /**
    * Read the registry. Returns the snapshot so a write can close the sheet on an
@@ -135,7 +124,7 @@ export function ProviderList({
 
   // The group header's action, which cannot hold a callback (see the header).
   useEffect(() => {
-    const open = (): void => setAdding({ focusId: null })
+    const open = (): void => setAdding(true)
     window.addEventListener(ADD_EVENT, open)
     return () => window.removeEventListener(ADD_EVENT, open)
   }, [])
@@ -156,7 +145,7 @@ export function ProviderList({
   const handleAdded = useCallback(
     async (registryId: string | null): Promise<void> => {
       const next = await reload()
-      setAdding(null)
+      setAdding(false)
       const row = registryId && next?.entries.some((entry) => entry.id === registryId)
       setOpenId(row ? registryId : null)
     },
@@ -169,8 +158,7 @@ export function ProviderList({
   const addSheet = adding && (
     <ProviderAddSheet
       snapshot={snapshot ?? EMPTY_SNAPSHOT}
-      focusId={adding.focusId}
-      onClose={() => setAdding(null)}
+      onClose={() => setAdding(false)}
       onAdded={handleAdded}
     />
   )
@@ -184,7 +172,10 @@ export function ProviderList({
     )
   }
 
-  const { entries, opencodeInstalled } = snapshot
+  const { opencodeInstalled } = snapshot
+  // Subscriptions are the section above (see the header); filtered on the
+  // registry's own fact, never on ids.
+  const entries = snapshot.entries.filter((entry) => !entry.subscription)
   const open = entries.find((entry) => entry.id === openId) ?? null
 
   return (
@@ -234,11 +225,7 @@ export function ProviderList({
             variant="link"
             testid={`${LIST}.manage`}
             dataId={entry.id}
-            onClick={() =>
-              entry.origin === 'anthropic'
-                ? navigate?.({ page: 'models', group: 'accounts' })
-                : setOpenId(entry.id)
-            }
+            onClick={() => setOpenId(entry.id)}
           >
             Manage
           </Button>
@@ -261,7 +248,6 @@ export function ProviderList({
           key={open.id}
           entry={open}
           opencodeInstalled={opencodeInstalled}
-          navigate={navigate}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
         />

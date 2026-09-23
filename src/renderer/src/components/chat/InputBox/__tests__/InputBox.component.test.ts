@@ -2159,7 +2159,8 @@ describe('InputBox FC — rendered', () => {
       act(() => {
         viewProps.onAddAccount?.()
       })
-      expect(opened).toEqual([{ page: 'models', group: 'providers' }])
+      // The ChatGPT accounts live on its Subscriptions card (ADR-074 §7).
+      expect(opened).toEqual([{ page: 'models', group: 'subscriptions' }])
     } finally {
       window.removeEventListener('open-settings', listener)
     }

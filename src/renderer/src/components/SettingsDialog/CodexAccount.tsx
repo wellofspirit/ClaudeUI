@@ -83,12 +83,12 @@ export function CodexAccount(): React.JSX.Element {
         data-testid="CodexAccount.manage"
         onClick={() =>
           window.dispatchEvent(
-            new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
+            new CustomEvent('open-settings', { detail: { page: 'models', group: 'subscriptions' } })
           )
         }
         className="text-[12px] text-accent hover:text-accent/80 transition-colors"
       >
-        Manage in Models &amp; providers ›
+        Manage in Subscriptions ›
       </button>
     </SettingRow>
   )
