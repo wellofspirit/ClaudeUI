@@ -679,6 +679,49 @@ catalog. Add sheet: one save + one set-key, sheet opens on the definition.
 
 ---
 
+## Slice 9 — "New sessions start on": last pick vs configured default (owner ruling 2026-09-23)
+
+The owner kept the current behaviour — a user's last-picked model on an engine (the "sticky" pick,
+`lastSelectedModelByEngine`) wins over the configured default for new sessions — but wants a setting to
+turn it off.
+
+### Verified facts
+
+- `session-store.ts` `createNewSession` (~line 1850): `sticky = state.lastSelectedModelByEngine[engineId]`;
+  `stickyAvailable` → the sticky value, else `resolveEngineDefaultModel(...)`; a Codex-specific branch
+  (`engineId === 'codex' && sticky`) and `codexModelExplicit` also read `sticky`.
+- `InputBox.tsx` (~line 327) reads `lastSelectedModelByEngine[engine]` for the welcome-screen pill
+  preview. Grep for any other reader (engine switch seeding, `setSelectedEngine`).
+- App settings: `AppSettings` in `session-store.ts:~418`, persisted in ClaudeUI's settings.json.
+
+### Changes
+
+1. `AppSettings.newSessionModel?: 'last-picked' | 'configured-default'` (absent = `'last-picked'`, today's
+   behaviour). With `'configured-default'`, every sticky read above behaves as if there were no sticky
+   pick (`lastSelectedModelByEngine` is still recorded, just not used for seeding), so each engine's
+   configured default — or its built-in default — seeds new sessions.
+2. A row at the top of **Models & providers › Default models**, identical on every engine segment
+   (engine-neutral): **"New sessions start on"** — segmented control **The last model I picked** /
+   **The default below**, with the line "Per engine. The composer's model picker always changes the
+   session you are in." (`SettingRow` testid tier-1 of the group's items; `dataId="newSessionModel"`).
+   Make it one item reused in every `byEngine` list rather than four copies.
+3. Claude's "Start new sessions on" row (`ClaudeDefaultsSection`) and the other engines' default-model
+   rows: when `'last-picked'` is active, add a short muted note "Used until you pick a model in the
+   composer." so the setting never looks broken.
+
+### Tests
+
+Store: `'last-picked'` → sticky wins (today); `'configured-default'` → configured default wins over an
+available sticky, and the built-in default when nothing is configured; Codex's explicit flag follows.
+InputBox preview follows the setting. Settings row: present on every segment, writes the setting.
+Guard-check the store test.
+
+### Suggested commit subject
+
+`feat(settings): choose whether new sessions start on your last-picked model or the configured default`
+
+---
+
 ## Slice 7 — one key per provider: catalog definitions (ADR-074 §6) — core only
 
 The UI for it (Add flow, merged row, key-conflict panel) is slice 8; this slice ships the core, the
