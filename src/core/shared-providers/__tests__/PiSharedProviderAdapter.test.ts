@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SharedProviderDefinition } from '../../../shared/shared-provider'
 import {
+  CLAUDEUI_KEYLESS_PLACEHOLDER,
   PiSharedProviderAdapter,
   type PiSharedProviderAuthTarget
 } from '../PiSharedProviderAdapter'
@@ -82,7 +83,8 @@ describe('PiSharedProviderAdapter', () => {
               contextWindow: 100_000,
               maxTokens: 8_000
             }
-          ]
+          ],
+          apiKey: CLAUDEUI_KEYLESS_PLACEHOLDER
         }
       },
       rootExtra: 'keep'
@@ -128,7 +130,7 @@ describe('PiSharedProviderAdapter', () => {
   })
   it('recreates a missing provider that remains centrally managed', () => {
     adapter().applyDefinition(provider, true, provider)
-    expect(readModels()).toEqual({ providers: { 'private-api': compiledProvider() } })
+    expect(readModels()).toEqual({ providers: { 'private-api': writtenProvider() } })
   })
   it('rejects a byte-identical external provider without claiming it', () => {
     mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
@@ -162,7 +164,7 @@ describe('PiSharedProviderAdapter', () => {
       providers: {
         foreign: { foreign: true },
         'renamed-api': {
-          ...compiledProvider(),
+          ...writtenProvider(),
           extension: 'keep',
           models: [{ ...compiledProvider().models[0], limit: 42 }]
         }
@@ -344,6 +346,90 @@ describe('PiSharedProviderAdapter — built-in vendor id collision (M-AT4)', () 
     expect(auth.removeVendorAuth).toHaveBeenCalledWith('openai-codex')
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADR-074 §4: pi omits a models.json provider with no usable credential from
+// `get_available_models`, so a keyless custom endpoint gets a placeholder
+// `apiKey` — but only when the entry has none, and never inside the managed
+// projection (entries written before the placeholder must not read as changed).
+// ---------------------------------------------------------------------------
+describe('PiSharedProviderAdapter — keyless placeholder (ADR-074 §4)', () => {
+  const entry = (): Record<string, unknown> =>
+    (readModels().providers as Record<string, Record<string, unknown>>)['private-api']
+
+  it('writes the placeholder apiKey into a fresh entry', () => {
+    adapter().applyDefinition(provider)
+    expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+  })
+
+  it('keeps an existing apiKey of any shape on re-apply', () => {
+    for (const apiKey of ['$MY_KEY', '!pass show key', 'sk-literal']) {
+      mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+      writeFileSync(
+        modelsPath,
+        JSON.stringify({ providers: { 'private-api': { ...compiledProvider(), apiKey } } })
+      )
+      adapter().applyDefinition(provider, true, provider)
+      expect(entry().apiKey).toBe(apiKey)
+    }
+  })
+
+  it('replaces an empty or non-string apiKey with the placeholder', () => {
+    for (const apiKey of ['', null, 42]) {
+      mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+      writeFileSync(
+        modelsPath,
+        JSON.stringify({ providers: { 'private-api': { ...compiledProvider(), apiKey } } })
+      )
+      adapter().applyDefinition(provider, true, provider)
+      expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+    }
+  })
+
+  it('re-applies an entry written before the placeholder existed and adds it', () => {
+    mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'private-api': compiledProvider() } }))
+    expect(adapter().hasDefinition(provider)).toBe(true)
+    expect(() => adapter().applyDefinition(provider, true, provider)).not.toThrow()
+    expect(readModels()).toEqual({ providers: { 'private-api': writtenProvider() } })
+  })
+
+  it('carries the placeholder through a managed rename', () => {
+    mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'private-api': compiledProvider() } }))
+    const renamed = {
+      ...provider,
+      routes: { ...provider.routes, pi: { enabled: true, providerId: 'renamed-api' } }
+    }
+    adapter().applyDefinition(renamed, true, provider)
+    expect(readModels()).toEqual({ providers: { 'renamed-api': writtenProvider() } })
+  })
+
+  it('still recognises and removes an entry that carries the placeholder', () => {
+    adapter().applyDefinition(provider)
+    expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+    expect(adapter().hasDefinition(provider)).toBe(true)
+    adapter().removeDefinition(provider)
+    expect(readModels()).toEqual({ providers: {} })
+  })
+
+  it('never puts the placeholder into auth.json', async () => {
+    const subject = adapter()
+    subject.applyDefinition(provider)
+    expect(auth.setVendorApiKey).not.toHaveBeenCalled()
+    await subject.vendApiKey(provider, 'real-key')
+    expect(auth.setVendorApiKey).toHaveBeenCalledWith('private-api', 'real-key')
+    expect(auth.setVendorApiKey).not.toHaveBeenCalledWith(
+      expect.anything(),
+      CLAUDEUI_KEYLESS_PLACEHOLDER
+    )
+  })
+})
+
+/** What the adapter writes: the compiled shape plus the keyless placeholder. */
+function writtenProvider() {
+  return { ...compiledProvider(), apiKey: CLAUDEUI_KEYLESS_PLACEHOLDER }
+}
 
 function compiledProvider() {
   return {

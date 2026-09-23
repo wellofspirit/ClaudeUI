@@ -353,6 +353,28 @@ describe('CREDENTIAL', () => {
     expect(called('vendorAuthSetKey')).toEqual([])
   })
 
+  it('reads a keyless custom endpoint as "No key needed" with an optional key', async () => {
+    // ADR-074 §4: no stored key is a working state for a custom endpoint.
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'ollama-local' ? { ...e, credential: 'keyless' } : e
+      )
+    }
+    await openSheet('ollama-local')
+    const chip = screen.getByTestId('ProviderSheet.credentialChip')
+    expect(chip).toHaveAttribute('data-id', 'keyless')
+    expect(chip).toHaveTextContent('No key needed')
+    const credential = screen.getByTestId('ProviderSheet.credential')
+    expect(credential).toHaveAttribute('data-id', 'key')
+    expect(credential).toHaveTextContent('Optional — this endpoint is used without a key.')
+    expect(credential).not.toHaveTextContent('Not set')
+    await click(screen.getByTestId('ProviderSheet.replaceKey'))
+    await typeInto('ProviderSheet.keyInput', 'sk-first')
+    await click(screen.getByTestId('ProviderSheet.saveKey'))
+    expect(sent('shared-provider:set-key')).toEqual([['ollama-local', 'sk-first']])
+  })
+
   it('replaces a native key in the ENGINE’s own auth store', async () => {
     await openSheet('opencode:openrouter')
     await click(screen.getByTestId('ProviderSheet.replaceKey'))

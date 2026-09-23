@@ -34,9 +34,12 @@ export type ProviderOrigin = 'anthropic' | 'shared' | 'opencode-native' | 'pi-na
  * - `custom`     — configured OUTSIDE ClaudeUI's stores: opencode reports the
  *                  provider as usable but no `auth.json` entry backs it, so the
  *                  key comes from an env var or another config file.
+ * - `keyless`    — a shared CUSTOM endpoint with no stored key (ADR-074 §4):
+ *                  used without one, which is a state rather than a failure.
  * - `none`       — nothing configured.
  */
-export type ProviderCredential = 'signed-in' | 'connected' | 'api-key' | 'free' | 'custom' | 'none'
+export type ProviderCredential =
+  'signed-in' | 'connected' | 'api-key' | 'free' | 'custom' | 'keyless' | 'none'
 
 /** What one engine's chip on the row says. */
 export interface ProviderEngineFacts {

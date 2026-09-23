@@ -338,6 +338,21 @@ describe('credential per origin', () => {
     ).toBe('none')
   })
 
+  it('shared: a custom endpoint with no stored key reads keyless, never none (ADR-074 §4)', () => {
+    const keyless = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt, localCustom],
+        statuses: [status({ connected: false }), status({ id: 'ollama-local', connected: false })]
+      })
+    )
+    expect(byId(keyless, 'ollama-local').credential).toBe('keyless')
+    // A subscription with nothing stored is still genuinely not connected.
+    expect(byId(keyless, 'chatgpt').credential).toBe('none')
+    expect(
+      byId(buildProviderRegistry(sources({ definitions: [chatgpt] })), 'chatgpt').credential
+    ).toBe('none')
+  })
+
   it('opencode native: free / connected / api-key / custom / none', () => {
     const snapshot = buildProviderRegistry(
       sources({

@@ -117,6 +117,7 @@ export const CREDENTIAL_LABEL: Record<ProviderCredential, string> = {
   'api-key': 'API key',
   free: 'Free',
   custom: 'Custom',
+  keyless: 'No key needed',
   none: 'Not connected'
 }
 
@@ -124,7 +125,9 @@ export const CREDENTIAL_LABEL: Record<ProviderCredential, string> = {
  * Its tint. A credential ClaudeUI can VOUCH for reads as success (a live
  * sign-in), one it holds a key for reads as accent, and everything else — a
  * free gateway, a key configured outside ClaudeUI, nothing at all — is outlined:
- * three greys would say the states are interchangeable, which they are not.
+ * three greys would say the states are interchangeable, which they are not. A
+ * keyless endpoint is outlined too, but in success: needing no key is a working
+ * state, not a missing one (ADR-074 §4).
  */
 const CREDENTIAL_TINT: Record<ProviderCredential, string> = {
   'signed-in': 'bg-success/15 text-success',
@@ -132,6 +135,7 @@ const CREDENTIAL_TINT: Record<ProviderCredential, string> = {
   'api-key': 'bg-accent/15 text-accent',
   free: 'border border-border text-text-secondary',
   custom: 'border border-border text-text-secondary',
+  keyless: 'border border-success/30 text-success',
   none: 'border border-border text-text-secondary'
 }
 
@@ -451,13 +455,23 @@ export function ProviderSheet({
         ? "Stored in pi's own auth.json, never in ClaudeUI's config."
         : "Stored in opencode's own auth.json, never in ClaudeUI's config."
 
+  // A keyless endpoint (ADR-074 §4) has nothing to report as "Not set": the
+  // description says the key is optional instead.
+  const keyless = entry.credential === 'keyless'
   const keyRow = (
-    <SettingRow testid={`${SHEET}.credential`} dataId="key" label="API key" description={keyStore}>
+    <SettingRow
+      testid={`${SHEET}.credential`}
+      dataId="key"
+      label="API key"
+      description={keyless ? 'Optional — this endpoint is used without a key.' : keyStore}
+    >
       {keyDraft === null ? (
         <>
-          <span className="font-mono text-[12px] text-text-secondary">
-            {entry.credential === 'api-key' ? '••••••••' : 'Not set'}
-          </span>
+          {!keyless && (
+            <span className="font-mono text-[12px] text-text-secondary">
+              {entry.credential === 'api-key' ? '••••••••' : 'Not set'}
+            </span>
+          )}
           <Button variant="link" testid={`${SHEET}.replaceKey`} onClick={() => setKeyDraft('')}>
             {entry.credential === 'api-key' ? 'Replace' : 'Add key'}
           </Button>

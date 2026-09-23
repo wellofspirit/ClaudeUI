@@ -466,6 +466,10 @@ function engineCounts(
  * A shared provider's credential is the CENTRAL one (`status.connected` is the
  * vault record), never a per-route peek: the whole point of the shared vault is
  * that the credential is held once and vended to each enabled engine.
+ *
+ * A custom endpoint with no stored key reads `keyless`, not `none` (ADR-074
+ * §4): self-hosted servers are normally used without one, and the pi
+ * projection writes a placeholder so pi still sees the provider.
  */
 function sharedCredential(
   definition: SharedProviderDefinition,
@@ -476,7 +480,7 @@ function sharedCredential(
   // that cannot be stale: the status read resolves the ACTIVE account, so a
   // provider mid-switch must not flicker through "Not connected".
   if (accounts && accounts.list.length > 0) return 'connected'
-  if (!status?.connected) return 'none'
+  if (!status?.connected) return definition.kind === 'custom' ? 'keyless' : 'none'
   return definition.kind === 'subscription' ? 'connected' : 'api-key'
 }
 

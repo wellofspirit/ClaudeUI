@@ -8,6 +8,21 @@ import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 16_384
 
+/**
+ * The `apiKey` written into a keyless custom provider's models.json entry
+ * (ADR-074 §4). pi omits a provider with no usable credential from
+ * `get_available_models` (`vendor/pi-cli/pi/docs/models.md`: "The dummy key
+ * makes the model available"), so a self-hosted endpoint added with the key
+ * left blank would never reach pi's picker without one.
+ *
+ * Safe because pi resolves credentials `--api-key` → `auth.json` →
+ * models.json `apiKey` → env: a real key vended to auth.json by
+ * {@link PiSharedProviderAdapter.vendApiKey} still wins. It never goes into
+ * auth.json itself — `hasCredential` reads auth.json ids, and a placeholder
+ * there would report a keyless provider as connected.
+ */
+export const CLAUDEUI_KEYLESS_PLACEHOLDER = 'claudeui-no-key'
+
 export interface PiOauthCredential {
   access: string
   refresh: string
@@ -304,6 +319,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -335,7 +354,25 @@ function managedProviderProjection(value: unknown): unknown {
   }
 }
 
+/**
+ * `compiled` over `existing`, keeping every native field ClaudeUI does not own.
+ *
+ * `apiKey` is one of those: an existing value of any shape (a literal, `$ENV`,
+ * `!command`) is left untouched, and only an entry with none gains
+ * {@link CLAUDEUI_KEYLESS_PLACEHOLDER}. It stays outside
+ * {@link managedProviderProjection}, so entries written before the placeholder
+ * existed still read as unchanged.
+ */
 function mergeProvider(existing: unknown, compiled: PiProviderConfig): Record<string, unknown> {
+  const merged = mergeManagedFields(existing, compiled)
+  if (!isNonEmptyString(merged.apiKey)) merged.apiKey = CLAUDEUI_KEYLESS_PLACEHOLDER
+  return merged
+}
+
+function mergeManagedFields(
+  existing: unknown,
+  compiled: PiProviderConfig
+): Record<string, unknown> {
   if (!isRecord(existing)) return { ...compiled }
   const existingModels = new Map(
     Array.isArray(existing.models)
