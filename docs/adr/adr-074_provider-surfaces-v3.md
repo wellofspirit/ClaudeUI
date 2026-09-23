@@ -173,8 +173,9 @@ Each is one commit, in this order (1–3 unblock pi without waiting for the rede
   until curated, and a keyless endpoint appears.
 - One place curates models for every engine, and every curation can be undone from the UI.
 - Rotating a provider's key is one action. The vault now holds catalog API keys that previously lived
-  only in each engine's `auth.json`; the vault's existing encryption and redaction rules (ADR-036)
-  apply to them.
+  only in each engine's `auth.json`. The vault is plaintext JSON at mode 0600 in a 0700 directory
+  (ADR-036) — the same protection those `auth.json` files have — so a key gains one more copy, not a
+  weaker one; the renderer still never receives a key value (status reads are redacted).
 - The Manage sheet stops branching origin × engine inline: each engine contributes a section adapter
   (engine row, curation adapter, model-setup links), which is what made "the pi half" easy to forget.
 
