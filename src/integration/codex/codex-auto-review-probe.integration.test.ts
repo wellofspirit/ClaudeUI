@@ -857,7 +857,11 @@ it.skipIf(!enabled)(
     expect(record.reviewerRequestCount).toBe(12)
     for (const review of completed) {
       expect(review.status).toBe('denied')
-      expect(review.riskLevel).toBe('high')
+      // 0.154.0 synthesized a `high`/`unknown` assessment for a failed review;
+      // 0.156.0's `ext/guardian-reviewer` (completion.rs) fails closed WITHOUT
+      // one, so neither field is set — only the status and rationale are.
+      expect(review.riskLevel).toBeNull()
+      expect(review.userAuthorization).toBeNull()
       expect(review.rationale).toBe(
         'Automatic approval review failed: guardian assessment was not valid JSON'
       )
@@ -1444,15 +1448,21 @@ it.skipIf(!enabled)(
       expect(variant.instructionsLength).toBe(JUDGE_INSTRUCTIONS.length)
     }
 
-    // The default surface for an `ephemeral` + `never` + readOnly thread. The
-    // goal tools are gone because `[features] goals` is off, so the baseline is
-    // already narrower than the policy probe's eight-tool list.
+    // The default surface for an `ephemeral` + `never` + readOnly thread. Up to
+    // 0.154.0 the goal tools were hidden here because an ephemeral thread has no
+    // persistent state; 0.156.0 (`ext/goal`) splits visibility from
+    // availability, so they are ADVERTISED on every non-review thread with
+    // `goals` on and only refuse at execution ("Goal tools require a persistent
+    // thread."). Only `[features] goals = false` removes them now.
     expect(at('baseline').toolNames).toEqual([
       'exec_command',
       'write_stdin',
       'request_user_input',
       'view_image',
-      'multi_agent_v1'
+      'multi_agent_v1',
+      'get_goal',
+      'create_goal',
+      'update_goal'
     ])
     expect(at('baseline').lsExitCode).toBe(EXIT_NESTED_SANDBOX)
 
