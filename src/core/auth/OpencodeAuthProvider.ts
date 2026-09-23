@@ -22,6 +22,7 @@ import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
+import { removalCaller } from './removal-caller'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { AccountIdentity } from '../../shared/account-key'
 import { AuthFileIdentityCache } from './account-identity'
@@ -297,6 +298,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   }
 
   async removeVendorAuth(vendorId: string): Promise<void> {
+    // See PiAuthProvider.removeVendorAuth: a removal always leaves a trace.
+    logger.info('OpencodeAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
     let mutated = false

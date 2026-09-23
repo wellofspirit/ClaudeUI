@@ -23,6 +23,8 @@
 import fs from 'fs'
 import path from 'path'
 import { piAgentDir } from '../services/pi-session-list'
+import { logger } from '../services/logger'
+import { removalCaller } from './removal-caller'
 import { invalidatePiModelCache } from '../pi/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import type {
@@ -230,6 +232,11 @@ export class PiAuthProvider implements EngineAuthProvider {
   /** Delete a provider's entry from auth.json entirely. Preserves every other entry. */
   async removeVendorAuth(vendorId: string): Promise<void> {
     const file = readAuthFileForWrite()
+    // A removal destroys a credential ClaudeUI cannot restore, so it always
+    // leaves a trace: the vendor id and the call site, never the key.
+    if (vendorId in file) {
+      logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
+    }
     delete file[vendorId]
     writeAuthFile(file)
     invalidatePiModelCache()
