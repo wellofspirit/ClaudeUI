@@ -722,6 +722,64 @@ Guard-check the store test.
 
 ---
 
+## Slice 10 — several keys for one catalog provider, and an on/off switch per provider (owner ruling 2026-09-23)
+
+The owner wants two OpenRouter keys usable at the same time (option B of two: separate entries, not
+one provider with switchable keys), and to be able to turn one entry off when only one is needed.
+Depends on 8b.
+
+### Why a second entry is a custom provider
+
+Each engine keys a credential by provider id, so a second key needs a second id (`openrouter-work`) in
+both engines. Neither engine has a built-in provider by that id, so it is declared the way Spark
+already is: a shared `custom` definition — `baseUrl` = the vendor's OpenAI-compatible endpoint
+(`https://openrouter.ai/api/v1`), `protocol` `openai-completions`, and a declared `models` list —
+projected into opencode's config and pi's `models.json`, with the key in the vault and delivered to
+each enabled engine. Verify in `vendor/opencode-fork-src/` that an opencode custom provider accepts
+model ids containing `/` (OpenRouter's are `vendor/model`), and in pi's docs that `models.json` does
+too; say what you found.
+
+### Changes
+
+1. **"Add another key"** on a catalog provider's Manage sheet (Key section; also reachable from a native
+   catalog row once 8b's merge has happened). A small stacked form: label ("Work" → id
+   `<vendor>-<slug>`, name "<Vendor> (Work)", id validated and unique), the key, engines (default both),
+   and the models to declare — seeded with the ORIGINAL entry's current picks (or its catalog when on
+   All models), searchable with the existing `ModelCurationList`, capped with a note above ~50 ("pick
+   the models you use; you can add more later"). Model metadata (name, context window, max tokens,
+   reasoning, vision) is copied from opencode's catalog entry for the vendor. The base URL comes from
+   that catalog entry's API URL when it has one; otherwise the form asks for it. Result: one
+   `saveSharedProvider` (custom) + one `setSharedProviderApiKey`.
+2. **Refresh models from the catalog** on such an entry (Endpoint section): re-copies metadata for its
+   declared models and offers the catalog's other models to add (same list UI). Record the origin on the
+   definition (`derivedFrom?: '<catalog vendor id>'`) so the sheet knows it is a clone and can offer
+   this; validate it in the repository.
+3. **On/off per provider.** `SharedProviderDefinition.disabled?: boolean` (absent = on). While
+   disabled, sync treats every route as off for delivery (remove projection + the key from each engine
+   whose route is enabled, per the existing ownership rules — never a key ClaudeUI did not deliver),
+   but `routes`, `curation` and defaults are kept untouched; re-enabling re-applies and re-vends. The
+   collision guard ignores disabled definitions (so "OpenRouter" and "OpenRouter (Work)" never collide
+   anyway — different ids — but a disabled catalog `openai` must not block ChatGPT). IPC
+   `shared-provider:set-disabled(id, disabled)`. UI: a switch on each shared API provider row in the
+   list (and in its sheet header); a disabled row is dimmed with an "Off" pill and its engine pills
+   read "off"; the sheet says "Off — not delivered to any engine. Its key and settings are kept."
+   Subscriptions are out of scope (ChatGPT has its own route switches).
+4. **List order:** a clone sorts right after its origin ("OpenRouter", "OpenRouter (Work)").
+
+### Tests
+
+Clone creation (id/slug/uniqueness, metadata copy, base URL from catalog or asked, one save + one key);
+refresh (metadata updated, new models offered); disabled: sync removes delivery but keeps routes/
+curation, re-enable restores exactly, collision guard ignores disabled; list order and dimmed row.
+Guard-check the disable/re-enable round trip.
+
+### Suggested commit subjects
+
+`feat(providers): add a second key for a catalog provider as its own entry`
+`feat(providers): turn a provider off without losing its key or settings`
+
+---
+
 ## Slice 7 — one key per provider: catalog definitions (ADR-074 §6) — core only
 
 The UI for it (Add flow, merged row, key-conflict panel) is slice 8; this slice ships the core, the
