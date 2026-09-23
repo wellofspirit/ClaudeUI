@@ -11,16 +11,16 @@ Mockups (owner-approved 2026-09-23), under `.claude/ui/mockups/<id>/index.html`:
 
 ## Status
 
-| #   | Slice                                                                       | State                                                       |
-| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915` (real-app check pending, with slice 2) |
-| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | implementing                                                |
-| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67` (real-app check pending)               |
-| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | implementing                                                |
-| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | specced                                                     |
-| 6   | §3 linked lists (mockup B)                                                  | specced                                                     |
-| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | specced (core seam map inline)                              |
-| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | to spec as 8a Subscriptions / 8b API providers              |
+| #   | Slice                                                                       | State                                                |
+| --- | --------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified              |
+| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3 |
+| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified              |
+| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app check pending         |
+| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | implementing                                         |
+| 6   | §3 linked lists (mockup B)                                                  | specced                                              |
+| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | specced (core seam map inline)                       |
+| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | to spec as 8a Subscriptions / 8b API providers       |
 
 ## Standing constraints for every implementer
 
@@ -636,3 +636,12 @@ from it — re-check a line number before relying on it.
 ## Log
 
 - 2026-09-23 — ADR-074 written; slices 1–7 specced. Slice 1 and 3 committed. Found while specifying: `config:save-opencode-settings` keeps the old allowlist when sent `{}` (fix in slice 5); `findModelReferences` is not engine-scoped, so a pi default blocks an opencode untick of the same value (fix in slice 5); the vault is plaintext 0600, not encrypted (ADR-074 corrected).
+- 2026-09-23 — Slices 1–3 verified in the real app (read-only verifier; built from the exact commit,
+  not the working tree). **Incident:** pi's `~/.pi/agent/auth.json` lost its `openrouter` api_key
+  some time between the owner's 10:50 OpenRouter use and 14:41:51 (the file's last write, the boot
+  OAuth feed, which preserves other entries). No ClaudeUI path removes a vendor it does not own
+  (every `removeVendorAuth` caller checked; tests run in a sandboxed HOME; pi's discovery probe
+  reproduced with dummy creds does not drop it). Cause undetermined; `663a1633` now logs every
+  removal with its call path. The owner must re-add the key.
+- 2026-09-23 — Slice 4 open question for the owner: a user's last-picked Claude model (sticky) still
+  wins over the configured "Start new sessions on" default, as it does for opencode/pi/Codex.
