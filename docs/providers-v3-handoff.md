@@ -919,3 +919,10 @@ from it — re-check a line number before relying on it.
   id/type; one `adopted the openrouter API key` log line, no removal lines, no repeat on later boots.
   Slice 9 committed `fa5c7019`. Slice 10 implementing (mockup `b90c7ea5`, owner-approved: the on/off
   switch applies to the original catalog provider too).
+- 2026-09-23 — Slice 10 committed `8a0a316f` (fresh-reviewed: 6 required + 8 minor fixed) and verified in
+  the real app. First boot of that build re-synced Spark's opencode block once, adding per-model
+  capability fields (`limit {0,0}` since Spark declares none — opencode's "unknown"); nothing else
+  changed. ADR-074 § As built written. Open follow-ups: (1) the owner's opencode config holds junk
+  provider blocks `s`, `sp`, `spa`, `spar` (pre-dating this arc's runs — some older form saved the
+  provider id on every keystroke); find the writer and offer a cleanup. (2) ADR-074 §6: where
+  engine-owned OAuth sign-ins are listed stays deferred. (3) Nothing pushed.

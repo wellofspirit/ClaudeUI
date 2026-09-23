@@ -1,6 +1,6 @@
 # ADR-074 — Provider surfaces v3: subscriptions vs API providers, one key and one model list per provider, pi curation that works
 
-**Status:** Accepted (2026-09-23), owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
+**Status:** Implemented (2026-09-23, slices 1–10 — see § As built); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) § "Providers: one list" (one list becomes two groups; the Accounts group folds into Subscriptions; the Anthropic endpoint leaves Models & providers) · [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §2 as amended by F14 (accounts move from the Accounts group onto each subscription card; the workspace explainer row becomes a tooltip)
 **Relates to:** [ADR-009](adr-009_claude-settings-vs-uisettings.md) (which store a setting lives in), [ADR-027](adr-027_test-data-attributes.md) (testids), [ADR-035](adr-035_pi-engine-backend.md) (pi wire), [ADR-059](adr-059_no-silent-model-fallback.md) (the spawn gate and the orphan guard this keeps), [ADR-036](adr-036_unified-auth-vault.md) (the vault that now holds catalog keys)
 
@@ -166,6 +166,58 @@ Each is one commit, in this order (1–3 unblock pi without waiting for the rede
 6. §3 linked lists.
 7. §6 one key per provider (core: catalog definitions, delivery, migration).
 8. §7 Subscriptions / API providers IA, Manage sheet, Add flow.
+
+## As built (2026-09-23)
+
+Commits, in order: `e5960915` (§4), `406d6692` (§1, §5), `f1d27e67` (§9), `6bca2a5c` (§8), `615e8b5e`
+(§2), `29f245ef` (§6 core), `e94222a3` (§7 Subscriptions), `63e550bd` (§3), `afe90f4e` (§6–7 API
+providers), `fa5c7019` (§10 below), `8a0a316f` (§11 below). Each slice was fresh-reviewed and verified
+in the real app; `docs/providers-v3-handoff.md` holds the specs and the log.
+
+What the build changed about the decision:
+
+1. **The vault is plaintext** (0600 in 0700), not encrypted — the same protection each engine's
+   `auth.json` has. §Consequences corrected.
+2. **`config:save-opencode-settings` no longer writes the allowlist at all.** Settings panes save the
+   whole object they loaded at mount, which reverted curation the Manage sheet had just changed;
+   `models:set-provider-allowlist` is the one writer for both engines.
+3. **`findModelReferences` is engine-scoped**: opencode and pi picker values share a namespace, so an
+   unscoped orphan guard let pi's default block an opencode untick of the same value.
+4. **Adoption compares keys in the main process** (last-four hints are the only part that leaves it)
+   and never touches OAuth or opencode `wellknown` entries. The first boot of the owner's build adopted
+   OpenRouter (identical keys in both engines). "Use for both" on a single-engine key enables the other
+   engine only when it holds no credential of its own.
+5. **A catalog definition owns only the native keys of routes it has enabled**; a key under a disabled
+   route is the user's and is never deleted by a sync.
+6. **Models in the picker is a summary + a stacked editor** in the Manage sheet (mockup D), which re-reads
+   the definition after every write so a split list never reopens as one.
+7. **Removal logging**: every `removeVendorAuth` logs the vendor id and call path (never the key), after
+   an unexplained loss of the owner's pi OpenRouter key during the arc.
+
+### 10. New sessions: last pick or configured default (owner ruling)
+
+The last model picked on an engine still seeds new sessions ahead of the configured default, but
+`AppSettings.newSessionModel` (`'last-picked'` default | `'configured-default'`), shown as "New
+sessions start on" at the top of every Default models segment, turns that off. Every seeding path reads
+the picks through `seedingModelPicks`. Default-model rows note "Used until you pick a model in the
+composer." while the last pick wins.
+
+### 11. Several keys for one provider, and an on/off switch (owner ruling, mockup `b90c7ea5`)
+
+- **A second key is its own entry** — a custom definition (`derivedFrom`, `copiedAt`) pointing at the
+  vendor's endpoint, with its own id in both engines (e.g. `openrouter-work`), so both keys are usable at
+  once. Protocol and URL come from the catalog's SDK package and endpoint when every model agrees,
+  otherwise the form asks; an id that is an opencode catalog vendor or a pi built-in is refused. Up to 50
+  models, metadata copied from the catalog; "Refresh from catalog" re-copies what the catalog states and
+  keeps the rest. Both engines accept `vendor/model` ids (verified).
+- **opencode now receives custom models' capabilities** (reasoning, attachment/input modalities, tool
+  calls, context and output limits), merged per leaf with hand edits kept; the managed check compares
+  identity only. Previously opencode saw only a name, so custom models had no effort control, image
+  input or compaction there.
+- **On/off per shared API provider** (`disabled`). Off removes projections and delivered keys under the
+  ownership rules and clears engine defaults pointing at it, keeping key, routes, curation and defaults;
+  on restores them, refusing to replace a key an engine was given meanwhile unless confirmed. A key
+  stranded by an interrupted switch-off is reclaimed by the next sync only while it equals the vault key.
 
 ## Consequences
 
