@@ -854,6 +854,41 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.selectedModel.value).toBe('sonnet')
   })
 
+  it('the welcome pill previews what "New sessions start on" will seed (slice 9)', async () => {
+    const models = [
+      claudeRow('default', 'claude-opus-5[1m]', 'Default (recommended)'),
+      claudeRow('sonnet', 'claude-sonnet-5', 'Sonnet 5'),
+      claudeRow('haiku', 'claude-haiku-4-5', 'Haiku 4.5')
+    ]
+    fcClaudeModels = models
+    const withMode = (mode: 'last-picked' | 'configured-default'): void => {
+      useSessionStore.setState((state) => ({
+        activeSessionId: null,
+        availableModels: models,
+        lastSelectedModelByEngine: { claude: 'haiku' },
+        claudeDefaultModel: 'sonnet',
+        claudeDefaultModelConfigured: true,
+        settings: { ...state.settings, newSessionModel: mode }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    // Last pick wins: the pill names the sticky model.
+    withMode('last-picked')
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.selectedModel.value).toBe('haiku')
+    cleanup()
+
+    // Configured default wins: the pill names it, sticky or not.
+    withMode('configured-default')
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.selectedModel.value).toBe('sonnet')
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, newSessionModel: undefined }
+    }))
+  })
+
   it('renders and passes props to View', () => {
     renderFC()
     expect(viewProps).toBeDefined()

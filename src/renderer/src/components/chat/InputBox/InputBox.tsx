@@ -5,7 +5,8 @@ import {
   useActiveSession,
   bootstrapPermissionMode,
   engineDefaultModels,
-  resolveEngineDefaultModel
+  resolveEngineDefaultModel,
+  seedingModelPicks
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
@@ -306,7 +307,9 @@ export function InputBox(): React.JSX.Element {
   // harness. For opencode use the same resolver the spawn path uses so display
   // == what will actually run.
   const engineDefaults = useSessionStore(useShallow(engineDefaultModels))
-  const lastSelectedModelByEngine = useSessionStore((s) => s.lastSelectedModelByEngine)
+  // The picks that SEED a new session — none when the user chose the
+  // configured default (`newSessionModel`), so the welcome pill previews it.
+  const lastSelectedModelByEngine = useSessionStore(seedingModelPicks)
   const selectedModel = useMemo(() => {
     const engine = effectiveEngineId ?? 'claude'
     const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
@@ -521,7 +524,7 @@ export function InputBox(): React.JSX.Element {
       const catalog = codexCatalogOf(state.availableModels)
       const model = codexModelIsExplicit(
         session,
-        state.lastSelectedModelByEngine.codex,
+        seedingModelPicks(state).codex,
         catalog,
         state.codexDefaultModel
       )
@@ -590,7 +593,7 @@ export function InputBox(): React.JSX.Element {
       engineId === 'codex' &&
       !codexModelIsExplicit(
         session,
-        state.lastSelectedModelByEngine.codex,
+        seedingModelPicks(state).codex,
         codexCatalogOf(state.availableModels),
         state.codexDefaultModel
       )

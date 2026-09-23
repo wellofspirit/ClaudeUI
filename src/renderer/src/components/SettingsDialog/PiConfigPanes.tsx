@@ -78,6 +78,7 @@ import {
 import { openProviderSettings, type SettingsTarget } from './settings-target'
 import { isPiModelAllowed, splitPiModelValue } from '../../../../shared/pi-model-allowlist'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
+import { LastPickNote } from './NewSessionModelSetting'
 import { usePiInstalled } from './use-engine-installed'
 import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
@@ -757,7 +758,12 @@ function PiSessionDefaultModel({
           testid={`${PANE}.row`}
           dataId="piConfig.defaultModel"
           label="Default model"
-          description={`The model new pi sessions start with; unset falls back to pi's own default (${PI_DEFAULT_MODEL}).`}
+          description={
+            <>
+              {`The model new pi sessions start with; unset falls back to pi's own default (${PI_DEFAULT_MODEL}).`}
+              <LastPickNote />
+            </>
+          }
           keyText="engines/pi.json · defaultModel"
           modified={current !== ''}
           onReset={() => update('')}

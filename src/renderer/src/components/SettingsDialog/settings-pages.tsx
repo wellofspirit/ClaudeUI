@@ -537,13 +537,15 @@ export const PAGES: SettingsPage[] = [
                 : undefined,
         appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
         note: (engine) => DEFAULT_MODEL_NOTES[engine],
+        // The engine-neutral "New sessions start on" row (slice 9) heads every
+        // segment: one item, reused, so the four cannot drift apart.
         byEngine: {
-          claude: itemsOf('effortDefaults'),
-          opencode: itemsOf('opencode-models'),
-          pi: itemsOf('pi-config-models'),
+          claude: [...itemsOf('new-session-model'), ...itemsOf('effortDefaults')],
+          opencode: [...itemsOf('new-session-model'), ...itemsOf('opencode-models')],
+          pi: [...itemsOf('new-session-model'), ...itemsOf('pi-config-models')],
           // ClaudeUI's OWN default for a Codex session, in `engines/codex.json`
           // — not the `model` key on the Codex page, which is Codex's file.
-          codex: itemsOf('codex-models')
+          codex: [...itemsOf('new-session-model'), ...itemsOf('codex-models')]
         }
       }
     ]
@@ -1084,6 +1086,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   usage: { page: 'advanced', group: 'usage' },
 
   'shared-providers': { page: 'models', group: 'providers' },
+  'new-session-model': { page: 'models', group: 'defaults' },
   effortDefaults: { page: 'models', group: 'defaults' },
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },

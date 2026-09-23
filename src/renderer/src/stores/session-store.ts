@@ -415,6 +415,27 @@ import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../sha
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
+/** See {@link AppSettings.newSessionModel}. */
+export type NewSessionModel = 'last-picked' | 'configured-default'
+
+const NO_SEEDING_PICKS: Readonly<Partial<Record<EngineId, string>>> = Object.freeze({})
+
+/**
+ * The per-engine last picks that may SEED a new session: the recorded map, or
+ * none at all when the user chose the configured default instead. The one
+ * reader every seeding path (and the welcome screen's preview of it) goes
+ * through, so none of them can disagree about which model a new session gets.
+ * Returns stable references, so it is safe as a store selector.
+ */
+export function seedingModelPicks(state: {
+  settings: Pick<AppSettings, 'newSessionModel'>
+  lastSelectedModelByEngine: Partial<Record<EngineId, string>>
+}): Readonly<Partial<Record<EngineId, string>>> {
+  return state.settings.newSessionModel === 'configured-default'
+    ? NO_SEEDING_PICKS
+    : state.lastSelectedModelByEngine
+}
+
 export interface AppSettings {
   theme: ThemeId
   /**
@@ -457,6 +478,14 @@ export interface AppSettings {
    * still wins.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
+  /**
+   * What a NEW session starts on, per engine (providers-v3 slice 9, owner
+   * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
+   * behaviour: the model last picked on that engine wins over its configured
+   * default. `'configured-default'` ignores that pick for seeding (it is still
+   * recorded), so the configured default — or the engine's built-in one — seeds.
+   */
+  newSessionModel?: NewSessionModel
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
@@ -1847,10 +1876,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       let engineId = state.lastSelectedEngineId
       const defaults = engineDefaultModels(state)
       // The user's last pick on THIS engine wins over the engine default — the
-      // model twin of `lastSelectedEngineId`. Only when it is still offered:
+      // model twin of `lastSelectedEngineId` — unless the user chose the
+      // configured default instead (`newSessionModel`). Only when it is still offered:
       // stickiness is a heuristic, so a stale entry falls through quietly (the
       // configured-default error rule below still applies underneath it).
-      const sticky = state.lastSelectedModelByEngine[engineId]
+      const sticky = seedingModelPicks(state)[engineId]
       const stickyAvailable =
         !!sticky &&
         state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))

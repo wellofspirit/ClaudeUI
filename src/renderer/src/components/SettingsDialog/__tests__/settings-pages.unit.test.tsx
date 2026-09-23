@@ -376,10 +376,15 @@ describe('Codex on the topic pages (ADR-068 §6, Slice 5b)', () => {
 
 describe('inventory guard', () => {
   it('every SECTIONS item has exactly one home in PAGES, and nothing else appears', () => {
-    const reachable = PAGES.flatMap((p) => p.groups.flatMap(allItemsOf)).map((i) => i.key)
+    // A HOME is a group. One item reused across the engine segments of ONE
+    // group is still one home — slice 9's engine-neutral "New sessions start
+    // on" row heads every segment of Default models on purpose — so each
+    // group's keys count once.
+    const reachable = PAGES.flatMap((p) =>
+      p.groups.flatMap((g) => [...new Set(allItemsOf(g).map((i) => i.key))])
+    )
 
-    // No key is rendered twice (a byEngine group contributes one per engine, so
-    // the SAME key twice would mean a genuine duplicate home).
+    // No key is rendered in two GROUPS (that would be a genuine duplicate home).
     const seen = new Map<string, number>()
     for (const key of reachable) seen.set(key, (seen.get(key) ?? 0) + 1)
     const duplicated = [...seen.entries()].filter(([, n]) => n > 1).map(([k]) => k)

@@ -14,6 +14,7 @@ import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { Button, SelectField, SettingRow } from './settings-controls'
 import type { SettingsTarget } from './settings-target'
+import { LastPickNote } from './NewSessionModelSetting'
 
 /**
  * Models & providers › Default models › Claude (ADR-074 §8, mockup C left).
@@ -204,7 +205,12 @@ export function ClaudeDefaultsSection({
         <SettingRow
           testid={`${T}.defaultModelRow`}
           label="Start new sessions on"
-          description="“Default” follows what Claude recommends for your account."
+          description={
+            <>
+              “Default” follows what Claude recommends for your account.
+              <LastPickNote />
+            </>
+          }
           keyText="engines/claude.json · claudeConfig.defaultModel"
           dimmed={!!override.pin}
           modified={defaultModel !== ''}

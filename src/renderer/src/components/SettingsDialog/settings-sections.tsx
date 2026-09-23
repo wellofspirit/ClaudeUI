@@ -51,6 +51,7 @@ import {
 } from './RemoteServerSettings'
 import { ProviderList } from './ProviderList'
 import { SubscriptionsSection } from './SubscriptionsSection'
+import { LastPickNote, NewSessionModelSetting } from './NewSessionModelSetting'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
@@ -1144,7 +1145,13 @@ export function CodexDefaultsSection(): React.JSX.Element {
         <SettingRow
           testid={`${testid}.defaultModelRow`}
           label="Default model"
-          description="The model new Codex sessions start with. Unset lets Codex pick from its own config for the working directory."
+          description={
+            <>
+              The model new Codex sessions start with. Unset lets Codex pick from its own config for
+              the working directory.
+              <LastPickNote />
+            </>
+          }
           keyText="engines/codex.json · codexConfig.defaultModel"
           modified={defaultModel !== ''}
           onReset={() => save({ defaultModel: '' })}
@@ -1270,7 +1277,12 @@ function OpencodeModelsSection(): React.JSX.Element {
         <SettingRow
           testid="OpencodeModelsSection.modelRow"
           label="Default model"
-          description="Model a new opencode session starts with."
+          description={
+            <>
+              Model a new opencode session starts with.
+              <LastPickNote />
+            </>
+          }
           modified={cfg.model !== undefined}
           onReset={() => update({ model: undefined })}
         >
@@ -3143,6 +3155,35 @@ export const SECTIONS: Section[] = [
         keywords:
           'shared provider add api key oauth credential custom endpoint self-hosted model pi opencode openrouter ollama',
         render: () => <ProviderList />
+      }
+    ]
+  },
+  {
+    // Providers-v3 slice 9: ONE engine-neutral row, reused at the top of every
+    // engine segment of Models & providers › Default models.
+    id: 'new-session-model',
+    label: 'New sessions start on',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'newSessionModel',
+        label: 'New sessions start on',
+        keywords:
+          'new session start model last picked sticky remembered default configured per engine composer',
+        render: (s, u) => <NewSessionModelSetting settings={s} update={u} />
       }
     ]
   },
