@@ -52,7 +52,7 @@ describe('find-in-chat live updates', () => {
     render(<LiveHarness />)
     const input = screen.getByPlaceholderText(/find in chat/i) as HTMLInputElement
     fireEvent.change(input, { target: { value: 'foo' } })
-    expect(await screen.findByText('1 / 1')).toBeTruthy()
+    expect(await screen.findByText('– / 1')).toBeTruthy()
 
     // Append two more matches via state update
     fireEvent.click(screen.getByTestId('add-foo'))

@@ -451,6 +451,8 @@ export interface AppSettings {
   hideToolInput: boolean
   expandThinking: boolean
   searchCaseSensitive: boolean
+  /** Find-in-chat skips content marked as tool output (TOOL_OUTPUT_SCOPE). */
+  searchExcludeToolOutput: boolean
   diffViewSplit: boolean
   diffIgnoreWhitespace: boolean
   diffWrapLines: boolean
@@ -532,6 +534,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hideToolInput: false,
   expandThinking: false,
   searchCaseSensitive: false,
+  searchExcludeToolOutput: false,
   diffViewSplit: false,
   diffIgnoreWhitespace: false,
   diffWrapLines: false,
