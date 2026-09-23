@@ -290,18 +290,22 @@ describe('ChatSearchOverlay find indicator', () => {
   it('flashes a text clone of a single-line match, outside the scroll container', async () => {
     render(<FlashHarness html="<p>find the needle here</p>" />)
     const flash = await revealFirst()
-    expect(flash.getAttribute('data-kind')).toBe('text')
+    expect(flash.getAttribute('data-fragments')).toBe('1')
     expect(flash.textContent).toBe('needle')
     expect(screen.getByTestId('scroll').contains(flash)).toBe(false)
     expect(flash.closest('[data-search="skip"]')).not.toBeNull()
   })
 
-  it('flashes a plain box for a match that wraps across lines', async () => {
-    clientRects = [rect(0), rect(16)]
+  it('flashes one text bubble per line of a match that wraps', async () => {
+    // "needle" is text offsets 9-15; it wraps after "nee".
+    Range.prototype.getBoundingClientRect = function (this: Range) {
+      return this.startOffset < 12 ? rect(0, 300) : rect(16, 0)
+    }
     render(<FlashHarness html="<p>find the needle here</p>" />)
     const flash = await revealFirst()
-    expect(flash.getAttribute('data-kind')).toBe('box')
-    expect(flash.textContent).toBe('')
+    expect(flash.getAttribute('data-fragments')).toBe('2')
+    const fragments = screen.getAllByTestId('ChatSearchOverlay.flashFragment')
+    expect(fragments.map((f) => f.textContent)).toEqual(['nee', 'dle'])
   })
 
   // Scrolling repositions rather than removes it: see ChatSearchFlash.component.test.tsx.

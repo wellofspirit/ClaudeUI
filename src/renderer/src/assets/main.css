@@ -311,9 +311,10 @@ html,
   color: #1a1a1a;
 }
 
-/* Find indicator (macOS-style "pop") over the match a search step landed on.
-   Positioned by its centre; `--s` is the base scale that makes the text clone
-   overlay the match exactly (it absorbs the chat `zoom`). */
+/* Find indicator (macOS-style "pop") over the match a search step landed on,
+   one bubble per line of the match. Positioned by its centre; `--s` is the
+   base scale that makes the text clone overlay its line exactly (it absorbs
+   the chat `zoom`). */
 .chat-search-flash {
   position: absolute;
   transform-origin: center;
@@ -324,11 +325,9 @@ html,
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   white-space: pre;
   line-height: 1.25;
+  padding: 0 2px;
   opacity: 0;
   animation: chat-search-flash 800ms ease-out forwards;
-}
-.chat-search-flash[data-kind='text'] {
-  padding: 0 2px;
 }
 
 @keyframes chat-search-flash {
