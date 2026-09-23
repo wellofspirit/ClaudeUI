@@ -11,16 +11,16 @@ Mockups (owner-approved 2026-09-23), under `.claude/ui/mockups/<id>/index.html`:
 
 ## Status
 
-| #   | Slice                                                                       | State                                                                       |
-| --- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified                                     |
-| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3                        |
-| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified                                     |
-| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app verified                                     |
-| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | committed `615e8b5e`; real-app verified                                     |
-| 6   | §3 linked lists (mockup B)                                                  | committed `63e550bd`; real-app check pending                                |
-| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | core committed `29f245ef`; registry + UI part folded into 8b                |
-| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | 8a committed `e94222a3` (fresh-reviewed, 4 required fixes); 8b implementing |
+| #   | Slice                                                                       | State                                                        |
+| --- | --------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified                      |
+| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3         |
+| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified                      |
+| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app verified                      |
+| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | committed `615e8b5e`; real-app verified                      |
+| 6   | §3 linked lists (mockup B)                                                  | committed `63e550bd`; real-app verified                      |
+| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | core committed `29f245ef`; registry + UI part folded into 8b |
+| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | 8a `e94222a3` + 8b `afe90f4e` committed; real-app verified   |
 
 ## Standing constraints for every implementer
 
@@ -913,3 +913,9 @@ from it — re-check a line number before relying on it.
   8b: the pi "Model list" summary (it lives under Default models › pi, not the pi page) counts
   "1 of 3 pi providers curated" with a curated key (`openrouter`) pi no longer offers; count over the
   providers pi reports, and mention stale keys separately.
+- 2026-09-23 — 8b and 9 verified in the real app (built from `afe90f4e`). The first boot of that build
+  adopted the owner's OpenRouter key (identical in opencode and pi): `providers/openrouter.json`
+  (catalog) created, vault `credentials.openrouter` stored, both engines' auth.json entries unchanged in
+  id/type; one `adopted the openrouter API key` log line, no removal lines, no repeat on later boots.
+  Slice 9 committed `fa5c7019`. Slice 10 implementing (mockup `b90c7ea5`, owner-approved: the on/off
+  switch applies to the original catalog provider too).
