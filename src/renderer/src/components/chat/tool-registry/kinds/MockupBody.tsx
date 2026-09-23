@@ -10,6 +10,7 @@
 
 import { MockupPreviewCard } from '../../MockupPreviewCard'
 import { ApprovalButtons } from '../../ApprovalButtons'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 export function MockupBody({
@@ -56,7 +57,10 @@ export function MockupBody({
         </div>
       )}
       {result?.isError && result.toolResult && (
-        <div className="border-t border-border px-3 py-2 text-[12px] text-danger whitespace-pre-wrap">
+        <div
+          {...TOOL_OUTPUT_SCOPE}
+          className="border-t border-border px-3 py-2 text-[12px] text-danger whitespace-pre-wrap"
+        >
           {result.toolResult}
         </div>
       )}

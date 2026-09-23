@@ -5,6 +5,7 @@ import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
+import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
 import { deriveTaskState, latestNotification } from './task-state'
 
@@ -419,7 +420,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           )}
           {/* Usage stats inline when collapsed */}
           {usage && (
-            <span className="text-[10px] font-mono text-text-secondary">
+            <span {...TOOL_OUTPUT_SCOPE} className="text-[10px] font-mono text-text-secondary">
               {[
                 usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                 usage.toolUses != null && `${usage.toolUses} tools`,
@@ -456,7 +457,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           )}
 
           {/* Result / running state */}
-          <div className="border-t border-border">
+          <div {...TOOL_OUTPUT_SCOPE} className="border-t border-border">
             {hasSubagentOutput ? (
               <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
                 <SubagentOutputBody
@@ -512,7 +513,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
                 </span>
               )}
               {usage && (
-                <span className="text-[10px] font-mono text-text-secondary ml-1">
+                <span
+                  {...TOOL_OUTPUT_SCOPE}
+                  className="text-[10px] font-mono text-text-secondary ml-1"
+                >
                   {[
                     usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                     usage.toolUses != null && `${usage.toolUses} tools`,
