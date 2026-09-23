@@ -80,6 +80,12 @@ export interface ProviderEngineFacts {
    * vendor: turning the route on replaces it with the stored key.
    */
   ownCredential?: true
+  /**
+   * A provider switched OFF (ADR-074 slice 10) whose route to this engine is on
+   * in its settings: `enabled` is false, and switching the provider on delivers
+   * it again.
+   */
+  routeOn?: true
 }
 
 export interface ProviderEntry {
@@ -110,6 +116,17 @@ export interface ProviderEntry {
    * `keep`) delivers it to both.
    */
   adoptable?: 'opencode' | 'pi'
+  /**
+   * A second key's entry (ADR-074 slice 10): the catalog vendor id it was made
+   * from. The list places it right after its origin's row.
+   */
+  derivedFrom?: string
+  /**
+   * A shared API provider switched OFF (ADR-074 slice 10): it reaches no engine,
+   * so every engine's facts read `enabled: false`, while its key and settings
+   * are kept for switching it back on.
+   */
+  disabled?: true
   /**
    * A sign-in SUBSCRIPTION rather than an API provider (ADR-074 §7): the
    * Anthropic row and every shared `kind: 'subscription'` definition. The

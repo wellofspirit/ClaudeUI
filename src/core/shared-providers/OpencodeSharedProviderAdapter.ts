@@ -7,7 +7,7 @@ import {
 } from '../opencode/opencode-config'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { loadEngineConfig } from '../services/ui-config'
-import type { OpencodeProviderSettings } from '../../shared/types'
+import type { OpencodeProviderModelSettings, OpencodeProviderSettings } from '../../shared/types'
 import type {
   SharedProviderDefinition,
   SharedProviderModel,
@@ -106,18 +106,20 @@ export class OpencodeSharedProviderAdapter {
     const compiled = compileProvider(definition)
     const previous = previousDefinition ?? definition
     const previousProviderId = opencodeProviderId(previous)
+    const previousCompiled = compileProvider(previous)
 
     if (previouslyManaged && previousProviderId !== providerId) {
       const newProvider = current.providers?.[providerId]
       if (newProvider !== undefined) {
         throw new Error(`OpenCode provider collision: ${providerId}`)
       }
-      if (!sameJson(current.providers?.[previousProviderId], compileProvider(previous))) {
+      const moved = current.providers?.[previousProviderId]
+      if (!sameIdentity(moved, previousCompiled)) {
         throw new Error(`OpenCode provider changed outside ClaudeUI: ${previousProviderId}`)
       }
       const providers = { ...current.providers }
       delete providers[previousProviderId]
-      providers[providerId] = compiled
+      providers[providerId] = mergeCapabilities(moved, compiled, previousCompiled)
       this.writeConfig({ ...current, providers })
       this.invalidateModelCache()
       return
@@ -127,18 +129,15 @@ export class OpencodeSharedProviderAdapter {
     if (existing !== undefined && !previouslyManaged) {
       throw new Error(`OpenCode provider collision: ${providerId}`)
     }
-    if (
-      previouslyManaged &&
-      existing !== undefined &&
-      !sameJson(existing, compileProvider(previous))
-    ) {
+    if (previouslyManaged && existing !== undefined && !sameIdentity(existing, previousCompiled)) {
       throw new Error(`OpenCode provider changed outside ClaudeUI: ${providerId}`)
     }
-    if (sameJson(existing, compiled)) return
+    const target = mergeCapabilities(existing, compiled, previousCompiled)
+    if (sameJson(existing, target)) return
 
     this.writeConfig({
       ...current,
-      providers: { ...current.providers, [providerId]: compiled }
+      providers: { ...current.providers, [providerId]: target }
     })
     this.invalidateModelCache()
   }
@@ -149,7 +148,7 @@ export class OpencodeSharedProviderAdapter {
 
     const providerId = opencodeProviderId(previousDefinition)
     const current = this.readConfig()
-    if (!sameJson(current.providers?.[providerId], compileProvider(previousDefinition))) return
+    if (!sameIdentity(current.providers?.[providerId], compileProvider(previousDefinition))) return
 
     const providers = { ...current.providers }
     delete providers[providerId]
@@ -185,7 +184,7 @@ export class OpencodeSharedProviderAdapter {
 
   hasDefinition(definition: SharedProviderDefinition): boolean {
     if (definition.kind !== 'custom') return true
-    return sameJson(
+    return sameIdentity(
       this.readConfig().providers?.[opencodeProviderId(definition)],
       compileProvider(definition)
     )
@@ -244,10 +243,85 @@ function npmForProtocol(protocol: NonNullable<SharedProviderDefinition['protocol
   }
 }
 
-function compileModel(model: SharedProviderModel): Array<{ id: string; name?: string }> {
+/**
+ * One declared model as opencode's config needs it (ADR-074 slice 10): what it
+ * can do and how large it is, which opencode otherwise reads as "nothing" for a
+ * model only a config declares (`reasoning`/`attachment` false, `limit` 0). The
+ * same defaults pi's projection applies to an absent fact — except the limits,
+ * where 0 is opencode's own "unknown". Key order matches the config reader's.
+ */
+function compileModel(model: SharedProviderModel): OpencodeProviderModelSettings[] {
   const override = model.harnessOverrides?.opencode
   if (override?.enabled === false || override?.available === false) return []
-  return [{ id: override?.id ?? model.id, ...(model.name ? { name: model.name } : {}) }]
+  return [
+    {
+      id: override?.id ?? model.id,
+      ...(model.name ? { name: model.name } : {}),
+      reasoning: model.reasoning === true,
+      attachment: model.vision === true,
+      toolCall: true,
+      inputModalities: model.vision ? ['text', 'image'] : ['text'],
+      limit: { context: model.contextWindow ?? 0, output: model.maxTokens ?? 0 }
+    }
+  ]
+}
+
+/** The capability leaves of a declared model — ClaudeUI's to seed, the user's to edit. */
+const CAPABILITY_KEYS = ['reasoning', 'attachment', 'toolCall', 'inputModalities', 'limit'] as const
+
+/**
+ * What identifies the provider block as the one ClaudeUI wrote: its name,
+ * adapter, endpoint and model ids and names. A difference here is someone else's
+ * provider, or ours changed outside ClaudeUI. The capability leaves are NOT part
+ * of it: they are hand-editable (opencode's model editor), and a block written
+ * before ClaudeUI declared them (a Spark from before slice 10) has none.
+ */
+function sameIdentity(
+  existing: OpencodeProviderSettings | undefined,
+  compiled: OpencodeProviderSettings
+): boolean {
+  const identity = (value: OpencodeProviderSettings | undefined): unknown =>
+    value && {
+      name: value.name,
+      npm: value.npm,
+      baseURL: value.baseURL,
+      models: value.models?.map((model) => ({ id: model.id, name: model.name }))
+    }
+  return sameJson(identity(existing), identity(compiled))
+}
+
+/**
+ * `compiled`, with each model's capability leaves three-way merged against what
+ * the file holds: ClaudeUI's new value where the file has none or still has
+ * the value ClaudeUI wrote last (`previous`), the file's where someone edited it
+ * since. A refresh therefore updates the details nobody touched, and a hand
+ * edit in opencode's model editor survives every sync.
+ */
+function mergeCapabilities(
+  existing: OpencodeProviderSettings | undefined,
+  compiled: OpencodeProviderSettings,
+  previous: OpencodeProviderSettings
+): OpencodeProviderSettings {
+  if (!existing) return compiled
+  const inFile = new Map((existing.models ?? []).map((model) => [model.id, model]))
+  const wrote = new Map((previous.models ?? []).map((model) => [model.id, model]))
+  return {
+    ...compiled,
+    models: compiled.models?.map((model) => {
+      const file = inFile.get(model.id)
+      if (!file) return model
+      const merged: OpencodeProviderModelSettings = {
+        id: model.id,
+        ...(model.name ? { name: model.name } : {})
+      }
+      for (const key of CAPABILITY_KEYS) {
+        const own = file[key] === undefined || sameJson(file[key], wrote.get(model.id)?.[key])
+        const value = own ? model[key] : file[key]
+        if (value !== undefined) Object.assign(merged, { [key]: value })
+      }
+      return merged
+    })
+  }
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

@@ -540,6 +540,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-key',
       'shared-provider:adopt-native',
       'shared-provider:set-curation',
+      'shared-provider:set-disabled',
       'shared-provider:sync',
       'shared-provider:disconnect',
       'shared-provider:set-default'
@@ -1728,6 +1729,8 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'shared-provider:save',
   'shared-provider:set-curation',
   'shared-provider:set-default',
+  // ADR-074 slice 10 — on/off moves delivery host-side; no key crosses.
+  'shared-provider:set-disabled',
   'shared-provider:set-key',
   'shared-provider:set-route',
   'shared-provider:sync',

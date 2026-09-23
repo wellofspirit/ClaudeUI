@@ -63,6 +63,7 @@ import type {
   ProviderRegistrySnapshot
 } from '../../shared/provider-registry'
 import {
+  deliveredDefinition,
   validateSharedProviderId,
   type ConfigurableHarnessId,
   type SharedProviderDefinition,
@@ -136,11 +137,17 @@ export interface ProviderRegistrySources {
   piCatalogCounts?: Readonly<Record<string, number>> | null
 }
 
-/** The unified list, ordered: Anthropic, then shared definitions, then natives. */
+/**
+ * The unified list, ordered: Anthropic, then shared definitions, then natives —
+ * except that a second key's entry sits right after its origin's row
+ * ("OpenRouter", "OpenRouter (Work)"), wherever that row is.
+ */
 export function buildProviderRegistry(sources: ProviderRegistrySources): ProviderRegistrySnapshot {
   const statuses = new Map(sources.statuses.map((status) => [status.id, status]))
   const catalog = new Map((sources.opencodeCatalog ?? []).map((entry) => [entry.id, entry]))
-  const owned = ownedNativeIds(sources.definitions)
+  // A provider switched off reaches no engine and owns no native row: the read
+  // model sees it as the engines do, with every route off (ADR-074 slice 10).
+  const owned = ownedNativeIds(sources.definitions.map(deliveredDefinition))
 
   const shared = sources.definitions
     .map((definition) => sharedEntry(definition, statuses.get(definition.id), catalog, sources))
@@ -164,7 +171,10 @@ export function buildProviderRegistry(sources: ProviderRegistrySources): Provide
     .sort(byNameThenId)
 
   return {
-    entries: [anthropicEntry(sources.accounts, sources.claudeAccount), ...shared, ...natives],
+    entries: [
+      anthropicEntry(sources.accounts, sources.claudeAccount),
+      ...placeClones([...shared, ...natives])
+    ],
     opencodeInstalled: sources.opencodeCatalog !== null
   }
 }
@@ -316,11 +326,12 @@ function billingLabel(billingType: BillingType | undefined): string | undefined 
 }
 
 function sharedEntry(
-  definition: SharedProviderDefinition,
+  stored: SharedProviderDefinition,
   status: SharedProviderStatus | undefined,
   catalog: ReadonlyMap<string, OpencodeProviderCatalogEntry>,
   sources: ProviderRegistrySources
 ): ProviderEntry {
+  const definition = deliveredDefinition(stored)
   const engines: ProviderEntry['engines'] = {}
   for (const harness of HARNESSES) {
     const route = definition.routes[harness]
@@ -330,13 +341,19 @@ function sharedEntry(
     // own (see the ownership gate above).
     if (!route.enabled) {
       // A catalog id is a vendor the engine already knows, so the engine may hold
-      // its OWN credential for it — which turning the route on would replace.
+      // its OWN credential for it — which turning the route on would replace, and
+      // so would switching the provider back on when the route is on in its
+      // settings (the service compares the keys and asks; this is the hint).
       const own =
         definition.kind === 'catalog' &&
         (harness === 'opencode'
           ? sources.opencodeCredentialKinds[resolveNativeId(definition, harness)] !== undefined
           : sources.piVendors[resolveNativeId(definition, harness)] !== undefined)
-      engines[harness] = own ? { enabled: false, ownCredential: true } : { enabled: false }
+      engines[harness] = {
+        enabled: false,
+        ...(stored.disabled && stored.routes[harness].enabled ? { routeOn: true as const } : {}),
+        ...(own ? { ownCredential: true as const } : {})
+      }
       continue
     }
     const nativeId = resolveNativeId(definition, harness)
@@ -378,6 +395,8 @@ function sharedEntry(
     engines,
     ...(definition.kind === 'subscription' ? { subscription: true as const } : {}),
     ...(accounts ? { accounts } : {}),
+    ...(definition.disabled ? { disabled: true as const } : {}),
+    ...(definition.derivedFrom ? { derivedFrom: definition.derivedFrom } : {}),
     ...(definition.kind === 'catalog'
       ? { kindLabel: 'Catalog' }
       : definition.kind === 'custom'
@@ -510,6 +529,34 @@ function withKeySharing(
       ? sources.piVendors[vendorId] !== undefined
       : sources.opencodeCredentialKinds[vendorId] !== undefined
   return otherHolds ? entry : { ...entry, adoptable: engine }
+}
+
+/**
+ * Move each second key's entry to just after its origin's row — the shared
+ * definition of that id, else the engine's own row for it — keeping the rest of
+ * the order, and the clones' own order among themselves. A clone whose origin
+ * has no row stays where the sort put it.
+ */
+function placeClones(entries: readonly ProviderEntry[]): ProviderEntry[] {
+  const rowId = (entry: ProviderEntry): string => entry.id.slice(entry.id.indexOf(':') + 1)
+  const originOf = (clone: ProviderEntry): ProviderEntry | undefined =>
+    entries.find((entry) => entry.id === clone.derivedFrom && entry.origin === 'shared') ??
+    entries.find(
+      (entry) =>
+        (entry.origin === 'opencode-native' || entry.origin === 'pi-native') &&
+        rowId(entry) === clone.derivedFrom
+    )
+  const placed = new Map<string, ProviderEntry[]>()
+  const clones = new Set<ProviderEntry>()
+  for (const entry of entries) {
+    const origin = entry.derivedFrom ? originOf(entry) : undefined
+    if (!origin || origin === entry) continue
+    placed.set(origin.id, [...(placed.get(origin.id) ?? []), entry])
+    clones.add(entry)
+  }
+  return entries.flatMap((entry) =>
+    clones.has(entry) ? [] : [entry, ...(placed.get(entry.id) ?? [])]
+  )
 }
 
 /** `Custom endpoint · <url>`, with the route default model when one is set. */

@@ -141,6 +141,12 @@ export interface SettingRowProps {
   layout?: 'inline' | 'stacked'
   /** Dependent-disabled: 50% opacity on label, description and control. */
   dimmed?: boolean
+  /**
+   * Whether `dimmed` reaches the control too (the default). A row that is
+   * dimmed because it is OFF still has a live switch — the API providers list's
+   * on/off — and turns this off so only its main column fades.
+   */
+  dimControls?: boolean
   /** Dependent rows nest exactly one level. */
   indent?: boolean
   /** Rendered before the label block (the radio circle of a `RadioRow`). */
@@ -173,6 +179,7 @@ export function SettingRow({
   locked,
   layout = 'inline',
   dimmed = false,
+  dimControls = dimmed,
   indent = false,
   leading,
   as = 'div',
@@ -279,8 +286,8 @@ export function SettingRow({
         <span
           className={
             layout === 'stacked'
-              ? `block w-full ${dimmed ? 'opacity-50' : ''}`
-              : `shrink-0 flex items-center justify-end gap-2 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimmed ? 'opacity-50' : ''}`
+              ? `block w-full ${dimControls ? 'opacity-50' : ''}`
+              : `shrink-0 flex items-center justify-end gap-2 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimControls ? 'opacity-50' : ''}`
           }
         >
           {layout === 'inline' && resetNode}

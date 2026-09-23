@@ -335,6 +335,11 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
   }
 }
 
+/** A limit a declared model may carry: a positive integer (the repository's own rule). */
+function positive(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
 /**
  * Return every catalog model for a single provider (for the model-allowlist
  * dialog). Reads from the cached catalog snapshot — no extra server spawn when
@@ -349,6 +354,9 @@ export async function getOpencodeProviderModels(
     if (!provider) return []
     // Same zen-gated free derivation as discoverOpencodeModels — see its comment.
     const providerIsFreeGateway = FREE_OPENCODE_VENDOR_IDS.has(providerId)
+    // A provider-level endpoint wins over each model's (ADR-074 slice 10).
+    const baseURL = provider.options?.baseURL
+    const providerUrl = typeof baseURL === 'string' && baseURL ? baseURL : undefined
     return Object.entries(provider.models ?? {})
       .map(([modelId, m]): OpencodeCatalogModel => {
         const rec = m as Provider['models'][string] & { release_date?: string }
@@ -360,7 +368,14 @@ export async function getOpencodeProviderModels(
           releaseDate: rec.release_date,
           toolCalling: !!rec.capabilities?.toolcall,
           reasoning: !!rec.capabilities?.reasoning,
-          ...(isFree ? { free: true } : {})
+          ...(isFree ? { free: true } : {}),
+          // A second key's declared copy of the model reads these (ADR-074
+          // slice 10); a zero limit is opencode's "unknown", not a limit.
+          ...(positive(rec.limit?.context) ? { contextWindow: rec.limit!.context } : {}),
+          ...(positive(rec.limit?.output) ? { maxTokens: rec.limit!.output } : {}),
+          ...(rec.capabilities?.input ? { vision: rec.capabilities.input.image === true } : {}),
+          ...((providerUrl ?? rec.api?.url) ? { apiUrl: providerUrl ?? rec.api.url } : {}),
+          ...(rec.api?.npm ? { apiNpm: rec.api.npm } : {})
         }
       })
       .sort((a, b) => {

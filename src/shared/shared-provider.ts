@@ -99,7 +99,47 @@ export interface SharedProviderDefinition {
    * they agree — so an existing install needs no migration write.
    */
   curation?: SharedProviderCuration
+  /**
+   * A `custom` definition made as a SECOND key for a catalog provider (ADR-074
+   * slice 10): the catalog vendor id it was cloned from (`openrouter` for
+   * "OpenRouter (Work)"). Its models are declared copies of that vendor's
+   * catalog entries, so the sheet can offer to refresh them, and the list sorts
+   * it right after its origin. Absent on every other definition.
+   */
+  derivedFrom?: string
+  /**
+   * When a second key's models were last copied from the catalog, as the
+   * calendar date `YYYY-MM-DD` (set on creation and on every refresh). Only with
+   * `derivedFrom`.
+   */
+  copiedAt?: string
+  /**
+   * The provider is switched OFF (ADR-074 slice 10): delivered to no engine —
+   * no projection, no key in any engine's store — while its key stays in the
+   * vault and its routes, list and defaults stay exactly as they are, so
+   * switching it back on restores them. Absent means on. Never on a
+   * subscription, whose engines have their own switches.
+   */
+  disabled?: boolean
   managed: true
+}
+
+/**
+ * The definition as the ENGINES see it: while it is switched off, every route is
+ * off. What delivery, the collision guard and the read model act on; the stored
+ * definition keeps the routes, so switching back on restores them.
+ */
+export function deliveredDefinition(
+  definition: SharedProviderDefinition
+): SharedProviderDefinition {
+  if (!definition.disabled) return definition
+  return {
+    ...definition,
+    routes: {
+      pi: { ...definition.routes.pi, enabled: false },
+      opencode: { ...definition.routes.opencode, enabled: false }
+    }
+  }
 }
 
 /**

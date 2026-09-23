@@ -858,6 +858,64 @@ describe('ordering', () => {
       'OpenRouter'
     ])
   })
+
+  it('puts a second key’s entry right after its origin, shared or native (ADR-074 slice 10)', () => {
+    const work: SharedProviderDefinition = {
+      ...localCustom,
+      id: 'openrouter-work',
+      // A name that would otherwise sort it far from its origin.
+      name: 'Work OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      derivedFrom: 'openrouter'
+    }
+    const personal: SharedProviderDefinition = {
+      ...work,
+      id: 'openrouter-personal',
+      name: 'Personal OpenRouter'
+    }
+    const groqTeam: SharedProviderDefinition = {
+      ...work,
+      id: 'groq-team',
+      name: 'Aardvark',
+      derivedFrom: 'groq'
+    }
+    const orphan: SharedProviderDefinition = {
+      ...work,
+      id: 'x-y',
+      name: 'Orphan',
+      derivedFrom: 'x'
+    }
+    const openrouter: SharedProviderDefinition = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      kind: 'catalog',
+      models: [],
+      managed: true,
+      routes: { pi: { enabled: true }, opencode: { enabled: true } }
+    }
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [work, localCustom, openrouter, personal, groqTeam, orphan],
+        piVendors: { groq: { authState: 'authenticated', billingType: 'apiKey' } }
+      })
+    )
+    expect(snapshot.entries.map((entry) => entry.id)).toEqual([
+      'anthropic',
+      'ollama-local',
+      'openrouter',
+      // Its clones, in their own name order.
+      'openrouter-personal',
+      'openrouter-work',
+      // No row for `x`: stays where its name put it.
+      'x-y',
+      // A native origin works the same.
+      'pi:groq',
+      'groq-team'
+    ])
+    expect(snapshot.entries.find((entry) => entry.id === 'openrouter-work')?.derivedFrom).toBe(
+      'openrouter'
+    )
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1190,6 +1248,34 @@ describe('catalog definitions and key sharing (ADR-074 §6–7)', () => {
     )
     expect(byId(snapshot, 'opencode:openrouter').adoptable).toBeUndefined()
     expect(byId(snapshot, 'opencode:github-copilot').adoptable).toBeUndefined()
+  })
+
+  it('a provider switched off reaches no engine, owns no native row, and says so (slice 10)', () => {
+    const off: SharedProviderDefinition = { ...openrouter, disabled: true }
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [off],
+        statuses: [catalogStatus(true)],
+        // The engines' own entries for the vendor are the user's again.
+        opencodeCatalog: [catalogEntry({ id: 'openrouter', name: 'OpenRouter' })],
+        opencodeCredentialKinds: { openrouter: 'api' },
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: PI_API
+      })
+    )
+    const row = byId(snapshot, 'openrouter')
+    expect(row.disabled).toBe(true)
+    expect(row.credential).toBe('api-key')
+    // Off everywhere; its routes kept, and each engine's own key flagged — both
+    // would come back, and replace those keys, when it is switched on.
+    expect(row.engines).toEqual({
+      pi: { enabled: false, routeOn: true, ownCredential: true },
+      opencode: { enabled: false, routeOn: true, ownCredential: true }
+    })
+    expect(row.piBuiltinId).toBeUndefined()
+    expect(snapshot.entries.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(['opencode:openrouter', 'pi:openrouter'])
+    )
   })
 
   it('subtitles native rows by kind', () => {

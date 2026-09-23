@@ -6,6 +6,7 @@ import { logger } from '../services/logger'
 import { setProviderModelAllowlist } from '../services/provider-model-allowlist'
 import { curationForEngine } from '../../shared/provider-curation'
 import {
+  deliveredDefinition,
   validateSharedProviderId,
   type ConfigurableHarnessId,
   type SharedProviderCuration,
@@ -104,7 +105,8 @@ export class SharedProviderService {
   }
 
   async getStatus(id: string): Promise<SharedProviderStatus> {
-    const definition = this.requireDefinition(id)
+    // A provider switched off reaches no engine: its routes report off.
+    const definition = deliveredDefinition(this.requireDefinition(id))
     const models = await this.listProviderModels(id)
     const [credential, piCredential, opencodeCredential] = await Promise.all([
       this.deps.vault.loadCredential(id),
@@ -138,9 +140,12 @@ export class SharedProviderService {
     return Promise.all(this.listDefinitions().map(({ id }) => this.getStatus(id)))
   }
 
-  async saveDefinition(definition: SharedProviderDefinition): Promise<void> {
+  async saveDefinition(incoming: SharedProviderDefinition): Promise<void> {
     await this.enqueue(async () => {
-      const previous = this.repository.get(definition.id)
+      const previous = this.repository.get(incoming.id)
+      // On/off moves through `setDisabled` only: a save — an endpoint edit, a
+      // refresh — keeps whatever the stored definition says.
+      const definition = withDisabled(incoming, previous?.disabled === true)
       this.assertNoNativeIdCollision(definition)
       if (definition.id === 'chatgpt') {
         this.repository.save(definition)
@@ -171,10 +176,22 @@ export class SharedProviderService {
           `Provider id "${definition.routes.pi.providerId ?? definition.id}" collides with a built-in pi vendor; choose a different provider id`
         )
       }
+      // What reaches the engines: nothing, while the provider is switched off.
+      const live = deliveredDefinition(definition)
+      const livePrevious = previous && deliveredDefinition(previous)
+      // A second key's id (slice 10) lands in both engines as a provider of its
+      // own: one either engine already knows would be merged with it, or shadow it.
+      if (!previous && definition.derivedFrom && this.deps.nativeKeys) {
+        const catalogs = await this.deps.nativeKeys.loadCatalogs()
+        if (catalogs.opencode.has(definition.id) || catalogs.pi.has(definition.id))
+          throw new Error(
+            `"${definition.id}" is a provider the engines already know. Choose another name.`
+          )
+      }
       const applied: Route[] = []
       try {
         for (const route of routes) {
-          this.applyRoute(definition, previous, route)
+          this.applyRoute(live, livePrevious, route)
           applied.push(route)
           this.clearError(definition.id, route)
         }
@@ -184,11 +201,11 @@ export class SharedProviderService {
         const failedRoute = routes[applied.length]
         if (failedRoute) this.recordError(definition.id, failedRoute, error)
         else for (const route of applied) this.recordError(definition.id, route, error)
-        this.rollbackDefinition(definition, previous, applied)
+        this.rollbackDefinition(live, livePrevious, applied)
         throw error
       }
-      await this.reconcileCustomCredentials(definition, previous)
-      for (const route of routes) this.applyDefault(definition, route, previous ?? definition)
+      await this.reconcileCustomCredentials(live, livePrevious)
+      for (const route of routes) this.applyDefault(live, route, livePrevious ?? live)
     })
   }
 
@@ -198,13 +215,16 @@ export class SharedProviderService {
       if (id === 'chatgpt') throw new Error('ChatGPT cannot be removed')
       this.deps.pi.removeDefinition(definition)
       this.deps.opencode.removeDefinitionRoute(definition)
+      // Switched off, a catalog provider already took its key back from every
+      // engine: what an engine holds for the vendor now is not ours to delete —
+      // unless it IS ours, stranded by an interrupted switch-off.
+      const live = deliveredDefinition(definition)
+      await this.reclaimStrandedKeys(definition)
       await Promise.all([
-        ...this.credentialRoutes(definition).map((route) =>
-          this.removeRouteCredential(definition, route)
-        ),
+        ...this.credentialRoutes(live).map((route) => this.removeRouteCredential(live, route)),
         this.deps.vault.removeCredential(id)
       ])
-      for (const route of routes) this.clearOwnedDefault(definition, route)
+      for (const route of routes) this.clearOwnedDefault(live, route)
       this.repository.remove(id)
       this.routeErrors.delete(id)
     })
@@ -215,6 +235,12 @@ export class SharedProviderService {
       const previous = this.requireDefinition(id)
       if (previous.routes[route].enabled === enabled) return
       const definition = withRoute(previous, route, { enabled })
+      // Switched off, the route is only recorded: turning the provider back on
+      // delivers it (and checks it for a collision then).
+      if (previous.disabled) {
+        this.repository.save(definition)
+        return
+      }
       if (enabled) this.assertNoNativeIdCollision(definition, route)
       if (!enabled) {
         this.repository.save(definition) // CredentialSync must observe disabled before native removal.
@@ -278,6 +304,61 @@ export class SharedProviderService {
   }
 
   /**
+   * Switch a key or endpoint provider off or on (ADR-074 slice 10).
+   *
+   * Off takes it out of every engine — the projection and the key, from each
+   * engine whose route is on, by the same ownership rules as turning that route
+   * off — and records `disabled`; the key stays in the vault, and the routes,
+   * the model list and the route defaults stay in the definition untouched. On
+   * clears the flag and re-delivers exactly that, after the collision guard has
+   * checked it against the providers that stayed on meanwhile.
+   *
+   * While a catalog provider was off, an engine may have been given a key of its
+   * own for the vendor: switching on would replace it, so that is refused unless
+   * `replaceOwn` says the user confirmed it (the keys are compared here, never
+   * sent anywhere).
+   */
+  async setDisabled(id: string, disabled: boolean, replaceOwn = false): Promise<void> {
+    await this.enqueue(async () => {
+      const previous = this.requireDefinition(id)
+      if (previous.kind === 'subscription')
+        throw new Error('A subscription is switched off per engine, not as a whole')
+      if ((previous.disabled === true) === disabled) return
+      const definition = withDisabled(previous, disabled)
+      if (!disabled) {
+        this.assertNoNativeIdCollision(definition)
+        const own = replaceOwn ? [] : await this.ownCredentialRoutes(definition)
+        if (own.length)
+          throw new Error(
+            `${own.join(' and ')} ${own.length > 1 ? 'have their own keys' : 'has its own key'} for ${
+              definition.name
+            }; switching it on replaces ${own.length > 1 ? 'them' : 'it'} with the stored one.`
+          )
+        this.repository.save(definition)
+        await this.syncDefinition(definition)
+        // A linked list reaches the engines with their routes (ADR-074 §3).
+        if (definition.curation?.linked) this.projectCuration(definition)
+        return
+      }
+      this.repository.save(definition) // Recorded first, as a route switched off is.
+      const failures: unknown[] = []
+      for (const route of routes) {
+        if (!previous.routes[route].enabled) continue
+        try {
+          await this.removeRoute(previous, route)
+          this.clearError(id, route)
+          this.clearOwnedDefault(previous, route)
+        } catch (error) {
+          this.recordError(id, route, error)
+          failures.push(error)
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(failures, `Failed to switch off shared provider ${id}`)
+    })
+  }
+
+  /**
    * Persist the provider-level model list and, while it is LINKED, project it
    * into every enabled engine's allowlist under that engine's ids (ADR-074 §3) —
    * through the same writer `models:set-provider-allowlist` uses. Unlinking only
@@ -294,7 +375,8 @@ export class SharedProviderService {
         : { linked: false }
       const definition = { ...previous, curation: record }
       this.repository.save(definition)
-      if (record.linked) this.projectCuration(definition)
+      // Switched off, no engine takes the list now; switching on projects it.
+      if (record.linked) this.projectCuration(deliveredDefinition(definition))
     })
   }
 
@@ -305,7 +387,9 @@ export class SharedProviderService {
         throw new Error('API keys are only supported for custom and catalog providers')
       if (!key) throw new Error('API key is required')
       await this.deps.vault.saveCredential(id, { type: 'api_key', key })
-      await this.reconcileCustomCredentials(definition, definition)
+      // Switched off, the key is only stored: switching on delivers it.
+      const live = deliveredDefinition(definition)
+      await this.reconcileCustomCredentials(live, live)
     })
   }
 
@@ -340,7 +424,7 @@ export class SharedProviderService {
         }
         return
       }
-      const owned = new Set(this.credentialRoutes(definition))
+      const owned = new Set(this.credentialRoutes(deliveredDefinition(definition)))
       const results = await Promise.allSettled([
         this.deps.vault.removeCredential(id),
         owned.has('pi') ? this.deps.pi.removeCredential(definition) : Promise.resolve(),
@@ -385,7 +469,12 @@ export class SharedProviderService {
       const definition = withRoute(previous, route, { defaultModel: modelId })
       this.repository.save(definition)
       if (modelId) this.clearOtherRouteDefaults(id, route)
-      this.applyDefault({ ...definition, models }, route, { ...previous, models })
+      // Recorded either way; an engine's default names it only while it is on.
+      this.applyDefault(
+        deliveredDefinition({ ...definition, models }),
+        route,
+        deliveredDefinition({ ...previous, models })
+      )
     })
   }
 
@@ -412,13 +501,22 @@ export class SharedProviderService {
       }
       return
     }
+    // Switched off, every route is off for delivery: a sync keeps it out of the
+    // engines, as it does a single route that is off.
+    const live = deliveredDefinition(definition)
     const failures: unknown[] = []
     for (const route of routes) {
       let failed = false
       try {
-        this.applyRoute(definition, definition, route)
-        if (definition.routes[route].enabled) await this.vendRouteCredential(definition, route)
-        else if (definition.kind !== 'catalog') await this.removeRouteCredential(definition, route)
+        this.applyRoute(live, live, route)
+        if (live.routes[route].enabled) await this.vendRouteCredential(live, route)
+        else if (live.kind !== 'catalog') {
+          // A provider switched off is synced at every boot, and removing from
+          // opencode starts its server: remove only a credential that is there.
+          if (!definition.disabled || (await this.routeHasCredential(live, route)))
+            await this.removeRouteCredential(live, route)
+        } else if (definition.disabled && definition.routes[route].enabled)
+          await this.reclaimStrandedKey(definition, route)
       } catch (error) {
         failed = true
         this.recordError(definition.id, route, error)
@@ -426,11 +524,9 @@ export class SharedProviderService {
       }
       try {
         this.applyDefault(
-          definition,
+          live,
           route,
-          definition.routes[route].enabled
-            ? definition
-            : withRoute(definition, route, { enabled: true })
+          live.routes[route].enabled ? live : withRoute(live, route, { enabled: true })
         )
       } catch (error) {
         failed = true
@@ -646,6 +742,64 @@ export class SharedProviderService {
       : routes
   }
 
+  private routeHasCredential(definition: SharedProviderDefinition, route: Route): Promise<boolean> {
+    return route === 'pi'
+      ? this.deps.pi.hasCredential(definition)
+      : this.deps.opencode.hasCredential(definition)
+  }
+
+  /**
+   * The engine's plain API key for this route's vendor is the one in the vault —
+   * compared here, in the main process. False when either is missing or no
+   * reader is wired.
+   */
+  private async holdsVaultKey(
+    definition: SharedProviderDefinition,
+    route: Route
+  ): Promise<boolean> {
+    const reader = this.deps.nativeKeys?.[route]
+    if (!reader) return false
+    const stored = await this.deps.vault.loadCredential(definition.id)
+    if (stored?.type !== 'api_key') return false
+    return reader.readApiKey(routeNativeId(definition, route)) === stored.key
+  }
+
+  /**
+   * A catalog provider that is OFF, on a route that is on in its settings: the
+   * engine still holding the VAULT key means a switch-off was interrupted before
+   * it took the key back. Take it now. Any other key there is the user's own.
+   */
+  private async reclaimStrandedKey(
+    definition: SharedProviderDefinition,
+    route: Route
+  ): Promise<void> {
+    if (await this.holdsVaultKey(definition, route))
+      await this.removeRouteCredential(definition, route)
+  }
+
+  private async reclaimStrandedKeys(definition: SharedProviderDefinition): Promise<void> {
+    if (!definition.disabled || definition.kind !== 'catalog') return
+    for (const route of routes)
+      if (definition.routes[route].enabled) await this.reclaimStrandedKey(definition, route)
+  }
+
+  /**
+   * The engines, among a catalog provider's routes that are on in its settings,
+   * that hold a credential for the vendor OTHER than the vault key — a key the
+   * user gave them while the provider was off, or a sign-in. Switching the
+   * provider on would replace it.
+   */
+  private async ownCredentialRoutes(definition: SharedProviderDefinition): Promise<Route[]> {
+    if (definition.kind !== 'catalog') return []
+    const own: Route[] = []
+    for (const route of routes) {
+      if (!definition.routes[route].enabled) continue
+      if (!(await this.routeHasCredential(definition, route))) continue
+      if (!(await this.holdsVaultKey(definition, route))) own.push(route)
+    }
+    return own
+  }
+
   /**
    * Refuse a definition whose ENABLED route lands on a native id another
    * definition's enabled route already delivers to, on the same engine
@@ -654,15 +808,18 @@ export class SharedProviderService {
    * removing either would delete the other's credential.
    */
   private assertNoNativeIdCollision(definition: SharedProviderDefinition, only?: Route): void {
+    // A provider switched off delivers nothing, so it neither collides nor is
+    // collided with: a catalog `openai` that is off must not block ChatGPT.
+    const live = deliveredDefinition(definition)
     for (const route of only ? [only] : routes) {
-      if (!definition.routes[route].enabled) continue
+      if (!live.routes[route].enabled) continue
       const nativeId = routeNativeId(definition, route)
       const other = this.repository
         .list()
         .find(
           (candidate) =>
             candidate.id !== definition.id &&
-            candidate.routes[route].enabled &&
+            deliveredDefinition(candidate).routes[route].enabled &&
             routeNativeId(candidate, route) === nativeId
         )
       if (other) {
@@ -913,6 +1070,14 @@ function isProviderId(id: string): boolean {
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+/** `definition` switched off (`disabled: true`) or on (no `disabled` key at all). */
+function withDisabled(
+  definition: SharedProviderDefinition,
+  disabled: boolean
+): SharedProviderDefinition {
+  const { disabled: _, ...rest } = definition
+  return disabled ? { ...rest, disabled: true } : rest
 }
 function withRoute(
   definition: SharedProviderDefinition,

@@ -525,16 +525,16 @@ export const PAGES: SettingsPage[] = [
         // own settings.json (no tag) and apply to the next SESSION — its default
         // model is `engines/claude.json`, named on that row's key line rather
         // than the card, which would mislabel the effort table; opencode's
-        // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
-        // pi's settings.json, read at session start.
+        // are its own jsonc, read when the per-cwd SERVER restarts; pi's
+        // default model and model list are ClaudeUI's `engines/pi.json` (the
+        // rows' key lines say so), read at session start — not pi's own
+        // settings.json.
         storage: (engine) =>
           engine === 'opencode'
             ? 'opencode.jsonc'
-            : engine === 'pi'
-              ? 'settings.json'
-              : engine === 'codex'
-                ? engineFile('codex')
-                : undefined,
+            : engine === 'pi' || engine === 'codex'
+              ? engineFile(engine)
+              : undefined,
         appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
         note: (engine) => DEFAULT_MODEL_NOTES[engine],
         // The engine-neutral "New sessions start on" row (slice 9) heads every

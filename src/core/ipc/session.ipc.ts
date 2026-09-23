@@ -57,6 +57,7 @@ import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
+import { deliveredDefinition } from '../../shared/shared-provider'
 import {
   accountState,
   hostIsPackaged,
@@ -1936,7 +1937,8 @@ function decorateSharedProviderClaims(
     claims = new Map(
       sharedProviderService
         .listDefinitions()
-        .filter((definition) => definition.routes.opencode.enabled)
+        // Switched off, a provider feeds nothing (ADR-074 slice 10).
+        .filter((definition) => deliveredDefinition(definition).routes.opencode.enabled)
         .map((definition) => [
           opencodeProviderId(definition),
           { id: definition.id, name: definition.name }

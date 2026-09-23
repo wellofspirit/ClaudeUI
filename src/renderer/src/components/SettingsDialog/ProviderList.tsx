@@ -6,7 +6,8 @@
  * Claude account, opencode's catalog + auth.json, pi's auth.json + models.json.
  * The rows come from `provider-registry:list` (phase 6a) and this component
  * renders them and nothing else — it derives no state beyond the rows it is
- * given, and every edit happens in the Manage sheet.
+ * given, and every edit happens in the Manage sheet — except a shared API
+ * provider's on/off switch (ADR-074 slice 10), which sits on its row as well.
  *
  * IT RE-READS AFTER EVERY WRITE. The registry publishes no change event, so a
  * write is only visible once `listProviderRegistry()` is called again; that is
@@ -41,13 +42,18 @@
  * here rather than in the sheet so the sheet has no existence to subscribe with.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
-import { Button, SettingRow } from './settings-controls'
+import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { diagnosisText } from './provider-diagnosis'
-import { CredentialChip, ProviderSheet } from './ProviderSheet'
+import {
+  CredentialChip,
+  ProviderSheet,
+  ownKeysReplacedOnSwitchOn,
+  ownKeysReplacedText
+} from './ProviderSheet'
 import { EnginePill, Pill, factsCount } from './provider-pills'
 import { isConflictDismissed } from './key-conflicts'
 import { ProviderAddSheet } from './ProviderAddSheet'
@@ -107,6 +113,11 @@ export function ProviderList(): React.JSX.Element {
   const [openId, setOpenId] = useState<string | null>(null)
   /** Whether the Add sheet is open. */
   const [adding, setAdding] = useState(false)
+  /** The row whose on/off switch is being written, and the last such write's failure. */
+  const [switching, setSwitching] = useState<string | null>(null)
+  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null)
+  /** A row whose switch-on would replace an engine's own key, asking first. */
+  const [confirmOn, setConfirmOn] = useState<string | null>(null)
   const [, setRenderTick] = useState(0)
 
   /**
@@ -146,11 +157,11 @@ export function ProviderList(): React.JSX.Element {
   }, [])
 
   /**
-   * After a sheet write: re-read, and close the sheet if its provider is gone —
-   * unless the write was an ADOPT (`follow`): that folds `opencode:openrouter`
-   * into the definition `openrouter` (ADR-074 §6), and the sheet follows it
-   * there rather than closing on the user. Any other write that makes the row
-   * vanish — a removal — closes it.
+   * After a sheet write: re-read, and close the sheet if its provider is gone.
+   * A write that names a shared row to `follow` opens that row instead: an ADOPT
+   * folds `opencode:openrouter` into the definition `openrouter` (ADR-074 §6),
+   * and "+ Add another key" makes a new entry the sheet moves to (slice 10). Any
+   * other write that makes the row vanish — a removal — closes it.
    */
   const handleWrote = useCallback(
     async (follow?: string): Promise<void> => {
@@ -159,11 +170,12 @@ export function ProviderList(): React.JSX.Element {
       // the same snapshot.
       setRenderTick((n) => n + 1)
       const next = await reload()
-      if (!next || openId === null || next.entries.some((entry) => entry.id === openId)) return
+      if (!next || openId === null) return
       const successor = follow
         ? next.entries.find((entry) => entry.id === follow && entry.origin === 'shared')
         : undefined
-      setOpenId(successor ? successor.id : null)
+      if (successor) setOpenId(successor.id)
+      else if (!next.entries.some((entry) => entry.id === openId)) setOpenId(null)
     },
     [reload, openId]
   )
@@ -184,6 +196,27 @@ export function ProviderList(): React.JSX.Element {
     },
     [reload]
   )
+
+  /**
+   * A shared API provider's row switch (ADR-074 slice 10): off takes it out of
+   * every engine and keeps its key and settings; on restores them. The model
+   * picker changes either way, and a failure — including a switch back on that
+   * could not deliver — is said on the list, where the switch is.
+   */
+  const toggleProvider = async (entry: ProviderEntry, replaceOwn = false): Promise<void> => {
+    setSwitching(entry.id)
+    setSwitchError(null)
+    setConfirmOn(null)
+    try {
+      await window.api.setSharedProviderDisabled(entry.id, entry.disabled !== true, replaceOwn)
+    } catch (e) {
+      setSwitchError({ id: entry.id, message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      useSessionStore.getState().reloadModels()
+      await reload()
+      setSwitching(null)
+    }
+  }
 
   // Mounted from BOTH returns: the header action can fire before the first read
   // resolves, and a button that silently does nothing for a second is worse than
@@ -218,70 +251,146 @@ export function ProviderList(): React.JSX.Element {
           <span className="text-[12px] text-danger truncate">{error}</span>
         </SettingRow>
       )}
+      {switchError && (
+        <SettingRow
+          testid={`${LIST}.switchError`}
+          dataId={switchError.id}
+          label={`Could not switch ${
+            entries.find((entry) => entry.id === switchError.id)?.name ?? switchError.id
+          }`}
+        >
+          <span className="text-[12px] text-danger truncate">{switchError.message}</span>
+        </SettingRow>
+      )}
 
       {entries.map((entry) => (
-        <SettingRow
-          key={entry.id}
-          testid={`${LIST}.row`}
-          dataId={entry.id}
-          label={entry.name}
-          labelBadge={
-            <>
-              <CredentialChip
-                credential={entry.credential}
-                // A subscription with several accounts: the COUNT is what the row
-                // has to say, and "Connected" would hide that there are others.
-                label={
-                  (entry.accounts?.list.length ?? 0) > 1
-                    ? `${entry.accounts!.list.length} accounts`
-                    : undefined
-                }
-                testid={`${LIST}.credential`}
-              />
-              {entry.keyConflict &&
-                !isConflictDismissed(
-                  entry.id.slice(entry.id.indexOf(':') + 1),
-                  entry.keyConflict
-                ) && (
-                  <Pill tone="warn" testid={`${LIST}.keyConflict`} dataId={entry.id}>
-                    2 different keys
+        <Fragment key={entry.id}>
+          <SettingRow
+            testid={`${LIST}.row`}
+            dataId={entry.id}
+            label={entry.name}
+            // Switched off: kept, reaching no engine — its main column dimmed, and
+            // saying so; the switch and Manage stay live.
+            dimmed={entry.disabled === true}
+            dimControls={false}
+            labelBadge={
+              <>
+                {entry.disabled ? (
+                  <Pill testid={`${LIST}.off`} dataId={entry.id}>
+                    Off
+                  </Pill>
+                ) : (
+                  <CredentialChip
+                    credential={entry.credential}
+                    // A subscription with several accounts: the COUNT is what the row
+                    // has to say, and "Connected" would hide that there are others.
+                    label={
+                      (entry.accounts?.list.length ?? 0) > 1
+                        ? `${entry.accounts!.list.length} accounts`
+                        : undefined
+                    }
+                    testid={`${LIST}.credential`}
+                  />
+                )}
+                {entry.keyConflict &&
+                  !isConflictDismissed(
+                    entry.id.slice(entry.id.indexOf(':') + 1),
+                    entry.keyConflict
+                  ) && (
+                    <Pill tone="warn" testid={`${LIST}.keyConflict`} dataId={entry.id}>
+                      2 different keys
+                    </Pill>
+                  )}
+                {failedEngine(entry) && (
+                  <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failedEngine(entry)}>
+                    Not delivered to {failedEngine(entry)}
                   </Pill>
                 )}
-              {failedEngine(entry) && (
-                <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failedEngine(entry)}>
-                  Not delivered to {failedEngine(entry)}
-                </Pill>
-              )}
-            </>
-          }
-          description={describe(entry)}
-        >
-          {ENGINE_ORDER.filter(
-            (engine) =>
-              entry.engines[engine] !== undefined &&
-              // The degraded case: with no opencode binary there is no opencode
-              // picker for anything to reach, whatever the route says.
-              (engine !== 'opencode' || opencodeInstalled)
-          ).map((engine) => (
-            // The same pill the Subscriptions Engines row wears, counting from
-            // the registry's facts — no catalog read per row.
-            <EnginePill
-              key={engine}
-              engine={engine}
-              on={entry.engines[engine]!.enabled}
-              count={factsCount(entry.engines[engine])}
-              testid={`${LIST}.engine`}
-            />
-          ))}
-          <Button
-            variant="link"
-            testid={`${LIST}.manage`}
-            dataId={entry.id}
-            onClick={() => setOpenId(entry.id)}
+              </>
+            }
+            description={describe(entry)}
           >
-            Manage
-          </Button>
-        </SettingRow>
+            {ENGINE_ORDER.filter(
+              (engine) =>
+                entry.engines[engine] !== undefined &&
+                // The degraded case: with no opencode binary there is no opencode
+                // picker for anything to reach, whatever the route says.
+                (engine !== 'opencode' || opencodeInstalled)
+            ).map((engine) => (
+              // The same pill the Subscriptions Engines row wears, counting from
+              // the registry's facts — no catalog read per row.
+              <EnginePill
+                key={engine}
+                engine={engine}
+                on={entry.engines[engine]!.enabled}
+                count={factsCount(entry.engines[engine])}
+                testid={`${LIST}.engine`}
+              />
+            ))}
+            {/* A key or endpoint provider can be switched off whole; a native row
+              is the engine's own entry, and has the sheet's per-engine controls. */}
+            {entry.origin === 'shared' && (
+              <button
+                type="button"
+                role="switch"
+                data-testid={`${LIST}.onOff`}
+                data-id={entry.id}
+                aria-checked={!entry.disabled}
+                aria-label={entry.name}
+                title={entry.disabled ? 'Turn on' : 'Turn off'}
+                disabled={switching !== null}
+                onClick={() =>
+                  ownKeysReplacedOnSwitchOn(entry).length > 0
+                    ? setConfirmOn(entry.id)
+                    : void toggleProvider(entry)
+                }
+                className="cursor-default disabled:opacity-40"
+              >
+                <ToggleSwitch checked={!entry.disabled} />
+              </button>
+            )}
+            <Button
+              variant="link"
+              testid={`${LIST}.manage`}
+              dataId={entry.id}
+              onClick={() => setOpenId(entry.id)}
+            >
+              Manage
+            </Button>
+          </SettingRow>
+          {/* Switching on would replace a key an engine holds of its own: asked
+            in place, under the row, before anything is written. */}
+          {confirmOn === entry.id && (
+            <SettingRow
+              testid={`${LIST}.switchOnConfirm`}
+              dataId={entry.id}
+              indent
+              description={
+                <span className="text-warning">
+                  {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
+                </span>
+              }
+            >
+              <Button
+                variant="primary"
+                testid={`${LIST}.switchOnReplace`}
+                dataId={entry.id}
+                disabled={switching !== null}
+                onClick={() => void toggleProvider(entry, true)}
+              >
+                Replace it
+              </Button>
+              <Button
+                variant="link"
+                testid={`${LIST}.switchOnCancel`}
+                dataId={entry.id}
+                onClick={() => setConfirmOn(null)}
+              >
+                Cancel
+              </Button>
+            </SettingRow>
+          )}
+        </Fragment>
       ))}
 
       {!opencodeInstalled && (

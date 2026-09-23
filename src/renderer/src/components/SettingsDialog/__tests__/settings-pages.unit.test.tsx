@@ -325,7 +325,8 @@ describe('PAGES structure', () => {
     // whose effort defaults are ClaudeUI's own settings.
     const defaults = pageOf('models').groups.find((g) => g.id === 'defaults')!
     expect(storageOf(defaults, 'opencode')).toBe('opencode.jsonc')
-    expect(storageOf(defaults, 'pi')).toBe('settings.json')
+    // pi's default model and model list are ClaudeUI's, not pi's settings.json.
+    expect(storageOf(defaults, 'pi')).toBe('engines/pi.json')
     expect(storageOf(defaults, 'claude')).toBeUndefined()
   })
 })

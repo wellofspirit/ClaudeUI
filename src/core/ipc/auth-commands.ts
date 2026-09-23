@@ -497,6 +497,19 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       )
     },
     {
+      // ADR-074 slice 10 — a key or endpoint provider switched off (delivered to
+      // no engine, everything else kept) or back on. `replaceOwn` is the user's
+      // confirmation that switching on may replace a key an engine holds of its
+      // own; the keys are compared host-side.
+      channel: 'shared-provider:set-disabled',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, disabled: boolean, replaceOwn?: boolean | null) => {
+        if (typeof disabled !== 'boolean') throw new Error('Invalid on/off state')
+        await sharedProviderService.setDisabled(id, disabled, replaceOwn === true)
+      })
+    },
+    {
       channel: 'shared-provider:sync',
       capability: 'config',
       kind: 'command',

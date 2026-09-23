@@ -564,6 +564,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'shared-provider:set-curation',
     args: ['openrouter', { linked: true, models: ['a/b'] }]
   },
+  {
+    method: 'setSharedProviderDisabled',
+    channel: 'shared-provider:set-disabled',
+    args: ['openrouter-work', false, true]
+  },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
   {

@@ -492,7 +492,31 @@ export interface OpencodeProviderSettings {
   baseURL?: string
   /** Native provider adapter package (provider.npm). */
   npm?: string
-  models?: { id: string; name?: string }[]
+  models?: OpencodeProviderModelSettings[]
+}
+
+/**
+ * One declared model in opencode's config (`provider.<id>.models.<id>`), as
+ * ClaudeUI reads and writes it. Beyond the name, the fields a declared model
+ * needs for opencode to know what it can do (ADR-074 slice 10): `reasoning`,
+ * `attachment`, `tool_call`, `modalities.input` and `limit` — opencode reads a
+ * config-only model's missing capability as false and its missing limit as 0.
+ *
+ * Each capability field is a LEAF the writer sets only when given and changed:
+ * a caller that does not model it (the opencode provider pane) leaves it as the
+ * file has it, so a hand edit survives an unrelated save.
+ */
+export interface OpencodeProviderModelSettings {
+  id: string
+  name?: string
+  reasoning?: boolean
+  attachment?: boolean
+  /** Native `tool_call`. */
+  toolCall?: boolean
+  /** Native `modalities.input`; `modalities.output` is never touched. */
+  inputModalities?: string[]
+  /** Native `limit.context` / `limit.output`; `limit.input` is never touched. */
+  limit?: { context: number; output: number }
 }
 
 /** Per-agent override injected via OPENCODE_CONFIG_CONTENT. */
@@ -730,6 +754,19 @@ export interface OpencodeCatalogModel {
   reasoning?: boolean
   /** Same zen-gated free derivation as ModelInfo.free — see its doc comment. */
   free?: boolean
+  /**
+   * What a declared COPY of this model needs (ADR-074 slice 10: a second key
+   * for a catalog provider declares its models as a custom endpoint): limits,
+   * image input, and the endpoint the catalog serves it from. Each absent when
+   * the catalog does not say.
+   */
+  contextWindow?: number
+  maxTokens?: number
+  vision?: boolean
+  /** The provider's own base URL when opencode's catalog sets one, else this model's. */
+  apiUrl?: string
+  /** The AI SDK package opencode speaks to this model with — which API it is. */
+  apiNpm?: string
 }
 
 export interface EngineConfig {
@@ -1569,6 +1606,12 @@ interface SharedProviderAPI {
   adoptSharedProviderNativeKey(id: string, keep?: ConfigurableHarnessId): Promise<void>
   /** One model list for every engine, or one each (ADR-074 §3); projected while linked. */
   setSharedProviderCuration(id: string, curation: SharedProviderCuration): Promise<void>
+  /**
+   * Switch a key or endpoint provider off (delivered to no engine; key, routes
+   * and model list kept) or back on (ADR-074 slice 10). Switching on refuses to
+   * replace a key an engine holds of its own unless `replaceOwn` confirms it.
+   */
+  setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
   syncSharedProvider(id: string): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(

@@ -64,6 +64,10 @@ export class SharedProviderRepository {
 
   save(provider: SharedProviderDefinition): void {
     validateDefinition(provider)
+    // A second key copies a catalog vendor, never another second key: the list
+    // places each right after its origin, one level deep.
+    if (provider.derivedFrom && this.get(provider.derivedFrom)?.derivedFrom)
+      throw new Error('Invalid shared provider origin: it is itself a second key')
     const normalized = provider.id === 'chatgpt' ? normalizeChatgpt(provider) : provider
     this.ensureDir()
     this.writeAtomic(sharedProviderPath(normalized.id), normalized)
@@ -173,6 +177,39 @@ function validateDefinition(provider: SharedProviderDefinition): void {
     (provider.protocol !== undefined || provider.baseUrl !== undefined || provider.models.length)
   )
     throw new Error('Catalog providers take no protocol, baseUrl or models')
+  // A second key for a catalog vendor is a custom endpoint that remembers which
+  // vendor it copies: a vendor id, never its own, and only on a custom one.
+  if (
+    provider.derivedFrom !== undefined &&
+    (provider.kind !== 'custom' ||
+      !isSharedId(provider.derivedFrom) ||
+      provider.derivedFrom === provider.id)
+  )
+    throw new Error('Invalid shared provider origin')
+  if (
+    provider.copiedAt !== undefined &&
+    (provider.derivedFrom === undefined ||
+      typeof provider.copiedAt !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(provider.copiedAt))
+  )
+    throw new Error('Invalid shared provider copy date')
+  // Off is a provider-level switch for keys and endpoints; a subscription's
+  // engines each have their own.
+  if (
+    provider.disabled !== undefined &&
+    (typeof provider.disabled !== 'boolean' || provider.kind === 'subscription')
+  )
+    throw new Error('Invalid shared provider on/off state')
+}
+
+function isSharedId(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    validateSharedProviderId(value)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** `{ linked: boolean, models?: string[] }`, the ids non-empty and unique — ADR-074 §3. */

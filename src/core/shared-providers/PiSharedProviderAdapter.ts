@@ -1,9 +1,10 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type {
-  SharedProviderDefinition,
-  SharedProviderModel,
-  SharedProviderRouteDiagnosis
+import {
+  deliveredDefinition,
+  type SharedProviderDefinition,
+  type SharedProviderModel,
+  type SharedProviderRouteDiagnosis
 } from '../../shared/shared-provider'
 import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
 import { piAgentDir } from '../services/pi-session-list'
@@ -339,7 +340,9 @@ export function nativeProviderId(definition: SharedProviderDefinition): string {
  * The membership test is {@link PiSharedProviderAdapter.applyDefinition}'s own
  * first three lines, in its order: ChatGPT is vended as a native credential and
  * never projected, a disabled pi route is removed rather than written, and a
- * non-custom provider writes no entry at all. Exported (rather than reproduced
+ * non-custom provider writes no entry at all. A provider switched off as a
+ * whole has every route disabled (`deliveredDefinition`), as the service
+ * applies it. Exported (rather than reproduced
  * by the caller) so the raw models.json editor's ownership guard — which must
  * refuse to hand-edit exactly these entries, since the next projection sync
  * would clobber the edit — cannot drift from what the writer actually owns.
@@ -352,7 +355,9 @@ export function managedPiProviderIds(definitions: readonly SharedProviderDefinit
   return [
     ...new Set(
       definitions.flatMap((definition) =>
-        definition.id !== 'chatgpt' && definition.kind === 'custom' && definition.routes.pi.enabled
+        definition.id !== 'chatgpt' &&
+        definition.kind === 'custom' &&
+        deliveredDefinition(definition).routes.pi.enabled
           ? [nativeProviderId(definition)]
           : []
       )

@@ -450,6 +450,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
     setSharedProviderCuration: (id, curation) =>
       unwrap('shared-provider:set-curation', id, curation),
+    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>

@@ -169,3 +169,84 @@ describe('SharedProviderRepository — curation record (ADR-074 §3)', () => {
     }
   })
 })
+
+describe('SharedProviderRepository — a second key’s origin (ADR-074 slice 10)', () => {
+  const clone = {
+    ...provider,
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    models: [{ id: 'moonshotai/kimi-k3', contextWindow: 262144 }],
+    derivedFrom: 'openrouter'
+  }
+
+  it('round-trips `derivedFrom` on a custom definition, with a slash in a model id', () => {
+    const repo = new SharedProviderRepository()
+    repo.save(clone)
+    expect(new SharedProviderRepository().get('openrouter-work')).toEqual(clone)
+  })
+
+  it('rejects it anywhere but a custom definition, and anything but a vendor id', () => {
+    const repo = new SharedProviderRepository()
+    const catalog = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      kind: 'catalog' as const,
+      models: [],
+      managed: true as const,
+      routes: { pi: { enabled: true }, opencode: { enabled: true } }
+    }
+    expect(() => repo.save({ ...catalog, derivedFrom: 'groq' })).toThrow(/origin/)
+    for (const derivedFrom of ['', 'Open Router', '../x', 'openrouter-work', 42]) {
+      expect(() => repo.save({ ...clone, derivedFrom: derivedFrom as never })).toThrow(/origin/)
+    }
+    // A hand-edited file with a bad origin is skipped like any other bad file.
+    repo.save(clone)
+    writeFileSync(
+      sharedProviderPath('openrouter-work'),
+      JSON.stringify({ ...clone, derivedFrom: 'Bad Id' })
+    )
+    expect(repo.get('openrouter-work')).toBeNull()
+  })
+})
+
+describe('SharedProviderRepository — switched off (ADR-074 slice 10)', () => {
+  it('round-trips `disabled` on a key or endpoint provider', () => {
+    const repo = new SharedProviderRepository()
+    repo.save({ ...provider, disabled: true })
+    expect(new SharedProviderRepository().get('local-api')?.disabled).toBe(true)
+  })
+
+  it('rejects a non-boolean, and any on a subscription', () => {
+    const repo = new SharedProviderRepository()
+    expect(() => repo.save({ ...provider, disabled: 'yes' as never })).toThrow(/on\/off/)
+    const chatgpt = repo.get('chatgpt')!
+    expect(() => repo.save({ ...chatgpt, disabled: true })).toThrow(/on\/off/)
+  })
+})
+
+describe('SharedProviderRepository — second keys, one level deep (slice 10 review)', () => {
+  const clone = {
+    ...provider,
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    derivedFrom: 'openrouter',
+    copiedAt: '2026-09-23'
+  }
+
+  it('keeps the copy date, and rejects a malformed one or one without an origin', () => {
+    const repo = new SharedProviderRepository()
+    repo.save(clone)
+    expect(repo.get('openrouter-work')?.copiedAt).toBe('2026-09-23')
+    expect(() => repo.save({ ...clone, copiedAt: '23 Sep' })).toThrow(/copy date/)
+    expect(() => repo.save({ ...provider, copiedAt: '2026-09-23' })).toThrow(/copy date/)
+  })
+
+  it('refuses a second key of a second key', () => {
+    const repo = new SharedProviderRepository()
+    repo.save(clone)
+    expect(() =>
+      repo.save({ ...clone, id: 'openrouter-work-eu', derivedFrom: 'openrouter-work' })
+    ).toThrow(/itself a second key/)
+  })
+})

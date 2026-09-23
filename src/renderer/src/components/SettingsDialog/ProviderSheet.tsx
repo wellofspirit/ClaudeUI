@@ -99,6 +99,8 @@ import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
 import { OpencodeProviderConfigModal } from './OpencodeProviders'
 import { PiProviderModal } from './PiCustomProviders'
+import { AddAnotherKeySheet, RefreshModelsSheet } from './ProviderCloneSheets'
+import { formatCopiedAt } from './provider-clone'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
@@ -213,6 +215,25 @@ export function nativeProviderId(entry: ProviderEntry): string {
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /**
+ * The engines whose OWN key for the vendor switching this provider back on
+ * would replace (ADR-074 slice 10): a route on in its settings, into an engine
+ * that holds a credential of its own. The switch asks first — here and on the
+ * list — and the service checks the keys themselves.
+ */
+export function ownKeysReplacedOnSwitchOn(entry: ProviderEntry): ('opencode' | 'pi')[] {
+  if (!entry.disabled) return []
+  return (['opencode', 'pi'] as const).filter(
+    (engine) => entry.engines[engine]?.routeOn && entry.engines[engine]?.ownCredential
+  )
+}
+
+/** "pi’s own key for OpenRouter will be replaced by the stored one." */
+export function ownKeysReplacedText(entry: ProviderEntry, engines: string[]): string {
+  const who = engines.map((engine) => `${engine}’s`).join(' and ')
+  return `${who} own key${engines.length > 1 ? 's' : ''} for ${entry.name} will be replaced by the stored one.`
+}
+
+/**
  * One ENABLED-FOR row.
  *
  * Built from `SettingRow` + a bare switch rather than `SettingsToggle`, because
@@ -277,9 +298,10 @@ export interface ProviderSheetProps {
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
    * snapshot, and closes the sheet itself when this entry is gone from it.
    *
-   * `follow` is set by an ADOPT only: the native row became the shared
-   * definition of that id, and the parent opens it rather than closing. No
-   * other write passes it — a removed provider must close, never re-open.
+   * `follow` names a shared row the parent opens next: an ADOPT (the native row
+   * became the shared definition of that id) and "+ Add another key" (the new
+   * entry). No other write passes it — a removed provider must close, never
+   * re-open.
    */
   onWrote: (follow?: string) => Promise<void>
 }
@@ -306,6 +328,14 @@ export function ProviderSheet({
     definition: SharedProviderDefinition | null
   }>({ resolved: false, definition: null })
   const definition = shared.definition
+  /**
+   * Every shared definition, from the same read: a second key's entry needs its
+   * origin's name, and "+ Add another key" needs every id already taken.
+   */
+  const [known, setKnown] = useState<SharedProviderDefinition[]>([])
+  /** The stacked "Another <name> key" form, or a second key's catalog refresh. */
+  const [cloneSheet, setCloneSheet] = useState<'add' | 'refresh' | null>(null)
+  const registry = useSessionStore((s) => s.providerRegistry)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** null = not editing; a string = the key being typed. Never pre-filled. */
@@ -388,8 +418,9 @@ export function ProviderSheet({
     window.api
       .listSharedProviders()
       .then((list) => {
-        if (!cancelled)
-          setShared({ resolved: true, definition: list.find((d) => d.id === entry.id) ?? null })
+        if (cancelled) return
+        setShared({ resolved: true, definition: list.find((d) => d.id === entry.id) ?? null })
+        setKnown(list)
       })
       .catch(() => {
         // A failed RE-read keeps what was read; only a first failure is "none".
@@ -457,6 +488,27 @@ export function ProviderSheet({
   const refreshAfterExternalWrite = useCallback((): void => {
     void run(async () => {})
   }, [run])
+
+  /**
+   * The provider's own on/off switch (ADR-074 slice 10). Re-reads whatever
+   * happened — a switch-on can fail AFTER the flag cleared (a delivery), and a
+   * stale "Off" would then misreport it.
+   */
+  const switchProvider = (replaceOwn: boolean): void => {
+    setBusy(true)
+    setError(null)
+    void (async () => {
+      try {
+        await window.api.setSharedProviderDisabled(entry.id, entry.disabled !== true, replaceOwn)
+      } catch (e) {
+        setError(message(e))
+      } finally {
+        useSessionStore.getState().reloadModels()
+        await onWrote()
+        setBusy(false)
+      }
+    })()
+  }
 
   /** Two-click confirm: arm on the first press, act on the second. */
   const confirmThen = (which: string, action: () => Promise<void>): void => {
@@ -753,7 +805,39 @@ export function ProviderSheet({
         </>
       )
     }
+    if (isShared && definition?.kind === 'catalog') {
+      return (
+        <>
+          {keyRow}
+          {anotherKeyRow(definition)}
+        </>
+      )
+    }
     return keyRow
+  }
+
+  /**
+   * A second key for this catalog provider, usable at the same time (ADR-074
+   * slice 10): it becomes its own entry, so it is offered here and made in a
+   * stacked form, which reads the original's model lists itself.
+   */
+  function anotherKeyRow(origin: SharedProviderDefinition): React.JSX.Element {
+    return (
+      <SettingRow
+        testid={`${SHEET}.anotherKey`}
+        label={`Another ${origin.name} key`}
+        description="Use a second key alongside this one — e.g. work and personal billing. It becomes its own entry."
+      >
+        <Button
+          variant="link"
+          testid={`${SHEET}.addAnotherKey`}
+          disabled={busy}
+          onClick={() => setCloneSheet('add')}
+        >
+          + Add another key
+        </Button>
+      </SettingRow>
+    )
   }
 
   // ── ENABLED FOR ────────────────────────────────────────────────────────────
@@ -855,12 +939,20 @@ export function ProviderSheet({
     // Turning a catalog route on while the engine holds its OWN credential for
     // the vendor replaces that credential — confirmed in place, as a conflict is.
     const confirmingEnable = confirming === `enable-${engine}`
+    /** The route's own setting — `on`, or what it returns to while the provider is off. */
+    const routeOn = on || facts?.routeOn === true
     // Enabled, keyed, no error — and still not in the engine's store: the file
     // was changed outside ClaudeUI. Retry re-delivers it.
     const undelivered =
       on && !facts?.error && entry.credential === 'api-key' && facts?.delivered === false
     let status: React.ReactNode
-    if (confirmingEnable) {
+    if (entry.disabled) {
+      // The provider as a whole is off; this route's own setting is kept, and
+      // can still be changed — it is only recorded until the provider is on.
+      status = facts?.routeOn
+        ? `Off while ${entry.name} is off — back on with it.`
+        : `Off, and stays off when ${entry.name} is switched on.`
+    } else if (confirmingEnable) {
       status = (
         <span className="text-warning">
           {label}’s own key for {entry.name} will be replaced by the stored one.
@@ -934,17 +1026,18 @@ export function ProviderSheet({
             type="button"
             data-testid={`${SHEET}.engineToggle`}
             data-id={engine}
-            aria-pressed={on}
-            aria-label={`${label}: ${on ? 'on' : 'off'}`}
+            aria-pressed={routeOn}
+            aria-label={`${label}: ${routeOn ? 'on' : 'off'}`}
             disabled={busy}
             onClick={() =>
-              !on && facts?.ownCredential
+              // Off as a whole, a route change only records: nothing to replace yet.
+              !routeOn && facts?.ownCredential && !entry.disabled
                 ? setConfirming(`enable-${engine}`)
-                : void run(() => window.api.setSharedProviderRoute(entry.id, engine, !on))
+                : void run(() => window.api.setSharedProviderRoute(entry.id, engine, !routeOn))
             }
             className="cursor-default disabled:opacity-40"
           >
-            <ToggleSwitch checked={on} />
+            <ToggleSwitch checked={routeOn} />
           </button>
         )}
       </SettingRow>
@@ -1187,6 +1280,8 @@ export function ProviderSheet({
   }
 
   const remove = removeAction()
+  /** What Remove deletes, said beside it while nothing failed. */
+  const removeNote = !error && isApiShared && remove !== null
   const removeTitle = isShared
     ? 'Built-in providers cannot be removed — disconnect it instead.'
     : 'This provider is not ClaudeUI’s to remove.'
@@ -1276,8 +1371,52 @@ export function ProviderSheet({
             Edit endpoint ›
           </Button>
         </SettingRow>
+        {definition.derivedFrom && (
+          <SettingRow
+            testid={`${SHEET}.cloneModels`}
+            label="Models"
+            description={`${definition.models.length} declared · copied from ${originName()}’s catalog${
+              formatCopiedAt(definition.copiedAt)
+                ? ` on ${formatCopiedAt(definition.copiedAt)}`
+                : ''
+            }`}
+          >
+            <Button
+              variant="link"
+              testid={`${SHEET}.refreshFromCatalog`}
+              disabled={busy}
+              onClick={() => setCloneSheet('refresh')}
+            >
+              Refresh from catalog ›
+            </Button>
+          </SettingRow>
+        )}
       </SheetGroup>
     )
+  }
+
+  /** A second key's origin, by name — its vendor id once the origin is gone. */
+  function originName(): string {
+    const from = definition?.derivedFrom
+    return known.find((d) => d.id === from)?.name ?? from ?? ''
+  }
+
+  /**
+   * Every id a second key must not take: each shared definition's, and each
+   * engine's own row's (it takes the id in both engines).
+   */
+  function takenIds(): Set<string> {
+    return new Set([
+      ...known.map((d) => d.id),
+      ...(registry?.entries ?? []).map((row) => nativeProviderId(row))
+    ])
+  }
+
+  /** Written from a stacked clone sheet: re-read, like `run` does for its own writes. */
+  const afterCloneWrite = async (follow?: string): Promise<void> => {
+    setCloneSheet(null)
+    useSessionStore.getState().reloadModels()
+    await onWrote(follow)
   }
 
   /** Save the edited definition, then its key if one was typed. */
@@ -1408,6 +1547,31 @@ export function ProviderSheet({
           <>
             <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
             <CredentialChip credential={entry.credential} testid={`${SHEET}.credentialChip`} />
+            {/* The whole provider on or off (ADR-074 slice 10) — an API
+                provider's; a subscription's engines have their own switches. */}
+            {isApiShared && (
+              <span className="ml-auto flex items-center gap-2">
+                <span className="text-[12px] text-text-secondary">
+                  {entry.disabled ? 'Off' : 'On'}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  data-testid={`${SHEET}.onOff`}
+                  aria-checked={!entry.disabled}
+                  aria-label={entry.name}
+                  disabled={busy}
+                  onClick={() =>
+                    ownKeysReplacedOnSwitchOn(entry).length > 0
+                      ? setConfirming('switch-on')
+                      : switchProvider(false)
+                  }
+                  className="cursor-default disabled:opacity-40"
+                >
+                  <ToggleSwitch checked={!entry.disabled} />
+                </button>
+              </span>
+            )}
           </>
         }
         onClose={onClose}
@@ -1441,16 +1605,20 @@ export function ProviderSheet({
                 a surface ends up reporting a stale failure next to a fresh row. */}
             <span
               data-testid={`${SHEET}.error`}
-              className="flex-1 min-w-0 truncate text-[12px] text-danger"
+              className={`${removeNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
             >
               {error}
             </span>
-            {!error && isApiShared && remove !== null && entry.credential === 'api-key' && (
+            {/* Wraps rather than truncating: a half-read warning about what
+                Remove deletes is worse than none. */}
+            {removeNote && (
               <span
                 data-testid={`${SHEET}.removeNote`}
-                className="min-w-0 truncate text-[12px] text-text-secondary"
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
               >
-                Removing deletes the key from ClaudeUI and from each engine it’s delivered to.
+                {entry.credential === 'api-key'
+                  ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+                  : 'Off keeps the settings; Remove deletes them.'}
               </span>
             )}
             <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>
@@ -1459,6 +1627,43 @@ export function ProviderSheet({
           </>
         }
       >
+        {entry.disabled && confirming === 'switch-on' ? (
+          <SettingRow
+            testid={`${SHEET}.switchOnConfirm`}
+            description={
+              <span className="text-warning">
+                {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
+              </span>
+            }
+          >
+            <Button
+              variant="primary"
+              testid={`${SHEET}.switchOnReplace`}
+              disabled={busy}
+              onClick={() => {
+                setConfirming(null)
+                switchProvider(true)
+              }}
+            >
+              Replace it
+            </Button>
+            <Button
+              variant="link"
+              testid={`${SHEET}.switchOnCancel`}
+              onClick={() => setConfirming(null)}
+            >
+              Cancel
+            </Button>
+          </SettingRow>
+        ) : (
+          entry.disabled && (
+            <SettingRow
+              testid={`${SHEET}.offNotice`}
+              description="Off — not delivered to any engine. Its key and settings are kept; turn it on to restore them."
+            />
+          )
+        )}
+
         {/* A subscription's credential IS its accounts, and they live on its
             Subscriptions card (ADR-074 §7) — the sheet is engines and models. */}
         {!entry.subscription && (
@@ -1612,6 +1817,25 @@ export function ProviderSheet({
             idLocked
           />
         </SheetFrame>
+      )}
+
+      {cloneSheet === 'add' && definition?.kind === 'catalog' && (
+        <AddAnotherKeySheet
+          origin={definition}
+          taken={takenIds()}
+          onClose={() => setCloneSheet(null)}
+          // The new entry is the next thing on screen (mockup `b90c7ea5`).
+          onAdded={(id) => afterCloneWrite(id)}
+        />
+      )}
+
+      {cloneSheet === 'refresh' && definition?.derivedFrom && (
+        <RefreshModelsSheet
+          definition={definition}
+          originName={originName()}
+          onClose={() => setCloneSheet(null)}
+          onSaved={() => afterCloneWrite()}
+        />
       )}
 
       {modelEditor === 'opencode' && (
