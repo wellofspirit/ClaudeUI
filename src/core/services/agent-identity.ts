@@ -41,20 +41,46 @@ export interface AgentIdentity {
   runCounts: Map<string, number>
 }
 
+/** Identity plus where each agent's last run stands — needs the terminal events too. */
+export interface AgentLifecycle extends AgentIdentity {
+  /**
+   * Agents whose latest run the transcript shows starting — an async spawn or
+   * a resume — and never ending. That is an agent that was still working when
+   * its process died: nothing will ever report it finished, and cli.js only
+   * reaps it if the session is resumed.
+   */
+  unfinished: Set<string>
+}
+
 export function emptyAgentIdentity(): AgentIdentity {
   return { origins: new Map(), runAliases: new Map(), runCounts: new Map() }
 }
 
 /** One `tool_result` as the transcript records it. */
 export interface TranscriptToolResult {
+  kind: 'result'
   toolUseId: string
   text: string
   /** The line's structured `toolUseResult`, when cli.js wrote one. */
   structured?: Record<string, unknown>
 }
 
+/** A `<task-notification>` the transcript records: one run of a task reached a terminal state. */
+export interface TranscriptTerminal {
+  kind: 'terminal'
+  taskId: string
+  /**
+   * The `<tool-use-id>` of the run it ends, when the XML carries one. The reap
+   * of an orphaned agent on `--resume` carries none — it ends whatever run is
+   * current.
+   */
+  runToolUseId?: string
+}
+
+export type TranscriptAgentEvent = TranscriptToolResult | TranscriptTerminal
+
 /**
- * Fold tool results, in transcript order, into agent identity.
+ * Fold a transcript's agent events, in order, into agent identity.
  *
  * A spawn is recognized by the structured `agentId` cli.js records on the
  * Agent/Task result, or failing that by the same `agentId:` text the live path
@@ -62,10 +88,26 @@ export interface TranscriptToolResult {
  * `resumedAgentId` — SendMessage's reply when it restarts a finished agent.
  * A SendMessage to a RUNNING agent answers "queued" with no `resumedAgentId`
  * and starts no run, which is also how the live counter sees it.
+ *
+ * A FOREGROUND spawn's result is the agent's final answer, so that run ends
+ * with its own result; only an async launch or a resume opens a run that a
+ * terminal event has to close. (Runs cli.js restarts on its own — a queued
+ * message, the agent's background Bash finishing — leave no tool result and
+ * are invisible here.)
  */
-export function foldAgentIdentity(results: Iterable<TranscriptToolResult>): AgentIdentity {
-  const identity = emptyAgentIdentity()
-  for (const { toolUseId, text, structured } of results) {
+export function foldAgentIdentity(events: Iterable<TranscriptAgentEvent>): AgentLifecycle {
+  const identity: AgentLifecycle = { ...emptyAgentIdentity(), unfinished: new Set() }
+  /** task id → the tool_use id of the run most recently started. */
+  const currentRun = new Map<string, string>()
+  for (const event of events) {
+    if (event.kind === 'terminal') {
+      // A notification for an EARLIER run (consumed by the parent after the
+      // next run began) must not close the current one.
+      if (event.runToolUseId && currentRun.get(event.taskId) !== event.runToolUseId) continue
+      identity.unfinished.delete(event.taskId)
+      continue
+    }
+    const { toolUseId, text, structured } = event
     const resumed = stringField(structured, 'resumedAgentId') ?? resumedAgentIdOf(text)
     if (resumed) {
       const origin = identity.origins.get(resumed)
@@ -75,6 +117,8 @@ export function foldAgentIdentity(results: Iterable<TranscriptToolResult>): Agen
       if (origin && toolUseId !== origin && !identity.runAliases.has(toolUseId)) {
         identity.runAliases.set(toolUseId, origin)
         identity.runCounts.set(origin, (identity.runCounts.get(origin) ?? 1) + 1)
+        currentRun.set(resumed, toolUseId)
+        identity.unfinished.add(resumed)
       }
       continue
     }
@@ -82,15 +126,27 @@ export function foldAgentIdentity(results: Iterable<TranscriptToolResult>): Agen
     if (agentId && !identity.origins.has(agentId)) {
       identity.origins.set(agentId, toolUseId)
       identity.runCounts.set(toolUseId, 1)
+      currentRun.set(agentId, toolUseId)
+      if (isAsyncLaunch(text, structured)) identity.unfinished.add(agentId)
     }
   }
   return identity
 }
 
+function isAsyncLaunch(text: string, structured: Record<string, unknown> | undefined): boolean {
+  return (
+    structured?.isAsync === true ||
+    structured?.status === 'async_launched' ||
+    text.startsWith('Async agent launched')
+  )
+}
+
 /**
- * Read a parent transcript's agent identity. Best-effort: a missing or
- * unreadable file yields an empty identity, never a throw — the session then
- * behaves exactly as it did before this seed existed.
+ * Read a parent transcript's agent identity — who spawned each agent and how
+ * many runs it has had. Terminal events are not read (the prefilter skips
+ * them), so this answers identity only, never whether a run finished.
+ * Best-effort: a missing or unreadable file yields an empty identity, never a
+ * throw — the session then behaves exactly as it did before this seed existed.
  */
 export function readAgentIdentity(transcriptPath: string): Promise<AgentIdentity> {
   return new Promise((resolve) => {
@@ -118,7 +174,10 @@ export function readAgentIdentity(transcriptPath: string): Promise<AgentIdentity
         // A torn or malformed line is skipped, as every other transcript reader does.
       }
     })
-    rl.on('close', () => resolve(foldAgentIdentity(results)))
+    rl.on('close', () => {
+      const { origins, runAliases, runCounts } = foldAgentIdentity(results)
+      resolve({ origins, runAliases, runCounts })
+    })
   })
 }
 
@@ -131,6 +190,7 @@ function collectToolResults(line: unknown, into: TranscriptToolResult[]): void {
     if (!isRecord(block) || block.type !== 'tool_result') continue
     if (typeof block.tool_use_id !== 'string' || !block.tool_use_id) continue
     into.push({
+      kind: 'result',
       toolUseId: block.tool_use_id,
       text: extractToolResultContent(block.content).text,
       structured

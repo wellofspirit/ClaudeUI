@@ -73,9 +73,9 @@ function writeTranscript(lines: string[]): string {
 describe('foldAgentIdentity', () => {
   it('maps an agent to the call that spawned it and counts each resume as a run', () => {
     const identity = foldAgentIdentity([
-      { toolUseId: ORIGIN, text: SPAWN_TEXT },
-      { toolUseId: RESUME_1, text: resumeText(AGENT) },
-      { toolUseId: RESUME_2, text: resumeText(AGENT) }
+      { kind: 'result', toolUseId: ORIGIN, text: SPAWN_TEXT },
+      { kind: 'result', toolUseId: RESUME_1, text: resumeText(AGENT) },
+      { kind: 'result', toolUseId: RESUME_2, text: resumeText(AGENT) }
     ])
     expect(identity.origins.get(AGENT)).toBe(ORIGIN)
     expect(identity.runAliases.get(RESUME_1)).toBe(ORIGIN)
@@ -86,8 +86,8 @@ describe('foldAgentIdentity', () => {
   it('does not count a message queued to a running agent as a run', () => {
     // cli.js starts no new run for it, and the live counter does not count it.
     const identity = foldAgentIdentity([
-      { toolUseId: ORIGIN, text: SPAWN_TEXT },
-      { toolUseId: RESUME_1, text: QUEUED_TEXT }
+      { kind: 'result', toolUseId: ORIGIN, text: SPAWN_TEXT },
+      { kind: 'result', toolUseId: RESUME_1, text: QUEUED_TEXT }
     ])
     expect(identity.runCounts.get(ORIGIN)).toBe(1)
     expect(identity.runAliases.size).toBe(0)
@@ -95,26 +95,74 @@ describe('foldAgentIdentity', () => {
 
   it('keeps the FIRST call that named an agent as its origin', () => {
     const identity = foldAgentIdentity([
-      { toolUseId: ORIGIN, text: SPAWN_TEXT },
-      { toolUseId: 'toolu_later_output_check', text: `agent_id: ${AGENT}` }
+      { kind: 'result', toolUseId: ORIGIN, text: SPAWN_TEXT },
+      { kind: 'result', toolUseId: 'toolu_later_output_check', text: `agent_id: ${AGENT}` }
     ])
     expect(identity.origins.get(AGENT)).toBe(ORIGIN)
   })
 
   it('prefers the structured result over the text', () => {
     const identity = foldAgentIdentity([
-      { toolUseId: ORIGIN, text: 'no id in this text', structured: { agentId: AGENT } },
-      { toolUseId: RESUME_1, text: '', structured: { resumedAgentId: AGENT } }
+      {
+        kind: 'result',
+        toolUseId: ORIGIN,
+        text: 'no id in this text',
+        structured: { agentId: AGENT }
+      },
+      { kind: 'result', toolUseId: RESUME_1, text: '', structured: { resumedAgentId: AGENT } }
     ])
     expect(identity.origins.get(AGENT)).toBe(ORIGIN)
     expect(identity.runCounts.get(ORIGIN)).toBe(2)
   })
 
   it('ignores a resume of an agent whose spawn the transcript does not hold', () => {
-    const identity = foldAgentIdentity([{ toolUseId: RESUME_1, text: resumeText(AGENT) }])
+    const identity = foldAgentIdentity([
+      { kind: 'result', toolUseId: RESUME_1, text: resumeText(AGENT) }
+    ])
     expect(identity.origins.size).toBe(0)
     expect(identity.runAliases.size).toBe(0)
     expect(identity.runCounts.size).toBe(0)
+  })
+})
+
+describe('foldAgentIdentity — runs the transcript never closes', () => {
+  const spawn = { kind: 'result', toolUseId: ORIGIN, text: SPAWN_TEXT } as const
+  const resume = { kind: 'result', toolUseId: RESUME_1, text: resumeText(AGENT) } as const
+  const ended = (runToolUseId?: string) =>
+    ({ kind: 'terminal', taskId: AGENT, runToolUseId }) as const
+
+  it('an async spawn with no terminal event is unfinished', () => {
+    expect(foldAgentIdentity([spawn]).unfinished).toEqual(new Set([AGENT]))
+  })
+
+  it("the run's own terminal event closes it", () => {
+    expect(foldAgentIdentity([spawn, ended(ORIGIN)]).unfinished.size).toBe(0)
+  })
+
+  it('a resume re-opens it, and only that run’s end closes it again', () => {
+    expect(foldAgentIdentity([spawn, ended(ORIGIN), resume]).unfinished).toEqual(new Set([AGENT]))
+    expect(foldAgentIdentity([spawn, ended(ORIGIN), resume, ended(RESUME_1)]).unfinished.size).toBe(
+      0
+    )
+  })
+
+  it('a late notification for an EARLIER run does not close the current one', () => {
+    // Run 1's XML consumed by the parent after the SendMessage started run 2.
+    expect(foldAgentIdentity([spawn, resume, ended(ORIGIN)]).unfinished).toEqual(new Set([AGENT]))
+  })
+
+  it('the --resume reap (no tool-use-id) closes whatever run is current', () => {
+    expect(foldAgentIdentity([spawn, resume, ended()]).unfinished.size).toBe(0)
+  })
+
+  it('a foreground spawn ends with its own result', () => {
+    const foreground = {
+      kind: 'result',
+      toolUseId: ORIGIN,
+      text: 'The answer is 42.',
+      structured: { status: 'completed', agentId: AGENT }
+    } as const
+    expect(foldAgentIdentity([foreground]).unfinished.size).toBe(0)
   })
 })
 

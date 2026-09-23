@@ -115,4 +115,38 @@ describe('deriveTaskState', () => {
   it('defaults resultIsError to false', () => {
     expect(deriveTaskState({ ...base }).isError).toBe(false)
   })
+
+  // ADR-073 §5 — a process that dies takes its agents with it.
+  it('reads a stop as stopped, not completed', () => {
+    const s = deriveTaskState({ ...base, hasResult: true, notification: notif('t', 'stopped') })
+    expect(s).toMatchObject({ isRunning: false, isError: false, isStopped: true, isLoaded: false })
+  })
+
+  it('a resumed run outranks the stop that ended the run before it', () => {
+    const s = deriveTaskState({
+      ...base,
+      hasActiveTask: true,
+      hasResult: true,
+      notification: notif('t', 'stopped')
+    })
+    expect(s).toMatchObject({ isRunning: true, isStopped: false })
+  })
+
+  it('reads an agent whose transcript ends mid-run as neutral, live or historical', () => {
+    for (const isHistorical of [true, false]) {
+      const s = deriveTaskState({
+        ...base,
+        isHistorical,
+        isBackground: true,
+        hasResult: true,
+        notification: notif('t', 'unfinished')
+      })
+      expect(s).toMatchObject({
+        isRunning: false,
+        isError: false,
+        isStopped: false,
+        isLoaded: true
+      })
+    }
+  })
 })

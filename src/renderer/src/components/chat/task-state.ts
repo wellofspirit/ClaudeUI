@@ -56,7 +56,16 @@ export interface TaskLifecycleInput {
 export interface TaskLifecycleState {
   isRunning: boolean
   isError: boolean
-  /** Historical transcripts show unfinished tasks as neutral, not as running. */
+  /**
+   * Ended by a stop — the user's, or the process dying under it — rather than
+   * finishing. Its own look, not "completed": the agent did not get to answer.
+   */
+  isStopped: boolean
+  /**
+   * Neither running nor settled: a historical task with nothing to say how it
+   * ended, or an agent whose transcript ends mid-run (`unfinished`, ADR-073 §5)
+   * and which might equally have died or still be running elsewhere.
+   */
   isLoaded: boolean
 }
 
@@ -94,9 +103,11 @@ export function deriveTaskState({
           ? true
           : !hasResult
 
+  const unfinished = notification?.status === 'unfinished'
   return {
     isRunning,
     isError: notification ? notification.status === 'failed' : resultIsError,
-    isLoaded: isHistorical && !hasResult && !notification
+    isStopped: !isRunning && notification?.status === 'stopped',
+    isLoaded: !isRunning && ((isHistorical && !hasResult && !notification) || unfinished)
   }
 }

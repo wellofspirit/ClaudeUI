@@ -22,11 +22,18 @@ function StatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
       </span>
     )
   }
+  const [status, color] = row.isError
+    ? ['failed', 'bg-danger']
+    : row.isStopped
+      ? ['stopped', 'bg-warning']
+      : row.isLoaded
+        ? ['loaded', 'bg-text-muted']
+        : ['done', 'bg-success']
   return (
     <span
       data-testid="AgentRow.status"
-      data-status={row.isError ? 'failed' : 'done'}
-      className={`h-2 w-2 rounded-full shrink-0 ${row.isError ? 'bg-danger' : 'bg-success'}`}
+      data-status={status}
+      className={`h-2 w-2 rounded-full shrink-0 ${color}`}
     />
   )
 }

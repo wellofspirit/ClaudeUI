@@ -35,6 +35,10 @@ export interface AgentRosterRow {
   description: string
   isRunning: boolean
   isError: boolean
+  /** Ended by a stop rather than finishing — see `deriveTaskState`. */
+  isStopped: boolean
+  /** Neither running nor settled (historical, or `unfinished`) — see `deriveTaskState`. */
+  isLoaded: boolean
   elapsedSeconds?: number
   lastToolName?: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
@@ -144,7 +148,7 @@ function toRow(
 ): AgentRosterRow {
   const notification = latestNotification(opts.notifications, entry.toolUseId)
   const active = opts.activeTasks[entry.toolUseId]
-  const { isRunning, isError } = deriveTaskState({
+  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: opts.isHistorical,
     hasActiveTask: !opts.isHistorical && !!active,
     isBackground: entry.isBackground,
@@ -162,6 +166,8 @@ function toRow(
     description: entry.description,
     isRunning,
     isError,
+    isStopped,
+    isLoaded,
     ...(progress?.elapsedTimeSeconds ? { elapsedSeconds: progress.elapsedTimeSeconds } : {}),
     ...(progress?.lastToolName ? { lastToolName: progress.lastToolName } : {}),
     ...(progress?.usage || notification?.usage

@@ -23,7 +23,7 @@ import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { extractToolResultContent } from './tool-result-content'
-import { agentIdOf } from './agent-identity'
+import { agentIdOf, foldAgentIdentity, type TranscriptAgentEvent } from './agent-identity'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -820,6 +820,14 @@ function extractOutputFile(text: string): string {
   return m ? m[1].trim() : ''
 }
 
+/** The `<tool-use-id>` of the run a `<task-notification>` ends; the reap on --resume has none. */
+function extractRunToolUseId(text: string): string | undefined {
+  const m = text.match(/<tool-use-id>([\s\S]*?)<\/tool-use-id>/)
+  return m ? m[1].trim() || undefined : undefined
+}
+
+const UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
+
 /**
  * Rehydrate user-attachment blocks from a `type:'user'` transcript line's array
  * content. Sibling to `extractToolResultImages` (tool-result-content.ts), which
@@ -953,6 +961,21 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
+    // Spawns, resumes and terminal events, in transcript order — folded at the
+    // end to find agents whose last run never ended (ADR-073 §5).
+    const agentEvents: TranscriptAgentEvent[] = []
+    const pushNotification = (
+      notif: Omit<TaskNotification, 'toolUseId' | 'outputFile'>,
+      text: string
+    ): void => {
+      const toolUseId = agentIdToToolUseId[notif.taskId] || null
+      taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
+      agentEvents.push({
+        kind: 'terminal',
+        taskId: notif.taskId,
+        runToolUseId: extractRunToolUseId(text)
+      })
+    }
     /** Set once the anchor line has been READ — every LATER line is dropped. */
     let pastAnchor = false
 
@@ -1024,8 +1047,7 @@ export async function loadSessionHistory(
             // Task notification
             const notif = parseTaskNotificationXml(text)
             if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
+              pushNotification(notif, text)
               return
             }
             // CLI commands — parse and emit as cli_command block
@@ -1070,8 +1092,7 @@ export async function loadSessionHistory(
             // Check if text is actually a task notification
             const notif = text ? parseTaskNotificationXml(text) : null
             if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
+              pushNotification(notif, text)
             } else if (
               text &&
               (text.startsWith('<command-name>') || text.startsWith('<local-command'))
@@ -1110,6 +1131,17 @@ export async function loadSessionHistory(
                 if (agentId) {
                   agentIdToToolUseId[agentId] = block.tool_use_id
                 }
+                agentEvents.push({
+                  kind: 'result',
+                  toolUseId: block.tool_use_id,
+                  text: resultText,
+                  structured:
+                    obj.toolUseResult &&
+                    typeof obj.toolUseResult === 'object' &&
+                    !Array.isArray(obj.toolUseResult)
+                      ? obj.toolUseResult
+                      : undefined
+                })
 
                 // Find last assistant message with matching tool_use
                 for (let i = messages.length - 1; i >= 0; i--) {
@@ -1243,14 +1275,7 @@ export async function loadSessionHistory(
           const content = obj.content as string | undefined
           if (content) {
             const notif = parseTaskNotificationXml(content)
-            if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({
-                ...notif,
-                toolUseId,
-                outputFile: extractOutputFile(content)
-              })
-            }
+            if (notif) pushNotification(notif, content)
           }
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
@@ -1277,6 +1302,25 @@ export async function loadSessionHistory(
     })
 
     rl.on('close', async () => {
+      // An agent whose last run the transcript opens and never closes gets a
+      // neutral `unfinished` entry, so its card stops reading "completed" off
+      // the launch result. Never `stopped`: this loader also serves sessions a
+      // CLI elsewhere is still running (session-watcher), where the agent may
+      // well be working. A live resume replaces it with cli.js's own reap.
+      const lifecycle = foldAgentIdentity(agentEvents)
+      for (const taskId of lifecycle.unfinished) {
+        const origin = lifecycle.origins.get(taskId)
+        if (!origin) continue
+        taskNotifications.push({
+          taskId,
+          toolUseId: origin,
+          status: 'unfinished',
+          outputFile: '',
+          summary: UNFINISHED_SUMMARY,
+          runIndex: lifecycle.runCounts.get(origin) ?? 1
+        })
+      }
+
       const statusLine = await computeTokenMetrics(filePath)
       // Slice C — merge durable dispatched-cost rows into the history-loaded
       // status line. A reopened session that hasn't spawned a ClaudeSession

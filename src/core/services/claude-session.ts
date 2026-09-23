@@ -269,6 +269,13 @@ export class ClaudeSession extends BaseSession {
    * Null once merged, or for a session that resumes nothing.
    */
   private identitySeed: Promise<AgentIdentity> | null = null
+  /**
+   * Tasks the CURRENT process has started and not yet ended: task id → the
+   * tool_use id its card is keyed by. They run inside cli.js, so when the
+   * process goes they go with it — and nothing else will ever say so until a
+   * `--resume` reaps them. `settleOrphanedTasks` reports them stopped.
+   */
+  private liveTasks = new Map<string, string>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -1061,6 +1068,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // object (replaced under its routingId) must never emit on the shared
       // routingId or re-arm a timer whose later cancel() would tear down the
       // LIVE session that now owns that routingId.
+      // This run's process is gone, and the tasks it was running with it. A
+      // superseded run leaves them to its successor, whose --resume reaps them;
+      // a disposed object must not speak on the shared routingId at all.
+      if (!superseded && !this.disposed) this.settleOrphanedTasks()
       if (!superseded && !this.disposed && !this.cancelled) {
         this.sendStatus()
         this.resetInactivityTimer()
@@ -1462,9 +1473,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (origin === undefined) {
       this.originByTaskId.set(taskId, toolUseId)
       this.runCountByOrigin.set(toolUseId, 1)
+      this.liveTasks.set(taskId, toolUseId)
       this.send('session:task-started', { toolUseId, taskId, taskType, runIndex: 1 })
       return
     }
+
+    this.liveTasks.set(taskId, origin)
 
     // A start we have already counted — the same call re-reported. Re-arm the
     // card (the record may have been dropped by a notification) without
@@ -1568,7 +1582,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
     this.itemStreams.sealOwner(toolUseId, true)
     this.markBackgroundDone(toolUseId)
-    this.taskIdMap.delete(taskId)
+    this.endTask(taskId)
 
     // Normalize cli.js's "killed" to the SDK's "stopped" vocabulary so the
     // renderer's resolveToolVisualState treats it uniformly.
@@ -1601,7 +1615,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (matchedToolUseId) {
       this.itemStreams.sealOwner(matchedToolUseId, true)
       this.markBackgroundDone(matchedToolUseId)
-      this.taskIdMap.delete(taskId)
+      this.endTask(taskId)
     }
 
     // Extract usage from the patched system message (task-notification-usage patch)
@@ -2629,7 +2643,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // turns.  Since TaskStop runs inside a control-message handler (no active
       // turn), the notification never reaches us.  Synthesize it directly.
       this.markBackgroundDone(toolUseId)
-      this.taskIdMap.delete(taskId)
+      this.endTask(taskId)
 
       this.send('session:task-notification', {
         taskId,
@@ -2820,7 +2834,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       const matchedToolUseId = this.originByTaskId.get(taskId) || this.taskIdMap.get(taskId) || null
       if (matchedToolUseId) {
         this.markBackgroundDone(matchedToolUseId)
-        this.taskIdMap.delete(taskId)
+        this.endTask(taskId)
       }
 
       const notification = {
@@ -3011,6 +3025,39 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // Agent identity is deliberately NOT cleared here: this runs on cancel(),
     // and the next run() --resumes the same conversation, whose agents cli.js
     // will reap or resume by task id (ADR-073 §5).
+  }
+
+  /** A task reached a terminal state: it no longer maps to a run, and is no longer live. */
+  private endTask(taskId: string): void {
+    this.taskIdMap.delete(taskId)
+    this.liveTasks.delete(taskId)
+  }
+
+  /**
+   * Report every task the ended process was running as stopped (ADR-073 §5).
+   *
+   * Agents and background shells run inside cli.js, so a killed or crashed
+   * process takes them down — but the only terminal event cli.js ever sends
+   * for them is the reap on a later `--resume`. Until then an agent spawned
+   * with `run_in_background: true` would read "running" (it settles only on a
+   * terminal event), indefinitely if the session is never resumed. When it is,
+   * the reap lands on the same tool_use id and run index, and the reducer folds
+   * the two into one entry.
+   */
+  private settleOrphanedTasks(): void {
+    for (const [taskId, owner] of this.liveTasks) {
+      this.taskIdMap.delete(taskId)
+      this.send('session:task-notification', {
+        taskId,
+        toolUseId: owner,
+        status: 'stopped',
+        outputFile: '',
+        summary: 'Stopped: the session ended while this task was running.',
+        usage: undefined,
+        runIndex: this.runCountByOrigin.get(owner) ?? 1
+      })
+    }
+    this.liveTasks.clear()
   }
 
   /**

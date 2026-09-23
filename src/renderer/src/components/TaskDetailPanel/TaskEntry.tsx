@@ -123,7 +123,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // immediate "launched successfully" tool_result (so `resultBlock.isError` is
   // false) — a FAILED one showed no failure badge in the panel at all.
   const hasActiveTask = !!activeTasks[toolUseId]
-  const { isRunning, isError } = deriveTaskState({
+  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: false,
     hasActiveTask,
     isBackground,
@@ -137,9 +137,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
       failed
     </span>
   ) : !isRunning ? (
-    bgNotification?.status === 'stopped' ? (
+    isStopped ? (
       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
         stopped
+      </span>
+    ) : isLoaded ? (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-hover text-text-muted shrink-0">
+        unfinished
       </span>
     ) : (
       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">

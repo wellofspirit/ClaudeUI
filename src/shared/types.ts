@@ -1088,10 +1088,21 @@ export interface TaskStartedData {
   runIndex?: number
 }
 
+/** The terminal states an engine reports for a task run. */
+export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
+
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
-  status: 'completed' | 'failed' | 'stopped'
+  /**
+   * `unfinished` is not a wire status: the history loader writes it for an
+   * agent whose transcript shows its last run starting and never ending
+   * (ADR-073 §5). A transcript cannot tell an agent that died with its process
+   * from one still running in another process, so history claims neither —
+   * the card reads neutral, and a live session replaces it with cli.js's own
+   * `stopped` reap.
+   */
+  status: TaskTerminalStatus | 'unfinished'
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }

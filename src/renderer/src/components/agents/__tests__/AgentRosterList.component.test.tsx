@@ -19,6 +19,8 @@ function row(over: Partial<AgentRosterRow> & { toolUseId: string }): AgentRoster
     description: 'doing something',
     isRunning: false,
     isError: false,
+    isStopped: false,
+    isLoaded: false,
     runIndex: 1,
     ...over
   }
@@ -127,14 +129,18 @@ describe('AgentRosterList', () => {
         agents: [
           row({ toolUseId: 'a', isRunning: true }),
           row({ toolUseId: 'b', isError: true }),
-          row({ toolUseId: 'c' })
+          row({ toolUseId: 'c' }),
+          // Killed with its process — not "done": it never got to answer.
+          row({ toolUseId: 'd', isStopped: true }),
+          // Transcript ends mid-run; dead or running elsewhere, it claims neither.
+          row({ toolUseId: 'e', isLoaded: true })
         ]
       })
     )
     expect(screen.getAllByTestId('AgentRow.stop')).toHaveLength(1)
     expect(
       screen.getAllByTestId('AgentRow.status').map((e) => e.getAttribute('data-status'))
-    ).toEqual(['running', 'failed', 'done'])
+    ).toEqual(['running', 'failed', 'done', 'stopped', 'loaded'])
   })
 
   it('shows the resume count only for an agent that was resumed', async () => {

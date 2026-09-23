@@ -15,6 +15,7 @@ import type {
   ToolReviewBlock,
   MeteringSnapshot,
   TaskNotification,
+  TaskTerminalStatus,
   UsageOrigin
 } from '../../shared/types'
 import type {
@@ -415,7 +416,7 @@ type CodexChild = {
 }
 
 /** Agent states that end a child's card, mapped onto the neutral task status. */
-const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
+const CHILD_TERMINAL_STATUS: Record<string, TaskTerminalStatus> = {
   completed: 'completed',
   errored: 'failed',
   notFound: 'failed',
@@ -424,7 +425,7 @@ const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
 }
 
 /** The inverse, for the status a closed child reports on a later `wait` card. */
-const CHILD_CLOSED_STATE: Record<TaskNotification['status'], CollabAgentStatus> = {
+const CHILD_CLOSED_STATE: Record<TaskTerminalStatus, CollabAgentStatus> = {
   completed: 'completed',
   failed: 'errored',
   stopped: 'shutdown'
@@ -2591,11 +2592,7 @@ export class CodexSession extends BaseSession {
    * child's own `turn/completed`, which only means "idle until the next
    * `send_input`" and would append a notification per turn.
    */
-  private finishChild(
-    childThreadId: string,
-    child: CodexChild,
-    status: TaskNotification['status']
-  ): void {
+  private finishChild(childThreadId: string, child: CodexChild, status: TaskTerminalStatus): void {
     if (child.notified) return
     this.flushItemStreams(undefined, child.parentToolUseId)
     child.notified = true

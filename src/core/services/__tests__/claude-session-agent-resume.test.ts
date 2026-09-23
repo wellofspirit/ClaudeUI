@@ -376,6 +376,14 @@ describe('ClaudeSession — agent identity survives the process', () => {
   const RESUME_SID = 'sess-resumed-0001'
   const RUN3 = 'toolu_01ResumeAfterRespawnxxxxx'
 
+  /** The `task_updated` patch cli.js sends alongside a run's terminal notification. */
+  const taskUpdatedTerminal = (taskId = TASK_ID): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'task_updated',
+    task_id: taskId,
+    patch: { status: 'completed', end_time: 1 }
+  })
+
   /** cli.js's reap of an orphaned agent on --resume: task id only. */
   const reap = (taskId = TASK_ID): Record<string, unknown> => ({
     type: 'system',
@@ -389,8 +397,8 @@ describe('ClaudeSession — agent identity survives the process', () => {
   /** What the resume target's transcript says: spawned by ORIGIN, resumed once by RUN2. */
   const seededIdentity = (): ReturnType<typeof foldAgentIdentity> =>
     foldAgentIdentity([
-      { toolUseId: ORIGIN, text: `agentId: ${TASK_ID}` },
-      { toolUseId: RUN2, text: '', structured: { resumedAgentId: TASK_ID } }
+      { kind: 'result', toolUseId: ORIGIN, text: `agentId: ${TASK_ID}` },
+      { kind: 'result', toolUseId: RUN2, text: '', structured: { resumedAgentId: TASK_ID } }
     ])
 
   it('reaps an orphaned agent onto its origin card in a resumed session', async () => {
@@ -444,13 +452,52 @@ describe('ClaudeSession — agent identity survives the process', () => {
     mockQuery.mockImplementationOnce(() => makeFakeQueryHandle([reap(), taskStarted(RUN2)]))
     await session.run('again')
 
-    expect(notifications(sent)).toEqual([
-      expect.objectContaining({ toolUseId: ORIGIN, status: 'stopped', runIndex: 1 })
+    // Two reports of the same stop: this object's own when the first process
+    // ended, then cli.js's reap — which only reaches the card because the
+    // identity survived (the reducer folds the pair into one entry). The fake
+    // second process then ends with run 2 still going.
+    expect(notifications(sent).map((n) => [n.toolUseId, n.status, n.runIndex])).toEqual([
+      [ORIGIN, 'stopped', 1],
+      [ORIGIN, 'stopped', 1],
+      [ORIGIN, 'stopped', 2]
     ])
     expect(startedEvents(sent).map((s) => [s.toolUseId, s.runToolUseId, s.runIndex])).toEqual([
       [ORIGIN, undefined, 1],
       [ORIGIN, RUN2, 2]
     ])
+  })
+
+  it('reports a task still running when its process ends as stopped, on the origin card', async () => {
+    // The agent was on its second run when the process died.
+    const sent = await runWire('routing-process-ends', [
+      taskStarted(ORIGIN),
+      taskNotification(ORIGIN),
+      taskStarted(RUN2)
+    ])
+    expect(notifications(sent).map((n) => [n.toolUseId, n.status, n.runIndex])).toEqual([
+      [ORIGIN, 'completed', 1],
+      [ORIGIN, 'stopped', 2]
+    ])
+  })
+
+  it('reports a background shell the process took down too', async () => {
+    const BASH_TASK = 'b491y9xmq'
+    const BASH_CALL = 'toolu_bash_background'
+    const sent = await runWire('routing-process-ends-bash', [
+      { ...taskStarted(BASH_CALL, BASH_TASK), task_type: 'local_bash' }
+    ])
+    expect(notifications(sent)).toEqual([
+      expect.objectContaining({ taskId: BASH_TASK, toolUseId: BASH_CALL, status: 'stopped' })
+    ])
+  })
+
+  it('does not re-report a task that already ended before the process did', async () => {
+    const sent = await runWire('routing-process-ends-clean', [
+      taskStarted(ORIGIN),
+      taskUpdatedTerminal(),
+      taskNotification(ORIGIN)
+    ])
+    expect(notifications(sent).map((n) => n.status)).toEqual(['completed', 'completed'])
   })
 
   it('does not read a transcript for a session that resumes nothing', async () => {
