@@ -11,16 +11,16 @@ Mockups (owner-approved 2026-09-23), under `.claude/ui/mockups/<id>/index.html`:
 
 ## Status
 
-| #   | Slice                                                                       | State                                                |
-| --- | --------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified              |
-| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3 |
-| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified              |
-| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app check pending         |
-| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | implementing                                         |
-| 6   | §3 linked lists (mockup B)                                                  | specced                                              |
-| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | specced (core seam map inline)                       |
-| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | to spec as 8a Subscriptions / 8b API providers       |
+| #   | Slice                                                                       | State                                                                   |
+| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified                                 |
+| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3                    |
+| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified                                 |
+| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app check pending                            |
+| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | committed `615e8b5e` (fresh-reviewed; 12 fixes); real-app check pending |
+| 6   | §3 linked lists (mockup B)                                                  | specced                                                                 |
+| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | core implementing; registry + renderer part after 8a                    |
+| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | 8a (Subscriptions) implementing; 8b (API providers) to spec             |
 
 ## Standing constraints for every implementer
 
@@ -523,6 +523,97 @@ panel options and effects, union list marks, separate copies the list. Guard-che
 
 ---
 
+## Slice 8a — Subscriptions (ADR-074 §7, mockup A)
+
+Target design: `.claude/ui/mockups/829a066c/index.html` (final state: Claude / Codex logos, "Set active",
+one Engines row with Manage, folded Options). Depends on slice 5 (the Manage sheet's curation).
+
+### Verified facts
+
+- Models & providers groups today (`settings-pages.tsx`, page `models`): `providers` (the one
+  `ProviderList`), `defaults`, `accounts` (`itemsOf('accounts')` → `AccountsSetting` for Anthropic at
+  `settings-sections.tsx:~351` and `ChatgptAccountsSetting.tsx` for ChatGPT). `SECTION_TARGET.accounts`
+  points at `{ page: 'models', group: 'accounts' }`; callers navigate there with
+  `navigate({ page: 'models', group: 'accounts' })` (grep `group: 'accounts'` — ProviderList's Anthropic
+  row, ProviderSheet's accounts link, maybe the sign-in dialog).
+- `AccountsSetting`: multi-account toggle (`setMultiAccountEnabled`), macOS Keychain notice, radio rows
+  (`switchAccount`), Remove (`deleteAccount`), Add (`openSignIn({ providerId: 'anthropic', mode: 'add'
+})`), a switch-rule sentence. With multi-account OFF it shows no account row at all — the signed-in
+  identity is on the registry's `anthropic` entry (`detail` = email · plan) / `buildClaudeAccountRef`.
+- `ChatgptAccountsSetting`: account rows (email, plan, workspace id), Remove with a per-row two-click
+  arm, Add / Sign in (`openSignIn`), per-session pinning toggle, switch rule, workspace explainer row;
+  accounts come from the registry `chatgpt` entry's `accounts` (`list`, `activeId`, `perSession`,
+  `needsReauth` per account).
+- The registry `chatgpt` entry has `engines.codex`, `engines.opencode`, `engines.pi` facts with
+  `enabled`, `modelCount`, `curated`, `providerId` (slice 5).
+- Logos are already in the repo: `src/renderer/src/assets/logos/{claude-color,codex-color}.svg` +
+  `NOTICE.md` (MIT, @lobehub/icons-static-svg 1.95.1). No SVG is imported anywhere in the renderer yet —
+  use Vite's asset import (`import claudeLogo from '../../assets/logos/claude-color.svg'`, add a
+  `*.svg` module declaration if TS needs one; check `src/renderer/src/env.d.ts` / vite client types),
+  and make sure `bun run build:web` still bundles it.
+
+### Changes
+
+1. **Registry flag.** `ProviderEntry.subscription?: true` on the `anthropic` and `chatgpt` entries (set
+   in `anthropicEntry` / `sharedEntry` for `kind: 'subscription'`), so the renderer filters on a fact,
+   not on ids.
+2. **New `SubscriptionsSection.tsx`** rendering one card per subscription entry, in registry order:
+   - **Header:** logo tile (Claude mark for Anthropic, Codex mark for ChatGPT), name, "· n accounts"
+     when more than one, subtitle ("Claude subscription" / "ChatGPT subscription"), status pill
+     (Signed in / Connected / "Active account signed out" amber when the active account
+     `needsReauth` / Not signed in).
+   - **Account list:** one row per account — initial avatar, email, plan pill, and for ChatGPT
+     "workspace <8 chars>… copy" with a tooltip "The ChatGPT organisation this account belongs to — not a
+     directory." (replaces the explainer row). Active row: green "Active" pill. Others: **Set active**
+     button → inline confirm under the row: "Set <email> as the active account?" + the consequence
+     sentence with a COUNT of live sessions it disconnects (Claude: every live Claude session; ChatGPT:
+     live Codex sessions that follow the active account, "pi and opencode switch too" naming only the
+     enabled routes, "n pinned Codex session(s) keep their account" when per-session is on) → **Set
+     active** / Cancel. A ⋯ menu: Set as active, Sign in again, Copy workspace id, Remove account… →
+     inline confirm ("Its stored sign-in is deleted. Another account becomes active first." when it is
+     the active one) → Remove / Cancel. A `needsReauth` account: amber row, "Signed out" pill, primary
+     **Sign in again** (`openSignIn({ providerId, mode: 'reauth', accountId })` — check the existing
+     reauth call shape). Anthropic with Multiple accounts OFF: one row for the signed-in identity from the
+     registry (no Set active / Remove); "+ Add account" turns Multiple accounts on (with its notice)
+     rather than being hidden.
+   - **+ Add account** button.
+   - **Engines row** (`.erow` in the mockup): label "Engines", pills — Anthropic: `Claude` + "Always
+     on", no Manage; ChatGPT: `Codex`, `opencode <n of m | all n | off>`, `pi <…>` (dim + "off" when the
+     route is disabled; amber when reauth), and **Manage** opening the existing `ProviderSheet` on the
+     `chatgpt` entry.
+   - **Options** (`<details>`, folded, summary line with the current state): Anthropic — Multiple
+     accounts switch + the plaintext/Keychain notice only while on; ChatGPT — "Pin an account per Codex
+     session" switch with its description.
+   - Not signed in (ChatGPT, no accounts): the card body is one CTA "Sign in with ChatGPT".
+     Reuse the existing IPC and store actions from the two old components; move their logic, then delete
+     `AccountsSetting` and `ChatgptAccountsSetting.tsx` (and their tests, replaced by the new ones).
+3. **Manage sheet for a subscription.** `ProviderSheet` drops the Credential group when
+   `entry.subscription` (the accounts are on the card): no accounts link row, no "Connected as …" row.
+   The sheet title is "<name> · engines & models"; footer keeps Disconnect. ENABLED FOR keeps its rows.
+4. **Page model.** Page `models` groups become: `subscriptions` (label "Subscriptions", header action
+   "+ Add subscription" dispatching the existing add event with a subscription filter, or omit the
+   action if the Add sheet cannot filter — say which), `providers` (label **"API providers"**, the
+   `ProviderList` now filtering OUT `entry.subscription`), `defaults`. Remove the `accounts` group.
+   Any `navigate({ page: 'models', group: 'accounts' })` and `SECTION_TARGET.accounts` → `subscriptions`;
+   add a small alias so an old `open-settings` deep link with `group: 'accounts'` still lands on
+   `subscriptions`. Search keywords from the old account items move to the new item.
+5. **Copy.** The group description under "API providers": "Keys and self-hosted endpoints. Sign-in
+   subscriptions are listed above." (or the group note).
+
+### Tests
+
+Component tests for both cards (fixtures from the registry shape): header states; Set active confirm
+counts and wording per provider (with/without per-session, with pi route off); Remove confirm; reauth
+row; Anthropic single-account row and Add → multi on; Options fold + notice only when on; Engines pills
+and Manage opens the sheet; ChatGPT not-signed-in CTA. ProviderList excludes subscription entries.
+Page-model: groups order, `accounts` alias. ProviderSheet for a subscription has no Credential group.
+
+### Suggested commit subject
+
+`feat(providers): subscriptions get their own cards, with accounts and engines in one place`
+
+---
+
 ## Slice 7 — one key per provider: catalog definitions (ADR-074 §6) — core only
 
 The UI for it (Add flow, merged row, key-conflict panel) is slice 8; this slice ships the core, the
@@ -645,3 +736,9 @@ from it — re-check a line number before relying on it.
   removal with its call path. The owner must re-add the key.
 - 2026-09-23 — Slice 4 open question for the owner: a user's last-picked Claude model (sticky) still
   wins over the configured "Start new sessions on" default, as it does for opencode/pi/Codex.
+- 2026-09-23 — Slice 5 committed after a fresh review (2 required: stale opencode writers reverting
+  curation — fixed at the root, `config:save-opencode-settings` no longer writes the allowlist; a
+  no-op vendor click flipping All → Only). Commits of parallel slices are staged by building index
+  blobs from the working file minus the other slice's pure-addition hunks (`git update-index
+--cacheinfo`); `git apply --unidiff-zero` with dropped hunks shifted line numbers and corrupted a
+  file — do not use it.
