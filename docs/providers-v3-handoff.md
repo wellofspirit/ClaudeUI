@@ -11,16 +11,16 @@ Mockups (owner-approved 2026-09-23), under `.claude/ui/mockups/<id>/index.html`:
 
 ## Status
 
-| #   | Slice                                                                       | State                                                                   |
-| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified                                 |
-| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3                    |
-| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified                                 |
-| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app check pending                            |
-| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | committed `615e8b5e` (fresh-reviewed; 12 fixes); real-app check pending |
-| 6   | §3 linked lists (mockup B)                                                  | specced                                                                 |
-| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | core implementing; registry + renderer part after 8a                    |
-| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | 8a (Subscriptions) implementing; 8b (API providers) to spec             |
+| #   | Slice                                                                       | State                                                                       |
+| --- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| 1   | §4 keyless placeholder + "No key needed"                                    | committed `e5960915`; real-app verified                                     |
+| 2   | §1 per-provider pi allowlist + migration; §5 pi diagnosis                   | committed `406d6692`; real-app verified with 1 and 3                        |
+| 3   | §9 Anthropic endpoint → Claude page (mockup C right)                        | committed `f1d27e67`; real-app verified                                     |
+| 4   | §8 Claude defaults from `supportedModels()` + default model (mockup C left) | committed `6bca2a5c`; real-app verified                                     |
+| 5   | §2 engine-generic curation + undo; pi page dialog removed (mockup B)        | committed `615e8b5e`; real-app verified                                     |
+| 6   | §3 linked lists (mockup B)                                                  | committed `63e550bd`; real-app check pending                                |
+| 7   | §6 one key per provider — core (catalog definitions, delivery, migration)   | core committed `29f245ef`; registry + UI part folded into 8b                |
+| 8   | §7 Subscriptions / API providers IA, Manage sheet, Add flow (mockups A, D)  | 8a committed `e94222a3` (fresh-reviewed, 4 required fixes); 8b implementing |
 
 ## Standing constraints for every implementer
 
@@ -614,6 +614,71 @@ Page-model: groups order, `accounts` alias. ProviderSheet for a subscription has
 
 ---
 
+## Slice 8b — API providers, and the rest of one-key-per-provider (ADR-074 §6–7, mockup D)
+
+Also carries slice 7's Changes 5–6 (registry + renderer), which waited for 8a. Target design:
+`.claude/ui/mockups/42e09418/index.html`. Depends on 7 core (`29f245ef`), 8a, and 6.
+
+### Changes
+
+1. **Registry** (`provider-registry.ts`): `sharedDetail` gets a `catalog` branch (no "subscription"
+   wording; the kind reads "Catalog" as a subtitle). A catalog definition's credential is `api-key` when
+   the vault holds one, `none` otherwise. `scanNativeKeys()` conflicts surface as
+   `ProviderEntry.keyConflict?: { opencode: string; pi: string }` (last-four hints only) on the pair's
+   native rows (both rows stay until resolved; mark each). Also expose a single-engine api-key native
+   row's adoptability as `ProviderEntry.adoptable?: 'opencode' | 'pi'` when the vendor is known to both
+   engines' catalogs (so the UI can offer "use this key for both engines"). Keep `listProviderRegistry`
+   cheap: `scanNativeKeys` only loads the opencode catalog when some vendor has a key in both engines.
+2. **List** (`ProviderList.tsx`, the "API providers" group from 8a): one row per provider; subtitle is
+   the kind ("Catalog", "Custom endpoint · <baseUrl>", "Catalog · free tier") instead of detail
+   sentences where the chips already say it; engine pills with counts (`opencode 4 of 382`, `pi all 8`,
+   dim + "off" when disabled) — the same pill component as the Subscriptions Engines row; credential
+   chip; a `keyConflict` row shows an amber "2 different keys" chip.
+3. **Manage sheet for an API provider** (`ProviderSheet.tsx`), sections in this order:
+   - **Key** — one row: masked key + Replace (writes `setSharedProviderApiKey`, i.e. once) for
+     shared/catalog; for a keyless custom endpoint the slice-1 optional copy; free tier says so. For a
+     `keyConflict` pair: the amber panel "opencode and pi hold different <name> keys." with two radio
+     options "Keep opencode's key (…a41f)" / "Keep pi's key (…09c2)" and **Use this key for both** →
+     `adoptSharedProviderNativeKey(id, keep)` after an inline confirm ("The other engine's key is
+     replaced.") and **Keep them separate** (dismisses for this session only). For an `adoptable`
+     single-engine native row: a row "This key is only in <engine>. Use it for both engines?" →
+     `adoptSharedProviderNativeKey(id, <engine>)`.
+   - **Engines** — one delivery row per engine (opencode, pi): engine pill, a status sentence ("Key
+     delivered to opencode's auth.json as `openrouter` · 4 of 382 models", "Off — turning it on
+     delivers the stored key; nothing to re-enter.", the keyless / free variants, or the route error in
+     danger colour with Retry → `syncSharedProvider`), and the route switch. Native (non-shared) rows
+     keep today's per-engine controls.
+   - **Models in the picker** — a summary row, as mockup D draws it: "One list · 4 picked" /
+     "Separate per engine · opencode 4 picked · pi all" / "All models", with **Edit models ›** opening
+     the slice 5/6 curation block (`ModelCuration` / `LinkedModelCuration`, unchanged) in a stacked
+     `SheetFrame` titled "<name> · models in the picker". "Curate ›" on an engine row opens the same
+     stacked sheet on that engine's tab. Applies to subscriptions' Manage sheet too.
+   - **Endpoint** (custom only), **Engine-specific** links (opencode models ›, pi overrides ›), footer
+     **Remove provider** allowed for `catalog` too ("Removing deletes the key from ClaudeUI and from every
+     engine."), confirm in place.
+4. **Add flow** (`ProviderAddSheet.tsx`): catalog candidate with an API key → `saveSharedProvider` a
+   `catalog` definition (routes enabled for the chosen engines, name from the candidate) then ONE
+   `setSharedProviderApiKey`, then open the sheet on the definition id (fix `registryIdFor` for shared
+   ids). OAuth candidates stay native. Steps shown as "Provider → Key & engines → Models"; the key field
+   says "Entered once. ClaudeUI stores it and delivers it to each engine you pick." Update the pinned
+   per-engine-loop tests.
+5. **pi summary follow-up** (from the 4–5 verification): the pi "Model list" row counts over providers
+   pi reports; a curated key for a provider pi no longer offers is mentioned separately ("1 list for a
+   provider pi no longer offers").
+
+### Tests
+
+Registry: catalog detail/credential; keyConflict and adoptable on the right rows; scan skipped when no
+vendor is in both. List: pills/subtitles/conflict chip. Sheet: key section per credential kind; conflict
+panel → adopt with keep + confirm; adoptable row; engine delivery rows incl. error + Retry; Remove for
+catalog. Add sheet: one save + one set-key, sheet opens on the definition.
+
+### Suggested commit subject
+
+`feat(providers): API providers show one key per provider, delivered to each engine`
+
+---
+
 ## Slice 7 — one key per provider: catalog definitions (ADR-074 §6) — core only
 
 The UI for it (Add flow, merged row, key-conflict panel) is slice 8; this slice ships the core, the
@@ -742,3 +807,8 @@ from it — re-check a line number before relying on it.
   blobs from the working file minus the other slice's pure-addition hunks (`git update-index
 --cacheinfo`); `git apply --unidiff-zero` with dropped hunks shifted line numbers and corrupted a
   file — do not use it.
+- 2026-09-23 — Slices 4–5 verified in the real app (read-only; built from `615e8b5e` with
+  `electron-vite build` only, so no `ensure-*` step wrote through the vendor symlinks). Follow-up for
+  8b: the pi "Model list" summary (it lives under Default models › pi, not the pi page) counts
+  "1 of 3 pi providers curated" with a curated key (`openrouter`) pi no longer offers; count over the
+  providers pi reports, and mention stale keys separately.
