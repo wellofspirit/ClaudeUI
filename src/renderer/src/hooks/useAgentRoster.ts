@@ -170,8 +170,16 @@ function toRow(
     isLoaded,
     ...(progress?.elapsedTimeSeconds ? { elapsedSeconds: progress.elapsedTimeSeconds } : {}),
     ...(progress?.lastToolName ? { lastToolName: progress.lastToolName } : {}),
+    // A live run's freshest figure is its progress tick; a finished run's is
+    // its terminal notification — cli.js's last tick lands before the run's
+    // final turns, so preferring it froze the row below the card's total. A
+    // stop reported for a dead process carries no usage and keeps the tick.
     ...(progress?.usage || notification?.usage
-      ? { usage: progress?.usage ?? notification?.usage }
+      ? {
+          usage: isRunning
+            ? (progress?.usage ?? notification?.usage)
+            : (notification?.usage ?? progress?.usage)
+        }
       : {}),
     runIndex: active?.runIndex ?? notification?.runIndex ?? 1
   }

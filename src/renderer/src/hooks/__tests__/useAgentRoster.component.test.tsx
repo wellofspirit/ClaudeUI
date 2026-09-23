@@ -199,6 +199,52 @@ describe('useAgentRoster', () => {
     expect(row.runIndex).toBe(2)
   })
 
+  it("reports a finished run's final usage, not the last progress tick before it", async () => {
+    // cli.js's last task_progress lands before the run's final turns; the
+    // terminal notification carries the run's real total. Pre-fix the row kept
+    // the stale tick (22.1k) while the card showed the final figure (23.7k).
+    const progress = {
+      toolUseId: 'tu-a',
+      toolName: 'Task',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 40,
+      usage: { totalTokens: 22100, toolUses: 1, durationMs: 40000 }
+    }
+    const final = {
+      taskId: 'a1',
+      toolUseId: 'tu-a',
+      status: 'completed' as const,
+      outputFile: '',
+      summary: 'TWO',
+      runIndex: 2,
+      usage: { totalTokens: 23700, toolUses: 1, durationMs: 50300 }
+    }
+    setSession({
+      messages: [assistantWithTool('m1', 'tu-a', 'Task', { name: 'impl' })],
+      taskProgressMap: { 'tu-a': progress },
+      taskNotifications: [final]
+    })
+    await renderProbe()
+    expect(seen!.agents[0].usage?.totalTokens).toBe(23700)
+
+    // While a run is live the progress tick is the freshest figure there is.
+    await act(async () => {
+      setSession({
+        activeTasks: { 'tu-a': { taskId: 'a1', taskType: 'local_agent', runIndex: 3 } }
+      })
+    })
+    expect(seen!.agents[0].usage?.totalTokens).toBe(22100)
+
+    // A stop reported for a dead process carries no usage — keep the last tick.
+    await act(async () => {
+      setSession({
+        activeTasks: {},
+        taskNotifications: [final, { ...final, status: 'stopped', runIndex: 3, usage: undefined }]
+      })
+    })
+    expect(seen!.agents[0].usage?.totalTokens).toBe(22100)
+  })
+
   it('shows nothing as running in a historical transcript', async () => {
     setSession({
       isHistorical: true,
