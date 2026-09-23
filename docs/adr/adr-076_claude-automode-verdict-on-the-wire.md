@@ -1,4 +1,4 @@
-# ADR-073: Claude's auto-mode verdict on the wire — and a pre-ask denial is not a verdict
+# ADR-076: Claude's auto-mode verdict on the wire — and a pre-ask denial is not a verdict
 
 **Status:** Accepted (2026-09-21), implemented on `automode-claude-judge`
 **Amends:** [ADR-067](adr-067_codex-shared-permission-model.md) §F18 — its closing sentence, "Claude's Auto mode is cli.js-native and emits no verdict on the wire, so it renders none", is no longer true in either half.
