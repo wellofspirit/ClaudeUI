@@ -47,7 +47,17 @@ vi.mock('../pi-locate', () => ({
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
+// `mockLoadEngineConfig` returns what is ON DISK; the real read-time normaliser
+// runs over it, as `loadEngineConfig('pi')` does in production.
+vi.mock('../../services/ui-config', async () => {
+  const { normalizePiEngineConfig } = await vi.importActual<
+    typeof import('../../../shared/pi-model-allowlist')
+  >('../../../shared/pi-model-allowlist')
+  return {
+    loadEngineConfig: (engineId: string) =>
+      normalizePiEngineConfig(structuredClone(mockLoadEngineConfig(engineId)))
+  }
+})
 
 const CATALOG = [
   {
@@ -92,10 +102,10 @@ beforeEach(() => {
 })
 
 describe('discoverPiModels', () => {
-  it('filters full model values while keeping the management catalog unfiltered', async () => {
+  it('filters per provider while keeping the management catalog unfiltered', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     mockLoadEngineConfig.mockReturnValue({
-      piConfig: { modelAllowlist: ['anthropic/claude-sonnet-4-6'] }
+      piConfig: { modelAllowlist: { anthropic: ['claude-sonnet-4-6'], 'openai-codex': [] } }
     })
     const { discoverPiModels, getPiModelCatalogGroups } = await importFresh()
 
@@ -107,24 +117,74 @@ describe('discoverPiModels', () => {
     ).toEqual(['openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'])
   })
 
-  it('treats an explicit empty allowlist as no available models', async () => {
+  it('treats an empty list under a provider key as none of that provider', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
-    mockLoadEngineConfig.mockReturnValue({ piConfig: { modelAllowlist: [] } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: { anthropic: [], 'openai-codex': [] } }
+    })
     const { discoverPiModels } = await importFresh()
 
     expect(await discoverPiModels()).toEqual([])
   })
 
+  it('reads a legacy EMPTY global list as "all" (ADR-074 §1 ruling)', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({ piConfig: { modelAllowlist: [] } })
+    const { discoverPiModels } = await importFresh()
+
+    expect((await discoverPiModels()).map((group) => group.vendorId)).toEqual([
+      'openai-codex',
+      'anthropic'
+    ])
+  })
+
+  // The owner's real config (ADR-074 Context §1): a global list naming two
+  // OpenRouter models hid ChatGPT's `openai-codex` route, whose 8 models pi
+  // reported as available, along with every provider added after it.
+  it("migrates the owner's legacy list: openrouter shows 2, openai-codex all 8", async () => {
+    const piModel = (provider: string, id: string) => ({
+      ...CATALOG[0],
+      provider,
+      id,
+      name: id
+    })
+    const openrouter = [
+      'deepseek/deepseek-v4-flash-0731',
+      'moonshotai/kimi-k3',
+      'z-ai/glm-5.3'
+    ].map((id) => piModel('openrouter', id))
+    const codex = Array.from({ length: 8 }, (_, index) => piModel('openai-codex', `gpt-${index}`))
+    mockRequest.mockResolvedValue({ success: true, data: { models: [...openrouter, ...codex] } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: {
+        modelAllowlist: [
+          'openrouter/deepseek/deepseek-v4-flash-0731',
+          'openrouter/moonshotai/kimi-k3'
+        ]
+      }
+    })
+    const { discoverPiModels } = await importFresh()
+
+    const groups = await discoverPiModels()
+    const count = (vendorId: string) =>
+      groups.find((group) => group.vendorId === vendorId)?.models.length ?? 0
+    expect(count('openrouter')).toBe(2)
+    expect(count('openai-codex')).toBe(8)
+    expect(
+      groups.find((group) => group.vendorId === 'openrouter')!.models.map((model) => model.value)
+    ).toEqual(['openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/moonshotai/kimi-k3'])
+  })
+
   it('reloads allowlist changes after cache invalidation', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     mockLoadEngineConfig.mockReturnValue({
-      piConfig: { modelAllowlist: ['openai-codex/gpt-5.6-luna'] }
+      piConfig: { modelAllowlist: { 'openai-codex': ['gpt-5.6-luna'], anthropic: [] } }
     })
     const { discoverPiModels, invalidatePiModelCache } = await importFresh()
     expect((await discoverPiModels())[0].vendorId).toBe('openai-codex')
 
     mockLoadEngineConfig.mockReturnValue({
-      piConfig: { modelAllowlist: ['anthropic/claude-sonnet-4-6'] }
+      piConfig: { modelAllowlist: { 'openai-codex': [], anthropic: ['claude-sonnet-4-6'] } }
     })
     invalidatePiModelCache()
     expect((await discoverPiModels())[0].vendorId).toBe('anthropic')

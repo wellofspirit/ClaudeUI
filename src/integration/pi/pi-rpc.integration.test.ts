@@ -23,25 +23,19 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { locatePiBinary } from '../../core/pi/pi-locate'
 import type { ChildProcess } from 'node:child_process'
 import { PI_BRIDGE_EXTENSION_SOURCE } from '../../core/pi/pi-bridge-source'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
-const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
-const ROOT = join(__dirname, '..', '..', '..')
-
-function findBinary(): string | null {
-  const candidate = join(ROOT, 'vendor', 'pi-cli', BINARY_NAME)
-  return existsSync(candidate) ? candidate : null
-}
 
 // Evaluated once at collection time (synchronous fs check) so every `it` in
 // this file can gate on it via it.skipIf — "skip gracefully if vendor/pi-cli
 // missing" even when PI_INTEGRATION_TESTS=1 is set.
-const BINARY_MISSING = !findBinary()
+const BINARY_MISSING = !locatePiBinary()
 
 /** Tiny extension fixture: registers a `/claudeui-probe` command with no
  *  external imports (type-only imports would need @earendil-works/pi-coding-agent
@@ -110,7 +104,7 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
 
   beforeAll(async () => {
     if (BINARY_MISSING) return
-    const binary = findBinary()!
+    const binary = locatePiBinary()!
 
     tmpDir = mkdtempSync(join(tmpdir(), 'pi-rpc-integration-'))
     const extensionPath = join(tmpDir, 'claudeui-probe-extension.ts')
@@ -273,7 +267,7 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
 
   beforeAll(async () => {
     if (BINARY_MISSING) return
-    const binary = findBinary()!
+    const binary = locatePiBinary()!
 
     tmpDir = mkdtempSync(join(tmpdir(), 'pi-rpc-skills-integration-'))
 

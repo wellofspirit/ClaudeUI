@@ -607,6 +607,27 @@ if (!skipB) {
     src =
       src.slice(0, mcpBlockMatch.index) + newMcp + src.slice(mcpBlockMatch.index + oldMcp.length)
     console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (block form)`)
+  } else if (src.includes('mcp_status:Ie') && src.includes('var Ie=(e,o)=>({mcpServers:')) {
+    // 2.1.280 routes mcp_status through a cross-chunk dispatch table.
+    // Await in the headless control-request branch, where both refresh bindings
+    // are in scope, immediately before dispatching the request.
+    const routedRe = /if\((\w+)\((\w+)\.request\)\)\{let (\w+)=\2\.request,(\w+)=/
+    const routed = routedRe.exec(src)
+    if (
+      !routed ||
+      routedRe.exec(src.slice(routed.index + 1)) ||
+      !sameChunk(src, routed.index, refreshFnIdx) ||
+      !sameChunk(src, routed.index, src.indexOf(PATCH_A_MARKER))
+    ) {
+      console.error('ERROR: Cannot prove routed MCP handler scope/uniqueness.')
+      process.exit(1)
+    }
+    const insertion = `${PATCH_B_MARKER}if(${routed[2]}.request.subtype==="mcp_status"){await ${refreshFn}();if(${x6Var})await ${x6Var};}`
+    src =
+      src.slice(0, routed.index + routed[0].indexOf('let ')) +
+      insertion +
+      src.slice(routed.index + routed[0].indexOf('let '))
+    console.log('Awaiting MCP refresh before routed mcp_status dispatch')
   } else {
     console.error('ERROR: Cannot locate mcp_status handler pattern.')
     console.error(

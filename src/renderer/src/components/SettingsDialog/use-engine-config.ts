@@ -122,7 +122,7 @@ function dispatchSnapshot(engineId: EngineId): EngineConfig | null {
  * The store is written and broadcast BEFORE the save is awaited, so a second
  * edit is computed against the first even while the first is still in flight.
  * The returned promise is the save's — `useEngineConfigObject` wraps it as the
- * fire-and-forget `update` and the awaitable `updateAsync`.
+ * fire-and-forget `update`.
  */
 function updateEngineConfigObject(engineId: EngineId, patch: Partial<EngineConfig>): Promise<void> {
   const entry = DISPATCH_STORES.get(engineId)
@@ -131,6 +131,27 @@ function updateEngineConfigObject(engineId: EngineId, patch: Partial<EngineConfi
   entry.config = next
   emitDispatchConfig(entry)
   return window.api.saveEngineConfig(engineId, next)
+}
+
+/**
+ * Re-read one engine's file into its LIVE entry, if any pane holds one — for a
+ * write made outside this store. The Manage sheet's model curation writes
+ * `engines/<id>.json` through its own leaf writer (`models:set-provider-allowlist`)
+ * while, on the same page, a pane over the same file may be mounted; left
+ * holding the pre-curation object, that pane's next whole-file save would put
+ * the old allowlist back.
+ */
+export function reloadEngineConfigObject(engineId: EngineId): Promise<void> {
+  const entry = DISPATCH_STORES.get(engineId)
+  if (!entry) return Promise.resolve()
+  return window.api
+    .loadEngineConfig(engineId)
+    .then((config) => {
+      if (DISPATCH_STORES.get(engineId) !== entry) return
+      entry.config = config
+      emitDispatchConfig(entry)
+    })
+    .catch(() => {})
 }
 
 /** Merge a patch into the engine's `dispatch` block and persist the whole file. */
@@ -155,12 +176,6 @@ export interface EngineConfigApi {
   engineCfg: EngineConfig | null
   /** Merge and persist, swallowing a failed write — the row-click path. */
   update: (patch: Partial<EngineConfig>) => void
-  /**
-   * The same write, awaitable and REJECTING on a failed save — for the callers
-   * that report the failure themselves (pi's model-allowlist dialog keeps
-   * itself open and shows the error).
-   */
-  updateAsync: (patch: Partial<EngineConfig>) => Promise<void>
 }
 
 /** The shared `EngineConfig` object for one engine — the store, unwrapped. */
@@ -178,8 +193,7 @@ export function useEngineConfigObject(engineId: EngineId): EngineConfigApi {
         updateEngineConfigObject(engineId, patch).catch(() => {})
       },
       [engineId]
-    ),
-    updateAsync: useCallback((patch) => updateEngineConfigObject(engineId, patch), [engineId])
+    )
   }
 }
 

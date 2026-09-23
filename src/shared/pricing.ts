@@ -156,6 +156,18 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 1.5
     }
   },
+  // Opus 5.5 — cli.js 2.1.280 tier_4_20_cache_read_0_20.
+  {
+    vendorId: 'anthropic',
+    match: 'opus-5-5',
+    pricing: {
+      inputPerMTok: 4,
+      outputPerMTok: 20,
+      cacheWritePerMTok: 5,
+      cacheWrite1hPerMTok: 8,
+      cacheReadPerMTok: 0.2
+    }
+  },
   // Opus fallback (assume newer pricing)
   {
     vendorId: 'anthropic',

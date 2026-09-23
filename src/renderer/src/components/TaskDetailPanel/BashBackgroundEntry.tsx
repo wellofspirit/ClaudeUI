@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { latestNotification } from '../chat/task-state'
 import { findTaskBlocks } from './utils'
 
 export function BashBackgroundEntry({
@@ -86,7 +87,7 @@ export function BashBackgroundEntry({
   if (!taskBlock) return null
 
   const command = String(taskBlock.toolInput?.command || '')
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const bgNotification = latestNotification(taskNotifications, toolUseId)
   const isRunning = !bgNotification
   const isError = bgNotification?.status === 'failed'
 

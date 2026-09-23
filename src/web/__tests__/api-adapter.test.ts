@@ -402,6 +402,12 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'config:patch-pi-models',
     args: [[{ path: ['providers', 'my-api', 'models', 0, 'contextWindow'], value: 200_000 }]]
   },
+  // ADR-074 §2: one provider's model allowlist; `null` = All models.
+  {
+    method: 'setProviderModelAllowlist',
+    channel: 'models:set-provider-allowlist',
+    args: ['pi', 'openrouter', ['z-ai/glm-5.3']]
+  },
   // opencode agent CRUD — five `config` verbs plus one `chat` verb.
   { method: 'listOpencodeAgents', channel: 'opencode-agents:list', args: ['/repo/app'] },
   {
@@ -547,6 +553,21 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'setSharedProviderApiKey',
     channel: 'shared-provider:set-key',
     args: ['local', 'sk-local']
+  },
+  {
+    method: 'adoptSharedProviderNativeKey',
+    channel: 'shared-provider:adopt-native',
+    args: ['openrouter', 'pi']
+  },
+  {
+    method: 'setSharedProviderCuration',
+    channel: 'shared-provider:set-curation',
+    args: ['openrouter', { linked: true, models: ['a/b'] }]
+  },
+  {
+    method: 'setSharedProviderDisabled',
+    channel: 'shared-provider:set-disabled',
+    args: ['openrouter-work', false, true]
   },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },

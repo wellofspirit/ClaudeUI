@@ -64,10 +64,24 @@ export interface SharedProviderAccountList {
   accounts: SharedProviderAccountStatus[]
 }
 
+/**
+ * What a shared definition IS (ADR-074 §6):
+ *
+ * - `subscription` — ChatGPT: OAuth accounts in the vault, vended to each engine.
+ * - `custom` — an endpoint ClaudeUI projects into each engine's own provider
+ *   config (`protocol` + `baseUrl` + `models`), keyed by an id ClaudeUI owns.
+ * - `catalog` — a provider every engine ALREADY knows (`openrouter`,
+ *   `anthropic`, …): nothing is projected, only the API key, stored once in the
+ *   vault and delivered to each enabled engine under `routes.<engine>.providerId`
+ *   (default: `id`). No `protocol`, no `baseUrl`, `models: []` — the engines'
+ *   own catalogs list the models.
+ */
+export type SharedProviderKind = 'subscription' | 'custom' | 'catalog'
+
 export interface SharedProviderDefinition {
   id: string
   name: string
-  kind: 'subscription' | 'custom'
+  kind: SharedProviderKind
   protocol?: SharedProviderProtocol
   baseUrl?: string
   models: SharedProviderModel[]
@@ -79,7 +93,65 @@ export interface SharedProviderDefinition {
    * accounts. Meaningless on a custom provider, which holds one API key.
    */
   accounts?: { perSession: boolean }
+  /**
+   * One model list for every engine, or one per engine (ADR-074 §3). Absent:
+   * derived from the engines' own lists by `effectiveCuration` — linked iff
+   * they agree — so an existing install needs no migration write.
+   */
+  curation?: SharedProviderCuration
+  /**
+   * A `custom` definition made as a SECOND key for a catalog provider (ADR-074
+   * slice 10): the catalog vendor id it was cloned from (`openrouter` for
+   * "OpenRouter (Work)"). Its models are declared copies of that vendor's
+   * catalog entries, so the sheet can offer to refresh them, and the list sorts
+   * it right after its origin. Absent on every other definition.
+   */
+  derivedFrom?: string
+  /**
+   * When a second key's models were last copied from the catalog, as the
+   * calendar date `YYYY-MM-DD` (set on creation and on every refresh). Only with
+   * `derivedFrom`.
+   */
+  copiedAt?: string
+  /**
+   * The provider is switched OFF (ADR-074 slice 10): delivered to no engine —
+   * no projection, no key in any engine's store — while its key stays in the
+   * vault and its routes, list and defaults stay exactly as they are, so
+   * switching it back on restores them. Absent means on. Never on a
+   * subscription, whose engines have their own switches.
+   */
+  disabled?: boolean
   managed: true
+}
+
+/**
+ * The definition as the ENGINES see it: while it is switched off, every route is
+ * off. What delivery, the collision guard and the read model act on; the stored
+ * definition keeps the routes, so switching back on restores them.
+ */
+export function deliveredDefinition(
+  definition: SharedProviderDefinition
+): SharedProviderDefinition {
+  if (!definition.disabled) return definition
+  return {
+    ...definition,
+    routes: {
+      pi: { ...definition.routes.pi, enabled: false },
+      opencode: { ...definition.routes.opencode, enabled: false }
+    }
+  }
+}
+
+/**
+ * The provider-level model list. `models` are CANONICAL ids — the definition's
+ * own model ids for a custom provider, the bare ids both engines share for
+ * ChatGPT and a catalog provider — and absent means All models. While `linked`
+ * it is the source of truth, projected into each enabled engine's allowlist
+ * under that engine's ids; unlinked, each engine's own list is.
+ */
+export interface SharedProviderCuration {
+  linked: boolean
+  models?: string[]
 }
 
 /**
@@ -95,11 +167,14 @@ export interface SharedProviderDefinition {
  *                            `disabled_providers`). The credential is fine.
  * - `models-restricted`    — a per-provider model allowlist filters every model
  *                            out (an empty allowlist surfaces nothing).
+ * - `no-credential`        — the engine reports models, but none for this
+ *                            provider id: no usable key, or a broken entry
+ *                            (pi's `models.json`).
  * - `no-models-discovered` — the engine reported no models at all: not installed,
  *                            or discovery failed.
  */
 export type SharedProviderRouteDiagnosis =
-  'provider-disabled' | 'models-restricted' | 'no-models-discovered'
+  'provider-disabled' | 'models-restricted' | 'no-credential' | 'no-models-discovered'
 
 export interface SharedProviderStatus {
   id: string

@@ -234,7 +234,7 @@ if (src.includes(PATCH_MARKER)) {
   // The app-state search keeps the ±window: getAppState/setAppState are locals
   // of the *enclosing* stream loop, and the nearest mentions can fall on either
   // side of the control_request branch.
-  const NEARBY_BACK = 16000
+  const NEARBY_BACK = 64000
   const chainCtx = src.slice(Math.max(chainStartIdx, anchorIdx - NEARBY_BACK), anchorIdx)
   const nearbyCtx = src.slice(Math.max(0, anchorIdx - NEARBY_BACK), anchorIdx + 2000)
 
@@ -244,10 +244,7 @@ if (src.includes(PATCH_MARKER)) {
   // the first: the window has had to grow twice, and a wide window that picks
   // "whatever matched first" is how an unrelated handler's reply helper gets
   // silently adopted. See the identical note in queue-control/apply.mjs.
-  const successRe = new RegExp(
-    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
-    'g'
-  )
+  const successRe = new RegExp(`(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)`, 'g')
   const successNames = [...chainCtx.matchAll(successRe)].map((m) => m[1])
   if (successNames.length === 0) {
     console.error(

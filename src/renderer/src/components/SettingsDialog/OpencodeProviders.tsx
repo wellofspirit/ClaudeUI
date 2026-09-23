@@ -211,7 +211,10 @@ export function OpencodeProviderConfigModal({
       providers: Object.keys(providers).length > 0 ? providers : undefined
     }
     setCfg(updated)
-    window.api.saveOpencodeSettings(updated).catch(() => {})
+    // Never the allowlist this pane loaded at mount: the Manage sheet may have
+    // curated since, and `models:set-provider-allowlist` is its only writer.
+    const { modelAllowlist: _stale, ...settings } = updated
+    window.api.saveOpencodeSettings(settings).catch(() => {})
     useSessionStore.getState().reloadModels()
   }
 

@@ -4,8 +4,15 @@ import { authVault } from '../auth/vault/AuthVault'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { SharedProviderModel } from '../../shared/shared-provider'
 import { aggregateChatgptModels } from './chatgpt-model-catalog'
-import { discoverOpencodeModels } from '../opencode/model-discovery'
+import {
+  discoverOpencodeModels,
+  discoverOpencodeProviderCatalog
+} from '../opencode/model-discovery'
+import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { resolveOpencodeAuthJsonPath } from '../opencode/auth-store'
+import { PI_API_KEY_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { discoverPiModels } from '../pi/model-discovery'
+import { authJsonApiKeyReader } from './native-api-keys'
 import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
 import { PiSharedProviderAdapter } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
@@ -30,5 +37,21 @@ export const sharedProviderService = new SharedProviderService({
   pi: new PiSharedProviderAdapter({ auth: piAuthProvider }),
   opencode: new OpencodeSharedProviderAdapter({ authTarget: opencodeAuthProvider }),
   credentialSync,
-  getChatgptModels
+  getChatgptModels,
+  // ADR-074 §6 adoption: plain API-key entries in each engine's own auth.json
+  // (`api` on opencode, `api_key` on pi). opencode's catalog costs a server
+  // spawn, so the service asks for it only once a vendor holds a key in both.
+  nativeKeys: {
+    pi: authJsonApiKeyReader(() => piAuthProvider.authFilePath(), 'api_key'),
+    opencode: authJsonApiKeyReader(resolveOpencodeAuthJsonPath, 'api'),
+    loadCatalogs: async (options) => ({
+      pi: new Set(PI_API_KEY_VENDOR_IDS),
+      opencode: new Map(
+        (!options?.skipOpencode && opencodeServerManager.isBinaryAvailable()
+          ? await discoverOpencodeProviderCatalog()
+          : []
+        ).map((entry) => [entry.id, entry.name] as const)
+      )
+    })
+  }
 })

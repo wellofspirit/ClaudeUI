@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import type { AgentRoster } from '../../hooks/useAgentRoster'
+import { AgentRosterList } from '../agents/AgentRosterList'
 import { TaskEntry } from './TaskEntry'
 import { BashBackgroundEntry } from './BashBackgroundEntry'
 
@@ -12,6 +14,11 @@ export interface TaskEntryDescriptor {
 export interface TaskDetailPanelViewProps {
   style?: React.CSSProperties
   entries: TaskEntryDescriptor[]
+  /** Every agent and background shell in the session — the list above the stack. */
+  roster: AgentRoster
+  /** Which of them are open below, so the roster can show what is selected. */
+  openedToolUseIds: string[]
+  onOpenAgent: (toolUseId: string) => void
   onClose: () => void
   /**
    * 'panel' (default) is the desktop side panel — bordered, its own "Tasks"
@@ -44,6 +51,9 @@ function PanelEntry({ entry }: { entry: TaskEntryDescriptor }): React.JSX.Elemen
 export function TaskDetailPanelView({
   style,
   entries,
+  roster,
+  openedToolUseIds,
+  onOpenAgent,
   onClose,
   variant = 'panel'
 }: TaskDetailPanelViewProps): React.JSX.Element {
@@ -136,7 +146,16 @@ export function TaskDetailPanelView({
         </div>
       )}
 
-      <div ref={containerRef} className="flex-1 min-h-0 flex flex-col">
+      <div className="shrink-0 border-b border-border">
+        <AgentRosterList
+          roster={roster}
+          selectedIds={openedToolUseIds}
+          onOpen={onOpenAgent}
+          emptyHint="No agents or background shells in this session yet."
+        />
+      </div>
+
+      <div ref={containerRef} className="flex-1 min-h-0 flex flex-col overflow-y-auto">
         {entries.map((entry, i) => (
           <div key={entry.toolUseId} className="contents">
             {i > 0 && <HResizeHandle onMouseDown={handleResizeMouseDown(i - 1)} />}

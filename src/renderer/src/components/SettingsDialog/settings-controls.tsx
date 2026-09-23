@@ -93,7 +93,12 @@ export interface SettingRowProps {
    * belong in the inline control column either.
    */
   trailing?: React.ReactNode
-  description?: string
+  /**
+   * A node rather than a string so a description can set a literal in mono
+   * (the Claude endpoint's "Sent as `Authorization: Bearer`" hint); plain text
+   * is still the norm.
+   */
+  description?: React.ReactNode
   /** The engine-native config key this row writes (11px mono, under the text). */
   keyText?: string
   /**
@@ -136,6 +141,12 @@ export interface SettingRowProps {
   layout?: 'inline' | 'stacked'
   /** Dependent-disabled: 50% opacity on label, description and control. */
   dimmed?: boolean
+  /**
+   * Whether `dimmed` reaches the control too (the default). A row that is
+   * dimmed because it is OFF still has a live switch — the API providers list's
+   * on/off — and turns this off so only its main column fades.
+   */
+  dimControls?: boolean
   /** Dependent rows nest exactly one level. */
   indent?: boolean
   /** Rendered before the label block (the radio circle of a `RadioRow`). */
@@ -168,6 +179,7 @@ export function SettingRow({
   locked,
   layout = 'inline',
   dimmed = false,
+  dimControls = dimmed,
   indent = false,
   leading,
   as = 'div',
@@ -274,8 +286,8 @@ export function SettingRow({
         <span
           className={
             layout === 'stacked'
-              ? `block w-full ${dimmed ? 'opacity-50' : ''}`
-              : `shrink-0 flex items-center justify-end gap-2 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimmed ? 'opacity-50' : ''}`
+              ? `block w-full ${dimControls ? 'opacity-50' : ''}`
+              : `shrink-0 flex items-center justify-end gap-2 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimControls ? 'opacity-50' : ''}`
           }
         >
           {layout === 'inline' && resetNode}
@@ -386,6 +398,7 @@ export function Segmented<T extends string>({
           // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
           data-testid={optionTestid ?? `${root}.option`}
           data-id={opt.value}
+          aria-pressed={value === opt.value}
           disabled={disabled || opt.disabled}
           onClick={() => onChange(opt.value)}
           className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default disabled:opacity-40 ${
@@ -808,6 +821,111 @@ export function RadioRow({
         />
       }
     />
+  )
+}
+
+export interface ChoiceCardOption<T extends string> {
+  value: T
+  label: string
+  description?: string
+  disabled?: boolean
+}
+
+/**
+ * A question with two or three answers that each change what the rest of the
+ * group shows — "where does Claude send requests", "all models or only the ones
+ * I pick". Side-by-side cards rather than `RadioRow`s, because the answer is
+ * the group's first decision and the rows under it depend on it (ADR-074).
+ *
+ * Radio semantics without native inputs: a `radiogroup` of `radio` buttons,
+ * one tab stop (the checked card, else the first enabled one), and the arrow
+ * keys move AND select, wrapping and skipping disabled cards — the WAI-ARIA
+ * radio pattern. Stacks below `md`, where two cards side by side would leave
+ * each description a few words per line.
+ */
+export function ChoiceCards<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  disabled = false,
+  testid
+}: {
+  value: T
+  options: ChoiceCardOption<T>[]
+  onChange: (value: T) => void
+  ariaLabel?: string
+  disabled?: boolean
+  testid?: string
+}): React.JSX.Element {
+  const root = testid ?? 'ChoiceCards'
+  const enabled = options.filter((o) => !disabled && !o.disabled)
+  const tabStop = enabled.some((o) => o.value === value) ? value : enabled[0]?.value
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>): void => {
+    const step =
+      e.key === 'ArrowRight' || e.key === 'ArrowDown'
+        ? 1
+        : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+          ? -1
+          : 0
+    if (step === 0 || enabled.length === 0) return
+    e.preventDefault()
+    const at = enabled.findIndex((o) => o.value === value)
+    const next = enabled[(at + step + enabled.length) % enabled.length]
+    onChange(next.value)
+    // Focus follows the selection, as a native radio group's does.
+    const cards = Array.from(e.currentTarget.parentElement?.children ?? [])
+    const target = cards.find((el) => el.getAttribute('data-id') === next.value)
+    if (target instanceof HTMLElement) target.focus()
+  }
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      data-testid={root}
+      className="flex gap-2 max-md:flex-col"
+    >
+      {options.map((opt) => {
+        const checked = opt.value === value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
+            data-testid={`${root}.option`}
+            data-id={opt.value}
+            disabled={disabled || opt.disabled}
+            tabIndex={opt.value === tabStop ? 0 : -1}
+            onClick={() => onChange(opt.value)}
+            onKeyDown={onKeyDown}
+            className={`flex-1 min-w-0 flex items-start gap-[9px] px-[11px] py-[9px] rounded-lg border text-left transition-colors cursor-default outline-none focus-visible:ring-1 focus-visible:ring-accent/60 disabled:opacity-40 ${
+              checked ? 'border-accent bg-accent/5' : 'border-border hover:border-border-bright'
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`w-3.5 h-3.5 mt-0.5 shrink-0 rounded-full ${
+                checked ? 'border-[4.5px] border-accent' : 'border-[1.5px] border-border-bright'
+              }`}
+            />
+            <span className="min-w-0">
+              <span className="block text-[13px] leading-[18px] text-text-primary">
+                {opt.label}
+              </span>
+              {opt.description && (
+                <span className="block text-[12px] leading-4 text-text-secondary mt-px">
+                  {opt.description}
+                </span>
+              )}
+            </span>
+          </button>
+        )
+      })}
+    </div>
   )
 }
 

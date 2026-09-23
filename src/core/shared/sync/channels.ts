@@ -213,7 +213,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: true,
-    why: 'activeTasks — without it a client that syncs mid-task reads an async Task as complete.'
+    why: 'activeTasks — without it a client that syncs mid-task reads an async Task as complete. Keyed by the agent’s origin tool_use id, so a resumed run re-arms the same record (ADR-073).'
   },
   'session:task-progress': {
     cls: 'replicated',

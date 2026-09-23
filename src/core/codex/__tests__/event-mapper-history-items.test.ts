@@ -23,6 +23,24 @@ const blocks = (item: ThreadItem, completed = true): unknown[] => {
   return event?.kind === 'message' ? event.message.content : []
 }
 
+describe('image references', () => {
+  it('preserves inline user images and visibly marks opaque file IDs', () => {
+    const item = {
+      type: 'userMessage',
+      id: 'item',
+      clientId: null,
+      content: [
+        { type: 'image', url: 'data:image/png;base64,QUJD' },
+        { type: 'image', fileId: 'opaque-user-image' }
+      ]
+    } as ThreadItem
+    expect(blocks(item)).toEqual([
+      { type: 'image', mediaType: 'image/png', base64Data: 'QUJD' },
+      { type: 'text', text: '[Native image reference is not an inline supported image]' }
+    ])
+  })
+})
+
 describe('webSearch', () => {
   const item = (results: unknown[] | null): ThreadItem =>
     ({
@@ -382,6 +400,7 @@ describe('functionCallOutput', () => {
         { type: 'input_text', text: 'line one' },
         { type: 'input_text', text: 'line two' },
         { type: 'input_image', image_url: 'data:image/png;base64,QUJD' },
+        { type: 'input_image', file_id: 'opaque-tool-image' },
         { type: 'encrypted_content', encrypted_content: 'nope' }
       ]
     } as unknown as ThreadItem

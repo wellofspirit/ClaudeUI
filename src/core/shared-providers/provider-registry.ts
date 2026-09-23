@@ -38,11 +38,10 @@
  * - **opencode** — the allowlist is PER PROVIDER (`opencodeConfig.modelAllowlist[id]`,
  *   key-presence gated, empty array = nothing). Curated → the allowlist length;
  *   otherwise the catalog's model count, falling back to the shared route's.
- * - **pi** — the allowlist is GLOBAL (`piConfig.modelAllowlist`, full
- *   `<provider>/<modelId>` values). Present → every pi provider is curated (one
- *   with no entry shows nothing), and the count is its own prefixed entries.
- *   Absent → the shared route's count, or nothing for a native row (pi exposes
- *   no per-provider catalog without a model discovery pass, which this read
+ * - **pi** — the same per-provider rule (`piConfig.modelAllowlist[id]`, bare
+ *   model ids, ADR-074 §1). Curated → the allowlist length; otherwise the
+ *   shared route's count, or nothing for a native row (pi exposes no
+ *   per-provider catalog without a model discovery pass, which this read
  *   deliberately does not make).
  */
 
@@ -53,6 +52,7 @@ import { piAuthProvider } from '../auth/PiAuthProvider'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { readOpencodeCredentialTypes } from '../opencode/auth-store'
 import { discoverOpencodeProviderCatalog } from '../opencode/model-discovery'
+import { peekPiCatalogCounts } from '../pi/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { loadEngineConfig } from '../services/ui-config'
 import type {
@@ -62,10 +62,12 @@ import type {
   ProviderEntry,
   ProviderRegistrySnapshot
 } from '../../shared/provider-registry'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition,
-  SharedProviderStatus
+import {
+  deliveredDefinition,
+  validateSharedProviderId,
+  type ConfigurableHarnessId,
+  type SharedProviderDefinition,
+  type SharedProviderStatus
 } from '../../shared/shared-provider'
 import type {
   AccountRef,
@@ -102,8 +104,8 @@ export interface ProviderRegistrySources {
   piVendors: Readonly<VendorAuthMap>
   /** `piAuthProvider.listVendorAuthOptions()` — pi's BUILT-IN vendor catalog, keyed by id. */
   piAuthOptions: Readonly<Record<string, VendorAuthOption[]>>
-  /** `piConfig.modelAllowlist` — global, full `<provider>/<modelId>` values. */
-  piModelAllowlist?: readonly string[]
+  /** `piConfig.modelAllowlist` — per-provider, key-presence gated, bare model ids. */
+  piModelAllowlist?: Readonly<Record<string, readonly string[]>>
   /** `accountState()` — the FILE-based accounts (ADR-015). Null in a headless boot. */
   accounts: AccountsState | null
   /**
@@ -120,13 +122,32 @@ export interface ProviderRegistrySources {
    * signal for the Anthropic row. Null when no host auth is wired (headless).
    */
   claudeAccount: AccountRef | null
+  /**
+   * `scanNativeKeys()`'s conflicts: vendors both engines hold a DIFFERENT key
+   * for, as last-four hints (ADR-074 §6). Absent or empty: none.
+   */
+  keyConflicts?: Readonly<Record<string, { opencode: string; pi: string }>>
+  /**
+   * `sharedProviderService.listPlainApiKeyVendorIds()` — the vendors each engine
+   * holds a PLAIN API key for, which is exactly what adoption can take (never an
+   * OAuth entry or opencode's `wellknown` client id). Ids only.
+   */
+  plainApiKeys?: Readonly<Record<ConfigurableHarnessId, readonly string[]>>
+  /** `peekPiCatalogCounts()` — models per provider in pi's WARM catalog; absent when cold. */
+  piCatalogCounts?: Readonly<Record<string, number>> | null
 }
 
-/** The unified list, ordered: Anthropic, then shared definitions, then natives. */
+/**
+ * The unified list, ordered: Anthropic, then shared definitions, then natives —
+ * except that a second key's entry sits right after its origin's row
+ * ("OpenRouter", "OpenRouter (Work)"), wherever that row is.
+ */
 export function buildProviderRegistry(sources: ProviderRegistrySources): ProviderRegistrySnapshot {
   const statuses = new Map(sources.statuses.map((status) => [status.id, status]))
   const catalog = new Map((sources.opencodeCatalog ?? []).map((entry) => [entry.id, entry]))
-  const owned = ownedNativeIds(sources.definitions)
+  // A provider switched off reaches no engine and owns no native row: the read
+  // model sees it as the engines do, with every route off (ADR-074 slice 10).
+  const owned = ownedNativeIds(sources.definitions.map(deliveredDefinition))
 
   const shared = sources.definitions
     .map((definition) => sharedEntry(definition, statuses.get(definition.id), catalog, sources))
@@ -145,10 +166,15 @@ export function buildProviderRegistry(sources: ProviderRegistrySources): Provide
     ...Object.entries(sources.piVendors)
       .filter(([vendorId]) => !owned.pi.has(vendorId))
       .map(([vendorId, status]) => piNativeEntry(vendorId, status, sources))
-  ].sort(byNameThenId)
+  ]
+    .map((entry) => withKeySharing(entry, sources, catalog))
+    .sort(byNameThenId)
 
   return {
-    entries: [anthropicEntry(sources.accounts, sources.claudeAccount), ...shared, ...natives],
+    entries: [
+      anthropicEntry(sources.accounts, sources.claudeAccount),
+      ...placeClones([...shared, ...natives])
+    ],
     opencodeInstalled: sources.opencodeCatalog !== null
   }
 }
@@ -177,6 +203,15 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
     // Never token material: getStatus() is the redacted snapshot (ADR-068 §2).
     credentialSync.getStatus()
   ])
+  // Last-four hints only, and a failed scan is no conflicts. It is handed the
+  // catalog just read, so a cold one is not fetched twice.
+  const nativeKeys = await sharedProviderService
+    .scanNativeKeys(
+      opencodeCatalog
+        ? { opencode: new Map(opencodeCatalog.map((entry) => [entry.id, entry.name])) }
+        : undefined
+    )
+    .catch(() => [])
   const definitions = sharedProviderService.listDefinitions()
   return buildProviderRegistry({
     definitions,
@@ -205,7 +240,14 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
     piAuthOptions,
     piModelAllowlist: loadEngineConfig('pi').piConfig?.modelAllowlist,
     accounts,
-    claudeAccount: buildClaudeAccountRef(accounts?.activeId ?? null)
+    claudeAccount: buildClaudeAccountRef(accounts?.activeId ?? null),
+    plainApiKeys: sharedProviderService.listPlainApiKeyVendorIds(),
+    piCatalogCounts: peekPiCatalogCounts(),
+    keyConflicts: Object.fromEntries(
+      nativeKeys.flatMap((candidate) =>
+        candidate.state === 'conflict' ? [[candidate.id, candidate.hints] as const] : []
+      )
+    )
   })
 }
 
@@ -236,24 +278,36 @@ function anthropicEntry(
   accounts: AccountsState | null,
   claudeAccount: AccountRef | null
 ): ProviderEntry {
+  // File-based accounts count only while Multiple accounts is ON: with it off,
+  // cli.js reads the Keychain login and a leftover account list describes
+  // nobody Claude runs as.
+  const fileAccounts = accounts?.enabled ? accounts.accounts : []
   const active =
-    accounts?.accounts.find((account) => account.id === accounts.activeId) ??
-    accounts?.accounts[0] ??
-    null
-  const signedIn =
-    claudeAccount?.authState === 'authenticated' || (accounts?.accounts.length ?? 0) > 0
+    fileAccounts.find((account) => account.id === accounts?.activeId) ?? fileAccounts[0] ?? null
+  const probed = claudeAccount?.authState === 'authenticated'
+  const signedIn = probed || active !== null
+  // ONE source for both halves, so a label and a plan never describe two
+  // different accounts: the active file account while one exists (it is what
+  // spawns read), else the probe.
+  const label = active ? (active.email ?? undefined) : (claudeAccount?.label ?? undefined)
+  const plan = active
+    ? (active.subscriptionType ?? undefined)
+    : billingLabel(claudeAccount?.billingType)
+  const unknown = !signedIn && claudeAccount?.authState === 'unknown'
   return {
     id: 'anthropic',
     name: 'Anthropic',
     origin: 'anthropic',
     credential: signedIn ? 'signed-in' : 'none',
     engines: { claude: { enabled: true } },
-    ...(!signedIn && claudeAccount?.authState === 'unknown'
+    subscription: true,
+    ...(signedIn && (label || plan)
+      ? { identity: { ...(label ? { label } : {}), ...(plan ? { plan } : {}) } }
+      : {}),
+    ...(unknown ? { signInUnknown: true as const } : {}),
+    ...(unknown
       ? { detail: 'Sign-in status is checked when the first Claude session starts.' }
-      : detail(
-          claudeAccount?.label ?? active?.email ?? undefined,
-          active?.subscriptionType ?? billingLabel(claudeAccount?.billingType)
-        ))
+      : detail(label, plan))
   }
 }
 
@@ -272,11 +326,12 @@ function billingLabel(billingType: BillingType | undefined): string | undefined 
 }
 
 function sharedEntry(
-  definition: SharedProviderDefinition,
+  stored: SharedProviderDefinition,
   status: SharedProviderStatus | undefined,
   catalog: ReadonlyMap<string, OpencodeProviderCatalogEntry>,
   sources: ProviderRegistrySources
 ): ProviderEntry {
+  const definition = deliveredDefinition(stored)
   const engines: ProviderEntry['engines'] = {}
   for (const harness of HARNESSES) {
     const route = definition.routes[harness]
@@ -285,20 +340,37 @@ function sharedEntry(
     // native row of the same id would be reading a provider this one does not
     // own (see the ownership gate above).
     if (!route.enabled) {
-      engines[harness] = { enabled: false }
+      // A catalog id is a vendor the engine already knows, so the engine may hold
+      // its OWN credential for it — which turning the route on would replace, and
+      // so would switching the provider back on when the route is on in its
+      // settings (the service compares the keys and asks; this is the hint).
+      const own =
+        definition.kind === 'catalog' &&
+        (harness === 'opencode'
+          ? sources.opencodeCredentialKinds[resolveNativeId(definition, harness)] !== undefined
+          : sources.piVendors[resolveNativeId(definition, harness)] !== undefined)
+      engines[harness] = {
+        enabled: false,
+        ...(stored.disabled && stored.routes[harness].enabled ? { routeOn: true as const } : {}),
+        ...(own ? { ownCredential: true as const } : {})
+      }
       continue
     }
     const nativeId = resolveNativeId(definition, harness)
     // `native` says the engine's OWN store holds this provider, not just ClaudeUI's.
     const native =
       harness === 'opencode' ? catalog.has(nativeId) : sources.piVendors[nativeId] !== undefined
+    const error = status?.routes[harness].error
     engines[harness] = {
       enabled: true,
+      providerId: nativeId,
       ...engineCounts(harness, nativeId, sources, {
         fallbackCount: status?.routes[harness].modelCount,
         catalogCount: catalog.get(nativeId)?.modelCount
       }),
-      ...(native ? { native: true } : {})
+      ...(native ? { native: true } : {}),
+      ...(error ? { error } : {}),
+      ...(status ? { delivered: status.routes[harness].delivered } : {})
     }
   }
   // The vault's account list belongs to the provider whose vault it is. Today
@@ -321,7 +393,15 @@ function sharedEntry(
     origin: 'shared',
     credential: sharedCredential(definition, status, accounts),
     engines,
+    ...(definition.kind === 'subscription' ? { subscription: true as const } : {}),
     ...(accounts ? { accounts } : {}),
+    ...(definition.disabled ? { disabled: true as const } : {}),
+    ...(definition.derivedFrom ? { derivedFrom: definition.derivedFrom } : {}),
+    ...(definition.kind === 'catalog'
+      ? { kindLabel: 'Catalog' }
+      : definition.kind === 'custom'
+        ? { kindLabel: customKindLabel(definition) }
+        : {}),
     ...sharedPiBuiltinId(definition),
     ...sharedDetail(definition, accounts),
     ...sharedDiagnosis(status)
@@ -359,10 +439,17 @@ function opencodeNativeEntry(
     credential: opencodeCredential(entry, sources.opencodeCredentialKinds),
     // `disabled_providers` is opencode's own veto: the provider is configured
     // but reaches no picker. Native by construction — this row IS the store entry.
-    engines: { opencode: { enabled: !entry.disabled, ...counts, native: true } },
+    engines: {
+      opencode: { enabled: !entry.disabled, providerId: entry.id, ...counts, native: true }
+    },
     // Carried, never re-derived: `removeKind` is what the remove channel must be
     // given, and it is non-null exactly when the provider can be removed at all.
     ...(entry.actions.removeKind ? { opencodeRemoveKind: entry.actions.removeKind } : {}),
+    kindLabel: entry.declaredEndpoint
+      ? 'Custom endpoint'
+      : entry.authState === 'free'
+        ? 'Catalog · free tier'
+        : 'Catalog',
     ...detail(
       entry.disabled ? 'Disabled in opencode' : undefined,
       counts.curated
@@ -388,10 +475,11 @@ function piNativeEntry(
     // pi has no per-provider veto: an entry in auth.json IS an enabled provider.
     // Turning the row off REMOVES it (owner ruling 1) — which is why there is no
     // disabled state to represent here.
-    engines: { pi: { enabled: true, ...counts, native: true } },
+    engines: { pi: { enabled: true, providerId: vendorId, ...counts, native: true } },
     // The SAME predicate as the detail line below, projected as a field so the
     // Manage sheet routes removal by data rather than by parsing prose.
     piKind: sources.piAuthOptions[vendorId] ? 'builtin' : 'custom',
+    kindLabel: sources.piAuthOptions[vendorId] ? 'Catalog' : 'Custom pi provider',
     // The SAME predicate again, deliberately side by side: a vendor pi ships is
     // exactly a vendor whose models.json entry is an OVERRIDE of pi's own
     // definition rather than a declaration of its own, and the two answers must
@@ -410,6 +498,83 @@ function piNativeEntry(
 // ---------------------------------------------------------------------------
 // Rules
 // ---------------------------------------------------------------------------
+
+/**
+ * Key-sharing facts on a NATIVE row (ADR-074 §6): the conflict hints when both
+ * engines hold a different key, or `adoptable` when only this engine holds a
+ * plain API key for a vendor the other engine's catalog also knows. A vendor a
+ * definition already claims by id is never either — it is shared already, or
+ * its definition is the thing to fix.
+ */
+function withKeySharing(
+  entry: ProviderEntry,
+  sources: ProviderRegistrySources,
+  catalog: ReadonlyMap<string, OpencodeProviderCatalogEntry>
+): ProviderEntry {
+  if (entry.origin !== 'opencode-native' && entry.origin !== 'pi-native') return entry
+  const vendorId = entry.id.slice(entry.id.indexOf(':') + 1)
+  if (!isSharedId(vendorId) || sources.definitions.some((d) => d.id === vendorId)) return entry
+  const conflict = sources.keyConflicts?.[vendorId]
+  if (conflict) return { ...entry, keyConflict: conflict }
+  // The same three facts `adoptNativeKey` checks: this engine holds a PLAIN key
+  // it can take, both engines' catalogs know the vendor (pi's is its API-key
+  // vendor list), and the other engine holds nothing of its own for it — so it
+  // really would be "used for both".
+  const piKnows = sources.piAuthOptions[vendorId]?.some((option) => option.type === 'api')
+  if (!piKnows || !catalog.has(vendorId)) return entry
+  const engine = entry.origin === 'opencode-native' ? 'opencode' : 'pi'
+  if (!sources.plainApiKeys?.[engine].includes(vendorId)) return entry
+  const otherHolds =
+    engine === 'opencode'
+      ? sources.piVendors[vendorId] !== undefined
+      : sources.opencodeCredentialKinds[vendorId] !== undefined
+  return otherHolds ? entry : { ...entry, adoptable: engine }
+}
+
+/**
+ * Move each second key's entry to just after its origin's row — the shared
+ * definition of that id, else the engine's own row for it — keeping the rest of
+ * the order, and the clones' own order among themselves. A clone whose origin
+ * has no row stays where the sort put it.
+ */
+function placeClones(entries: readonly ProviderEntry[]): ProviderEntry[] {
+  const rowId = (entry: ProviderEntry): string => entry.id.slice(entry.id.indexOf(':') + 1)
+  const originOf = (clone: ProviderEntry): ProviderEntry | undefined =>
+    entries.find((entry) => entry.id === clone.derivedFrom && entry.origin === 'shared') ??
+    entries.find(
+      (entry) =>
+        (entry.origin === 'opencode-native' || entry.origin === 'pi-native') &&
+        rowId(entry) === clone.derivedFrom
+    )
+  const placed = new Map<string, ProviderEntry[]>()
+  const clones = new Set<ProviderEntry>()
+  for (const entry of entries) {
+    const origin = entry.derivedFrom ? originOf(entry) : undefined
+    if (!origin || origin === entry) continue
+    placed.set(origin.id, [...(placed.get(origin.id) ?? []), entry])
+    clones.add(entry)
+  }
+  return entries.flatMap((entry) =>
+    clones.has(entry) ? [] : [entry, ...(placed.get(entry.id) ?? [])]
+  )
+}
+
+/** `Custom endpoint · <url>`, with the route default model when one is set. */
+function customKindLabel(definition: SharedProviderDefinition): string {
+  const defaultModel = HARNESSES.map((harness) => definition.routes[harness].defaultModel).find(
+    Boolean
+  )
+  return ['Custom endpoint', definition.baseUrl, defaultModel].filter(Boolean).join(' · ')
+}
+
+function isSharedId(id: string): boolean {
+  try {
+    validateSharedProviderId(id)
+    return true
+  } catch {
+    return false
+  }
+}
 
 /** A catalog entry the user has actually set up (or vetoed) — the row predicate. */
 function isConfiguredOpencodeProvider(entry: OpencodeProviderCatalogEntry): boolean {
@@ -444,28 +609,31 @@ function engineCounts(
   nativeId: string,
   sources: ProviderRegistrySources,
   fallbacks: { fallbackCount?: number; catalogCount?: number }
-): Pick<ProviderEngineFacts, 'modelCount' | 'curated'> {
-  if (harness === 'opencode') {
-    const allowed = sources.opencodeModelAllowlist[nativeId]
-    if (allowed) return { modelCount: allowed.length, curated: true }
-    const count = fallbacks.catalogCount ?? fallbacks.fallbackCount
-    return count === undefined ? {} : { modelCount: count }
-  }
-  const allowlist = sources.piModelAllowlist
-  if (allowlist) {
-    const prefix = `${nativeId}/`
-    return {
-      modelCount: allowlist.filter((value) => value.startsWith(prefix)).length,
-      curated: true
-    }
-  }
-  return fallbacks.fallbackCount === undefined ? {} : { modelCount: fallbacks.fallbackCount }
+): Pick<ProviderEngineFacts, 'modelCount' | 'curated' | 'catalogCount'> {
+  // The catalog size, when a source knows it without a discovery pass: opencode's
+  // own catalog entry, else the shared route's count (a custom definition's model
+  // list). pi has no per-provider catalog read here, so a native pi row has none.
+  const total =
+    harness === 'opencode'
+      ? (fallbacks.catalogCount ?? fallbacks.fallbackCount)
+      : (fallbacks.fallbackCount ?? sources.piCatalogCounts?.[nativeId])
+  const catalogCount = total === undefined ? {} : { catalogCount: total }
+  const allowed =
+    harness === 'opencode'
+      ? sources.opencodeModelAllowlist[nativeId]
+      : sources.piModelAllowlist?.[nativeId]
+  if (allowed) return { modelCount: allowed.length, curated: true, ...catalogCount }
+  return total === undefined ? {} : { modelCount: total, ...catalogCount }
 }
 
 /**
  * A shared provider's credential is the CENTRAL one (`status.connected` is the
  * vault record), never a per-route peek: the whole point of the shared vault is
  * that the credential is held once and vended to each enabled engine.
+ *
+ * A custom endpoint with no stored key reads `keyless`, not `none` (ADR-074
+ * §4): self-hosted servers are normally used without one, and the pi
+ * projection writes a placeholder so pi still sees the provider.
  */
 function sharedCredential(
   definition: SharedProviderDefinition,
@@ -476,7 +644,7 @@ function sharedCredential(
   // that cannot be stale: the status read resolves the ACTIVE account, so a
   // provider mid-switch must not flicker through "Not connected".
   if (accounts && accounts.list.length > 0) return 'connected'
-  if (!status?.connected) return 'none'
+  if (!status?.connected) return definition.kind === 'custom' ? 'keyless' : 'none'
   return definition.kind === 'subscription' ? 'connected' : 'api-key'
 }
 
@@ -516,6 +684,9 @@ function sharedDetail(
     )
     return detail(definition.baseUrl, defaultModel)
   }
+  // A catalog provider's kind is its whole description; the engine pills carry
+  // which engines it reaches (ADR-074 §7).
+  if (definition.kind === 'catalog') return detail('Catalog')
   const enabled = HARNESSES.filter((harness) => definition.routes[harness].enabled)
   return detail(
     `${definition.name} subscription`,
@@ -524,14 +695,18 @@ function sharedDetail(
 }
 
 /**
- * One diagnosis per row, preferring opencode's: it is the only route that can
- * distinguish WHY it is empty (a provider veto vs a model allowlist), so pi's
- * invariant `no-models-discovered` would only ever hide a more precise answer.
+ * One diagnosis per row: the first PRECISE cause (opencode's, then pi's), and
+ * only then the generic `no-models-discovered` — both routes can now say why
+ * they are empty (ADR-074 §5), and the generic answer from one must not hide a
+ * precise one from the other.
  */
 function sharedDiagnosis(status: SharedProviderStatus | undefined): {
   diagnosis?: SharedProviderStatus['routes'][ConfigurableHarnessId]['diagnosis']
 } {
-  const diagnosis = status?.routes.opencode.diagnosis ?? status?.routes.pi.diagnosis
+  const found = [status?.routes.opencode.diagnosis, status?.routes.pi.diagnosis].filter(
+    (diagnosis) => diagnosis !== undefined
+  )
+  const diagnosis = found.find((cause) => cause !== 'no-models-discovered') ?? found[0]
   return diagnosis ? { diagnosis } : {}
 }
 

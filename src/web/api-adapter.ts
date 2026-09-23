@@ -347,6 +347,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
     setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+    setSharedProviderCuration: (id, curation) =>
+      unwrap('shared-provider:set-curation', id, curation),
+    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>
@@ -1000,6 +1005,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
     readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
     patchPiModels: (patches) => unwrap('config:patch-pi-models', patches),
+    setProviderModelAllowlist: (engine, providerId, models) =>
+      unwrap('models:set-provider-allowlist', engine, providerId, models),
 
     // opencode agent CRUD — the same family, split across two capabilities:
     // `config` for the five file verbs, `chat` for `generate` because it spends

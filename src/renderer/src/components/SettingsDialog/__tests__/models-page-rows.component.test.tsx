@@ -1,230 +1,287 @@
 /**
- * Layer 2: the two Models & providers groups ADR-065 phase 3A put on the row
- * vocabulary — Anthropic endpoint (`vendor-anthropic`) and Default models ›
- * Claude (`effortDefaults`).
+ * Layer 2: Models & providers › Default models › Claude (ADR-074 §8) —
+ * `ClaudeDefaultsSection`, rendered through its `effortDefaults` item.
  *
- * Both used to be forms of their own: uppercase sub-headers with 10px labels
- * over bare inputs, dependent fields that VANISHED when their master toggle was
- * off, and a prose footer repeating what the group header now says. What is
- * guarded here is the behaviour that changed with the vocabulary, not the markup:
+ * The rows used to be a hard-coded list of five model ids; they are now built
+ * from the live Claude catalog in the store. What is guarded here:
  *
- *  - a dependent row stays MOUNTED and readable when its parent is off, and is
- *    disabled rather than absent (ADR-065's dependent-row rule);
- *  - the auth token is masked until Reveal, which is a per-view toggle;
- *  - every write still goes through `updateVendorConfig` with the whole-object
- *    patch shape the pre-redesign form used — byte-identical to the file;
- *  - an effort row is "modified" when its key is PRESENT in
- *    `modelEffortDefaults` (the object-valued setting the phase-1 `appDefault`
- *    helper cannot compare), and Reset DELETES that key rather than writing the
- *    default level.
+ *  - one effort row per `claudeEffortKey`, so an alias and the model it resolves
+ *    to share a row, with the aliases listed and the levels taken from the row;
+ *  - a model with no effort control says so instead of offering a select;
+ *  - "Start new sessions on" writes `claudeConfig.defaultModel` (blank DELETES
+ *    it) and mirrors the store, and never offers `default` twice;
+ *  - a saved effort the account no longer offers is folded, with Remove;
+ *  - a pinned model (Claude › Model mapping) banners and dims the default row;
+ *  - an unloaded catalog says so, with Refresh, and keeps the saved list.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
-import type { AppSettings } from '../../../stores/session-store'
-import type { VendorConfig } from '../../../../../shared/types'
+import { useSessionStore, type AppSettings } from '../../../stores/session-store'
+import type { EngineConfig, ModelInfo, VendorConfig } from '../../../../../shared/types'
 
 afterEach(cleanup)
 
-// ── Anthropic endpoint ───────────────────────────────────────────────
+const T = 'ClaudeDefaultsSection'
 
-function renderAnthropic(vendorConfig: VendorConfig): {
-  updateVendorConfig: ReturnType<typeof vi.fn>
-} {
-  const updateVendorConfig = vi.fn()
-  const item = SECTIONS.find((s) => s.id === 'vendor-anthropic')!.items[0]
-  render(
-    item.render(
-      {} as never,
-      () => {},
-      {} as never,
-      () => {},
-      vendorConfig,
-      updateVendorConfig as never
-    )
-  )
-  return { updateVendorConfig }
-}
+const row = (
+  value: string,
+  resolvedModel: string,
+  displayName: string,
+  extra: Partial<ModelInfo> = {}
+): ModelInfo => ({
+  value,
+  resolvedModel,
+  displayName,
+  description: '',
+  engineId: 'claude',
+  vendorId: 'anthropic',
+  ...extra
+})
 
-const V = 'VendorAnthropicEditableForm'
+const FIVE: ModelInfo['supportedEffortLevels'] = ['low', 'medium', 'high', 'xhigh', 'max']
+const CATALOG: ModelInfo[] = [
+  row('default', 'claude-opus-5[1m]', 'Default (recommended)', {
+    supportsEffort: true,
+    supportedEffortLevels: FIVE
+  }),
+  row('opus[1m]', 'claude-opus-5[1m]', 'Opus 5 (1M)', {
+    supportsEffort: true,
+    supportedEffortLevels: FIVE
+  }),
+  row('sonnet', 'claude-sonnet-5', 'Sonnet 5', {
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh']
+  }),
+  row('sonnet[1m]', 'claude-sonnet-5', 'Sonnet 5 (1M)', {
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh']
+  }),
+  row('haiku', 'claude-haiku-4-5-20251001', 'Haiku 4.5', { supportsEffort: false }),
+  // Another engine's row must never reach the Claude table.
+  { value: 'openai/gpt-5.5', displayName: 'GPT', description: '', engineId: 'opencode' }
+]
 
-const ENDPOINT_ON: VendorConfig = {
-  endpoint: { enabled: true, baseUrl: 'https://gw.example.com', authToken: 'sk-ant-secret' }
-}
-
-describe('Anthropic endpoint rows', () => {
-  it('keeps the dependent rows mounted and readable when the toggle is OFF', () => {
-    renderAnthropic({
-      endpoint: { enabled: false, baseUrl: 'https://gw.example.com', authToken: '' }
-    })
-
-    // The old form unmounted these entirely, so what was configured was
-    // invisible until you flipped the switch to find out (ADR-065).
-    const baseUrl = screen.getByTestId(`${V}.baseUrl`) as HTMLInputElement
-    expect(baseUrl.value).toBe('https://gw.example.com')
-    expect(baseUrl.disabled).toBe(true)
-    expect((screen.getByTestId(`${V}.authToken`) as HTMLInputElement).disabled).toBe(true)
-    // Dimmed, one nesting level in — never removed.
-    expect(screen.getByTestId(`${V}.baseUrlRow`).className).toContain('pl-[38px]')
-  })
-
-  it('enables them when the toggle is ON', () => {
-    renderAnthropic(ENDPOINT_ON)
-    expect((screen.getByTestId(`${V}.baseUrl`) as HTMLInputElement).disabled).toBe(false)
-    expect((screen.getByTestId(`${V}.authToken`) as HTMLInputElement).disabled).toBe(false)
-  })
-
-  it('masks the auth token until Reveal, and re-masks on a second press', () => {
-    renderAnthropic(ENDPOINT_ON)
-
-    const token = (): HTMLInputElement => screen.getByTestId(`${V}.authToken`) as HTMLInputElement
-    expect(token().type).toBe('password')
-
-    fireEvent.click(screen.getByTestId(`${V}.revealToken`))
-    expect(token().type).toBe('text')
-    expect(token().value).toBe('sk-ant-secret')
-
-    fireEvent.click(screen.getByTestId(`${V}.revealToken`))
-    expect(token().type).toBe('password')
-  })
-
-  it('writes the WHOLE endpoint object on every edit, exactly as before', () => {
-    const { updateVendorConfig } = renderAnthropic(ENDPOINT_ON)
-
-    fireEvent.change(screen.getByTestId(`${V}.baseUrl`), {
-      target: { value: 'https://other.example.com' }
-    })
-
-    expect(updateVendorConfig).toHaveBeenCalledWith({
-      endpoint: {
-        enabled: true,
-        baseUrl: 'https://other.example.com',
-        authToken: 'sk-ant-secret'
-      }
-    })
-  })
-
-  it('still edits all four model-override fields, each writing the whole object', () => {
-    // `claude-spawn-prep` maps every one of these onto an
-    // ANTHROPIC_DEFAULT_*_MODEL env var, so dropping three of them would orphan
-    // three live settings.
-    const { updateVendorConfig } = renderAnthropic({
-      modelOverride: {
-        enabled: true,
-        model: 'm',
-        sonnetModel: 's',
-        opusModel: 'o',
-        haikuModel: 'h'
-      }
-    })
-
-    const fields = screen.getAllByTestId(`${V}.modelField`).map((el) => el.getAttribute('data-id'))
-    expect(fields).toEqual(['model', 'sonnetModel', 'opusModel', 'haikuModel'])
-
-    const opus = screen
-      .getAllByTestId(`${V}.modelField`)
-      .find((el) => el.getAttribute('data-id') === 'opusModel')!
-    fireEvent.change(opus, { target: { value: 'claude-opus-4-8' } })
-
-    expect(updateVendorConfig).toHaveBeenCalledWith({
-      modelOverride: {
-        enabled: true,
-        model: 'm',
-        sonnetModel: 's',
-        opusModel: 'claude-opus-4-8',
-        haikuModel: 'h'
-      }
-    })
-  })
-
-  it('has no uppercase sub-headers and no prose footer left', () => {
-    renderAnthropic(ENDPOINT_ON)
-    // "Applies on next session start / persists to vendors/anthropic.json" is
-    // the group's applies-on badge plus its storage tag now — not a third copy
-    // in 10px muted type at the bottom of the card.
-    const text = screen.getByTestId(V).textContent ?? ''
-    expect(text).not.toContain('Persists to vendors/anthropic.json')
-    expect(text).not.toContain('ENDPOINT')
+beforeEach(() => {
+  useSessionStore.setState({
+    availableModels: CATALOG,
+    claudeDefaultModel: '',
+    claudeDefaultModelConfigured: false
   })
 })
 
-// ── Default models › Claude (per-model effort) ───────────────────────
-
-function renderEffortRows(settings: Partial<AppSettings>): {
+function renderSection({
+  settings = {},
+  engineConfig = {},
+  vendorConfig = {}
+}: {
+  settings?: Partial<AppSettings>
+  engineConfig?: EngineConfig
+  vendorConfig?: VendorConfig
+} = {}): {
   update: ReturnType<typeof vi.fn>
+  updateEngineConfig: ReturnType<typeof vi.fn>
+  navigate: ReturnType<typeof vi.fn>
 } {
   const update = vi.fn()
+  const updateEngineConfig = vi.fn()
+  const navigate = vi.fn()
   const section = SECTIONS.find((s) => s.id === 'effortDefaults')!
+  expect(section.items.map((i) => i.key)).toEqual(['claudeDefaults'])
   render(
-    <div>
-      {section.items.map((item) => (
-        <div key={item.key}>
-          {item.render(
-            settings as AppSettings,
-            update as never,
-            {} as never,
-            () => {},
-            {} as never,
-            () => {}
-          )}
-        </div>
-      ))}
-    </div>
+    section.items[0].render(
+      settings as AppSettings,
+      update as never,
+      engineConfig,
+      updateEngineConfig as never,
+      vendorConfig,
+      () => {},
+      { navigate } as never
+    )
   )
-  return { update }
+  return { update, updateEngineConfig, navigate }
 }
 
-function effortRow(modelId: string): HTMLElement {
-  const row = screen
-    .getAllByTestId('ModelEffortRow')
-    .find((el) => el.getAttribute('data-id') === modelId)
-  expect(row, `ModelEffortRow for ${modelId}`).toBeTruthy()
-  return row!
-}
+const effortRow = (key: string): HTMLElement =>
+  screen.getAllByTestId(`${T}.effortRow`).find((el) => el.getAttribute('data-id') === key)!
 
-describe('Default models › Claude effort rows', () => {
-  it('is a row per model: display name, canonical id as the config key, one select', () => {
-    renderEffortRows({})
-
-    const ids = screen.getAllByTestId('ModelEffortRow').map((el) => el.getAttribute('data-id'))
-    expect(ids).toEqual([
+describe('Default models › Claude — the effort table', () => {
+  it('is one row per resolved model, in catalog order, with the aliases that reach it', () => {
+    renderSection()
+    expect(screen.getAllByTestId(`${T}.effortRow`).map((r) => r.getAttribute('data-id'))).toEqual([
+      'claude-opus-5',
       'claude-sonnet-5',
-      'claude-sonnet-4-6',
-      'claude-opus-4-7',
-      'claude-opus-4-8',
-      'claude-fable-5'
+      'claude-haiku-4-5'
     ])
-
-    const row = effortRow('claude-opus-4-8')
-    expect(row.textContent).toContain('Opus 4.8')
-    expect(row.textContent).toContain('claude-opus-4-8')
-    expect(within(row).getByTestId('ModelEffortRow.effort')).toBeTruthy()
+    // The name is not "Default (recommended)": the first non-`default` row names it.
+    expect(effortRow('claude-opus-5').textContent).toContain('Opus 5 (1M)')
+    const aliases = (key: string): string =>
+      screen.getAllByTestId(`${T}.aliases`).find((el) => el.getAttribute('data-id') === key)!
+        .textContent ?? ''
+    expect(aliases('claude-opus-5')).toBe('defaultopus[1m]')
+    expect(aliases('claude-sonnet-5')).toBe('sonnetsonnet[1m]')
   })
 
-  it('marks a row modified only when ITS key is present in modelEffortDefaults', () => {
-    renderEffortRows({ modelEffortDefaults: { 'claude-opus-4-8': 'max' } })
-
-    // The accent dot is gone (2026-09-08); the hover Reset is the marker, and
-    // the row always passes `onReset`, so its presence IS "this row is
-    // modified".
-    expect(within(effortRow('claude-opus-4-8')).queryByTestId('ModelEffortRow.reset')).toBeTruthy()
-    expect(within(effortRow('claude-sonnet-5')).queryByTestId('ModelEffortRow.reset')).toBeNull()
+  it("offers each model's OWN levels, and no select at all without effort control", () => {
+    renderSection()
+    const select = within(effortRow('claude-sonnet-5')).getByTestId(`${T}.effort`)
+    expect(select).toBeTruthy()
+    expect(within(effortRow('claude-haiku-4-5')).queryByTestId(`${T}.effort`)).toBeNull()
+    expect(within(effortRow('claude-haiku-4-5')).getByTestId(`${T}.noEffort`).textContent).toBe(
+      'No effort control'
+    )
   })
 
-  it('Reset DELETES the key rather than writing the default level', () => {
-    const { update } = renderEffortRows({
-      modelEffortDefaults: { 'claude-opus-4-8': 'max', 'claude-sonnet-5': 'low' }
+  it('marks the row a new session starts on: `default` unset, the configured value when set', () => {
+    renderSection()
+    expect(within(effortRow('claude-opus-5')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
+    cleanup()
+    renderSection({ engineConfig: { claudeConfig: { defaultModel: 'sonnet[1m]' } } })
+    expect(within(effortRow('claude-sonnet-5')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
+    expect(within(effortRow('claude-opus-5')).queryByTestId(`${T}.startsHere`)).toBeNull()
+  })
+
+  it('reset DELETES the key rather than writing the default level', () => {
+    const { update } = renderSection({
+      settings: { modelEffortDefaults: { 'claude-opus-5': 'max', 'claude-sonnet-5': 'low' } }
     })
-
-    fireEvent.click(within(effortRow('claude-opus-4-8')).getByTestId('ModelEffortRow.reset'))
-
+    expect(within(effortRow('claude-sonnet-5')).queryByTestId(`${T}.effortReset`)).toBeTruthy()
+    fireEvent.click(within(effortRow('claude-opus-5')).getByTestId(`${T}.effortReset`))
     expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { 'claude-sonnet-5': 'low' } })
-    expect(update.mock.calls[0][0].modelEffortDefaults).not.toHaveProperty('claude-opus-4-8')
   })
 
-  it('replaces the 11px footer with a description-only row', () => {
-    renderEffortRows({})
-    const note = screen.getByTestId('EffortDefaultsNote')
-    expect(note.textContent).toContain('per-session effort chip always wins')
+  it('folds a saved effort for a model the account no longer offers, with Remove', () => {
+    const { update } = renderSection({
+      settings: { modelEffortDefaults: { 'claude-opus-4-7': 'xhigh', 'claude-sonnet-5': 'low' } }
+    })
+    const toggle = screen.getByTestId(`${T}.orphansToggle`)
+    expect(toggle.textContent).toContain(
+      '1 saved setting for a model this account no longer offers'
+    )
+    expect(screen.queryByTestId(`${T}.orphan`)).toBeNull()
+    fireEvent.click(toggle)
+    expect(screen.getByTestId(`${T}.orphan`).textContent).toContain('starts at Extra high')
+    fireEvent.click(screen.getByTestId(`${T}.orphanRemove`))
+    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { 'claude-sonnet-5': 'low' } })
+  })
+})
+
+describe('Default models › Claude — Start new sessions on', () => {
+  const openPicker = (): HTMLElement[] => {
+    fireEvent.click(
+      within(screen.getByTestId(`${T}.defaultModel`)).getByTestId('ModelPicker.trigger')
+    )
+    return screen.getAllByTestId('ModelPicker.option')
+  }
+
+  it('names what Default resolves to, and does not offer `default` a second time', () => {
+    renderSection()
+    const options = openPicker()
+    expect(options[0].textContent).toBe('Default (recommended) → Opus 5 (1M)')
+    // `default` collapses away; its concrete twin `opus[1m]` survives the dedupe.
+    expect(options.map((o) => o.getAttribute('data-value'))).toEqual([
+      '',
+      'opus[1m]',
+      'sonnet',
+      'haiku'
+    ])
+  })
+
+  it('writes claudeConfig.defaultModel and mirrors the store', () => {
+    const { updateEngineConfig } = renderSection()
+    fireEvent.click(openPicker().find((o) => o.getAttribute('data-value') === 'sonnet')!)
+    expect(updateEngineConfig).toHaveBeenCalledWith({ claudeConfig: { defaultModel: 'sonnet' } })
+    expect(useSessionStore.getState().claudeDefaultModel).toBe('sonnet')
+    expect(useSessionStore.getState().claudeDefaultModelConfigured).toBe(true)
+  })
+
+  it('choosing Default deletes the key and clears the store flag', () => {
+    useSessionStore.setState({ claudeDefaultModel: 'sonnet', claudeDefaultModelConfigured: true })
+    const { updateEngineConfig } = renderSection({
+      engineConfig: { claudeConfig: { defaultModel: 'sonnet' } }
+    })
+    fireEvent.click(openPicker()[0])
+    expect(updateEngineConfig).toHaveBeenCalledWith({ claudeConfig: {} })
+    expect(useSessionStore.getState().claudeDefaultModelConfigured).toBe(false)
+  })
+
+  it('warns when the configured default is no longer offered', () => {
+    renderSection({ engineConfig: { claudeConfig: { defaultModel: 'claude-opus-4-7' } } })
+    expect(screen.getByTestId(`${T}.defaultModel.staleModel`).textContent).toContain(
+      'claude-opus-4-7'
+    )
+  })
+})
+
+describe('Default models › Claude — model mapping banners', () => {
+  it('a pinned model banners, dims the default-model row, and links to Model mapping', () => {
+    const { navigate } = renderSection({
+      vendorConfig: {
+        modelOverride: {
+          enabled: true,
+          pinEnabled: true,
+          renameEnabled: false,
+          model: 'gw-large',
+          sonnetModel: 'gw-sonnet',
+          opusModel: '',
+          haikuModel: ''
+        }
+      }
+    })
+    expect(screen.getByTestId(`${T}.pinBanner`).textContent).toContain('gw-large')
+    expect(screen.queryByTestId(`${T}.renameBanner`)).toBeNull()
+    expect(screen.getByTestId(`${T}.defaultModelRow`).innerHTML).toContain('opacity-50')
+    fireEvent.click(screen.getByTestId(`${T}.pinBanner.open`))
+    expect(navigate).toHaveBeenCalledWith({ page: 'claude', group: 'model-mapping' })
+  })
+
+  it('renamed aliases banner the renames and leave the default-model row alone', () => {
+    renderSection({
+      vendorConfig: {
+        modelOverride: {
+          enabled: true,
+          pinEnabled: false,
+          renameEnabled: true,
+          model: 'gw-large',
+          sonnetModel: 'gw-sonnet',
+          opusModel: '',
+          haikuModel: ''
+        }
+      }
+    })
+    const banner = screen.getByTestId(`${T}.renameBanner`).textContent ?? ''
+    expect(banner).toContain('sonnet → gw-sonnet')
+    expect(banner).not.toContain('opus →')
+    expect(screen.queryByTestId(`${T}.pinBanner`)).toBeNull()
+    expect(screen.getByTestId(`${T}.defaultModelRow`).innerHTML).not.toContain('opacity-50')
+  })
+
+  it('no mapping, no banner', () => {
+    renderSection()
+    expect(screen.queryByTestId(`${T}.pinBanner`)).toBeNull()
+    expect(screen.queryByTestId(`${T}.renameBanner`)).toBeNull()
+  })
+})
+
+describe('Default models › Claude — catalog not loaded', () => {
+  it('says so with Refresh, and keeps the saved efforts reachable', () => {
+    useSessionStore.setState({ availableModels: [] })
+    renderSection({ settings: { modelEffortDefaults: { 'claude-opus-5': 'max' } } })
+    expect(screen.getByTestId(`${T}.notLoaded`).textContent).toContain(
+      "Claude's model list isn't loaded yet"
+    )
+    expect(screen.queryByTestId(`${T}.effortTable`)).toBeNull()
+    const before = useSessionStore.getState().modelReloadNonce
+    fireEvent.click(screen.getByTestId(`${T}.refresh`))
+    expect(useSessionStore.getState().modelReloadNonce).toBe(before + 1)
+    // Nothing is known to be gone without a list — just saved.
+    expect(screen.getByTestId(`${T}.orphansToggle`).textContent).toContain('1 saved effort setting')
+  })
+
+  it('keeps the composer note', () => {
+    renderSection()
+    expect(screen.getByTestId(`${T}.note`).textContent).toBe(
+      'The effort chip in the composer always wins for the session you are in.'
+    )
   })
 })

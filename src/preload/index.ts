@@ -484,6 +484,11 @@ const api: ClaudeAPI = {
   readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
   patchPiModels: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-models', patches),
+  setProviderModelAllowlist: (
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ) => unwrap('models:set-provider-allowlist', engine, providerId, models),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (
     name: string,
@@ -527,6 +532,10 @@ const api: ClaudeAPI = {
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
   setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
+  adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+  setSharedProviderCuration: (id, curation) => unwrap('shared-provider:set-curation', id, curation),
+  setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+    unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>

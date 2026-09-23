@@ -75,8 +75,10 @@ import {
   LeafNumberInput,
   LeafTextInput
 } from './OpencodeConfigPanes'
-import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
+import { openProviderSettings, type SettingsTarget } from './settings-target'
+import { isPiModelAllowed, splitPiModelValue } from '../../../../shared/pi-model-allowlist'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
+import { LastPickNote } from './NewSessionModelSetting'
 import { usePiInstalled } from './use-engine-installed'
 import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
@@ -669,11 +671,40 @@ export function PiRetrySection(): React.JSX.Element {
  * Its testids are unchanged across the ADR-065 restyle so the deep links and
  * tests that name them keep working. The install gate lives in `PaneShell`.
  */
-function PiSessionDefaultModel(): React.JSX.Element {
-  const { engineCfg: cfg, update: saveConfig, updateAsync } = useEngineConfigObject('pi')
+function PiSessionDefaultModel({
+  navigate
+}: {
+  /**
+   * The render context's navigator. Without one (a render with no context),
+   * the `open-settings` event is the fallback — it cannot re-jump to the target
+   * the dialog last opened on, which is why the navigator is preferred.
+   */
+  navigate?: (target: SettingsTarget) => void
+}): React.JSX.Element {
+  const { engineCfg: cfg, update: saveConfig } = useEngineConfigObject('pi')
   const [models, setModels] = useState<ModelInfo[]>([])
   const [customMode, setCustomMode] = useState(false)
-  const [managingModels, setManagingModels] = useState(false)
+  /**
+   * The providers pi reports, unfiltered — the "of m" in the Model list summary.
+   * `null` until read, so a curated list is never called "no longer offered"
+   * just because the read has not landed yet.
+   */
+  const [piProviders, setPiProviders] = useState<string[] | null>(null)
+  /**
+   * Bumped by every `reloadModels()` — including the Manage sheet's curation
+   * writes on this same page, which change what pi's picker offers. Both reads
+   * follow it, or the default-model picker keeps offering what was curated away.
+   */
+  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
+
+  useEffect(() => {
+    window.api
+      .getPiModelCatalogGroups()
+      // An EMPTY report is pi failing to answer (not installed, discovery
+      // failed), not pi offering nothing — "unknown", never "every list stale".
+      .then((groups) => setPiProviders(groups.length > 0 ? groups.map((g) => g.vendorId) : null))
+      .catch(() => {})
+  }, [modelReloadNonce])
 
   useEffect(() => {
     window.api
@@ -683,7 +714,7 @@ function PiSessionDefaultModel(): React.JSX.Element {
         setModels(pi.flatMap((g) => g.models))
       })
       .catch(() => {})
-  }, [])
+  }, [modelReloadNonce])
 
   const refreshModels = (): void => {
     window.api
@@ -705,17 +736,25 @@ function PiSessionDefaultModel(): React.JSX.Element {
   const current = cfg.piConfig?.defaultModel ?? ''
   const known = current === '' || models.some((m) => m.value === current)
   const allowlist = cfg.piConfig?.modelAllowlist
-  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
-
-  // No re-read before the write: the store object IS the latest config — every
-  // pane over `engines/pi.json` edits it in place, and an `update` lands in it
-  // before its save is even in flight. `updateAsync` rather than `saveConfig`
-  // because the allowlist dialog reports a failed save itself.
-  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
-    await updateAsync({ piConfig: { ...cfg.piConfig, modelAllowlist } })
-    useSessionStore.getState().reloadModels()
-    refreshModels()
-  }
+  const currentSplit = splitPiModelValue(current)
+  const defaultExcluded =
+    currentSplit !== null &&
+    !isPiModelAllowed(allowlist, currentSplit.provider, currentSplit.modelId)
+  // Curation is per provider, in each provider's Manage sheet (ADR-074 §2);
+  // this row only counts — over the providers pi REPORTS. A list kept for a
+  // provider pi no longer offers (signed out, removed) is said separately: it
+  // is not one of pi's providers, and counting it in "of m" misstated both.
+  const curatedIds = Object.keys(allowlist ?? {})
+  const reported = new Set(piProviders ?? [])
+  const curated = curatedIds.filter((id) => piProviders === null || reported.has(id))
+  const stale = piProviders === null ? [] : curatedIds.filter((id) => !reported.has(id))
+  const providerCount = piProviders === null ? curatedIds.length : reported.size
+  const staleText =
+    stale.length === 0
+      ? ''
+      : stale.length === 1
+        ? ' · 1 list for a provider pi no longer offers'
+        : ` · ${stale.length} lists for providers pi no longer offers`
 
   const update = (value: string): void => {
     saveConfig({ piConfig: { ...cfg.piConfig, defaultModel: value || undefined } })
@@ -735,7 +774,12 @@ function PiSessionDefaultModel(): React.JSX.Element {
           testid={`${PANE}.row`}
           dataId="piConfig.defaultModel"
           label="Default model"
-          description={`The model new pi sessions start with; unset falls back to pi's own default (${PI_DEFAULT_MODEL}).`}
+          description={
+            <>
+              {`The model new pi sessions start with; unset falls back to pi's own default (${PI_DEFAULT_MODEL}).`}
+              <LastPickNote />
+            </>
+          }
           keyText="engines/pi.json · defaultModel"
           modified={current !== ''}
           onReset={() => update('')}
@@ -829,43 +873,36 @@ function PiSessionDefaultModel(): React.JSX.Element {
           testid={`${PANE}.row`}
           dataId="piConfig.modelAllowlist"
           label="Model list"
-          description="Which discovered pi models the picker offers; all of them unless you curate the list."
+          description={`Curated per provider in Models & providers — ${curated.length} of ${providerCount} pi providers curated${staleText}.`}
           keyText="engines/pi.json · modelAllowlist"
         >
           <Button variant="link" testid="PiDefaultModelSection.refresh" onClick={refreshModels}>
             Refresh
           </Button>
           <Button
-            testid="PiDefaultModelSection.manageModels"
-            onClick={() => setManagingModels(true)}
+            variant="link"
+            testid="PiDefaultModelSection.providersLink"
+            onClick={() =>
+              navigate ? navigate({ page: 'models', group: 'providers' }) : openProviderSettings()
+            }
           >
-            Manage (
-            {allowlist === undefined
-              ? 'all'
-              : allowlist.length === 0
-                ? 'none'
-                : `${allowlist.length} selected`}
-            )
+            Providers ›
           </Button>
         </SettingRow>
       </div>
-      {managingModels && (
-        <PiModelAllowlistDialog
-          providerName="pi"
-          current={allowlist}
-          onClose={() => setManagingModels(false)}
-          onSave={saveAllowlist}
-        />
-      )}
     </div>
   )
 }
 
-export function PiModelsSection(): React.JSX.Element {
+export function PiModelsSection({
+  navigate
+}: {
+  navigate?: (target: SettingsTarget) => void
+}): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
     <PaneShell testid="PiModelsSection" api={api}>
-      <PiSessionDefaultModel />
+      <PiSessionDefaultModel navigate={navigate} />
     </PaneShell>
   )
 }

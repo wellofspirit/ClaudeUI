@@ -628,3 +628,7 @@ surfaced:
 | ----------- | ------------- |
 | `README.md` | This document |
 | `apply.mjs` | Patch script  |
+
+## 2.1.280 reply-helper anchor
+
+The old `),<reply>(<msg>,{})}catch` site disappeared when stop_task moved into a routed handler. The patch now requires agreement across all `<reply>(<msg>,{})` sites in the control-request dispatch (five in 2.1.280), rather than identifying a single stop_task catch. Locate with `bundle-analyzer find vendor/claude-cli/cli.js "Unsupported control request subtype"` and verify the reply helper stays in scope. Application and syntax checks pass; live voice-server behavior is not covered by the shared patch test runner.

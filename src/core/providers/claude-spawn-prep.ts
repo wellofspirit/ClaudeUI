@@ -5,6 +5,7 @@ import { setEndpointEnv } from '../sdk/endpoint-env'
 import { setModelEnv } from '../sdk/model-env'
 import { logger } from '../services/logger'
 import { claudeModel } from '../../shared/types'
+import { effectiveModelOverride } from '../../shared/model-override'
 import type {
   ProxySettings,
   AnthropicEndpointSettings,
@@ -101,24 +102,25 @@ export function applyEndpointEnv(endpoint: AnthropicEndpointSettings | undefined
 
 /**
  * Apply model-override settings into the cli.js spawn env. Each field maps to
- * an Anthropic env var (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`).
- * Empty fields stay unset so cli.js's defaults apply to the unset families.
+ * an Anthropic env var (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`),
+ * gated by its own switch — pin for the first, rename for the three aliases
+ * (`effectiveModelOverride`, ADR-074 §9). Empty or switched-off fields stay
+ * unset so cli.js's defaults apply to those families.
  */
 export function applyModelEnv(model: ModelOverrideSettings | undefined): void {
-  const anyValue =
-    model?.enabled && (model.model || model.sonnetModel || model.opusModel || model.haikuModel)
-  if (anyValue) {
+  const { pin, sonnet, opus, haiku } = effectiveModelOverride(model)
+  if (pin || sonnet || opus || haiku) {
     setModelEnv({
-      ANTHROPIC_MODEL: model.model ?? '',
-      ANTHROPIC_DEFAULT_SONNET_MODEL: model.sonnetModel ?? '',
-      ANTHROPIC_DEFAULT_OPUS_MODEL: model.opusModel ?? '',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: model.haikuModel ?? ''
+      ANTHROPIC_MODEL: pin ?? '',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: sonnet ?? '',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: opus ?? '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: haiku ?? ''
     })
     const parts: string[] = []
-    if (model.model) parts.push(`model=${model.model}`)
-    if (model.sonnetModel) parts.push(`sonnet=${model.sonnetModel}`)
-    if (model.opusModel) parts.push(`opus=${model.opusModel}`)
-    if (model.haikuModel) parts.push(`haiku=${model.haikuModel}`)
+    if (pin) parts.push(`model=${pin}`)
+    if (sonnet) parts.push(`sonnet=${sonnet}`)
+    if (opus) parts.push(`opus=${opus}`)
+    if (haiku) parts.push(`haiku=${haiku}`)
     logger.info('Model', `Model override enabled: ${parts.join(', ')}`)
   } else {
     setModelEnv(null)

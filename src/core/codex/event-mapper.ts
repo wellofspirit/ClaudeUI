@@ -150,7 +150,7 @@ export function mapCodexItem(
                 input.type === 'text'
                   ? [{ type: 'text', text: input.text }]
                   : input.type === 'image'
-                    ? codexImage(input.url)
+                    ? codexImage('url' in input ? input.url : '')
                     : []
               ),
               'user'
@@ -648,7 +648,7 @@ function functionOutputText(output: FunctionCallOutputBody): string {
 function functionOutputImages(output: FunctionCallOutputBody): ToolResultImage[] {
   if (typeof output === 'string') return []
   return output.flatMap((entry) => {
-    if (entry.type !== 'input_image') return []
+    if (entry.type !== 'input_image' || !('image_url' in entry)) return []
     const match = /^data:([^;]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(entry.image_url)
     return match && isImageMediaType(match[1])
       ? [{ mediaType: match[1], base64Data: match[2] }]

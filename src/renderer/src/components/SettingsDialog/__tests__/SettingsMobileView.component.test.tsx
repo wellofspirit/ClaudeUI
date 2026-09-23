@@ -261,6 +261,7 @@ describe('SettingsDialog mobile fork', () => {
       expect(idsOf('SettingsMobileView.group')).toEqual([
         'theme',
         'layout',
+        'agents',
         'diff',
         'status-line',
         'git-panel'

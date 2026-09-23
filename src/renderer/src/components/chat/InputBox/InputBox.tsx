@@ -5,7 +5,8 @@ import {
   useActiveSession,
   bootstrapPermissionMode,
   engineDefaultModels,
-  resolveEngineDefaultModel
+  resolveEngineDefaultModel,
+  seedingModelPicks
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
@@ -25,7 +26,7 @@ import {
   modelResolveEffort,
   modelDefaultEffort,
   modelDefaultThinkingMode,
-  canonicalizeModelValue,
+  claudeEffortKey,
   type EffortLevel,
   type ThinkingMode,
   codexPublishesEffort
@@ -306,7 +307,9 @@ export function InputBox(): React.JSX.Element {
   // harness. For opencode use the same resolver the spawn path uses so display
   // == what will actually run.
   const engineDefaults = useSessionStore(useShallow(engineDefaultModels))
-  const lastSelectedModelByEngine = useSessionStore((s) => s.lastSelectedModelByEngine)
+  // The picks that SEED a new session — none when the user chose the
+  // configured default (`newSessionModel`), so the welcome pill previews it.
+  const lastSelectedModelByEngine = useSessionStore(seedingModelPicks)
   const selectedModel = useMemo(() => {
     const engine = effectiveEngineId ?? 'claude'
     const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
@@ -327,6 +330,21 @@ export function InputBox(): React.JSX.Element {
       const sticky = lastSelectedModelByEngine[engine]
       const m = sticky ? sameEngine.find((mm) => mm.value === sticky) : undefined
       if (m) return m
+    }
+    // Claude with a CONFIGURED default (ADR-074 §8): the welcome pill previews
+    // what `createNewSession` will seed — ahead of `exact`, which the empty
+    // session's `'default'` placeholder would otherwise win — and a session
+    // seeded '' because that default is gone reads unset rather than naming the
+    // list's first row. Unconfigured, this is skipped: the pill is today's.
+    if (engine === 'claude' && engineDefaults.claudeDefaultModelConfigured) {
+      if (!activeSessionId) {
+        const resolved = resolveEngineDefaultModel(engine, models, engineDefaults)
+        if (resolved === null) return unset
+        const m = sameEngine.find((mm) => mm.value === resolved)
+        if (m) return m
+      } else if (!selectedModelValue) {
+        return unset
+      }
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
@@ -506,7 +524,7 @@ export function InputBox(): React.JSX.Element {
       const catalog = codexCatalogOf(state.availableModels)
       const model = codexModelIsExplicit(
         session,
-        state.lastSelectedModelByEngine.codex,
+        seedingModelPicks(state).codex,
         catalog,
         state.codexDefaultModel
       )
@@ -538,8 +556,9 @@ export function InputBox(): React.JSX.Element {
     const desiredThinking: ThinkingMode =
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
-    const userDefault =
-      state.settings.modelEffortDefaults?.[canonicalizeModelValue(modelInfo?.value)]
+    // Keyed by `claudeEffortKey` — the rule the Default models table writes
+    // with — so an alias row reads the setting of the model it resolves to.
+    const userDefault = state.settings.modelEffortDefaults?.[claudeEffortKey(modelInfo)]
     // Not the codex branch (returned above): here the store's pick is one of
     // the Claude rungs, the only values the non-native picker can set.
     const desiredEffort: EffortLevel =
@@ -554,14 +573,14 @@ export function InputBox(): React.JSX.Element {
   }
 
   /**
-   * Refuse to spawn a non-Claude engine with an EMPTY model.
+   * Refuse to spawn with an EMPTY model.
    *
-   * An empty `selectedModel` on opencode/pi only happens when the user's
-   * configured default named a model that is gone (the store seeds `''` and
-   * banners it rather than substituting). Passing that through would hand the
-   * spawn resolver `undefined`, which for pi means "use pi's own default" — the
-   * silent substitute this whole path exists to prevent. Claude's `'default'`
-   * alias is a real value and never trips this.
+   * An empty `selectedModel` only happens when the user's configured default
+   * named a model that is gone (the store seeds `''` and banners it rather than
+   * substituting). Passing that through would hand the spawn resolver
+   * `undefined`, which for pi means "use pi's own default" — the silent
+   * substitute this whole path exists to prevent. An unconfigured Claude seeds
+   * its `'default'` alias, a real value, and never trips this.
    */
   function assertModelResolved(routingId: string): void {
     const state = useSessionStore.getState()
@@ -574,13 +593,18 @@ export function InputBox(): React.JSX.Element {
       engineId === 'codex' &&
       !codexModelIsExplicit(
         session,
-        state.lastSelectedModelByEngine.codex,
+        seedingModelPicks(state).codex,
         codexCatalogOf(state.availableModels),
         state.codexDefaultModel
       )
     )
       return
-    if (engineId === 'claude' || session?.selectedModel) return
+    if (session?.selectedModel) return
+    // Claude's `'default'` alias is always a real value — EXCEPT when the user
+    // configured a Claude default the account no longer offers, which seeds ''
+    // (ADR-074 §8). Spawning that would let cli.js pick its own model: the
+    // silent substitute ADR-059 forbids. Unconfigured, Claude passes as before.
+    if (engineId === 'claude' && !state.claudeDefaultModelConfigured) return
     throw new Error(
       `No model selected for this ${engineId} session — the configured default model is no longer available. Pick one in the model picker.`
     )
@@ -1101,7 +1125,7 @@ export function InputBox(): React.JSX.Element {
   )
   const handleAddAccount = useCallback(() => {
     window.dispatchEvent(
-      new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
+      new CustomEvent('open-settings', { detail: { page: 'models', group: 'subscriptions' } })
     )
   }, [])
 

@@ -391,3 +391,7 @@ Sanity check that only the intended chunk moved: diff the patched concat against
 | `README.md` | This document                                           |
 | `apply.mjs` | Patch script (Part A + Part B, multi-version fallbacks) |
 | `test.mjs`  | Behavioral harness                                      |
+
+## 2.1.280 maintenance note
+
+2.1.280: `var Pe={mcp_status:Ie,...}` routes through a cross-chunk handler; `Ie` serializes `o.mcpConnections()`. Refresh bindings remain in the headless dispatch chunk, so Part B awaits them before dispatch in `if(e0r(y.request)){let L=y.request,...Ssn(L,Ta)}`. Cross-chunk captures must never be injected. Find `"mcp_status:"` via bundle-analyzer.

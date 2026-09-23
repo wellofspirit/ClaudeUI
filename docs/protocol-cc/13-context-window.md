@@ -10,6 +10,13 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+Partial 2.1.280 drift check: the baked catalog's native-1M model prefixes
+remain covered by `IMPLICIT_1M_BASE_MODELS`; its `opus` default moved to
+`claude-opus-5-5` and its `tier_4_20_cache_read_0_20` is now mirrored in
+`model-capabilities.ts` and `pricing.ts`. The env/beta/remote gate strings
+remain present. This is not a full re-verification of all capabilities or
+provider-specific alias resolution; the banner above remains 2.1.268.
+
 ---
 
 ## 13.1 cli.js resolution chain

@@ -181,6 +181,13 @@ export interface EngineDefaultModels {
    */
   codexDefaultModel: string
   codexDefaultModelConfigured: boolean
+  /**
+   * `engines/claude.json#claudeConfig.defaultModel`, or '' when unset (ADR-074
+   * §8). Unset is Claude's own `default` alias — exactly today's behaviour — so
+   * the flag, not the string, is what switches the Claude branch on.
+   */
+  claudeDefaultModel: string
+  claudeDefaultModelConfigured: boolean
 }
 
 /** Narrow a store snapshot to the default-model inputs. */
@@ -191,6 +198,8 @@ export function engineDefaultModels(state: {
   piDefaultModelConfigured: boolean
   codexDefaultModel: string
   codexDefaultModelConfigured: boolean
+  claudeDefaultModel: string
+  claudeDefaultModelConfigured: boolean
 }): EngineDefaultModels {
   return {
     opencodeDefaultModel: state.opencodeDefaultModel,
@@ -198,7 +207,9 @@ export function engineDefaultModels(state: {
     piDefaultModel: state.piDefaultModel,
     piDefaultModelConfigured: state.piDefaultModelConfigured,
     codexDefaultModel: state.codexDefaultModel,
-    codexDefaultModelConfigured: state.codexDefaultModelConfigured
+    codexDefaultModelConfigured: state.codexDefaultModelConfigured,
+    claudeDefaultModel: state.claudeDefaultModel,
+    claudeDefaultModelConfigured: state.claudeDefaultModelConfigured
   }
 }
 
@@ -270,6 +281,17 @@ export function resolveEngineDefaultModel(
       engineMeta(engineId).defaultModelValue(defaults.piDefaultModel)
     )
   }
+  if (engineId === 'claude' && defaults.claudeDefaultModelConfigured) {
+    // The opencode/pi rule (ADR-059): a CONFIGURED default the live Claude list
+    // no longer offers is null — unset picker plus banner — never `default`. An
+    // empty list has not been fetched yet, so the value passes through. With
+    // nothing configured the branch is skipped and the answer is today's.
+    const claude = models.filter((model) => isModelForEngine(model, 'claude'))
+    if (claude.length === 0) return defaults.claudeDefaultModel
+    return claude.some((model) => model.value === defaults.claudeDefaultModel)
+      ? defaults.claudeDefaultModel
+      : null
+  }
   return engineMeta(engineId).defaultModelValue()
 }
 
@@ -339,6 +361,7 @@ function configuredDefaultModelOf(
     const hasCatalog = models.some((model) => isModelForEngine(model, 'codex'))
     return hasCatalog && defaults.codexDefaultModelConfigured ? defaults.codexDefaultModel : ''
   }
+  if (engineId === 'claude') return defaults.claudeDefaultModel
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
@@ -350,6 +373,12 @@ function configuredDefaultModelOf(
 export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
   if (engineId === 'codex' && !model)
     return 'No Codex models were discovered. Check installation and native account/model settings.'
+  // Claude's default lives on Models & providers, not on its engine page.
+  if (engineId === 'claude')
+    return (
+      `The configured Claude default model "${model}" is no longer offered by this account. ` +
+      'Pick a model in the picker, or change it in Settings → Models & providers → Default models.'
+    )
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
     `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
@@ -386,8 +415,37 @@ import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../sha
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
+/** See {@link AppSettings.newSessionModel}. */
+export type NewSessionModel = 'last-picked' | 'configured-default'
+
+const NO_SEEDING_PICKS: Readonly<Partial<Record<EngineId, string>>> = Object.freeze({})
+
+/**
+ * The per-engine last picks that may SEED a new session: the recorded map, or
+ * none at all when the user chose the configured default instead. The one
+ * reader every seeding path (and the welcome screen's preview of it) goes
+ * through, so none of them can disagree about which model a new session gets.
+ * Returns stable references, so it is safe as a store selector.
+ */
+export function seedingModelPicks(state: {
+  settings: Pick<AppSettings, 'newSessionModel'>
+  lastSelectedModelByEngine: Partial<Record<EngineId, string>>
+}): Readonly<Partial<Record<EngineId, string>>> {
+  return state.settings.newSessionModel === 'configured-default'
+    ? NO_SEEDING_PICKS
+    : state.lastSelectedModelByEngine
+}
+
 export interface AppSettings {
   theme: ThemeId
+  /**
+   * The two agent-roster surfaces (ADR-073). The pill is the scroll-independent
+   * door to the panel and stays while the session has any agent; the tab sits
+   * on the composer's top-right corner and exists only while one is running.
+   * Both default on; with both off the transcript card is the way in, as before.
+   */
+  showAgentPill: boolean
+  showAgentTab: boolean
   expandToolCalls: boolean
   expandReadResults: boolean
   hideToolInput: boolean
@@ -420,6 +478,14 @@ export interface AppSettings {
    * still wins.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
+  /**
+   * What a NEW session starts on, per engine (providers-v3 slice 9, owner
+   * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
+   * behaviour: the model last picked on that engine wins over its configured
+   * default. `'configured-default'` ignores that pick for seeding (it is still
+   * recorded), so the configured default — or the engine's built-in one — seeds.
+   */
+  newSessionModel?: NewSessionModel
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
@@ -459,6 +525,8 @@ export interface AppSettings {
 /** Exported for the replica's settings projection (one merge base, not two). */
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
+  showAgentPill: true,
+  showAgentTab: true,
   expandToolCalls: true,
   expandReadResults: false,
   hideToolInput: false,
@@ -664,7 +732,10 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     // native `model` win (ADR-068 §6).
     codexDefaultModel: codexEngineConfig?.codexConfig?.defaultModel || '',
     codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
-    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || ''
+    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || '',
+    // No builtin fallback either: blank is Claude's own `default` alias.
+    claudeDefaultModel: loadedEngineConfig?.claudeConfig?.defaultModel || '',
+    claudeDefaultModelConfigured: !!loadedEngineConfig?.claudeConfig?.defaultModel
   })
   // Who is signed in, for the picker/composer entry points (ADR-068 §3). NOT in
   // the Promise.all above: `provider-registry:list` is a slow read (it can start
@@ -784,7 +855,7 @@ export interface PerSessionState {
    * only opencode/pi child sessions and historical transcripts (which never
    * emit task_started) fall back to the old heuristic.
    */
-  activeTasks: Record<string, { taskId: string; taskType: string }>
+  activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
@@ -1256,6 +1327,11 @@ export interface SessionState {
   /** The Codex twin of {@link opencodeDefaultModelConfigured}. There is no builtin
    *  constant behind it, so this is simply "the key is non-empty". */
   codexDefaultModelConfigured: boolean
+  /** Configurable Claude default model (engines/claude.json `claudeConfig.defaultModel`,
+   *  ADR-074 §8). '' = Claude's own `default` alias, the pre-ADR behaviour. */
+  claudeDefaultModel: string
+  /** The Claude twin of {@link opencodeDefaultModelConfigured}: "the key is non-empty". */
+  claudeDefaultModelConfigured: boolean
   /** Configurable Codex reasoning tier (engines/codex.json `codexConfig.defaultEffort`).
    *  A NATIVE tier value from the model catalog, not an {@link EffortLevel}; '' = the
    *  model's own default. */
@@ -1386,6 +1462,8 @@ export interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Update the configurable Claude default model (mirrors claudeConfig.defaultModel). */
+  setClaudeDefaultModel: (model: string) => void
   /** Update the configurable Codex session defaults (mirrors codexConfig, ADR-068 §6). */
   setCodexDefaults: (defaults: { model?: string; effort?: string }) => void
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
@@ -1470,6 +1548,12 @@ export interface SessionState {
   watchBackgroundOutput: (routingId: string, toolUseId: string) => void
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
+  /**
+   * Open or close the panel on the ROSTER, with no agent selected (ADR-073).
+   * What the top-bar pill does: reaching the list must not depend on a card
+   * still being on screen, which is what `openTaskPanel` requires.
+   */
+  toggleAgentsPanel: (routingId: string) => void
   closeTaskPanel: (routingId: string) => void
   removeTaskFromPanel: (routingId: string, toolUseId: string) => void
   setTaskStopping: (routingId: string, toolUseId: string) => void
@@ -1679,6 +1763,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   piDefaultModelConfigured: false,
   codexDefaultModel: '',
   codexDefaultModelConfigured: false,
+  claudeDefaultModel: '',
+  claudeDefaultModelConfigured: false,
   codexDefaultEffort: '',
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
@@ -1790,10 +1876,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       let engineId = state.lastSelectedEngineId
       const defaults = engineDefaultModels(state)
       // The user's last pick on THIS engine wins over the engine default — the
-      // model twin of `lastSelectedEngineId`. Only when it is still offered:
+      // model twin of `lastSelectedEngineId` — unless the user chose the
+      // configured default instead (`newSessionModel`). Only when it is still offered:
       // stickiness is a heuristic, so a stale entry falls through quietly (the
       // configured-default error rule below still applies underneath it).
-      const sticky = state.lastSelectedModelByEngine[engineId]
+      const sticky = seedingModelPicks(state)[engineId]
       const stickyAvailable =
         !!sticky &&
         state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
@@ -1994,6 +2081,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPiDefaultModel: (model) =>
     set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
+
+  setClaudeDefaultModel: (model) =>
+    set({ claudeDefaultModel: model, claudeDefaultModelConfigured: !!model }),
 
   // One action for both keys, because the settings pane writes them into one
   // `codexConfig` block and a partial update must not reset the other half.
@@ -2590,6 +2680,15 @@ export const useSessionStore = create<SessionState>((set) => ({
           : [...s.openedTaskToolUseIds, toolUseId],
         rightPanel: 'task' as const
       }))
+    })),
+
+  toggleAgentsPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) =>
+        s.rightPanel === 'task'
+          ? { openedTaskToolUseIds: [], rightPanel: 'none' as const }
+          : { rightPanel: 'task' as const }
+      )
     })),
 
   closeTaskPanel: (routingId) =>

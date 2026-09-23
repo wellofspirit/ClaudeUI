@@ -72,6 +72,7 @@ import type {
 import type {
   ConfigurableHarnessId,
   SharedProviderAccountList,
+  SharedProviderCuration,
   SharedProviderDefinition
 } from '../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
@@ -470,6 +471,43 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       handler: safeHandler(async (id: string, key: string) =>
         sharedProviderService.setApiKey(id, key)
       )
+    },
+    {
+      // ADR-074 §6: turn a key an engine already holds into a catalog definition.
+      // `keep` names the engine whose key wins (a conflict, or a key only one
+      // engine holds); omitted, both engines must hold the same key. The key is
+      // read and moved host-side — nothing about it comes back.
+      channel: 'shared-provider:adopt-native',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, keep?: ConfigurableHarnessId | null) => {
+        if (keep != null && keep !== 'pi' && keep !== 'opencode')
+          throw new Error(`Unknown engine: ${String(keep)}`)
+        await sharedProviderService.adoptNativeKey(id, opt(keep))
+      })
+    },
+    {
+      // ADR-074 §3 — one model list per provider, projected into each enabled
+      // engine's allowlist while linked. Shape-checked by the repository on save.
+      channel: 'shared-provider:set-curation',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, curation: SharedProviderCuration) =>
+        sharedProviderService.setCuration(id, curation)
+      )
+    },
+    {
+      // ADR-074 slice 10 — a key or endpoint provider switched off (delivered to
+      // no engine, everything else kept) or back on. `replaceOwn` is the user's
+      // confirmation that switching on may replace a key an engine holds of its
+      // own; the keys are compared host-side.
+      channel: 'shared-provider:set-disabled',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, disabled: boolean, replaceOwn?: boolean | null) => {
+        if (typeof disabled !== 'boolean') throw new Error('Invalid on/off state')
+        await sharedProviderService.setDisabled(id, disabled, replaceOwn === true)
+      })
     },
     {
       channel: 'shared-provider:sync',

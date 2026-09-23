@@ -372,6 +372,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     writePiNativeText: async () => {},
     readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
     patchPiModels: async () => {},
+    setProviderModelAllowlist: (engine, providerId, models) =>
+      unwrap('models:set-provider-allowlist', engine, providerId, models),
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
@@ -445,6 +447,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
     setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+    setSharedProviderCuration: (id, curation) =>
+      unwrap('shared-provider:set-curation', id, curation),
+    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>

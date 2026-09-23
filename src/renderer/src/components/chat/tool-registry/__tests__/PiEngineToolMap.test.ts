@@ -326,6 +326,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Subagent: echoer',
       prompt: 'say hi',
+      name: 'echoer',
       subagent: 'echoer'
     })
   })
@@ -341,6 +342,8 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Subagents: scout, planner',
       prompt: '[scout] find X\n\n[planner] plan Y',
+      // One tool_use id, two agents: the row counts them (ADR-073 §3).
+      name: '2 subagents',
       subagent: 'scout, planner'
     })
   })

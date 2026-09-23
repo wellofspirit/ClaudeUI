@@ -174,7 +174,7 @@ if (!skipA1) {
   // inside 16000. The window is additionally clamped to the dispatch chain, so
   // however far it has to grow next time it can never reach another function's
   // reply helper.
-  const NEARBY_BACK = 16000
+  const NEARBY_BACK = 64000
   const nearbyCtx = src.slice(Math.max(chainStartIdx, anchorIdx - NEARBY_BACK), anchorIdx)
 
   // --- Success response helper ---
@@ -185,10 +185,7 @@ if (!skipA1) {
   // match in the window and require them to name the same function — with
   // several sibling control handlers all replying through the one helper, unanimity
   // is a far stronger signal than "whatever matched first".
-  const successRe = new RegExp(
-    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
-    'g'
-  )
+  const successRe = new RegExp(`(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)`, 'g')
   const successNames = [...nearbyCtx.matchAll(successRe)].map((m) => m[1])
   if (successNames.length === 0) {
     console.error(
@@ -239,17 +236,24 @@ if (!skipA1) {
     `function (${V})\\((${V})[^)\\n]{0,80}\\)\\{[^\\n]{0,240}?` +
       `(${V})\\.push\\(\\{\\.\\.\\.(?:\\2|${V}\\(\\2\\)),priority:\\2\\.priority\\?\\?"next",timestamp:`
   )
-  const pushDefMatch = pushDefRe.exec(src)
+  // 2.1.280 constructs the normalized item first, then optionally unshifts it.
+  const stagedPushRe = new RegExp(
+    `function (${V})\\((${V}),[^\\n]{0,80}?\\)\\{[^\\n]{0,180}?let (${V})=\\{\\.\\.\\.${V}\\(\\2\\),priority:\\2\\.priority\\?\\?"next",timestamp:[^\\n]{0,130}?\\};if\\([^\\n]{0,60}?\\.unshift\\(\\3\\);else (${V})\\.push\\(\\3\\)`
+  )
+  const pushDefMatch = pushDefRe.exec(src) ?? stagedPushRe.exec(src)
   if (!pushDefMatch) {
     console.error('ERROR: Cannot find queue push function by priority??"next" pattern')
     process.exit(1)
   }
-  if (pushDefRe.exec(src.slice(pushDefMatch.index + 1))) {
+  if (
+    pushDefRe.exec(src.slice(pushDefMatch.index + 1)) ||
+    stagedPushRe.exec(src.slice(pushDefMatch.index + 1))
+  ) {
     console.error('ERROR: queue push function pattern matched more than once. Aborting.')
     process.exit(1)
   }
   const pushFn = pushDefMatch[1]
-  const queueArr = pushDefMatch[3]
+  const queueArr = pushDefMatch[4] ?? pushDefMatch[3]
   console.log(`  Queue push function: ${pushFn} (cross-check only)`)
   console.log(`  Queue array: ${queueArr}`)
 
@@ -270,13 +274,24 @@ if (!skipA1) {
       `${V}=(${V})\\.isFoldInFlight\\(${V}\\)\\?\\[\\]:\\1\\.dequeueAllMatching\\(`
   )
   const cancelSiblingMatch = cancelSiblingRe.exec(src)
-  if (!cancelSiblingMatch) {
+  // 2.1.280 delegates cancellation to Cu({messageQueue:N,...}); Cu itself
+  // must call dequeueAllMatching on that same queue parameter.
+  const delegatedCancelRe = new RegExp(
+    `subtype==="cancel_async_message"\\)${V}\\(${msgVarEsc},\\{cancelled:(${V})\\(\\{targetUuid:${msgVarEsc}\\.request\\.message_uuid,sender:"host",messageQueue:(${V}),`
+  )
+  const delegatedCancel = delegatedCancelRe.exec(src)
+  const delegatedHelper =
+    delegatedCancel &&
+    new RegExp(
+      `function ${delegatedCancel[1]}\\(\\{targetUuid:${V},sender:${V},messageQueue:(${V}),[^\\n]{0,100}?\\)\\{[^\\n]{0,120}?\\1\\.dequeueAllMatching\\(`
+    ).test(src)
+  if (!cancelSiblingMatch && !delegatedHelper) {
     console.error(
       'ERROR: Cannot find the cancel_async_message sibling handler to derive the queue instance.'
     )
     process.exit(1)
   }
-  if (cancelSiblingRe.exec(src.slice(cancelSiblingMatch.index + 1))) {
+  if (cancelSiblingMatch && cancelSiblingRe.exec(src.slice(cancelSiblingMatch.index + 1))) {
     console.error('ERROR: cancel_async_message sibling handler matched more than once. Aborting.')
     process.exit(1)
   }
@@ -284,15 +299,16 @@ if (!skipA1) {
   // it has to sit inside the very else-if chain the fallback closes. A match
   // anywhere else names a local from some other function — the 2.1.241
   // misbind class (applies clean, calls a non-function at runtime).
-  if (cancelSiblingMatch.index <= chainStartIdx || cancelSiblingMatch.index >= anchorIdx) {
+  const siblingIdx = cancelSiblingMatch?.index ?? delegatedCancel.index
+  if (siblingIdx <= chainStartIdx || siblingIdx >= anchorIdx) {
     console.error(
-      `ERROR: cancel_async_message handler at ${cancelSiblingMatch.index} is outside the ` +
+      `ERROR: cancel_async_message handler at ${siblingIdx} is outside the ` +
         `control-request dispatch chain (${chainStartIdx}..${anchorIdx}) — its locals are not ` +
         'in scope at the injection point. Aborting.'
     )
     process.exit(1)
   }
-  const queueInstance = cancelSiblingMatch[1]
+  const queueInstance = cancelSiblingMatch?.[1] ?? delegatedCancel[2]
   const removeFn = `${queueInstance}.dequeueAllMatching`
   console.log(`  Queue instance: ${queueInstance} (remove via ${removeFn})`)
 
@@ -760,12 +776,21 @@ if (!skipA3) {
   const drainAnchorRe = new RegExp(
     `let (${V})=${V}\\(${batchVarEsc}\\);${V}=\\1===void 0\\?void 0:\\{userMessageUuid:\\1,anchor:`
   )
-  const drainAnchorMatch = drainAnchorRe.exec(src)
+  // 2.1.280 commits through the drain controller's onCommitted callback.
+  const committedRe = new RegExp(
+    `onCommitted:\\(\\{command:${V},members:(${V})\\}\\)=>\\{let ${V}=${V}\\(\\1\\);if\\(`
+  )
+  const legacyAnchor = drainAnchorRe.exec(src)
+  const committedAnchor = committedRe.exec(src)
+  const drainAnchorMatch = legacyAnchor ?? committedAnchor
   if (!drainAnchorMatch) {
     console.error("ERROR: Cannot find the drain loop's user-message-uuid stamp (A3 anchor).")
     process.exit(1)
   }
-  if (drainAnchorRe.exec(src.slice(drainAnchorMatch.index + 1))) {
+  if (
+    drainAnchorRe.exec(src.slice(drainAnchorMatch.index + 1)) ||
+    committedRe.exec(src.slice(drainAnchorMatch.index + 1))
+  ) {
     console.error('ERROR: drain-loop user-message-uuid stamp matched more than once. Aborting.')
     process.exit(1)
   }
@@ -773,7 +798,7 @@ if (!skipA3) {
   // emitter inside the same loop body. A match further away would name a
   // batch/outbound pair that does not exist at the injection point (the
   // 2.1.241 misbind class — applies clean, throws or emits nothing at runtime).
-  const A3_MAX_SPAN = 4000
+  const A3_MAX_SPAN = 10000
   if (
     drainAnchorMatch.index <= replayMatch.index ||
     drainAnchorMatch.index - replayMatch.index > A3_MAX_SPAN
@@ -792,14 +817,18 @@ if (!skipA3) {
   // isMeta is deliberately NOT filtered, for the same reason A2 does not
   // filter forwarded-intent commands: a spurious notification is a no-op,
   // a missing one strands a queue card.
+  const committedMembers = committedAnchor && drainAnchorMatch === committedAnchor
   const injectionA3 =
     PATCH_A3_MARKER +
-    `for(let q6 of ${batchVar})if(q6.mode==="prompt")` +
+    `for(let q6 of ${committedMembers ? committedAnchor[1] : batchVar})if(q6.mode==="prompt")` +
     `${outboundVar}.enqueue({type:"system",subtype:"queued_command_consumed",` +
     `prompt:q6.value,source_uuid:q6.uuid,session_id:${sessionFn}(),` +
     `uuid:globalThis.crypto.randomUUID()});`
 
-  src = src.slice(0, drainAnchorMatch.index) + injectionA3 + src.slice(drainAnchorMatch.index)
+  const injectAt = committedMembers
+    ? drainAnchorMatch.index + drainAnchorMatch[0].indexOf('let ')
+    : drainAnchorMatch.index
+  src = src.slice(0, injectAt) + injectionA3 + src.slice(injectAt)
 
   console.log('Injected queued_command_consumed ahead of the drained turn')
 }

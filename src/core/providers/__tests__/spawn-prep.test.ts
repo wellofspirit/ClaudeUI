@@ -44,7 +44,7 @@ const piModelDiscoveryMocks = vi.hoisted(() => ({
 }))
 vi.mock('../../pi/model-discovery', () => piModelDiscoveryMocks)
 
-import { claudeSpawnPrep } from '../claude-spawn-prep'
+import { claudeSpawnPrep, applyModelEnv } from '../claude-spawn-prep'
 import { opencodeSpawnPrep } from '../../opencode/opencode-spawn-prep'
 import { piSpawnPrep } from '../../pi/pi-spawn-prep'
 import { spawnPrepRegistry } from '../SpawnPrepRegistry'
@@ -99,6 +99,54 @@ describe('claudeSpawnPrep', () => {
     expect(endpointMocks.setEndpointEnv).toHaveBeenCalledWith(null)
     expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith(null)
     expect(result).toEqual({ resolvedModel: 'claude-opus-4-8' })
+  })
+})
+
+describe('applyModelEnv — pin and rename are separate switches (ADR-074 §9)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const FIELDS = { model: 'x', sonnetModel: 's', opusModel: 'o', haikuModel: 'h' }
+
+  it('a legacy enabled:true config still sets all four vars', () => {
+    applyModelEnv({ enabled: true, ...FIELDS })
+    expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith({
+      ANTHROPIC_MODEL: 'x',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 's',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'o',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'h'
+    })
+  })
+
+  it('pin on, rename off → ANTHROPIC_MODEL only', () => {
+    applyModelEnv({ enabled: true, pinEnabled: true, renameEnabled: false, ...FIELDS })
+    expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith({
+      ANTHROPIC_MODEL: 'x',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: '',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ''
+    })
+  })
+
+  it('rename on, pin off → the alias vars only, no pinned model', () => {
+    applyModelEnv({ enabled: true, pinEnabled: false, renameEnabled: true, ...FIELDS })
+    expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith({
+      ANTHROPIC_MODEL: '',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 's',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'o',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'h'
+    })
+  })
+
+  it('a legacy enabled:false config clears the slot', () => {
+    applyModelEnv({ enabled: false, ...FIELDS })
+    expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith(null)
+  })
+
+  it('pin on with an empty model and rename off clears the slot', () => {
+    applyModelEnv({ enabled: true, pinEnabled: true, renameEnabled: false, ...FIELDS, model: '' })
+    expect(modelEnvMocks.setModelEnv).toHaveBeenCalledWith(null)
   })
 })
 

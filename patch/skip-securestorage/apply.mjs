@@ -48,6 +48,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CHUNK_DELIM_PREFIX } from '../../scripts/lib/chunk-format.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
@@ -123,7 +124,26 @@ const composerLit = composer.replace(/[$]/g, '\\$&') // escape $ for regex
 const siteRe = new RegExp(
   `function (${V})\\(\\)\\{([^{}]*?${composerLit}\\((${V}),(${V})\\)[^{}]*?)\\}`
 )
-const matches = [...src.matchAll(new RegExp(siteRe, 'g'))]
+// Minified names are only chunk-unique (2.1.280: the composer is `U` on Windows
+// and `x` on macOS, and both letters are reused by unrelated chunks), so scope
+// the search to the composer's own chunk and require the call's args to be the
+// chunk-local backends: the fallback is `{name:"plaintext"}`, the primary a
+// named secure store. Observed getters (2.1.280):
+//   macOS:   function $n(){if(U)return U;return x(I,w)}
+//   Windows: function $n(){if(Y)return Y;if(nHn())return U(x,D);return D}
+const chunkStart = Math.max(0, src.lastIndexOf(CHUNK_DELIM_PREFIX, composerMatch.index))
+const chunkEndIdx = src.indexOf(CHUNK_DELIM_PREFIX, composerMatch.index)
+const chunk = src.slice(chunkStart, chunkEndIdx < 0 ? src.length : chunkEndIdx)
+const definesBackend = (id, nameRe) =>
+  new RegExp(`(?:^|[^\\w$])${id.replace(/[$]/g, '\\$&')}=\\{name:"${nameRe}"`).test(chunk)
+const matches = [...chunk.matchAll(new RegExp(siteRe, 'g'))]
+  .filter(
+    (m) =>
+      m[2].includes('return ' + composer + '(') &&
+      definesBackend(m[4], 'plaintext') &&
+      definesBackend(m[3], '(?:keychain|windows-credman)')
+  )
+  .map((m) => Object.assign(m, { index: chunkStart + m.index }))
 if (matches.length !== 1) {
   console.error(`ERROR: expected exactly 1 store-getter match, found ${matches.length}. Aborting.`)
   process.exit(1)
@@ -134,7 +154,10 @@ if (matches.length !== 1) {
 // are NOT re-interpreted by replace(), so no escaping is needed.
 const replacement = `function $1(){${MARKER}if(process.env.SKIP_SECURESTORAGE)return $4;$2}`
 
-src = src.replace(siteRe, replacement)
+src =
+  src.slice(0, matches[0].index) +
+  matches[0][0].replace(siteRe, replacement) +
+  src.slice(matches[0].index + matches[0][0].length)
 
 writeFileSync(cliPath, src, 'utf-8')
 const m = matches[0]

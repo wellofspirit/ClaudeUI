@@ -11,6 +11,7 @@ import type {
   ConfigurableHarnessId,
   SharedProviderAccountList,
   SharedProviderAccountStatus,
+  SharedProviderCuration,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -443,9 +444,18 @@ export interface AnthropicEndpointSettings {
  * intact for the unset families. Useful when pointing cli.js at a custom
  * gateway whose model identifiers differ from Anthropic's canonical ones
  * (e.g. LM Studio, OpenRouter).
+ *
+ * The two jobs have their own switches (ADR-074 §9): `pinEnabled` gates
+ * `model` and `renameEnabled` gates the three aliases. Each falls back to
+ * `enabled` when absent, so a file written before the split behaves as it did;
+ * `effectiveModelOverride` (shared/model-override.ts) is that rule. The UI
+ * writes both flags and keeps `enabled = pinEnabled || renameEnabled` for
+ * older builds reading the same file.
  */
 export interface ModelOverrideSettings {
   enabled: boolean
+  pinEnabled?: boolean
+  renameEnabled?: boolean
   model: string
   sonnetModel: string
   opusModel: string
@@ -482,7 +492,31 @@ export interface OpencodeProviderSettings {
   baseURL?: string
   /** Native provider adapter package (provider.npm). */
   npm?: string
-  models?: { id: string; name?: string }[]
+  models?: OpencodeProviderModelSettings[]
+}
+
+/**
+ * One declared model in opencode's config (`provider.<id>.models.<id>`), as
+ * ClaudeUI reads and writes it. Beyond the name, the fields a declared model
+ * needs for opencode to know what it can do (ADR-074 slice 10): `reasoning`,
+ * `attachment`, `tool_call`, `modalities.input` and `limit` — opencode reads a
+ * config-only model's missing capability as false and its missing limit as 0.
+ *
+ * Each capability field is a LEAF the writer sets only when given and changed:
+ * a caller that does not model it (the opencode provider pane) leaves it as the
+ * file has it, so a hand edit survives an unrelated save.
+ */
+export interface OpencodeProviderModelSettings {
+  id: string
+  name?: string
+  reasoning?: boolean
+  attachment?: boolean
+  /** Native `tool_call`. */
+  toolCall?: boolean
+  /** Native `modalities.input`; `modalities.output` is never touched. */
+  inputModalities?: string[]
+  /** Native `limit.context` / `limit.output`; `limit.input` is never touched. */
+  limit?: { context: number; output: number }
 }
 
 /** Per-agent override injected via OPENCODE_CONFIG_CONTENT. */
@@ -565,8 +599,12 @@ export interface OpencodeConfigSettings {
    *   - key absent  → show ALL of that provider's models (legacy / externally-authed
    *                   providers keep working unchanged).
    *   - key present → show ONLY the listed model ids (an empty array → none). The
-   *                   "Add provider" flow always writes a key, so a newly-added
-   *                   provider never auto-floods the picker.
+   *                   "Add provider" flow writes `[]` for a catalog over 50
+   *                   models, so a newly-added gateway never floods the picker.
+   *
+   * READ-ONLY on this object (ADR-074 §2): `config:load-opencode-settings`
+   * reports it, `config:save-opencode-settings` ignores it, and its one writer
+   * is `models:set-provider-allowlist` (`setProviderModelAllowlist`).
    */
   modelAllowlist?: Record<string, string[]>
 }
@@ -690,6 +728,11 @@ export interface OpencodeProviderCatalogEntry {
   source?: OpencodeProviderSource
   /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
   envVarNames?: string[]
+  /**
+   * Declared in opencode's config with its own adapter package or base URL — a
+   * custom endpoint rather than a catalog vendor (ADR-074 §7's subtitle).
+   */
+  declaredEndpoint?: true
   /** Which row actions are legitimately available. See provider-actions.ts. */
   actions: ProviderActions
   /**
@@ -711,6 +754,19 @@ export interface OpencodeCatalogModel {
   reasoning?: boolean
   /** Same zen-gated free derivation as ModelInfo.free — see its doc comment. */
   free?: boolean
+  /**
+   * What a declared COPY of this model needs (ADR-074 slice 10: a second key
+   * for a catalog provider declares its models as a custom endpoint): limits,
+   * image input, and the endpoint the catalog serves it from. Each absent when
+   * the catalog does not say.
+   */
+  contextWindow?: number
+  maxTokens?: number
+  vision?: boolean
+  /** The provider's own base URL when opencode's catalog sets one, else this model's. */
+  apiUrl?: string
+  /** The AI SDK package opencode speaks to this model with — which API it is. */
+  apiNpm?: string
 }
 
 export interface EngineConfig {
@@ -726,6 +782,24 @@ export interface EngineConfig {
   piConfig?: PiConfig
   /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
   codexConfig?: CodexEngineConfig
+  /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
+  claudeConfig?: ClaudeEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN defaults for Claude sessions — NOT `~/.claude/settings.json`.
+ *
+ * cli.js reads `model` from its own settings, and so does the terminal `claude`;
+ * writing there would change the terminal's default as a side effect. ClaudeUI
+ * passes a session's model itself, so its default lives here and reaches only
+ * sessions started from ClaudeUI (ADR-074 §8). Blank means "Claude's own
+ * `default` alias", today's behaviour. A value here IS an explicit choice
+ * (ADR-059): one the live model list no longer offers banners rather than
+ * silently starting on something else.
+ */
+export interface ClaudeEngineConfig {
+  /** A Claude picker value from `supportedModels()` (`opus`, `claude-fable-5-1`, …). */
+  defaultModel?: string
 }
 
 /**
@@ -761,10 +835,19 @@ export interface PiConfig {
    *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
    *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
   defaultModel?: string
-  /** ClaudeUI-private visible-model allowlist using full `<provider>/<modelId>`
-   * picker values. Undefined exposes every authenticated pi model; a present
-   * array exposes only its entries, including none when the array is empty. */
-  modelAllowlist?: string[]
+  /**
+   * ClaudeUI-private per-provider model allowlist (ADR-074 §1), keyed by pi
+   * provider id with BARE model ids — opencode's `modelAllowlist` rule.
+   *
+   * Semantics by KEY PRESENCE (the array, not its length, is the gate):
+   *   - key absent  → show ALL of that provider's models, including ones it
+   *                   adds later.
+   *   - key present → show ONLY the listed model ids (an empty array → none).
+   *
+   * The legacy global `string[]` of `<provider>/<modelId>` values is migrated
+   * on read by `normalizePiModelAllowlist` (`shared/pi-model-allowlist.ts`).
+   */
+  modelAllowlist?: Record<string, string[]>
 }
 
 /**
@@ -962,6 +1045,15 @@ export interface TaskProgress {
   toolName: string
   parentToolUseId: string | null
   elapsedTimeSeconds: number
+  /**
+   * Cumulative usage for the task so far, from `system/task_progress` (§4.7).
+   * Claude-only, and only while the task is running — the terminal figure lives
+   * on `TaskNotification.usage`. Absent for every engine that reports no
+   * periodic progress.
+   */
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /** The tool the task ran most recently, from `system/task_progress`. */
+  lastToolName?: string
 }
 
 /**
@@ -977,9 +1069,23 @@ export interface TaskProgress {
  * falls back to the pre-existing tool_result/background-flag heuristic.
  */
 export interface TaskStartedData {
+  /**
+   * The agent's ORIGIN tool_use id — the call that first spawned it, which is
+   * the id every other subagent channel is keyed by. On a resume this is NOT
+   * the id the wire reported (see `runToolUseId`); ClaudeSession normalizes it
+   * so a resumed agent re-arms the card that spawned it (ADR-073).
+   */
   toolUseId: string
   taskId: string
   taskType: string
+  /**
+   * The tool_use id cli.js actually reported for THIS run, when it differs from
+   * the origin — i.e. the `SendMessage` call that resumed a finished agent.
+   * Absent on a first run. Carried for diagnostics; nothing keys off it.
+   */
+  runToolUseId?: string
+  /** 1-based run counter for this agent. `> 1` means it was resumed. */
+  runIndex?: number
 }
 
 export interface TaskNotification {
@@ -989,6 +1095,12 @@ export interface TaskNotification {
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /**
+   * Which run of the agent this terminal event ends (1-based). Kept on the
+   * notification as well as on the active record because `activeTasks` drops
+   * the task at terminal — this is what still knows "resumed ×2" afterwards.
+   */
+  runIndex?: number
 }
 
 export interface SubagentMessageData {
@@ -1426,6 +1538,15 @@ interface SessionAPI {
   readPiModelsRaw(): Promise<PiModelsRaw>
   /** Apply leaf patches to pi's models.json; refuses projection-owned provider entries. */
   patchPiModels(patches: RawConfigPatch[]): Promise<void>
+  /**
+   * One provider's ClaudeUI model allowlist (ADR-074 §2): `null` deletes the key
+   * (All models, including ones added later), a list sets it (`[]` → none).
+   */
+  setProviderModelAllowlist(
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,
@@ -1478,6 +1599,19 @@ interface SharedProviderAPI {
     enabled: boolean
   ): Promise<void>
   setSharedProviderApiKey(id: string, key: string): Promise<void>
+  /**
+   * Adopt a key an engine already holds into a catalog definition (ADR-074 §6).
+   * `keep` names the engine whose key wins; omitted, both must hold the same key.
+   */
+  adoptSharedProviderNativeKey(id: string, keep?: ConfigurableHarnessId): Promise<void>
+  /** One model list for every engine, or one each (ADR-074 §3); projected while linked. */
+  setSharedProviderCuration(id: string, curation: SharedProviderCuration): Promise<void>
+  /**
+   * Switch a key or endpoint provider off (delivered to no engine; key, routes
+   * and model list kept) or back on (ADR-074 slice 10). Switching on refuses to
+   * replace a key an engine holds of its own unless `replaceOwn` confirms it.
+   */
+  setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
   syncSharedProvider(id: string): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(

@@ -40,9 +40,10 @@
 // @vitest-environment node
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { locatePiBinary } from '../../core/pi/pi-locate'
 import { PiRpcClient } from '../../core/pi/PiRpcClient'
 import {
   PiBridgeHost,
@@ -51,19 +52,13 @@ import {
 } from '../../core/pi/PiBridgeHost'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
-const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
-const ROOT = join(__dirname, '..', '..', '..')
 const MODEL = { provider: 'openai-codex', modelId: 'gpt-5.6-luna' }
-
-function findBinary(): string | null {
-  const candidate = join(ROOT, 'vendor', 'pi-cli', BINARY_NAME)
-  return existsSync(candidate) ? candidate : null
-}
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
 function hasCodexCredentials(): boolean {
   try {
-    const raw = readFileSync(join(homedir(), '.pi', 'agent', 'auth.json'), 'utf-8')
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
+    const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
     const parsed = JSON.parse(raw) as Record<string, unknown>
     return Boolean(parsed['openai-codex'])
   } catch {
@@ -73,7 +68,7 @@ function hasCodexCredentials(): boolean {
 
 // Evaluated once at collection time so describe.skipIf can gate on it even
 // when PI_INTEGRATION_TESTS=1 is set — "skip gracefully", not a hard failure.
-const BINARY_MISSING = !findBinary()
+const BINARY_MISSING = !locatePiBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
 /**
@@ -141,7 +136,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       const bridgePath = writeBridgeExtension()
       const subagentPath = writeSubagentExtension()
 
-      const binary = findBinary()!
+      const binary = locatePiBinary()!
       client = new PiRpcClient(binary, {
         cwd: tmpDir,
         args: ['--mode', 'rpc', '-e', bridgePath, '-e', subagentPath, '--session-dir', tmpDir],

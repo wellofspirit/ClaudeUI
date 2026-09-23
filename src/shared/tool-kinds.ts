@@ -73,6 +73,15 @@ export type ToolView =
       kind: 'task'
       description: string
       prompt: string
+      /**
+       * What to CALL this agent in a list: the name the spawning call gave it
+       * (Claude's `name`, pi's `agent`, Codex's agent path leaf), falling back
+       * to its type. Distinct from `subagent`, which is the card's badge and
+       * carries dispatch's "<engine> · <model>" instead. Without it a fan-out
+       * reads "Explore, Explore, Explore" and nothing can tie a
+       * `SendMessage{to}` back to the agent it addressed (ADR-073).
+       */
+      name?: string
       subagent?: string
       model?: string
       background?: boolean

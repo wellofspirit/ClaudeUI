@@ -20,13 +20,13 @@ import { render, screen, fireEvent, cleanup, act, within } from '@testing-librar
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
+import { SubscriptionsSection } from '../SubscriptionsSection'
 import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
 } from '../../../../../shared/provider-registry'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
-import type { SettingsTarget } from '../settings-target'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -35,9 +35,10 @@ const chatgpt: ProviderEntry = {
   name: 'ChatGPT',
   origin: 'shared',
   credential: 'connected',
+  subscription: true,
   engines: {
-    opencode: { enabled: true, native: true },
-    pi: { enabled: true, native: true },
+    opencode: { enabled: true, native: true, providerId: 'openai' },
+    pi: { enabled: true, native: true, providerId: 'openai-codex' },
     // Fed by vault injection, not by a route (ADR-068 §1) — F14 projects it.
     codex: { enabled: true }
   },
@@ -51,7 +52,7 @@ const custom: ProviderEntry = {
   name: 'Ollama',
   origin: 'shared',
   credential: 'api-key',
-  engines: { opencode: { enabled: false }, pi: { enabled: true } },
+  engines: { opencode: { enabled: false }, pi: { enabled: true, providerId: 'ollama-local' } },
   detail: 'http://localhost:11434'
 }
 
@@ -60,7 +61,15 @@ const openrouter: ProviderEntry = {
   name: 'OpenRouter',
   origin: 'opencode-native',
   credential: 'api-key',
-  engines: { opencode: { enabled: true, modelCount: 2, curated: true, native: true } },
+  engines: {
+    opencode: {
+      enabled: true,
+      modelCount: 2,
+      curated: true,
+      native: true,
+      providerId: 'openrouter'
+    }
+  },
   detail: '2 of 300 models shown in the picker',
   opencodeRemoveKind: 'credential'
 }
@@ -70,7 +79,7 @@ const groq: ProviderEntry = {
   name: 'groq',
   origin: 'pi-native',
   credential: 'api-key',
-  engines: { pi: { enabled: true, native: true } },
+  engines: { pi: { enabled: true, native: true, providerId: 'groq' } },
   piKind: 'builtin',
   piBuiltinId: 'groq'
 }
@@ -80,7 +89,7 @@ const piCustom: ProviderEntry = {
   name: 'my-endpoint',
   origin: 'pi-native',
   credential: 'api-key',
-  engines: { pi: { enabled: true, native: true } },
+  engines: { pi: { enabled: true, native: true, providerId: 'my-endpoint' } },
   detail: 'Custom pi provider',
   piKind: 'custom'
 }
@@ -119,6 +128,8 @@ let registryReads: number
 let sharedModels: Array<{ id: string; name?: string }>
 /** `session:get-opencode-providers` — read on demand by "Model overrides ›". */
 let opencodeCatalog: unknown[]
+/** `session:get-opencode-provider-models` — a provider's catalog models. */
+let providerModels: unknown[]
 
 /** Record a channel and answer it. */
 function stub(channel: string, answer: (...args: unknown[]) => unknown = () => undefined): void {
@@ -145,12 +156,8 @@ const api = {
 
 const called = (method: keyof typeof api): unknown[][] => api[method].mock.calls
 
-/** The render context's navigator — the Accounts link row's destination. */
-let navigate: ReturnType<typeof vi.fn<(target: SettingsTarget) => void>>
-
 beforeEach(async () => {
   app = await bootTestApp()
-  navigate = vi.fn()
   // The registry snapshot lives in the store (F12), which is a module singleton
   // outliving `teardown()` — a case must not open on the previous case's rows.
   useSessionStore.setState({ providerRegistry: null })
@@ -185,7 +192,9 @@ beforeEach(async () => {
   app.bridge.ipcMain.handle('shared-provider:list', async () => definitions)
   app.bridge.ipcMain.handle('shared-provider:models', async () => sharedModels)
   app.bridge.ipcMain.handle('pi:binary-path', async () => '/opt/pi/bin/pi')
-  app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [])
+  providerModels = []
+  app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => providerModels)
+  app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [])
   app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
   app.bridge.ipcMain.handle('session:get-engine-models', async () => [])
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
@@ -203,6 +212,7 @@ beforeEach(async () => {
   stub('session:set-opencode-provider-disabled')
   stub('session:remove-opencode-provider')
   stub('config:save-opencode-settings')
+  stub('models:set-provider-allowlist')
   api.vendorAuthSetKey.mockClear()
   api.vendorAuthRemove.mockClear()
   api.patchPiModels.mockClear()
@@ -214,16 +224,38 @@ afterEach(() => {
   app.teardown()
 })
 
-/** Render the list and open one provider's sheet. */
+/**
+ * Render the page's two provider surfaces and open one provider's sheet — from
+ * its API-provider row, or, for a subscription (ADR-074 §7), from its card's
+ * Engines row, which is the only place its sheet opens from now.
+ */
 async function openSheet(id: string): Promise<HTMLElement> {
-  render(<ProviderList navigate={navigate} />)
-  await screen.findAllByTestId('ProviderList.row')
+  render(
+    <>
+      <SubscriptionsSection />
+      <ProviderList />
+    </>
+  )
+  const subscription = snapshot.entries.find((e) => e.id === id)?.subscription === true
+  const manage = subscription
+    ? await screen.findByTestId('SubscriptionsSection.manage')
+    : (await screen.findAllByTestId('ProviderList.manage')).find((el) => el.dataset.id === id)!
   await act(async () => {
-    fireEvent.click(
-      screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === id)!
-    )
+    fireEvent.click(manage)
   })
   return screen.getByTestId('ProviderSheet')
+}
+
+/**
+ * Open the sheet, then its stacked "models in the picker" sheet (ADR-074 §7,
+ * mockup D): curation is a place the summary row leads to, not a section.
+ */
+async function openModels(id: string): Promise<HTMLElement> {
+  const sheet = await openSheet(id)
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('ProviderSheet.editModels'))
+  })
+  return sheet
 }
 
 const engineRow = (engine: string): HTMLElement =>
@@ -258,8 +290,11 @@ describe('ENABLED FOR', () => {
     // Codex is injection, not a route (ADR-068 §1): there is nothing to toggle,
     // and a row that offered one would promise a switch the vault does not have.
     await openSheet('chatgpt')
-    expect(engineRow('codex')).toHaveTextContent('Codex always uses the active ChatGPT account.')
-    expect(engineRow('codex')).toHaveTextContent('Pin a different one per session')
+    expect(engineRow('codex')).toHaveTextContent('Codex always uses the active ChatGPT account')
+    // The Accounts page is gone: pinning lives on the ChatGPT card (ADR-074 §7).
+    expect(engineRow('codex')).toHaveTextContent(
+      'per-session pinning is in the ChatGPT card’s Options'
+    )
     expect(
       screen.queryAllByTestId('ProviderSheet.engineToggle').map((el) => el.dataset.id)
     ).not.toContain('codex')
@@ -353,6 +388,28 @@ describe('CREDENTIAL', () => {
     expect(called('vendorAuthSetKey')).toEqual([])
   })
 
+  it('reads a keyless custom endpoint as "No key needed" with an optional key', async () => {
+    // ADR-074 §4: no stored key is a working state for a custom endpoint.
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'ollama-local' ? { ...e, credential: 'keyless' } : e
+      )
+    }
+    await openSheet('ollama-local')
+    const chip = screen.getByTestId('ProviderSheet.credentialChip')
+    expect(chip).toHaveAttribute('data-id', 'keyless')
+    expect(chip).toHaveTextContent('No key needed')
+    const credential = screen.getByTestId('ProviderSheet.credential')
+    expect(credential).toHaveAttribute('data-id', 'key')
+    expect(credential).toHaveTextContent('Optional — this endpoint is used without a key.')
+    expect(credential).not.toHaveTextContent('Not set')
+    await click(screen.getByTestId('ProviderSheet.replaceKey'))
+    await typeInto('ProviderSheet.keyInput', 'sk-first')
+    await click(screen.getByTestId('ProviderSheet.saveKey'))
+    expect(sent('shared-provider:set-key')).toEqual([['ollama-local', 'sk-first']])
+  })
+
   it('replaces a native key in the ENGINE’s own auth store', async () => {
     await openSheet('opencode:openrouter')
     await click(screen.getByTestId('ProviderSheet.replaceKey'))
@@ -374,9 +431,9 @@ describe('CREDENTIAL', () => {
     expect(credential).toHaveTextContent('API key')
   })
 
-  it('disconnects a subscription only on the second press', async () => {
-    const sheet = await openSheet('chatgpt')
-    expect(sheet).toHaveTextContent('Connected as ChatGPT')
+  it('disconnects a subscription from the footer, only on the second press', async () => {
+    await openSheet('chatgpt')
+    expect(screen.getByTestId('ProviderSheet.disconnect')).toHaveTextContent('Disconnect ChatGPT')
     await click(screen.getByTestId('ProviderSheet.disconnect'))
     expect(sent('shared-provider:disconnect')).toEqual([])
     await click(screen.getByTestId('ProviderSheet.disconnect'))
@@ -384,16 +441,14 @@ describe('CREDENTIAL', () => {
   })
 })
 
-// ── Accounts (ADR-068 §2, re-homed by F14) ───────────────────────────
+// ── A subscription's sheet (ADR-074 §7) ──────────────────────────────
 
 /**
- * Accounts are no longer MANAGED here. Every provider's stored accounts live on
- * Models & providers › Accounts (F14), so the sheet keeps exactly two things:
- * one link row that says how many accounts there are and where they are, and
- * the provider-wide "Disconnect all accounts" in the footer. The row-level
- * cases moved verbatim to `ChatgptAccountsSetting.component.test.tsx`.
+ * A subscription's credential is its ACCOUNTS, and they live on its
+ * Subscriptions card, so its Manage sheet is engines and models only. What the
+ * sheet keeps is the provider-wide Disconnect in the footer.
  */
-describe('ACCOUNTS', () => {
+describe('a subscription’s sheet', () => {
   const twoAccounts = {
     activeId: 'acc-1',
     perSession: false,
@@ -411,28 +466,19 @@ describe('ACCOUNTS', () => {
     }
   }
 
-  it('replaces the account rows with ONE link row naming the count', async () => {
+  it('has no Credential group, and is titled for what it holds', async () => {
     withAccounts(twoAccounts)
     const sheet = await openSheet('chatgpt')
-    const link = screen.getByTestId('ProviderSheet.accountsLink')
-    expect(link).toHaveTextContent('2 accounts')
-    expect(link).toHaveTextContent('managed on Accounts')
-    // Two homes for one list is exactly what F14 removed.
-    expect(screen.queryAllByTestId('ProviderSheet.account')).toEqual([])
-    expect(screen.queryByTestId('ProviderSheet.accountRemove')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('ProviderSheet.perSession')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('ProviderSheet.addAccount')).not.toBeInTheDocument()
-    expect(sheet).toHaveTextContent('Accounts')
-  })
-
-  it('the link navigates to Models & providers › Accounts', async () => {
-    withAccounts(twoAccounts)
-    await openSheet('chatgpt')
-    await click(screen.getByTestId('ProviderSheet.manageAccounts'))
-    expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
-    // The sheet closes with the jump: a page that changed BEHIND an open sheet
-    // is what the live drive showed, and it reads as a link that did nothing.
-    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+    const groups = within(sheet)
+      .getAllByTestId('ProviderSheet.group')
+      .map((el) => el.dataset.id)
+    expect(groups).not.toContain('credential')
+    expect(groups).not.toContain('accounts')
+    expect(within(sheet).queryByTestId('ProviderSheet.credential')).not.toBeInTheDocument()
+    expect(within(sheet).queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
+    expect(sheet).toHaveTextContent('ChatGPT · engines & models')
+    // ENABLED FOR keeps its rows.
+    expect(groups).toContain('enabled')
   })
 
   it('disconnects EVERY account from the footer, on the second press', async () => {
@@ -446,12 +492,14 @@ describe('ACCOUNTS', () => {
     expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
   })
 
-  it('falls back to the single-credential row when the registry reports no accounts', async () => {
-    // A row from a build (or a boot) with no account list must not render an
-    // empty Accounts card that looks like "you have no subscription".
-    await openSheet('chatgpt')
-    expect(screen.queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
-    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent('Connected')
+  it('an API provider still has its Credential group', async () => {
+    const sheet = await openSheet('ollama-local')
+    expect(
+      within(sheet)
+        .getAllByTestId('ProviderSheet.group')
+        .map((el) => el.dataset.id)
+    ).toContain('credential')
+    expect(within(sheet).queryByTestId('ProviderSheet.disconnect')).not.toBeInTheDocument()
   })
 })
 
@@ -586,6 +634,8 @@ describe('MODELS IN THE PICKER', () => {
     screen
       .getAllByTestId('ProviderSheet.models.groupToggle')
       .find((el) => el.dataset.id === prefix)!
+  const mode = (id: 'all' | 'pick'): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.curationMode.option').find((el) => el.dataset.id === id)!
 
   beforeEach(() => {
     app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => models)
@@ -594,25 +644,25 @@ describe('MODELS IN THE PICKER', () => {
     }))
   })
 
-  it('curates through the opencode allowlist, one row at a time', async () => {
-    await openSheet('opencode:openrouter')
+  it('curates through the ONE allowlist writer, one row at a time', async () => {
+    await openModels('opencode:openrouter')
     expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')
     expect(row('openai/gpt-5-6-sol')).toHaveAttribute('aria-checked', 'false')
 
     await click(row('openai/gpt-5-6-sol'))
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
+    // The whole-settings save is not how curation writes any more.
+    expect(sent('config:save-opencode-settings')).toEqual([])
   })
 
   it('groups by vendor prefix, and a vendor checkbox writes the whole group', async () => {
-    await openSheet('opencode:openrouter')
+    await openModels('opencode:openrouter')
     // Both vendors hold a selection, so both are open; the tie in selected
     // count breaks alphabetically by label (Moonshot, OpenAI).
     expect(screen.getAllByTestId('ProviderSheet.models.group').map((el) => el.dataset.id)).toEqual([
@@ -622,52 +672,80 @@ describe('MODELS IN THE PICKER', () => {
     expect(groupToggle('openai')).toHaveAttribute('data-state', 'mixed')
 
     await click(groupToggle('openai'))
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
   })
 
-  it('an ABSENT allowlist means all of them, and the first de-selection writes the list', async () => {
+  it('an ABSENT allowlist is All models; unticking one switches to Only, with Undo', async () => {
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
-    await openSheet('opencode:openrouter')
+    await openModels('opencode:openrouter')
+    expect(mode('all')).toHaveAttribute('aria-pressed', 'true')
     for (const model of models) expect(row(model.id)).toHaveAttribute('aria-checked', 'true')
 
     await click(row('moonshotai/kimi-k3'))
-    expect(sent('config:save-opencode-settings')).toEqual([
-      [{ modelAllowlist: { openrouter: ['openai/gpt-5-6-luna', 'openai/gpt-5-6-sol'] } }]
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']]
     ])
+    expect(mode('pick')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('ProviderSheet.curationToast')).toHaveTextContent(
+      'Switched to Only the ones I pick — everything but this model is picked.'
+    )
+
+    await click(screen.getByTestId('ProviderSheet.curationUndo'))
+    // Undo restores ALL — the key is deleted, not rewritten as today's catalog.
+    expect(sent('models:set-provider-allowlist').at(-1)).toEqual(['opencode', 'openrouter', null])
+    expect(mode('all')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByTestId('ProviderSheet.curationToast')).not.toBeInTheDocument()
+  })
+
+  it('the summary row and the engine row say what the block says, not the registry', async () => {
+    // The registry fixture claims 2 curated models; one of the stored ids is gone
+    // from the catalog, so the block counts 1 — and so must everything else.
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gone'] }
+    }))
+    await openModels('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.modelsSummary')).toHaveTextContent('1 picked')
+    expect(engineRow('opencode')).toHaveTextContent('1 of 3 models reach the picker.')
+
+    await click(mode('all'))
+    expect(screen.getByTestId('ProviderSheet.modelsSummary')).toHaveTextContent('All models')
+    expect(engineRow('opencode')).toHaveTextContent('3 models reach the picker.')
+  })
+
+  it('choosing All models with a selection deletes the key', async () => {
+    await openModels('opencode:openrouter')
+    expect(mode('pick')).toHaveTextContent('Only the ones I pick · 2')
+    await click(mode('all'))
+    expect(sent('models:set-provider-allowlist')).toEqual([['opencode', 'openrouter', null]])
+    expect(screen.getByTestId('ProviderSheet.curationModeRow')).toHaveTextContent(
+      'Every model OpenRouter offers is shown, including ones added later.'
+    )
   })
 
   it('Select all acts on what the search narrowed to', async () => {
-    await openSheet('opencode:openrouter')
+    await openModels('opencode:openrouter')
     await typeInto('ProviderSheet.modelFilter', 'openai/')
     expect(screen.getByTestId('ProviderSheet.models.selectAll')).toHaveTextContent('Select all 2')
 
     await click(screen.getByTestId('ProviderSheet.models.selectAll'))
     // The model outside the search keeps its place in the list.
-    expect(sent('config:save-opencode-settings')).toEqual([
+    expect(sent('models:set-provider-allowlist')).toEqual([
       [
-        {
-          modelAllowlist: {
-            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
-          }
-        }
+        'opencode',
+        'openrouter',
+        ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
       ]
     ])
   })
 
-  it('refuses a de-selection that would orphan a configured model', async () => {
-    // No-silent-fallback (ADR-059): the reference would break far from here.
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      model: 'openrouter/moonshotai/kimi-k3',
-      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
-    }))
+  /** opencode reports Kimi K3 as discovered — the set a setting can name. */
+  const discoveredKimi = (): void => {
     app.bridge.ipcMain.handle('session:get-engine-models', async () => [
       {
         engineId: 'opencode',
@@ -684,18 +762,208 @@ describe('MODELS IN THE PICKER', () => {
         ]
       }
     ])
-    await openSheet('opencode:openrouter')
-    await click(row('moonshotai/kimi-k3'))
-    expect(screen.getByTestId('ProviderSheet.modelsError')).toHaveTextContent(
-      'the opencode default model'
+  }
+
+  it('locks a model a setting uses, says where, and refuses to untick it', async () => {
+    // No-silent-fallback (ADR-059): the reference would break far from here.
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      model: 'openrouter/moonshotai/kimi-k3',
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
+    }))
+    discoveredKimi()
+    await openModels('opencode:openrouter')
+    const lock = screen
+      .getAllByTestId('ProviderSheet.models.lock')
+      .find((el) => el.dataset.id === 'moonshotai/kimi-k3')!
+    expect(lock).toHaveAttribute(
+      'title',
+      'Default model for opencode — Models & providers › Default models › opencode. Change that setting first.'
     )
-    expect(sent('config:save-opencode-settings')).toEqual([])
+    await click(row('moonshotai/kimi-k3'))
+    expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')
+    // Clear takes every other picked model, and never the locked one.
+    await click(screen.getByTestId('ProviderSheet.models.clearShown'))
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['moonshotai/kimi-k3']]
+    ])
+  })
+
+  it('a pi default spelled the same does not lock an opencode model (scoped guard)', async () => {
+    // opencode and pi picker values share a namespace.
+    app.bridge.ipcMain.handle('config:load-engine-config', async (_e: unknown, id: unknown) =>
+      id === 'pi' ? { piConfig: { defaultModel: 'openrouter/moonshotai/kimi-k3' } } : {}
+    )
+    discoveredKimi()
+    await openModels('opencode:openrouter')
+    expect(screen.queryAllByTestId('ProviderSheet.models.lock')).toEqual([])
+    await click(row('moonshotai/kimi-k3'))
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['opencode', 'openrouter', ['openai/gpt-5-6-luna']]
+    ])
   })
 
   it('“Curate models ›” focuses the list’s search box', async () => {
-    await openSheet('opencode:openrouter')
+    await openModels('opencode:openrouter')
     await click(screen.getByTestId('ProviderSheet.curate'))
     expect(screen.getByTestId('ProviderSheet.modelFilter')).toHaveFocus()
+  })
+})
+
+// ── Curation for every engine (ADR-074 §2) ───────────────────────────
+
+describe('MODELS IN THE PICKER — any engine', () => {
+  const piGroup = (vendorId: string, ids: string[]) => ({
+    engineId: 'pi',
+    vendorId,
+    vendorName: vendorId,
+    models: ids.map((id) => ({
+      value: `${vendorId}/${id}`,
+      displayName: id,
+      description: '',
+      engineId: 'pi'
+    }))
+  })
+  const tabs = (): string[] =>
+    screen.queryAllByTestId('ProviderSheet.curationTab').map((el) => el.dataset.id!)
+  const tab = (engine: string): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.curationTab').find((el) => el.dataset.id === engine)!
+
+  it('a provider on both engines gets one tab each, keyed by each engine’s own id', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-6-sol'])
+    ])
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      modelAllowlist: { openai: ['gpt-5.6-luna'] }
+    }))
+    await openModels('chatgpt')
+    expect(tabs()).toEqual(['opencode', 'pi'])
+    // Scoped: the subscription card's opencode pill says the same count.
+    await within(screen.getByTestId('ProviderSheet.modelsSheet')).findByText('1 of 2')
+    expect(
+      screen
+        .getAllByTestId('ProviderSheet.curationTabCount')
+        .map((el) => [el.dataset.id, el.textContent])
+    ).toEqual([
+      ['opencode', '1 of 2'],
+      ['pi', 'all 3']
+    ])
+
+    await click(tab('pi'))
+    await click(
+      screen.getAllByTestId('ProviderSheet.models.row').find((el) => el.dataset.id === 'gpt-6-sol')!
+    )
+    // pi's id for ChatGPT is `openai-codex`, never the definition id.
+    expect(sent('models:set-provider-allowlist')).toEqual([
+      ['pi', 'openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol']]
+    ])
+  })
+
+  it('a list split in the stacked editor reopens split, and stays split on the next edit', async () => {
+    // The sheet re-reads the definition after every write; the editor seeds
+    // from it on each open. Read once, a split list reopened as ONE list.
+    stub('shared-provider:set-curation', (id, curation) => {
+      definitions = definitions.map((d) =>
+        d.id === id ? { ...d, curation: curation as SharedProviderDefinition['curation'] } : d
+      )
+    })
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna'])
+    ])
+    const card = (id: string): HTMLElement =>
+      screen.getAllByTestId('ProviderSheet.curationLink.option').find((el) => el.dataset.id === id)!
+
+    await openModels('chatgpt')
+    expect(card('one')).toHaveAttribute('aria-checked', 'true')
+    await click(card('separate'))
+    expect(sent('shared-provider:set-curation')).toEqual([['chatgpt', { linked: false }]])
+
+    await click(screen.getByTestId('ProviderSheet.modelsDone'))
+    expect(screen.getByTestId('ProviderSheet.modelsSummary')).toHaveTextContent(
+      'Separate per engine'
+    )
+    await click(screen.getByTestId('ProviderSheet.editModels'))
+    expect(card('separate')).toHaveAttribute('aria-checked', 'true')
+
+    // The next edit is a per-engine one: nothing re-links the list.
+    await click(
+      screen
+        .getAllByTestId('ProviderSheet.models.row')
+        .find((el) => el.dataset.id === 'gpt-5.6-luna')!
+    )
+    expect(sent('models:set-provider-allowlist')).toHaveLength(1)
+    expect(sent('shared-provider:set-curation')).toEqual([['chatgpt', { linked: false }]])
+  })
+
+  it('a single-engine provider gets no tabs, and pi curation writes pi', async () => {
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('groq', ['llama-4', 'kimi'])
+    ])
+    await openModels('pi:groq')
+    expect(tabs()).toEqual([])
+    await click(
+      screen
+        .getAllByTestId('ProviderSheet.curationMode.option')
+        .find((el) => el.dataset.id === 'pick')!
+    )
+    // A small catalog starts Only with everything picked.
+    expect(sent('models:set-provider-allowlist')).toEqual([['pi', 'groq', ['llama-4', 'kimi']]])
+  })
+
+  it('an empty pi catalog says why instead of listing nothing', async () => {
+    // pi reports OTHER providers, so this one has no usable credential.
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('groq', ['llama-4'])
+    ])
+    await openModels('ollama-local')
+    const models = await screen.findByTestId('ProviderSheet.models')
+    expect(models).toHaveAttribute('data-id', 'empty')
+    expect(models).toHaveTextContent('pi reports no models for this provider')
+  })
+
+  it('a shared provider both engines curate shows ONE list, marked per engine (ADR-074 §3)', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna', 'gpt-5.6-sol'])
+    ])
+    await openModels('chatgpt')
+    await screen.findAllByTestId('ProviderSheet.curationLink.option')
+    expect(screen.queryByTestId('ProviderSheet.curationTabs')).toBeNull()
+    const sol = screen
+      .getAllByTestId('ProviderSheet.models.row')
+      .find((el) => el.dataset.id === 'gpt-5.6-sol')!
+    expect(
+      within(sol)
+        .getAllByTestId('ProviderSheet.modelMark')
+        .map((el) => [el.dataset.id, el.dataset.available])
+    ).toEqual([
+      ['opencode', 'false'],
+      ['pi', 'true']
+    ])
+  })
+
+  it('“Curate models ›” on the pi row opens the pi tab', async () => {
+    // Tabs exist only when the lists are split (ADR-074 §3); linked, there is
+    // one shared list and no tab to open.
+    definitions = [{ ...chatgptDefinition, curation: { linked: false } }, customDefinition]
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' }
+    ])
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      piGroup('openai-codex', ['gpt-5.6-luna'])
+    ])
+    await openModels('chatgpt')
+    await screen.findAllByTestId('ProviderSheet.curationTab')
+    await click(screen.getAllByTestId('ProviderSheet.curate').find((el) => el.dataset.id === 'pi')!)
+    expect(tab('pi')).toHaveAttribute('aria-selected', 'true')
   })
 })
 
@@ -776,25 +1044,6 @@ describe('the re-homed vault flows', () => {
     await openSheet('chatgpt')
     expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()
   })
-
-  it('a disconnected subscription opens the sign-in dialog, not the Add sheet', async () => {
-    // One sign-in surface, and since ADR-068 §3 it is the dialog.
-    snapshot = {
-      ...snapshot,
-      entries: snapshot.entries.map((e) =>
-        e.id === 'chatgpt' ? { ...e, credential: 'none' as const } : e
-      )
-    }
-    await openSheet('chatgpt')
-    await click(screen.getByTestId('ProviderSheet.signIn'))
-
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'chatgpt',
-      mode: 'reauth'
-    })
-    expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
-  })
 })
 
 /**
@@ -848,5 +1097,817 @@ describe('model setup', () => {
     await openSheet('ollama-local')
     expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ProviderSheet.piOverrides')).not.toBeInTheDocument()
+  })
+})
+
+// ── API providers (ADR-074 §6–7, mockup D) ───────────────────────────
+
+describe('API providers — one key, delivered to each engine', () => {
+  const catalogEntry: ProviderEntry = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    origin: 'shared',
+    credential: 'api-key',
+    kindLabel: 'Catalog',
+    engines: {
+      opencode: {
+        enabled: true,
+        native: true,
+        providerId: 'openrouter',
+        modelCount: 4,
+        curated: true,
+        catalogCount: 382
+      },
+      pi: { enabled: false }
+    }
+  }
+  const catalogDefinition: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: false }, opencode: { enabled: true } }
+  }
+
+  beforeEach(() => {
+    snapshot = { entries: [catalogEntry], opencodeInstalled: true }
+    definitions = [chatgptDefinition, catalogDefinition]
+    stub('shared-provider:adopt-native')
+  })
+
+  it('the Key section replaces the ONE key through the vault', async () => {
+    await openSheet('openrouter')
+    const key = screen
+      .getAllByTestId('ProviderSheet.credential')
+      .find((el) => el.dataset.id === 'key')!
+    expect(key).toHaveTextContent("Stored once in ClaudeUI's vault")
+    await click(screen.getByTestId('ProviderSheet.replaceKey'))
+    await typeInto('ProviderSheet.keyInput', 'sk-new')
+    await click(screen.getByTestId('ProviderSheet.saveKey'))
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-new']])
+    expect(called('vendorAuthSetKey')).toEqual([])
+  })
+
+  it('one delivery row per engine: where the key went, and what Off means', async () => {
+    await openSheet('openrouter')
+    // No Claude row on an API provider: its rows are deliveries.
+    expect(screen.getAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).toEqual([
+      'opencode',
+      'pi'
+    ])
+    expect(engineRow('opencode')).toHaveTextContent(
+      'Key delivered to opencode’s auth.json as openrouter · 4 of 382 models'
+    )
+    expect(engineRow('pi')).toHaveTextContent(
+      'Off. Turning it on delivers the stored key; nothing to re-enter.'
+    )
+    await click(engineToggle('pi'))
+    expect(sent('shared-provider:set-route')).toEqual([['openrouter', 'pi', true]])
+  })
+
+  it('a failed delivery is shown on its engine row, with Retry', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...catalogEntry,
+          engines: {
+            ...catalogEntry.engines,
+            pi: { enabled: true, providerId: 'openrouter', error: 'permission denied' }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('openrouter')
+    expect(engineRow('pi')).toHaveTextContent('permission denied')
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.retry'))
+    expect(sent('shared-provider:sync')).toEqual([['openrouter']])
+  })
+
+  it('Remove is allowed for a catalog provider, and says what it deletes', async () => {
+    await openSheet('openrouter')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(
+      'Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+    )
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(sent('shared-provider:remove')).toEqual([])
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(sent('shared-provider:remove')).toEqual([['openrouter']])
+  })
+
+  it('models are a summary row; Edit models › opens the editor in a stacked sheet', async () => {
+    await openSheet('openrouter')
+    expect(screen.getByTestId('ProviderSheet.modelsSummary')).toHaveTextContent('All models')
+    expect(screen.queryByTestId('ProviderSheet.modelsSheet')).toBeNull()
+    await click(screen.getByTestId('ProviderSheet.editModels'))
+    expect(screen.getByTestId('ProviderSheet.modelsSheet')).toHaveTextContent(
+      'OpenRouter · models in the picker'
+    )
+  })
+
+  it('“Curate ›” on an engine row opens the same stacked sheet', async () => {
+    await openSheet('openrouter')
+    await click(within(engineRow('opencode')).getByTestId('ProviderSheet.curate'))
+    expect(screen.getByTestId('ProviderSheet.modelsSheet')).toBeInTheDocument()
+  })
+
+  it('turning a route on over the engine’s OWN key for the vendor asks first', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...catalogEntry,
+          engines: { ...catalogEntry.engines, pi: { enabled: false, ownCredential: true } }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('openrouter')
+    await click(engineToggle('pi'))
+    expect(sent('shared-provider:set-route')).toEqual([])
+    expect(engineRow('pi')).toHaveTextContent(
+      'pi’s own key for OpenRouter will be replaced by the stored one.'
+    )
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.enableConfirm'))
+    expect(sent('shared-provider:set-route')).toEqual([['openrouter', 'pi', true]])
+  })
+
+  it('an enabled route that is not actually delivered says so, with Retry', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...catalogEntry,
+          engines: {
+            ...catalogEntry.engines,
+            opencode: { ...catalogEntry.engines.opencode!, delivered: false }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('openrouter')
+    expect(engineRow('opencode')).toHaveTextContent('Not in opencode’s auth.json.')
+    expect(engineRow('opencode')).not.toHaveTextContent('Key delivered')
+    await click(within(engineRow('opencode')).getByTestId('ProviderSheet.retry'))
+    expect(sent('shared-provider:sync')).toEqual([['openrouter']])
+  })
+
+  it('a removal that makes the row vanish closes the sheet — it never follows', async () => {
+    stub('shared-provider:remove', () => {
+      // A native row of the same bare id is left behind; the sheet must not jump to it.
+      snapshot = {
+        entries: [{ ...openrouter, id: 'opencode:openrouter' }],
+        opencodeInstalled: true
+      }
+    })
+    await openSheet('openrouter')
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(screen.queryByTestId('ProviderSheet')).toBeNull()
+  })
+
+  it('a keyless custom endpoint keeps the optional-key copy, and pi’s placeholder row', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...custom,
+          credential: 'keyless',
+          engines: {
+            opencode: { enabled: false },
+            pi: { enabled: true, providerId: 'ollama-local' }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('ollama-local')
+    expect(
+      screen.getAllByTestId('ProviderSheet.credential').find((el) => el.dataset.id === 'key')!
+    ).toHaveTextContent('Optional — this endpoint is used without a key.')
+    expect(engineRow('pi')).toHaveTextContent('Placeholder key in models.json · as ollama-local')
+  })
+})
+
+describe('native keys — conflict and adoption (ADR-074 §6)', () => {
+  const conflicted: ProviderEntry = {
+    ...openrouter,
+    keyConflict: { opencode: '…a41f', pi: '…09c2' }
+  }
+
+  beforeEach(() => {
+    stub('shared-provider:adopt-native')
+  })
+
+  it('asks which key to keep, and adopts ONLY after the in-place confirm', async () => {
+    snapshot = { entries: [conflicted], opencodeInstalled: true }
+    await openSheet('opencode:openrouter')
+    const panel = screen.getByTestId('ProviderSheet.keyConflict')
+    expect(panel).toHaveTextContent('opencode and pi hold different OpenRouter keys.')
+    const option = (id: string): HTMLElement =>
+      within(panel)
+        .getAllByTestId('ProviderSheet.keepKey')
+        .find((el) => el.dataset.id === id)!
+    expect(option('opencode')).toHaveTextContent('Keep opencode’s key (…a41f)')
+    expect(option('pi')).toHaveTextContent('Keep pi’s key (…09c2)')
+
+    await click(within(option('pi')).getByRole('radio'))
+    await click(screen.getByTestId('ProviderSheet.adoptKeep'))
+    // Nothing yet — the other engine's key is about to be replaced.
+    expect(sent('shared-provider:adopt-native')).toEqual([])
+    expect(screen.getByTestId('ProviderSheet.adoptConfirmRow')).toHaveTextContent(
+      'opencode’s key (…a41f) is deleted, and pi’s key (…09c2) is delivered to both engines.'
+    )
+    // The confirm takes focus; the panel is a labelled group.
+    expect(document.activeElement).toBe(screen.getByTestId('ProviderSheet.adoptConfirm'))
+    expect(panel).toHaveAttribute('role', 'group')
+    expect(document.getElementById(panel.getAttribute('aria-labelledby')!)).toHaveTextContent(
+      'opencode and pi hold different OpenRouter keys.'
+    )
+    await click(screen.getByTestId('ProviderSheet.adoptConfirm'))
+    expect(sent('shared-provider:adopt-native')).toEqual([['openrouter', 'pi']])
+  })
+
+  it('Cancel backs out of the confirm without writing', async () => {
+    snapshot = { entries: [conflicted], opencodeInstalled: true }
+    await openSheet('opencode:openrouter')
+    await click(screen.getByTestId('ProviderSheet.adoptKeep'))
+    await click(screen.getByTestId('ProviderSheet.adoptCancel'))
+    // Focus goes back to the button that opened the confirm.
+    expect(document.activeElement).toBe(screen.getByTestId('ProviderSheet.adoptKeep'))
+    expect(sent('shared-provider:adopt-native')).toEqual([])
+  })
+
+  it('Keep them separate dismisses the panel for this session', async () => {
+    snapshot = { entries: [{ ...conflicted, id: 'opencode:groq-x' }], opencodeInstalled: true }
+    await openSheet('opencode:groq-x')
+    await click(screen.getByTestId('ProviderSheet.keepSeparate'))
+    expect(screen.queryByTestId('ProviderSheet.keyConflict')).toBeNull()
+    expect(sent('shared-provider:adopt-native')).toEqual([])
+    cleanup()
+    await openSheet('opencode:groq-x')
+    expect(screen.queryByTestId('ProviderSheet.keyConflict')).toBeNull()
+  })
+
+  it('names short keys by engine alone, so the options stay distinguishable', async () => {
+    snapshot = {
+      entries: [{ ...openrouter, keyConflict: { opencode: '…', pi: '…' } }],
+      opencodeInstalled: true
+    }
+    await openSheet('opencode:openrouter')
+    expect(screen.getAllByTestId('ProviderSheet.keepKey').map((el) => el.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('Keep opencode’s key')])
+    )
+    for (const el of screen.getAllByTestId('ProviderSheet.keepKey'))
+      expect(el.textContent).not.toContain('(…)')
+  })
+
+  it('keeping them separate also hides the list’s “2 different keys” chip', async () => {
+    snapshot = {
+      entries: [
+        { ...openrouter, id: 'opencode:mistral', keyConflict: { opencode: '…1111', pi: '…2222' } }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('opencode:mistral')
+    const row = screen
+      .getAllByTestId('ProviderList.row')
+      .find((el) => el.dataset.id === 'opencode:mistral')!
+    expect(within(row).getByTestId('ProviderList.keyConflict')).toBeInTheDocument()
+    await click(screen.getByTestId('ProviderSheet.keepSeparate'))
+    expect(within(row).queryByTestId('ProviderList.keyConflict')).toBeNull()
+  })
+
+  it('offers a key only one engine holds to both engines', async () => {
+    snapshot = { entries: [{ ...openrouter, adoptable: 'opencode' }], opencodeInstalled: true }
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.adoptable')).toHaveTextContent(
+      'This key is only in opencode.'
+    )
+    await click(screen.getByTestId('ProviderSheet.adopt'))
+    expect(sent('shared-provider:adopt-native')).toEqual([['openrouter', 'opencode']])
+  })
+})
+
+describe('a second key for a catalog provider (ADR-074 slice 10)', () => {
+  const OR_URL = 'https://openrouter.ai/api/v1'
+  const OR_NPM = '@openrouter/ai-sdk-provider'
+  const kimi = {
+    id: 'moonshotai/kimi-k3',
+    name: 'Kimi K3',
+    reasoning: true,
+    vision: true,
+    contextWindow: 262144,
+    maxTokens: 32768,
+    apiUrl: OR_URL,
+    apiNpm: OR_NPM
+  }
+  const glm = {
+    id: 'z-ai/glm-5.3',
+    name: 'GLM 5.3',
+    contextWindow: 200000,
+    apiUrl: OR_URL,
+    apiNpm: OR_NPM
+  }
+  const origin: ProviderEntry = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    origin: 'shared',
+    credential: 'api-key',
+    kindLabel: 'Catalog',
+    engines: {
+      opencode: { enabled: true, native: true, providerId: 'openrouter' },
+      pi: { enabled: true, providerId: 'openrouter' }
+    }
+  }
+  const originDefinition: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } },
+    // One list, one pick: what the new key's form starts with.
+    curation: { linked: true, models: ['moonshotai/kimi-k3'] }
+  }
+  const work: SharedProviderDefinition = {
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    kind: 'custom',
+    protocol: 'openai-completions',
+    baseUrl: OR_URL,
+    models: [{ id: 'moonshotai/kimi-k3', name: 'Old name', contextWindow: 1000 }],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } },
+    derivedFrom: 'openrouter',
+    copiedAt: '2026-09-01'
+  }
+  const workEntry: ProviderEntry = {
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    origin: 'shared',
+    credential: 'api-key',
+    kindLabel: `Custom endpoint · ${OR_URL}`,
+    derivedFrom: 'openrouter',
+    engines: {
+      opencode: { enabled: true, native: true, providerId: 'openrouter-work' },
+      pi: { enabled: true, providerId: 'openrouter-work' }
+    }
+  }
+  const DATE = expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
+
+  beforeEach(() => {
+    snapshot = { entries: [origin], opencodeInstalled: true }
+    definitions = [chatgptDefinition, originDefinition]
+    providerModels = [kimi, glm]
+  })
+
+  const addSheet = (): HTMLElement => screen.getByTestId('AddAnotherKeySheet')
+
+  async function openForm(): Promise<void> {
+    await openSheet('openrouter')
+    await click(screen.getByTestId('ProviderSheet.addAnotherKey'))
+  }
+
+  it('is offered on a catalog provider’s Key section', async () => {
+    await openSheet('openrouter')
+    expect(screen.getByTestId('ProviderSheet.anotherKey')).toHaveTextContent(
+      'Another OpenRouter key'
+    )
+  })
+
+  it('is not offered on a custom endpoint', async () => {
+    snapshot = { entries: [custom], opencodeInstalled: true }
+    definitions = [chatgptDefinition, customDefinition]
+    await openSheet('ollama-local')
+    expect(screen.getByTestId('ProviderSheet.credential')).toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.anotherKey')).toBeNull()
+  })
+
+  it('adds the key as its own entry — ONE save, ONE key — and opens it', async () => {
+    stub('shared-provider:save', (definition) => {
+      definitions = [...definitions, definition as SharedProviderDefinition]
+      snapshot = { entries: [origin, workEntry], opencodeInstalled: true }
+    })
+    await openForm()
+    expect(addSheet()).toHaveTextContent('Another OpenRouter key')
+    // Endpoint AND API come from the catalog, and the picks from the original.
+    expect(screen.getByTestId('AddAnotherKeySheet.endpointFound')).toHaveTextContent(
+      `${OR_URL} · openai-completions · from OpenRouter’s catalog`
+    )
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent(
+      'Pre-ticked with OpenRouter’s current picks.'
+    )
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent('1 selected')
+    expect(screen.getByTestId('AddAnotherKeySheet.save')).toBeDisabled()
+
+    await typeInto('AddAnotherKeySheet.label', 'Work')
+    expect(screen.getByTestId('AddAnotherKeySheet.identity')).toHaveTextContent(
+      'Shows as OpenRouter (Work) · id openrouter-work'
+    )
+    await typeInto('AddAnotherKeySheet.keyInput', 'sk-work')
+    await click(screen.getByTestId('AddAnotherKeySheet.save'))
+
+    expect(sent('shared-provider:save')).toEqual([
+      [
+        {
+          id: 'openrouter-work',
+          name: 'OpenRouter (Work)',
+          kind: 'custom',
+          protocol: 'openai-completions',
+          baseUrl: OR_URL,
+          // Details copied from the catalog entry; the endpoint is not a model fact.
+          models: [
+            {
+              id: 'moonshotai/kimi-k3',
+              name: 'Kimi K3',
+              reasoning: true,
+              vision: true,
+              contextWindow: 262144,
+              maxTokens: 32768
+            }
+          ],
+          routes: { pi: { enabled: true }, opencode: { enabled: true } },
+          derivedFrom: 'openrouter',
+          copiedAt: DATE,
+          managed: true
+        }
+      ]
+    ])
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter-work', 'sk-work']])
+    expect(called('vendorAuthSetKey')).toEqual([])
+    expect(screen.queryByTestId('AddAnotherKeySheet')).toBeNull()
+    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'openrouter-work')
+  })
+
+  it('takes the new entry back out when its key cannot be stored', async () => {
+    stub('shared-provider:set-key', () => {
+      throw new Error('vault is locked')
+    })
+    await openForm()
+    await typeInto('AddAnotherKeySheet.label', 'Work')
+    await typeInto('AddAnotherKeySheet.keyInput', 'sk-work')
+    await click(screen.getByTestId('AddAnotherKeySheet.save'))
+    expect(sent('shared-provider:remove')).toEqual([['openrouter-work']])
+    expect(screen.getByTestId('AddAnotherKeySheet.error')).toHaveTextContent('vault is locked')
+  })
+
+  it('refuses an id already taken — by a definition, or by any catalog provider', async () => {
+    definitions = [chatgptDefinition, originDefinition, work]
+    // A provider opencode's catalog knows but nobody has set up.
+    opencodeCatalog = [
+      ...opencodeCatalog,
+      { ...(opencodeCatalog[0] as object), id: 'openrouter-eu', authState: 'unauthenticated' }
+    ]
+    await openForm()
+    await typeInto('AddAnotherKeySheet.label', 'Work')
+    expect(screen.getByTestId('AddAnotherKeySheet.idError')).toHaveTextContent(
+      '"openrouter-work" is already a provider.'
+    )
+    await typeInto('AddAnotherKeySheet.label', 'EU')
+    expect(screen.getByTestId('AddAnotherKeySheet.idError')).toHaveTextContent(
+      '"openrouter-eu" is already a provider.'
+    )
+    await typeInto('AddAnotherKeySheet.label', 'Personal')
+    expect(screen.queryByTestId('AddAnotherKeySheet.idError')).toBeNull()
+  })
+
+  it('asks for the endpoint and the API when the catalog does not say, and checks the URL', async () => {
+    providerModels = [{ id: 'moonshotai/kimi-k3', name: 'Kimi K3' }]
+    await openForm()
+    expect(screen.getByTestId('AddAnotherKeySheet.endpointAsk')).toHaveTextContent(
+      'OpenRouter’s catalog does not say one endpoint or API for its models — enter both.'
+    )
+    await typeInto('AddAnotherKeySheet.label', 'Personal')
+    await typeInto('AddAnotherKeySheet.keyInput', 'sk-personal')
+    await typeInto('AddAnotherKeySheet.baseUrl', 'https://gateway.test/${ACCOUNT}/v1')
+    expect(screen.getByTestId('AddAnotherKeySheet.urlError')).toHaveTextContent('placeholder')
+    await typeInto('AddAnotherKeySheet.baseUrl', 'https://gateway.test/v1')
+    // No API chosen yet: nothing to save.
+    expect(screen.getByTestId('AddAnotherKeySheet.save')).toBeDisabled()
+    chooseSelectMenuOption(screen.getByTestId('AddAnotherKeySheet.protocol'), 'anthropic-messages')
+    await click(screen.getByTestId('AddAnotherKeySheet.save'))
+    expect(sent('shared-provider:save')).toEqual([
+      [
+        expect.objectContaining({
+          id: 'openrouter-personal',
+          name: 'OpenRouter (Personal)',
+          baseUrl: 'https://gateway.test/v1',
+          protocol: 'anthropic-messages'
+        })
+      ]
+    ])
+  })
+
+  it('seeds from the original’s own lists even while it is off, and says when it cannot', async () => {
+    // Off: no engine curates it in the sheet, but its lists are still there.
+    snapshot = {
+      entries: [
+        {
+          ...origin,
+          disabled: true,
+          engines: { opencode: { enabled: false }, pi: { enabled: false } }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    definitions = [
+      chatgptDefinition,
+      { ...originDefinition, disabled: true, curation: { linked: false } }
+    ]
+    app.bridge.ipcMain.removeHandler('config:load-opencode-settings')
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+      modelAllowlist: { openrouter: ['z-ai/glm-5.3'] }
+    }))
+    app.bridge.ipcMain.removeHandler('config:load-engine-config')
+    app.bridge.ipcMain.handle('config:load-engine-config', async () => ({
+      piConfig: { modelAllowlist: { openrouter: ['z-ai/glm-5.3'] } }
+    }))
+    await openForm()
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent(
+      'Pre-ticked with OpenRouter’s current picks.'
+    )
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent('1 selected')
+  })
+
+  it('declares only the engines ticked, never more than the cap, and says why none is ticked', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      id: `v/m${i}`,
+      name: `M${i}`,
+      apiUrl: OR_URL,
+      apiNpm: OR_NPM
+    }))
+    providerModels = many
+    // All models, over the cap: the form starts with nothing picked, and says so.
+    definitions = [chatgptDefinition, { ...originDefinition, curation: { linked: true } }]
+    await openForm()
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent(
+      'OpenRouter shows all 60 of its models — too many to declare. Tick the ones you use.'
+    )
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent('0 selected')
+    await typeInto('AddAnotherKeySheet.list.filter', 'v/m1')
+    await click(
+      screen.getAllByTestId('AddAnotherKeySheet.list.row').find((el) => el.dataset.id === 'v/m1')!
+    )
+    expect(screen.getByTestId('AddAnotherKeySheet.models')).toHaveTextContent('1 selected')
+    await click(
+      within(screen.getByTestId('AddAnotherKeySheet.engines')).getByText('pi', { exact: true })
+    )
+    await typeInto('AddAnotherKeySheet.label', 'Team')
+    await typeInto('AddAnotherKeySheet.keyInput', 'sk-team')
+    await click(screen.getByTestId('AddAnotherKeySheet.save'))
+    expect(sent('shared-provider:save')[0][0]).toMatchObject({
+      models: [{ id: 'v/m1', name: 'M1' }],
+      routes: { pi: { enabled: false }, opencode: { enabled: true } }
+    })
+  })
+
+  it('refresh re-copies the declared models’ details, offers the catalog’s others, and dates it', async () => {
+    snapshot = { entries: [origin, workEntry], opencodeInstalled: true }
+    definitions = [chatgptDefinition, originDefinition, work]
+    await openSheet('openrouter-work')
+    expect(screen.getByTestId('ProviderSheet.cloneModels')).toHaveTextContent(
+      '1 declared · copied from OpenRouter’s catalog on 1 Sep 2026'
+    )
+    await click(screen.getByTestId('ProviderSheet.refreshFromCatalog'))
+    expect(screen.getByTestId('RefreshModelsSheet.summary')).toHaveTextContent(
+      '1 of 1 declared models get OpenRouter’s current details. 1 more in the catalog'
+    )
+    await typeInto('RefreshModelsSheet.list.filter', 'glm')
+    await click(
+      screen
+        .getAllByTestId('RefreshModelsSheet.list.row')
+        .find((el) => el.dataset.id === 'z-ai/glm-5.3')!
+    )
+    await click(screen.getByTestId('RefreshModelsSheet.save'))
+    expect(sent('shared-provider:save')).toEqual([
+      [
+        {
+          ...work,
+          copiedAt: DATE,
+          models: [
+            {
+              id: 'moonshotai/kimi-k3',
+              name: 'Kimi K3',
+              reasoning: true,
+              vision: true,
+              contextWindow: 262144,
+              maxTokens: 32768
+            },
+            { id: 'z-ai/glm-5.3', name: 'GLM 5.3', contextWindow: 200000 }
+          ]
+        }
+      ]
+    ])
+    expect(screen.queryByTestId('RefreshModelsSheet')).toBeNull()
+  })
+
+  it('offers no refresh on an endpoint that is not a second key', async () => {
+    snapshot = { entries: [custom], opencodeInstalled: true }
+    definitions = [chatgptDefinition, customDefinition]
+    await openSheet('ollama-local')
+    expect(screen.getByTestId('ProviderSheet.endpoint')).toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.cloneModels')).toBeNull()
+  })
+})
+
+describe('switching an API provider off and on (ADR-074 slice 10)', () => {
+  const workEntry: ProviderEntry = {
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    origin: 'shared',
+    credential: 'api-key',
+    kindLabel: 'Custom endpoint · https://openrouter.ai/api/v1',
+    engines: {
+      opencode: { enabled: true, native: true, providerId: 'openrouter-work', modelCount: 4 },
+      pi: { enabled: true, providerId: 'openrouter-work', modelCount: 4 }
+    }
+  }
+  /** What the registry says once it is off: every engine off, its routes kept. */
+  const offEntry: ProviderEntry = {
+    ...workEntry,
+    disabled: true,
+    engines: { opencode: { enabled: false, routeOn: true }, pi: { enabled: false, routeOn: true } }
+  }
+  const workDefinition: SharedProviderDefinition = {
+    id: 'openrouter-work',
+    name: 'OpenRouter (Work)',
+    kind: 'custom',
+    protocol: 'openai-completions',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    models: [{ id: 'moonshotai/kimi-k3' }],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  beforeEach(() => {
+    definitions = [chatgptDefinition, workDefinition]
+    snapshot = { entries: [workEntry, openrouter], opencodeInstalled: true }
+    stub('shared-provider:set-disabled', (_id, disabled) => {
+      snapshot = {
+        entries: [disabled ? offEntry : workEntry, openrouter],
+        opencodeInstalled: true
+      }
+    })
+  })
+
+  const listRow = (id: string): HTMLElement =>
+    screen.getAllByTestId('ProviderList.row').find((el) => el.dataset.id === id)!
+
+  it('a shared row carries the switch; off shows an Off pill with every engine off', async () => {
+    render(<ProviderList />)
+    await screen.findAllByTestId('ProviderList.row')
+    // A native row is the engine's own entry: no provider-wide switch.
+    expect(screen.getAllByTestId('ProviderList.onOff').map((el) => el.dataset.id)).toEqual([
+      'openrouter-work'
+    ])
+    const toggle = within(listRow('openrouter-work')).getByTestId('ProviderList.onOff')
+    expect(toggle).toHaveAttribute('role', 'switch')
+    expect(toggle).toHaveAccessibleName('OpenRouter (Work)')
+    await click(toggle)
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', true, false]])
+
+    const row = listRow('openrouter-work')
+    expect(within(row).getByTestId('ProviderList.off')).toHaveTextContent('Off')
+    expect(within(row).queryByTestId('ProviderList.credential')).toBeNull()
+    expect(
+      within(row)
+        .getAllByTestId('ProviderList.engine')
+        .map((el) => [el.dataset.id, el.dataset.on, el.textContent])
+    ).toEqual([
+      ['opencode', 'false', 'opencodeoff'],
+      ['pi', 'false', 'pioff']
+    ])
+    expect(within(row).getByTestId('ProviderList.onOff')).toHaveAttribute('aria-checked', 'false')
+
+    await click(within(row).getByTestId('ProviderList.onOff'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter-work', true, false],
+      ['openrouter-work', false, false]
+    ])
+    expect(within(listRow('openrouter-work')).getByTestId('ProviderList.credential')).toBeTruthy()
+  })
+
+  it('switching on over an engine’s own key asks first, on the row', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...offEntry,
+          engines: {
+            opencode: { enabled: false, routeOn: true },
+            pi: { enabled: false, routeOn: true, ownCredential: true }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    render(<ProviderList />)
+    await screen.findAllByTestId('ProviderList.row')
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    expect(screen.getByTestId('ProviderList.switchOnConfirm')).toHaveTextContent(
+      'pi’s own key for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    await click(screen.getByTestId('ProviderList.switchOnCancel'))
+    expect(screen.queryByTestId('ProviderList.switchOnConfirm')).toBeNull()
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    await click(screen.getByTestId('ProviderList.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+  })
+
+  it('a failed switch is said on the list, where the switch is', async () => {
+    stub('shared-provider:set-disabled', () => {
+      throw new Error('opencode config is not writable')
+    })
+    render(<ProviderList />)
+    await screen.findAllByTestId('ProviderList.row')
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(screen.getByTestId('ProviderList.switchError')).toHaveTextContent(
+      'Could not switch OpenRouter (Work)'
+    )
+    expect(screen.getByTestId('ProviderList.switchError')).toHaveTextContent(
+      'opencode config is not writable'
+    )
+  })
+
+  it('the sheet header switches it; while off it says what is kept, and routes stay editable', async () => {
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    stub('shared-provider:set-route', () => {
+      snapshot = {
+        entries: [
+          { ...offEntry, engines: { opencode: { enabled: false }, pi: offEntry.engines.pi! } }
+        ],
+        opencodeInstalled: true
+      }
+    })
+    await openSheet('openrouter-work')
+    expect(screen.getByTestId('ProviderSheet.offNotice')).toHaveTextContent(
+      'Off — not delivered to any engine. Its key and settings are kept'
+    )
+    expect(engineRow('pi')).toHaveTextContent(
+      'Off while OpenRouter (Work) is off — back on with it.'
+    )
+    // A route change while off only records it — no confirm, nothing delivered.
+    expect(engineToggle('opencode')).toHaveAttribute('aria-pressed', 'true')
+    await click(engineToggle('opencode'))
+    expect(sent('shared-provider:set-route')).toEqual([['openrouter-work', 'opencode', false]])
+    expect(engineRow('opencode')).toHaveTextContent(
+      'Off, and stays off when OpenRouter (Work) is switched on.'
+    )
+
+    expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'false')
+    await click(screen.getByTestId('ProviderSheet.onOff'))
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, false]])
+    expect(screen.queryByTestId('ProviderSheet.offNotice')).toBeNull()
+    expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('the sheet asks before switching on over an engine’s own key', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...offEntry,
+          engines: {
+            opencode: { enabled: false, routeOn: true, ownCredential: true },
+            pi: { enabled: false, routeOn: true }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('openrouter-work')
+    await click(screen.getByTestId('ProviderSheet.onOff'))
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    expect(screen.getByTestId('ProviderSheet.switchOnConfirm')).toHaveTextContent(
+      'opencode’s own key for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    await click(screen.getByTestId('ProviderSheet.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+  })
+
+  it('a failed switch still re-reads, so the sheet never shows a stale Off', async () => {
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    stub('shared-provider:set-disabled', () => {
+      // The flag cleared, then a delivery failed.
+      snapshot = { entries: [workEntry], opencodeInstalled: true }
+      throw new Error('pi auth.json is locked')
+    })
+    await openSheet('openrouter-work')
+    await click(screen.getByTestId('ProviderSheet.onOff'))
+    expect(screen.getByTestId('ProviderSheet.error')).toHaveTextContent('pi auth.json is locked')
+    expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByTestId('ProviderSheet.offNotice')).toBeNull()
+  })
+
+  it('offers no provider switch on a subscription’s sheet', async () => {
+    snapshot = { entries: [chatgpt], opencodeInstalled: true }
+    await openSheet('chatgpt')
+    expect(screen.queryByTestId('ProviderSheet.onOff')).toBeNull()
+  })
+
+  it('the footer says what Off keeps and what Remove deletes', async () => {
+    await openSheet('openrouter-work')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(
+      'Off keeps the key and settings. Removing deletes the key from ClaudeUI'
+    )
   })
 })

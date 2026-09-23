@@ -2,7 +2,7 @@
  * codex-device-code.ts — the ChatGPT DEVICE-CODE sign-in (ADR-068 §3, Slice 7).
  *
  * Ported from Codex's own `codex-rs/login/src/device_code_auth.rs` (vendored at
- * `.cache/codex-src/`), against the SAME issuer and the SAME `CLIENT_ID` as the
+ * `vendor/codex-src/`), against the SAME issuer and the SAME `CLIENT_ID` as the
  * loopback flow in `codex-oauth.ts`. The wire, verbatim from that file:
  *
  *   1. `POST {issuer}/api/accounts/deviceauth/usercode` `{client_id}` →

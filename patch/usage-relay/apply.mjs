@@ -204,10 +204,7 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  const successRe = new RegExp(
-    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
-    'g'
-  )
+  const successRe = new RegExp(`(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)`, 'g')
   const successMatches = [...src.matchAll(successRe)]
   if (successMatches.length === 0) {
     console.error('ERROR: Cannot find success response helper pattern')

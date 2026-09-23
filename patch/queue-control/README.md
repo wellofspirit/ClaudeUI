@@ -607,3 +607,7 @@ Edit after consumption:
 8. **No consumer change needed.** `yEe` builds the attachment as
    `{prompt: <cmd>.value, source_uuid: <cmd>.uuid}`, so emitting those two
    fields from the drain produces a payload byte-identical to A2's.
+
+## 2.1.280 maintenance note
+
+2.1.280: `wr(pr,{ahead:Tr=!1})` now stages `ks={...cGe(pr),priority:pr.priority??"next",timestamp:...}` then unshifts or pushes it. `cancel_async_message` delegates to `Cu({targetUuid:y.request.message_uuid,sender:"host",messageQueue:N,...})`; `Cu` removes through its queue argument. The reply helper `ze` is determined from unanimous `ze(y,{})` call sites in the control chain. The new `onCommitted:({command:h,members:I})=>{let F=EQt(I);...}` callback is the between-turn committed-batch injection site. Find with `bundle-analyzer find vendor/claude-cli/cli.js "onCommitted:"` and `"cancel_async_message"`. The authenticated queue-control suite passed using the app-selected account.

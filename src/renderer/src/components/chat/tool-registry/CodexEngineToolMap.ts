@@ -152,6 +152,11 @@ export const CodexEngineToolMap: EngineToolMap = {
           // a v2 `subAgentActivity` carries neither, only the agent's canonical
           // path (`/root/<task_name>`), which is then the only thing that tells
           // two sibling agents apart on the card header.
+          // `agentPath` is "/root/<task_name>"; its leaf is the only thing that
+          // tells two sibling agents apart, so it doubles as the roster name.
+          ...(input?.agentPath != null
+            ? { name: String(input.agentPath).split('/').filter(Boolean).pop() }
+            : {}),
           ...(input?.model != null
             ? { subagent: String(input.model), model: String(input.model) }
             : input?.agentPath != null

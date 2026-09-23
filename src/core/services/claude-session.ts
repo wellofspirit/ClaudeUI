@@ -236,7 +236,26 @@ export class ClaudeSession extends BaseSession {
   private isProcessing = false
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
-  private taskIdMap = new Map<string, string>() // agentId → toolUseId
+  private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
+  /**
+   * An agent's identity, and the three maps that keep it (ADR-073).
+   *
+   * `task_id` is stable for the life of an agent; `tool_use_id` identifies one
+   * RUN of it. `SendMessage` to a finished agent restarts it, and cli.js
+   * re-emits the whole lifecycle under the SendMessage call's tool_use id
+   * (`docs/protocol-cc/04-system-subtypes.md` §4.5) — while the resumed child's
+   * completed assistant message still arrives under the ORIGINAL Agent call's
+   * id. Everything downstream (subagentMessages, itemStreams, activeTasks, the
+   * stop path) is keyed by tool_use id, so runs are normalized onto the origin
+   * here, at the one seam that sees the wire.
+   *
+   * `originByTaskId` is NOT evicted on a terminal notification — that eviction
+   * is what made run 2 unattributable and the card read "complete" while the
+   * agent was working. It is cleared with the session.
+   */
+  private originByTaskId = new Map<string, string>() // taskId → origin toolUseId
+  private runAliasByToolUseId = new Map<string, string>() // a run's toolUseId → origin
+  private runCountByOrigin = new Map<string, number>() // origin toolUseId → runs started
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -1181,7 +1200,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleAssistantMessage(msg: AssistantMessage): void {
-    const parentToolUseId = msg.parent_tool_use_id ?? undefined
+    // Aliased to the agent's origin: a resumed run's partials arrive under the
+    // SendMessage call's id while its completed message arrives under the
+    // original Agent call's, and both belong on the one card (ADR-073).
+    const parentToolUseId = this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined)
     const isSidechain = !!parentToolUseId
 
     // cli.js surfaces API failures (401/auth, rate_limit, overloaded, …) as a
@@ -1250,16 +1272,23 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleStreamEvent(msg: StreamEventMessage): void {
-    const routingId = msg.parent_tool_use_id ?? undefined
+    const routingId = this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined)
     const event = msg.event
     if (event) this.itemStreams.handleEvent(event, routingId)
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {
+    const reportedId = msg.tool_use_id || ''
+    const toolUseId = this.resolveTaskOwner(reportedId) || ''
+    // A resumed run's clock is reported against the SendMessage call, whose
+    // tool_name is "SendMessage". The row it lands on is the Agent call's, so
+    // the name is withheld and the reducer's merge keeps the origin's; only the
+    // elapsed time is this run's to report (ADR-073).
+    const aliased = toolUseId !== reportedId
     this.send('session:task-progress', {
-      toolUseId: msg.tool_use_id || '',
-      toolName: msg.tool_name || '',
-      parentToolUseId: msg.parent_tool_use_id ?? null,
+      toolUseId,
+      ...(aliased ? {} : { toolName: msg.tool_name || '' }),
+      parentToolUseId: this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined) ?? null,
       elapsedTimeSeconds: msg.elapsed_time_seconds || 0
     })
   }
@@ -1279,6 +1308,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     if (msg.subtype === 'task_started') {
       this.handleTaskStarted(msg)
+      return
+    }
+    if (msg.subtype === 'task_progress') {
+      this.handleTaskProgressSnapshot(msg)
       return
     }
     if (msg.subtype === 'task_updated') {
@@ -1399,11 +1432,93 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (!taskId || !toolUseId) return
     this.taskIdMap.set(taskId, toolUseId)
 
+    const taskType = msg.task_type || ''
+    const origin = this.originByTaskId.get(taskId)
+
+    // First run: this call IS the agent's identity.
+    if (origin === undefined) {
+      this.originByTaskId.set(taskId, toolUseId)
+      this.runCountByOrigin.set(toolUseId, 1)
+      this.send('session:task-started', { toolUseId, taskId, taskType, runIndex: 1 })
+      return
+    }
+
+    // A start we have already counted — the same call re-reported. Re-arm the
+    // card (the record may have been dropped by a notification) without
+    // inflating the run counter, so a replayed event can't read as a resume.
+    const known = toolUseId === origin || this.runAliasByToolUseId.get(toolUseId) === origin
+    if (known) {
+      this.send('session:task-started', {
+        toolUseId: origin,
+        taskId,
+        taskType,
+        runIndex: this.runCountByOrigin.get(origin) ?? 1
+      })
+      return
+    }
+
+    // A resume: a new tool call (the SendMessage) started another run of an
+    // agent we already know. Alias it so this run's output, tool results and
+    // terminal event all land on the card that spawned the agent.
+    this.runAliasByToolUseId.set(toolUseId, origin)
+    const runIndex = (this.runCountByOrigin.get(origin) ?? 1) + 1
+    this.runCountByOrigin.set(origin, runIndex)
     this.send('session:task-started', {
-      toolUseId,
+      toolUseId: origin,
       taskId,
-      taskType: msg.task_type || ''
+      taskType,
+      runToolUseId: toolUseId,
+      runIndex
     })
+  }
+
+  /**
+   * `system/task_progress` (§4.7) — the periodic snapshot cli.js already sends
+   * and we used to drop on the floor. It is the only live source of a running
+   * task's token spend and of the tool it is on right now; `tool_progress`
+   * (the separate message handled in handleToolProgress) carries the elapsed
+   * clock and nothing else. Both land on `session:task-progress`, each
+   * contributing the fields it knows, and the reducer merges them — so neither
+   * can blank the other's half of the row.
+   */
+  private handleTaskProgressSnapshot(msg: SystemMessage): void {
+    const toolUseId = this.resolveTaskOwner(msg.tool_use_id || '')
+    if (!toolUseId) return
+
+    const rawUsage = msg.usage
+    this.send('session:task-progress', {
+      toolUseId,
+      ...(msg.last_tool_name ? { lastToolName: msg.last_tool_name } : {}),
+      ...(rawUsage
+        ? {
+            usage: {
+              totalTokens: rawUsage.total_tokens || 0,
+              toolUses: rawUsage.tool_uses || 0,
+              durationMs: rawUsage.duration_ms || 0
+            }
+          }
+        : {})
+    })
+  }
+
+  /**
+   * The tool_use id that owns a subagent signal: a resumed run's id maps back
+   * to the agent's origin, everything else passes through untouched.
+   */
+  private resolveTaskOwner(toolUseId: string | undefined): string | undefined {
+    if (!toolUseId) return toolUseId
+    return this.runAliasByToolUseId.get(toolUseId) ?? toolUseId
+  }
+
+  /** The agent id for an owner tool_use id — current run first, then origin. */
+  private taskIdForOwner(toolUseId: string): string | null {
+    for (const [tid, tuid] of this.taskIdMap.entries()) {
+      if (tuid === toolUseId) return tid
+    }
+    for (const [tid, origin] of this.originByTaskId.entries()) {
+      if (origin === toolUseId) return tid
+    }
+    return null
   }
 
   /**
@@ -1423,7 +1538,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // backgrounded) don't imply completion and would wrongly dismiss the UI.
     if (status !== 'completed' && status !== 'killed' && status !== 'failed') return
 
-    const toolUseId = this.taskIdMap.get(taskId) || null
+    // The origin first: after a resume, taskIdMap holds the LATEST run's id,
+    // but every renderer key belongs to the agent's origin call (ADR-073).
+    const toolUseId = this.originByTaskId.get(taskId) ?? this.taskIdMap.get(taskId) ?? null
     if (!toolUseId) return
 
     this.itemStreams.sealOwner(toolUseId, true)
@@ -1441,19 +1558,23 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       status: normalized,
       outputFile: this.backgroundFilePaths.get(toolUseId) || '',
       summary: '',
-      usage: undefined
+      usage: undefined,
+      runIndex: this.runCountByOrigin.get(toolUseId) ?? 1
     })
   }
 
   private handleTaskNotification(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const outputFile = msg.output_file || ''
-    // taskIdMap is populated by task_started/detectTaskMapping and is the
-    // normal path, but the wire's own tool_use_id (docs/protocol-cc/04-system-
-    // subtypes.md §4.4) is a reliable fallback for the rare case the reverse
-    // lookup misses (e.g. task_started never arrived, or the mapping was
-    // already evicted by an earlier stopTask/task_updated race).
-    const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
+    // The agent's ORIGIN call owns every renderer key, so it is consulted
+    // first: on a resume the wire's own tool_use_id is the SendMessage call's,
+    // which no card is keyed by (ADR-073). taskIdMap is the next best thing
+    // (populated by task_started/detectTaskMapping), and the wire's
+    // tool_use_id (docs/protocol-cc/04-system-subtypes.md §4.4) remains the
+    // fallback for the rare case both lookups miss — task_started never
+    // arrived, or an earlier stopTask/task_updated race evicted the mapping.
+    const matchedToolUseId =
+      this.originByTaskId.get(taskId) || this.taskIdMap.get(taskId) || msg.tool_use_id || null
     if (matchedToolUseId) {
       this.itemStreams.sealOwner(matchedToolUseId, true)
       this.markBackgroundDone(matchedToolUseId)
@@ -1476,7 +1597,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       status: msg.status || 'completed',
       outputFile,
       summary: msg.summary || '',
-      usage
+      usage,
+      ...(matchedToolUseId
+        ? { runIndex: this.runCountByOrigin.get(matchedToolUseId) ?? 1 }
+        : undefined)
     })
   }
 
@@ -2442,14 +2566,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
-    // Reverse lookup: toolUseId → task_id
-    let taskId: string | null = null
-    for (const [tid, tuid] of this.taskIdMap.entries()) {
-      if (tuid === toolUseId) {
-        taskId = tid
-        break
-      }
-    }
+    // Reverse lookup: toolUseId → task_id. Checks origins too — after a resume
+    // taskIdMap holds the latest RUN's id, but the Stop button passes the card's
+    // id, which is the agent's origin. Without that arm a resumed agent's Stop
+    // fell through to interrupt() and aborted the whole turn (ADR-073).
+    const taskId: string | null = this.taskIdForOwner(toolUseId)
 
     if (!taskId) {
       // Foreground tasks don't have a taskIdMap entry yet (detectTaskMapping runs
@@ -2573,7 +2694,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const messageParam = msg.message as Record<string, unknown> | undefined
     if (!messageParam) return
 
-    const routingId = msg.parent_tool_use_id as string | undefined
+    const routingId = this.resolveTaskOwner(msg.parent_tool_use_id as string | undefined)
     const content = messageParam.content
 
     // Case 1: Array content — extract tool_result blocks
@@ -2670,7 +2791,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     if (taskId) {
-      const matchedToolUseId = this.taskIdMap.get(taskId) || null
+      // Same resolution order as handleTaskNotification: the agent's origin
+      // call owns every renderer key, and after a resume taskIdMap holds the
+      // latest RUN's id, which no card is keyed by (ADR-073).
+      const matchedToolUseId = this.originByTaskId.get(taskId) || this.taskIdMap.get(taskId) || null
       if (matchedToolUseId) {
         this.markBackgroundDone(matchedToolUseId)
         this.taskIdMap.delete(taskId)
@@ -2682,7 +2806,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         status,
         outputFile,
         summary,
-        usage
+        usage,
+        ...(matchedToolUseId
+          ? { runIndex: this.runCountByOrigin.get(matchedToolUseId) ?? 1 }
+          : undefined)
       }
       this.send('session:task-notification', notification)
     }
@@ -2713,6 +2840,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
     if (agentId) {
       this.taskIdMap.set(agentId, toolUseId)
+      // Seed the identity too, for the path where task_started never arrived.
+      // Never overwrites: the first call to spawn an agent is its origin.
+      if (!this.originByTaskId.has(agentId)) {
+        this.originByTaskId.set(agentId, toolUseId)
+        this.runCountByOrigin.set(toolUseId, this.runCountByOrigin.get(toolUseId) ?? 1)
+      }
     }
 
     // Record output file path for background commands (permanent — survives completion).
@@ -2852,6 +2985,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     })
     this.backgroundPollers.clear()
     this.backgroundFilePaths.clear()
+    // Agent identity is per-session: origins are deliberately never evicted on
+    // a terminal notification (ADR-073), so this is where they go.
+    this.originByTaskId.clear()
+    this.runAliasByToolUseId.clear()
+    this.runCountByOrigin.clear()
   }
 
   /** Upsert a message into the in-memory history (same dedup as the renderer). */

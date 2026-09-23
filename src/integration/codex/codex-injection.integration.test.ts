@@ -104,6 +104,7 @@ const fakeJwt = (suffix: string): string => fakeJwtFor(WORKSPACE, EMAIL, suffix)
 const clients: CodexClient[] = []
 let directory: string | undefined
 let provider: FixtureProvider | undefined
+let bootstrap: FixtureProvider | undefined
 
 afterEach(async () => {
   const survivors: number[] = []
@@ -135,6 +136,10 @@ afterEach(async () => {
       if (provider) {
         await provider.close()
         provider = undefined
+      }
+      if (bootstrap) {
+        await bootstrap.close()
+        bootstrap = undefined
       }
     } finally {
       setHostPaths(null)
@@ -202,8 +207,17 @@ async function setupFixture(): Promise<Fixture> {
     // to refresh only for an unauthorized provider answer.
     statusFor: () => status.next.shift() ?? 200
   })
+  // A distinct bootstrap origin prevents Codex from rewriting the HTTP model
+  // provider to the HTTPS origin required by workspace-discovery metadata.
+  bootstrap = await startFixtureProvider({
+    chatgpt: true,
+    chatgptWorkspaceIds: [WORKSPACE, SECOND_WORKSPACE],
+    backend: provider.backend,
+    errors: provider.errors
+  })
   const { authorizations, errors, backend } = provider
   const port = provider.port
+  const bootstrapPort = bootstrap.port
   containment.profile = join(directory, 'isolation.sb')
   writeFileSync(
     containment.profile,
@@ -215,6 +229,7 @@ async function setupFixture(): Promise<Fixture> {
 (allow file-write* (subpath "${directory}") (subpath "/dev"))
 (deny network*)
 (allow network-outbound (remote ip "localhost:${port}"))
+(allow network-outbound (remote ip "localhost:${bootstrapPort}"))
 `
   )
   // `chatgpt: true` is what adds `chatgpt_base_url` and, unlike every other
@@ -223,7 +238,12 @@ async function setupFixture(): Promise<Fixture> {
   // auth rather than an ordinary failure, or nothing would ever ask the host to
   // refresh. No `apiKey`, so no `auth.json` — the token is memory-only, which
   // two of the cases below assert by reading that path and expecting a throw.
-  writeFixtureCodexHome(codexHome, { port, model: 'mock-model', chatgpt: true })
+  writeFixtureCodexHome(codexHome, {
+    port,
+    model: 'mock-model',
+    chatgpt: true,
+    chatgptPort: bootstrapPort
+  })
   return {
     cwd,
     authorizations,
@@ -417,9 +437,8 @@ it.skipIf(!enabled)(
     const fixture = await setupFixture()
     writeFileSync(
       join(fixture.env.CODEX_HOME as string, 'config.toml'),
-      `${readFileSync(join(fixture.env.CODEX_HOME as string, 'config.toml'), 'utf8')}
-forced_chatgpt_workspace_id = "ws-somebody-else"
-`
+      `forced_chatgpt_workspace_id = "ws-somebody-else"
+${readFileSync(join(fixture.env.CODEX_HOME as string, 'config.toml'), 'utf8')}`
     )
     const { source } = fakeSource()
     const hook = codexAuthHook({ source })
@@ -439,16 +458,9 @@ forced_chatgpt_workspace_id = "ws-somebody-else"
       )
       .then(() => null)
       .catch((error: Error) => error)
-    // FINDING (0.154.0, Windows x64 and the isolated fixture, 2026-09-13): a
-    // USER-level `forced_chatgpt_workspace_id` does not gate an injected token —
-    // the login is accepted and `account/read` reports the injected workspace.
-    // `ManagedAuthPolicy::effective_chatgpt_workspaces` (config/src/auth_policy.rs)
-    // reads as though it should, so either the app-server's AuthManager is built
-    // before the user layer is applied or the gate only binds under a managed
-    // `allowed_chatgpt_workspaces`. The refusal PATH is still real (the unit
-    // guard drives it with a scripted native error) and stays wired; this test
-    // pins the observed behaviour so a binary that starts enforcing it shows up
-    // as a finding, not as a silent identity swap.
+    // The earlier 0.154.0 probe put this key inside [features], so it did not
+    // establish root-level workspace-policy behavior. Keep it at the root:
+    // either login is refused or account/read must preserve the injected identity.
     if (failure) {
       expect(failure).toBeInstanceOf(CodexInjectionError)
       expect(failure.message).toContain('ws-somebody-else')
