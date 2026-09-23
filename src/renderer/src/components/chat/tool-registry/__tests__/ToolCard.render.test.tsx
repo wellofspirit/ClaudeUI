@@ -762,6 +762,24 @@ describe('ToolCard — pre-ask denial', () => {
     )
   })
 
+  /**
+   * Auto mode refused without judging — the classifier was unavailable or
+   * reached no verdict. It must read as a refusal with no verdict, never as
+   * the judge's block, and still say why under the sentence.
+   */
+  it('words an auto-mode no-verdict block as one, with its reason under it', () => {
+    renderCard(denial({ source: 'autoModeNoVerdict', reason: 'Classifier unavailable' }), false)
+    expect(screen.getByTestId('ToolCard.denialChip')).toHaveTextContent('Blocked · no verdict')
+
+    renderCard(denial({ source: 'autoModeNoVerdict', reason: 'Classifier unavailable' }))
+    const strip = screen.getByTestId('ToolCard.denial')
+    expect(strip).toHaveTextContent(
+      'Auto mode could not reach a verdict, so it blocked this action'
+    )
+    expect(strip).toHaveTextContent('Classifier unavailable')
+    expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+  })
+
   /** UNTRUSTED text — a hook's own stdout. Plain text, never markdown. */
   it('renders the reason verbatim, never through markdown', () => {
     renderCard(denial({ source: 'hook', reason: 'It writes **only** to dist/.' }))

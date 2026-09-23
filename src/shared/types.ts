@@ -129,8 +129,16 @@ export type ToolReviewBlock = {
  * absent: a judge's verdict is a {@link ToolReviewBlock}. Anything unrecognised
  * lands on `other` rather than widening the union, so a new upstream source
  * renders as a generic denial instead of vanishing.
+ *
+ * One member is NOT cli.js's: `autoModeNoVerdict` is derived by the producer
+ * (`core/services/claude-permission-decision.ts`) from a `classifier` denial
+ * where the classifier reached no verdict — it was unavailable, the transcript
+ * overflowed its context, a safeguard refused it. The action was refused, but
+ * nobody judged it, so it is a denial rather than a review. It is never
+ * accepted from the wire.
  */
 export type PermissionDenialSource =
+  | 'autoModeNoVerdict'
   | 'rule'
   | 'mode'
   | 'subcommandResults'

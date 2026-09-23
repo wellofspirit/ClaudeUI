@@ -26,9 +26,8 @@ import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-iden
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
 import {
-  classifierReviewBlock,
   isClassifierDecision,
-  permissionDenialBlock,
+  permissionDecisionBlock,
   readPermissionDecisionFrame
 } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
@@ -1467,8 +1466,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * opencode and Codex all render a verdict — and an auto-mode allow showed
    * nothing at all.
    *
-   * The two outcomes go to two different blocks on purpose; the split lives in
-   * `claude-permission-decision.ts`, which owns the wire contract.
+   * Which block a frame becomes — a verdict, a denial, or nothing — is decided
+   * entirely by `permissionDecisionBlock` in `claude-permission-decision.ts`,
+   * which owns the wire contract; this method only narrows, logs and sends.
    *
    * Frames from INSIDE a subagent carry `agent_id`. They are dropped here
    * rather than emitted: the call they name lives in a subagent transcript, and
@@ -1494,28 +1494,35 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     const denied = msg.subtype === 'permission_denied'
-    if (isClassifierDecision(frame)) {
-      const review = classifierReviewBlock(frame, denied ? 'denied' : 'approved')
+    const block = permissionDecisionBlock(frame, denied ? 'denied' : 'allowed')
+    if (!block) {
+      // `permission_allowed` only ever carries a classifier verdict — the patch
+      // emits nothing for a rule/mode allow, because an allow nobody judged is
+      // just the tool running. A non-classifier one is a wire contract change.
+      if (!isClassifierDecision(frame)) {
+        logger.warn(
+          'ClaudeSession',
+          `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
+        )
+      } else {
+        logger.debug(
+          'ClaudeSession',
+          `permission_allowed for ${frame.toolUseId} with no verdict — nothing to render`
+        )
+      }
+      return
+    }
+
+    if (block.type === 'tool_review') {
       logger.info(
         'ClaudeSession',
-        `auto-mode ${denied ? 'BLOCK' : 'allow'}${review.rule ? ` (rule=${review.rule})` : ''} ${msg.tool_name ?? '?'}`
+        `auto-mode ${denied ? 'BLOCK' : 'allow'}${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
       )
-      this.send('session:tool-review', { toolUseId: frame.toolUseId, review })
+      this.send('session:tool-review', { toolUseId: frame.toolUseId, review: block })
       return
     }
 
-    // `permission_allowed` only ever carries a classifier decision — the patch
-    // emits nothing for a rule/mode allow, because an allow nobody judged is
-    // just the tool running. Anything else here is a wire contract change.
-    if (!denied) {
-      logger.warn(
-        'ClaudeSession',
-        `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
-      )
-      return
-    }
-
-    const denial = permissionDenialBlock(frame)
+    const denial = block
     logger.info(
       'ClaudeSession',
       `pre-ask denial (${denial.source}) ${msg.tool_name ?? '?'}${denial.reason ? ` — ${denial.reason}` : ''}`

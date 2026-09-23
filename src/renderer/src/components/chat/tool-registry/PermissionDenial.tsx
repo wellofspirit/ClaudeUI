@@ -27,6 +27,12 @@ import type { PermissionDenialBlock } from '../../../../../shared/types'
  */
 function sentence(source: PermissionDenialBlock['source']): string {
   switch (source) {
+    // Not cli.js's own source: the producer derives it from a classifier
+    // denial that reached no verdict. Said plainly, because the difference
+    // from a verdict card is the point — auto mode blocked this without
+    // judging it, and the reason under the sentence says why it could not.
+    case 'autoModeNoVerdict':
+      return 'Auto mode could not reach a verdict, so it blocked this action'
     // `subcommandResults` shares the sentence rather than getting one about
     // "part of this command": cli.js reports it for EVERY Bash decision, one
     // subcommand or ten, so a partiality claim is wrong more often than right
@@ -58,6 +64,8 @@ function sentence(source: PermissionDenialBlock['source']): string {
 /** The chip's second word — the same fact as {@link sentence}, at a glance. */
 function shortSource(source: PermissionDenialBlock['source']): string {
   switch (source) {
+    case 'autoModeNoVerdict':
+      return 'no verdict'
     case 'rule':
     case 'subcommandResults':
       return 'deny rule'

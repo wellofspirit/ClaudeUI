@@ -337,6 +337,78 @@ describe('a cli.js permission decision reaches the card it is about', () => {
   })
 
   /**
+   * "Classifier unavailable" is a `classifier` DENY with no `no_verdict` flag:
+   * the call was refused, but no judge weighed it. It must land as a denial
+   * saying so — a verdict card would claim a judgment that never happened.
+   */
+  it('turns an unavailable-classifier block into a no-verdict denial, not a verdict', async () => {
+    const { blocks, channels } = await decide(
+      'routing-unavailable',
+      deniedFrame({ decision_reason_type: 'classifier', decision_reason: 'Classifier unavailable' })
+    )
+    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
+    expect(channels).not.toContain('session:tool-review')
+    expect(blocks.filter((b) => b.type === 'permission_denial')).toEqual([
+      {
+        type: 'permission_denial',
+        toolUseId: 'toolu_1',
+        denialId: 'frame-1',
+        source: 'autoModeNoVerdict',
+        reason: 'Classifier unavailable'
+      }
+    ])
+  })
+
+  it('turns a patch-flagged no_verdict block into a no-verdict denial', async () => {
+    const { blocks } = await decide(
+      'routing-noverdict-deny',
+      deniedFrame({
+        decision_reason_type: 'classifier',
+        decision_reason: 'Auto mode classifier transcript exceeded context window',
+        no_verdict: true
+      })
+    )
+    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
+    expect(blocks.filter((b) => b.type === 'permission_denial')).toMatchObject([
+      { source: 'autoModeNoVerdict' }
+    ])
+  })
+
+  /** Defensive: the patch never emits one, but an allow nobody judged renders nothing. */
+  it('renders nothing for a no-verdict classifier allow', async () => {
+    const { blocks, channels } = await decide(
+      'routing-noverdict-allow',
+      deniedFrame({
+        subtype: 'permission_allowed',
+        decision_reason_type: 'classifier',
+        decision_reason: 'Delivered with a note: the classifier could not review it',
+        no_verdict: true
+      }),
+      false
+    )
+    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
+    expect(blocks.filter((b) => b.type === 'permission_denial')).toEqual([])
+    expect(channels).not.toContain('session:tool-review')
+    expect(channels).not.toContain('session:permission-denial')
+  })
+
+  it('keeps a classifier block but drops its content-free rationale', async () => {
+    const { blocks } = await decide(
+      'routing-contentfree-deny',
+      deniedFrame({ decision_reason_type: 'classifier', decision_reason: 'No reason provided' })
+    )
+    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([
+      {
+        type: 'tool_review',
+        toolUseId: 'toolu_1',
+        reviewId: 'frame-1',
+        reviewer: 'auto-mode',
+        decision: 'denied'
+      }
+    ])
+  })
+
+  /**
    * A `permission_allowed` that is NOT the classifier's would mean the patch's
    * filter changed upstream. Ignore it rather than inventing a verdict nobody
    * reached — an allow nothing judged is just the tool running.

@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest'
 import {
   classifierReviewBlock,
   isClassifierDecision,
+  permissionDecisionBlock,
   permissionDenialBlock,
   readPermissionDecisionFrame,
   splitRulePrefix
@@ -56,6 +57,21 @@ describe('readPermissionDecisionFrame', () => {
   ])('drops a frame missing %s', (_field, over) => {
     expect(readPermissionDecisionFrame(frame(over))).toBeNull()
   })
+
+  // The `automode-verdict` patch's flag: present only when cli.js's decision
+  // carried `noVerdict: true`, so only an exact `true` may set it.
+  it('reads the patch no_verdict flag', () => {
+    expect(readPermissionDecisionFrame(frame({ no_verdict: true }))?.noVerdict).toBe(true)
+  })
+
+  it.each([[false], ['true'], [1], [undefined]])(
+    'ignores a no_verdict that is not exactly true (%p)',
+    (value) => {
+      expect(readPermissionDecisionFrame(frame({ no_verdict: value }))).not.toHaveProperty(
+        'noVerdict'
+      )
+    }
+  )
 
   it('omits decision_reason fields that are absent, rather than emitting empty ones', () => {
     const read = readPermissionDecisionFrame(frame({ decision_reason_type: 'subcommandResults' }))
@@ -253,5 +269,168 @@ describe('permissionDenialBlock', () => {
       })
     )
     expect(block.reason).toHaveLength(REVIEW_RATIONALE_LIMIT)
+  })
+})
+
+/**
+ * The content-free reasons cli.js's classifier falls back to. They carry no
+ * judgment, so they are dropped as RATIONALE — by exact string — while the
+ * decision (and any rule badge) stays.
+ */
+describe('classifierReviewBlock — content-free reasons', () => {
+  const read = (over: Record<string, unknown>) =>
+    readPermissionDecisionFrame(frame({ decision_reason_type: 'classifier', ...over }))!
+
+  it.each([['Not flagged by the server-side auto mode classifier'], ['No reason provided']])(
+    'drops the content-free allow reason %p',
+    (reason) => {
+      const block = classifierReviewBlock(read({ decision_reason: reason }), 'approved')
+      expect(block.decision).toBe('approved')
+      expect(block).not.toHaveProperty('rationale')
+    }
+  )
+
+  it.each([['Blocked by classifier'], ['No reason provided'], ['  No reason provided  ']])(
+    'drops the content-free deny reason %p but keeps the decision',
+    (reason) => {
+      const block = classifierReviewBlock(read({ decision_reason: reason }), 'denied')
+      expect(block.decision).toBe('denied')
+      expect(block).not.toHaveProperty('rationale')
+    }
+  )
+
+  it('still parses the rule in front of a content-free deny reason', () => {
+    expect(
+      classifierReviewBlock(
+        read({ decision_reason: '[Data Exfiltration] No reason provided' }),
+        'denied'
+      )
+    ).toEqual({
+      type: 'tool_review',
+      toolUseId: 'toolu_01',
+      reviewId: 'frame-uuid-1',
+      reviewer: 'auto-mode',
+      decision: 'denied',
+      rule: 'Data Exfiltration'
+    })
+  })
+
+  // Exact match: a real sentence that merely contains the words is the judge's.
+  it('keeps a deny reason that only resembles a fallback', () => {
+    expect(
+      classifierReviewBlock(
+        read({ decision_reason: 'Blocked by classifier policy on prod hosts.' }),
+        'denied'
+      ).rationale
+    ).toBe('Blocked by classifier policy on prod hosts.')
+  })
+
+  // The two sets are separate: an allow-only constant is not dropped from a
+  // denial, where it would be the judge's own words.
+  it('does not apply the allow-only constants to a denial', () => {
+    expect(
+      classifierReviewBlock(
+        read({ decision_reason: 'Not flagged by the server-side auto mode classifier' }),
+        'denied'
+      ).rationale
+    ).toBe('Not flagged by the server-side auto mode classifier')
+  })
+})
+
+/**
+ * The single routing decision `handlePermissionDecision` delegates to. Every
+ * rule the session used to apply inline, plus the no-verdict split: a
+ * `classifier` frame is not always a verdict.
+ */
+describe('permissionDecisionBlock', () => {
+  const read = (over: Record<string, unknown>) => readPermissionDecisionFrame(frame(over))!
+  const classifier = (over: Record<string, unknown> = {}) =>
+    read({ decision_reason_type: 'classifier', ...over })
+
+  it('classifier + allowed → an approved review', () => {
+    expect(
+      permissionDecisionBlock(classifier({ decision_reason: 'Reads only.' }), 'allowed')
+    ).toMatchObject({ type: 'tool_review', decision: 'approved', rationale: 'Reads only.' })
+  })
+
+  // Defensive: the patch gates on cli.js's classifierAllowed and never emits
+  // one. An allow nobody judged is just the tool running.
+  it('classifier + allowed with no verdict → nothing', () => {
+    expect(
+      permissionDecisionBlock(
+        classifier({
+          no_verdict: true,
+          decision_reason: 'Delivered with a note: the classifier could not review it'
+        }),
+        'allowed'
+      )
+    ).toBeNull()
+  })
+
+  it('classifier + denied → a denied review', () => {
+    expect(
+      permissionDecisionBlock(classifier({ decision_reason: '[Git Destructive] nope' }), 'denied')
+    ).toMatchObject({ type: 'tool_review', decision: 'denied', rule: 'Git Destructive' })
+  })
+
+  // The refusal is real but nobody judged it: a denial, never a verdict.
+  it('classifier + denied with no verdict → an autoModeNoVerdict denial carrying the reason', () => {
+    const reason = 'Auto mode classifier transcript exceeded context window'
+    expect(
+      permissionDecisionBlock(classifier({ no_verdict: true, decision_reason: reason }), 'denied')
+    ).toEqual({
+      type: 'permission_denial',
+      toolUseId: 'toolu_01',
+      denialId: 'frame-uuid-1',
+      source: 'autoModeNoVerdict',
+      reason
+    })
+  })
+
+  // cli.js sends "Classifier unavailable" with NO noVerdict flag and tells it
+  // apart by the exact string itself, so the reason alone must route it.
+  it.each([['Classifier unavailable'], ['  Classifier unavailable  ']])(
+    'classifier + denied %p (no flag) → an autoModeNoVerdict denial',
+    (reason) => {
+      expect(permissionDecisionBlock(classifier({ decision_reason: reason }), 'denied')).toEqual({
+        type: 'permission_denial',
+        toolUseId: 'toolu_01',
+        denialId: 'frame-uuid-1',
+        source: 'autoModeNoVerdict',
+        reason: 'Classifier unavailable'
+      })
+    }
+  )
+
+  it('matches "Classifier unavailable" exactly, not as a prefix', () => {
+    expect(
+      permissionDecisionBlock(
+        classifier({ decision_reason: 'Classifier unavailable for this tool, judged on text.' }),
+        'denied'
+      )?.type
+    ).toBe('tool_review')
+  })
+
+  it('non-classifier + allowed → nothing', () => {
+    expect(permissionDecisionBlock(read({ decision_reason_type: 'rule' }), 'allowed')).toBeNull()
+  })
+
+  it('non-classifier + denied → a denial naming its source', () => {
+    expect(
+      permissionDecisionBlock(read({ decision_reason_type: 'subcommandResults' }), 'denied')
+    ).toEqual({
+      type: 'permission_denial',
+      toolUseId: 'toolu_01',
+      denialId: 'frame-uuid-1',
+      source: 'subcommandResults'
+    })
+  })
+
+  // `autoModeNoVerdict` is OURS — derived, never read. A frame that claims it
+  // as its reason type is an unknown wire value like any other.
+  it('never accepts autoModeNoVerdict from the wire', () => {
+    expect(
+      permissionDecisionBlock(read({ decision_reason_type: 'autoModeNoVerdict' }), 'denied')
+    ).toMatchObject({ type: 'permission_denial', source: 'other' })
   })
 })

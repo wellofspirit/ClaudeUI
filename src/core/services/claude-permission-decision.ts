@@ -23,8 +23,17 @@
  * nothing, so it is a `PermissionDenialBlock`; calling it a "review" would put a
  * judgment where there was only a policy lookup.
  *
+ * A `classifier` frame is not always a verdict, though. cli.js also tags its
+ * no-verdict fallbacks `classifier` — the transcript overflowed the judge's
+ * context, a safeguard refused the classifier request, the classifier was
+ * unreachable — and blocks the call anyway. Those become a
+ * `PermissionDenialBlock` with the synthetic source `autoModeNoVerdict`: the
+ * action was refused, but nobody weighed it, so a "review" would claim a
+ * judgment that never happened.
+ *
  * Everything here is PURE — frame in, block out — so the wire contract is
- * testable without a session. `claude-session.ts` owns the routing.
+ * testable without a session. {@link permissionDecisionBlock} owns ALL the
+ * routing; `claude-session.ts` only narrows, logs and sends.
  */
 import type {
   PermissionDenialBlock,
@@ -45,15 +54,29 @@ export interface PermissionDecisionFrame {
   decisionReasonType?: string
   /** `decision_reason` verbatim — UNTRUSTED, not yet collapsed or capped. */
   decisionReason?: string
+  /**
+   * The `automode-verdict` patch's `no_verdict: true` — cli.js decided under
+   * the `classifier` banner without the classifier reaching a verdict. Present
+   * only when the wire carried exactly `true`.
+   */
+  noVerdict?: true
 }
+
+/** The {@link PermissionDenialSource}s cli.js itself can send. */
+type WireDenialSource = Exclude<PermissionDenialSource, 'autoModeNoVerdict'>
 
 /**
  * cli.js's declared `PermissionDecisionReason` discriminators (`WBn`). Kept as a
  * runtime Set rather than trusting the string: `decision_reason_type` is a wire
  * field, and a value we do not recognise must degrade to `other` instead of
  * reaching a `PermissionDenialSource`-typed slot unchecked.
+ *
+ * WIRE-ONLY on purpose. `autoModeNoVerdict` is a source WE derive from a
+ * `classifier` frame (see {@link permissionDecisionBlock}); cli.js never sends
+ * it, so a frame that claimed it must degrade to `other` like any other
+ * unknown value. The `WireDenialSource` element type keeps it out statically.
  */
-const DENIAL_SOURCES = new Set<PermissionDenialSource>([
+const DENIAL_SOURCES = new Set<WireDenialSource>([
   'rule',
   'mode',
   'subcommandResults',
@@ -71,9 +94,9 @@ export function isClassifierDecision(frame: PermissionDecisionFrame): boolean {
   return frame.decisionReasonType === 'classifier'
 }
 
-function denialSource(raw: string | undefined): PermissionDenialSource {
-  return raw !== undefined && DENIAL_SOURCES.has(raw as PermissionDenialSource)
-    ? (raw as PermissionDenialSource)
+function denialSource(raw: string | undefined): WireDenialSource {
+  return raw !== undefined && DENIAL_SOURCES.has(raw as WireDenialSource)
+    ? (raw as WireDenialSource)
     : 'other'
 }
 
@@ -117,9 +140,10 @@ export function splitRulePrefix(reason: string | undefined): {
 }
 
 /**
- * cli.js's two content-free allow reasons. Unlike a DENIAL's reason — which is
- * the judge's own `<reason>` text — an allow's is a fixed constant naming the
- * stage that cleared it, and nothing else.
+ * cli.js's content-free allow reasons. Unlike a DENIAL's reason — which is the
+ * judge's own `<reason>` text — an allow's is a fixed constant naming the stage
+ * that cleared it (stage 1, stage 2, the server-side classifier), or stage 2's
+ * fallback when the model gave no `<reason>` at all.
  *
  * They are dropped rather than rendered, for two reasons. The card's own
  * sentence is already "Auto mode allowed this action", so the strip read as the
@@ -129,14 +153,31 @@ export function splitRulePrefix(reason: string | undefined): {
  * card the odd one out, which is the exact thing this work exists to fix.
  *
  * Matched by exact string on purpose: an allow that says anything ELSE is
- * carrying real information (the `onBlock: "flag"` path delivers a tool with
- * "Flagged by the classifier, delivered with its warning: …"), and must survive.
+ * carrying real information and must survive.
  */
-const CONTENT_FREE_ALLOW_REASONS = new Set(['Allowed by classifier', 'Allowed by fast classifier'])
+const CONTENT_FREE_ALLOW_REASONS = new Set([
+  'Allowed by classifier',
+  'Allowed by fast classifier',
+  'Not flagged by the server-side auto mode classifier',
+  'No reason provided'
+])
 
-function isContentFreeAllowReason(reason: string | undefined): boolean {
-  return reason !== undefined && CONTENT_FREE_ALLOW_REASONS.has(reason.trim())
-}
+/**
+ * The same for a denial: stage 2's fallbacks when it names no rule
+ * (`"Blocked by classifier"`, category mode) or the model gave no `<reason>`
+ * (`"No reason provided"`). Only the RATIONALE is dropped — the decision stands,
+ * and a `[Rule Name]` in front is still split out into the badge. Exact match,
+ * so a real sentence that merely contains these words survives.
+ */
+const CONTENT_FREE_DENY_REASONS = new Set(['Blocked by classifier', 'No reason provided'])
+
+/**
+ * cli.js's "the classifier could not be reached" reason (`Gwe`). It arrives on a
+ * `classifier` DENY with no `noVerdict` flag; cli.js itself tells it apart by
+ * this exact string (its own `automode-unavailable` classification), so we do
+ * too.
+ */
+const CLASSIFIER_UNAVAILABLE_REASON = 'Classifier unavailable'
 
 /**
  * A classifier verdict as the block that renders on the card it judged.
@@ -149,11 +190,10 @@ export function classifierReviewBlock(
   frame: PermissionDecisionFrame,
   decision: 'approved' | 'denied'
 ): ToolReviewBlock {
-  const { rule, rationale } = splitRulePrefix(
-    decision === 'approved' && isContentFreeAllowReason(frame.decisionReason)
-      ? undefined
-      : frame.decisionReason
-  )
+  const { rule, rationale: said } = splitRulePrefix(frame.decisionReason)
+  const contentFree =
+    decision === 'approved' ? CONTENT_FREE_ALLOW_REASONS : CONTENT_FREE_DENY_REASONS
+  const rationale = said !== undefined && contentFree.has(said) ? undefined : said
   return {
     type: 'tool_review',
     toolUseId: frame.toolUseId,
@@ -167,14 +207,59 @@ export function classifierReviewBlock(
 
 /** A non-judge pre-ask denial as its own block. */
 export function permissionDenialBlock(frame: PermissionDecisionFrame): PermissionDenialBlock {
+  return denialBlock(frame, denialSource(frame.decisionReasonType))
+}
+
+function denialBlock(
+  frame: PermissionDecisionFrame,
+  source: PermissionDenialSource
+): PermissionDenialBlock {
   const reason = reviewRationale(frame.decisionReason)
   return {
     type: 'permission_denial',
     toolUseId: frame.toolUseId,
     denialId: frame.frameUuid,
-    source: denialSource(frame.decisionReasonType),
+    source,
     ...(reason ? { reason } : {})
   }
+}
+
+/**
+ * True when a `classifier` DENY is a fallback rather than a verdict: the patch
+ * flagged it `no_verdict`, or it is cli.js's "Classifier unavailable", which
+ * carries no flag.
+ */
+function isNoVerdictDenial(frame: PermissionDecisionFrame): boolean {
+  return frame.noVerdict === true || frame.decisionReason?.trim() === CLASSIFIER_UNAVAILABLE_REASON
+}
+
+/**
+ * The single routing decision: which block, if any, a decision frame renders
+ * as on its card.
+ *
+ *  - classifier + allowed → an approved review. `null` for a no-verdict allow:
+ *    the patch never emits one (it gates on cli.js's own `classifierAllowed`),
+ *    so this is defensive — an allow nobody judged is just the tool running.
+ *  - classifier + denied → a denied review, UNLESS the classifier reached no
+ *    verdict; then a `permission_denial` with source `autoModeNoVerdict`,
+ *    because the refusal is real but no judgment was made.
+ *  - non-classifier + allowed → `null`. The patch emits allows for classifier
+ *    verdicts only, so this means the wire contract moved; the caller logs it.
+ *  - non-classifier + denied → a `permission_denial` naming its source.
+ */
+export function permissionDecisionBlock(
+  frame: PermissionDecisionFrame,
+  outcome: 'allowed' | 'denied'
+): ToolReviewBlock | PermissionDenialBlock | null {
+  if (isClassifierDecision(frame)) {
+    if (outcome === 'allowed') {
+      return frame.noVerdict ? null : classifierReviewBlock(frame, 'approved')
+    }
+    return isNoVerdictDenial(frame)
+      ? denialBlock(frame, 'autoModeNoVerdict')
+      : classifierReviewBlock(frame, 'denied')
+  }
+  return outcome === 'denied' ? permissionDenialBlock(frame) : null
 }
 
 /**
@@ -200,6 +285,7 @@ export function readPermissionDecisionFrame(
     ...(typeof msg.decision_reason_type === 'string'
       ? { decisionReasonType: msg.decision_reason_type }
       : {}),
-    ...(typeof msg.decision_reason === 'string' ? { decisionReason: msg.decision_reason } : {})
+    ...(typeof msg.decision_reason === 'string' ? { decisionReason: msg.decision_reason } : {}),
+    ...(msg.no_verdict === true ? { noVerdict: true as const } : {})
   }
 }

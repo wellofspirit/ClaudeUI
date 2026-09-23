@@ -35,6 +35,7 @@ import type {
   GitStatusData,
   MeteringSnapshot,
   PendingApproval,
+  PermissionDenialBlock,
   PermissionMode,
   QueuedItem,
   SessionResult,
@@ -165,6 +166,17 @@ export interface SyncEventMap {
   'session:tool-review': (
     routingId: string,
     data: { toolUseId: string; review: ToolReviewBlock }
+  ) => void
+  /**
+   * A pre-ask refusal nobody judged — a deny rule, a mode, a hook, or auto mode
+   * failing to reach a verdict — on the tool call it refused. The sibling of
+   * `session:tool-review`, with the same producer-holds / reducer-drops rule:
+   * it binds to an assistant message that already holds the `tool_use`, and is
+   * idempotent by `denialId`.
+   */
+  'session:permission-denial': (
+    routingId: string,
+    data: { toolUseId: string; denial: PermissionDenialBlock }
   ) => void
   'session:status': (routingId: string, status: SessionStatus) => void
   'session:result': (routingId: string, result: SessionResult) => void
