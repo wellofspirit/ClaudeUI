@@ -44,6 +44,7 @@
  */
 
 import { useLayoutEffect, useRef, useState } from 'react'
+import { effectiveZoom } from '../../lib/effective-zoom'
 
 export interface AnchoredMenu {
   style: React.CSSProperties
@@ -80,7 +81,7 @@ interface Frame {
  */
 function frameOf(anchor: HTMLElement): Frame {
   const rect = anchor.getBoundingClientRect()
-  const scale = anchor.offsetWidth ? rect.width / anchor.offsetWidth : 1
+  const scale = effectiveZoom(anchor, rect)
   return {
     scale,
     top: rect.top / scale,
