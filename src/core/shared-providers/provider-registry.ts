@@ -38,11 +38,10 @@
  * - **opencode** — the allowlist is PER PROVIDER (`opencodeConfig.modelAllowlist[id]`,
  *   key-presence gated, empty array = nothing). Curated → the allowlist length;
  *   otherwise the catalog's model count, falling back to the shared route's.
- * - **pi** — the allowlist is GLOBAL (`piConfig.modelAllowlist`, full
- *   `<provider>/<modelId>` values). Present → every pi provider is curated (one
- *   with no entry shows nothing), and the count is its own prefixed entries.
- *   Absent → the shared route's count, or nothing for a native row (pi exposes
- *   no per-provider catalog without a model discovery pass, which this read
+ * - **pi** — the same per-provider rule (`piConfig.modelAllowlist[id]`, bare
+ *   model ids, ADR-074 §1). Curated → the allowlist length; otherwise the
+ *   shared route's count, or nothing for a native row (pi exposes no
+ *   per-provider catalog without a model discovery pass, which this read
  *   deliberately does not make).
  */
 
@@ -102,8 +101,8 @@ export interface ProviderRegistrySources {
   piVendors: Readonly<VendorAuthMap>
   /** `piAuthProvider.listVendorAuthOptions()` — pi's BUILT-IN vendor catalog, keyed by id. */
   piAuthOptions: Readonly<Record<string, VendorAuthOption[]>>
-  /** `piConfig.modelAllowlist` — global, full `<provider>/<modelId>` values. */
-  piModelAllowlist?: readonly string[]
+  /** `piConfig.modelAllowlist` — per-provider, key-presence gated, bare model ids. */
+  piModelAllowlist?: Readonly<Record<string, readonly string[]>>
   /** `accountState()` — the FILE-based accounts (ADR-015). Null in a headless boot. */
   accounts: AccountsState | null
   /**
@@ -451,14 +450,8 @@ function engineCounts(
     const count = fallbacks.catalogCount ?? fallbacks.fallbackCount
     return count === undefined ? {} : { modelCount: count }
   }
-  const allowlist = sources.piModelAllowlist
-  if (allowlist) {
-    const prefix = `${nativeId}/`
-    return {
-      modelCount: allowlist.filter((value) => value.startsWith(prefix)).length,
-      curated: true
-    }
-  }
+  const allowed = sources.piModelAllowlist?.[nativeId]
+  if (allowed) return { modelCount: allowed.length, curated: true }
   return fallbacks.fallbackCount === undefined ? {} : { modelCount: fallbacks.fallbackCount }
 }
 
@@ -528,14 +521,18 @@ function sharedDetail(
 }
 
 /**
- * One diagnosis per row, preferring opencode's: it is the only route that can
- * distinguish WHY it is empty (a provider veto vs a model allowlist), so pi's
- * invariant `no-models-discovered` would only ever hide a more precise answer.
+ * One diagnosis per row: the first PRECISE cause (opencode's, then pi's), and
+ * only then the generic `no-models-discovered` — both routes can now say why
+ * they are empty (ADR-074 §5), and the generic answer from one must not hide a
+ * precise one from the other.
  */
 function sharedDiagnosis(status: SharedProviderStatus | undefined): {
   diagnosis?: SharedProviderStatus['routes'][ConfigurableHarnessId]['diagnosis']
 } {
-  const diagnosis = status?.routes.opencode.diagnosis ?? status?.routes.pi.diagnosis
+  const found = [status?.routes.opencode.diagnosis, status?.routes.pi.diagnosis].filter(
+    (diagnosis) => diagnosis !== undefined
+  )
+  const diagnosis = found.find((cause) => cause !== 'no-models-discovered') ?? found[0]
   return diagnosis ? { diagnosis } : {}
 }
 

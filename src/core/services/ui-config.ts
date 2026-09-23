@@ -12,6 +12,7 @@ import {
   hasCodexSessionOverrides
 } from './db'
 import { assertSafeIdSegment, isPathInside } from './path-containment'
+import { normalizePiEngineConfig } from '../../shared/pi-model-allowlist'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
@@ -431,9 +432,24 @@ function configFileFor(dir: string, id: unknown, label: string): string {
   return filePath
 }
 
+/**
+ * Per-engine read-time normalisers: an older on-disk shape is read as the
+ * current one, and the next save persists it. The file is never rewritten on
+ * read. Every reader — main-process and renderer (through IPC) — goes through
+ * `loadEngineConfig`, so this is the one place a migration needs to live.
+ */
+const ENGINE_CONFIG_NORMALISERS: Partial<
+  Record<string, (config: import('../../shared/types').EngineConfig) => unknown>
+> = {
+  // ADR-074 §1: the global `<provider>/<model>` list becomes a per-provider record.
+  pi: normalizePiEngineConfig
+}
+
 export function loadEngineConfig(engineId: string): import('../../shared/types').EngineConfig {
   const filePath = configFileFor(ENGINES_DIR, engineId, 'engineId')
-  return readJson<import('../../shared/types').EngineConfig>(filePath) ?? {}
+  const config = readJson<import('../../shared/types').EngineConfig>(filePath) ?? {}
+  ENGINE_CONFIG_NORMALISERS[engineId]?.(config)
+  return config
 }
 
 export function saveEngineConfig(

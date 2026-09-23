@@ -4,9 +4,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SharedProviderDefinition } from '../../../shared/shared-provider'
+import type { PiModel } from '../../pi/pi-protocol'
 import {
   CLAUDEUI_KEYLESS_PLACEHOLDER,
   PiSharedProviderAdapter,
+  diagnosePiZeroModels,
   type PiSharedProviderAuthTarget
 } from '../PiSharedProviderAdapter'
 
@@ -423,6 +425,77 @@ describe('PiSharedProviderAdapter — keyless placeholder (ADR-074 §4)', () => 
       expect.anything(),
       CLAUDEUI_KEYLESS_PLACEHOLDER
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-074 §5: pi names why a route is empty instead of always reporting
+// `no-models-discovered` — the owner's ChatGPT row blamed the engine while the
+// real cause was the allowlist.
+// ---------------------------------------------------------------------------
+describe('PiSharedProviderAdapter — zero-model diagnosis (ADR-074 §5)', () => {
+  const model = (provider: string, id: string): PiModel =>
+    ({
+      id,
+      name: id,
+      api: 'openai-responses',
+      provider,
+      baseUrl: 'https://api.example.test/v1',
+      reasoning: false,
+      input: ['text'],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    }) as PiModel
+  const catalog = [model('openai-codex', 'gpt-5.6-luna'), model('openai-codex', 'gpt-5.6-sol')]
+
+  it('no-models-discovered when pi reported nothing at all', () => {
+    expect(diagnosePiZeroModels('openai-codex', [], undefined)).toBe('no-models-discovered')
+    expect(diagnosePiZeroModels('openai-codex', [], { 'openai-codex': [] })).toBe(
+      'no-models-discovered'
+    )
+  })
+
+  it('no-credential when pi reports models, but none for this provider id', () => {
+    expect(diagnosePiZeroModels('private-api', catalog, undefined)).toBe('no-credential')
+    // An allowlist key cannot be the cause of a provider pi does not report.
+    expect(diagnosePiZeroModels('private-api', catalog, { 'private-api': [] })).toBe(
+      'no-credential'
+    )
+  })
+
+  it('models-restricted when the provider key admits none of its catalog models', () => {
+    expect(diagnosePiZeroModels('openai-codex', catalog, { 'openai-codex': [] })).toBe(
+      'models-restricted'
+    )
+    expect(diagnosePiZeroModels('openai-codex', catalog, { 'openai-codex': ['gpt-retired'] })).toBe(
+      'models-restricted'
+    )
+  })
+
+  it('falls back to no-models-discovered when the allowlist admits something', () => {
+    expect(diagnosePiZeroModels('openai-codex', catalog, undefined)).toBe('no-models-discovered')
+    expect(diagnosePiZeroModels('openai-codex', catalog, { openrouter: [] })).toBe(
+      'no-models-discovered'
+    )
+  })
+
+  it('asks its injected catalog and allowlist under the native provider id', async () => {
+    const subject = new PiSharedProviderAdapter({
+      modelsPath,
+      auth,
+      loadCatalog: async () => catalog,
+      readModelAllowlist: () => ({ 'openai-codex': [] })
+    })
+    const chatgpt: SharedProviderDefinition = {
+      ...provider,
+      id: 'chatgpt',
+      kind: 'subscription',
+      models: [],
+      routes: { pi: { enabled: true }, opencode: { enabled: true } }
+    }
+    await expect(subject.diagnoseZeroModels(chatgpt)).resolves.toBe('models-restricted')
+    await expect(subject.diagnoseZeroModels(provider)).resolves.toBe('no-credential')
   })
 })
 

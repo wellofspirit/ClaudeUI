@@ -223,6 +223,7 @@ describe('the rows', () => {
     // fix is. Two of the three had no coverage once that pane went.
     for (const [diagnosis, text] of [
       ['models-restricted', 'Every model is filtered out'],
+      ['no-credential', 'pi reports no models for this provider'],
       ['no-models-discovered', 'The engine reported no models']
     ] as const) {
       snapshot = { entries: [{ ...chatgpt, diagnosis }], opencodeInstalled: true }

@@ -1,8 +1,15 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { SharedProviderDefinition, SharedProviderModel } from '../../shared/shared-provider'
+import type {
+  SharedProviderDefinition,
+  SharedProviderModel,
+  SharedProviderRouteDiagnosis
+} from '../../shared/shared-provider'
+import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
 import { piAgentDir } from '../services/pi-session-list'
-import { invalidatePiModelCache } from '../pi/model-discovery'
+import { loadEngineConfig } from '../services/ui-config'
+import { getPiModelCatalog, invalidatePiModelCache } from '../pi/model-discovery'
+import type { PiModel } from '../pi/pi-protocol'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 
 const DEFAULT_CONTEXT_WINDOW = 128_000
@@ -41,6 +48,10 @@ export interface PiSharedProviderAdapterDeps {
   modelsPath?: string
   auth: PiSharedProviderAuthTarget
   invalidateModelCache?: () => void
+  /** pi's UNFILTERED catalog — `getPiModelCatalog()` (cached, [] on failure). */
+  loadCatalog?: () => Promise<PiModel[]>
+  /** `piConfig.modelAllowlist`, as `loadEngineConfig('pi')` normalises it. */
+  readModelAllowlist?: () => Readonly<Record<string, readonly string[]>> | undefined
 }
 
 interface PiModelConfig {
@@ -63,10 +74,30 @@ type PiModelsFile = Record<string, unknown> & { providers?: Record<string, unkno
 export class PiSharedProviderAdapter {
   private readonly modelsPath: string
   private readonly invalidateModelCache: () => void
+  private readonly loadCatalog: () => Promise<PiModel[]>
+  private readonly readModelAllowlist: () => Readonly<Record<string, readonly string[]>> | undefined
 
   constructor(private readonly deps: PiSharedProviderAdapterDeps) {
     this.modelsPath = deps.modelsPath ?? path.join(piAgentDir(), 'models.json')
     this.invalidateModelCache = deps.invalidateModelCache ?? invalidatePiModelCache
+    this.loadCatalog = deps.loadCatalog ?? getPiModelCatalog
+    this.readModelAllowlist =
+      deps.readModelAllowlist ?? (() => loadEngineConfig('pi').piConfig?.modelAllowlist)
+  }
+
+  /**
+   * Why an enabled pi route surfaces zero models (ADR-074 §5) — the question
+   * `OpencodeSharedProviderAdapter.diagnoseZeroModels` answers for opencode,
+   * asked of pi's unfiltered catalog and its per-provider allowlist.
+   */
+  async diagnoseZeroModels(
+    definition: SharedProviderDefinition
+  ): Promise<SharedProviderRouteDiagnosis> {
+    return diagnosePiZeroModels(
+      nativeProviderId(definition),
+      await this.loadCatalog(),
+      this.readModelAllowlist()
+    )
   }
 
   applyDefinition(
@@ -260,6 +291,35 @@ function compileModel(model: SharedProviderModel): PiModelConfig {
     contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS
   }
+}
+
+/**
+ * The pure half of {@link PiSharedProviderAdapter.diagnoseZeroModels}, most
+ * general cause last:
+ *
+ * - pi reported nothing at all → `no-models-discovered` (not installed, no
+ *   auth anywhere, or the probe failed);
+ * - it reported models, none under this provider id → `no-credential` (pi
+ *   omits a provider it has no usable key for, and a broken `models.json`
+ *   entry looks the same from here);
+ * - the provider has models but its allowlist key admits none of them →
+ *   `models-restricted`.
+ *
+ * Anything else — pi offers models the allowlist admits, yet the route counts
+ * zero — has no more precise answer than `no-models-discovered`.
+ */
+export function diagnosePiZeroModels(
+  providerId: string,
+  catalog: readonly PiModel[],
+  allowlist: Readonly<Record<string, readonly string[]>> | undefined
+): SharedProviderRouteDiagnosis {
+  if (catalog.length === 0) return 'no-models-discovered'
+  const own = catalog.filter((model) => model.provider === providerId)
+  if (own.length === 0) return 'no-credential'
+  if (!own.some((model) => isPiModelAllowed(allowlist, providerId, model.id))) {
+    return 'models-restricted'
+  }
+  return 'no-models-discovered'
 }
 
 export function nativeProviderId(definition: SharedProviderDefinition): string {

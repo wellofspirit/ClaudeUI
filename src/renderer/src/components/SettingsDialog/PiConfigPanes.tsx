@@ -76,6 +76,11 @@ import {
   LeafTextInput
 } from './OpencodeConfigPanes'
 import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
+import {
+  isPiModelAllowed,
+  splitPiModelValue,
+  type PiModelAllowlist
+} from '../../../../shared/pi-model-allowlist'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { usePiInstalled } from './use-engine-installed'
 import { useEngineConfigObject } from './use-engine-config'
@@ -705,13 +710,17 @@ function PiSessionDefaultModel(): React.JSX.Element {
   const current = cfg.piConfig?.defaultModel ?? ''
   const known = current === '' || models.some((m) => m.value === current)
   const allowlist = cfg.piConfig?.modelAllowlist
-  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
+  const currentSplit = splitPiModelValue(current)
+  const defaultExcluded =
+    currentSplit !== null &&
+    !isPiModelAllowed(allowlist, currentSplit.provider, currentSplit.modelId)
+  const curatedProviders = Object.keys(allowlist ?? {}).length
 
   // No re-read before the write: the store object IS the latest config — every
   // pane over `engines/pi.json` edits it in place, and an `update` lands in it
   // before its save is even in flight. `updateAsync` rather than `saveConfig`
   // because the allowlist dialog reports a failed save itself.
-  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
+  const saveAllowlist = async (modelAllowlist: PiModelAllowlist): Promise<void> => {
     await updateAsync({ piConfig: { ...cfg.piConfig, modelAllowlist } })
     useSessionStore.getState().reloadModels()
     refreshModels()
@@ -829,7 +838,7 @@ function PiSessionDefaultModel(): React.JSX.Element {
           testid={`${PANE}.row`}
           dataId="piConfig.modelAllowlist"
           label="Model list"
-          description="Which discovered pi models the picker offers; all of them unless you curate the list."
+          description="Which discovered pi models the picker offers, per provider; a provider you have not curated shows all of its models."
           keyText="engines/pi.json · modelAllowlist"
         >
           <Button variant="link" testid="PiDefaultModelSection.refresh" onClick={refreshModels}>
@@ -840,11 +849,9 @@ function PiSessionDefaultModel(): React.JSX.Element {
             onClick={() => setManagingModels(true)}
           >
             Manage (
-            {allowlist === undefined
+            {curatedProviders === 0
               ? 'all'
-              : allowlist.length === 0
-                ? 'none'
-                : `${allowlist.length} selected`}
+              : `${curatedProviders} ${curatedProviders === 1 ? 'provider' : 'providers'} curated`}
             )
           </Button>
         </SettingRow>

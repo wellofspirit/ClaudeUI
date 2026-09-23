@@ -196,23 +196,78 @@ describe('pi session-default model (Models & thinking pane)', () => {
     fireEvent.click(rows[0])
     fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
 
+    // Unticking openai-codex's only model curates THAT provider to nothing;
+    // anthropic, still fully ticked, gets no key (ADR-074 §1).
     await waitFor(() =>
       expect(saveEngineConfig).toHaveBeenCalledWith('pi', {
         ...latest,
         piConfig: {
           defaultModel: 'openai-codex/gpt-5.6-luna',
-          modelAllowlist: ['anthropic/claude-sonnet-5']
+          modelAllowlist: { 'openai-codex': [] }
         }
       })
     )
     expect(useSessionStore.getState().modelReloadNonce).toBeGreaterThan(0)
   })
 
+  it('seeds from the per-provider record and omits a fully ticked provider on save', async () => {
+    loadEngineConfig.mockResolvedValue({
+      piConfig: { modelAllowlist: { 'openai-codex': [], groq: ['llama-4'] } }
+    })
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    expect(screen.getByTestId('PiDefaultModelSection.manageModels')).toHaveTextContent(
+      'Manage (2 providers curated)'
+    )
+
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
+    await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
+    // Absent key → ticked; `[]` → unticked.
+    expect(screen.getByTestId('ModelAllowlistDialog')).toHaveTextContent('1 selected')
+    fireEvent.click(
+      screen
+        .getAllByTestId('ModelAllowlistDialog.modelRow')
+        .find((row) => row.dataset.id === 'openai-codex/gpt-5.6-luna')!
+    )
+    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+
+    // Every catalog model of openai-codex and anthropic is ticked → neither
+    // has a key. groq is not in the catalog (signed out), so it keeps its own.
+    await waitFor(() =>
+      expect(saveEngineConfig).toHaveBeenCalledWith('pi', {
+        piConfig: { modelAllowlist: { groq: ['llama-4'] } }
+      })
+    )
+  })
+
+  it('labels the Manage button "all" with no record or an empty one', async () => {
+    loadEngineConfig.mockResolvedValue({ piConfig: { modelAllowlist: {} } })
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    expect(screen.getByTestId('PiDefaultModelSection.manageModels')).toHaveTextContent(
+      'Manage (all)'
+    )
+  })
+
+  it('does not warn when the default belongs to a provider with no allowlist key', async () => {
+    loadEngineConfig.mockResolvedValue({
+      piConfig: {
+        defaultModel: 'openai-codex/gpt-5.6-luna',
+        modelAllowlist: { anthropic: ['claude-sonnet-5'] }
+      }
+    })
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    expect(
+      screen.queryByTestId('PiDefaultModelSection.excludedDefaultWarning')
+    ).not.toBeInTheDocument()
+  })
+
   it('warns when the configured default is excluded', async () => {
     loadEngineConfig.mockResolvedValue({
       piConfig: {
         defaultModel: 'openai-codex/gpt-5.6-luna',
-        modelAllowlist: ['anthropic/claude-sonnet-5']
+        modelAllowlist: { 'openai-codex': [], anthropic: ['claude-sonnet-5'] }
       }
     })
     getEngineModels.mockResolvedValue([

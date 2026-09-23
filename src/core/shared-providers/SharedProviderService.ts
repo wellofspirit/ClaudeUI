@@ -71,21 +71,22 @@ export class SharedProviderService {
     const opencodeConfigured =
       definition.kind !== 'custom' || this.deps.opencode.hasDefinition(definition)
     const errors = this.routeErrors.get(id)
+    const [pi, opencode] = await Promise.all([
+      this.statusRoute(definition, 'pi', piCredential, piConfigured, models, errors?.pi),
+      this.statusRoute(
+        definition,
+        'opencode',
+        opencodeCredential,
+        opencodeConfigured,
+        models,
+        errors?.opencode
+      )
+    ])
     return {
       id,
       connected: credential !== null,
       modelCount: models.length,
-      routes: {
-        pi: this.statusRoute(definition, 'pi', piCredential, piConfigured, models, errors?.pi),
-        opencode: this.statusRoute(
-          definition,
-          'opencode',
-          opencodeCredential,
-          opencodeConfigured,
-          models,
-          errors?.opencode
-        )
-      }
+      routes: { pi, opencode }
     }
   }
 
@@ -480,14 +481,14 @@ export class SharedProviderService {
       ? { ...definition, models: await this.listProviderModels(definition.id) }
       : definition
   }
-  private statusRoute(
+  private async statusRoute(
     definition: SharedProviderDefinition,
     route: Route,
     credential: boolean,
     configured: boolean,
     models: SharedProviderModel[],
     error?: string
-  ): SharedProviderStatus['routes'][Route] {
+  ): Promise<SharedProviderStatus['routes'][Route]> {
     const enabled = definition.routes[route].enabled
     const modelCount = models.filter(
       (model) =>
@@ -503,23 +504,25 @@ export class SharedProviderService {
       // empty by intent, and an errored one already says what went wrong — adding
       // a cause there would compete with the actual failure.
       ...(enabled && !error && modelCount === 0
-        ? { diagnosis: this.diagnoseRoute(definition, route) }
+        ? { diagnosis: await this.diagnoseRoute(definition, route) }
         : {})
     }
   }
 
   /**
-   * Ask the route's adapter why it is empty. Only opencode can distinguish causes
-   * (its native provider veto vs a model allowlist); pi has neither concept, so
-   * an empty pi route can only mean nothing was discovered.
+   * Ask the route's adapter why it is empty: opencode tells its native provider
+   * veto from a model allowlist; pi tells a missing credential from its
+   * per-provider allowlist (ADR-074 §5). An adapter that cannot answer falls
+   * back to the generic cause.
    */
-  private diagnoseRoute(
+  private async diagnoseRoute(
     definition: SharedProviderDefinition,
     route: Route
-  ): SharedProviderRouteDiagnosis {
-    if (route === 'pi') return 'no-models-discovered'
+  ): Promise<SharedProviderRouteDiagnosis> {
     try {
-      return this.deps.opencode.diagnoseZeroModels(definition)
+      return route === 'pi'
+        ? await this.deps.pi.diagnoseZeroModels(definition)
+        : this.deps.opencode.diagnoseZeroModels(definition)
     } catch {
       return 'no-models-discovered'
     }

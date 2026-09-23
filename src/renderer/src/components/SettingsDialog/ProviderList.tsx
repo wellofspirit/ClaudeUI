@@ -83,6 +83,8 @@ function diagnosisText(diagnosis: SharedProviderRouteDiagnosis): string {
       return 'Disabled in the engine — turn it back on below.'
     case 'models-restricted':
       return 'Every model is filtered out — adjust the model list below.'
+    case 'no-credential':
+      return 'pi reports no models for this provider — check its key, or its entry in ~/.pi/agent/models.json.'
     case 'no-models-discovered':
       return 'The engine reported no models — check it is installed and reachable.'
   }

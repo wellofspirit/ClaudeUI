@@ -770,10 +770,19 @@ export interface PiConfig {
    *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
    *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
   defaultModel?: string
-  /** ClaudeUI-private visible-model allowlist using full `<provider>/<modelId>`
-   * picker values. Undefined exposes every authenticated pi model; a present
-   * array exposes only its entries, including none when the array is empty. */
-  modelAllowlist?: string[]
+  /**
+   * ClaudeUI-private per-provider model allowlist (ADR-074 §1), keyed by pi
+   * provider id with BARE model ids — opencode's `modelAllowlist` rule.
+   *
+   * Semantics by KEY PRESENCE (the array, not its length, is the gate):
+   *   - key absent  → show ALL of that provider's models, including ones it
+   *                   adds later.
+   *   - key present → show ONLY the listed model ids (an empty array → none).
+   *
+   * The legacy global `string[]` of `<provider>/<modelId>` values is migrated
+   * on read by `normalizePiModelAllowlist` (`shared/pi-model-allowlist.ts`).
+   */
+  modelAllowlist?: Record<string, string[]>
 }
 
 /**

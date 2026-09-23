@@ -450,22 +450,38 @@ describe('engine facts', () => {
     })
   })
 
-  it('pi: the GLOBAL allowlist curates every pi row, counted by prefix', () => {
+  it('pi: the allowlist curates PER PROVIDER — a provider with no key is not curated', () => {
     const snapshot = buildProviderRegistry(
       sources({
         piVendors: {
           groq: { authState: 'authenticated', billingType: 'apiKey' },
-          xai: { authState: 'authenticated', billingType: 'apiKey' }
+          xai: { authState: 'authenticated', billingType: 'apiKey' },
+          mistral: { authState: 'authenticated', billingType: 'apiKey' }
         },
-        piAuthOptions: { groq: [], xai: [] },
-        piModelAllowlist: ['groq/llama-3', 'groq/kimi', 'xai/grok-4']
+        piAuthOptions: { groq: [], xai: [], mistral: [] },
+        piModelAllowlist: { groq: ['llama-3', 'kimi'], xai: [] }
       })
     )
     expect(byId(snapshot, 'pi:groq')).toMatchObject({
       engines: { pi: { enabled: true, modelCount: 2, curated: true, native: true } },
       detail: '2 models shown in the picker'
     })
-    expect(byId(snapshot, 'pi:xai').engines.pi.modelCount).toBe(1)
+    // `[]` is a curated NOTHING, not "all".
+    expect(byId(snapshot, 'pi:xai').engines.pi).toMatchObject({ modelCount: 0, curated: true })
+    // Before ADR-074 §1 the list was global and this row read "0 models shown".
+    expect(byId(snapshot, 'pi:mistral').engines.pi).toEqual({ enabled: true, native: true })
+  })
+
+  it('pi: a shared route with no allowlist key keeps its own count, uncurated', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [chatgpt],
+        statuses: [status()],
+        piModelAllowlist: { openrouter: ['deepseek/deepseek-v4-flash-0731'] }
+      })
+    )
+    expect(byId(snapshot, 'chatgpt').engines.pi).toMatchObject({ enabled: true, modelCount: 4 })
+    expect(byId(snapshot, 'chatgpt').engines.pi.curated).toBeUndefined()
   })
 
   it('pi: no allowlist means no count to report for a native row', () => {
@@ -552,6 +568,31 @@ describe('engine facts', () => {
       engines: { pi: { enabled: true, modelCount: 4 }, opencode: { enabled: true, modelCount: 0 } },
       diagnosis: 'provider-disabled'
     })
+  })
+
+  it("a precise pi diagnosis is not hidden behind opencode's generic one", () => {
+    const empty = (diagnosis: 'no-models-discovered' | 'models-restricted') => ({
+      enabled: true,
+      delivered: true,
+      modelCount: 0,
+      diagnosis
+    })
+    const row = (
+      opencode: 'no-models-discovered' | 'models-restricted',
+      pi: 'no-models-discovered' | 'models-restricted'
+    ) =>
+      byId(
+        buildProviderRegistry(
+          sources({
+            definitions: [chatgpt],
+            statuses: [status({ routes: { pi: empty(pi), opencode: empty(opencode) } })]
+          })
+        ),
+        'chatgpt'
+      ).diagnosis
+    expect(row('no-models-discovered', 'models-restricted')).toBe('models-restricted')
+    expect(row('models-restricted', 'no-models-discovered')).toBe('models-restricted')
+    expect(row('no-models-discovered', 'no-models-discovered')).toBe('no-models-discovered')
   })
 })
 

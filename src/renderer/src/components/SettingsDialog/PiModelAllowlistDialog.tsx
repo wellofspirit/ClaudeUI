@@ -1,11 +1,48 @@
 import { useEffect, useRef, useState } from 'react'
+import {
+  isPiModelAllowed,
+  splitPiModelValue,
+  type PiModelAllowlist
+} from '../../../../shared/pi-model-allowlist'
 
 interface PiModelAllowlistEntry {
+  /** The full picker value, `<provider>/<modelId>`. */
   id: string
   name: string
   provider: string
+  /** The allowlist's key for this model (pi's provider id) and its bare id there. */
+  vendorId: string
+  modelId: string
   reasoning?: boolean
   toolCalling?: boolean
+}
+
+/**
+ * The per-provider record a flat selection saves as (ADR-074 §1): a provider
+ * with every one of its catalog models ticked gets NO key — "all, including
+ * ones it adds later" — and any other gets exactly its ticked bare ids
+ * (possibly `[]`). A provider missing from the catalog (signed out for now)
+ * keeps whatever it had: the dialog cannot see its models, so it must not
+ * decide for it.
+ */
+export function allowlistFromSelection(
+  catalog: readonly PiModelAllowlistEntry[],
+  checked: ReadonlySet<string>,
+  current: PiModelAllowlist | undefined
+): PiModelAllowlist {
+  const byProvider = new Map<string, PiModelAllowlistEntry[]>()
+  for (const model of catalog) {
+    byProvider.set(model.vendorId, [...(byProvider.get(model.vendorId) ?? []), model])
+  }
+  const next: PiModelAllowlist = {}
+  for (const [provider, ids] of Object.entries(current ?? {})) {
+    if (!byProvider.has(provider)) next[provider] = ids
+  }
+  for (const [provider, models] of byProvider) {
+    const picked = models.filter((model) => checked.has(model.id))
+    if (picked.length < models.length) next[provider] = picked.map((model) => model.modelId)
+  }
+  return next
 }
 
 export function PiModelAllowlistDialog({
@@ -15,17 +52,20 @@ export function PiModelAllowlistDialog({
   onClose
 }: {
   providerName: string
-  current: string[] | undefined
-  onSave: (ids: string[]) => void | Promise<void>
+  current: PiModelAllowlist | undefined
+  onSave: (allowlist: PiModelAllowlist) => void | Promise<void>
   onClose: () => void
 }): React.JSX.Element {
   const [models, setModels] = useState<PiModelAllowlistEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
+  // Seeded once the catalog arrives: an absent provider key means every one of
+  // that provider's models, which only the catalog can enumerate.
+  const [checked, setChecked] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
-  const seededRef = useRef(current !== undefined)
+  /** The record as it was when the dialog opened — what the seed reads. */
+  const initialRef = useRef(current)
 
   useEffect(() => {
     let cancelled = false
@@ -33,22 +73,32 @@ export function PiModelAllowlistDialog({
       .getPiModelCatalogGroups()
       .then((groups) =>
         groups.flatMap((group) =>
-          group.models.map((model) => ({
-            id: model.value,
-            name: model.displayName,
-            provider: group.vendorName || group.vendorId,
-            reasoning: model.supportsEffort,
-            toolCalling: model.toolCalling
-          }))
+          group.models.map((model) => {
+            const split = splitPiModelValue(model.value)
+            return {
+              id: model.value,
+              name: model.displayName,
+              provider: group.vendorName || group.vendorId,
+              vendorId: split?.provider ?? group.vendorId,
+              modelId: split?.modelId ?? model.value,
+              reasoning: model.supportsEffort,
+              toolCalling: model.toolCalling
+            }
+          })
         )
       )
       .then((list) => {
         if (cancelled) return
         setModels(list)
-        if (!seededRef.current) {
-          seededRef.current = true
-          setChecked(new Set(list.map((model) => model.id)))
-        }
+        setChecked(
+          new Set(
+            list
+              .filter((model) =>
+                isPiModelAllowed(initialRef.current, model.vendorId, model.modelId)
+              )
+              .map((model) => model.id)
+          )
+        )
       })
       .catch((reason: unknown) => {
         if (!cancelled)
@@ -82,7 +132,7 @@ export function PiModelAllowlistDialog({
     setSaving(true)
     setSaveError(null)
     try {
-      await onSave([...checked])
+      await onSave(allowlistFromSelection(models ?? [], checked, current))
       setSaving(false)
       onClose()
     } catch (reason) {

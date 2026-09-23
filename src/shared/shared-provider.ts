@@ -95,11 +95,14 @@ export interface SharedProviderDefinition {
  *                            `disabled_providers`). The credential is fine.
  * - `models-restricted`    — a per-provider model allowlist filters every model
  *                            out (an empty allowlist surfaces nothing).
+ * - `no-credential`        — the engine reports models, but none for this
+ *                            provider id: no usable key, or a broken entry
+ *                            (pi's `models.json`).
  * - `no-models-discovered` — the engine reported no models at all: not installed,
  *                            or discovery failed.
  */
 export type SharedProviderRouteDiagnosis =
-  'provider-disabled' | 'models-restricted' | 'no-models-discovered'
+  'provider-disabled' | 'models-restricted' | 'no-credential' | 'no-models-discovered'
 
 export interface SharedProviderStatus {
   id: string

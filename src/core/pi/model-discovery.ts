@@ -19,6 +19,7 @@ import { locatePiBinary, piBinaryAvailable } from './pi-locate'
 import type { PiGetAvailableModelsData, PiModel } from './pi-protocol'
 import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
+import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
 
 const DISCOVERY_TIMEOUT_MS = 15_000
 
@@ -125,11 +126,10 @@ export async function discoverPiModels(): Promise<EngineModelGroup[]> {
   const models = await fetchPiModelCatalog()
   if (models.length === 0) return []
 
+  // Per provider (ADR-074 §1): a provider with no key shows every model it
+  // reports, so one curated provider no longer hides every other one.
   const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
-  const allowed = allowlist === undefined ? null : new Set(allowlist)
-  const groups = groupPiModels(
-    allowed === null ? models : models.filter((m) => allowed.has(`${m.provider}/${m.id}`))
-  )
+  const groups = groupPiModels(models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id)))
 
   cachedGroups = groups
   return groups
