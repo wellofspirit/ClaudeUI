@@ -4,16 +4,19 @@ ClaudeUI's opencode patches, unlike the `cli.js` ones in the sibling directories
 are **source patches on a git fork**, not surgery on a minified bundle. There is
 no `.patch` file to re-anchor: the patches live as commits on
 `github.com/wellofspirit/opencode` branch `claudeui`, and `scripts/ensure-opencode.mjs`
-clones that branch, checks out the pinned fork tag (`package.json#opencodeFork.ref`),
+clones that branch into `vendor/opencode-fork-src/` (gitignored; fork clones are
+`vendor/<engine>-fork-src/`, upstream checkouts `vendor/<engine>-src/` — see
+CLAUDE.md), checks out the pinned fork tag (`package.json#opencodeFork.ref`),
 builds it with opencode's own release pipeline, and vendors the binary into
-`vendor/opencode-cli/`.
+`vendor/opencode-cli/`. A clone left at the old `.cache/opencode-fork` is moved
+there on the next run rather than re-cloned.
 
 Policy: **ADR-037** — fork + patch, narrow diffs, **never upstream**.
 
 **No-fork revisit (upstream v1.18.32):** the public plugin `Hooks` type has no
 HTTP-route registration or direct provider/auth service; `tool.definition` can
 change description/parameters, not remove tools. A plugin-owned localhost
-sidecar *could* expose its own endpoint but must own authentication, provider
+sidecar _could_ expose its own endpoint but must own authentication, provider
 transport and lifecycle. A truly isolated `opencode serve` with no interactive
 sessions/always-approvals avoids the shared instance's global approval list,
 but deny rules still do not make tools structurally unreachable or supply P1's
@@ -21,13 +24,13 @@ completion budget. These alternatives have not been implemented or validated.
 
 ## Affected component
 
-| Component   | Value                                                                    |
-| ----------- | ------------------------------------------------------------------------ |
-| Upstream    | `github.com/anomalyco/opencode` (MIT)                                   |
-| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                    |
+| Component   | Value                                                                                                                                               |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream    | `github.com/anomalyco/opencode` (MIT)                                                                                                               |
+| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                                                                                               |
 | Forked from | tag `v1.18.9`, currently merged through upstream **`v1.18.32`** (fork tag `v1.18.32-claudeui.1`, commit `b7012a354f6c98ac1c50b007c33e5b81a9e87879`) |
-| Pinned by   | `package.json#opencodeCliVersion` + `opencodeFork.ref` (fork tag/commit) |
-| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`)  |
+| Pinned by   | `package.json#opencodeCliVersion` + `opencodeFork.ref` (fork tag/commit)                                                                            |
+| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`)                                                                             |
 
 Upstream's release branch is **`dev`**, not `main`. Release tags (`vX.Y.Z`) are
 CI commits created _on top of_ `dev` and never merged back, so `git merge-base
@@ -280,7 +283,7 @@ included, to a third party.
 ## Bump protocol (ADR-037 §3)
 
 ```bash
-cd .cache/opencode-fork                       # the pipeline's own clone
+cd vendor/opencode-fork-src                   # the pipeline's own clone
 git fetch upstream --tags
 git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
 ```
@@ -343,7 +346,7 @@ upgrade`, the script drops a pinned standalone bun in `.cache/bun-<version>/`.
   children open on `vendor/opencode-cli/opencode.exe`, so `rename(tmp, dest)`
   fails `EPERM`. The script renames the _old_ file out of the way first (allowed
   on Windows even while running) and sweeps the leftovers next run.
-- **Clone refresh.** `bun install` rewrites `bun.lock` in the cache clone, so the
+- **Clone refresh.** `bun install` rewrites `bun.lock` in the pipeline's clone, so the
   refresh path uses `git checkout -f` before `reset --hard`. It never runs `git
 clean` — that would delete the cached `node_modules` and make every run a cold
   install.

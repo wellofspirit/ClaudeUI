@@ -2,7 +2,7 @@
 
 Written 2026-09-16 for roadmap item 1 of [`codex-integration-handoff.md`](codex-integration-handoff.md): inventory every tool and history item each harness exposes against ClaudeUI's card vocabulary BEFORE writing the Codex history mappers. The mapping proposal is at the end, with one mockup page ([`mockups/f20-history-cards.html`](mockups/f20-history-cards.html)) drawn in the app's own card chrome. The kickoff (F20) followed Daniel's choices in § 6 and landed 2026-09-17 (`git log -p -- docs/codex-followups-spec.md` for the kickoff itself, deleted with the rest of the landed specs).
 
-Sources: `docs/protocol-cc/` (cli.js 2.1.268), `.cache/opencode-fork` (opencode 1.18.29; the ADR-cited `vendor/opencode-src` path does not exist), `vendor/pi-cli/pi/docs/` (pi 0.84.3; one directory deeper than the docs cite), `.cache/codex-src` (Codex 0.154.0) with `src/core/codex/protocol/v2/ThreadItem.ts`, and the renderer's `tool-registry/`. Every claim was verified by reading the code; file:line citations are in the four agent reports this condenses.
+Sources: `docs/protocol-cc/` (cli.js 2.1.268), `vendor/opencode-fork-src` (opencode 1.18.29; then at `.cache/opencode-fork`), `vendor/pi-cli/pi/docs/` (pi 0.84.3; one directory deeper than the docs cite), `vendor/codex-src` (Codex 0.154.0; then at `.cache/codex-src`) with `src/core/codex/protocol/v2/ThreadItem.ts`, and the renderer's `tool-registry/`. Every claim was verified by reading the code; file:line citations are in the four agent reports this condenses.
 
 ## 1. The card vocabulary
 
