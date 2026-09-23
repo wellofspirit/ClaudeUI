@@ -12,6 +12,8 @@ Full documentation index: [docs/README.md](docs/README.md)
 
 Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
+**Engine source checkouts live in `vendor/<engine>-src/`** (`vendor/codex-src`, `vendor/opencode-src`, `vendor/pi-src`; Claude Code has no public source — use `vendor/claude-cli/cli.js` + `docs/protocol-cc/`), checked out at the tag matching that engine's `package.json` pin. They are gitignored (`/vendor/*-src/`) and already excluded from ESLint and electron-builder. Never clone into `.cache/`, `/tmp` or the scratchpad. Read the source before black-box probing an engine's behavior, cite paths as `vendor/<engine>-src/...`, and bump the checkout together with the pin. (`.cache/opencode-fork` is not a reading checkout: it is `ensure-opencode`'s build clone.)
+
 ## Development Workflow (read this first)
 
 For any **non-trivial change**, follow the loop in `docs/adr/adr-026_development-workflow.md` (full step-by-step + standing constraints live there):
