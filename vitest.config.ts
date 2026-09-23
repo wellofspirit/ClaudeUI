@@ -38,6 +38,9 @@ export default defineConfig({
             '**/node_modules/**',
             '**/dist/**',
             '**/.{idea,git,cache,output,temp}/**',
+            // `*.test.*` above also matches `*.component.test.*`; those belong
+            // to the `component` project alone, or every one runs twice.
+            '**/*.component.test.{ts,tsx}',
             'src/main/services/__tests__/git-service*.test.ts',
             'src/main/services/__tests__/worktree.test.ts'
           ],

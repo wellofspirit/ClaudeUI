@@ -305,7 +305,7 @@ bun run test:component # Layer 2 — component tests only
 bun run test:e2e       # Layer 3 — e2e tests only
 bun run test:integration # Layer 4 — integration tests (needs CLAUDE_INTEGRATION_TESTS=1)
 bun run test:ci        # Layers 1+2+3 — what runs in CI pipeline
-bun run test:watch     # Unit tests in watch mode
+bun run test:watch     # Unit + component tests in watch mode
 ```
 
 ## Conventions

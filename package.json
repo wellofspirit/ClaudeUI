@@ -61,7 +61,7 @@
     "verify:sqlite": "bun scripts/verify-bun-sqlite.ts",
     "build:server": "node scripts/build-server.mjs bundle",
     "build:server:compile": "node scripts/build-server.mjs compile",
-    "test:watch": "vitest --project unit"
+    "test:watch": "vitest --project unit --project component"
   },
   "_comment_dependencies": "Only packages imported by src/main or src/preload belong here. electron-vite's externalizeDepsPlugin externalizes exactly the `dependencies` keys, so a main-process import that lives in devDependencies gets inline-bundled instead. Renderer/web-only packages are bundled by vite and must stay in devDependencies so electron-builder prunes them from the shipped node_modules.",
   "dependencies": {
