@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -74,8 +74,8 @@ The session layer normalizes runs onto the **origin** tool_use id — the one th
 so the renderer's tool_use-id keying is untouched everywhere.
 
 - `ClaudeSession` keeps `originByTaskId: Map<taskId, originToolUseId>`, set on the **first**
-  `task_started` for a task id and **not evicted** by a terminal notification. It is cleared with the
-  session, like the other per-session maps.
+  `task_started` for a task id and **not evicted** by a terminal notification. It belongs to the
+  conversation, not to the cli.js process — see §5.
 - A later `task_started` for a known `taskId` with a different `tool_use_id` is a **resume**. It
   emits `session:task-started` under the **origin** id, carrying `runToolUseId` and a 1-based
   `runIndex`, and registers an alias `runToolUseId → originToolUseId`.
@@ -184,6 +184,70 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   roster, the re-armed card with `resumed ×1`, the origin-keyed `runIndex: 2` notification, and the
   two Appearance toggles all asserted by `data-testid` before the screenshots were read.
 
+### 5. Identity outlives the process (amendment, 2026-09-23)
+
+§1 cleared the identity maps "with the session", and `cancel()` was where that happened. But
+`cancel()` ends a **process**, not the conversation. The user's Stop, the idle reaper and an account
+switch all call it, and the next send `--resume`s the same conversation, either on the same object or
+on a new one after an app restart. The agents outlive the process. Probed against 2.1.280
+(`scripts/probe-agent-respawn.mjs`; protocol-cc §4.5):
+
+```
+[p1] Agent            toolu_019e…  → task_started task_id=acb38d…  (mid-run when p1 is killed)
+[p2] task_notification task_id=acb38d… tool_use_id=—  status=stopped   ← the reap, before system/init
+[p2] SendMessage to=acb38d…        → task_started task_id=acb38d… tool_use_id=<the SendMessage>
+[p2] child/assistant parent=toolu_019e…                            ← the ORIGINAL Agent call, from p1
+```
+
+A session without the maps can attribute neither event, and the owner hit both on 2026-09-23:
+
+- **Stuck running.** Three agents were mid-run when the session was killed. An agent spawned with
+  `run_in_background: true` stays running until a terminal event matches its card, and the reap
+  carries only the task id, so it matched no card and the agents read "running" forever, including
+  after they were resumed and finished.
+- **Resumed agent reads complete.** The resume armed the SendMessage call's id, which no card
+  renders as a task. The agent's own card read "complete" with a frozen token count, while its
+  output kept streaming into it through the original id.
+
+**Decision.** The identity maps (`originByTaskId`, the run aliases, the run counts) are never
+cleared on `cancel()`; they live as long as the `ClaudeSession` object. A new object that resumes a
+transcript rebuilds them from it (`core/services/agent-identity.ts`): a spawn result's `agentId`
+(structured `toolUseResult.agentId`, falling back to the `agentId:` text the live path matches)
+names the origin, and each SendMessage result carrying `resumedAgentId` adds one run. A SendMessage
+to a running agent answers "queued" and starts no run, exactly as the live counter sees it. The seed
+fills gaps only, and is merged at the top of the message loop before the first wire message is
+handled, because the reap arrives before `system/init`. Waiting there delays only that process's
+first message and cannot reorder concurrent `run()` calls. Forks are seeded too: an agent spawned
+before the anchor can be resumed from the fork.
+
+**Settled when the process ends.** An agent dies with its process, but cli.js says so only in the
+reap, and only if the session is resumed. Until then, a `run_in_background` card read "running", and
+it stayed that way for good if the session was never resumed. `ClaudeSession` now tracks the tasks
+the current process has started and not ended (`liveTasks`). When a run's process goes (cancel,
+crash, idle reaper) it reports each one as `stopped` against its card and run index. A superseded
+run leaves them to its successor, whose `--resume` reaps them. A disposed object stays silent on the
+shared routing id. When the reap does come, it has the same tool_use id and run index, and the
+reducer folds the two into one entry.
+
+**Stopped reads as stopped.** `deriveTaskState` returns `isStopped`. The roster dot (`stopped`,
+warning) and the transcript card (a stop glyph, warning border, `data-status="stopped"`) now draw a
+stop differently from a finish, as the panel's `TaskEntry` badge already did. An agent that was
+stopped never got to answer, so drawing it as "done" was wrong.
+
+**History says `unfinished`, never `stopped`.** The history loader folds the transcript's spawns,
+resumes and `<task-notification>`s (`foldAgentIdentity`). An agent whose last run starts (an async
+launch or a resume) and never ends gets a synthetic entry with `status: 'unfinished'` and its run
+index. A foreground spawn ends with its own result. A notification whose `<tool-use-id>` names an
+earlier run does not close the current one. The reap, which carries no id, closes whatever run is
+current. `unfinished` is deliberately not `stopped`: session-watcher runs the same loader over
+sessions another CLI is still running, where the agent may well be working. It renders neutral:
+`isLoaded`, the muted dot, and the card's "unfinished" label. A live resume replaces it with the
+real reap.
+
+**Not addressed:** after a respawn, `SendMessage{to: <name>}` fails ("No agent named … is
+reachable") and only the raw agent id resumes. That is cli.js's name registry and nothing ClaudeUI
+can change.
+
 ## Consequences
 
 - A resumed agent re-arms its own card, streams into it live, and reports the run that actually
@@ -193,8 +257,8 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   harness no longer exists, so the record is the comment block in `top-bar-tiers.ts`; the next
   never-dropped control will need a one-off measurement the same way.
 - `originByTaskId` grows by one entry per agent per session and is never pruned within a session.
-  That is bounded by how many agents a session spawns and is not worth an eviction policy; it is
-  cleared with the session.
+  That is bounded by how many agents a session spawns and is not worth an eviction policy; it lives
+  as long as the session object and is rebuilt from the transcript when a new object resumes (§5).
 - If cli.js ever stops re-emitting `task_started` on resume, the failure mode is today's behaviour —
   the card reads complete during run 2 — caught by the guard tests this arc adds, and by
   `scripts/probe-agent-resume.mjs` re-run against the new binary at the next CLI bump.

@@ -71,7 +71,13 @@ function record(kind, detail, raw) {
   appendFileSync(OUT, JSON.stringify({ tMs: Date.now() - t0, kind, detail, raw }) + '\n')
 }
 
-const { q, channel, cleanup } = createStreamingQuery(SPAWN_PROMPT, {}, 300_000)
+// PROBE_MODEL overrides test-helpers' default (e.g. claude-haiku-4-5-20251001).
+const MODEL = process.env.PROBE_MODEL
+const { q, channel, cleanup } = createStreamingQuery(
+  SPAWN_PROMPT,
+  MODEL ? { model: MODEL } : {},
+  300_000
+)
 
 let phase = 'spawn'
 let notificationsSeen = 0
@@ -100,7 +106,30 @@ try {
       )
     }
 
+    // The <task-notification> XML the parent is fed. ClaudeSession treats it as a
+    // terminal event too, so WHEN it reaches stdout relative to a resume matters.
+    if (msg.type === 'user' && !msg.parent_tool_use_id) {
+      const c = msg.message?.content
+      const text =
+        typeof c === 'string'
+          ? c
+          : Array.isArray(c)
+            ? c.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('')
+            : ''
+      if (text.includes('<task-notification>')) {
+        const tag = (t) => text.match(new RegExp(`<${t}>([\\s\\S]*?)</${t}>`))?.[1]?.trim() ?? '-'
+        record(
+          'user/task-notification',
+          `[${phase}] task_id=${tag('task-id')} tool_use_id=${tag('tool-use-id')} status=${tag('status')}`,
+          msg
+        )
+      }
+    }
+
     if (msg.type === 'system' && typeof msg.subtype === 'string') {
+      if (msg.subtype === 'queued_command_consumed') {
+        record('system/queued_cmd_consumed', `[${phase}]`, msg)
+      }
       if (msg.subtype.startsWith('task_')) {
         const bits = [
           `task_id=${msg.task_id ?? '-'}`,

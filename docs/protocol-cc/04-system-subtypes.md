@@ -301,6 +301,29 @@ run 2   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…
 `ToolSearch` (`select:SendMessage`) to load its schema before it can invoke it. A probe that stops
 at the first `result` after asking for a resume will cut the run off mid-`ToolSearch`.
 
+**Re-probed 2026-09-23 at 2.1.280** (Haiku 4.5). The clean resume above is unchanged. Three
+additions:
+
+- **cli.js resumes agents on its own, reusing the id of the run already in progress.** A
+  `SendMessage` to a _running_ agent answers `"Message queued for delivery …"` and starts no
+  run. If the agent finishes first, cli.js closes the run (`task_updated` + `task_notification`)
+  and immediately starts another one to deliver the message, with a `task_started` under the same
+  `tool_use_id`. An agent whose own background Bash finishes after the
+  agent went idle is restarted the same way. Only a `SendMessage` to a _finished_ agent (answer:
+  `"resumedAgentId"`) gets a new `tool_use_id`.
+- **The resume `task_started` is gated on a terminal claim.** `register` emits it for an existing
+  task only if the task id is in `terminalEmitClaims`. The claim is set when a terminal
+  `task_notification` is emitted, consumed by the next `register`, and cleared wholesale by
+  `reset()`.
+- **Agents outlive the parent process** (`scripts/probe-agent-respawn.mjs`). When the parent is
+  killed mid-run and the session is `--resume`d, cli.js reaps each orphaned agent with a
+  `task_notification` carrying the `task_id`, `status: "stopped"` and **no `tool_use_id`**, ahead of
+  `system/init`. A later `SendMessage{to: <agent id>}` resumes the agent from its disk transcript:
+  `task_started` under the SendMessage id, while the child's completed messages carry the
+  **original Agent call's id from the dead process**. `SendMessage{to: <name>}` fails after a
+  respawn ("No agent named … is reachable"); only the id works. A consumer's task-id → origin map
+  therefore has to survive the process (ADR-073 §5).
+
 ---
 
 ## 4.6 `task_updated`
