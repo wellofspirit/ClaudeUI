@@ -1601,11 +1601,20 @@ it.skipIf(!enabled)(
       toolUseId: card.toolUseId,
       status: 'completed'
     })
-    const subagent = coreEvents.mock.calls
-      .filter(([channel]) => channel === 'session:subagent-message')
-      .map((call) => (call[1] as [string, { toolUseId: string; message: { id: string } }])[1])
+    // Child text rides the item lane since ADR-055's Codex migration: a sealed
+    // `agentMessage` is a `session:item-seal` owned by the card, and the reducer
+    // commits it into that card's subagent transcript. Only tool-carrying child
+    // messages still use `session:subagent-message` — this child just speaks.
+    const subagent = coreEvents.mock.calls.flatMap(([channel, payload]) => {
+      const data = (payload as [string, Record<string, unknown>])[1]
+      if (channel === 'session:subagent-message')
+        return [{ owner: data.toolUseId, message: data.message as { id: string } }]
+      if (channel === 'session:item-seal' && data.ownerToolUseId)
+        return [{ owner: data.ownerToolUseId, message: data.message as { id: string } }]
+      return []
+    })
     expect(subagent.length).toBeGreaterThan(0)
-    expect(subagent.every((data) => data.toolUseId === card.toolUseId)).toBe(true)
+    expect(subagent.every((data) => data.owner === card.toolUseId)).toBe(true)
     expect(subagent.some((data) => data.message.id.includes(childThreadId))).toBe(true)
     expect(
       session
