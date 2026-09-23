@@ -3,7 +3,8 @@ import type {
   ChatMessage,
   ContentBlock,
   PendingApproval,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
@@ -51,10 +52,13 @@ function renderToolBlock(
   result: ToolResultBlockForDispatch | undefined,
   approval: PendingApproval | undefined,
   key: number | string,
-  // A permission judge's verdict on this call (F18). Only the passive card shows
-  // it: the lifted kinds below are interactions (a plan, a question, a todo
-  // list), and none of them is an action a judge gates.
-  review?: ToolReviewBlock,
+  // What the permission system decided about this call before it ran — a
+  // judge's verdict (F18) or a pre-ask refusal nothing judged. ONE param, not
+  // two, because cli.js decides each call once: it is either weighed or looked
+  // up. Only the passive card shows it: the lifted kinds below are interactions
+  // (a plan, a question, a todo list), and none of them is an action a judge
+  // gates.
+  decision?: ToolReviewBlock | PermissionDenialBlock,
   // Whether this block is on the LAST assistant message — read only by the plan
   // card, whose no-approval action set (Codex, F20) belongs to the latest plan
   // and to no earlier one.
@@ -113,7 +117,14 @@ function renderToolBlock(
   // Passive kinds → ToolCallBlock host → ToolCard + kind body
   // (command/fileEdit/fileWrite/fileRead/search/web/diagram/mockup/mcp/unknown).
   return (
-    <ToolCallBlock key={key} block={block} result={result} approval={approval} review={review} />
+    <ToolCallBlock
+      key={key}
+      block={block}
+      result={result}
+      approval={approval}
+      review={decision?.type === 'tool_review' ? decision : undefined}
+      denial={decision?.type === 'permission_denial' ? decision : undefined}
+    />
   )
 }
 
@@ -339,14 +350,16 @@ export const MessageBubble = memo(function MessageBubble({
 
   // Pair tool_use blocks with their tool_result
   const resultMap = new Map<string, ToolResultBlock>()
-  // …and with a permission judge's verdict on them (F18). LAST one wins: a
-  // re-review after "approve anyway" is a new decision, not a second opinion.
-  const reviewMap = new Map<string, ToolReviewBlock>()
+  // …and with what the permission system decided about them: a judge's verdict
+  // (F18) or a pre-ask refusal nothing judged. LAST one wins — a re-review after
+  // "approve anyway" is a new decision, not a second opinion — and the two kinds
+  // share a map because a call only ever carries one of them.
+  const decisionMap = new Map<string, ToolReviewBlock | PermissionDenialBlock>()
   for (const block of message.content) {
     if (block.type === 'tool_result') {
       resultMap.set(block.toolUseId, block)
-    } else if (block.type === 'tool_review') {
-      reviewMap.set(block.toolUseId, block)
+    } else if (block.type === 'tool_review' || block.type === 'permission_denial') {
+      decisionMap.set(block.toolUseId, block)
     }
   }
 
@@ -395,9 +408,10 @@ export const MessageBubble = memo(function MessageBubble({
   const visible = message.content.filter(
     (b) =>
       b.type !== 'tool_result' &&
-      // A verdict renders ON its card, never as a row of its own — and never as
+      // A decision renders ON its card, never as a row of its own — and never as
       // a gap that would split a run of tool calls into two groups.
       b.type !== 'tool_review' &&
+      b.type !== 'permission_denial' &&
       !(b.type === 'tool_use' && b.toolName && toolMap.hidden.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
@@ -446,8 +460,8 @@ export const MessageBubble = memo(function MessageBubble({
           const { block, index } = item.blocks[0]
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
-          const review = reviewMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index, review, isLastAssistant)
+          const decision = decisionMap.get(block.toolUseId)
+          return renderToolBlock(toolMap, block, result, approval, index, decision, isLastAssistant)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -458,14 +472,14 @@ export const MessageBubble = memo(function MessageBubble({
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              const review = block.toolUseId ? reviewMap.get(block.toolUseId) : undefined
+              const decision = block.toolUseId ? decisionMap.get(block.toolUseId) : undefined
               return renderToolBlock(
                 toolMap,
                 block,
                 result,
                 approval,
                 index,
-                review,
+                decision,
                 isLastAssistant
               )
             })}

@@ -36,6 +36,16 @@ export function mergeContentBlocks(
       .filter((b): b is Extract<ContentBlock, { type: 'tool_review' }> => b.type === 'tool_review')
       .map((b) => b.reviewId)
   )
+  // A pre-ask denial arrives on its own channel too, for the same reason and
+  // with the same consequence — preserved by `denialId`.
+  const newDenialIds = new Set(
+    newBlocks
+      .filter(
+        (b): b is Extract<ContentBlock, { type: 'permission_denial' }> =>
+          b.type === 'permission_denial'
+      )
+      .map((b) => b.denialId)
+  )
   const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
   const newHasText = newBlocks.some((b) => b.type === 'text')
 
@@ -52,6 +62,8 @@ export function mergeContentBlocks(
     } else if (b.type === 'tool_result' && !newToolResultIds.has(b.toolUseId)) {
       preserved.push(b)
     } else if (b.type === 'tool_review' && !newReviewIds.has(b.reviewId)) {
+      preserved.push(b)
+    } else if (b.type === 'permission_denial' && !newDenialIds.has(b.denialId)) {
       preserved.push(b)
     } else if (b.type === 'thinking') {
       if (thinkingsSeen < droppedThinkingCount) {
