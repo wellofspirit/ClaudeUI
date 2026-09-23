@@ -11,6 +11,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { AnsiUp } from 'ansi_up'
 import { useSessionStore, useActiveSession, type ThemeId } from '../../../../stores/session-store'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 
 export function LiveBashOutput({
   output,
@@ -43,7 +44,7 @@ export function LiveBashOutput({
   }, [html])
 
   return (
-    <div data-testid="LiveBashOutput" className="px-3 py-2.5">
+    <div data-testid="LiveBashOutput" {...TOOL_OUTPUT_SCOPE} className="px-3 py-2.5">
       <div className="flex items-center gap-2 mb-1.5">
         <div className="text-[11px] text-text-secondary uppercase tracking-wider">Live Output</div>
         <span className="text-[10px] font-mono text-text-muted">
@@ -127,7 +128,11 @@ export function BackgroundBashOutput({
   const hasMore = bgOutput.totalSize > prependedContent.length + tailLen
 
   return (
-    <div data-testid="BackgroundBashOutput" className="border-t border-border px-3 py-2.5">
+    <div
+      data-testid="BackgroundBashOutput"
+      {...TOOL_OUTPUT_SCOPE}
+      className="border-t border-border px-3 py-2.5"
+    >
       <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Output</div>
       {hasMore && (
         <button

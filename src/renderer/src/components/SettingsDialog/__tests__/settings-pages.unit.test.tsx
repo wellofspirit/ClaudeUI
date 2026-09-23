@@ -96,23 +96,26 @@ describe('PAGES structure', () => {
 
   it('each page lists its groups in the documented order', () => {
     const expected: Record<string, string[]> = {
-      appearance: ['theme', 'layout', 'diff', 'status-line', 'git-panel'],
+      appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
       sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
       advanced: ['logging', 'usage'],
       about: ['about'],
       models: [
-        // ONE providers group since 6c: the two engine-native groups and the
-        // shared vault's bridge folded into the list and its two sheets.
+        // ADR-074 §7: sign-in subscriptions first, then API providers — ONE
+        // providers group since 6c, now without the subscriptions — then the
+        // defaults. 'accounts' folded into the Subscriptions cards; 'anthropic'
+        // moved to Claude › Endpoint / Model mapping (ADR-074 §9).
+        'subscriptions',
         'providers',
-        'defaults',
-        'anthropic',
-        'accounts'
+        'defaults'
       ],
       dispatch: ['concurrency', 'into', 'limits'],
       mockups: ['network'],
-      remote: ['follow', 'server', 'access', 'security', 'links'],
-      claude: ['sandbox', 'proxy'],
+      // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
+      remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
+      // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
+      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
       opencode: [
         'session',
         'tool-output',
@@ -311,7 +314,7 @@ describe('PAGES structure', () => {
     // A fixed tag ignores the engine.
     expect(
       storageOf(
-        pageOf('models').groups.find((g) => g.id === 'anthropic')!,
+        pageOf('claude').groups.find((g) => g.id === 'endpoint')!,
         'claude'
       )
     ).toBe('vendors/anthropic.json')
@@ -322,7 +325,8 @@ describe('PAGES structure', () => {
     // whose effort defaults are ClaudeUI's own settings.
     const defaults = pageOf('models').groups.find((g) => g.id === 'defaults')!
     expect(storageOf(defaults, 'opencode')).toBe('opencode.jsonc')
-    expect(storageOf(defaults, 'pi')).toBe('settings.json')
+    // pi's default model and model list are ClaudeUI's, not pi's settings.json.
+    expect(storageOf(defaults, 'pi')).toBe('engines/pi.json')
     expect(storageOf(defaults, 'claude')).toBeUndefined()
   })
 })
@@ -373,10 +377,15 @@ describe('Codex on the topic pages (ADR-068 §6, Slice 5b)', () => {
 
 describe('inventory guard', () => {
   it('every SECTIONS item has exactly one home in PAGES, and nothing else appears', () => {
-    const reachable = PAGES.flatMap((p) => p.groups.flatMap(allItemsOf)).map((i) => i.key)
+    // A HOME is a group. One item reused across the engine segments of ONE
+    // group is still one home — slice 9's engine-neutral "New sessions start
+    // on" row heads every segment of Default models on purpose — so each
+    // group's keys count once.
+    const reachable = PAGES.flatMap((p) =>
+      p.groups.flatMap((g) => [...new Set(allItemsOf(g).map((i) => i.key))])
+    )
 
-    // No key is rendered twice (a byEngine group contributes one per engine, so
-    // the SAME key twice would mean a genuine duplicate home).
+    // No key is rendered in two GROUPS (that would be a genuine duplicate home).
     const seen = new Map<string, number>()
     for (const key of reachable) seen.set(key, (seen.get(key) ?? 0) + 1)
     const duplicated = [...seen.entries()].filter(([, n]) => n > 1).map(([k]) => k)
@@ -388,7 +397,8 @@ describe('inventory guard', () => {
       'sandboxCrossLink',
       'otherEnginePermissions',
       'versions',
-      'codexNativeAccount'
+      'codexNativeAccount',
+      'usageHub'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -440,14 +450,27 @@ describe('SECTION_TARGET', () => {
 
 describe('visibleGroups', () => {
   it('keeps every group when the engine has the capability', () => {
-    expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual(['sandbox', 'proxy'])
+    expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping',
+      'sandbox',
+      'proxy'
+    ])
   })
 
   it('drops a gated group when the engine lacks the capability', () => {
+    // The endpoint groups are ungated: every Claude build reads the env vars.
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
-    expect(visibleGroups(pageOf('claude'), caps)).toEqual([])
+    expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping'
+    ])
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
-    expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual(['proxy'])
+    expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping',
+      'proxy'
+    ])
   })
 
   it('is unaffected on pages with no engine', () => {
@@ -481,6 +504,17 @@ describe('searchSettings', () => {
     const hits = searchSettings('whitelist')
     expect(hits.some((h) => h.page.id === 'claude' && h.group.id === 'sandbox')).toBe(true)
     expect(hits.every((h) => !h.item.label.toLowerCase().includes('whitelist'))).toBe(true)
+  })
+
+  it('lands the old Anthropic endpoint searches on the Claude page (ADR-074 §9)', () => {
+    const at = (q: string): Set<string> =>
+      new Set(searchSettings(q).map((h) => `${h.page.id}/${h.group.id}`))
+    expect(at('gateway').has('claude/endpoint')).toBe(true)
+    expect(at('model override').has('claude/model-mapping')).toBe(true)
+    expect(at('haiku').has('claude/model-mapping')).toBe(true)
+    for (const q of ['gateway', 'model override', 'anthropic endpoint']) {
+      expect(at(q).has('models/anthropic'), q).toBe(false)
+    }
   })
 
   it('matches nothing for a nonsense query', () => {

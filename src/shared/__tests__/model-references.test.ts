@@ -35,8 +35,16 @@ describe('findModelReferences', () => {
       GONE
     )
     expect(refs).toEqual([
-      { model: 'openai/gpt-5.5', label: 'the opencode default model' },
-      { model: 'openai/gpt-5.6-luna', label: 'the opencode small model' }
+      {
+        model: 'openai/gpt-5.5',
+        label: 'the opencode default model',
+        where: 'Default model for opencode — Models & providers › Default models › opencode'
+      },
+      {
+        model: 'openai/gpt-5.6-luna',
+        label: 'the opencode small model',
+        where: 'Small model for opencode — Models & providers › Default models › opencode'
+      }
     ])
   })
 
@@ -78,7 +86,65 @@ describe('findModelReferences', () => {
       { engines: { pi: { piConfig: { defaultModel: 'openai/gpt-5.5' } } } },
       GONE
     )
-    expect(refs).toEqual([{ model: 'openai/gpt-5.5', label: 'the pi default model' }])
+    expect(refs).toEqual([
+      {
+        model: 'openai/gpt-5.5',
+        label: 'the pi default model',
+        where: 'Default model for pi — Models & providers › Default models › pi'
+      }
+    ])
+  })
+
+  it('says where each dispatch and judge reference lives', () => {
+    const refs = findModelReferences(
+      {
+        engines: {
+          opencode: {
+            autoMode: { judgeModel: 'openai/gpt-5.5' },
+            dispatch: { defaultModel: 'openai/gpt-5.5', allowedModels: ['openai/gpt-5.6-luna'] }
+          }
+        }
+      },
+      GONE
+    )
+    expect(refs.map((r) => r.where)).toEqual([
+      'Auto-mode judge for opencode — Sessions & autonomy › Auto-mode judge › opencode',
+      'Dispatch default for opencode — Cross-engine dispatch › Dispatch into › opencode',
+      'Allowed dispatch model for opencode — Cross-engine dispatch › Dispatch into › opencode'
+    ])
+  })
+
+  // ADR-074 §2: opencode and pi picker values share a namespace, so an
+  // unscoped scan blocked unticking an opencode model because pi's default was
+  // spelled the same.
+  describe('scoped to one engine', () => {
+    const sources = {
+      opencode: { model: 'openai/gpt-5.6-luna' },
+      engines: {
+        pi: { piConfig: { defaultModel: 'openai/gpt-5.5' } },
+        opencode: { dispatch: { defaultModel: 'openai/gpt-5.6-luna' } }
+      }
+    }
+
+    it('an opencode removal is not blocked by a pi default with the same value', () => {
+      expect(findModelReferences(sources, ['openai/gpt-5.5'], 'opencode')).toEqual([])
+      expect(findModelReferences(sources, ['openai/gpt-5.5'], 'pi')).toHaveLength(1)
+    })
+
+    it("reads opencode's native default only for opencode", () => {
+      expect(
+        findModelReferences(sources, ['openai/gpt-5.6-luna'], 'opencode').map((r) => r.label)
+      ).toEqual(['the opencode default model', 'the opencode dispatch default model'])
+      expect(findModelReferences(sources, ['openai/gpt-5.6-luna'], 'pi')).toEqual([])
+    })
+
+    it('unscoped, every engine still counts', () => {
+      expect(findModelReferences(sources, GONE).map((r) => r.label)).toEqual([
+        'the opencode default model',
+        'the pi default model',
+        'the opencode dispatch default model'
+      ])
+    })
   })
 
   it('tolerates null/absent config slots', () => {

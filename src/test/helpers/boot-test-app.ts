@@ -283,7 +283,13 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
     fetchAccountLimits: (refresh) => ipcRenderer.invoke('usage:limits', refresh ?? false),
     fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
-    fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
+    fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
+    usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
+    configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
+    setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),
+    syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
+    resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
+    forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
@@ -366,6 +372,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     writePiNativeText: async () => {},
     readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
     patchPiModels: async () => {},
+    setProviderModelAllowlist: (engine, providerId, models) =>
+      unwrap('models:set-provider-allowlist', engine, providerId, models),
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
@@ -439,6 +447,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
     setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+    setSharedProviderCuration: (id, curation) =>
+      unwrap('shared-provider:set-curation', id, curation),
+    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>

@@ -10,7 +10,15 @@ import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { Summary } from '../Summary'
 import { buildProviderColorMap } from '../usage-utils'
-import { makeDashboard, makeProvider, makeAccount, makeTotals } from './dashboard-fixtures'
+import type { UsageDashboardData } from '../../../../../shared/types'
+import {
+  makeAccount,
+  makeDashboard,
+  makeDay,
+  makeMachine,
+  makeProvider,
+  makeTotals
+} from './dashboard-fixtures'
 
 function colors(ids: string[]): Map<string, string> {
   return buildProviderColorMap(ids)
@@ -268,5 +276,165 @@ describe('Summary — coverage bar geometry', () => {
       { id: 'anthropic', pct: 75 },
       { id: 'openai', pct: 5 }
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The combined scope (S5c)
+// ---------------------------------------------------------------------------
+
+describe('Summary — all machines', () => {
+  /** $75 Anthropic of which $30 relayed, $25 OpenAI all local. */
+  function combined(overrides: Partial<UsageDashboardData> = {}): UsageDashboardData {
+    return makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          label: 'Anthropic',
+          totals: makeTotals({ displayCostUsd: 75 }),
+          accounts: [makeAccount()]
+        }),
+        makeProvider({
+          providerId: 'openai',
+          label: 'OpenAI',
+          totals: makeTotals({ displayCostUsd: 25 }),
+          accounts: [makeAccount({ accountKey: 'chatgpt:w:u', providerId: 'openai' })]
+        })
+      ],
+      totals: makeTotals({ displayCostUsd: 100 }),
+      localUsd: 70,
+      remoteUsd: 30,
+      machines: [
+        makeMachine({ deviceId: 'dev-self', self: true }),
+        makeMachine({
+          deviceId: 'dev-peer',
+          self: false,
+          totals: makeTotals({ displayCostUsd: 30 })
+        })
+      ],
+      days: [
+        {
+          date: '2026-09-21',
+          byProvider: {
+            anthropic: { apiCostUsd: 75, billedCostUsd: 0, displayCostUsd: 75 },
+            openai: { apiCostUsd: 25, billedCostUsd: 0, displayCostUsd: 25 }
+          },
+          byProviderRemote: {
+            anthropic: { apiCostUsd: 30, billedCostUsd: 0, displayCostUsd: 30 }
+          },
+          totals: makeTotals({ displayCostUsd: 100 })
+        }
+      ],
+      ...overrides
+    })
+  }
+
+  it('names the scope and splits the hero into this machine and what was relayed', () => {
+    render(
+      <Summary data={combined()} compact={false} providerColors={colors(['anthropic', 'openai'])} />
+    )
+
+    expect(screen.getByTestId('Summary')).toHaveTextContent('all machines')
+    const line = screen.getByTestId('Summary.machinesLine')
+    expect(line).toHaveTextContent('$70.00 on this machine')
+    expect(line).toHaveTextContent('$30.00 relayed from 1 machine')
+    // The hero itself is untouched: the scope widens what it means, not the rule.
+    expect(screen.getByTestId('Summary.hero')).toHaveTextContent('$100.00')
+  })
+
+  it('distinguishes the machines that spent from the machines there are', () => {
+    // Two peers the hub knows about, one of them idle, plus a retired one that
+    // is not counted at all: `2 of 3` would be wrong, `1 of 2` is right (M3).
+    const data = combined({
+      machines: [
+        makeMachine({ deviceId: 'dev-self', self: true }),
+        makeMachine({
+          deviceId: 'dev-peer',
+          self: false,
+          totals: makeTotals({ displayCostUsd: 30 })
+        }),
+        makeMachine({ deviceId: 'dev-idle', self: false, totals: makeTotals() }),
+        makeMachine({ deviceId: 'dev-old', self: false, retired: true, totals: makeTotals() })
+      ]
+    })
+    render(<Summary data={data} compact={false} providerColors={colors(['anthropic', 'openai'])} />)
+    expect(screen.getByTestId('Summary.machinesLine')).toHaveTextContent(
+      '$30.00 from 1 of 2 other machines'
+    )
+  })
+
+  it('says `relayed from N machines` when every other machine spent something', () => {
+    render(
+      <Summary data={combined()} compact={false} providerColors={colors(['anthropic', 'openai'])} />
+    )
+    expect(screen.getByTestId('Summary.machinesLine')).toHaveTextContent(
+      '$30.00 relayed from 1 machine'
+    )
+  })
+
+  it('says so when nothing has been relayed yet, rather than claiming $0.00 from 0 machines', () => {
+    const data = combined({
+      localUsd: 100,
+      remoteUsd: 0,
+      days: [makeDay('2026-09-21', { anthropic: 75, openai: 25 })]
+    })
+    render(<Summary data={data} compact={false} providerColors={colors(['anthropic', 'openai'])} />)
+    expect(screen.getByTestId('Summary.machinesLine')).toHaveTextContent(
+      'nothing relayed yet from the other machines'
+    )
+  })
+
+  it('hatches each provider’s remote share inside its own segment, never beside it', () => {
+    render(
+      <Summary data={combined()} compact={false} providerColors={colors(['anthropic', 'openai'])} />
+    )
+
+    const bar = screen.getByTestId('Summary.providerBar')
+    const hatched = bar.querySelectorAll('[data-testid="Summary.providerBar.remote"]')
+    // Only the provider that HAS a remote share.
+    expect([...hatched].map((el) => el.getAttribute('data-provider-id'))).toEqual(['anthropic'])
+    // 30 of Anthropic's 75 — a share of the segment, so the segment is still 75%
+    // of the bar and the bar still totals the hero.
+    expect((hatched[0] as HTMLElement).style.width).toBe('40%')
+    expect((hatched[0] as HTMLElement).style.backgroundImage).toContain('repeating-linear-gradient')
+    expect(hatched[0].getAttribute('title')).toBe('Anthropic · other machines $30.00')
+  })
+
+  it('adds a legend entry only for a provider with a remote share', () => {
+    render(
+      <Summary data={combined()} compact={false} providerColors={colors(['anthropic', 'openai'])} />
+    )
+    const entries = screen.getAllByTestId('Summary.legend.remote')
+    expect(entries.map((e) => e.getAttribute('data-provider-id'))).toEqual(['anthropic'])
+    expect(entries[0]).toHaveTextContent('other machines')
+    expect(entries[0]).toHaveTextContent('$30.00')
+  })
+
+  it('changes nothing under local: no machines line, no hatch, no legend entry', () => {
+    const data = makeDashboard({
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          totals: makeTotals({ displayCostUsd: 75 }),
+          accounts: [makeAccount()]
+        })
+      ],
+      totals: makeTotals({ displayCostUsd: 75 })
+    })
+    render(<Summary data={data} compact={false} providerColors={colors(['anthropic'])} />)
+
+    expect(screen.queryByTestId('Summary.machinesLine')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('Summary.providerBar.remote')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('Summary.legend.remote')).not.toBeInTheDocument()
+    expect(screen.getByTestId('Summary')).not.toHaveTextContent('all machines')
+  })
+
+  it('carries the machines line into the phone strip too', () => {
+    render(
+      <Summary data={combined()} compact={true} providerColors={colors(['anthropic', 'openai'])} />
+    )
+    expect(screen.getByTestId('Summary.strip')).toBeInTheDocument()
+    expect(screen.getByTestId('Summary.machinesLine')).toHaveTextContent('$70.00 on this machine')
   })
 })

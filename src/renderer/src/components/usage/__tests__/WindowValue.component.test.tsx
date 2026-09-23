@@ -13,7 +13,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { WindowValue } from '../WindowValue'
 import { buildProviderColorMap } from '../usage-utils'
-import { makeAccount, makeDashboard, makeLimits, makeProvider } from './dashboard-fixtures'
+import {
+  makeAccount,
+  makeDashboard,
+  makeLimits,
+  makeMachine,
+  makeProvider
+} from './dashboard-fixtures'
 import { chooseSelectMenuOption, selectMenuValue } from '@test/helpers/select-menu'
 import type { AccountLimits, UsageWindowSummaryRow } from '../../../../../shared/types'
 
@@ -38,6 +44,7 @@ function makeRow(overrides: Partial<UsageWindowSummaryRow> = {}): UsageWindowSum
     windowKind: '7d',
     canonicalEnd: END,
     windowStart: END - 7 * DAY,
+    windowMinutes: null,
     peakPercent,
     apiCostUsd,
     billedCostUsd: 0,
@@ -254,6 +261,26 @@ describe('WindowValue — B, subscriptions compared', () => {
     ).toEqual(['5h', '7d', '7d:fable'])
   })
 
+  /**
+   * S3c — a ChatGPT plan states each window's length, so a kind can be any
+   * duration. Ordering by the two literals dropped `3d` and `1h` into the
+   * "anything new" bucket after the scoped weeklies, and labelled them with
+   * their raw kind.
+   */
+  it('orders an arbitrary duration by its length and labels it in words', async () => {
+    await renderWith([
+      makeRow({ windowKind: '7d' }),
+      makeRow({ windowKind: '3d', canonicalEnd: END - DAY }),
+      makeRow({ windowKind: '1h', canonicalEnd: END - 2 * DAY }),
+      makeRow({ windowKind: '5h', canonicalEnd: END - 3 * DAY })
+    ])
+    await screen.findByTestId('WindowValue.compare')
+    const kinds = screen.getAllByTestId('WindowValue.compare.kind')
+    expect(kinds.map((k) => k.getAttribute('data-kind'))).toEqual(['1h', '5h', '3d', '7d'])
+    expect(kinds[0]).toHaveTextContent('1-hour')
+    expect(kinds[2]).toHaveTextContent('3-day')
+  })
+
   it('names the account from the credentials when the ledger has no row for it', async () => {
     await renderWith(
       [makeRow({ accountKey: 'anthropic:org-9:acct-9' })],
@@ -382,5 +409,47 @@ describe('WindowValue — C, peak vs delivered', () => {
     expect(screen.getByTestId('WindowValue.scatter')).toHaveTextContent('No closed window yet')
     // The open window still has a column: A is the section that can show it.
     expect(screen.getByTestId('WindowValue.perWindow.column')).toHaveAttribute('data-open', 'true')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The combined scope (S5c)
+// ---------------------------------------------------------------------------
+
+describe('WindowValue — all machines', () => {
+  it('asks the query for the combined windows and says how many machines went in', async () => {
+    const data = makeDashboard({
+      scope: 'all',
+      machines: [
+        makeMachine({ deviceId: 'dev-self', self: true }),
+        makeMachine({ deviceId: 'dev-peer', self: false }),
+        // Retired, and therefore not one of the machines the numerator was
+        // summed over — the same count the chip and the summary print (M3).
+        makeMachine({ deviceId: 'dev-old', self: false, retired: true })
+      ]
+    })
+    // One row, so the card draws its sections rather than its empty state.
+    mockFetchWindows.mockResolvedValue([makeRow()])
+    render(<WindowValue data={data} limits={[]} providerColors={COLORS} range="30d" />)
+
+    await waitFor(() =>
+      expect(mockFetchWindows).toHaveBeenCalledWith({ sinceTs: data.fromTs, scope: 'all' })
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('WindowValue.combined')).toHaveTextContent(
+        'combined across 2 machines'
+      )
+    )
+    // The bias footnote is unchanged: the hub closes the other-machines half and
+    // nothing closes the claude.ai half.
+    expect(screen.getByTestId('WindowValue.footnote')).toBeInTheDocument()
+  })
+
+  it('asks for nothing but the range under local, and says nothing about machines', async () => {
+    const data = makeDashboard()
+    render(<WindowValue data={data} limits={[]} providerColors={COLORS} range="30d" />)
+
+    await waitFor(() => expect(mockFetchWindows).toHaveBeenCalledWith({ sinceTs: data.fromTs }))
+    expect(screen.queryByTestId('WindowValue.combined')).not.toBeInTheDocument()
   })
 })

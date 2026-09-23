@@ -1062,7 +1062,7 @@ describe('useClaudeEvents extended component tests', () => {
       app.emit('usage:data', first)
       app.emit('usage:data', second)
 
-      expect(useSessionStore.getState().accountUsage?.fiveHour.usedPercent).toBe(90)
+      expect(useSessionStore.getState().accountUsage?.fiveHour?.usedPercent).toBe(90)
     })
   })
 

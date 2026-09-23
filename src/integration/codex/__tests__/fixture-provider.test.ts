@@ -249,8 +249,14 @@ shell_snapshot = false
     const native = renderFixtureConfigToml({ port: 41999, model: 'mock-model' })
     expect(native).not.toContain('chatgpt_base_url')
     expect(native).toContain('requires_openai_auth = false')
-    const injected = renderFixtureConfigToml({ port: 41999, model: 'mock-model', chatgpt: true })
-    expect(injected).toContain('chatgpt_base_url = "http://127.0.0.1:41999/backend-api"')
+    const injected = renderFixtureConfigToml({
+      port: 41999,
+      model: 'mock-model',
+      chatgpt: true,
+      chatgptPort: 42000
+    })
+    expect(injected).toContain('chatgpt_base_url = "http://127.0.0.1:42000/backend-api"')
+    expect(injected).toContain('base_url = "http://127.0.0.1:41999/v1"')
     expect(injected).toContain('requires_openai_auth = true')
     // The redirect is additive: a home that also redirects the built-in
     // provider (what a real app session uses) keeps both lines.
@@ -457,6 +463,30 @@ describe('fixture provider', () => {
 })
 
 describe('fixture provider under an injected ChatGPT identity', () => {
+  it('serves only the declared workspace IDs at accounts/check', async () => {
+    provider = await startFixtureProvider({
+      chatgpt: true,
+      chatgptWorkspaceIds: ['ws-fixture-0001', 'ws-fixture-0002']
+    })
+    const check = await post(provider.port, '', {
+      method: 'GET',
+      path: '/backend-api/wham/accounts/check'
+    })
+    expect(check.status).toBe(200)
+    expect(JSON.parse(check.body)).toEqual({
+      accounts: ['ws-fixture-0001', 'ws-fixture-0002'].map((id) => ({
+        id,
+        workspace_backend_origin: 'https://127.0.0.1',
+        account_routing_override: 'NO_CONSTRAINT'
+      })),
+      account_ordering: ['ws-fixture-0001', 'ws-fixture-0002'],
+      default_account_id: 'ws-fixture-0001'
+    })
+    expect(provider.backend).toEqual(['GET /backend-api/wham/accounts/check'])
+    expect(provider.requests).toEqual([])
+    expect(provider.errors).toEqual([])
+  })
+
   it("answers the binary's own backend calls 404 and records them outside errors", async () => {
     // These are the calls the binary makes for ITSELF once an external token is
     // injected — profile, workspace check, config bundle, usage — plus the

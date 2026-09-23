@@ -36,6 +36,8 @@ const defaults = (patch: Partial<EngineDefaultModels> = {}): EngineDefaultModels
   piDefaultModelConfigured: false,
   codexDefaultModel: '',
   codexDefaultModelConfigured: false,
+  claudeDefaultModel: '',
+  claudeDefaultModelConfigured: false,
   ...patch
 })
 

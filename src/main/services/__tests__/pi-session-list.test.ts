@@ -867,3 +867,75 @@ describe('loadPiSessionHistory — custom_message entries', () => {
     expect(messages.find((m) => m.id === 'blank')).toBeUndefined()
   })
 })
+
+/**
+ * R1b — a pi session this app never ran has no model persisted on our side, so
+ * the transcript's own last assistant message is where the reopened session's
+ * model comes from.
+ */
+describe('loadPiSessionHistory — lastModel', () => {
+  const userEntry = (id: string, parentId: string | null, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: { role: 'user', content: text, timestamp: 1 }
+  })
+  const assistantEntry = (id: string, parentId: string, provider: string, model: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:01.000Z',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      api: 'a',
+      provider,
+      model,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: 'stop',
+      timestamp: 2
+    }
+  })
+
+  it('names the model the LAST assistant message answered on', async () => {
+    writeSessionFile('--proj-lm--', 'x_sess-lm.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-lm',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/lm'
+      },
+      userEntry('u1', null, 'hi'),
+      assistantEntry('a1', 'u1', 'openai', 'gpt-old'),
+      userEntry('u2', 'a1', 'again'),
+      assistantEntry('a2', 'u2', 'alicloud', 'qwen-x')
+    ])
+
+    const { lastModel } = await loadPiSessionHistory('sess-lm')
+    expect(lastModel).toEqual({ engineId: 'pi', vendorId: 'alicloud', modelId: 'qwen-x' })
+  })
+
+  it('names none when no assistant message does', async () => {
+    writeSessionFile('--proj-lm2--', 'x_sess-lm2.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-lm2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/lm2'
+      },
+      userEntry('u1', null, 'hi')
+    ])
+
+    const { lastModel } = await loadPiSessionHistory('sess-lm2')
+    expect(lastModel).toBeNull()
+  })
+})

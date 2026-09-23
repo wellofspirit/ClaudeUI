@@ -97,7 +97,9 @@ describe('migration v22', () => {
       'cache_read_tokens',
       'sample_count',
       'closed',
-      'updated_at'
+      'updated_at',
+      // Appended by v25 (S3c) — the length the vendor stated for the window.
+      'window_minutes'
     ])
     db.close()
   })

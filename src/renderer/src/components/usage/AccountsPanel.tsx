@@ -19,6 +19,16 @@
  * is the absence of one (ADR-071 §3). Joining on it matched every unattributed
  * row in the ledger to one stored credential and reported that credential's
  * state five times. `unknown` never joins.
+ *
+ * A THIRD KIND OF READING ARRIVES HERE (ADR-072 §4, slice S5c): one another
+ * machine took. It is not scoped to the combined view, because a limit is the
+ * account's state right now however many machines watch it — what the hub
+ * changes is that an account this machine holds no credential for can have a
+ * reading at all, without spending a refresh grant here. Such a row says WHOSE
+ * reading it is and how old, and when only the hub's masked label is available
+ * it says that too: `d•••@e•••.com` is not what the account is called, it is as
+ * much of it as a device caller is given, and a reader who is not told reads it
+ * as corruption. What the SCOPE decides is only the right-hand machines column.
  */
 
 import { useState } from 'react'
@@ -28,6 +38,7 @@ import type {
   BillingType,
   BlockUsageData,
   DashboardAccount,
+  DashboardMachine,
   UsageDashboardData
 } from '../../../../shared/types'
 import { providerIdForBucket, providerLabel } from '../../../../shared/provider-label'
@@ -48,6 +59,33 @@ const ANTHROPIC = 'anthropic'
 
 /** ADR-071 §3's stand-in for "this row's account is not known". Never a key. */
 const UNKNOWN_KEY = 'unknown'
+
+/**
+ * Is this row's NAME the hub's masked form?
+ *
+ * Two sources, one fact. A credential row shows its reading's label; a ledger row
+ * shows the query's, which since round 3 is the masked label whenever nothing
+ * else names the key. Reading only the first made the same account carry the tag
+ * under `local` and lose it under `all`.
+ */
+function isLabelMasked(row: PanelRow): boolean {
+  if (row.limits?.labelMasked === true) return true
+  return row.kind === 'ledger' && row.account.labelMasked === true
+}
+
+/**
+ * Which machine a relayed reading came from, or null when this one took it.
+ *
+ * The whole source, not just the id: the NAME travels with the reading (round
+ * 2, R2), because a relayed row shows under both scopes and the combined
+ * payload's machine list — the only other place a name could come from — is
+ * empty under `local`.
+ */
+function relaySource(
+  limits: AccountLimits | null
+): { deviceId: string; deviceName: string } | null {
+  return limits !== null && limits.source !== 'local' ? limits.source : null
+}
 
 // ---------------------------------------------------------------------------
 // The union
@@ -160,6 +198,16 @@ interface AccountsPanelProps {
   providerColors: Map<string, string>
 }
 
+/** Device id → the name to show for it, from the query's own machine list. */
+function machineNames(machines: ReadonlyArray<DashboardMachine>): Map<string, string> {
+  return new Map(
+    machines.map((m) => [
+      m.deviceId,
+      m.deviceName.trim() === '' ? m.deviceId.slice(0, 8) : m.deviceName
+    ])
+  )
+}
+
 export function AccountsPanel({
   data,
   limits,
@@ -168,6 +216,8 @@ export function AccountsPanel({
 }: AccountsPanelProps): React.JSX.Element {
   const providers = buildProviders(data, limits ?? [])
   const total = data.totals.displayCostUsd
+  const combined = data.scope === 'all'
+  const names = machineNames(data.machines)
 
   return (
     <div
@@ -178,7 +228,10 @@ export function AccountsPanel({
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
           Accounts
         </h3>
-        <span className="text-[9px] text-text-muted">spend over the range · limits now</span>
+        <span className="text-[9px] text-text-muted">
+          spend over the range · limits now
+          {combined && ', relayed where this machine holds no credential'}
+        </span>
       </div>
 
       {providers.length === 0 ? (
@@ -194,6 +247,7 @@ export function AccountsPanel({
             color={providerColors.get(provider.providerId)}
             limitsLoaded={limits !== null}
             blockUsage={blockUsage}
+            machineNames={combined ? names : null}
           />
         ))
       )}
@@ -206,13 +260,16 @@ function ProviderGroup({
   grandTotal,
   color,
   limitsLoaded,
-  blockUsage
+  blockUsage,
+  machineNames
 }: {
   provider: PanelProvider
   grandTotal: number
   color: string | undefined
   limitsLoaded: boolean
   blockUsage: BlockUsageData | null
+  /** Non-null under the combined scope only — then each row names its machines. */
+  machineNames: Map<string, string> | null
 }): React.JSX.Element {
   const usd = provider.totals?.displayCostUsd ?? 0
   const requests = provider.totals?.requestCount ?? 0
@@ -288,6 +345,7 @@ function ProviderGroup({
             providerId={provider.providerId}
             limitsLoaded={limitsLoaded}
             blockUsage={blockUsage}
+            machineNames={machineNames}
           />
         ))}
     </div>
@@ -298,12 +356,14 @@ function AccountRow({
   row,
   providerId,
   limitsLoaded,
-  blockUsage
+  blockUsage,
+  machineNames
 }: {
   row: PanelRow
   providerId: string
   limitsLoaded: boolean
   blockUsage: BlockUsageData | null
+  machineNames: Map<string, string> | null
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   // Only an Anthropic subscription has 5-hour blocks to drill into; every other
@@ -320,7 +380,15 @@ function AccountRow({
       data-limits-only={row.kind === 'limits' ? 'true' : undefined}
       className="border-b border-border/50 last:border-b-0"
     >
-      <div className="flex items-center gap-3 pl-3 pr-3 py-2">
+      {/* ONE ROW, TWO LINES BELOW `lg`, and NO SCROLLER anywhere.
+          Round 2 gave each row its own `overflow-x-auto`, which put six
+          scrollbars on one card and still left the relayed tag outside it. This
+          WRAPS instead: the meters and the machines column carry `order-last`,
+          so below `lg` the first line is the label and the spend and the second
+          is the meters, each with its relayed tag wrapping under it. At `lg` the
+          orders reset and the widths return — the single-line layout S4b-1
+          measured on the owner's profile, unchanged. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pl-3 pr-3 py-2">
         {drillable ? (
           <button
             data-testid="AccountsPanel.drillIn.toggle"
@@ -335,10 +403,11 @@ function AccountRow({
           <span className="w-4 shrink-0" />
         )}
 
-        {/* Proportional, not fixed: a fixed column truncated every long label beside
-            free space once the panel took the full width. A percentage keeps the
-            meters aligned across rows; the floor keeps a narrow window readable. */}
-        <div className="w-[28%] min-w-[190px] shrink-0 flex items-center gap-1.5">
+        {/* Below `lg` it takes the line minus the spend; at `lg` it is the
+            proportional column S4b-1 settled on — a fixed one truncated every
+            long label beside free space once the panel took the full width, and
+            the percentage keeps the meters aligned across rows. */}
+        <div className="flex-1 min-w-0 lg:flex-none lg:w-[28%] lg:min-w-[190px] flex items-center gap-1.5">
           <span className="text-[11px] text-text-primary truncate" title={rowLabel(row)}>
             {rowLabel(row)}
           </span>
@@ -347,9 +416,21 @@ function AccountRow({
               {billingType}
             </span>
           )}
+          {isLabelMasked(row) && (
+            <span
+              data-testid="AccountsPanel.masked"
+              className="text-[9px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary shrink-0"
+              title="Only another machine holds a credential for this account, and the hub masks its label for a device. This is as much of the name as it will give."
+            >
+              masked
+            </span>
+          )}
         </div>
 
-        <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div
+          data-testid="AccountsPanel.account.meters"
+          className="order-last lg:order-none w-full lg:w-auto lg:flex-1 min-w-0 flex flex-wrap items-center gap-x-3 gap-y-1"
+        >
           <LimitsCell row={row} limitsLoaded={limitsLoaded} />
         </div>
 
@@ -369,6 +450,8 @@ function AccountRow({
             —
           </div>
         )}
+
+        {machineNames !== null && <MachinesCell row={row} machineNames={machineNames} />}
       </div>
 
       {drillable && expanded && (
@@ -437,10 +520,24 @@ function LimitsCell({
     )
   }
 
+  const relayedFrom = relaySource(limits)
+
   return (
     <>
       {windows.map((w) => (
-        <Meter key={w.kind} limitWindow={w} />
+        // WRAPS rather than extending the row: at phone width a meter plus
+        // `via laptop · 31h` is wider than the viewport, and pushing the row out
+        // put the tag itself out of reach. Under `md` the tag sits beneath its
+        // own meter; from `md` up they share a line as before.
+        <span key={w.kind} className="flex flex-wrap items-center gap-x-1.5 min-w-0">
+          {/* Beside EVERY meter it feeds, not once for the row: a reader
+              scanning one meter must not have to look elsewhere to learn that
+              this machine did not take the reading. */}
+          <Meter limitWindow={w} />
+          {relayedFrom !== null && (
+            <RelayedTag source={relayedFrom} observedAt={limits.observedAt} />
+          )}
+        </span>
       ))}
       {windows.length === 0 && credits && (
         <span className="text-[10px] text-text-secondary">{creditsLabel(credits)}</span>
@@ -451,6 +548,91 @@ function LimitsCell({
       {state === 'stale' && <StateChip limits={limits} />}
       {hint}
     </>
+  )
+}
+
+/**
+ * Which machine a reading came from, and how old it is.
+ *
+ * The age is the point, not decoration: a relayed reading is as current as the
+ * last time THAT machine looked, and a meter with no date beside it reads as
+ * now. The name comes from the READING (round 2, R2) rather than from the
+ * combined payload's machine list, which is empty under `local` — that is what
+ * made this tag print a uuid prefix on the scope it is most often read in.
+ */
+function RelayedTag({
+  source,
+  observedAt
+}: {
+  source: { deviceId: string; deviceName: string }
+  observedAt: number
+}): React.JSX.Element {
+  const age = formatDuration(Math.max(0, Date.now() - observedAt))
+  // The relay falls back to the id itself when the hub has dropped the device
+  // row, so this is already the best name there is.
+  const shown = source.deviceName
+  return (
+    <span
+      data-testid="AccountsPanel.relayed"
+      data-device-id={source.deviceId}
+      className="text-[9px] px-1 py-px rounded bg-bg-tertiary text-text-secondary whitespace-nowrap"
+      title={`Read on ${shown} ${age} ago and relayed through the usage hub. This machine holds no credential for this account, so it spent no refresh grant of its own.`}
+    >
+      via {shown} · {age}
+    </span>
+  )
+}
+
+/**
+ * The machines an account is used on — the combined scope's right-hand column.
+ *
+ * `N machines` rather than a list: at three machines the names do not fit beside
+ * three meters, and the one thing worth reading at a glance is whether the
+ * account is shared. The single-machine cases are named outright, because there
+ * the name IS the answer.
+ */
+function MachinesCell({
+  row,
+  machineNames
+}: {
+  row: PanelRow
+  machineNames: Map<string, string>
+}): React.JSX.Element {
+  const ids = row.kind === 'ledger' ? (row.account.machines ?? []) : []
+  const relayedFrom = relaySource(row.limits)
+  let text: string
+  let title: string
+  if (ids.length > 1) {
+    text = `${ids.length} machines`
+    title = ids.map((id) => machineNames.get(id) ?? id.slice(0, 8)).join(', ')
+  } else if (ids.length === 1) {
+    const only = machineNames.get(ids[0]) ?? ids[0].slice(0, 8)
+    // A row whose single machine is not this one reads `<name> only`; this
+    // machine's own reads `this machine`, which needs no name.
+    const remoteOnly = row.kind === 'ledger' && row.account.remoteOnly === true
+    text = remoteOnly ? `${only} only` : 'this machine'
+    title = `Only ${only} recorded spend for this account in this range.`
+  } else if (relayedFrom !== null) {
+    // A relayed reading with no spend in range: the account exists elsewhere.
+    const only = machineNames.get(relayedFrom.deviceId) ?? relayedFrom.deviceName
+    text = `${only} only`
+    title = `No spend in this range. The reading came from ${only}.`
+  } else {
+    text = '—'
+    title = 'No spend in this range on any machine.'
+  }
+  return (
+    // HIDDEN below `md`: it is the least urgent column on the row, and at phone
+    // width it was 100px of a 406px viewport — enough to push the spend figure
+    // and the relayed tag out of reach. The same fact is on the machines card
+    // and under the `machine` group-by, both of which fit a phone.
+    <div
+      data-testid="AccountsPanel.account.machines"
+      title={title}
+      className="order-last lg:order-none hidden md:block w-[100px] shrink-0 text-right text-[9px] text-text-muted truncate"
+    >
+      {text}
+    </div>
   )
 }
 
@@ -521,7 +703,7 @@ function Meter({ limitWindow: w }: { limitWindow: AccountLimitWindow }): React.J
   const severity = meterSeverity(pct)
   // The row shows the form this kind of window is acted on; the tooltip carries
   // the other one, so neither reading costs a click.
-  const reset = formatReset(w.kind, w.resetsAt)
+  const reset = formatReset(w.kind, w.resetsAt, Date.now(), w.windowMinutes)
   const relative = formatResetRelative(w.resetsAt)
 
   return (

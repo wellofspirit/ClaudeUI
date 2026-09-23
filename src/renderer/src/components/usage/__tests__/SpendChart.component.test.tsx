@@ -23,6 +23,7 @@ import {
   makeDashboard,
   makeDay,
   makeHour,
+  makeMachine,
   makeProvider,
   makeTotals
 } from './dashboard-fixtures'
@@ -412,5 +413,147 @@ describe('SpendChart — the hourly grain', () => {
     expect(
       screen.getAllByTestId('SpendChart.column').map((c) => c.getAttribute('data-date'))
     ).toEqual(['2026-09-19', '2026-09-20'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The combined scope (S5c)
+// ---------------------------------------------------------------------------
+
+describe('SpendChart — all machines', () => {
+  /** One day: $10 Anthropic of which $4 relayed, $5 OpenAI all local. */
+  function combined(): UsageDashboardData {
+    return makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          label: 'Anthropic',
+          totals: makeTotals({ displayCostUsd: 10 }),
+          accounts: [makeAccount()]
+        }),
+        makeProvider({
+          providerId: 'openai',
+          label: 'OpenAI',
+          totals: makeTotals({ displayCostUsd: 5 }),
+          accounts: [makeAccount({ accountKey: 'chatgpt:w:u', providerId: 'openai' })]
+        })
+      ],
+      totals: makeTotals({ displayCostUsd: 15 }),
+      localUsd: 11,
+      remoteUsd: 4,
+      days: [
+        {
+          date: '2026-09-21',
+          byProvider: {
+            anthropic: { apiCostUsd: 10, billedCostUsd: 0, displayCostUsd: 10 },
+            openai: { apiCostUsd: 5, billedCostUsd: 0, displayCostUsd: 5 }
+          },
+          byProviderRemote: {
+            anthropic: { apiCostUsd: 4, billedCostUsd: 0, displayCostUsd: 4 }
+          },
+          byMachine: {
+            'dev-self': { apiCostUsd: 11, billedCostUsd: 0, displayCostUsd: 11 },
+            'dev-peer': { apiCostUsd: 4, billedCostUsd: 0, displayCostUsd: 4 }
+          },
+          totals: makeTotals({ displayCostUsd: 15 })
+        }
+      ],
+      machines: [
+        makeMachine({
+          deviceId: 'dev-self',
+          deviceName: 'desk',
+          self: true,
+          totals: makeTotals({ displayCostUsd: 11 })
+        }),
+        makeMachine({
+          deviceId: 'dev-peer',
+          deviceName: 'studio',
+          self: false,
+          totals: makeTotals({ displayCostUsd: 4 })
+        })
+      ]
+    })
+  }
+
+  it('hatches the remote part of a segment, inside it and only where there is one', () => {
+    render(<SpendChart data={combined()} providerColors={COLORS} groupBy="provider" />)
+
+    const hatched = screen.getAllByTestId('SpendChart.segment.remote')
+    expect(hatched.map((el) => el.getAttribute('data-provider-id'))).toEqual(['anthropic'])
+    const solid = screen
+      .getAllByTestId('SpendChart.segment')
+      .find((el) => el.getAttribute('data-provider-id') === 'anthropic')!
+    // A SUBSET: never taller than the segment it qualifies, so the column's
+    // total and the axis are untouched.
+    expect(Number(hatched[0].getAttribute('height'))).toBeLessThanOrEqual(
+      Number(solid.getAttribute('height'))
+    )
+    expect(hatched[0].getAttribute('y')).toBe(solid.getAttribute('y'))
+    expect(hatched[0].getAttribute('fill')).toContain('url(#spendchart-hatch-anthropic)')
+  })
+
+  it('splits the tooltip into two lines that add up to the provider’s own figure', () => {
+    render(<SpendChart data={combined()} providerColors={COLORS} groupBy="provider" />)
+
+    fireEvent.mouseEnter(screen.getAllByTestId('SpendChart.column')[0])
+    const tip = screen.getByTestId('SpendChart.tooltip')
+
+    const local = within(tip).getByTestId('SpendChart.tooltip.local')
+    const remote = within(tip).getByTestId('SpendChart.tooltip.remote')
+    expect(local).toHaveTextContent('Anthropic · this machine')
+    expect(local).toHaveTextContent('$6.00')
+    expect(remote).toHaveTextContent('Anthropic · other machines')
+    expect(remote).toHaveTextContent('$4.00')
+    // $6 + $4 is the $10 Anthropic had before the split, and the total is still
+    // the sum of every line drawn.
+    expect(tip).toHaveTextContent('$15.00')
+    // A provider with no remote part keeps its one plain line.
+    expect(tip).toHaveTextContent('OpenAI')
+    expect(within(tip).getAllByTestId('SpendChart.tooltip.remote')).toHaveLength(1)
+  })
+
+  it('offers a per-machine mode that draws one row per machine that spent something', () => {
+    render(<SpendChart data={combined()} providerColors={COLORS} groupBy="provider" />)
+
+    fireEvent.click(screen.getByTestId('SpendChart.mode.machine'))
+
+    expect(screen.getByTestId('SpendChart')).toHaveAttribute('data-mode', 'machine')
+    const rows = screen.getAllByTestId('SpendChart.machineRow')
+    expect(rows.map((r) => r.getAttribute('data-device-id'))).toEqual(['dev-self', 'dev-peer'])
+    expect(rows[0]).toHaveAttribute('data-self', 'true')
+    // Each row's total is the sum of the bars beside it, read from `byMachine`.
+    const totals = screen.getAllByTestId('SpendChart.machineRow.total')
+    expect(totals[0]).toHaveTextContent('$11.00')
+    expect(totals[1]).toHaveTextContent('$4.00')
+  })
+
+  it('counts a machine with no spend in the range rather than drawing an empty row', () => {
+    const data = combined()
+    data.machines = [
+      ...data.machines,
+      makeMachine({ deviceId: 'dev-idle', deviceName: 'idle', self: false, totals: makeTotals() })
+    ]
+    render(<SpendChart data={data} providerColors={COLORS} groupBy="provider" />)
+
+    fireEvent.click(screen.getByTestId('SpendChart.mode.machine'))
+    expect(screen.getAllByTestId('SpendChart.machineRow')).toHaveLength(2)
+    expect(screen.getByTestId('SpendChart.machineRowsNote')).toHaveTextContent(
+      '1 machine with no spend hidden'
+    )
+  })
+
+  it('offers no per-machine mode under local, and drops the hatch with it', () => {
+    const data = makeDashboard({
+      providers: [makeProvider({ totals: makeTotals({ displayCostUsd: 10 }) })],
+      totals: makeTotals({ displayCostUsd: 10 }),
+      days: [makeDay('2026-09-21', { anthropic: 10 })]
+    })
+    render(<SpendChart data={data} providerColors={COLORS} groupBy="provider" />)
+
+    expect(screen.queryByTestId('SpendChart.mode.machine')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('SpendChart.segment.remote')).not.toBeInTheDocument()
+    fireEvent.mouseEnter(screen.getAllByTestId('SpendChart.column')[0])
+    expect(screen.queryByTestId('SpendChart.tooltip.remote')).not.toBeInTheDocument()
   })
 })

@@ -33,18 +33,40 @@
  * need a sealed-fields entry and a replication story for data that is re-derived
  * on every open anyway. `blockUsage` stays on the store because the Claude
  * drill-in has always read it from there and it arrives on a push channel.
+ *
+ * THE SCOPE (ADR-072 §7, slice S5c) is a third thing the shell owns, and it is
+ * the only control here that can be UNAVAILABLE: without a usage hub there is
+ * one machine, so the pills are not drawn and the query is asked for `local`.
+ * The hub's own state arrives on a third push channel, `usage-hub:changed`, and
+ * feeds both the chip beside the title and the machines card at the bottom of
+ * the Spend tab. A stored `all` on a machine whose hub has since been forgotten
+ * falls back to `local` rather than asking for a scope the query would refuse.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
-import type { AccountLimits, DashboardRange, UsageDashboardData } from '../../../../shared/types'
+import type {
+  AccountLimits,
+  DashboardRange,
+  DashboardScope,
+  UsageDashboardData,
+  UsageHubStatus
+} from '../../../../shared/types'
 import { Summary } from './Summary'
 import { AccountsPanel } from './AccountsPanel'
 import { WindowValue } from './WindowValue'
 import { SpendChart } from './SpendChart'
 import { BreakdownTable } from './BreakdownTable'
-import { buildProviderColorMap, formatDuration } from './usage-utils'
+import { MachinesPanel, MACHINES_PANEL_ANCHOR } from './MachinesPanel'
+import {
+  buildProviderColorMap,
+  combinedMachineCount,
+  formatDuration,
+  HUB_STATE_SEVERITY,
+  SEVERITY_ICON,
+  SEVERITY_TEXT_CLASS
+} from './usage-utils'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SelectMenu } from '../shared/SelectMenu'
 
@@ -93,6 +115,46 @@ function storeRange(range: DashboardRange): void {
   }
 }
 
+/**
+ * Whose spend is being looked at (S5c). Persisted per viewer like the range: a
+ * phone on the remote transport is a different reader of the same host.
+ */
+const SCOPES: ReadonlyArray<{ id: DashboardScope; label: string; title: string }> = [
+  {
+    id: 'local',
+    label: 'This machine',
+    title: 'Only what this machine recorded — the view every range had before the usage hub.'
+  },
+  {
+    id: 'all',
+    label: 'All machines',
+    title:
+      'This machine plus every other one the hub knows about, from the last pull — so it works offline.'
+  }
+]
+
+const DEFAULT_SCOPE: DashboardScope = 'local'
+
+const SCOPE_STORAGE_KEY = 'claudeui.usage.scope'
+
+function readStoredScope(): DashboardScope {
+  try {
+    const raw = window.localStorage.getItem(SCOPE_STORAGE_KEY)
+    if (SCOPES.some((s) => s.id === raw)) return raw as DashboardScope
+  } catch {
+    // As with the range: a preference is never worth failing the screen for.
+  }
+  return DEFAULT_SCOPE
+}
+
+function storeScope(scope: DashboardScope): void {
+  try {
+    window.localStorage.setItem(SCOPE_STORAGE_KEY, scope)
+  } catch {
+    // As above.
+  }
+}
+
 /** Which half of the dashboard is on screen (S4c). */
 type DashboardTab = 'spend' | 'plans'
 
@@ -125,9 +187,16 @@ function storeTab(tab: DashboardTab): void {
 }
 
 /** What the breakdown's hierarchy is rooted on; the chart only explains itself by it. */
-export type DashboardGroupBy = 'provider' | 'account' | 'engine' | 'model'
+export type DashboardGroupBy = 'provider' | 'account' | 'engine' | 'model' | 'machine'
 
 const GROUP_BY: DashboardGroupBy[] = ['provider', 'account', 'engine', 'model']
+
+/**
+ * The groupings the combined scope adds. `machine` is the only dimension the
+ * `local` data has no second value for, so offering it there would be a pill
+ * that always draws one root.
+ */
+const COMBINED_GROUP_BY: DashboardGroupBy[] = ['machine']
 
 /**
  * How long a nudge waits before it turns into a read. A finished turn emits
@@ -135,6 +204,9 @@ const GROUP_BY: DashboardGroupBy[] = ['provider', 'account', 'engine', 'model']
  * headers land; re-running two queries for each would be noise.
  */
 const NUDGE_DEBOUNCE_MS = 2_000
+
+/** How long a machine may go without pushing before the chip and the card say so. */
+const BEHIND_MS = 24 * 60 * 60 * 1000
 
 interface UsageViewProps {
   onClose: () => void
@@ -150,7 +222,9 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 
   const [tab, setTab] = useState<DashboardTab>(readStoredTab)
   const [range, setRange] = useState<DashboardRange>(readStoredRange)
+  const [scope, setScope] = useState<DashboardScope>(readStoredScope)
   const [groupBy, setGroupBy] = useState<DashboardGroupBy>('provider')
+  const [hub, setHub] = useState<UsageHubStatus | null>(null)
   const [dashboard, setDashboard] = useState<UsageDashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [limits, setLimits] = useState<AccountLimits[] | null>(null)
@@ -160,12 +234,28 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   // Bumped by the debounced event handlers; the fetch effects depend on it.
   const [ledgerNudge, setLedgerNudge] = useState(0)
   const [limitsNudge, setLimitsNudge] = useState(0)
+  const [hubNudge, setHubNudge] = useState(0)
 
-  // The ledger read: on mount, on a range change, and on a debounced nudge.
+  /**
+   * What the CONTROLS say, which is not always what was asked for.
+   *
+   * A stored `all` outlives the hub that justified it — a machine can be
+   * forgotten in Settings while this screen is open — so the pills fall back to
+   * `local` the moment the status says there is no hub. The REQUEST does not
+   * wait for that: it sends the stored preference and lets the query downgrade,
+   * which it already does and already reports (`data.scope`). Gating the first
+   * read on the hub status instead would have cost every viewer a second fetch
+   * on mount, or a round trip before the first paint.
+   */
+  const hubEnabled = hub?.enabled === true
+  const effectiveScope: DashboardScope = hubEnabled ? scope : 'local'
+
+  // The ledger read: on mount, on a range or scope change, and on a debounced
+  // nudge — including a hub one, since a pull is new remote rows to fold.
   useEffect(() => {
     let cancelled = false
     window.api
-      .fetchUsageDashboard(range)
+      .fetchUsageDashboard(range, scope)
       .then((data) => {
         if (cancelled) return
         setDashboard(data)
@@ -178,7 +268,41 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [range, ledgerNudge])
+  }, [range, scope, ledgerNudge])
+
+  /**
+   * `machine` is not a grouping the `local` data has, so it cannot outlive the
+   * scope that offered it.
+   *
+   * HERE rather than only in the pill's click handler, because most of the ways
+   * the scope can fall back to `local` are not clicks: the hub is disabled or
+   * forgotten in Settings, `usage-hub:changed` lands, the pill unmounts — and a
+   * breakdown still rooted on `machine` then drew "Nothing in this range to
+   * break down" under a hero of real money (round 2, R1).
+   */
+  useEffect(() => {
+    if (effectiveScope !== 'local') return
+    setGroupBy((current) => (current === 'machine' ? 'provider' : current))
+  }, [effectiveScope])
+
+  // The hub's state: on mount and on every `usage-hub:changed`. It decides
+  // whether the scope pills exist at all, so it is read even with no hub.
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .usageHubStatus()
+      .then((status) => {
+        if (!cancelled) setHub(status)
+      })
+      .catch(() => {
+        // A machine whose hub channel is unavailable has no combined view to
+        // offer; the local dashboard is unaffected.
+        if (!cancelled) setHub(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hubNudge])
 
   // The limits read. `false` ALWAYS: nothing that happens on its own may spend a
   // refresh grant (ADR-071 §6).
@@ -203,6 +327,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   useEffect(() => {
     let ledgerTimer: ReturnType<typeof setTimeout> | undefined
     let limitsTimer: ReturnType<typeof setTimeout> | undefined
+    let hubTimer: ReturnType<typeof setTimeout> | undefined
     const scheduleLedger = (): void => {
       clearTimeout(ledgerTimer)
       ledgerTimer = setTimeout(() => setLedgerNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
@@ -211,23 +336,47 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       clearTimeout(limitsTimer)
       limitsTimer = setTimeout(() => setLimitsNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
     }
+    const scheduleHub = (): void => {
+      clearTimeout(hubTimer)
+      hubTimer = setTimeout(() => setHubNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
+    }
     const offBlock = onSyncEvent('usage:block-data', scheduleLedger)
     const offLimits = onSyncEvent('usage:limits-changed', () => {
       // A moved reading can also mean a turn just finished, so both reads go.
       scheduleLedger()
       scheduleLimits()
     })
+    // The hub changes state several times a pass (`syncing` → `idle`), and a
+    // finished pull is new rows in all THREE of the things this screen reads:
+    // the machine list, the ledger's remote buckets, and `remote_limits` — which
+    // is where a relayed reading comes from (ADR-072 §4). Leaving the limits out
+    // meant a peer's meters only appeared on the next open of this screen. The
+    // read is local and spends no refresh grant, so it rides the same debounce.
+    const offHub = onSyncEvent('usage-hub:changed', () => {
+      scheduleHub()
+      scheduleLedger()
+      scheduleLimits()
+    })
     return () => {
       clearTimeout(ledgerTimer)
       clearTimeout(limitsTimer)
+      clearTimeout(hubTimer)
       offBlock()
       offLimits()
+      offHub()
     }
   }, [])
 
   const handleRange = useCallback((next: DashboardRange) => {
     setRange(next)
     storeRange(next)
+  }, [])
+
+  const handleScope = useCallback((next: DashboardScope) => {
+    setScope(next)
+    storeScope(next)
+    // The `machine` group-by is dropped by the effect above, which covers this
+    // click and the three ways the scope falls back without one.
   }, [])
 
   const handleTab = useCallback((next: DashboardTab) => {
@@ -294,9 +443,30 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
               accountFilter={blockUsage?.accountFilter ?? null}
             />
           )}
+          {hub !== null && hub.enabled && <HubChip status={hub} />}
         </Header>
         <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
           <TabStrip tab={tab} onSelect={handleTab} />
+
+          {/* Only drawn when there is more than one machine to choose between:
+              without a hub the answer is always `local`, and a control with one
+              real option reads as a broken filter. */}
+          {hubEnabled && (
+            <PillGroup testid="UsageView.scope" label="Scope" value={effectiveScope}>
+              {SCOPES.map((s) => (
+                <Pill
+                  key={s.id}
+                  testid={`UsageView.scope.${s.id}`}
+                  value={s.id}
+                  active={s.id === effectiveScope}
+                  title={s.title}
+                  onClick={() => handleScope(s.id)}
+                >
+                  {s.label}
+                </Pill>
+              ))}
+            </PillGroup>
+          )}
 
           <PillGroup testid="UsageView.range" label="Range">
             {RANGES.map((r) => (
@@ -315,10 +485,11 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
               so is not offered there. */}
           {tab === 'spend' && (
             <PillGroup testid="UsageView.groupBy" label="Group by" value={groupBy}>
-              {GROUP_BY.map((g) => (
+              {[...GROUP_BY, ...(effectiveScope === 'all' ? COMBINED_GROUP_BY : [])].map((g) => (
                 <Pill
                   key={g}
                   testid={`UsageView.groupBy.${g}`}
+                  value={g}
                   active={g === groupBy}
                   onClick={() => setGroupBy(g)}
                 >
@@ -413,6 +584,12 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
             <SpendChart data={dashboard} providerColors={providerColors} groupBy={groupBy} />
 
             <BreakdownTable data={dashboard} groupBy={groupBy} providerColors={providerColors} />
+
+            {/* LAST on the tab, and mounted only under `all` (owner's ruling on
+                the mockup: a card at the bottom, not a popover behind the chip). */}
+            {dashboard.scope === 'all' && (
+              <MachinesPanel data={dashboard} status={hub} onSynced={setHub} />
+            )}
           </>
         )}
 
@@ -490,12 +667,17 @@ function PillGroup({
   children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[9px] uppercase tracking-wider text-text-muted">{label}</span>
+    // `min-w-0` and a group that may wrap inside itself: the control row wraps
+    // between its groups (S4c), but a flex ITEM is never narrower than its own
+    // content, so one group whose pills did not fit still pushed the row wider
+    // than the viewport and gave it a horizontal scrollbar. Four pills in a
+    // labelled box is the widest thing here, and `Scope` added a fifth group.
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span className="text-[9px] uppercase tracking-wider text-text-muted shrink-0">{label}</span>
       <div
         data-testid={testid}
         data-value={value}
-        className="flex items-center gap-0.5 bg-bg-secondary border border-border/50 rounded-md p-0.5"
+        className="flex flex-wrap items-center gap-0.5 min-w-0 bg-bg-secondary border border-border/50 rounded-md p-0.5"
       >
         {children}
       </div>
@@ -505,11 +687,16 @@ function PillGroup({
 
 function Pill({
   testid,
+  value,
+  title,
   active,
   onClick,
   children
 }: {
   testid: string
+  /** The machine-readable choice, when the label is prose (`This machine`). */
+  value?: string
+  title?: string
   active: boolean
   onClick: () => void
   children: React.ReactNode
@@ -517,14 +704,82 @@ function Pill({
   return (
     <button
       data-testid={testid}
+      data-value={value}
       data-active={active}
       aria-pressed={active}
+      title={title}
       onClick={onClick}
       className={`[-webkit-app-region:no-drag] text-[10px] px-2 py-0.5 rounded transition-colors cursor-default ${
         active ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:text-text-secondary'
       }`}
     >
       {children}
+    </button>
+  )
+}
+
+/**
+ * The sync chip (ADR-072 §7, mockup `47cfbd90`'s Machines C).
+ *
+ * Machines C with Machines A behind it was the layout pick, and the owner then
+ * ruled the list a CARD at the bottom of the Spend tab rather than a popover: a
+ * table of four machines in a popover over the summary hid the figures it is
+ * meant to qualify. So the chip is a link to that card — one click, one scroll —
+ * and carries only what has to be legible without opening anything: the client's
+ * state, how many machines, how many are behind, and how fresh the view is.
+ *
+ * `behind` counts PEERS only. This machine's own push lag is a fact about its
+ * hub connection, which the state dot already reports; counting it here would
+ * tell a reader that their own screen is missing its own spend, which it is not.
+ */
+function HubChip({ status }: { status: UsageHubStatus }): React.JSX.Element {
+  const severity = HUB_STATE_SEVERITY[status.state]
+  const now = Date.now()
+  // `remote.devices` is the peers — the pull filters this device out of it.
+  const machines = combinedMachineCount(status.remote.devices)
+  const behind = status.remote.devices.filter(
+    (d) => !d.retired && now - d.lastPushAt > BEHIND_MS
+  ).length
+  const synced =
+    status.lastPullAt === null
+      ? 'never synced'
+      : `synced ${formatDuration(Math.max(0, now - status.lastPullAt))} ago`
+
+  return (
+    <button
+      data-testid="UsageView.hubChip"
+      data-state={status.state}
+      data-severity={severity}
+      data-behind={behind > 0 ? String(behind) : undefined}
+      onClick={() => {
+        document
+          .getElementById(MACHINES_PANEL_ANCHOR)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }}
+      title={
+        status.lastError ??
+        `Usage hub: ${status.state} · ${machines} machines · ${synced}. Shows the machine list.`
+      }
+      className="[-webkit-app-region:no-drag] flex items-center gap-1.5 min-w-0 shrink text-[10px] bg-bg-secondary border border-border/50 rounded-full px-2 py-0.5 text-text-secondary hover:text-text-primary transition-colors cursor-default"
+    >
+      <span aria-hidden="true" className={`shrink-0 ${SEVERITY_TEXT_CLASS[severity]}`}>
+        {SEVERITY_ICON[severity]}
+      </span>
+      <span className="truncate">
+        Hub · {machines} {machines === 1 ? 'machine' : 'machines'}
+      </span>
+      {behind > 0 && (
+        <span
+          data-testid="UsageView.hubChip.behind"
+          className="shrink-0 whitespace-nowrap text-warning"
+        >
+          · {behind} behind
+        </span>
+      )}
+      {/* The freshness is the first thing to give way at phone width: the header
+          it sits in neither wraps nor scrolls, and the count and the behind
+          warning are what a glance is for. The tooltip still carries it. */}
+      <span className="hidden sm:inline whitespace-nowrap text-text-muted">{synced}</span>
     </button>
   )
 }
@@ -542,7 +797,7 @@ function Header({
 }): React.JSX.Element {
   return (
     <div className="flex items-center justify-between px-4 h-12 [-webkit-app-region:drag]">
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <svg
           width="16"
           height="16"
@@ -556,7 +811,9 @@ function Header({
           <path d="M12 20V4" />
           <path d="M6 20v-6" />
         </svg>
-        <h2 className="text-sm font-semibold text-text-primary">Usage Analytics</h2>
+        <h2 className="hidden min-w-0 shrink truncate text-sm font-semibold text-text-primary sm:block">
+          Usage Analytics
+        </h2>
         {children}
       </div>
       <button

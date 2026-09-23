@@ -29,6 +29,7 @@ import type { RateLimitWindow } from './protocol/v2/RateLimitWindow'
 import { emitEvent } from '../services/sync-host'
 import { recordLimitSamples, type LimitSampleWindow } from '../services/window-samples'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { windowKindsForReading } from '../../shared/window-kind'
 
 /**
  * `resetsAt` is a unix timestamp in SECONDS.
@@ -42,16 +43,39 @@ import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
  *
  * Multiplying by 1000 is therefore the whole conversion; ClaudeUI's `RateWindow`
  * carries ISO 8601 because `formatResetTime` and every Claude usage row already do.
+ *
+ * `windowDurationMins` is KEPT (S3c). It is the only trusted statement of how
+ * long the window lasts — the ChatGPT backend's `limit_window_seconds`, through
+ * Codex's `window_minutes` — and dropping it is what left a weekly-only plan
+ * filed under the five-hour kind. Non-positive or non-finite is no statement at
+ * all and travels as null.
  */
 export function rateWindow(window: RateLimitWindow | null | undefined): RateWindow | null {
   if (!window || typeof window.usedPercent !== 'number') return null
   const seconds = window.resetsAt
+  const minutes = window.windowDurationMins
   return {
     usedPercent: window.usedPercent,
     resetsAt:
       typeof seconds === 'number' && Number.isFinite(seconds)
         ? new Date(seconds * 1000).toISOString()
-        : null
+        : null,
+    windowMinutes:
+      typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : null
+  }
+}
+
+/**
+ * One observed window as the sample writer takes it, under the kind the whole
+ * reading resolved it to (S3c) — the DURATION's kind, never the slot's, and
+ * `windowKindsForReading` keeps the two slots distinct when they share a length.
+ */
+function sampleWindow(kind: string, window: RateWindow): LimitSampleWindow {
+  return {
+    kind,
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    windowMinutes: window.windowMinutes ?? null
   }
 }
 
@@ -161,9 +185,14 @@ export class ChatgptRateLimitStore {
     // The OBSERVED windows, not the merged ones: a sample says "this is what the
     // account read at this instant", and re-recording a window this push did not
     // carry would restate an old reading under a new timestamp.
+    //
+    // The KINDS, though, come from the MERGED pair: a sparse push that carries
+    // only one slot must file it under the same kind the full read did, and the
+    // collision rule (two slots of one length) can only be seen with both.
+    const kinds = windowKindsForReading({ primary, secondary })
     const observed: LimitSampleWindow[] = []
-    if (observedPrimary) observed.push({ kind: '5h', ...observedPrimary })
-    if (observedSecondary) observed.push({ kind: '7d', ...observedSecondary })
+    if (observedPrimary) observed.push(sampleWindow(kinds.primary, observedPrimary))
+    if (observedSecondary) observed.push(sampleWindow(kinds.secondary, observedSecondary))
     if (observed.length) this.deps.persist(vaultAccountId, observed)
 
     this.deps.changed()
@@ -260,9 +289,21 @@ async function persistChatgptSamples(
   windows: LimitSampleWindow[]
 ): Promise<void> {
   try {
-    const { accountKey } = await credentialSync.accountIdentity(vaultAccountId)
+    const { accountKey, accountLabel } = await credentialSync.accountIdentity(vaultAccountId)
     if (accountKey === UNKNOWN_ACCOUNT_KEY) return
-    recordLimitSamples({ accountKey, windows })
+    // The plan comes from the entry `record()` has just folded in, which is the
+    // merged one — a sparse push carries no `planType` and must not un-name the
+    // plan the last full read established. Label and plan are display-only here:
+    // the SAMPLE stores neither, and they exist for the hub relay (ADR-072 §4),
+    // where a machine that does not hold this credential still has to say whose
+    // meter it is looking at.
+    recordLimitSamples({
+      accountKey,
+      accountLabel,
+      vendorId: 'openai',
+      plan: chatgptRateLimits.snapshot()[vaultAccountId]?.planType ?? null,
+      windows
+    })
   } catch {
     /* advisory */
   }

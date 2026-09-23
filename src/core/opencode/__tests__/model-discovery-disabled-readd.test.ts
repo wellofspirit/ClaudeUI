@@ -298,3 +298,25 @@ describe('model-discovery — disabled provider re-add (Add provider list)', () 
     expect(mockAcquire).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('discoverOpencodeProviderCatalog — declared endpoints (ADR-074 §7)', () => {
+  beforeEach(() => {
+    invalidateOpencodeModelCache()
+  })
+
+  it('flags a provider declared with its own adapter or base URL, and nothing else', async () => {
+    setupMocks([])
+    mockReadOpencodeNativeConfig.mockReturnValue({
+      disabledProviders: [],
+      providers: {
+        // A models.dev vendor with a proxy URL is an endpoint of the user's own.
+        mistral: { baseURL: 'https://proxy.example/v1' },
+        // A name alone is not an endpoint.
+        anthropic: { name: 'Anthropic (work)' }
+      }
+    })
+    const catalog = await discoverOpencodeProviderCatalog()
+    expect(catalog.find((p) => p.id === 'mistral')?.declaredEndpoint).toBe(true)
+    expect(catalog.find((p) => p.id === 'anthropic')?.declaredEndpoint).toBeUndefined()
+  })
+})

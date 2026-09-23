@@ -24,6 +24,7 @@ import { useSessionStore, useActiveSession } from '../../../stores/session-store
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { engineToolMap } from '../tool-registry/engine-tool-maps'
 import { ToolCard } from '../tool-registry/ToolCard'
+import { latestNotification } from '../task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -70,7 +71,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
   const bgNotification = isBackgroundBash
-    ? (taskNotifications.find((n) => n.toolUseId === toolUseId) ?? null)
+    ? (latestNotification(taskNotifications, toolUseId) ?? null)
     : null
 
   const isStopping = stoppingTaskIds.includes(toolUseId)

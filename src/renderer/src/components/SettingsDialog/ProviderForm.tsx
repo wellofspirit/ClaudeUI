@@ -239,7 +239,7 @@ export function ProviderForm({
             testid={`${FORM}.key`}
             value={apiKey}
             onChange={onApiKey}
-            placeholder={idLocked ? 'Set or replace the key' : 'Set an API key'}
+            placeholder={idLocked ? 'Set or replace the key' : 'API key (optional)'}
             className="w-[150px]"
           />
         </SettingRow>

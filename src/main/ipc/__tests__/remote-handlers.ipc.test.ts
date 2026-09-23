@@ -538,6 +538,9 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:remove',
       'shared-provider:set-route',
       'shared-provider:set-key',
+      'shared-provider:adopt-native',
+      'shared-provider:set-curation',
+      'shared-provider:set-disabled',
       'shared-provider:sync',
       'shared-provider:disconnect',
       'shared-provider:set-default'
@@ -1687,6 +1690,13 @@ const S1B_SWEEP_CHANNELS = [
 const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
 
 /**
+ * ADR-074 §2 — one provider's model allowlist, for opencode or pi: the Manage
+ * sheet's curation writer. `config`, like the settings saves it narrows, and
+ * reachable remotely for the same reason — curation is engine configuration.
+ */
+const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
+
+/**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
  * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
@@ -1712,10 +1722,15 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'auth:cancel',
   'auth:sign-in',
   'auth:submit-code',
+  // ADR-074 §6 — the key moves host-side; nothing about it comes back.
+  'shared-provider:adopt-native',
   'shared-provider:disconnect',
   'shared-provider:remove',
   'shared-provider:save',
+  'shared-provider:set-curation',
   'shared-provider:set-default',
+  // ADR-074 slice 10 — on/off moves delivery host-side; no key crosses.
+  'shared-provider:set-disabled',
   'shared-provider:set-key',
   'shared-provider:set-route',
   'shared-provider:sync',
@@ -1847,6 +1862,22 @@ const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
+/**
+ * The usage hub's six channels (ADR-072 §7).
+ *
+ * Restated here rather than imported from `usage-hub-commands.ts`, like every
+ * other family in this file: a pin that imported the list it is pinning would
+ * pass whatever the source said.
+ */
+const USAGE_HUB_CHANNELS = [
+  'usage-hub:status',
+  'usage-hub:configure',
+  'usage-hub:set-secret',
+  'usage-hub:sync-now',
+  'usage-hub:resync',
+  'usage-hub:forget'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1890,6 +1921,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
         ...TRUST_LIST_CHANNELS,
+        ...MODEL_ALLOWLIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
@@ -1917,7 +1949,13 @@ describe('remote surface parity (phase 1 port)', () => {
         // ADR-071 §7: the window-value ledger, read-only, for the same dashboard.
         'usage:windows',
         // ADR-071 §8: the dashboard's own read over the ledger's buckets.
-        'usage:dashboard'
+        'usage:dashboard',
+        // ADR-072 §7: the usage hub's six channels, declared once in
+        // `usage-hub-commands.ts` and spread by both transports. Remote because
+        // the combined dashboard and the settings group that configures it are
+        // not desktop-only — and no shape among them can return the device
+        // secret, which is why a write-only `set-secret` command is safe here.
+        ...USAGE_HUB_CHANNELS
       ].sort()
     )
   })
@@ -1927,7 +1965,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS].map(
+    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS, ...MODEL_ALLOWLIST_CHANNELS].map(
       (c) => [c, commandRegistry.declaration(c)?.capability] as const
     )
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))

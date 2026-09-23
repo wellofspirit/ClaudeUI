@@ -267,6 +267,64 @@ are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
 `parent_tool_use_id`** — task events are not scoped to the agent that spawned the task.
 
+### A RESUMED agent emits a second `task_started` (probed 2026-09-21, 2.1.268)
+
+"Non-existent → existing" above describes the first run only. `SendMessage` to an agent that has
+already reached a terminal `task_notification` **restarts it, and the full lifecycle repeats**:
+`task_started` → `task_updated` → `task_notification`, once per run. Probe:
+`scripts/probe-agent-resume.mjs`.
+
+- `task_id` is **stable across runs** — it is the agent's identity.
+- `tool_use_id` is **the id of whichever tool call started that run**: the `Agent` call for run 1,
+  the `SendMessage` call for run 2. It is NOT stable, and it is not the agent's identity.
+- `description` keeps the value from the original spawn.
+
+The resumed child's own output is **split across both ids**, which is the trap:
+
+| run 2 signal                                          | carries the tool_use_id of  |
+| ----------------------------------------------------- | --------------------------- |
+| `task_started` / `task_updated` / `task_notification` | the SendMessage call        |
+| `stream_event` partials                               | the SendMessage call        |
+| the completed `assistant` message                     | **the original Agent call** |
+
+A consumer that keys subagent state by `tool_use_id` (as ClaudeUI does) must therefore map each
+run's id back to the agent's ORIGIN tool_use id via `task_id`, and must not evict that mapping on a
+terminal notification — see ADR-073. Observed sequence, `proberalpha`, 2.1.268:
+
+```
+run 1   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01Csp3…  task_type=local_agent
+        task_notification task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01Csp3…  status=completed
+run 2   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…  task_type=local_agent
+        task_notification task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…  status=completed
+```
+
+**Harness gotcha:** `SendMessage` is a DEFERRED tool at this version — the model must call
+`ToolSearch` (`select:SendMessage`) to load its schema before it can invoke it. A probe that stops
+at the first `result` after asking for a resume will cut the run off mid-`ToolSearch`.
+
+**Re-probed 2026-09-23 at 2.1.280** (Haiku 4.5). The clean resume above is unchanged. Three
+additions:
+
+- **cli.js resumes agents on its own, reusing the id of the run already in progress.** A
+  `SendMessage` to a _running_ agent answers `"Message queued for delivery …"` and starts no
+  run. If the agent finishes first, cli.js closes the run (`task_updated` + `task_notification`)
+  and immediately starts another one to deliver the message, with a `task_started` under the same
+  `tool_use_id`. An agent whose own background Bash finishes after the
+  agent went idle is restarted the same way. Only a `SendMessage` to a _finished_ agent (answer:
+  `"resumedAgentId"`) gets a new `tool_use_id`.
+- **The resume `task_started` is gated on a terminal claim.** `register` emits it for an existing
+  task only if the task id is in `terminalEmitClaims`. The claim is set when a terminal
+  `task_notification` is emitted, consumed by the next `register`, and cleared wholesale by
+  `reset()`.
+- **Agents outlive the parent process** (`scripts/probe-agent-respawn.mjs`). When the parent is
+  killed mid-run and the session is `--resume`d, cli.js reaps each orphaned agent with a
+  `task_notification` carrying the `task_id`, `status: "stopped"` and **no `tool_use_id`**, ahead of
+  `system/init`. A later `SendMessage{to: <agent id>}` resumes the agent from its disk transcript:
+  `task_started` under the SendMessage id, while the child's completed messages carry the
+  **original Agent call's id from the dead process**. `SendMessage{to: <name>}` fails after a
+  respawn ("No agent named … is reachable"); only the id works. A consumer's task-id → origin map
+  therefore has to survive the process (ADR-073 §5).
+
 ---
 
 ## 4.6 `task_updated`

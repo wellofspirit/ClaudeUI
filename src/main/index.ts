@@ -68,7 +68,7 @@ import {
   type AppOrigin
 } from '../core/shell-security'
 import { readImagePreview } from '../core/sent-file-security'
-import { setHostPaths } from '../core/host'
+import { setHostAppVersion, setHostPaths } from '../core/host'
 import { setSqliteDriver } from '../core/services/sqlite-driver'
 import { verifierHooksEnabled, VERIFIER_HOOKS_SWITCH } from '../shared/verifier-hooks'
 import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
@@ -639,6 +639,10 @@ app.whenReady().then(() => {
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
   const versionInfo = { appVersion, cliVersion }
+  // Publish it to core as well (ADR-072 §5): the usage hub sends the app version
+  // with each push so the hub's machine list can say which build a device is on,
+  // and `app.getVersion()` is reachable from main alone.
+  setHostAppVersion(appVersion)
   ipcMain.handle('app:version-info', () => versionInfo)
   // Mirror to the remote dispatcher so the web client's Settings dialog can
   // read the server's build versions.
@@ -730,6 +734,10 @@ app.whenReady().then(() => {
       // §5) and settles its own cards on the way out.
       codexHostRegistry.dispose()
       void core?.remoteServer.stop()
+      // The usage hub's timers (ADR-072 §7). Nothing waits on the client: a
+      // push in flight is idempotent on the hub, so the worst a killed one
+      // costs is a batch re-sent as duplicates on the next launch.
+      core?.usageHubClient.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe

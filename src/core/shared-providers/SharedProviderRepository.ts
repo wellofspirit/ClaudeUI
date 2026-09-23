@@ -9,6 +9,7 @@ import {
 } from '../../shared/shared-provider'
 
 const PROTOCOLS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages'])
+const KINDS: ReadonlySet<string> = new Set(['subscription', 'custom', 'catalog'])
 
 export function sharedProvidersDir(): string {
   return path.join(os.homedir(), '.claude', 'ui', 'providers')
@@ -63,6 +64,10 @@ export class SharedProviderRepository {
 
   save(provider: SharedProviderDefinition): void {
     validateDefinition(provider)
+    // A second key copies a catalog vendor, never another second key: the list
+    // places each right after its origin, one level deep.
+    if (provider.derivedFrom && this.get(provider.derivedFrom)?.derivedFrom)
+      throw new Error('Invalid shared provider origin: it is itself a second key')
     const normalized = provider.id === 'chatgpt' ? normalizeChatgpt(provider) : provider
     this.ensureDir()
     this.writeAtomic(sharedProviderPath(normalized.id), normalized)
@@ -123,7 +128,9 @@ function normalizeChatgpt(value: SharedProviderDefinition): SharedProviderDefini
     },
     // The account policy is the user's (ADR-068 §2); the native route mapping
     // above is not. Absent stays absent — the flag exists once it is turned on.
-    ...(value.accounts ? { accounts: { perSession: value.accounts.perSession === true } } : {})
+    ...(value.accounts ? { accounts: { perSession: value.accounts.perSession === true } } : {}),
+    // So is the model list (ADR-074 §3) — validated by the caller, carried as is.
+    ...(value.curation ? { curation: value.curation } : {})
   }
 }
 
@@ -140,8 +147,7 @@ function validateDefinition(provider: SharedProviderDefinition): void {
   if (!provider || provider.managed !== true || typeof provider.name !== 'string' || !provider.name)
     throw new Error('Invalid shared provider definition')
   validateSharedProviderId(provider.id)
-  if (provider.kind !== 'subscription' && provider.kind !== 'custom')
-    throw new Error('Invalid shared provider kind')
+  if (!KINDS.has(provider.kind)) throw new Error('Invalid shared provider kind')
   if (
     !Array.isArray(provider.models) ||
     !provider.models.every(isModel) ||
@@ -154,6 +160,8 @@ function validateDefinition(provider: SharedProviderDefinition): void {
     throw new Error('Invalid shared provider protocol')
   if (provider.accounts !== undefined && !isAccountsPolicy(provider.accounts))
     throw new Error('Invalid shared provider accounts policy')
+  if (provider.curation !== undefined && !isCuration(provider.curation))
+    throw new Error('Invalid shared provider curation')
   if (
     provider.kind === 'custom' &&
     (!PROTOCOLS.has(provider.protocol ?? '') ||
@@ -161,6 +169,60 @@ function validateDefinition(provider: SharedProviderDefinition): void {
       !provider.baseUrl)
   )
     throw new Error('Custom providers require protocol and baseUrl')
+  // A catalog provider is one every engine already knows: there is no endpoint
+  // to project, so an endpoint on one is a malformed file, not a variant — and no
+  // models either: the engines' own catalogs list them.
+  if (
+    provider.kind === 'catalog' &&
+    (provider.protocol !== undefined || provider.baseUrl !== undefined || provider.models.length)
+  )
+    throw new Error('Catalog providers take no protocol, baseUrl or models')
+  // A second key for a catalog vendor is a custom endpoint that remembers which
+  // vendor it copies: a vendor id, never its own, and only on a custom one.
+  if (
+    provider.derivedFrom !== undefined &&
+    (provider.kind !== 'custom' ||
+      !isSharedId(provider.derivedFrom) ||
+      provider.derivedFrom === provider.id)
+  )
+    throw new Error('Invalid shared provider origin')
+  if (
+    provider.copiedAt !== undefined &&
+    (provider.derivedFrom === undefined ||
+      typeof provider.copiedAt !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(provider.copiedAt))
+  )
+    throw new Error('Invalid shared provider copy date')
+  // Off is a provider-level switch for keys and endpoints; a subscription's
+  // engines each have their own.
+  if (
+    provider.disabled !== undefined &&
+    (typeof provider.disabled !== 'boolean' || provider.kind === 'subscription')
+  )
+    throw new Error('Invalid shared provider on/off state')
+}
+
+function isSharedId(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    validateSharedProviderId(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** `{ linked: boolean, models?: string[] }`, the ids non-empty and unique — ADR-074 §3. */
+function isCuration(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const { linked, models } = value as { linked?: unknown; models?: unknown }
+  if (typeof linked !== 'boolean') return false
+  if (models === undefined) return true
+  return (
+    Array.isArray(models) &&
+    models.every((id) => typeof id === 'string' && id.length > 0) &&
+    new Set(models).size === models.length
+  )
 }
 
 /** `{ perSession: boolean }` and nothing else — ADR-068 §2. */

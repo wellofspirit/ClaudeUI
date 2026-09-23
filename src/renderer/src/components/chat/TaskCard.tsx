@@ -5,7 +5,9 @@ import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
+import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
+import { deriveTaskState, latestNotification } from './task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -101,7 +103,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const bgNotification = latestNotification(taskNotifications, toolUseId)
   const hasSubagentOutput = msgs.length > 0
   const isBackground = !!view.background
   // Has this task received a task_started wire event with no matching
@@ -116,17 +118,17 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   // task_started, so they have no activeTasks record and fall through to the
   // unchanged legacy heuristic below.
   const hasActiveTask = !isHistorical && !!activeTasks[toolUseId]
-  // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
-  const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isHistorical
-    ? false
-    : hasActiveTask
-      ? true
-      : isBackground
-        ? !bgNotification
-        : !hasResult
-  // In historical mode, tasks without results show as "loaded" (neutral state)
-  const isLoaded = isHistorical && !hasResult && !bgNotification
+  // Background tasks get a tool_result immediately ("agent launched") but keep
+  // running until task_notification. In historical mode, tasks without results
+  // show as "loaded" (neutral state) rather than running.
+  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
+    isHistorical,
+    hasActiveTask,
+    isBackground,
+    hasResult,
+    notification: bgNotification,
+    resultIsError: result?.isError ?? false
+  })
 
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
@@ -136,6 +138,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
+  // How many times this agent has been started. The live record carries it
+  // while it runs; the notification carries it afterwards, because activeTasks
+  // drops the task at terminal (ADR-073).
+  const runIndex = activeTasks[toolUseId]?.runIndex ?? bgNotification?.runIndex ?? 1
 
   const { body: resultBody, usage: parsedUsage } = useMemo(
     () => parseUsage(result?.toolResult || ''),
@@ -158,7 +164,20 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
       ? 'border-accent/30'
       : isError
         ? 'border-danger/30'
-        : 'border-success/30'
+        : isStopped
+          ? 'border-warning/30'
+          : isLoaded
+            ? 'border-border'
+            : 'border-success/30'
+  const status = isRunning
+    ? 'running'
+    : isError
+      ? 'failed'
+      : isStopped
+        ? 'stopped'
+        : isLoaded
+          ? 'loaded'
+          : 'completed'
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
@@ -253,6 +272,19 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
     </svg>
+  ) : isStopped ? (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-warning shrink-0"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <rect x="9" y="9" width="6" height="6" />
+    </svg>
   ) : isLoaded ? (
     <svg
       width="12"
@@ -286,6 +318,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   return (
     <div
       data-testid="TaskCard"
+      data-status={status}
       className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}
     >
       {/* Header — always visible, clickable to expand/collapse */}
@@ -304,7 +337,12 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
             {formatElapsed(elapsed)}
           </span>
         )}
-        {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
+        {isStopped && <span className="text-[10px] text-warning shrink-0">stopped</span>}
+        {isLoaded && (
+          <span className="text-[10px] text-text-muted shrink-0">
+            {bgNotification?.status === 'unfinished' ? 'unfinished' : 'loaded'}
+          </span>
+        )}
         {canBackground && !isBackgrounding && !isHistorical && (
           <button
             data-testid="TaskCard.sendToBackground"
@@ -371,9 +409,18 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               background
             </span>
           )}
+          {runIndex > 1 && (
+            <span
+              data-testid="TaskCard.resumed"
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+              title="This agent was sent a message after it finished, and ran again"
+            >
+              resumed ×{runIndex - 1}
+            </span>
+          )}
           {/* Usage stats inline when collapsed */}
           {usage && (
-            <span className="text-[10px] font-mono text-text-secondary">
+            <span {...TOOL_OUTPUT_SCOPE} className="text-[10px] font-mono text-text-secondary">
               {[
                 usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                 usage.toolUses != null && `${usage.toolUses} tools`,
@@ -410,7 +457,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           )}
 
           {/* Result / running state */}
-          <div className="border-t border-border">
+          <div {...TOOL_OUTPUT_SCOPE} className="border-t border-border">
             {hasSubagentOutput ? (
               <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
                 <SubagentOutputBody
@@ -456,8 +503,20 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
                   background
                 </span>
               )}
+              {runIndex > 1 && (
+                <span
+                  data-testid="TaskCard.resumed"
+                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+                  title="This agent was sent a message after it finished, and ran again"
+                >
+                  resumed ×{runIndex - 1}
+                </span>
+              )}
               {usage && (
-                <span className="text-[10px] font-mono text-text-secondary ml-1">
+                <span
+                  {...TOOL_OUTPUT_SCOPE}
+                  className="text-[10px] font-mono text-text-secondary ml-1"
+                >
                   {[
                     usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                     usage.toolUses != null && `${usage.toolUses} tools`,

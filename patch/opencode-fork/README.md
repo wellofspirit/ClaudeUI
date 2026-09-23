@@ -4,21 +4,33 @@ ClaudeUI's opencode patches, unlike the `cli.js` ones in the sibling directories
 are **source patches on a git fork**, not surgery on a minified bundle. There is
 no `.patch` file to re-anchor: the patches live as commits on
 `github.com/wellofspirit/opencode` branch `claudeui`, and `scripts/ensure-opencode.mjs`
-clones that branch, checks out the pinned fork tag (`package.json#opencodeFork.ref`),
+clones that branch into `vendor/opencode-fork-src/` (gitignored; fork clones are
+`vendor/<engine>-fork-src/`, upstream checkouts `vendor/<engine>-src/` — see
+CLAUDE.md), checks out the pinned fork tag (`package.json#opencodeFork.ref`),
 builds it with opencode's own release pipeline, and vendors the binary into
-`vendor/opencode-cli/`.
+`vendor/opencode-cli/`. A clone left at the old `.cache/opencode-fork` is moved
+there on the next run rather than re-cloned.
 
 Policy: **ADR-037** — fork + patch, narrow diffs, **never upstream**.
 
+**No-fork revisit (upstream v1.18.32):** the public plugin `Hooks` type has no
+HTTP-route registration or direct provider/auth service; `tool.definition` can
+change description/parameters, not remove tools. A plugin-owned localhost
+sidecar _could_ expose its own endpoint but must own authentication, provider
+transport and lifecycle. A truly isolated `opencode serve` with no interactive
+sessions/always-approvals avoids the shared instance's global approval list,
+but deny rules still do not make tools structurally unreachable or supply P1's
+completion budget. These alternatives have not been implemented or validated.
+
 ## Affected component
 
-| Component   | Value                                                                    |
-| ----------- | ------------------------------------------------------------------------ |
-| Upstream    | `github.com/sst/opencode` (MIT)                                          |
-| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                    |
-| Forked from | tag `v1.18.9`, currently merged up to **`v1.18.29`**                     |
-| Pinned by   | `package.json#opencodeCliVersion` + `opencodeFork.ref` (fork tag/commit) |
-| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`)  |
+| Component   | Value                                                                                                                                               |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream    | `github.com/anomalyco/opencode` (MIT)                                                                                                               |
+| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                                                                                               |
+| Forked from | tag `v1.18.9`, currently merged through upstream **`v1.18.32`** (fork tag `v1.18.32-claudeui.1`, commit `b7012a354f6c98ac1c50b007c33e5b81a9e87879`) |
+| Pinned by   | `package.json#opencodeCliVersion` + `opencodeFork.ref` (fork tag/commit)                                                                            |
+| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`)                                                                             |
 
 Upstream's release branch is **`dev`**, not `main`. Release tags (`vX.Y.Z`) are
 CI commits created _on top of_ `dev` and never merged back, so `git merge-base
@@ -190,9 +202,9 @@ is exactly why `usage` was added. The `--vary-system` negative control drives
 both back to `cacheRead 0`, confirming the metric is prefix-keyed and not a
 constant the provider echoes.
 
-### P4 — `filesystem` ↔ `filesystem/search` import-cycle fix (build-order bug)
+### P4 — `filesystem` ↔ `filesystem/search` import-cycle fix (absorbed upstream)
 
-**File:** `packages/core/src/filesystem/search.ts` (fork commit `385b1062e`).
+**File:** `packages/core/src/filesystem/search.ts` (fork commit `385b1062e`; upstream v1.18.32 commit `f5ce4f881e477c7b75421cea2d20939f0ddd71fb`). The published v1.18.32 merge takes upstream's equivalent fix: this file has zero delta against the upstream tag. P4 is no longer a fork delta.
 
 **Why.** Upstream `filesystem.ts` imports `FileSystemSearch` (for
 `FileSystem.node`'s `deps` and the search layer) and `filesystem/search.ts`
@@ -236,13 +248,30 @@ A good build ends in `Cannot connect to API`; a bad one in the `a.name`
 `TypeError` (also logged as `prompt_async failed … Die(TypeError …)` in
 `~/.local/share/opencode/log/opencode.log`).
 
+**v1.18.32 verification:** the
+isolated fork clone passed 567 hermetic/transform tests, 35 filesystem tests
+(1 skipped), full Turbo typecheck (30/30 tasks), the direct Windows build and
+the dead-provider pre-LLM smoke. A live OAuth judge succeeded; its cache-read
+tokens were `0, 4864, 4864` with a stable system prompt and `0, 0, 0` under
+the varying-system negative control. API-key model attempts returned 404/502:
+**API-key transport is not verified**. The earlier ClaudeUI `test:ci` run had
+19 Claude-cli marker failures while that binary was being rebuilt. Final combined
+verification on `pre-release` passed all 775 test files, including those guards;
+all 12 live Claude patch suites also passed using the app-selected account.
+The published ref peels to `b7012a354f6c98ac1c50b007c33e5b81a9e87879`.
+After vendoring, all 15 judge/hermetic integration tests passed against the
+new executable, the schema probe confirmed unknown PATCH fields remain
+accepted, and the application build passed with a `1.18.32` fork cache hit.
+The vendored binary SHA-256 is
+`651f612ec0a51fe1cd3d420a099281967d0bbaa34dbccd0570a0361d08f98f5f`.
+
 ## ClaudeUI side
 
 | File                                   | Role                                                                                                                 |
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `src/main/opencode/judge-transport.ts` | direct P1 transport + `/doc` probe + fallback to the session judge                                                   |
-| `src/main/opencode/OpencodeSession.ts` | `SEALED_THROWAWAY_PATCH`; `makeJudgeFn` prefers the endpoint, `makeSessionJudgeFn` is the fallback                   |
-| `src/main/opencode/agent-generate.ts`  | seals its throwaway session                                                                                          |
+| `src/core/opencode/judge-transport.ts` | direct P1 transport + `/doc` probe + fallback to the session judge                                                   |
+| `src/core/opencode/OpencodeSession.ts` | `SEALED_THROWAWAY_PATCH`; `makeJudgeFn` prefers the endpoint, `makeSessionJudgeFn` is the fallback                   |
+| `src/core/opencode/agent-generate.ts`  | seals its throwaway session                                                                                          |
 | `scripts/ensure-opencode.mjs`          | clone → check out `opencodeFork.ref` → build → vendor; `--from-release` falls back to the unpatched upstream tarball |
 
 The judge transport probes **`GET /doc`**, never a speculative `POST`. An
@@ -254,7 +283,7 @@ included, to a third party.
 ## Bump protocol (ADR-037 §3)
 
 ```bash
-cd .cache/opencode-fork                       # the pipeline's own clone
+cd vendor/opencode-fork-src                   # the pipeline's own clone
 git fetch upstream --tags
 git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
 ```
@@ -317,7 +346,7 @@ upgrade`, the script drops a pinned standalone bun in `.cache/bun-<version>/`.
   children open on `vendor/opencode-cli/opencode.exe`, so `rename(tmp, dest)`
   fails `EPERM`. The script renames the _old_ file out of the way first (allowed
   on Windows even while running) and sweeps the leftovers next run.
-- **Clone refresh.** `bun install` rewrites `bun.lock` in the cache clone, so the
+- **Clone refresh.** `bun install` rewrites `bun.lock` in the pipeline's clone, so the
   refresh path uses `git checkout -f` before `reset --hard`. It never runs `git
 clean` — that would delete the cached `node_modules` and make every run a cold
   install.
@@ -344,7 +373,7 @@ clean` — that would delete the cached `node_modules` and make every run a cold
 
 Automated coverage: `packages/opencode/test/permission/hermetic.test.ts` in the
 fork (the P2 piercing, end to end through real `ask`/`reply`);
-`src/main/opencode/__tests__/judge-transport.test.ts` and the
+`src/core/opencode/__tests__/judge-transport.test.ts` and the
 `OpencodeSession` / `agent-generate` suites in ClaudeUI;
 `src/integration/opencode/opencode-judge.integration.test.ts` and
 `opencode-hermetic.integration.test.ts` against the built binary.

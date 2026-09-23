@@ -81,6 +81,8 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
     loadEngineConfig,
     saveEngineConfig,
     getEngineModels,
+    // The Model list row counts pi's providers from the unfiltered catalog.
+    getPiModelCatalogGroups: vi.fn(async () => []),
     ...overrides
   }
 }

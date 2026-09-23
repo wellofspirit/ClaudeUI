@@ -25,6 +25,7 @@ import {
 } from '../../shared/InlinePickers'
 import { MobileConfigSheet } from './MobileConfigSheet'
 import { formatCostOrUnknown } from '../../../utils/cost'
+import { AgentTab } from '../../agents/AgentTab'
 
 export type { ModelDisplay }
 
@@ -540,6 +541,11 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   : 'Plan'}
             </div>
           )}
+
+          {/* The agent tab — the mode tab's mirror on the opposite corner of the
+              same edge, so neither can collide with the other and neither costs
+              the composer any height (ADR-073). Self-hides when nothing runs. */}
+          <AgentTab />
 
           {/* Slash command autocomplete */}
           {slashMenuOpen && filteredSlashCommands.length > 0 && (

@@ -29,6 +29,7 @@ import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId } from './settings-target'
+import { UsageHubSettings } from './UsageHubSettings'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -211,11 +212,26 @@ const CODEX_ACCOUNT: SettingItem = {
   keywords: 'codex chatgpt openai native account login authentication vault',
   render: () => <CodexAccount />
 }
+
+/**
+ * The usage hub (ADR-072). Page-local rather than a `SECTIONS` item because
+ * none of it is a ClaudeUI setting: the whole group writes `usage_hub_config`
+ * in the operational database through its own channels, the way the remote
+ * server config does.
+ */
+const USAGE_HUB: SettingItem = {
+  key: 'usageHub',
+  label: 'Usage hub',
+  keywords:
+    'usage hub sync metering device token cloudflare access service token machines resync forget combined spend',
+  render: () => <UsageHubSettings />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
   VERSIONS,
-  CODEX_ACCOUNT
+  CODEX_ACCOUNT,
+  USAGE_HUB
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -362,6 +378,7 @@ export const PAGES: SettingsPage[] = [
     groups: [
       { id: 'theme', label: 'Theme & type', items: itemsOf('appearance') },
       { id: 'layout', label: 'Chat layout', items: itemsOf('chat') },
+      { id: 'agents', label: 'Agents', items: itemsOf('agents') },
       { id: 'diff', label: 'Diff viewer', items: itemsOf('diff') },
       { id: 'status-line', label: 'Status line', items: itemsOf('status-line') },
       { id: 'git-panel', label: 'Git panel', items: itemsOf('git', ['gitPanelLayout']) }
@@ -475,14 +492,24 @@ export const PAGES: SettingsPage[] = [
       'Which providers ClaudeUI can reach, and which model each engine starts a session with.',
     groups: [
       {
-        // ONE list over the three stores (ADR-065 § "Providers: one list"), so
-        // the 'Shared' badge is gone: the card is no longer the shared vault's
-        // pane, it is every provider ClaudeUI can reach, whichever store backs
-        // it. Phase 6c folded the two engine-native groups and the vault's own
-        // pane in — this group is now the whole provider surface, and the
-        // header action opens the Add sheet that replaced their three add flows.
+        // ADR-074 §7: sign-in subscriptions first, each a card with its
+        // accounts, the engines it reaches and its options. No header action:
+        // the only subscription ClaudeUI can add is ChatGPT, whose card is
+        // always here and signs in from its own body, and the Add sheet cannot
+        // be filtered to subscriptions — a "+ Add subscription" would open a
+        // sheet about API providers.
+        id: 'subscriptions',
+        label: 'Subscriptions',
+        items: itemsOf('subscriptions')
+      },
+      {
+        // ONE list over the three stores (ADR-065 § "Providers: one list"),
+        // minus the subscriptions above (ADR-074 §7): every API provider
+        // ClaudeUI can reach, whichever store backs it. The header action opens
+        // the Add sheet that replaced the three old add flows.
         id: 'providers',
-        label: 'Providers',
+        label: 'API providers',
+        note: 'Keys and self-hosted endpoints. Sign-in subscriptions are listed above.',
         action: {
           label: '+ Add provider',
           testid: 'ProviderList.add',
@@ -495,38 +522,32 @@ export const PAGES: SettingsPage[] = [
         id: 'defaults',
         label: 'Default models',
         // Three engines, three answers: Claude's effort defaults are ClaudeUI's
-        // own settings.json (no tag) and apply to the next SESSION; opencode's
-        // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
-        // pi's settings.json, read at session start.
+        // own settings.json (no tag) and apply to the next SESSION — its default
+        // model is `engines/claude.json`, named on that row's key line rather
+        // than the card, which would mislabel the effort table; opencode's
+        // are its own jsonc, read when the per-cwd SERVER restarts; pi's
+        // default model and model list are ClaudeUI's `engines/pi.json` (the
+        // rows' key lines say so), read at session start — not pi's own
+        // settings.json.
         storage: (engine) =>
           engine === 'opencode'
             ? 'opencode.jsonc'
-            : engine === 'pi'
-              ? 'settings.json'
-              : engine === 'codex'
-                ? engineFile('codex')
-                : undefined,
+            : engine === 'pi' || engine === 'codex'
+              ? engineFile(engine)
+              : undefined,
         appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
         note: (engine) => DEFAULT_MODEL_NOTES[engine],
+        // The engine-neutral "New sessions start on" row (slice 9) heads every
+        // segment: one item, reused, so the four cannot drift apart.
         byEngine: {
-          claude: itemsOf('effortDefaults'),
-          opencode: itemsOf('opencode-models'),
-          pi: itemsOf('pi-config-models'),
+          claude: [...itemsOf('new-session-model'), ...itemsOf('effortDefaults')],
+          opencode: [...itemsOf('new-session-model'), ...itemsOf('opencode-models')],
+          pi: [...itemsOf('new-session-model'), ...itemsOf('pi-config-models')],
           // ClaudeUI's OWN default for a Codex session, in `engines/codex.json`
           // — not the `model` key on the Codex page, which is Codex's file.
-          codex: itemsOf('codex-models')
+          codex: [...itemsOf('new-session-model'), ...itemsOf('codex-models')]
         }
-      },
-      {
-        id: 'anthropic',
-        label: 'Anthropic endpoint',
-        storage: 'vendors/anthropic.json',
-        // The old pane footer's "applies on next session start", as the badge.
-        appliesOn: 'next-session',
-        note: 'Applies to new Claude sessions.',
-        items: itemsOf('vendor-anthropic')
-      },
-      { id: 'accounts', label: 'Accounts', items: itemsOf('accounts') }
+      }
     ]
   },
   {
@@ -623,7 +644,20 @@ export const PAGES: SettingsPage[] = [
       },
       // BELOW security on purpose: the locked-state copy inside AccessLinks
       // reads "Unlock in Session security above".
-      { id: 'links', label: 'Access links', items: itemsOf('remote', ['remoteLinks']) }
+      { id: 'links', label: 'Access links', items: itemsOf('remote', ['remoteLinks']) },
+      // LAST, and on this page rather than beside the usage dials on Advanced:
+      // every other group here configures how this machine talks to the network
+      // and holds its credential in the same database, which is the
+      // neighbourhood a reader looking for "where does my usage go" searches
+      // (ADR-072 §7). No applies-later badge — `usage-hub:configure` re-arms
+      // the client on the spot, so every row here binds immediately.
+      {
+        id: 'usage-hub',
+        label: 'Usage hub',
+        storage: 'usage_hub_config',
+        note: 'Applies as soon as it is saved.',
+        items: [USAGE_HUB]
+      }
     ]
   },
   {
@@ -632,8 +666,29 @@ export const PAGES: SettingsPage[] = [
     rail: 'engines',
     icon: ICON_CLAUDE,
     engine: 'claude',
-    description: "Claude Code's launch parameters. Permission rules are on Sessions & autonomy.",
+    description:
+      'Where Claude Code sends requests, and its launch parameters. Permission rules are on Sessions & autonomy.',
     groups: [
+      // FIRST, and here rather than on Models & providers (ADR-074 §9):
+      // `vendors/anthropic.json` only ever reaches cli.js spawns, so the page of
+      // the engine it configures is its one home. No `requires` — every Claude
+      // build honours ANTHROPIC_BASE_URL and the model env vars.
+      {
+        id: 'endpoint',
+        label: 'Endpoint',
+        storage: 'vendors/anthropic.json',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions. Never reaches opencode or pi.',
+        items: itemsOf('claude-endpoint', ['claudeEndpoint'])
+      },
+      {
+        id: 'model-mapping',
+        label: 'Model mapping',
+        storage: 'vendors/anthropic.json',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions.',
+        items: itemsOf('claude-endpoint', ['claudeModelMapping'])
+      },
       {
         id: 'sandbox',
         label: 'Sandbox',
@@ -1010,6 +1065,7 @@ export function appliesOnOf(
  */
 export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; group: string }>> = {
   appearance: { page: 'appearance', group: 'theme' },
+  agents: { page: 'appearance', group: 'agents' },
   chat: { page: 'appearance', group: 'layout' },
   diff: { page: 'appearance', group: 'diff' },
   'status-line': { page: 'appearance', group: 'status-line' },
@@ -1030,12 +1086,12 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   usage: { page: 'advanced', group: 'usage' },
 
   'shared-providers': { page: 'models', group: 'providers' },
+  'new-session-model': { page: 'models', group: 'defaults' },
   effortDefaults: { page: 'models', group: 'defaults' },
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
   'codex-models': { page: 'models', group: 'defaults' },
-  'vendor-anthropic': { page: 'models', group: 'anthropic' },
-  accounts: { page: 'models', group: 'accounts' },
+  subscriptions: { page: 'models', group: 'subscriptions' },
 
   'dispatch-concurrency': { page: 'dispatch', group: 'concurrency' },
   'claude-dispatch': { page: 'dispatch', group: 'into' },
@@ -1047,6 +1103,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
 
   remote: { page: 'remote', group: 'server' },
 
+  'claude-endpoint': { page: 'claude', group: 'endpoint' },
   sandbox: { page: 'claude', group: 'sandbox' },
   proxy: { page: 'claude', group: 'proxy' },
 

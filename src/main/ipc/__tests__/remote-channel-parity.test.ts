@@ -119,7 +119,10 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/remote-view-commands.ts',
   // ADR-066 — the native-Codex family (settings, approvals, the login
   // ceremony), spread by both transports from one declaration.
-  'src/core/ipc/codex-commands.ts'
+  'src/core/ipc/codex-commands.ts',
+  // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
+  // transports (`registerSessionIpc` on the desktop side).
+  'src/core/ipc/usage-hub-commands.ts'
 ]
 
 /**
@@ -190,8 +193,20 @@ const TRUST_LIST_SWEEP: Record<string, { capability: Capability; kind: 'command'
   'config:save-shared-automode': { capability: 'config', kind: 'command' }
 }
 
+/**
+ * ADR-074 §2 — the ONE writer of a provider's model allowlist, for opencode or
+ * pi. Its own table for the same reason as {@link TRUST_LIST_SWEEP}. `config`
+ * like the settings saves it narrows: it edits one leaf of `engines/<id>.json`,
+ * with the engine checked against a closed pair and the provider id against the
+ * id-segment guard at the perimeter (`config-commands-model-allowlist.test.ts`).
+ */
+const MODEL_ALLOWLIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> =
+  {
+    'models:set-provider-allowlist': { capability: 'config', kind: 'command' }
+  }
+
 /** Every channel the two shared config modules declare: S1b plus what followed. */
-const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP }
+const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP, ...MODEL_ALLOWLIST_SWEEP }
 
 /**
  * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and

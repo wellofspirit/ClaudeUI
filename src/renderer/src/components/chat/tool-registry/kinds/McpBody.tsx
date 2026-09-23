@@ -15,6 +15,7 @@
 
 import { TerminalView } from '../../TerminalView'
 import { ExpandableText } from './ExpandableText'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 const DEFAULT_MAX_CHARS = 5000
@@ -78,6 +79,7 @@ export function McpBody({
       {showResult && (
         <div
           data-testid={hideToolInput ? 'McpBody' : undefined}
+          {...TOOL_OUTPUT_SCOPE}
           className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
         >
           {!hideToolInput && (

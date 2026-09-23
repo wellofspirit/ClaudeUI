@@ -1,6 +1,7 @@
 # ADR-071: One metering ledger, two costs, machine-independent account keys, and a window-value ledger
 
-**Status:** Proposed (2026-09-20). Drafted from the owner's rulings of the same date and mockup `140549af`.
+**Status:** Accepted (2026-09-21; proposed 2026-09-20), as-built tidy 2026-09-22. Drafted from the owner's rulings of 2026-09-20 and mockup `140549af`. Slices S0 to S4 are built on it. §6 amended 2026-09-21 to the 401 rule as built, and again on 2026-09-21 (S3c) so a window's kind and length come from the value the API states rather than from the window's position.
+As-built tidy 2026-09-22: §1 (the per-engine token convention, and `selectRowCostUsd` surviving as the pre-v18 fallback), §3 (what a ChatGPT key does with no user claim and no email), §6 (the shipped `AccountLimits` fields, and a relayed reading showing under both scopes), §7 (the 24-hour close grace, and where the 5% floor is applied), and the slices marked landed.
 **Amends:** [ADR-011](adr-011_canonical-usage-windows-and-account-attribution.md) §4 (account attribution), [ADR-033](adr-033_cross-engine-dispatch.md) (what `dispatch.maxCostUsd` gates on, where dispatched usage is stored), [ADR-034](adr-034_session-time-and-cost-accounting.md) (what `totalCostUsd` means)
 **Relates to:** [ADR-015](adr-015_multi-account-file-credentials.md) (per-account Claude credential files), [ADR-030](adr-030_capability-honesty.md) (unknown is never shown as zero), [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) and [ADR-069](adr-069_codex-host-per-home-and-account.md) (ChatGPT accounts and their hosts), [ADR-070](adr-070_one-auth-surface.md) (where a dead credential is reported), [ADR-072](adr-072_usage-hub-self-hosted-sync.md) (the sync that consumes this ledger)
 
@@ -15,7 +16,7 @@ The usage dashboard was built for one engine and one account. Four engines and s
 5. **Rows cannot answer "which account" or "covered by what".** `usage_event` has no billing type. Claude rows carry `account_uuid` and a null `account_id`. opencode rows carry neither, because `OpencodeAuthProvider.buildAccountRef` returns no `accountId` at all. `daily_usage` has no account column, so any per-account history is gone once `usage_event` is pruned at 90 days. `dispatched_usage` is a separate table with a token total and a cost and nothing else, which is why the dashboard shows dispatched work in its own section and leaves it out of every total.
 6. **Limits are per-engine one-offs.** ChatGPT limits are held per vault account in memory with no history. Claude limits exist for the active account only. `usage-provider.ts` is a 57-line placeholder for the abstraction both need.
 
-The owner's requirements, stated 2026-09-20: show what subscription usage would have cost on the API, next to what was billed. Track usage and limits per account. Count dispatched work. Show how much API-equivalent usage each subscription delivers per 5-hour and per 7-day window, which is the measure of what a plan is worth. OpenAI plans have only the 7-day window.
+The owner's requirements, stated 2026-09-20: show what subscription usage would have cost on the API, next to what was billed. Track usage and limits per account. Count dispatched work. Show how much API-equivalent usage each subscription delivers per window, which is the measure of what a plan is worth. (The first draft said "per 5-hour and per 7-day window" and "OpenAI plans have only the 7-day window". **Amended 2026-09-21 (S3c):** a plan has whatever windows it has and each one states its own length — the owner's ChatGPT plan reports ONE window and it is weekly, while Codex's fixtures carry 30-minute, 1-hour and 1-day windows. See §6.)
 
 ## Decision
 
@@ -35,7 +36,9 @@ New columns on `usage_event`:
 | `api_cost_usd`      | Tokens priced at list price. Null when the model has no known price.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `billed_cost_usd`   | Money that left a wallet. The engine's figure for `apiKey`, `0` for `subscription` and `free`. Under `unknown` it is the engine's figure only when that figure is positive AND the engine reports charges (opencode, pi); otherwise null. cli.js's figure is an API-equivalent whatever the plan (ADR-034), so a Claude row's bill is its figure under `apiKey`, `0` under `subscription` and null under `unknown`, and its `api_cost_usd` is that same figure, which prices the 1h cache tier our table does not. |
 
-`equiv_cost_usd` and `engine_cost_usd` stay as the raw inputs. The two new cost columns are derived from them once, at write time, by one function. `selectRowCostUsd` and its `> 0` heuristics are deleted.
+`equiv_cost_usd` and `engine_cost_usd` stay as the raw inputs. The two new cost columns are derived from them once, at write time, by one function. ~~`selectRowCostUsd` and its `> 0` heuristics are deleted.~~ **As built: `selectRowCostUsd` survives as the pre-v18 FALLBACK** (`src/core/services/usage-aggregation.ts`). Its first line is now `displayCostFromRow`, so every row written since v18 resolves by the rule above and never reaches the old chain; the `> 0` heuristics below it exist for one case only, a row written before v18 whose backfill could fill neither cost column because nothing priced it and the engine reported nothing either. Such a row still has to render as something, and a fresh recompute against the current pricing table even self-heals one whose model had no price when it was recorded. `block-usage.ts` calls it for the per-engine breakdown and for the Claude block grouping, which read rows of every age.
+
+**The token counts follow each engine's own convention, and a row does not say which (as built).** opencode folds `reasoning` into the output count, in the live session and in the reconciler alike, because every provider it meters this way bills reasoning as output and its `info.cost` already includes it. pi does not: its rows carry the split pi reported, and the fold happens only for PRICING, inside `src/core/pi/message-cost.ts`, when our table has to price a turn pi reported as zero. Codex needs no fold at all, because `reasoningOutputTokens` is already a subset of `outputTokens` on its wire, which is what `codexDisjointTokens` states. So `output_tokens` is comparable across engines as a BILLING quantity and not as a count of tokens the model emitted, and any future sum that cares about the difference has to key on `engine_id`.
 
 `daily_usage` is replaced by `usage_bucket`, keyed by `(hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin)`. Buckets are hourly and in UTC so that a reader in any timezone can group them into local days, and so that ADR-072's hub can hold the same table. Buckets are kept forever. `usage_event` keeps its 90-day retention. Existing `daily_usage` rows migrate to midday-UTC buckets under `account_key = 'unknown'`.
 
@@ -53,14 +56,16 @@ New columns on `usage_event`:
 
 A vault id is a UUID minted on one machine, so it cannot identify an account on another. ADR-072 needs the same key on every machine, and changing keys later means rewriting the ledger, so the key is machine-independent from the first row.
 
-| Account                                            | `account_key`                                                                                                                                |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude subscription                                | `anthropic:<organizationUuid>:<accountUuid>`, both from the account's own credential (see below)                                             |
-| ChatGPT subscription                               | `chatgpt:<chatgpt_account_id>:<user>`, where `<user>` is the id token's stable user claim, or the lowercased email if the token carries none |
-| Any API key                                        | `<vendor>:key:<hex16>`, where `hex16` is the first 16 hex characters of `SHA-256("claudeui-account-key-v1:" + vendor + ":" + apiKey)`        |
-| Credentials an engine holds and we cannot identify | `<engine>:<vendor>:native`                                                                                                                   |
+| Account                                            | `account_key`                                                                                                                                                                                                 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude subscription                                | `anthropic:<organizationUuid>:<accountUuid>`, both from the account's own credential (see below)                                                                                                              |
+| ChatGPT subscription                               | `chatgpt:<chatgpt_account_id>:<user>`, where `<user>` is the id token's stable user claim, or the lowercased email if the token carries none, **or the literal `unknown` when it carries neither (as built)** |
+| Any API key                                        | `<vendor>:key:<hex16>`, where `hex16` is the first 16 hex characters of `SHA-256("claudeui-account-key-v1:" + vendor + ":" + apiKey)`                                                                         |
+| Credentials an engine holds and we cannot identify | `<engine>:<vendor>:native`                                                                                                                                                                                    |
 
 **A key names a subscription, not a person.** The owner's correction of 2026-09-20: one email can hold a personal and a business ChatGPT subscription, and the same happens on Anthropic, more rarely. Each has its own limits and its own bill, so each is its own account here. That is why the subscription's id comes first in both subscription keys. On ChatGPT it is `chatgpt_account_id`. On Anthropic it is `organizationUuid`, which `oauthAccount` carries next to `organizationName` and `organizationRateLimitTier` and which nothing reads today. **Amended 2026-09-21 (S2e):** under multi-account (ADR-015) the identity is NOT read from `~/.claude.json`. That file is one shared file for every account dir and for the terminal `claude`, and cli.js rewrites its `oauthAccount` only when it refetches the profile (daily at most), so the block names whichever process refetched last, not the account whose credentials a spawn holds. Found on the owner's machine: the company dir stamped with the personal identity and a day of rows keyed to the wrong subscription. The identity of an account dir is resolved from the dir's own credential through `GET /api/oauth/profile` (the call cli.js itself makes), cached on the `account` row and in memory per credential file, re-resolved when the file changes; app-side switches append to the account log so time-based attribution follows the app. Single-account (Keychain) mode still reads `~/.claude.json`, where one login is the only login. A one-shot repair re-keys the rows written under the stale attribution since the log's last record. The user part stays in the key because ADR-068 records the reverse case too: two people's accounts inside one workspace. `account_label` shows the email with the plan or organization name, so two subscriptions under one email can be told apart on screen.
+
+**A missing user half degrades, it does not throw the key away (as built).** `chatgptAccountKey` in `src/shared/account-key.ts` writes the literal `unknown` in that slot when the token carries neither a stable user claim nor an email. The workspace half still names the subscription, which is what the limits and the bill belong to, and it is the same string on every machine; discarding the whole key instead would put those turns in the unattributed bucket, which is strictly worse.
 
 The API-key rule is a plain hash, not an HMAC, because it has to give the same answer on a machine that has never heard of a hub. A provider API key carries at least 128 bits of entropy, so a 64-bit digest of it cannot be inverted or guessed. All it allows is confirming a key somebody already holds. The label shows the last four characters of the key, as provider consoles do.
 
@@ -104,19 +109,39 @@ A failed or interrupted turn that moved tokens writes a row. The ledger records 
 interface AccountLimits {
   accountKey: string
   label: string
-  plan?: string
-  windows: Array<{ kind: '5h' | '7d' | string; usedPercent: number; resetsAt: string | null }>
+  vendorId: string // which provider's meter this is, for grouping and for the relay
+  plan: string | null
+  windows: Array<{
+    kind: '5h' | '7d' | string
+    label: string
+    usedPercent: number
+    resetsAt: string | null
+    windowMinutes?: number | null // the length the vendor stated (S3c)
+  }>
   credits?: { unlimited: boolean; balance: string | null }
   observedAt: number
-  source: 'local' | { deviceId: string } // ADR-072 relays readings from other machines
+  source: 'local' | { deviceId: string; deviceName: string } // ADR-072 relays readings
+  labelMasked?: boolean // `label` is the hub's masked form, not a name this machine read
+  state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
+  error?: string
 }
 ```
 
+`vendorId`, `labelMasked`, `state` and `error` are as built and were not in the first sketch, and `source` gained the observing machine's name beside its id. A per-account FAILURE has to be a value rather than an exception, because one account needing a sign-in must not blank the others: `state` carries it and `error` carries the detail, `stale` meaning the answer came from the last persisted sample because no token might be spent. `labelMasked` says that `label` is as much of the name as the hub gives a device caller (ADR-072 §6) rather than a name this machine read, so no surface renames an account silently. And the name on `source` is there because a tag reading `via 3f2a1b9c` answers nobody.
+
+**A relayed reading shows under BOTH dashboard scopes (ruled during S5c, 2026-09-22).** A limit is a fact about the account, true whichever machines are watching it; the scope switch decides whose SPEND is summed, which is a different question. So `readAccountLimits` relays by default and the combined view is not a precondition, on two conditions the ruling attached: the reading names the machine that took it, and a key this machine holds a local reading for keeps that local one whatever its state, `needs-sign-in` included, because that says this machine's own credential is dead and replacing it with a healthy reading from elsewhere would hide the one place the problem shows.
+
 The ChatGPT provider wraps `ChatgptRateLimitStore` unchanged. The Claude provider takes a credential directory (ADR-015), so it can read any stored account. The account's identity (key and billing type) comes from the same credential through the profile endpoint (§3 as amended 2026-09-21), never from `~/.claude.json`, and a stored account's identity is resolved only on a user-driven refresh, like its reading.
 
-**Inactive Claude accounts are never refreshed in the background.** The owner's concern is that Anthropic may limit how many refresh grants an account gets, and a timer spending them on accounts nobody is using is the wrong trade. The rule is: use the stored access token while it is valid. Refresh only when the user opens the dashboard or presses refresh. On a 401, mark the account as needing sign-in through ADR-070's pill and stop. With ADR-072 enabled, a reading relayed from the machine where the account is active beats any local fetch, and this machine spends no token at all.
+**Inactive Claude accounts are never refreshed in the background.** The owner's concern is that Anthropic may limit how many refresh grants an account gets, and a timer spending them on accounts nobody is using is the wrong trade. The rule is: use the stored access token while it is valid. Refresh only when the user opens the dashboard or presses refresh. On a 401 during a read the user asked for, spend one refresh grant and retry once. If the refresh fails or the retry is a 401 too, mark the account as needing sign-in through ADR-070's pill and stop. A read that may not refresh marks it on the first 401. (Amended 2026-09-21. The first draft said to stop on the first 401 in every case. The owner ruled that the one retry stays, because no timer reaches this path, refreshes are single-flighted per credentials file, and stopping cold would turn a server-side token revocation into a full sign-in. Syncing tokens between machines is a later discussion.) With ADR-072 enabled, a reading relayed from the machine where the account is active beats any local fetch, and this machine spends no token at all.
 
 Readings are persisted. `usage_window_sample` gains `account_key` and `window_kind`, and takes ChatGPT readings as well as Claude's.
+
+**A window's kind and length come from the value the API states, never from the window's position (amended 2026-09-21, S3c; owner: "don't just assume, use trusted value").** Claude names its own windows (`five_hour`, `seven_day`, and `limits[]` entries of `kind: "weekly_scoped"`), so `5h`, `7d` and `7d:<slug>` are the payload's own vocabulary and their lengths come with their names. ChatGPT names nothing: it fills two SLOTS, `primary` and `secondary`, and states each window's length — the backend's `limit_window_seconds`, which Codex carries as `window_minutes` and the app-server wire as `windowDurationMins`. Reading the slot as the kind filed a weekly-only plan's one window (the owner's, delivered as `primary`) under `5h`, labelled it `5-hour`, and summed a week of spend over five hours in §7's ledger.
+
+So one shared function derives the kind and the label from the duration: 300 minutes is `5h`, 10,080 is `7d`, any other whole number of days or hours is `<n>d` / `<n>h`, anything else `<n>m`. A window whose duration the vendor withheld keeps the slot's own name (`primary` / `secondary`) and is labelled `limit` — never a guessed `5h`. When BOTH slots of one reading state the same length, the secondary's kind becomes `<kind>:secondary`: the kind is an identity downstream (the sample dedup key, `usage_window`'s primary key, one row per kind in a stale read, the accounts panel's meter key), so two windows may never share one. `usage_window_sample` and `usage_window` carry a nullable `window_minutes` (migration v25, which also drops the mis-kinded ChatGPT rows so they re-seed), and §7's ledger takes a window's span from it when present, falling back to the kind's own name for Claude's rows. A window whose length nothing states is sampled but never materialised into `usage_window`: no length, no numerator.
+
+The same amendment removes ONE assumption on the Claude side: `AccountUsage.fiveHour` was defaulted to `{ usedPercent: 0, resetsAt: null }` when the payload carried no `five_hour`, so an account with no five-hour window (an API key, Bedrock, Vertex) got a fabricated 0 % meter and samples under a window it does not have. It is nullable now, and an absent window is absent (ADR-030).
 
 ### 7. The window-value ledger
 
@@ -128,9 +153,11 @@ New table `usage_window`, one row per `(account_key, window_kind, canonical_end)
 | `api_cost_usd`, tokens | The ledger's sum for that account between the window's start and end. |
 | `closed`               | Set once `canonical_end` has passed and a final recompute has run.    |
 
+**A window closes 24 hours after its end, not at it (as built: `WINDOW_CLOSE_GRACE_MS` in `src/core/services/usage-window-ledger.ts`).** "A final recompute has run" above is the intent; the grace is what makes it true. A turn reaches the ledger later than it happened, because the reconciler backfills transcripts every ten minutes and a session the app was not watching is imported at the next start, so a window shut on the first pass past its own end would drop every late arrival with nothing to notice it by. Until the grace is up the window is recomputed on every pass like any other open one, and the pass that finally closes it has just summed it. From there `closed` is final and the row is never touched again, which matters because the samples behind its peak are pruned at 30 days. A window whose end and grace both pass while the app is closed is summed and closed by the first pass after start-up, and one whose row lands more than a day late is not counted, which is the price of the bound. The hub applies the same 24-hour grace to its own window ledger (ADR-072 §4), so the two agree about when a window is done.
+
 The dashboard derives dollars per 1% and the implied value of a full window (`api_cost_usd / peak_percent × 100`) on read. Window identity reuses ADR-011's `canonicalizeWindowEnd` for every kind, not only the 5-hour one.
 
-The implied value has a known bias, and the dashboard says so. `peak_percent` is the account's global utilization, but the dollars are only what this ledger saw. Usage on another machine, or in claude.ai, pushes the percent up without adding dollars, so the implied value reads low. ADR-072 fixes the other-machines part by summing the numerator across machines. Nothing fixes the claude.ai part. A window whose peak is under 5% is excluded from the averages, because dividing by a small percent turns noise into a headline.
+The implied value has a known bias, and the dashboard says so. `peak_percent` is the account's global utilization, but the dollars are only what this ledger saw. Usage on another machine, or in claude.ai, pushes the percent up without adding dollars, so the implied value reads low. ADR-072 fixes the other-machines part by summing the numerator across machines. Nothing fixes the claude.ai part. A window whose peak is under 5% is excluded from the averages, because dividing by a small percent turns noise into a headline. **As built that floor lives on the READ side** (`usageWindowSummary`): such a window keeps its real sums and its real peak, which are facts, and reports no derived figure at all, so the floor can be moved without a migration and without losing a row.
 
 ADR-011's WLS projection stays as it is and stays Claude-only. It answers a different question (where will this window end up) from the same samples.
 
@@ -151,13 +178,15 @@ Categorical colour follows the provider, in a fixed order, and a filter never re
 
 ## Slices
 
-| Slice | Content                                                                                                                                     |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| S0    | The Codex cumulative-total probe (§4).                                                                                                      |
-| S1    | The two-cost rule, the status-line fix for opencode and pi, the dispatch cap fix, models.dev prices. Ships alone and fixes the `$0` report. |
-| S2    | Schema migration, `account_key` derivation, Codex recording, dispatch rows folded in, `usage_bucket`.                                       |
-| S3    | Limits providers, on-demand reads of inactive Claude accounts, persisted samples, `usage_window`.                                           |
-| S4    | The dashboard.                                                                                                                              |
+Every slice below landed: S0 and the first of S1 on 2026-09-20, the rest on 2026-09-21. Each was built in lettered sub-slices (S1a to S1e, S2a to S2g, S3a to S3c, S4a to S4d), three of which were repairs rather than new surface: S2e moved Claude identity to the account directory's own credential, S2g fixed attribution across an account switch, and S3c took a window's kind from the length the vendor states. The sync that consumes all of it is ADR-072's S5a to S6.
+
+| Slice | Content                                                                                                                                     | State  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| S0    | The Codex cumulative-total probe (§4).                                                                                                      | Landed |
+| S1    | The two-cost rule, the status-line fix for opencode and pi, the dispatch cap fix, models.dev prices. Ships alone and fixes the `$0` report. | Landed |
+| S2    | Schema migration, `account_key` derivation, Codex recording, dispatch rows folded in, `usage_bucket`.                                       | Landed |
+| S3    | Limits providers, on-demand reads of inactive Claude accounts, persisted samples, `usage_window`.                                           | Landed |
+| S4    | The dashboard.                                                                                                                              | Landed |
 
 Each slice follows ADR-026. S2's guard tests have to fail before the fix: a rekeyed Codex session producing one row per turn, an opencode subscription turn carrying a non-null `api_cost_usd`, and a dispatched turn appearing in the provider subtotal.
 

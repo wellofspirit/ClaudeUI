@@ -8,7 +8,7 @@
  *
  *  1. **fork build (default)** — clone `package.json#opencodeFork` (our
  *     `sst/opencode` fork, branch `claudeui`, forked from the vendored tag) into
- *     `.cache/opencode-fork`, check out `opencodeFork.ref` (a tag on the fork
+ *     `vendor/opencode-fork-src`, check out `opencodeFork.ref` (a tag on the fork
  *     or a commit reachable from the branch; branch HEAD when unset), build it
  *     with opencode's own release pipeline
  *     (`packages/opencode/script/build.ts --single`), and vendor the result.
@@ -59,7 +59,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'opencode-cli')
 const CACHE_BASE = join(ROOT, '.cache')
-const FORK_DIR = join(CACHE_BASE, 'opencode-fork')
+// Engine source trees live under vendor/: `<engine>-src` for upstream,
+// `<engine>-fork-src` for a fork (CLAUDE.md). Build caches stay in `.cache/`.
+const FORK_DIR = join(ROOT, 'vendor', 'opencode-fork-src')
+const LEGACY_FORK_DIR = join(CACHE_BASE, 'opencode-fork')
 
 const QUIET = process.argv.includes('--quiet')
 
@@ -480,7 +483,7 @@ function ensureBun(forkDir) {
  * and return the sha that will be built.
  */
 function syncFork(fork) {
-  mkdirSync(CACHE_BASE, { recursive: true })
+  mkdirSync(dirname(FORK_DIR), { recursive: true })
   if (!existsSync(join(FORK_DIR, '.git'))) {
     info(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
     // Blobless: full history/refs (the build reads `git branch --show-current`)
@@ -617,6 +620,15 @@ const version = getPinnedVersion()
 const pkgName = detectPackageName()
 
 const expect = fromRelease ? { source: 'release' } : { source: 'fork', ...getForkConfig() }
+
+// One-time move of a clone made before the vendor/ layout. Runs ahead of the
+// cache check: an up-to-date machine never reaches syncFork, and would
+// otherwise re-clone on the next bump and leave the old tree orphaned.
+if (!existsSync(FORK_DIR) && existsSync(join(LEGACY_FORK_DIR, '.git'))) {
+  mkdirSync(dirname(FORK_DIR), { recursive: true })
+  renameSync(LEGACY_FORK_DIR, FORK_DIR)
+  info(`[ensure-opencode] Moved the fork clone ${LEGACY_FORK_DIR} -> ${FORK_DIR}`)
+}
 
 if (!force && isCacheHit(version, expect)) {
   console.log(

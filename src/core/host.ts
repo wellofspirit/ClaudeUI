@@ -134,6 +134,32 @@ export function hostAccountsDir(): string {
 }
 
 // ---------------------------------------------------------------------------
+// The build this process is (ADR-072 §5)
+// ---------------------------------------------------------------------------
+
+let hostVersion: string | null = null
+
+/**
+ * Publish the version string this host reports for itself.
+ *
+ * `app.getVersion()` is Electron-only and `src/main/index.ts` already derives
+ * the display form from it (`Local Build` for a dev run), so this is the same
+ * seam shape `setHostAccountsDir` uses: main publishes what only main can know,
+ * and core reads it. The usage hub is the one consumer — ADR-072 §5 sends the
+ * app version with each push so the hub's machine list can say which build a
+ * device is on, which is how "two machines priced the same model differently"
+ * becomes diagnosable rather than mysterious.
+ */
+export function setHostAppVersion(version: string | null): void {
+  hostVersion = version
+}
+
+/** The host's version, or `unknown` when nothing published one (vitest, a script). */
+export function hostAppVersion(): string {
+  return hostVersion ?? 'unknown'
+}
+
+// ---------------------------------------------------------------------------
 // Native directory picker
 // ---------------------------------------------------------------------------
 

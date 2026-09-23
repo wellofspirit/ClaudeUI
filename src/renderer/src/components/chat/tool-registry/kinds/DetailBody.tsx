@@ -14,6 +14,7 @@
 
 import { OutputView } from '../../OutputView'
 import type { KindBodyProps } from './types'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 
 export function DetailBody({
   view,
@@ -25,6 +26,8 @@ export function DetailBody({
   const text = view.text ?? result?.toolResult ?? ''
   const isError = !!result?.isError
   const hasFields = view.fields.length > 0
+  // Usually the result, but SendMessage puts its INPUT message here.
+  const textIsOutput = text === result?.toolResult
 
   return (
     <>
@@ -45,7 +48,10 @@ export function DetailBody({
       )}
 
       {!!text && (
-        <div className={`px-3 py-2.5 ${hasFields ? 'border-t border-border' : ''}`}>
+        <div
+          {...(textIsOutput ? TOOL_OUTPUT_SCOPE : {})}
+          className={`px-3 py-2.5 ${hasFields ? 'border-t border-border' : ''}`}
+        >
           {isError ? (
             <pre className="text-[12px] font-mono whitespace-pre-wrap break-words overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border text-danger">
               {text.slice(0, toolOutputMaxChars)}

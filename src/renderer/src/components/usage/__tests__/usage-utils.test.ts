@@ -352,6 +352,27 @@ describe('formatReset', () => {
     expect(formatReset('7d', null, now)).toBe('—')
     expect(formatReset('5h', 'not a date', now)).toBe('—')
   })
+
+  /**
+   * S3c — the form is chosen by the window's LENGTH, not by the `7d` prefix. A
+   * ChatGPT plan can report any duration, and its weekly window used to arrive
+   * kinded `5h`, which drew "in 28h 55m" for a window a week long.
+   */
+  it('decides by length, so a multi-day window gets the weekday form', () => {
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('3d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('1d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('23h', '2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('believes the stated minutes over the kind', () => {
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('5h', at.toISOString(), now, 10_080)).toBe('Thu 09:00')
+  })
+
+  it('counts down a window whose length nothing states', () => {
+    expect(formatReset('primary', '2026-09-21T13:48:00.000Z', now, null)).toBe('in 1h 48m')
+  })
 })
 
 describe('buildSeriesColorMap', () => {

@@ -15,7 +15,7 @@
  *      symptom until they disagree.
  *   2. Every item RENDERS A DEFINED COMPONENT. A bad import leaves the element
  *      type `undefined` and only blows up when the user opens that page.
- *   3. The Anthropic vendor row, whose render is the one that reads the fifth
+ *   3. The Claude endpoint rows, whose renders are the ones that read the fifth
  *      and sixth arguments (`vendorConfig` / `updateVendorConfig`).
  */
 
@@ -109,37 +109,41 @@ describe('every item renders a defined component', () => {
   })
 })
 
-describe('Anthropic vendor section', () => {
-  it('vendor-anthropic section exists and has vendorAnthropicEndpoint item', () => {
-    const sec = SECTIONS.find((s) => s.id === 'vendor-anthropic')
-    expect(sec).toBeDefined()
-    const item = sec?.items.find((i) => i.key === 'vendorAnthropicEndpoint')
-    expect(item).toBeDefined()
-    expect(item?.label).toBe('Endpoint & model override')
+describe('Claude endpoint section', () => {
+  it('claude-endpoint holds the Endpoint and Model mapping items, in that order', () => {
+    const sec = SECTIONS.find((s) => s.id === 'claude-endpoint')
+    expect(sec?.items.map((i) => i.key)).toEqual(['claudeEndpoint', 'claudeModelMapping'])
+    // The old section is gone, not duplicated.
+    expect(SECTIONS.find((s) => s.id === 'vendor-anthropic')).toBeUndefined()
   })
 
-  it('vendor-anthropic item render accepts vendorConfig + updateVendorConfig args', () => {
-    const sec = SECTIONS.find((s) => s.id === 'vendor-anthropic')!
-    const item = sec.items.find((i) => i.key === 'vendorAnthropicEndpoint')!
-    // This is the render that actually reads args 5-6 — verify it is callable
-    // with mock args without throwing.
-    const mockSettings = {} as Parameters<typeof item.render>[0]
-    const mockUpdate = (): void => {}
-    const mockEngineConfig = {}
+  it('keeps the old search terms reaching the moved rows', () => {
+    const sec = SECTIONS.find((s) => s.id === 'claude-endpoint')!
+    const words = sec.items.map((i) => `${i.label} ${i.keywords ?? ''}`).join(' ')
+    for (const w of ['anthropic', 'endpoint', 'gateway', 'base url', 'token', 'model override'])
+      expect(words, w).toContain(w)
+    for (const w of ['alias', 'sonnet', 'opus', 'haiku']) expect(words, w).toContain(w)
+  })
+
+  it('both item renders accept vendorConfig + updateVendorConfig args', () => {
+    const sec = SECTIONS.find((s) => s.id === 'claude-endpoint')!
+    // These are the renders that actually read args 5-6 — verify they are
+    // callable with mock args without throwing.
     const mockVendorConfig = {
       endpoint: { enabled: true, baseUrl: 'https://test.com', authToken: '' },
       modelOverride: { enabled: false }
     }
-    const mockUpdateVendor = (): void => {}
-    expect(() =>
-      item.render(
-        mockSettings,
-        mockUpdate,
-        mockEngineConfig as never,
-        mockUpdate as never,
-        mockVendorConfig as never,
-        mockUpdateVendor
-      )
-    ).not.toThrow()
+    for (const item of sec.items) {
+      expect(() =>
+        item.render(
+          {} as Parameters<typeof item.render>[0],
+          () => {},
+          {} as never,
+          (() => {}) as never,
+          mockVendorConfig as never,
+          () => {}
+        )
+      ).not.toThrow()
+    }
   })
 })

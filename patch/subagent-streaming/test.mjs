@@ -19,31 +19,16 @@ import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-
 
 // --- Test 1: Foreground sub-agent streaming (Patches F, A-D) ---
 
-const FOREGROUND_PROMPT = `You MUST use the Task tool (also known as Agent tool) right now. Do NOT answer directly.
-
-Call it with these exact parameters:
-- description: "math question"
-- prompt: "What is 2+2? Reply with just the number."
-- subagent_type: "general-purpose"
-
-This is a test. You MUST call the tool. Do not answer the question yourself.`
+const FOREGROUND_PROMPT = `Use the Task (Agent) tool with subagent_type general-purpose to inspect docs/architecture/README.md and report the name of the file documenting metering. Do not read the file yourself: delegate this repository investigation to the subagent and report its answer.`
 
 // --- Test 2: Background sub-agent streaming (Patch G) ---
 
-const BACKGROUND_PROMPT = `You MUST use the Task tool (also known as Agent tool) right now with run_in_background set to true. Do NOT answer directly.
-
-Call it with these exact parameters:
-- description: "background math"
-- prompt: "What is 3+3? Think step by step then reply with just the number."
-- subagent_type: "general-purpose"
-- run_in_background: true
-
-This is a test. You MUST call the tool with run_in_background=true. Do not answer the question yourself.`
+const BACKGROUND_PROMPT = `Use the Task (Agent) tool with subagent_type general-purpose and run_in_background=true to inspect docs/architecture/README.md and docs/architecture/metering.md. Ask it to identify which file documents metering and summarize the first section. Do not read files yourself: delegate the repository investigation in the background and report its answer.`
 
 async function testForeground(t) {
   console.log('\n  === Test 1: Foreground sub-agent streaming ===')
   console.log('  Starting SDK query...')
-  const { q, cleanup } = createQuery(FOREGROUND_PROMPT, { effort: 'medium' }, 120_000)
+  const { q, cleanup } = createQuery(FOREGROUND_PROMPT, { effort: 'high' }, 120_000)
   const messages = await collectMessages(q, { cleanup })
 
   dumpMessages(messages)
@@ -86,7 +71,7 @@ async function testForeground(t) {
 async function testBackground(t) {
   console.log('\n  === Test 2: Background sub-agent streaming (Patch G) ===')
   console.log('  Starting SDK query...')
-  const { q, cleanup } = createQuery(BACKGROUND_PROMPT, { effort: 'medium' }, 120_000)
+  const { q, cleanup } = createQuery(BACKGROUND_PROMPT, { effort: 'high' }, 120_000)
 
   let bgStreamCount = 0
   let bgAssistantCount = 0

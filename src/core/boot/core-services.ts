@@ -54,6 +54,7 @@ import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
@@ -83,6 +84,12 @@ export interface CoreServices {
   vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
+  /**
+   * The usage hub client (ADR-072 §7). Handed back so each host can stop it on
+   * the way out: it holds a ten-minute interval and a retry timer, and a
+   * half-finished push at exit is a push the cursor never advanced over.
+   */
+  usageHubClient: typeof usageHubClient
 }
 
 export interface CoreServicesOptions {
@@ -231,6 +238,21 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       ])
   })
 
+  // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
+  //
+  // Its first pass pushes limit READINGS, and a reading is filed under the
+  // account key `credentialSync` resolves — so starting it above this line would
+  // let the first push go out under whatever identity the vault had not yet
+  // reconciled. It is also the last of the three background loops to start, for
+  // the same reason `usageFetcher.startPolling()` is where it is: nothing here
+  // may resolve an account identity before that line.
+  //
+  // `start()` is a no-op when no hub is configured, which is every machine until
+  // someone pastes a URL and a token into Settings. It reads the `enabled` flag
+  // out of the database itself rather than taking it as an option, so the one
+  // answer serves both hosts and a `usage-hub:configure` can re-arm it in place.
+  usageHubClient.start()
+
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
   // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either
   // host's entrypoint because BOTH deployments must do it, and after the
@@ -287,6 +309,17 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       logger.warn(
         'main',
         `sharedProviderService.syncAll() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // After the sync, so a vendor an existing definition already delivers to is
+    // claimed and never re-adopted (ADR-074 §6). It logs per vendor and does not
+    // throw; the catch is for the boot contract, not for an expected failure.
+    try {
+      await sharedProviderService.adoptNativeKeys()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `sharedProviderService.adoptNativeKeys() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   })()
@@ -379,6 +412,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     tailscaleManager,
     automationManager,
     vscodeWebService,
-    hostAnchor
+    hostAnchor,
+    usageHubClient
   }
 }

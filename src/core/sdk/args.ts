@@ -271,6 +271,18 @@ function resolveAppNodeModules(): string | null {
 
 let cachedNodeModules: string | null | undefined
 
+/**
+ * The `CLAUDE_CODE_ENTRYPOINT` every cli.js spawn of ours carries, and the value
+ * its transcript lines record.
+ *
+ * Exported because it is read back as well as written: a transcript line whose
+ * entrypoint is anything else was produced by a `claude` this app did not spawn
+ * — a terminal one, which under multi-account uses the DEFAULT `~/.claude` login
+ * rather than the active credential dir, so its usage belongs to no account this
+ * app can name (S2g, block-usage's `attributionForEntry`).
+ */
+export const APP_ENTRYPOINT = 'claude-desktop'
+
 export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base }
   if (env.DEBUG_CLAUDE_AGENT_SDK) env.DEBUG = '1'
@@ -289,7 +301,7 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   // Override so that a developer running `bun run dev` from inside a Claude
   // Code session doesn't inherit the parent's `sdk-cli` entrypoint, which
   // would re-tier the spawned cli.js as Agent SDK usage.
-  env.CLAUDE_CODE_ENTRYPOINT = 'claude-desktop'
+  env.CLAUDE_CODE_ENTRYPOINT = APP_ENTRYPOINT
 
   // Give the model a checklist tool. `TodoWrite.isEnabled` is `!z_() && mL()` in
   // 2.1.268: `z_()` is "the Tasks system is on", true unless CLAUDE_CODE_ENABLE_TASKS

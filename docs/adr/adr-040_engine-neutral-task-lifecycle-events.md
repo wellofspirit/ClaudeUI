@@ -1,6 +1,10 @@
 # ADR-040 — Task lifecycle is event-driven: `session:task-started` / `session:task-notification`
 
-**Status:** Accepted
+**Status:** Accepted (amended by [ADR-073](adr-073_agent-roster-and-task-run-identity.md), 2026-09-21:
+a task can have SEVERAL runs. `SendMessage` to a finished agent re-emits the whole lifecycle under a
+new `tool_use_id` while `task_id` stays the same, so the identity below is per-RUN, not per-agent —
+`taskIdMap`'s eviction on a terminal notification is what made a resumed agent invisible, and the
+`activeTasks` record is now armed under the agent's ORIGIN tool_use id.)
 **Relates to:** ADR-038 (the same principle for approvals — lifecycle state mirrors explicit wire
 events, never inferred from turn/tool state), ADR-033 (cross-engine dispatch renders through the
 same TaskCard), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5 (the cli.js wire shapes)

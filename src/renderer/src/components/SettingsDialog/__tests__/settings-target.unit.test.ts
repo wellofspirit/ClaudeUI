@@ -24,6 +24,25 @@ describe('settingsTargetFromEvent', () => {
     expect(settingsTargetFromEvent(openSettings({ page: 42 }))).toBeUndefined()
   })
 
+  // ADR-074 §7: Models & providers › Accounts became Subscriptions. A link
+  // written before that (a notification, another pane, an older client) must
+  // still land where the accounts are now.
+  it('lands an old `accounts` link on Subscriptions, and only on the models page', () => {
+    expect(settingsTargetFromEvent(openSettings({ page: 'models', group: 'accounts' }))).toEqual({
+      page: 'models',
+      group: 'subscriptions'
+    })
+    // The alias is page-scoped: another page's `accounts` group is not this one.
+    expect(settingsTargetFromEvent(openSettings({ page: 'remote', group: 'accounts' }))).toEqual({
+      page: 'remote',
+      group: 'accounts'
+    })
+    // Every alias names a group that exists.
+    const models = PAGES.find((page) => page.id === 'models')!
+    expect(models.groups.map((group) => group.id)).toContain('subscriptions')
+    expect(models.groups.map((group) => group.id)).not.toContain('accounts')
+  })
+
   it('drops a group that is not a string rather than navigating with it', () => {
     expect(settingsTargetFromEvent(openSettings({ page: 'models', group: 7 }))).toEqual({
       page: 'models',

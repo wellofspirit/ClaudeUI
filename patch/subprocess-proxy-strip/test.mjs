@@ -6,25 +6,24 @@
  * subprocesses (here: the Bash tool) by default, and preserved when the parent
  * opts in via CLAUDEUI_PROXY_SUBPROCESSES=1.
  *
- * Mechanism: set ALL_PROXY in the parent env, then have the model run a Bash
- * command that prints $ALL_PROXY. The Bash subprocess's env is built by the
+ * Mechanism: set NO_PROXY to a non-matching sentinel in the parent env, then
+ * have the model run a Bash command that prints $NO_PROXY. The Bash subprocess's env is built by the
  * patched env-builder, so the probe reveals whether the strip helper ran.
  *
- * Why ALL_PROXY (not HTTP_PROXY): cli.js's HTTP client (undici) honors
- * HTTP_PROXY/HTTPS_PROXY/NO_PROXY for its own API traffic but NOT ALL_PROXY, so
- * a sentinel ALL_PROXY exercises the strip list without breaking the API call.
- * ALL_PROXY is in the patch's strip set just like the others.
+ * A non-matching NO_PROXY hostname exercises the strip list without routing
+ * the model's API traffic through an unreachable test proxy. Upstream now
+ * honors ALL_PROXY for API traffic, so the old sentinel blocked inference.
  *
  * Usage: node patch/subprocess-proxy-strip/test.mjs
  */
 
 import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
 
-const SENTINEL = 'http://127.0.0.1:59999'
+const SENTINEL = 'claudeui-proxy-probe.invalid'
 
-// printf in a real subprocess shell; ${ALL_PROXY:-MISSING} is shell expansion,
+// printf in a real subprocess shell; ${NO_PROXY:-MISSING} is shell expansion,
 // kept literal in JS (single-quoted, so no template interpolation).
-const PROBE_CMD = 'printf "PROXYPROBE=[%s]\\n" "${ALL_PROXY:-MISSING}"'
+const PROBE_CMD = 'printf "PROXYPROBE=[%s]\\n" "${NO_PROXY:-MISSING}"'
 const PROMPT =
   `Run this exact bash command and nothing else:\n${PROBE_CMD}\n` +
   `Do NOT explain anything, just run the command.`
@@ -47,8 +46,8 @@ function extractProbes(messages) {
 
 async function runPhase(label, optIn, timeoutMs = 90_000) {
   // Set the sentinel proxy var; toggle the opt-in gate per phase.
-  process.env.ALL_PROXY = SENTINEL
-  process.env.all_proxy = SENTINEL
+  process.env.NO_PROXY = SENTINEL
+  process.env.no_proxy = SENTINEL
   if (optIn) process.env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
   else delete process.env.CLAUDEUI_PROXY_SUBPROCESSES
 
@@ -64,23 +63,23 @@ async function runPhase(label, optIn, timeoutMs = 90_000) {
 async function main() {
   const t = new TestRunner('subprocess-proxy-strip')
 
-  const savedAll = process.env.ALL_PROXY
-  const savedAllLower = process.env.all_proxy
+  const savedAll = process.env.NO_PROXY
+  const savedAllLower = process.env.no_proxy
   const savedGate = process.env.CLAUDEUI_PROXY_SUBPROCESSES
 
   try {
     // --- Phase 1: default — proxy must be STRIPPED from the subprocess --------
     const def = await runPhase('default', false)
     dumpMessages(def.messages)
-    t.assert('[default] session completed (API not broken by ALL_PROXY)', def.completed)
+    t.assert('[default] session completed (API not broken by NO_PROXY)', def.completed)
     t.assert('[default] subprocess produced a probe value', def.probes.length > 0)
     if (def.probes.length > 0) {
       t.assert(
-        '[default] ALL_PROXY stripped from subprocess (probe = MISSING)',
+        '[default] NO_PROXY stripped from subprocess (probe = MISSING)',
         def.probes.every((v) => v === 'MISSING')
       )
       t.assert(
-        '[default] sentinel proxy value never leaked to subprocess',
+        '[default] sentinel value never leaked to subprocess',
         def.probes.every((v) => v !== SENTINEL)
       )
     }
@@ -92,16 +91,16 @@ async function main() {
     t.assert('[opt-in] subprocess produced a probe value', opt.probes.length > 0)
     if (opt.probes.length > 0) {
       t.assert(
-        '[opt-in] ALL_PROXY preserved in subprocess (probe = sentinel)',
+        '[opt-in] NO_PROXY preserved in subprocess (probe = sentinel)',
         opt.probes.includes(SENTINEL)
       )
     }
   } finally {
     // Restore the parent env regardless of outcome.
-    if (savedAll === undefined) delete process.env.ALL_PROXY
-    else process.env.ALL_PROXY = savedAll
-    if (savedAllLower === undefined) delete process.env.all_proxy
-    else process.env.all_proxy = savedAllLower
+    if (savedAll === undefined) delete process.env.NO_PROXY
+    else process.env.NO_PROXY = savedAll
+    if (savedAllLower === undefined) delete process.env.no_proxy
+    else process.env.no_proxy = savedAllLower
     if (savedGate === undefined) delete process.env.CLAUDEUI_PROXY_SUBPROCESSES
     else process.env.CLAUDEUI_PROXY_SUBPROCESSES = savedGate
   }

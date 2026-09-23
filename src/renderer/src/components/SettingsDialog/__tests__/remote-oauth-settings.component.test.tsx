@@ -2,11 +2,10 @@
  * The SETTINGS half of ADR-057 / S4-UI — the two provider/account panes that
  * can start an OAuth flow from a remote client.
  *
- * 1. Accounts › + Add account. `account:add` starts a login host-side, and the
- *    URL a remote user needs rides back on the RESPONSE (`pendingSignIn`) rather
- *    than on the host-local `auth:state` event. The pane folds it into the
- *    store's `authState` — the same field AuthBanner drives — so the Claude flow
- *    still has exactly one state.
+ * 1. Subscriptions › Anthropic › + Add account. `account:add` starts a login
+ *    host-side, and the URL a remote user needs rides back on the RESPONSE
+ *    (`pendingSignIn`) rather than on the host-local `auth:state` event. Since
+ *    ADR-068 §3 the card only opens the sign-in dialog, which owns the flow.
  * 2. Models & providers › the two provider SHEETS (ADR-065 phase 6c): the Add
  *    sheet's catalog pick and the Manage sheet's re-authorise, whose OAuth
  *    button parks the shared paste-back flow on web and keeps its own local
@@ -42,12 +41,22 @@ const MANUAL_URL = 'https://claude.ai/oauth/authorize?state=acct'
 
 afterEach(cleanup)
 
-// ── Accounts pane ────────────────────────────────────────────────────────
+// ── The Anthropic subscription card ──────────────────────────────────────
 
 const ACCOUNTS = {
   enabled: true,
   activeId: 'a1',
   accounts: [{ id: 'a1', email: null, subscriptionType: null, organization: null, createdAt: 0 }]
+}
+
+/** The Subscriptions section reads the registry from the store; seed the Anthropic row. */
+const ANTHROPIC: ProviderEntry = {
+  id: 'anthropic',
+  name: 'Anthropic',
+  origin: 'anthropic',
+  credential: 'signed-in',
+  engines: { claude: { enabled: true } },
+  subscription: true
 }
 
 function installAccountsApi(platform: string, over: Record<string, unknown> = {}): void {
@@ -74,20 +83,25 @@ function installAccountsApi(platform: string, over: Record<string, unknown> = {}
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()
 }
 
-describe('Settings › Accounts — add-account opens the ONE dialog', () => {
+describe('Settings › Subscriptions — add-account opens the ONE dialog', () => {
   beforeEach(() => {
-    useSessionStore.setState({ accountsState: null, authState: null, signInDialog: null })
+    useSessionStore.setState({
+      accountsState: null,
+      authState: null,
+      signInDialog: null,
+      providerRegistry: { entries: [ANTHROPIC], opencodeInstalled: true }
+    })
   })
 
   it('+ Add account opens SignInDialog in add mode and starts no flow here', async () => {
-    // ADR-068 §3: this pane used to host the paste-back flow AND fold
+    // ADR-068 §3: the accounts pane used to host the paste-back flow AND fold
     // `pendingSignIn` into `authState` itself, which made it the fourth copy of
     // the Claude sign-in. `addAccount()` is unchanged; the DIALOG calls it now.
     installAccountsApi('web')
-    await act(async () => renderSection('accounts'))
+    await act(async () => renderSection('subscriptions'))
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('AccountsSetting.addAccount'))
+      fireEvent.click(screen.getByTestId('SubscriptionsSection.addAccount'))
     })
 
     expect(useSessionStore.getState().signInDialog).toEqual({
@@ -98,10 +112,10 @@ describe('Settings › Accounts — add-account opens the ONE dialog', () => {
     expect(useSessionStore.getState().authState).toBeNull()
   })
 
-  it('the pane carries no flow UI on either platform', async () => {
+  it('the card carries no flow UI on either platform', async () => {
     for (const platform of ['web', 'darwin']) {
       installAccountsApi(platform)
-      await act(async () => renderSection('accounts'))
+      await act(async () => renderSection('subscriptions'))
       act(() =>
         useSessionStore.getState().setAuthState({
           status: 'authorizing',
@@ -110,121 +124,10 @@ describe('Settings › Accounts — add-account opens the ONE dialog', () => {
           manualUrl: MANUAL_URL
         })
       )
-      expect(screen.queryByTestId('AccountsSetting.signInFlow')).toBeNull()
       expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
       expect(screen.queryByTestId('OAuthOutcomeNotice')).toBeNull()
       cleanup()
     }
-  })
-})
-
-/**
- * The pane's ROWS, after ADR-065 phase 3A. It was a stack of bordered cards with
- * 12px/10px text and an icon-only trash can; it is now `SettingRow`s — a radio
- * per account, the plan as the description, and a named destructive Button.
- *
- * `as="label"` rather than `as="button"` is load-bearing: the row carries a real
- * Remove BUTTON, and a button inside a button is invalid HTML.
- */
-describe('Settings › Accounts — the rows', () => {
-  const TWO = {
-    enabled: true,
-    activeId: 'a2',
-    accounts: [
-      {
-        id: 'a1',
-        email: 'one@example.com',
-        subscriptionType: 'Claude Team',
-        organization: null,
-        createdAt: 0
-      },
-      {
-        id: 'a2',
-        email: 'two@example.com',
-        subscriptionType: 'Claude Max',
-        organization: null,
-        createdAt: 0
-      }
-    ]
-  }
-
-  function installTwoAccounts(over: Record<string, unknown> = {}): void {
-    installAccountsApi('darwin', {
-      getAccounts: vi.fn(async () => TWO),
-      switchAccount: vi.fn(async () => TWO),
-      deleteAccount: vi.fn(async () => TWO),
-      setMultiAccountEnabled: vi.fn(async () => TWO),
-      ...over
-    })
-  }
-
-  function row(id: string): HTMLElement {
-    const found = screen
-      .getAllByTestId('AccountsSetting.accountRow')
-      .find((el) => el.getAttribute('data-id') === id)
-    expect(found, `accountRow ${id}`).toBeTruthy()
-    return found!
-  }
-
-  beforeEach(() => {
-    useSessionStore.setState({ accountsState: null, authState: null })
-  })
-
-  it('renders one row per account, the active one selected', async () => {
-    installTwoAccounts()
-    await act(async () => renderSection('accounts'))
-
-    expect(
-      screen.getAllByTestId('AccountsSetting.accountRow').map((el) => el.getAttribute('data-id'))
-    ).toEqual(['a1', 'a2'])
-    expect(row('a2').textContent).toContain('two@example.com')
-    expect(row('a2').textContent).toContain('Claude Max')
-
-    // A real radio, so the group is keyboard- and screen-reader-navigable.
-    const radios = screen.getAllByRole('radio') as HTMLInputElement[]
-    expect(radios.map((r) => r.value)).toEqual(['a1', 'a2'])
-    expect(radios.find((r) => r.value === 'a2')!.checked).toBe(true)
-  })
-
-  it('picking a row switches account; Remove deletes THAT account only', async () => {
-    installTwoAccounts()
-    await act(async () => renderSection('accounts'))
-
-    const inactive = (screen.getAllByRole('radio') as HTMLInputElement[]).find(
-      (r) => r.value === 'a1'
-    )!
-    await act(async () => {
-      fireEvent.click(inactive)
-    })
-    expect(window.api.switchAccount).toHaveBeenCalledWith('a1')
-
-    const remove = screen
-      .getAllByTestId('AccountsSetting.removeAccount')
-      .find((el) => el.getAttribute('data-id') === 'a1')!
-    await act(async () => {
-      fireEvent.click(remove)
-    })
-    expect(window.api.deleteAccount).toHaveBeenCalledWith('a1')
-  })
-
-  it('never nests a button inside a button (the Remove-in-a-row hazard)', async () => {
-    installTwoAccounts()
-    await act(async () => renderSection('accounts'))
-
-    for (const button of Array.from(document.querySelectorAll('button'))) {
-      expect(button.querySelector('button')).toBeNull()
-    }
-  })
-
-  it('shows only the master toggle while multi-account is OFF', async () => {
-    installAccountsApi('darwin', {
-      getAccounts: vi.fn(async () => ({ ...TWO, enabled: false }))
-    })
-    await act(async () => renderSection('accounts'))
-
-    expect(screen.getByTestId('AccountsSetting.multiAccount')).toBeTruthy()
-    expect(screen.queryAllByTestId('AccountsSetting.accountRow')).toHaveLength(0)
-    expect(screen.queryByTestId('AccountsSetting.addAccount')).toBeNull()
   })
 })
 

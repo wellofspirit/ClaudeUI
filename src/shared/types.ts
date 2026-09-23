@@ -11,6 +11,7 @@ import type {
   ConfigurableHarnessId,
   SharedProviderAccountList,
   SharedProviderAccountStatus,
+  SharedProviderCuration,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -509,9 +510,18 @@ export interface AnthropicEndpointSettings {
  * intact for the unset families. Useful when pointing cli.js at a custom
  * gateway whose model identifiers differ from Anthropic's canonical ones
  * (e.g. LM Studio, OpenRouter).
+ *
+ * The two jobs have their own switches (ADR-074 §9): `pinEnabled` gates
+ * `model` and `renameEnabled` gates the three aliases. Each falls back to
+ * `enabled` when absent, so a file written before the split behaves as it did;
+ * `effectiveModelOverride` (shared/model-override.ts) is that rule. The UI
+ * writes both flags and keeps `enabled = pinEnabled || renameEnabled` for
+ * older builds reading the same file.
  */
 export interface ModelOverrideSettings {
   enabled: boolean
+  pinEnabled?: boolean
+  renameEnabled?: boolean
   model: string
   sonnetModel: string
   opusModel: string
@@ -548,7 +558,31 @@ export interface OpencodeProviderSettings {
   baseURL?: string
   /** Native provider adapter package (provider.npm). */
   npm?: string
-  models?: { id: string; name?: string }[]
+  models?: OpencodeProviderModelSettings[]
+}
+
+/**
+ * One declared model in opencode's config (`provider.<id>.models.<id>`), as
+ * ClaudeUI reads and writes it. Beyond the name, the fields a declared model
+ * needs for opencode to know what it can do (ADR-074 slice 10): `reasoning`,
+ * `attachment`, `tool_call`, `modalities.input` and `limit` — opencode reads a
+ * config-only model's missing capability as false and its missing limit as 0.
+ *
+ * Each capability field is a LEAF the writer sets only when given and changed:
+ * a caller that does not model it (the opencode provider pane) leaves it as the
+ * file has it, so a hand edit survives an unrelated save.
+ */
+export interface OpencodeProviderModelSettings {
+  id: string
+  name?: string
+  reasoning?: boolean
+  attachment?: boolean
+  /** Native `tool_call`. */
+  toolCall?: boolean
+  /** Native `modalities.input`; `modalities.output` is never touched. */
+  inputModalities?: string[]
+  /** Native `limit.context` / `limit.output`; `limit.input` is never touched. */
+  limit?: { context: number; output: number }
 }
 
 /** Per-agent override injected via OPENCODE_CONFIG_CONTENT. */
@@ -631,8 +665,12 @@ export interface OpencodeConfigSettings {
    *   - key absent  → show ALL of that provider's models (legacy / externally-authed
    *                   providers keep working unchanged).
    *   - key present → show ONLY the listed model ids (an empty array → none). The
-   *                   "Add provider" flow always writes a key, so a newly-added
-   *                   provider never auto-floods the picker.
+   *                   "Add provider" flow writes `[]` for a catalog over 50
+   *                   models, so a newly-added gateway never floods the picker.
+   *
+   * READ-ONLY on this object (ADR-074 §2): `config:load-opencode-settings`
+   * reports it, `config:save-opencode-settings` ignores it, and its one writer
+   * is `models:set-provider-allowlist` (`setProviderModelAllowlist`).
    */
   modelAllowlist?: Record<string, string[]>
 }
@@ -756,6 +794,11 @@ export interface OpencodeProviderCatalogEntry {
   source?: OpencodeProviderSource
   /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
   envVarNames?: string[]
+  /**
+   * Declared in opencode's config with its own adapter package or base URL — a
+   * custom endpoint rather than a catalog vendor (ADR-074 §7's subtitle).
+   */
+  declaredEndpoint?: true
   /** Which row actions are legitimately available. See provider-actions.ts. */
   actions: ProviderActions
   /**
@@ -777,6 +820,19 @@ export interface OpencodeCatalogModel {
   reasoning?: boolean
   /** Same zen-gated free derivation as ModelInfo.free — see its doc comment. */
   free?: boolean
+  /**
+   * What a declared COPY of this model needs (ADR-074 slice 10: a second key
+   * for a catalog provider declares its models as a custom endpoint): limits,
+   * image input, and the endpoint the catalog serves it from. Each absent when
+   * the catalog does not say.
+   */
+  contextWindow?: number
+  maxTokens?: number
+  vision?: boolean
+  /** The provider's own base URL when opencode's catalog sets one, else this model's. */
+  apiUrl?: string
+  /** The AI SDK package opencode speaks to this model with — which API it is. */
+  apiNpm?: string
 }
 
 export interface EngineConfig {
@@ -792,6 +848,24 @@ export interface EngineConfig {
   piConfig?: PiConfig
   /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
   codexConfig?: CodexEngineConfig
+  /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
+  claudeConfig?: ClaudeEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN defaults for Claude sessions — NOT `~/.claude/settings.json`.
+ *
+ * cli.js reads `model` from its own settings, and so does the terminal `claude`;
+ * writing there would change the terminal's default as a side effect. ClaudeUI
+ * passes a session's model itself, so its default lives here and reaches only
+ * sessions started from ClaudeUI (ADR-074 §8). Blank means "Claude's own
+ * `default` alias", today's behaviour. A value here IS an explicit choice
+ * (ADR-059): one the live model list no longer offers banners rather than
+ * silently starting on something else.
+ */
+export interface ClaudeEngineConfig {
+  /** A Claude picker value from `supportedModels()` (`opus`, `claude-fable-5-1`, …). */
+  defaultModel?: string
 }
 
 /**
@@ -827,10 +901,19 @@ export interface PiConfig {
    *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
    *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
   defaultModel?: string
-  /** ClaudeUI-private visible-model allowlist using full `<provider>/<modelId>`
-   * picker values. Undefined exposes every authenticated pi model; a present
-   * array exposes only its entries, including none when the array is empty. */
-  modelAllowlist?: string[]
+  /**
+   * ClaudeUI-private per-provider model allowlist (ADR-074 §1), keyed by pi
+   * provider id with BARE model ids — opencode's `modelAllowlist` rule.
+   *
+   * Semantics by KEY PRESENCE (the array, not its length, is the gate):
+   *   - key absent  → show ALL of that provider's models, including ones it
+   *                   adds later.
+   *   - key present → show ONLY the listed model ids (an empty array → none).
+   *
+   * The legacy global `string[]` of `<provider>/<modelId>` values is migrated
+   * on read by `normalizePiModelAllowlist` (`shared/pi-model-allowlist.ts`).
+   */
+  modelAllowlist?: Record<string, string[]>
 }
 
 /**
@@ -1028,6 +1111,15 @@ export interface TaskProgress {
   toolName: string
   parentToolUseId: string | null
   elapsedTimeSeconds: number
+  /**
+   * Cumulative usage for the task so far, from `system/task_progress` (§4.7).
+   * Claude-only, and only while the task is running — the terminal figure lives
+   * on `TaskNotification.usage`. Absent for every engine that reports no
+   * periodic progress.
+   */
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /** The tool the task ran most recently, from `system/task_progress`. */
+  lastToolName?: string
 }
 
 /**
@@ -1043,18 +1135,49 @@ export interface TaskProgress {
  * falls back to the pre-existing tool_result/background-flag heuristic.
  */
 export interface TaskStartedData {
+  /**
+   * The agent's ORIGIN tool_use id — the call that first spawned it, which is
+   * the id every other subagent channel is keyed by. On a resume this is NOT
+   * the id the wire reported (see `runToolUseId`); ClaudeSession normalizes it
+   * so a resumed agent re-arms the card that spawned it (ADR-073).
+   */
   toolUseId: string
   taskId: string
   taskType: string
+  /**
+   * The tool_use id cli.js actually reported for THIS run, when it differs from
+   * the origin — i.e. the `SendMessage` call that resumed a finished agent.
+   * Absent on a first run. Carried for diagnostics; nothing keys off it.
+   */
+  runToolUseId?: string
+  /** 1-based run counter for this agent. `> 1` means it was resumed. */
+  runIndex?: number
 }
+
+/** The terminal states an engine reports for a task run. */
+export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
 
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
-  status: 'completed' | 'failed' | 'stopped'
+  /**
+   * `unfinished` is not a wire status: the history loader writes it for an
+   * agent whose transcript shows its last run starting and never ending
+   * (ADR-073 §5). A transcript cannot tell an agent that died with its process
+   * from one still running in another process, so history claims neither —
+   * the card reads neutral, and a live session replaces it with cli.js's own
+   * `stopped` reap.
+   */
+  status: TaskTerminalStatus | 'unfinished'
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /**
+   * Which run of the agent this terminal event ends (1-based). Kept on the
+   * notification as well as on the active record because `activeTasks` drops
+   * the task at terminal — this is what still knows "resumed ×2" afterwards.
+   */
+  runIndex?: number
 }
 
 export interface SubagentMessageData {
@@ -1492,6 +1615,15 @@ interface SessionAPI {
   readPiModelsRaw(): Promise<PiModelsRaw>
   /** Apply leaf patches to pi's models.json; refuses projection-owned provider entries. */
   patchPiModels(patches: RawConfigPatch[]): Promise<void>
+  /**
+   * One provider's ClaudeUI model allowlist (ADR-074 §2): `null` deletes the key
+   * (All models, including ones added later), a list sets it (`[]` → none).
+   */
+  setProviderModelAllowlist(
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,
@@ -1544,6 +1676,19 @@ interface SharedProviderAPI {
     enabled: boolean
   ): Promise<void>
   setSharedProviderApiKey(id: string, key: string): Promise<void>
+  /**
+   * Adopt a key an engine already holds into a catalog definition (ADR-074 §6).
+   * `keep` names the engine whose key wins; omitted, both must hold the same key.
+   */
+  adoptSharedProviderNativeKey(id: string, keep?: ConfigurableHarnessId): Promise<void>
+  /** One model list for every engine, or one each (ADR-074 §3); projected while linked. */
+  setSharedProviderCuration(id: string, curation: SharedProviderCuration): Promise<void>
+  /**
+   * Switch a key or endpoint provider off (delivered to no engine; key, routes
+   * and model list kept) or back on (ADR-074 slice 10). Switching on refuses to
+   * replace a key an engine holds of its own unless `replaceOwn` confirms it.
+   */
+  setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
   syncSharedProvider(id: string): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(
@@ -1974,8 +2119,27 @@ interface AccountAPI {
   /**
    * The dashboard's one read over the ledger's hourly buckets (ADR-071 §8),
    * grouped provider → account → model for the given range.
+   *
+   * `scope` defaults to `local`, this machine's own ledger. `all` folds the
+   * cached rows of every other machine the hub knows about into the same totals
+   * (ADR-072 §3); a machine with no hub answers `local` and says so.
    */
-  fetchUsageDashboard(range: DashboardRange): Promise<UsageDashboardData>
+  fetchUsageDashboard(range: DashboardRange, scope?: DashboardScope): Promise<UsageDashboardData>
+  /** The usage hub's client state (ADR-072 §7). Never carries the device secret. */
+  usageHubStatus(): Promise<UsageHubStatus>
+  /** Write the hub's URL, this device's name, the service-token id, and the on/off switch. */
+  configureUsageHub(input: UsageHubConfigureInput): Promise<UsageHubStatus>
+  /**
+   * Store the device secret. WRITE-ONLY: nothing reads it back, and the answer
+   * is the status, whose `hasSecret` is all a surface is told.
+   */
+  setUsageHubSecret(secret: string): Promise<UsageHubStatus>
+  /** Push then pull, now. Ignores the non-essential-traffic gate — the user asked. */
+  syncUsageHubNow(): Promise<UsageHubStatus>
+  /** ADR-072 §2's repair: have the hub drop this device's recent rows and re-push them. */
+  resyncUsageHub(): Promise<UsageHubStatus>
+  /** Forget the hub: the config, the secret and every cached remote row. */
+  forgetUsageHub(): Promise<UsageHubStatus>
 }
 
 export interface NetworkInterfaceInfo {
@@ -2827,6 +2991,17 @@ export interface ClaudeAPI
 export interface RateWindow {
   usedPercent: number // 0-100
   resetsAt: string | null // ISO8601 timestamp
+  /**
+   * How long the window lasts, when the vendor says (ADR-071 §6, S3c).
+   *
+   * ChatGPT states it (`limit_window_seconds` → Codex's `window_minutes` →
+   * `windowDurationMins`) and it is what the window's KIND is derived from, so
+   * a plan with only a weekly limit is no longer filed as a five-hour one.
+   * Claude never states it: its windows are named by the API itself
+   * (`five_hour`, `seven_day`), so the name carries the length and this stays
+   * absent. Absent and null mean the same thing — no stated length.
+   */
+  windowMinutes?: number | null
 }
 
 /**
@@ -2838,9 +3013,12 @@ export interface RateWindow {
  * window resets"), converted to ISO 8601 on the way in so the panel's existing
  * `formatResetTime` works unchanged.
  *
- * `primary` is the rolling 5-hour window and `secondary` the weekly one; either
- * is null when the backend did not report it, which the panel shows as
- * unavailable rather than as zero usage.
+ * `primary` and `secondary` are SLOTS, not lengths (corrected 2026-09-21, S3c):
+ * the backend fills whichever ones the plan has, and a plan with one weekly
+ * limit delivers it as `primary`. How long each window lasts is
+ * {@link RateWindow.windowMinutes}, and `windowKindForMinutes` is what turns
+ * that into a kind and a label. Either slot is null when the backend did not
+ * report it, which the panel shows as unavailable rather than as zero usage.
  */
 export interface ChatgptAccountLimits {
   email?: string
@@ -2877,10 +3055,12 @@ export interface AccountLimitWindow {
    * identity of spend.
    */
   kind: '5h' | '7d' | string
-  /** The display name — `5-hour`, `7-day`, `7-day Fable`. */
+  /** The display name — `5-hour`, `7-day`, `7-day Fable`, `limit`. */
   label: string
   usedPercent: number
   resetsAt: string | null
+  /** The window's length when the vendor stated it — see {@link RateWindow.windowMinutes}. */
+  windowMinutes?: number | null
 }
 
 /**
@@ -2906,10 +3086,108 @@ export interface AccountLimits {
   windows: AccountLimitWindow[]
   credits?: { unlimited: boolean; balance: string | null }
   observedAt: number
-  /** Where the reading came from — ADR-072 relays readings from other machines. */
-  source: 'local' | { deviceId: string }
+  /**
+   * Where the reading came from — ADR-072 relays readings from other machines.
+   *
+   * The NAME travels with the reading, not only the id. A relayed reading is
+   * shown under both scopes (ADR-072 §4: a limit is a fact about the account,
+   * and the dashboard scope decides whose spend is summed), so it cannot borrow
+   * the machine list from a combined payload that may not exist — a `via` tag
+   * reading `via 3f2a1b9c` is not an answer to "who read this". The id is the
+   * fallback for a device the hub has since dropped from its list.
+   */
+  source: 'local' | { deviceId: string; deviceName: string }
+  /**
+   * True when {@link label} is the hub's MASKED form (`d•••@e•••.com`) rather
+   * than a name this machine read itself (S5c).
+   *
+   * A surface has to be able to say so: the masked label is not what the account
+   * is called, it is as much of it as a device caller is given (ADR-072 §6), and
+   * a reader who sees it without that qualification reads it as a corrupted
+   * address. Only a relayed reading for a key this machine has no ledger row for
+   * can carry it.
+   */
+  labelMasked?: boolean
   state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
   error?: string
+}
+
+// ---------------------------------------------------------------------------
+// The usage hub (ADR-072)
+//
+// What the `usage-hub:*` channels carry. The SECRET is not here and is not in
+// any shape below: the device credential lives in the operational database and
+// no query returns it — `hasSecret` is the whole answer a surface gets.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the client is doing, or why it is not.
+ *
+ *  - `off` — no hub configured, or sync disabled;
+ *  - `idle` — configured and up to date;
+ *  - `syncing` — a pass is in flight;
+ *  - `backoff` — a 5xx, a network failure or a 429; a retry is scheduled;
+ *  - `needs-credentials` — the hub refused the service token (a 401, or the 302
+ *    to the Access login page that a bad token actually gets). Only a person can
+ *    fix it, so nothing is retried;
+ *  - `update-hub` — the hub speaks an older schema (`426`). The cursor is
+ *    untouched, so nothing is lost;
+ *  - `error` — a request the hub refused for some other reason.
+ */
+export type UsageHubState =
+  'off' | 'idle' | 'syncing' | 'backoff' | 'needs-credentials' | 'update-hub' | 'error'
+
+/**
+ * One other machine, as `GET /v1/devices` describes it (ADR-072 §6).
+ *
+ * A device caller may read this: a name the user chose, an OS family, a build
+ * and an instant are not sensitive, and without them the machine list can only
+ * show opaque uuids and guess "behind" from the newest hour it holds — so a
+ * machine that synced but spent nothing would read as stale.
+ */
+export interface UsageHubDevice {
+  deviceId: string
+  deviceName: string
+  os: string
+  appVersion: string
+  /** When the hub last accepted a write from that machine. */
+  lastPushAt: number
+  /** The owner marked it retired, so the machine list stops flagging it. */
+  retired: boolean
+}
+
+/** Everything `usage-hub:status` answers. Carries no credential. */
+export interface UsageHubStatus {
+  enabled: boolean
+  url: string
+  /** Null until sync has been enabled once — reading the status never creates one. */
+  deviceId: string | null
+  deviceName: string
+  /** The Access service token's client id. Public by design, so the form can show it. */
+  clientId: string
+  /** Whether a device secret is stored. Never the secret. */
+  hasSecret: boolean
+  state: UsageHubState
+  lastPushAt: number | null
+  lastPullAt: number | null
+  lastError: string | null
+  /** Attributed ledger rows waiting past the cursor. `unknown` rows are not counted. */
+  pendingEvents: number
+  remote: {
+    devices: UsageHubDevice[]
+    /** The hub's bucket-rebuild generation, or null before the first pull. */
+    epoch: number | null
+  }
+}
+
+/** What `usage-hub:configure` takes. The secret has its own write-only channel. */
+export interface UsageHubConfigureInput {
+  /** `https:` only, except `http://localhost` / `http://127.0.0.1`. No path, no credentials. */
+  url: string
+  deviceName: string
+  /** The Access service token's client id. Not a secret — the id is public by design. */
+  clientId: string
+  enabled: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -2926,8 +3204,15 @@ export interface UsageWindowRow {
   /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
   windowKind: string
   canonicalEnd: number
-  /** `canonicalEnd - windowDurationMs(windowKind)`, stored so a reader need not restate the rule. */
+  /** `canonicalEnd - windowDurationMs(windowKind, windowMinutes)`, stored so a reader need not restate the rule. */
   windowStart: number
+  /**
+   * The length the vendor stated, when it did (S3c). It is what
+   * {@link windowStart} was computed from; a row without one had its length
+   * read off its kind, which is Claude's case and every row written before the
+   * duration was kept.
+   */
+  windowMinutes: number | null
   /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
   peakPercent: number
   /**
@@ -2975,6 +3260,12 @@ export interface UsageWindowQuery {
   accountKey?: string
   kind?: string
   sinceTs?: number
+  /**
+   * `all` prefers the hub's row for a window it holds (ADR-072 §4): its
+   * numerator is summed over every machine, which is the half of ADR-071 §7's
+   * bias this arc exists to close. Defaults to `local`.
+   */
+  scope?: DashboardScope
 }
 
 // ---------------------------------------------------------------------------
@@ -2987,6 +3278,18 @@ export interface UsageWindowQuery {
 
 /** The ranges the dashboard offers. `today` is the viewer's local calendar day. */
 export type DashboardRange = 'today' | '7d' | '30d' | '90d'
+
+/**
+ * Whose spend the dashboard is about (ADR-072 §3, slice S5c).
+ *
+ * `local` is this machine's ledger and is what every range meant before the
+ * usage hub existed; `all` folds the cached `remote_usage_bucket` rows in
+ * through the same arithmetic, so a combined figure is the same kind of number
+ * as a local one rather than a second, differently-derived total. `local` is the
+ * wire's default, and the answer says which scope it actually used — a hub that
+ * is off has no remote rows to fold and answers `local` whatever was asked.
+ */
+export type DashboardScope = 'local' | 'all'
 
 /**
  * What one grouping of buckets cost, in the three currencies ADR-071 §2 defines
@@ -3037,6 +3340,26 @@ export interface DashboardAccount {
   models: DashboardModel[]
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /**
+   * The machines this account's spend came from, this one as its own device id
+   * (S5c). Emitted under the `all` scope only — under `local` there is one
+   * machine and naming it would be noise.
+   */
+  machines?: string[]
+  /** True when no bucket of this account's spend was written on THIS machine (S5c). */
+  remoteOnly?: boolean
+  /**
+   * True when {@link label} is the hub's MASKED form of the name rather than one
+   * this machine read (S5c round 3) — the same flag {@link AccountLimits} carries,
+   * for the same reason.
+   *
+   * The masked label IS the account's name when nothing else knows one: showing
+   * the key's fallback (`ws-9`) instead made the same account read differently
+   * under the two scopes, because under `local` it is a credential row that shows
+   * the mask and under `all` it is a ledger row that showed the fallback. A
+   * ledger label always wins over the mask, and then this is never set.
+   */
+  labelMasked?: boolean
 }
 
 /** One provider's spend over the range, and the accounts under it. */
@@ -3053,6 +3376,20 @@ export interface DashboardDay {
   date: string
   /** Only the providers that spent something that day; a missing one is zero. */
   byProvider: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  /**
+   * The OTHER machines' part of {@link byProvider}, under the `all` scope only
+   * (S5c) — a subset of it, never an addition, so a column's total is still
+   * `byProvider` alone and a chart hatches this much of each segment.
+   */
+  byProviderRemote?: DashboardDay['byProvider']
+  /**
+   * The same cell split by DEVICE instead of by provider, under the `all` scope
+   * only (S5c). A second split rather than a nesting: the two answer different
+   * questions and neither derives the other — `byProviderRemote` loses which
+   * machine, this loses which provider — and a `provider × machine` cell would
+   * be the product of both for a chart that draws one at a time.
+   */
+  byMachine?: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
   totals: CostTotals
 }
 
@@ -3069,7 +3406,62 @@ export interface DashboardHour {
   hourUtc: number
   /** Only the providers that spent something that hour; a missing one is zero. */
   byProvider: DashboardDay['byProvider']
+  /** The other machines' part of {@link byProvider} — see {@link DashboardDay.byProviderRemote}. */
+  byProviderRemote?: DashboardDay['byProvider']
+  /** The hour split by device — see {@link DashboardDay.byMachine}. */
+  byMachine?: DashboardDay['byMachine']
   totals: CostTotals
+}
+
+/**
+ * One (provider, account) slice of ONE machine's spend (S5c).
+ *
+ * The provider tree carries no device, and the buckets carry no engine or model
+ * per machine that a `machine → provider → account` tree would need to invent, so
+ * the machine group-by reads this list instead of re-folding the tree. Labels are
+ * not repeated here: every key in it also appears in `providers`, which is where
+ * a reader resolves both.
+ */
+export interface DashboardMachineAccount {
+  providerId: string
+  accountKey: string
+  totals: CostTotals
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
+  dispatched: CostTotals | null
+}
+
+/**
+ * One machine that spent something in the range, or that the hub knows about
+ * (ADR-072 §7, slice S5c).
+ *
+ * THIS MACHINE IS ALWAYS FIRST and is the only row with `self: true`; the rest
+ * come from `remote_device`, which never holds this device. A machine the hub
+ * lists that spent nothing in the range is still a row, with zero totals — "it
+ * synced and spent nothing" and "it has not synced" are different facts and
+ * dropping the row would spell them the same way.
+ *
+ * `lastPushAt` is null when no push instant is known: for THIS machine before
+ * its first announce, and for a machine that has cached buckets but no
+ * `remote_device` row — a peer the hub has dropped since the last pull, whose
+ * hours are still in the combined total and so still need a row. Nothing
+ * derives "behind" from a null: an unknown last push is not a late one.
+ */
+export interface DashboardMachine {
+  deviceId: string
+  deviceName: string
+  /** `process.platform`'s family — `win32`, `darwin`, `linux`, or `unknown`. */
+  os: string
+  appVersion: string
+  lastPushAt: number | null
+  /** The owner marked it retired on the hub, so nothing flags it as behind. */
+  retired: boolean
+  /** The machine the reader is looking at. Exactly one row carries it. */
+  self: boolean
+  totals: CostTotals
+  /** Its display cost as a FRACTION of the range's, `0` when the range cost nothing. */
+  share: number
+  /** Its spend split by provider and account — the machine group-by's leaves. */
+  accounts: DashboardMachineAccount[]
 }
 
 /**
@@ -3081,6 +3473,13 @@ export interface DashboardHour {
  */
 export interface UsageDashboardData {
   range: DashboardRange
+  /**
+   * The scope this answer was actually built at (S5c). `all` only ever comes
+   * back from a machine with a hub enabled and a device id of its own; anything
+   * else answers `local`, because there is nothing to combine and no way to say
+   * which rows are this machine's.
+   */
+  scope: DashboardScope
   /**
    * Where the range begins: the local midnight `range` days before {@link toTs}
    * (today's own midnight for `today`), floored to the UTC hour `usage_bucket`
@@ -3105,10 +3504,30 @@ export interface UsageDashboardData {
   hours?: DashboardHour[]
   /** Σ display over the `unknown` account — history from before attribution. */
   unattributedUsd: number
+  /**
+   * The part of `totals.displayCostUsd` this machine's own ledger produced, and
+   * the part relayed from the others (S5c). They always add up to the hero: under
+   * `local` the first IS the hero and the second is zero.
+   */
+  localUsd: number
+  remoteUsd: number
+  /**
+   * Every machine in the combined view, this one first — empty under `local`,
+   * where there is one machine and the question does not arise.
+   */
+  machines: DashboardMachine[]
 }
 
 export interface AccountUsage {
-  fiveHour: RateWindow
+  /**
+   * Null when the API reported no five-hour window at all (S3c).
+   *
+   * It used to default to `{ usedPercent: 0, resetsAt: null }`, which drew a
+   * 0 % meter and wrote samples under a window the account does not have — the
+   * case an API-key, Bedrock or Vertex session hits, where `rate_limits` is
+   * unavailable. An absent window is now absent (ADR-030).
+   */
+  fiveHour: RateWindow | null
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
@@ -3306,6 +3725,14 @@ export interface ModelCostEntry {
 export interface EngineHistoryLoad {
   messages: ChatMessage[]
   statusLine: StatusLineData | null
+  /**
+   * The model the transcript's LAST assistant message names, or null when it
+   * names none. A session created outside this app has no persisted model
+   * entry, so without this it reopens on the configured default — a model it
+   * never ran and will not resume on. Null/absent leaves the existing
+   * fallback in place.
+   */
+  lastModel?: ModelRef | null
 }
 
 /**

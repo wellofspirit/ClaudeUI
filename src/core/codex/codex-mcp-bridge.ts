@@ -28,7 +28,7 @@ import { logger } from '../services/logger'
 
 // ---------------------------------------------------------------------------
 // Types — mirror `RawMcpServerConfig` from
-// `.cache/codex-src/codex-rs/config/src/mcp_types.rs`. That struct is
+// `vendor/codex-src/codex-rs/config/src/mcp_types.rs`. That struct is
 // `deny_unknown_fields`, so only the keys below may ever be sent.
 // ---------------------------------------------------------------------------
 

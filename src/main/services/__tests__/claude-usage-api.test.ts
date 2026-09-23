@@ -125,6 +125,112 @@ describe('fetchClaudeUsage', () => {
     expect(root.claudeAiOauth.accessToken).toBe('fake-access-1')
   })
 
+  // S2g part 4 — the request the refresh actually makes.
+  //
+  // What was here before posted to `console.anthropic.com/v1/oauth/token` with
+  // `client_id: 'cli'` and a form-encoded body. Both refresh attempts in 14 days
+  // of the owner's logs came back 400, so it had probably never worked; it is
+  // rarely reached because cli.js keeps the ACTIVE folder's token fresh. These
+  // three values are read out of the pinned CLI binary (see `CLI_OAUTH`), and
+  // nothing else in the app would notice them going wrong.
+  it('posts the refresh the way the pinned cli.js does', async () => {
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock
+      .mockResolvedValueOnce(ok({ access_token: 'fake-access-2', expires_in: 3600 }))
+      .mockResolvedValueOnce(ok(usageBody()))
+
+    await read()
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://platform.claude.com/v1/oauth/token')
+    expect(init.method).toBe('POST')
+    expect(init.headers['Content-Type']).toBe('application/json')
+    // cli.js's own 30 s. A hung refresh matters here: the account-switch marker
+    // is only written once the read has failed, so every second it hangs is a
+    // second in which a turn's rows still resolve to the previous account.
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(JSON.parse(init.body as string)).toEqual({
+      grant_type: 'refresh_token',
+      refresh_token: 'fake-refresh-1',
+      client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+      // The credential's OWN scopes, so the refreshed token is granted no more
+      // than the one it replaces.
+      scope: 'user:inference'
+    })
+  })
+
+  it('sends cli.js’s default scopes when the credential names none', async () => {
+    await writeFile(
+      accountPath,
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'fake-access-1',
+          refreshToken: 'fake-refresh-1',
+          expiresAt: Date.now() - 1000,
+          scopes: []
+        }
+      }),
+      'utf-8'
+    )
+    fetchMock
+      .mockResolvedValueOnce(ok({ access_token: 'fake-access-2', expires_in: 3600 }))
+      .mockResolvedValueOnce(ok(usageBody()))
+
+    await read()
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).scope).toBe(
+      'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+    )
+  })
+
+  it('says a refused refresh spent a grant, so a retry loop can stop offering it', async () => {
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock.mockResolvedValueOnce(status(400))
+
+    expect(await read()).toMatchObject({ error: 'needs-sign-in', refreshFailed: true })
+  })
+
+  it('answers `unavailable` for a refresh that failed on the network', async () => {
+    // Round 3, owner ruling: `needs-sign-in` is what `usage-provider.ts` turns
+    // into ADR-070's "Sign in again" chip, so a dropped connection was telling
+    // the user to re-authenticate a healthy account. It is also not a refusal,
+    // so the grant may well still be good and the file's version is not
+    // latched against another attempt.
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    const result = await read()
+
+    expect(result).toMatchObject({ error: 'unavailable' })
+    expect(result).not.toHaveProperty('refreshFailed')
+  })
+
+  it('answers `unavailable` for a refresh that TIMED OUT', async () => {
+    // The 30 s timeout added in round 2 is exactly how a slow link now fails,
+    // and it must not read as a dead credential.
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    const aborted = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+    fetchMock.mockRejectedValueOnce(aborted)
+
+    const result = await read()
+
+    expect(result).toMatchObject({ error: 'unavailable' })
+    expect(result).not.toHaveProperty('refreshFailed')
+  })
+
+  it('still answers `needs-sign-in` when the endpoint REFUSED the grant', async () => {
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock.mockResolvedValueOnce(status(400))
+
+    expect(await read()).toMatchObject({ error: 'needs-sign-in', refreshFailed: true })
+  })
+
+  it('does not claim a grant was spent when the token was simply valid', async () => {
+    fetchMock.mockResolvedValueOnce(status(503))
+
+    expect(await read()).not.toMatchObject({ refreshFailed: true })
+  })
+
   it('retries ONCE behind a 401, with the refreshed token', async () => {
     fetchMock
       .mockResolvedValueOnce(status(401))
@@ -318,5 +424,43 @@ describe('the windows a reading carries', () => {
 
   it('omits a window the reading did not carry', () => {
     expect(claudeLimitWindows(usage({ sevenDay: null })).map((w) => w.kind)).toEqual(['5h'])
+  })
+
+  /**
+   * S3c — the five-hour window is not special. It used to be the one window
+   * that was always emitted, defaulted to 0 % when the payload carried none, so
+   * an account with no five-hour limit (an API key, Bedrock, Vertex) got a
+   * fabricated meter and a `usage_window_sample` row under a window it does not
+   * have.
+   */
+  it('emits NO 5-hour window when the reading has none', () => {
+    expect(claudeLimitWindows(usage({ fiveHour: null })).map((w) => w.kind)).toEqual(['7d'])
+    expect(claudeLimitWindows(usage({ fiveHour: null, sevenDay: null }))).toEqual([])
+  })
+})
+
+describe('a reading with no five-hour window', () => {
+  it('answers null rather than a 0 % window', async () => {
+    fetchMock.mockResolvedValueOnce(
+      ok({ seven_day: { utilization: 12, resets_at: '2026-09-25T15:00:00.000Z' } })
+    )
+
+    const result = await read()
+
+    expect('usage' in result).toBe(true)
+    const { usage } = result as { usage: AccountUsage }
+    expect(usage.fiveHour).toBeNull()
+    expect(usage.sevenDay).toEqual({ usedPercent: 12, resetsAt: '2026-09-25T15:00:00.000Z' })
+    // Nothing to sample: the ONE writer skips a window it was not given.
+    expect(claudeLimitWindows(usage).map((w) => w.kind)).toEqual(['7d'])
+  })
+
+  it('leaves a reading that DOES carry one untouched', async () => {
+    fetchMock.mockResolvedValueOnce(ok(usageBody()))
+
+    const result = await read()
+
+    const { usage } = result as { usage: AccountUsage }
+    expect(usage.fiveHour).toEqual({ usedPercent: 31, resetsAt: '2026-09-21T15:00:00.000Z' })
   })
 })

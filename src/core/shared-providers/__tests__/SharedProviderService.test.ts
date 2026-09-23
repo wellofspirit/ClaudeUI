@@ -46,6 +46,7 @@ function setup(
     removeCredential: vi.fn(async () => events.push('pi:remove-cred')),
     hasCredential: vi.fn(async () => false),
     hasDefinition: vi.fn(() => true),
+    diagnoseZeroModels: vi.fn(async () => 'no-models-discovered' as const),
     resolveDefaultModel: vi.fn((definition) =>
       definition.routes.pi.enabled && definition.routes.pi.defaultModel
         ? `local-api/${definition.routes.pi.defaultModel}`
@@ -493,9 +494,22 @@ describe('SharedProviderService', () => {
       expect(opencode.diagnoseZeroModels).toHaveBeenCalled()
     })
 
-    it('reports no-models-discovered for pi, which has no veto or allowlist', async () => {
-      const { service } = setup([chatgpt()])
+    it('asks the pi adapter too, rather than assuming nothing was discovered', async () => {
+      const { service, pi } = setup([chatgpt()])
+      vi.mocked(pi.diagnoseZeroModels).mockResolvedValueOnce('models-restricted')
+
       const status = await service.getStatus('chatgpt')
+
+      expect(status.routes.pi.diagnosis).toBe('models-restricted')
+      expect(pi.diagnoseZeroModels).toHaveBeenCalledWith(expect.objectContaining({ id: 'chatgpt' }))
+    })
+
+    it('falls back to no-models-discovered when the pi adapter rejects', async () => {
+      const { service, pi } = setup([chatgpt()])
+      vi.mocked(pi.diagnoseZeroModels).mockRejectedValueOnce(new Error('pi probe failed'))
+
+      const status = await service.getStatus('chatgpt')
+
       expect(status.routes.pi.diagnosis).toBe('no-models-discovered')
     })
 

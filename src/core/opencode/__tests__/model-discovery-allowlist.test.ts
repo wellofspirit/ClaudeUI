@@ -191,4 +191,81 @@ describe('model-discovery — provider catalog', () => {
     const models = await getOpencodeProviderModels('openrouter')
     expect(models.map((m) => m.id).sort()).toEqual(['gpt-x', 'gpt-y', 'gpt-z'])
   })
+
+  it('carries what a declared copy of a model needs: limits, image input, its endpoint', async () => {
+    const withFacts = model('moonshotai/kimi-k3', 'Kimi K3', {
+      api: {
+        id: 'moonshotai/kimi-k3',
+        url: 'https://openrouter.ai/api/v1',
+        npm: '@openrouter/ai-sdk-provider'
+      },
+      limit: { context: 262144, output: 32768 },
+      capabilities: {
+        temperature: true,
+        reasoning: true,
+        attachment: true,
+        toolcall: true,
+        input: { text: true, audio: false, image: true, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false }
+      }
+    })
+    MockOpencodeClient.mockImplementation(function () {
+      return {
+        getConfigProviders: vi.fn().mockResolvedValue(CONFIG_PROVIDERS),
+        getProviders: vi.fn().mockResolvedValue({
+          all: [
+            {
+              ...CONFIG_PROVIDERS.providers[0],
+              // A zero limit is opencode's "unknown" — never copied as a limit.
+              models: {
+                'moonshotai/kimi-k3': withFacts,
+                'gpt-x': model('gpt-x', 'GPT X', { limit: { context: 0, output: 0 } })
+              }
+            }
+          ]
+        }),
+        getProviderAuth: vi.fn().mockResolvedValue(AUTH_CATALOG)
+      }
+    })
+    invalidateOpencodeModelCache()
+    const models = await getOpencodeProviderModels('openrouter')
+    expect(models.find((m) => m.id === 'moonshotai/kimi-k3')).toMatchObject({
+      contextWindow: 262144,
+      maxTokens: 32768,
+      vision: true,
+      reasoning: true,
+      apiUrl: 'https://openrouter.ai/api/v1',
+      apiNpm: '@openrouter/ai-sdk-provider'
+    })
+    const bare = models.find((m) => m.id === 'gpt-x')!
+    expect(bare).not.toHaveProperty('contextWindow')
+    expect(bare).not.toHaveProperty('maxTokens')
+    // The catalog says it takes no images: a fact, not an absence.
+    expect(bare.vision).toBe(false)
+    expect(bare).not.toHaveProperty('apiUrl')
+    expect(bare).not.toHaveProperty('apiNpm')
+  })
+
+  it('prefers the provider’s own base URL over each model’s', async () => {
+    MockOpencodeClient.mockImplementation(function () {
+      return {
+        getConfigProviders: vi.fn().mockResolvedValue(CONFIG_PROVIDERS),
+        getProviders: vi.fn().mockResolvedValue({
+          all: [
+            {
+              ...CONFIG_PROVIDERS.providers[0],
+              options: { baseURL: 'https://gateway.test/v1' },
+              models: {
+                a: model('a', 'A', { api: { id: 'a', url: 'https://model.test/v1', npm: 'n' } })
+              }
+            }
+          ]
+        }),
+        getProviderAuth: vi.fn().mockResolvedValue(AUTH_CATALOG)
+      }
+    })
+    invalidateOpencodeModelCache()
+    const [only] = await getOpencodeProviderModels('openrouter')
+    expect(only.apiUrl).toBe('https://gateway.test/v1')
+  })
 })

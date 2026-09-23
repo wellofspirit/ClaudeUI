@@ -30,12 +30,16 @@ import {
   activeClaudeAttribution,
   claudeAccountLabel,
   claudeBillingTypeFromProfile,
+  isUnresolvedMarker,
+  type AccountLogEntry,
+  type AccountLogMarker,
   type AccountLogRecord
 } from './usage-windows'
 import {
   claudeLimitWindows,
   fetchClaudeUsage,
   parseUsageResponse,
+  type ClaudeUsageError,
   type CredentialsFile,
   type OAuthCredentials
 } from './claude-usage-api'
@@ -111,6 +115,30 @@ const CACHE_PATH = join(CACHE_DIR, 'usage-cache.json')
 const CLAUDE_JSON_PATH = join(homedir(), '.claude.json')
 const ACCOUNT_LOG_DIR = join(CACHE_DIR, 'usage')
 const ACCOUNT_LOG_PATH = join(ACCOUNT_LOG_DIR, 'account-log.jsonl')
+
+/**
+ * Backoff for a read of the ACTIVE account that could not be completed (S2g
+ * part 3, generalised in round 3): 5 s, 15 s, 60 s, then this cadence.
+ *
+ * Two causes arm it, and neither is an answer from the endpoint: an identity
+ * that could not be read, and a usage read that failed for a transient reason.
+ * A refusal never does — retrying it would spend grants on an account that has
+ * said no — and neither does a 429, which has its own handling.
+ *
+ * Every attempt re-reads the credentials file first, because cli.js rewrites it
+ * the moment the user sends a turn — so the usual recovery is that a later
+ * attempt finds a fresh access token and spends nothing at all. The 30-minute
+ * poll is far too slow for this: on 2026-09-21 it left thirteen minutes of
+ * turns keyed to the account the user had just switched AWAY from.
+ *
+ * The steady cadence is the standing cost of a fault that never clears: one
+ * `/api/oauth/profile` GET every five minutes for a folder whose identity stays
+ * unread, and one `/api/oauth/usage` GET every five minutes while a reading
+ * keeps failing. Both stop the moment they succeed, and `stopPolling` clears
+ * the timer.
+ */
+const RETRY_DELAYS_MS = [5_000, 15_000, 60_000]
+const RETRY_STEADY_MS = 5 * 60 * 1000
 
 /** Delay after the 5h window expires before proactively re-fetching usage. */
 const WINDOW_EXPIRY_FETCH_DELAY_MS = 10_000
@@ -215,10 +243,87 @@ export class UsageFetcher {
     size: number
     identity: ClaudeDirIdentity
   } | null = null
-  /** Which dir `activeAccount` was resolved for, or null in Keychain mode. */
+  /**
+   * Which dir `activeAccount` was RESOLVED for, or null in Keychain mode and
+   * before the first resolve of the process.
+   *
+   * Only a successful resolve writes it (S2g): it is what tells "this folder's
+   * endpoint is briefly down, keep the account we already read" apart from "the
+   * folder moved and we have never read it", and the second case is the one
+   * whose rows must not be lent to the previous account.
+   */
   private activeAccountDir: string | null = null
+  /**
+   * False until the first `trackActiveAccount` pass of the process has finished.
+   *
+   * "At boot" is a real distinction — it is the one moment where an unreadable
+   * identity may mean nothing moved — and it cannot be read off
+   * `activeAccountDir`, which the single-account and API-key paths reset to null
+   * mid-session (round 2, M9).
+   */
+  private firstTrackedPassDone = false
   /** Unsubscribe from the account-switch hook, while polling. */
   private unsubscribeSwitch: (() => void) | null = null
+  /**
+   * What this process decided about a folder whose identity it could not read
+   * (S2g), and which folder that was.
+   *
+   * `markerTs` is the instant of the marker in the account log, or null for
+   * "nothing moved, nothing deferred" (the boot case below). While a marker is
+   * open, a Claude transcript row after it is DEFERRED rather than written;
+   * closing it appends the real record at that same instant, so the rows land
+   * with their own timestamps under the account that ran them.
+   *
+   * `dir: null` means the marker was read back off the log at startup — a
+   * deferral that outlived the process that opened it. The folder cannot have
+   * moved while the app was down (`AccountManager` writes the pointer), so the
+   * first folder this process sees is taken to be the marker's.
+   *
+   * ONE decision per folder, and it is this field rather than the retry episode
+   * below that answers "have I already marked this folder": the episode can
+   * outlive the decision when another folder resolves in between, and taking it
+   * as the memo left a re-switch to a still-unread folder unmarked (round 2, R1).
+   */
+  private unreadFolder: { dir: string | null; markerTs: number | null } | null = null
+  /**
+   * What the ONE retry loop is working on: the folder that was applied when it
+   * was armed (null in single-account mode), how many tries in it is, and
+   * whether the folder's IDENTITY is the thing that could not be read.
+   *
+   * `identityUnread` decides what an attempt does. While it is set, only the
+   * identity is re-read: a full pass would offer the same credential file its
+   * own refresh grant on every attempt, which is the spending ADR-071 §6 exists
+   * to prevent. Once the identity is in hand, an attempt is a whole pass, so a
+   * reading that had failed lands too.
+   */
+  private retryState: { dir: string | null; attempt: number; identityUnread: boolean } | null = null
+  /** The retry loop's ONE timer. Cleared by a resolve, a new cause, and stop. */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * The credentials-file version a refresh grant has already been spent on and
+   * REFUSED by the endpoint (ADR-071 §6 applied to the retry loop).
+   *
+   * Keyed by mtime and size like {@link identityCache}, because that pair is
+   * what changes when cli.js rotates the file. While it has not changed, a
+   * second refresh would offer the endpoint the very token it just rejected.
+   *
+   * ONE slot, deliberately: the fetcher reads the ACTIVE credential and nothing
+   * else, so two paths hold a refusal at once only across a switch, where the
+   * new folder's first read is the one that matters. A dashboard sweep of
+   * STORED accounts does not come through here (it has its own reads, with
+   * `allowRefresh` decided per account), so the slot cannot be evicted by
+   * another account's failure mid-retry.
+   */
+  private refreshRefusedOn: { path: string; mtimeMs: number; size: number } | null = null
+  /**
+   * Why the direct read of THIS pass failed, or null when it succeeded.
+   *
+   * `fetch` reads it to decide whether to retry: only `unavailable` is a
+   * transient fault. It is on the instance rather than returned because
+   * `fetchDirect` answers the older `AccountUsage | null` contract that the SDK
+   * relay's fallback is built on, and widening that would touch every caller.
+   */
+  private lastDirectFailure: ClaudeUsageError | null = null
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
@@ -250,7 +355,7 @@ export class UsageFetcher {
     this.loadCache()
       .then((cached) => {
         const windowIndicative =
-          cached?.fiveHour.resetsAt != null &&
+          cached?.fiveHour?.resetsAt != null &&
           new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
         if (cached) {
           this.publish(cached)
@@ -290,9 +395,16 @@ export class UsageFetcher {
     // identity is the dir's, not the machine's. `AccountManager` lives in main
     // and core cannot import it, so the credential-dir pointer is the seam.
     this.unsubscribeSwitch ??= onSecurestorageEnvChange(() => {
+      // THE SWITCH INSTANT, taken before any await (S2g part 1). Every turn
+      // after it runs on the new folder — `AccountManager.persistAndApply`
+      // cancels the live sessions — so this, and not the moment the identity
+      // read happens to come back, is where the new account's spend begins.
+      // Reading the identity costs a network round trip on every switch (the
+      // cache holds one folder), and on 2026-09-21 it took thirteen minutes.
+      const switchAt = Date.now()
       // `fetch()` tracks the account first, so the limits and the sample land
       // under the new one in the same pass.
-      this.fetch().catch((err) => {
+      this.fetch(switchAt).catch((err) => {
         logger.warn('UsageFetcher', 'Account-switch fetch failed', err)
       })
     })
@@ -314,15 +426,24 @@ export class UsageFetcher {
       clearTimeout(this.expiryTimer)
       this.expiryTimer = null
     }
+    this.retryState = null
+    this.clearRetry()
     this.unsubscribeSwitch?.()
     this.unsubscribeSwitch = null
   }
 
-  /** Fetch usage and push to the renderer. Returns the result. */
-  async fetch(): Promise<AccountUsage> {
+  /**
+   * Fetch usage and push to the renderer. Returns the result.
+   *
+   * `switchAt` is the instant the ACTIVE credential folder moved, and only the
+   * switch listener passes it: an account-log record written because of a switch
+   * is stamped with the switch, not with the moment the identity read returned
+   * (S2g). Every other caller means "now".
+   */
+  async fetch(switchAt?: number): Promise<AccountUsage> {
     this.lastFetchStartedAt = Date.now()
     // Track the authenticated account alongside usage (cheap local read)
-    await this.trackActiveAccount()
+    await this.trackActiveAccount(switchAt)
 
     const usage = await this.fetchUsage()
 
@@ -333,6 +454,13 @@ export class UsageFetcher {
     } else {
       this.lastUsage = usage
     }
+
+    // A reading that could not be taken for a TRANSIENT reason retries on the
+    // backoff rather than waiting out the half-hourly poll (round 3, item 1).
+    // A refusal and a 429 are answers, and neither arms anything. One that
+    // succeeded retires a retry armed by an earlier failure.
+    if (usage.error && this.lastDirectFailure === 'unavailable') this.armRetry(false)
+    else if (!usage.error) this.retireReadRetry()
 
     this.publish(this.lastUsage)
     this.scheduleCacheWrite()
@@ -347,7 +475,7 @@ export class UsageFetcher {
    * its resets_at without waiting for the regular poll. Throttled.
    */
   fetchIfWindowUnknown(): void {
-    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const resetsAt = this.lastUsage?.fiveHour?.resetsAt
     const windowKnown = resetsAt != null && new Date(resetsAt).getTime() > Date.now()
     if (windowKnown) return
     if (Date.now() - this.lastFetchStartedAt < UNKNOWN_WINDOW_FETCH_THROTTLE_MS) return
@@ -397,7 +525,7 @@ export class UsageFetcher {
    * read — whatever the log did not write down about that account is gone by
    * the time the row is built.
    */
-  private async trackActiveAccount(): Promise<void> {
+  private async trackActiveAccount(switchAt?: number): Promise<void> {
     const dir = getSecurestorageEnv()?.dir
     // Multi-account is ON but no dir has been applied to this process: the
     // shared file names whichever account some cli.js refetched last, and the
@@ -412,25 +540,46 @@ export class UsageFetcher {
       return
     }
     try {
-      if (dir) await this.trackAccountFromDir(dir)
-      else await this.trackAccountFromClaudeJson()
+      if (dir) await this.trackAccountFromDir(dir, switchAt)
+      else await this.trackAccountFromClaudeJson(switchAt)
     } catch (err) {
       logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
+    } finally {
+      this.firstTrackedPassDone = true
     }
   }
 
+  /**
+   * Is `dir` still the applied credential folder?
+   *
+   * Asked after every await on the folder path (round 2, R3). Two switches can
+   * straddle one in-flight profile read, and a read that comes back for a folder
+   * the app has already left must touch nothing: a late FAILURE would mark a
+   * switch instant while another folder is applied, deferring that folder's real
+   * spend, and a late SUCCESS would back-stamp a record over turns that ran
+   * somewhere else. The pass is simply dropped; the folder that IS applied has
+   * its own pass, from its own switch.
+   */
+  private stillApplied(dir: string): boolean {
+    if (getSecurestorageEnv()?.dir === dir) return true
+    logger.debug(
+      'UsageFetcher',
+      `account ${basename(dir)} was switched away from mid-read — dropping the pass`
+    )
+    return false
+  }
+
   /** The multi-account path: the dir's own credential names the account. */
-  private async trackAccountFromDir(dir: string): Promise<void> {
+  private async trackAccountFromDir(dir: string, switchAt?: number): Promise<void> {
+    // Before the read, not after it: the boot check below compares the folder's
+    // own row against the log's last record, and closing a marker needs to know
+    // there is one. Seeding is one-shot, so this costs nothing per poll.
+    await this.seedAccountLog()
+    if (!this.stillApplied(dir)) return
     const identity = await this.resolveDirIdentity(dir)
+    if (!this.stillApplied(dir)) return
     if (!identity) {
-      // A dir we already resolved keeps what it had — the endpoint being down
-      // says nothing about who the account is. A dir we have NOT resolved gets
-      // nothing: a row keyed to the previous dir's subscription is the exact
-      // bug this replaced, and `unknown` is the honest answer instead.
-      if (this.activeAccountDir !== dir) {
-        this.activeAccountDir = dir
-        this.activeAccount = null
-      }
+      await this.deferUnreadIdentity(dir, switchAt ?? Date.now())
       return
     }
 
@@ -455,9 +604,12 @@ export class UsageFetcher {
     }
     this.rememberAccountIdentity(this.activeAccount)
 
-    await this.seedAccountLog()
+    const settled = this.settleUnreadIdentity(dir, switchAt)
     const staleRecord = this.lastLoggedRecord
-    await this.appendAccountLogIfMoved(this.activeAccount)
+    await this.appendAccountLogIfMoved(this.activeAccount, {
+      ts: settled.from,
+      force: settled.releasesDeferred
+    })
     // After the append, the log's last record IS the dir — so the repair reads
     // the one captured before it, which is the stale attribution it has to move.
     repairClaudeIdentityOnce({
@@ -465,6 +617,251 @@ export class UsageFetcher {
       ...(organizationName ? { organizationName } : {}),
       lastRecord: staleRecord
     })
+    if (settled.releasesDeferred) this.flushDeferredClaudeRows(settled.from)
+  }
+
+  /**
+   * The identity of a folder could not be read. Decide whether this is a SWITCH
+   * whose rows have to be deferred, and keep retrying either way (S2g part 2).
+   *
+   * @param at the switch instant, or now for a boot or a poll.
+   */
+  private async deferUnreadIdentity(dir: string, at: number): Promise<void> {
+    // A dir whose account we are STILL HOLDING keeps what it had — the endpoint
+    // being down says nothing about who the account is, and no switch happened,
+    // so the rows after it still belong to the account we read.
+    //
+    // Both halves matter (round 3, item 2). `activeAccountDir` alone is stale
+    // after another folder's unread pass nulled the account: a switch away and
+    // back, with the credential rewritten in between so the cache misses, would
+    // return here with no account, the other folder's marker still open and
+    // nothing retrying.
+    if (this.activeAccountDir === dir && this.activeAccount !== null) return
+
+    // A dir we cannot name gets nothing in memory: a row keyed to the previous
+    // dir's subscription is the exact bug this replaced.
+    this.activeAccount = null
+    // ONE decision per folder, taken from `unreadFolder` and not from the retry
+    // episode (round 2, R1): a folder can come back unread AFTER another folder
+    // resolved, and the episode from its first switch may still be running.
+    if (this.unreadFolder?.dir === null) {
+      // A restart INSIDE the gap: the log already carries the marker, stamped
+      // with the switch this process never saw. One boundary, not two.
+      this.unreadFolder = { dir, markerTs: this.unreadFolder.markerTs }
+    } else if (this.unreadFolder?.dir !== dir) {
+      // A marker belonging to ANOTHER folder is deliberately NOT reused. Its gap
+      // holds turns that ran on a credential we still cannot read, and the new
+      // marker is what stops the rows after THIS switch from resolving to the
+      // record in between. The abandoned gap is bounded by DEFERRAL_MAX_MS.
+      this.unreadFolder = { dir, markerTs: await this.decideUnreadMarker(dir, at) }
+    }
+    this.armRetry(true)
+  }
+
+  /**
+   * Write the marker that defers this folder's rows, unless nothing moved, and
+   * answer the instant it defers from (null when nothing is deferred).
+   *
+   * THE BOOT CASE. On the first pass of the process there is no previous folder
+   * to have moved away from, so an unreadable identity is only a problem if the
+   * log's last record names a DIFFERENT account than this folder's own
+   * `account` row does. When they agree, time-based attribution is still right
+   * and deferring would hold rows back for nothing.
+   */
+  private async decideUnreadMarker(dir: string, at: number): Promise<number | null> {
+    if (!this.firstTrackedPassDone && this.folderMatchesLastRecord(dir)) {
+      logger.info(
+        'UsageFetcher',
+        `active account ${basename(dir)} identity unread at startup, but the log already names it — nothing deferred`
+      )
+      return null
+    }
+    await this.appendUnresolvedMarker(at)
+    return at
+  }
+
+  /**
+   * Does this folder's own `account` row name the account the log's last record
+   * names? Then nothing moved while we were not looking.
+   *
+   * The row is written by `rememberAccountIdentity` on every resolved poll, so
+   * it survives a restart; an account that has never resolved has none, and
+   * that is not a match.
+   */
+  private folderMatchesLastRecord(dir: string): boolean {
+    const last = this.lastLoggedRecord
+    if (!last?.accountUuid) return false
+    try {
+      const uuid = getAccount(basename(dir))?.accountUuid
+      return !!uuid && uuid === last.accountUuid
+    } catch (err) {
+      logger.debug('UsageFetcher', `Account row read failed: ${err}`)
+      return false
+    }
+  }
+
+  /**
+   * An identity resolved. Stop retrying, and say from which instant the record
+   * takes effect — plus whether that record releases deferred rows.
+   *
+   * `dir` is null for the single-account and API-key paths, which have no
+   * credential folder: an open marker of theirs belongs to a folder whose
+   * credential they are not reading, so it is closed from HERE (round 2, R2).
+   */
+  private settleUnreadIdentity(
+    dir: string | null,
+    switchAt?: number
+  ): { from: number; releasesDeferred: boolean } {
+    // Whatever the retry loop was waiting on, it is not waiting any more: this
+    // process just resolved an account. Dropping the episode only when it names
+    // the resolving folder left a timer running against a folder the app had
+    // left, and made the episode look like a marker the next time that folder
+    // came back unread (round 2, R1). The pass's own usage read re-arms it if
+    // the reading still cannot be taken.
+    if (this.retryState) {
+      this.retryState = null
+      this.clearRetry()
+    }
+    const unread = this.unreadFolder
+    // No deferral: a plain switch takes effect from the SWITCH (S2g part 1),
+    // and a boot or a poll from now.
+    if (!unread) return { from: switchAt ?? Date.now(), releasesDeferred: false }
+    // Either way this record is what stops a marker deferring anything further,
+    // so the decision is spent.
+    this.unreadFolder = null
+    if (unread.markerTs === null) {
+      // The boot case: nothing was ever deferred, so there is nothing to force
+      // or to re-offer.
+      return { from: switchAt ?? Date.now(), releasesDeferred: false }
+    }
+    // This folder's own marker — or one recovered from the log, whose folder
+    // this process never saw. The record takes the MARKER's instant, so every
+    // row deferred since the switch lands under the account that ran it.
+    if (dir !== null && (unread.dir === null || unread.dir === dir)) {
+      return { from: unread.markerTs, releasesDeferred: true }
+    }
+    // Another folder's gap. Those turns ran on a credential we still cannot
+    // read, so they are not lent to whichever account resolved next; this
+    // record releases the rows from here on, and DEFERRAL_MAX_MS bounds the
+    // gap itself.
+    return { from: switchAt ?? Date.now(), releasesDeferred: true }
+  }
+
+  // -------------------------------------------------------------------------
+  // The retry loop for a read of the ACTIVE account (S2g part 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Arm the ONE retry timer for the folder that is applied now.
+   *
+   * An unread IDENTITY outranks a failed reading: while it is set an attempt
+   * re-reads only the identity, and the attempt count carries over so a second
+   * cause does not restart the backoff. A different folder does restart it.
+   */
+  private armRetry(identityUnread: boolean): void {
+    const dir = getSecurestorageEnv()?.dir ?? null
+    const existing = this.retryState
+    if (existing && existing.dir === dir) {
+      existing.identityUnread ||= identityUnread
+    } else {
+      this.retryState = { dir, attempt: 0, identityUnread }
+      this.clearRetry()
+    }
+    this.scheduleRetry()
+  }
+
+  /**
+   * A reading was taken, so a retry armed by a FAILED READING has done its job.
+   *
+   * An unread identity is not retired here: it is settled by the resolve, and
+   * until then a reading can succeed on a folder whose owner is still unknown.
+   */
+  private retireReadRetry(): void {
+    if (!this.retryState || this.retryState.identityUnread) return
+    this.retryState = null
+    this.clearRetry()
+  }
+
+  /** Schedule the next attempt, at the delay this attempt count has earned. */
+  private scheduleRetry(): void {
+    if (this.retryTimer) return
+    const attempt = this.retryState?.attempt ?? 0
+    const delay = RETRY_DELAYS_MS[attempt] ?? RETRY_STEADY_MS
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      void this.runRetry().catch((err) => {
+        logger.debug('UsageFetcher', `retry failed: ${err}`)
+      })
+    }, delay)
+  }
+
+  private clearRetry(): void {
+    if (!this.retryTimer) return
+    clearTimeout(this.retryTimer)
+    this.retryTimer = null
+  }
+
+  /**
+   * One attempt.
+   *
+   * While the IDENTITY is what could not be read, only that is re-read: a whole
+   * pass would offer the same credential file its own refresh grant every time,
+   * which is the spending ADR-071 §6 exists to prevent. Once it resolves — or
+   * when the identity was never the problem — the attempt is a full pass, so a
+   * reading that had failed lands with its window samples in the same go.
+   */
+  private async runRetry(): Promise<void> {
+    const pending = this.retryState
+    if (!pending) return
+    if ((getSecurestorageEnv()?.dir ?? null) !== pending.dir) {
+      // The folder moved on; whatever is applied now has its own pass.
+      this.retryState = null
+      return
+    }
+    pending.attempt++
+    if (pending.identityUnread) {
+      // `trackActiveAccount` re-arms the timer through `deferUnreadIdentity` if
+      // the read fails again, so there is nothing to schedule here.
+      await this.trackActiveAccount()
+      if (this.retryState?.identityUnread) return
+    }
+    await this.fetch().catch((err) => {
+      logger.warn('UsageFetcher', 'Retry fetch failed', err)
+    })
+  }
+
+  /**
+   * Re-offer the Claude rows that were deferred while the identity was unread.
+   *
+   * The account log now names the account from the switch instant onward, so the
+   * transcript entries that were skipped have to be offered again — and the
+   * reconciler's Claude pass IS that offer: it re-parses every transcript in the
+   * scan window through `block-usage` (which reloads the log, because it just
+   * changed) and re-inserts. `ON CONFLICT(message_id) DO NOTHING` makes every
+   * row that already landed a no-op, so there is no queue to keep and nothing
+   * here has to know which files changed.
+   *
+   * The hourly buckets the dashboard reads are rebuilt by the next
+   * recalculation — the JSONL watcher's, or the reconciler's own ten-minute
+   * tick — which is also what keeps this out of the dev build's snapshot
+   * writes. So the dashboard lags by up to that tick and is never wrong.
+   *
+   * Dynamic import because `usage-reconciler` statically imports `block-usage`,
+   * which imports this module: the same cycle `claude-session` and `session.ipc`
+   * avoid the same way.
+   */
+  private flushDeferredClaudeRows(since: number): void {
+    void import('./usage-reconciler')
+      .then(({ usageReconciler }) => usageReconciler.reconcileClaude())
+      .then(() => {
+        logger.info(
+          'UsageFetcher',
+          `re-offered the Claude rows deferred since ${new Date(since).toISOString()}`
+        )
+      })
+      .catch((err) => {
+        logger.debug('UsageFetcher', `deferred-row flush failed: ${err}`)
+      })
   }
 
   /**
@@ -482,8 +879,16 @@ export class UsageFetcher {
     }
   }
 
-  /** The single-account (Keychain) path: `~/.claude.json` is the only source. */
-  private async trackAccountFromClaudeJson(): Promise<void> {
+  /**
+   * The single-account (Keychain) path: `~/.claude.json` is the only source.
+   *
+   * It takes `switchAt` and closes an open marker like the folder path does
+   * (round 2, R2): turning multi-account OFF, or deleting the active account,
+   * fires the switch listener and lands here — and if a marker were left open
+   * the dedup would swallow this record (the pair is usually unchanged) and
+   * every Claude row from then on would be deferred until it aged out.
+   */
+  private async trackAccountFromClaudeJson(switchAt?: number): Promise<void> {
     const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
     const parsed = JSON.parse(raw) as {
       oauthAccount?: {
@@ -500,7 +905,7 @@ export class UsageFetcher {
     const uuid = oauthAccount?.accountUuid
     const email = oauthAccount?.emailAddress
     if (!uuid || !email) {
-      await this.trackApiKeyAccount(parsed.primaryApiKey)
+      await this.trackApiKeyAccount(parsed.primaryApiKey, switchAt)
       return
     }
     const organizationUuid = oauthAccount?.organizationUuid
@@ -520,10 +925,15 @@ export class UsageFetcher {
     this.rememberAccountIdentity(this.activeAccount)
 
     await this.seedAccountLog()
-    await this.appendAccountLogIfMoved(this.activeAccount)
+    const settled = this.settleUnreadIdentity(null, switchAt)
+    await this.appendAccountLogIfMoved(this.activeAccount, {
+      ts: settled.from,
+      force: settled.releasesDeferred
+    })
     // One credential file, so the shared `~/.claude.json` described it
     // correctly and there is nothing for S2e's re-key to move.
     skipClaudeIdentityRepair('single-account mode')
+    if (settled.releasesDeferred) this.flushDeferredClaudeRows(settled.from)
   }
 
   /**
@@ -545,7 +955,7 @@ export class UsageFetcher {
    * digest and the last four characters — never the key, in the log record, on
    * disk, or in a logger call.
    */
-  private async trackApiKeyAccount(fileKey: string | undefined): Promise<void> {
+  private async trackApiKeyAccount(fileKey: string | undefined, switchAt?: number): Promise<void> {
     // `||`, not `??`: an env var set to the empty string is not a key, and the
     // file's is the better answer than none (ADR-070 Slice J's rule).
     const key = process.env.ANTHROPIC_API_KEY?.trim() || fileKey?.trim()
@@ -568,10 +978,16 @@ export class UsageFetcher {
     // not per dir. Under a dir the profile read above owns the identity.
 
     await this.seedAccountLog()
-    await this.appendAccountLogIfMoved(this.activeAccount)
+    // Closes an open marker like the two paths above (round 2, R2).
+    const settled = this.settleUnreadIdentity(null, switchAt)
+    await this.appendAccountLogIfMoved(this.activeAccount, {
+      ts: settled.from,
+      force: settled.releasesDeferred
+    })
     // No per-dir credential, so there is no mis-attributed dir for S2e's
     // one-shot re-key to move.
     skipClaudeIdentityRepair('api-key account')
+    if (settled.releasesDeferred) this.flushDeferredClaudeRows(settled.from)
   }
 
   /**
@@ -579,33 +995,32 @@ export class UsageFetcher {
    *
    * The 30-minute poll must not ask the profile endpoint again for an answer
    * that cannot have moved: the only thing that puts a different account behind
-   * this path is a re-login, and that rewrites the file. `allowRefresh` is true
-   * because this is the ACTIVE account — cli.js keeps its token fresh, so a
-   * refresh here is the exception, not the rule (ADR-071 §6).
+   * this path is a re-login, and that rewrites the file. Whether a refresh grant
+   * may be spent is {@link refreshAllowedFor}'s answer — this is the ACTIVE
+   * account, so cli.js normally keeps its token fresh and a refresh here is the
+   * exception (ADR-071 §6).
    */
   private async resolveDirIdentity(dir: string): Promise<ClaudeDirIdentity | null> {
     const credentialsPath = join(dir, '.credentials.json')
-    let mtimeMs = 0
-    let size = 0
-    try {
-      const info = await stat(credentialsPath)
-      mtimeMs = info.mtimeMs
-      size = info.size
-      const cached = this.identityCache
-      if (cached && cached.dir === dir && cached.mtimeMs === mtimeMs && cached.size === size) {
-        return cached.identity
-      }
-    } catch {
-      // No credential file: the resolve below answers `needs-sign-in`, and
-      // nothing is cached against a file that is not there.
+    const { mtimeMs, size } = await this.credentialVersion(credentialsPath)
+    const cached = this.identityCache
+    if (
+      mtimeMs > 0 &&
+      cached &&
+      cached.dir === dir &&
+      cached.mtimeMs === mtimeMs &&
+      cached.size === size
+    ) {
+      return cached.identity
     }
 
     const result = await resolveClaudeDirIdentity({
       credentialsPath,
-      allowRefresh: true,
+      allowRefresh: this.refreshAllowedFor(credentialsPath, mtimeMs, size),
       userAgent: this.userAgent
     })
     if ('error' in result) {
+      this.noteRefreshResult(result, credentialsPath, mtimeMs, size)
       logger.info(
         'UsageFetcher',
         `active account ${basename(dir)} identity not read: ${result.error} (${result.detail})`
@@ -622,41 +1037,139 @@ export class UsageFetcher {
     return result.identity
   }
 
-  /** Load the log's last record once per launch — the dedup and repair subject. */
-  private async seedAccountLog(): Promise<void> {
-    if (this.accountLogSeeded) return
-    this.accountLogSeeded = true
+  /** A credentials file's version — `{ mtimeMs: 0, size: 0 }` when it is absent. */
+  private async credentialVersion(path: string): Promise<{ mtimeMs: number; size: number }> {
     try {
-      const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
-      // Backwards to the last line that PARSES: a crash mid-append leaves a
-      // partial one, and the repair reads this record to decide what to move.
-      const lines = log.split('\n')
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (!lines[i].trim()) continue
-        try {
-          const record = JSON.parse(lines[i]) as AccountLogRecord
-          if (typeof record.ts !== 'number' || typeof record.email !== 'string') continue
-          this.lastLoggedRecord = record
-          this.lastLoggedAccountPair = record.accountUuid
-            ? {
-                accountUuid: record.accountUuid,
-                organizationUuid: record.organizationUuid,
-                accountKey: record.accountKey
-              }
-            : null
-          return
-        } catch {
-          // Try the line before it.
-        }
-      }
-      this.lastLoggedAccountPair = null
+      const info = await stat(path)
+      return { mtimeMs: info.mtimeMs, size: info.size }
     } catch {
-      this.lastLoggedAccountPair = null
+      // Not there: a read of it answers `needs-sign-in` without a request, and
+      // there is no version to cache or to charge a refresh against.
+      return { mtimeMs: 0, size: 0 }
     }
   }
 
-  /** Append a record when the subscription moved. No-op otherwise. */
-  private async appendAccountLogIfMoved(account: ActiveAccount): Promise<void> {
+  /**
+   * May a read of this credentials file spend a refresh grant? (ADR-071 §6.)
+   *
+   * No, while a refresh for THIS version of the file has already been POSTed and
+   * refused: the endpoint has seen that token and said no, and cli.js has not
+   * rewritten the file since, so offering it again only spends grants. It turns
+   * back on by itself the moment the file changes — which is what cli.js does
+   * as soon as the user sends a turn on the account.
+   *
+   * Both reads of a credential go through here, the identity and the usage one:
+   * they share one file and one grant, and the switch that reaches this path
+   * used to POST a refused token twice in a single pass.
+   *
+   * A MISSING file has no version to latch (round 2, R4). `{0, 0}` is what
+   * `credentialVersion` answers for one, and latching it would mean that in
+   * single-account Keychain mode — where the credential lives in the Keychain
+   * and the file legitimately does not exist — one refused refresh disabled
+   * every later refresh for the life of the process.
+   */
+  private refreshAllowedFor(path: string, mtimeMs: number, size: number): boolean {
+    if (mtimeMs <= 0) return true
+    const refused = this.refreshRefusedOn
+    return !(refused?.path === path && refused.mtimeMs === mtimeMs && refused.size === size)
+  }
+
+  /** Remember a refused refresh, so {@link refreshAllowedFor} stops offering it. */
+  private noteRefreshResult(
+    result: { refreshFailed?: boolean },
+    path: string,
+    mtimeMs: number,
+    size: number
+  ): void {
+    if (mtimeMs <= 0) return
+    if (result.refreshFailed) this.refreshRefusedOn = { path, mtimeMs, size }
+  }
+
+  /**
+   * Load the log's newest entries once per launch: the last RECORD, which is
+   * the dedup and repair subject, and whether the log ends on one of S2g's
+   * markers, which means a deferral outlived the process that opened it.
+   *
+   * Newest by `ts`, with the later line winning a tie — the rule
+   * `accountRecordForTimestamp` applies, so this and the log's readers cannot
+   * disagree about which entry is in force. (A record written for a switch
+   * carries the switch's instant, so a slow identity read racing a second
+   * switch can leave the FILE out of order.) A line that does not parse is
+   * skipped: a crash mid-append leaves a partial one.
+   */
+  private async seedAccountLog(): Promise<void> {
+    if (this.accountLogSeeded) return
+    this.accountLogSeeded = true
+    this.lastLoggedAccountPair = null
+    try {
+      const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
+      let newestEntry: AccountLogEntry | null = null
+      let newestRecord: AccountLogRecord | null = null
+      for (const line of log.split('\n')) {
+        if (!line.trim()) continue
+        let entry: AccountLogEntry
+        try {
+          entry = JSON.parse(line) as AccountLogEntry
+        } catch {
+          continue
+        }
+        if (typeof entry.ts !== 'number' || typeof entry.email !== 'string') continue
+        if (!newestEntry || entry.ts >= newestEntry.ts) newestEntry = entry
+        if (!isUnresolvedMarker(entry) && (!newestRecord || entry.ts >= newestRecord.ts)) {
+          newestRecord = entry
+        }
+      }
+      if (newestRecord) {
+        this.lastLoggedRecord = newestRecord
+        this.lastLoggedAccountPair = newestRecord.accountUuid
+          ? {
+              accountUuid: newestRecord.accountUuid,
+              organizationUuid: newestRecord.organizationUuid,
+              accountKey: newestRecord.accountKey
+            }
+          : null
+      }
+      // The folder cannot have moved while the app was down, so this marker
+      // belongs to whichever folder this process sees first (`dir: null` until
+      // then). Rows after it stay deferred across the restart, which is the
+      // whole point of the marker being on disk.
+      if (newestEntry && isUnresolvedMarker(newestEntry)) {
+        this.unreadFolder = { dir: null, markerTs: newestEntry.ts }
+      }
+    } catch {
+      /* No log yet: nothing is logged, and nothing is deferred. */
+    }
+  }
+
+  /**
+   * Record that the active folder moved at `ts` and we cannot say whose it is.
+   *
+   * Deliberately NOT the dedup subject: a marker names no account, so
+   * `lastLoggedAccountPair` and `lastLoggedRecord` keep pointing at the last
+   * real record — which is what S2e's one-shot repair reads, and what the
+   * append below compares against when the identity finally resolves.
+   */
+  private async appendUnresolvedMarker(ts: number): Promise<void> {
+    const marker: AccountLogMarker = { ts, email: '', unresolved: true }
+    await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
+    await appendFile(ACCOUNT_LOG_PATH, JSON.stringify(marker) + '\n', 'utf-8')
+    logger.info(
+      'UsageFetcher',
+      `Active account changed at ${new Date(ts).toISOString()} but its identity could not be read — rows deferred until it can`
+    )
+  }
+
+  /**
+   * Append a record when the subscription moved. No-op otherwise.
+   *
+   * `ts` is the instant the record takes effect from — the switch's, not the
+   * append's (S2g). `force` writes the record even when it names the account
+   * the last one already did, which is how a marker gets superseded.
+   */
+  private async appendAccountLogIfMoved(
+    account: ActiveAccount,
+    opts: { ts?: number; force?: boolean } = {}
+  ): Promise<void> {
     // A pre-ADR-071 last record names no organization, so the first run after
     // the upgrade sees a changed pair and appends one that does. That is how
     // an existing log starts naming subscriptions at all. S2f adds the KEY to
@@ -667,10 +1180,10 @@ export class UsageFetcher {
       organizationUuid: account.organizationUuid,
       accountKey: account.accountKey
     }
-    if (samePair(this.lastLoggedAccountPair, pair)) return
+    if (!opts.force && samePair(this.lastLoggedAccountPair, pair)) return
     this.lastLoggedAccountPair = pair
     const record: AccountLogRecord = {
-      ts: Date.now(),
+      ts: opts.ts ?? Date.now(),
       accountUuid: account.uuid,
       email: account.email,
       ...(account.organizationUuid ? { organizationUuid: account.organizationUuid } : {}),
@@ -743,7 +1256,7 @@ export class UsageFetcher {
       clearTimeout(this.expiryTimer)
       this.expiryTimer = null
     }
-    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const resetsAt = this.lastUsage?.fiveHour?.resetsAt
     if (!resetsAt) return
     const resetMs = new Date(resetsAt).getTime()
     if (isNaN(resetMs)) return
@@ -865,7 +1378,10 @@ export class UsageFetcher {
       if (!data.fetchedAt || Date.now() - data.fetchedAt > CACHE_STALE_MS) return null
       // A cache written before sevenDayModels or accountLabel existed has no
       // such key. The label is re-stamped on publish anyway; this keeps the
-      // object honest for anything that reads it in between.
+      // object honest for anything that reads it in between. A pre-S3c file's
+      // fabricated 0 % `fiveHour` is deliberately NOT sanitised: it carries no
+      // `resetsAt`, so it is not window-indicative, writes no sample and is
+      // replaced by the immediate fetch that a non-indicative cache triggers.
       return {
         ...data,
         sevenDayModels: data.sevenDayModels ?? null,
@@ -890,9 +1406,14 @@ export class UsageFetcher {
     }, CACHE_WRITE_DEBOUNCE_MS)
   }
 
+  /**
+   * The merge base for a header or `rate_limit_event` update that arrives before
+   * any full read. Every window is null: nothing has been observed yet, and a
+   * placeholder 0 % five-hour window is exactly what S3c removed.
+   */
   private defaultUsage(): AccountUsage {
     return {
-      fiveHour: { usedPercent: 0, resetsAt: null },
+      fiveHour: null,
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,
@@ -960,6 +1481,12 @@ export class UsageFetcher {
         accountKey: activeClaudeAttribution(active, buildClaudeAccountRef()?.billingType)
           .accountKey,
         accountUuid: active.uuid,
+        // Display-only, and for the hub relay alone (ADR-072 §4): a machine
+        // where this account is not active shows the reading this one paid for,
+        // and it has to be able to name whose it is.
+        accountLabel: claudeAccountLabel(active),
+        vendorId: 'anthropic',
+        plan: usage.planName ?? null,
         windows: claudeLimitWindows(usage)
       })
       // ADR-071 §6's nudge, beside `usage:data`: a client watching LIMITS across
@@ -1010,13 +1537,19 @@ export class UsageFetcher {
    * than a fallback (the regression pin in usage-fetcher-expanded holds this).
    */
   private async fetchDirect(): Promise<AccountUsage | null> {
+    const credentialsPath = this.credentialsPath()
+    const { mtimeMs, size } = await this.credentialVersion(credentialsPath)
     const result = await fetchClaudeUsage({
-      credentialsPath: this.credentialsPath(),
-      allowRefresh: true,
+      credentialsPath,
+      // Still the ACTIVE account, which may refresh — but not with a grant this
+      // version of the file has already had refused (see refreshAllowedFor).
+      allowRefresh: this.refreshAllowedFor(credentialsPath, mtimeMs, size),
       userAgent: this.userAgent,
       fallbackCredentials: () => this.readKeychainCredentials()
     })
+    this.lastDirectFailure = 'usage' in result ? null : result.error
     if ('usage' in result) return result.usage
+    this.noteRefreshResult(result, credentialsPath, mtimeMs, size)
     if (result.error === 'rate-limited') {
       logger.debug(
         'UsageFetcher',
@@ -1093,7 +1626,7 @@ export class UsageFetcher {
 
   private errorResult(message: string): AccountUsage {
     return {
-      fiveHour: { usedPercent: 0, resetsAt: null },
+      fiveHour: null,
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,

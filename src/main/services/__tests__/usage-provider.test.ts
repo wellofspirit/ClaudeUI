@@ -20,6 +20,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AccountInfo, AccountUsage, ChatgptRateLimits } from '../../../shared/types'
+type RemoteLimitRow = import('../../../core/services/db').RemoteLimitRow
 
 const {
   mockFetch,
@@ -34,7 +35,10 @@ const {
   mockAccountIdentity,
   mockEmitEvent,
   mockUpdateAccountIdentity,
-  mockResolveDirIdentity
+  mockResolveDirIdentity,
+  mockListRemoteLimits,
+  mockLatestAccountLabels,
+  mockListRemoteDevices
 } = vi.hoisted(() => ({
   mockFetch: vi.fn(),
   mockGetLastUsage: vi.fn(),
@@ -48,7 +52,10 @@ const {
   mockAccountIdentity: vi.fn(),
   mockEmitEvent: vi.fn(),
   mockUpdateAccountIdentity: vi.fn(),
-  mockResolveDirIdentity: vi.fn()
+  mockResolveDirIdentity: vi.fn(),
+  mockListRemoteLimits: vi.fn(),
+  mockLatestAccountLabels: vi.fn(),
+  mockListRemoteDevices: vi.fn()
 }))
 
 vi.mock('../../../core/services/usage-fetcher', () => ({
@@ -69,7 +76,10 @@ vi.mock('../../../core/services/claude-usage-api', async (importOriginal) => ({
 vi.mock('../../../core/services/db', () => ({
   getAllAccounts: mockGetAllAccounts,
   latestWindowSamples: mockLatestWindowSamples,
-  updateAccountIdentity: mockUpdateAccountIdentity
+  updateAccountIdentity: mockUpdateAccountIdentity,
+  listRemoteLimits: mockListRemoteLimits,
+  latestAccountLabels: mockLatestAccountLabels,
+  listRemoteDevices: mockListRemoteDevices
 }))
 
 // Only the network call is replaced — `claudeDirAccountKey` is the real rule.
@@ -182,6 +192,10 @@ beforeEach(async () => {
   mockChatgptSnapshot.mockReturnValue({} as ChatgptRateLimits)
   mockAccountIdentity.mockResolvedValue({ accountKey: 'chatgpt:ws-1:user-1', accountLabel: null })
   mockResolveDirIdentity.mockResolvedValue({ error: 'unavailable', detail: 'not stubbed' })
+  // No hub by default, so every case above reads exactly as it did pre-S5c.
+  mockListRemoteLimits.mockReturnValue([])
+  mockLatestAccountLabels.mockReturnValue(new Map())
+  mockListRemoteDevices.mockReturnValue([])
 })
 
 afterEach(async () => {
@@ -265,7 +279,8 @@ describe('a STORED (inactive) Claude account', () => {
         usedPercent: 61,
         canonicalEnd: 1_700_010_000_000,
         accountKey: STORED_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       }
     ])
 
@@ -286,7 +301,8 @@ describe('a STORED (inactive) Claude account', () => {
           kind: '5h',
           label: '5-hour',
           usedPercent: 61,
-          resetsAt: new Date(1_700_010_000_000).toISOString()
+          resetsAt: new Date(1_700_010_000_000).toISOString(),
+          windowMinutes: null
         }
       ]
     })
@@ -328,6 +344,12 @@ describe('a STORED (inactive) Claude account', () => {
     expect(mockRecordLimitSamples).toHaveBeenCalledWith({
       accountKey: STORED_KEY,
       accountUuid: 'acct-uuid-b',
+      // Display-only, and for the hub relay alone (ADR-072 §4): a machine where
+      // this account is not active shows the reading this one paid for, so it
+      // has to be able to name whose it is.
+      accountLabel: expect.any(String),
+      vendorId: 'anthropic',
+      plan: 'pro',
       windows: expect.arrayContaining([expect.objectContaining({ kind: '5h' })])
     })
     expect(mockEmitEvent).toHaveBeenCalledWith('usage:limits-changed', [])
@@ -595,14 +617,18 @@ describe('the ChatGPT provider', () => {
       'vault-1': {
         email: 'chat@example.test',
         planType: 'plus',
-        primary: { usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z' },
-        secondary: { usedPercent: 8, resetsAt: '2026-09-27T10:00:00.000Z' },
+        primary: { usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z', windowMinutes: 300 },
+        secondary: {
+          usedPercent: 8,
+          resetsAt: '2026-09-27T10:00:00.000Z',
+          windowMinutes: 10_080
+        },
         fetchedAt: 1_700_000_100_000
       }
     } as ChatgptRateLimits)
   })
 
-  it('maps the store’s two windows onto the canonical kinds', async () => {
+  it('maps the store’s two windows onto the kinds their durations name', async () => {
     const limits = await readAccountLimits()
 
     expect(limits[1]).toEqual({
@@ -611,14 +637,113 @@ describe('the ChatGPT provider', () => {
       vendorId: 'openai',
       plan: 'plus',
       windows: [
-        { kind: '5h', label: '5-hour', usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z' },
-        { kind: '7d', label: '7-day', usedPercent: 8, resetsAt: '2026-09-27T10:00:00.000Z' }
+        {
+          kind: '5h',
+          label: '5-hour',
+          usedPercent: 40,
+          resetsAt: '2026-09-21T10:00:00.000Z',
+          windowMinutes: 300
+        },
+        {
+          kind: '7d',
+          label: '7-day',
+          usedPercent: 8,
+          resetsAt: '2026-09-27T10:00:00.000Z',
+          windowMinutes: 10_080
+        }
       ],
       observedAt: 1_700_000_100_000,
       source: 'local',
       state: 'ok'
     })
     expect(mockAccountIdentity).toHaveBeenCalledWith('vault-1')
+  })
+
+  /**
+   * S3c — the owner's plan. ONE limit, weekly, delivered in the `primary`
+   * slot: position said five-hour, and the panel drew a `5-Hour` meter that
+   * reset in 28 hours.
+   */
+  it('reads a weekly-only plan’s lone primary window as 7-day', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        email: 'chat@example.test',
+        planType: 'prolite',
+        primary: { usedPercent: 63, resetsAt: '2026-09-27T10:00:00.000Z', windowMinutes: 10_080 },
+        secondary: null,
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: '7d',
+        label: '7-day',
+        usedPercent: 63,
+        resetsAt: '2026-09-27T10:00:00.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  /**
+   * Round 2 — the provider and the store's sample writer share ONE helper, so a
+   * meter and the sample behind it cannot be filed under two different kinds.
+   * Two slots of one length would otherwise both be `7d`, and the panel keys
+   * its meters by kind.
+   */
+  it('gives two same-length windows distinct kinds', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        email: 'chat@example.test',
+        primary: { usedPercent: 63, resetsAt: '2026-09-27T10:00:00.000Z', windowMinutes: 10_080 },
+        secondary: { usedPercent: 12, resetsAt: '2026-09-28T10:00:00.000Z', windowMinutes: 10_080 },
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: '7d',
+        label: '7-day',
+        usedPercent: 63,
+        resetsAt: '2026-09-27T10:00:00.000Z',
+        windowMinutes: 10_080
+      },
+      {
+        kind: '7d:secondary',
+        label: '7-day secondary',
+        usedPercent: 12,
+        resetsAt: '2026-09-28T10:00:00.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  it('calls a window whose duration the backend withheld a plain `limit`', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        primary: { usedPercent: 11, resetsAt: '2026-09-22T10:00:00.000Z', windowMinutes: null },
+        secondary: null,
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: 'primary',
+        label: 'limit',
+        usedPercent: 11,
+        resetsAt: '2026-09-22T10:00:00.000Z',
+        windowMinutes: null
+      }
+    ])
   })
 
   it('prefers the vault’s label for the account', async () => {
@@ -671,6 +796,168 @@ describe('the ChatGPT provider', () => {
   })
 })
 
+/**
+ * Relayed readings (ADR-072 §4, slice S5c).
+ *
+ * The rule: a key this machine holds NO credential for takes the hub's reading
+ * and spends no grant; a key it does hold keeps its own, whatever state that
+ * one is in.
+ */
+describe('a relayed limit reading', () => {
+  const PEER = 'dev-peer'
+  const PEER_KEY = 'chatgpt:ws-9:user-9'
+
+  function remoteLimit(over: Partial<RemoteLimitRow> = {}): RemoteLimitRow {
+    return {
+      accountKey: PEER_KEY,
+      windowKind: '7d',
+      deviceId: PEER,
+      labelMasked: 'p•••@e•••.test',
+      vendorId: 'openai',
+      plan: 'plus',
+      windowMinutes: 10_080,
+      usedPercent: 44,
+      resetsAt: '2026-09-25T15:00:00.000Z',
+      observedAt: 1_700_000_100_000,
+      ...over
+    }
+  }
+
+  it('is a row of its own for a key nothing here can read, and spends no fetch', async () => {
+    mockListRemoteLimits.mockReturnValue([
+      remoteLimit(),
+      remoteLimit({
+        windowKind: '5h',
+        windowMinutes: 300,
+        usedPercent: 13,
+        observedAt: 1_700_000_000_000
+      })
+    ])
+    mockListRemoteDevices.mockReturnValue([
+      {
+        deviceId: PEER,
+        deviceName: 'studio-mac',
+        os: 'darwin',
+        appVersion: '3.3.0',
+        lastPushAt: 1_700_000_100_000,
+        retired: false
+      }
+    ])
+
+    const limits = await readAccountLimits({})
+    const relayed = limits.find((l) => l.accountKey === PEER_KEY)!
+
+    // The NAME travels with the reading: a relayed row is shown under both
+    // scopes, and the combined machine list it could otherwise borrow from does
+    // not exist under `local` (R2).
+    expect(relayed.source).toEqual({ deviceId: PEER, deviceName: 'studio-mac' })
+    expect(relayed.state).toBe('ok')
+    // The freshest of the two observations, so the age a surface prints is the
+    // age of the newest thing on the row.
+    expect(relayed.observedAt).toBe(1_700_000_100_000)
+    expect(relayed.vendorId).toBe('openai')
+    expect(relayed.plan).toBe('plus')
+    // The hub's masked label, said to BE masked so a surface can qualify it.
+    expect(relayed.label).toBe('p•••@e•••.test')
+    expect(relayed.labelMasked).toBe(true)
+    // Both kinds, in the vendor's order rather than the pull's, each carrying
+    // the length S3c made the kind come from.
+    expect(relayed.windows.map((w) => [w.kind, w.label, w.usedPercent, w.windowMinutes])).toEqual([
+      ['5h', '5-hour', 13, 300],
+      ['7d', '7-day', 44, 10_080]
+    ])
+    // The refresh-grant rule: relaying costs nothing at all.
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(mockFetchClaudeUsage).not.toHaveBeenCalled()
+  })
+
+  it('never displaces a key this machine holds a credential for', async () => {
+    // The ACTIVE Claude account, relayed from a peer at a different percent.
+    mockListRemoteLimits.mockReturnValue([
+      remoteLimit({
+        accountKey: ACTIVE_KEY,
+        vendorId: 'anthropic',
+        windowKind: '5h',
+        usedPercent: 99
+      })
+    ])
+
+    const limits = await readAccountLimits({})
+    const rows = limits.filter((l) => l.accountKey === ACTIVE_KEY)
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].source).toBe('local')
+    expect(rows[0].windows.find((w) => w.kind === '5h')!.usedPercent).toBe(42.5)
+  })
+
+  it('leaves a local reading that needs a sign-in alone — the fix belongs here', async () => {
+    await seedStoredCredentials('acct-b')
+    mockResolveDirIdentity.mockResolvedValue({ error: 'needs-sign-in', detail: 'refused' })
+    mockFetchClaudeUsage.mockResolvedValue({ error: 'needs-sign-in', detail: '401' })
+    mockListRemoteLimits.mockReturnValue([
+      remoteLimit({ accountKey: STORED_KEY, vendorId: 'anthropic', usedPercent: 7 })
+    ])
+
+    const limits = await readAccountLimits({ refresh: true })
+    const rows = limits.filter((l) => l.accountKey === STORED_KEY)
+
+    // One row, and it is the one that says the credential HERE is dead. A
+    // healthy relayed reading in its place would hide the only place it shows.
+    expect(rows).toHaveLength(1)
+    expect(rows[0].state).toBe('needs-sign-in')
+    expect(rows[0].source).toBe('local')
+  })
+
+  it('prefers the ledger label over the hub mask, and says nothing is masked then', async () => {
+    mockLatestAccountLabels.mockReturnValue(new Map([[PEER_KEY, 'known@example.test']]))
+    mockListRemoteLimits.mockReturnValue([remoteLimit()])
+
+    const relayed = (await readAccountLimits({})).find((l) => l.accountKey === PEER_KEY)!
+
+    expect(relayed.label).toBe('known@example.test')
+    expect(relayed.labelMasked).toBeUndefined()
+  })
+
+  it('never relays the shared unknown bucket as one account', async () => {
+    mockListRemoteLimits.mockReturnValue([remoteLimit({ accountKey: 'unknown' })])
+    const limits = await readAccountLimits({})
+    expect(limits.some((l) => l.accountKey === 'unknown')).toBe(false)
+  })
+
+  it('names the device by its id when the hub no longer lists it', async () => {
+    mockListRemoteLimits.mockReturnValue([remoteLimit()])
+    mockListRemoteDevices.mockReturnValue([])
+
+    const relayed = (await readAccountLimits({})).find((l) => l.accountKey === PEER_KEY)!
+
+    expect(relayed.source).toEqual({ deviceId: PEER, deviceName: PEER })
+  })
+
+  it('relays nothing at all when the caller asked for no relay', async () => {
+    // The dashboard's LABEL map under the `local` scope: that scope promises the
+    // answer comes from this machine's own tables (R3).
+    mockListRemoteLimits.mockReturnValue([remoteLimit()])
+
+    const limits = await readAccountLimits({ relayed: false })
+
+    expect(limits.some((l) => l.accountKey === PEER_KEY)).toBe(false)
+    expect(mockListRemoteLimits).not.toHaveBeenCalled()
+  })
+
+  it('keeps the local readings when the remote cache cannot be read', async () => {
+    mockListRemoteLimits.mockImplementation(() => {
+      throw new Error('no such table: remote_limits')
+    })
+    const limits = await readAccountLimits({})
+    expect(limits.map((l) => l.accountKey)).toContain(ACTIVE_KEY)
+  })
+
+  it('adds nothing at all when no machine has relayed anything', async () => {
+    const limits = await readAccountLimits({})
+    expect(limits.every((l) => l.source === 'local')).toBe(true)
+  })
+})
+
 describe('resolveUsageProvider — per-billingType gate', () => {
   it('returns a provider for Claude/anthropic + subscription', () => {
     expect(resolveUsageProvider('claude', 'anthropic', 'subscription')).not.toBeNull()
@@ -717,6 +1004,14 @@ describe('claudeUsageProvider.getWindow', () => {
 
   it('returns null when usageFetcher has no data', () => {
     mockGetLastUsage.mockReturnValue(null)
+    const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
+    expect(provider.getWindow()).toBeNull()
+  })
+
+  it('returns null when the account HAS no five-hour window', () => {
+    // S3c: `fiveHour` is null now instead of a fabricated 0 % window, and a
+    // window that does not exist is not a window this gate may report.
+    mockGetLastUsage.mockReturnValue({ error: null, fiveHour: null })
     const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
     expect(provider.getWindow()).toBeNull()
   })

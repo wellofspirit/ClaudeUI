@@ -21,7 +21,11 @@ import { parse as jsoncParse, modify, applyEdits } from 'jsonc-parser'
 import type { FormattingOptions } from 'jsonc-parser'
 import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
 import { detectEol, safeRead, jsoncParseSafe } from './opencode-jsonc-io'
-import type { OpencodeConfigSettings, OpencodeProviderSettings } from '../../shared/types'
+import type {
+  OpencodeConfigSettings,
+  OpencodeProviderModelSettings,
+  OpencodeProviderSettings
+} from '../../shared/types'
 
 // ─── Path resolution ──────────────────────────────────────────────────────────
 
@@ -60,8 +64,9 @@ export function resolveOpencodeConfigFile(): { path: string; existed: boolean } 
 
 /**
  * Map opencode's native provider record shape → ClaudeUI's OpencodeProviderSettings:
- *   { name?, npm?, options?: { baseURL? }, models?: Record<id, {name?}> }
- *   → { name?, npm?, baseURL?, models?: { id, name? }[] }
+ *   { name?, npm?, options?: { baseURL? }, models?: Record<id, {name?, …}> }
+ *   → { name?, npm?, baseURL?, models?: { id, name?, … }[] }
+ * (each model's capability leaves as {@link nativeModelToSettings} reads them).
  */
 function nativeProviderToSettings(
   id: string,
@@ -76,15 +81,50 @@ function nativeProviderToSettings(
   }
   const nativeModels = entry.models as Record<string, unknown> | undefined
   if (nativeModels && typeof nativeModels === 'object' && !Array.isArray(nativeModels)) {
-    result.models = Object.entries(nativeModels).map(([modelId, v]) => {
-      const modelEntry = v as Record<string, unknown>
-      const m: { id: string; name?: string } = { id: modelId }
-      if (typeof modelEntry?.name === 'string' && modelEntry.name) m.name = modelEntry.name
-      return m
-    })
+    result.models = Object.entries(nativeModels).map(([modelId, v]) =>
+      nativeModelToSettings(modelId, (v ?? {}) as Record<string, unknown>)
+    )
   }
   void id // id is validated by the caller
   return result
+}
+
+/**
+ * One native model entry → its settings shape, in a FIXED key order (the
+ * shared-provider adapter compares projections as JSON). A leaf of the wrong
+ * type is simply not read, as if absent.
+ */
+function nativeModelToSettings(
+  modelId: string,
+  entry: Record<string, unknown>
+): OpencodeProviderModelSettings {
+  const m: OpencodeProviderModelSettings = { id: modelId }
+  if (typeof entry.name === 'string' && entry.name) m.name = entry.name
+  if (typeof entry.reasoning === 'boolean') m.reasoning = entry.reasoning
+  if (typeof entry.attachment === 'boolean') m.attachment = entry.attachment
+  if (typeof entry.tool_call === 'boolean') m.toolCall = entry.tool_call
+  const modalities = entry.modalities as { input?: unknown } | undefined
+  if (
+    Array.isArray(modalities?.input) &&
+    modalities.input.every((value): value is string => typeof value === 'string')
+  )
+    m.inputModalities = [...modalities.input]
+  const limit = entry.limit as { context?: unknown; output?: unknown } | undefined
+  if (typeof limit?.context === 'number' && typeof limit.output === 'number')
+    m.limit = { context: limit.context, output: limit.output }
+  return m
+}
+
+/** One model's settings → its native entry (a model being ADDED; kept ones are leaf-edited). */
+function settingsModelToNative(m: OpencodeProviderModelSettings): Record<string, unknown> {
+  const entry: Record<string, unknown> = {}
+  if (m.name) entry.name = m.name
+  if (m.reasoning !== undefined) entry.reasoning = m.reasoning
+  if (m.attachment !== undefined) entry.attachment = m.attachment
+  if (m.toolCall !== undefined) entry.tool_call = m.toolCall
+  if (m.inputModalities) entry.modalities = { input: m.inputModalities }
+  if (m.limit) entry.limit = { context: m.limit.context, output: m.limit.output }
+  return entry
 }
 
 /**
@@ -96,7 +136,7 @@ function settingsProviderToNative(p: OpencodeProviderSettings): Record<string, u
   if (p.npm) entry.npm = p.npm
   if (p.baseURL) entry.options = { baseURL: p.baseURL }
   if (p.models && p.models.length > 0) {
-    entry.models = Object.fromEntries(p.models.map((m) => [m.id, m.name ? { name: m.name } : {}]))
+    entry.models = Object.fromEntries(p.models.map((m) => [m.id, settingsModelToNative(m)]))
   }
   return entry
 }
@@ -115,11 +155,12 @@ export type NativeOpencodeFields = Pick<
  * base is computed identically to what the UI reads.
  *
  * The projection is deliberately LOSSY: it models only `{name?, npm?, baseURL?,
- * models:{id,name?}[]}` per provider and `{model?, temperature?}` per agent.
- * Everything else opencode understands (model-level attachment/modalities/
- * tool_call/cost/limit, provider-level options.apiKey, unknown agent fields)
- * is invisible here — which is exactly why the writer must never round-trip a
- * whole subtree from this projection.
+ * models:{id,name?,reasoning?,attachment?,toolCall?,inputModalities?,limit?}[]}`
+ * per provider and `{model?, temperature?}` per agent. Everything else opencode
+ * understands (model-level cost/variants/headers/modalities.output/limit.input,
+ * provider-level options.apiKey, unknown agent fields) is invisible here —
+ * which is exactly why the writer must never round-trip a whole subtree from
+ * this projection.
  */
 function projectNativeToFields(native: Record<string, unknown>): NativeOpencodeFields {
   const result: NativeOpencodeFields = {}
@@ -275,8 +316,11 @@ function arraysEqual(a: string[] | undefined, b: string[] | undefined): boolean 
  *     different, delete when emptied.
  *   - provider: per id — add (whole native shape), remove (delete subtree, which
  *     IS user intent), or keep with per-field leaf edits (name, options.baseURL,
- *     npm, models per id). Never touches unmodelled fields (options.apiKey,
- *     model attachment/modalities/tool_call/cost/limit/…).
+ *     npm, models per id). A model's capability leaves (reasoning, attachment,
+ *     tool_call, modalities.input, limit.context/output) are SET when the
+ *     incoming model gives them and they differ, and never deleted: a caller
+ *     that does not model them leaves the file's. Never touches unmodelled
+ *     fields (options.apiKey, model cost/variants/modalities.output/…).
  *   - agent: per name — add/remove/keep; keep touches only model/temperature and
  *     preserves unknown entry fields (prompt, mode, permission, …).
  *
@@ -387,16 +431,30 @@ export function writeOpencodeNativeConfig(fields: NativeOpencodeFields): void {
         const im = inModels.get(modelId)
         const cm = curModels.get(modelId)
         if (im && !cm) {
-          set(['provider', id, 'models', modelId], im.name ? { name: im.name } : {})
+          set(['provider', id, 'models', modelId], settingsModelToNative(im))
         } else if (!im && cm) {
           del(['provider', id, 'models', modelId])
         } else if (im && cm) {
+          const at = ['provider', id, 'models', modelId]
           const inMName = normScalar(im.name)
           const curMName = normScalar(cm.name)
           if (inMName !== curMName) {
-            if (inMName === undefined) del(['provider', id, 'models', modelId, 'name'])
-            else set(['provider', id, 'models', modelId, 'name'], inMName)
+            if (inMName === undefined) del([...at, 'name'])
+            else set([...at, 'name'], inMName)
           }
+          // Capability leaves: set when given and changed, never deleted.
+          if (im.reasoning !== undefined && im.reasoning !== cm.reasoning)
+            set([...at, 'reasoning'], im.reasoning)
+          if (im.attachment !== undefined && im.attachment !== cm.attachment)
+            set([...at, 'attachment'], im.attachment)
+          if (im.toolCall !== undefined && im.toolCall !== cm.toolCall)
+            set([...at, 'tool_call'], im.toolCall)
+          if (im.inputModalities && !arraysEqual(im.inputModalities, cm.inputModalities))
+            set([...at, 'modalities', 'input'], im.inputModalities)
+          if (im.limit && im.limit.context !== cm.limit?.context)
+            set([...at, 'limit', 'context'], im.limit.context)
+          if (im.limit && im.limit.output !== cm.limit?.output)
+            set([...at, 'limit', 'output'], im.limit.output)
         }
       }
     }

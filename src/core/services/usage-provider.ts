@@ -31,15 +31,25 @@ import type {
   AccountLimits,
   AccountLimitWindow,
   AccountUsage,
-  BillingType
+  BillingType,
+  RateWindow
 } from '../../shared/types'
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { windowKindLabel, windowKindsForReading } from '../../shared/window-kind'
 import { usageFetcher, getCliUserAgent } from './usage-fetcher'
 import { claudeLimitWindows, fetchClaudeUsage } from './claude-usage-api'
 import { claudeDirAccountKey, resolveClaudeDirIdentity } from './claude-account-identity'
 import { activeClaudeAttribution, claudeAccountLabel } from './usage-windows'
 import { recordLimitSamples } from './window-samples'
-import { getAllAccounts, latestWindowSamples, updateAccountIdentity } from './db'
+import {
+  getAllAccounts,
+  latestAccountLabels,
+  latestWindowSamples,
+  listRemoteDevices,
+  listRemoteLimits,
+  updateAccountIdentity,
+  type RemoteLimitRow
+} from './db'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { buildClaudeAccountRef, hostAccountsDir } from '../host'
@@ -63,7 +73,9 @@ export interface UsageProvider {
 const claudeUsageProvider: UsageProvider = {
   getWindow(): UsageWindow | null {
     const usage = usageFetcher.getLastUsage()
-    if (!usage || usage.error) return null
+    // No five-hour window is now literally none (S3c) rather than a fabricated
+    // 0 % one, and this gate already means "no window is available".
+    if (!usage || usage.error || !usage.fiveHour) return null
     return { usedPercent: usage.fiveHour.usedPercent, resetsAt: usage.fiveHour.resetsAt }
   }
 }
@@ -116,14 +128,6 @@ async function credentialsMtime(path: string): Promise<number | null> {
   } catch {
     return null
   }
-}
-
-/** The display name of a window kind read back from storage (which keeps no label). */
-function windowKindLabel(kind: string): string {
-  if (kind === '5h') return '5-hour'
-  if (kind === '7d') return '7-day'
-  if (kind.startsWith('7d:')) return `7-day ${kind.slice(3).replace(/-/g, ' ')}`
-  return kind
 }
 
 /**
@@ -313,6 +317,11 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
       const written = recordLimitSamples({
         accountKey,
         accountUuid,
+        // Display-only, for the hub relay (ADR-072 §4) — the same three fields
+        // the active poll passes, from the base this loop already built.
+        accountLabel: base.label,
+        vendorId: base.vendorId,
+        plan: result.usage.planName ?? account.subscriptionType,
         windows
       })
       persisted += written
@@ -358,10 +367,13 @@ function lastPersistedReading(
   if (samples.length === 0) return { windows: [], observedAt: 0, state: 'unavailable' }
   const windows: AccountLimitWindow[] = samples.map((sample) => ({
     kind: sample.windowKind,
+    // Storage keeps no label, so it is rebuilt from the kind — the one rule
+    // every surface labels a window by (S3c).
     label: windowKindLabel(sample.windowKind),
     usedPercent: sample.usedPercent,
     // The canonical end IS the window's reset instant (ADR-011's snap rule).
-    resetsAt: new Date(sample.canonicalEnd).toISOString()
+    resetsAt: new Date(sample.canonicalEnd).toISOString(),
+    windowMinutes: sample.windowMinutes
   }))
   return {
     windows,
@@ -388,6 +400,17 @@ const claudeLimitsProvider: LimitsProvider = {
   }
 }
 
+/** One ChatGPT window in ADR-071 §6's vocabulary, under the kind the reading gave it. */
+function chatgptWindow(kind: string, window: RateWindow): AccountLimitWindow {
+  return {
+    kind,
+    label: windowKindLabel(kind),
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    windowMinutes: window.windowMinutes ?? null
+  }
+}
+
 const chatgptLimitsProvider: LimitsProvider = {
   vendorId: 'openai',
   async read({ refresh }) {
@@ -398,9 +421,15 @@ const chatgptLimitsProvider: LimitsProvider = {
     const limits: AccountLimits[] = []
     for (const [vaultAccountId, account] of Object.entries(snapshot)) {
       const identity = await credentialSync.accountIdentity(vaultAccountId)
+      // The KIND comes from the length the backend stated, never from the slot
+      // the window arrived in (S3c): a plan whose only limit is weekly delivers
+      // it as `primary`, and position said it was a five-hour window. The SAME
+      // helper the store's sample writer uses, so a meter and the sample behind
+      // it can never be filed under two different kinds.
+      const kinds = windowKindsForReading(account)
       const windows: AccountLimitWindow[] = []
-      if (account.primary) windows.push({ kind: '5h', label: '5-hour', ...account.primary })
-      if (account.secondary) windows.push({ kind: '7d', label: '7-day', ...account.secondary })
+      if (account.primary) windows.push(chatgptWindow(kinds.primary, account.primary))
+      if (account.secondary) windows.push(chatgptWindow(kinds.secondary, account.secondary))
       limits.push({
         accountKey: identity.accountKey,
         label: identity.accountLabel ?? account.email ?? vaultAccountId,
@@ -442,16 +471,25 @@ let refreshInFlight: Promise<AccountLimits[]> | null = null
  * are not spawned twice either. A non-refreshing read is local and cheap, and
  * must not queue behind a refresh, so it runs on its own.
  */
-export function readAccountLimits(opts: { refresh?: boolean } = {}): Promise<AccountLimits[]> {
-  if (!opts.refresh) return readEveryProvider(false)
+export function readAccountLimits(
+  opts: { refresh?: boolean; relayed?: boolean } = {}
+): Promise<AccountLimits[]> {
+  // `relayed` defaults ON: every surface that asks "what are this account's
+  // limits" wants the hub's answer for a key it cannot read itself. The one
+  // caller that passes `false` is the dashboard's LABEL map, which must not
+  // read a `remote_*` table under the `local` scope at all (S5c round 2, R3).
+  const relayed = opts.relayed ?? true
+  if (!opts.refresh) return readEveryProvider(false, relayed)
+  // The single-flight covers the refreshing read only, and every refreshing
+  // caller wants the relay, so the flight needs no second key.
   if (refreshInFlight) return refreshInFlight
-  refreshInFlight = readEveryProvider(true).finally(() => {
+  refreshInFlight = readEveryProvider(true, relayed).finally(() => {
     refreshInFlight = null
   })
   return refreshInFlight
 }
 
-async function readEveryProvider(refresh: boolean): Promise<AccountLimits[]> {
+async function readEveryProvider(refresh: boolean, relayed: boolean): Promise<AccountLimits[]> {
   // A refreshing read is the one thing in the app that may spend refresh
   // grants, so it always leaves a line; a cheap read is debug-only.
   logger[refresh ? 'info' : 'debug']('UsageProvider', `limits read (refresh: ${refresh})`)
@@ -465,5 +503,112 @@ async function readEveryProvider(refresh: boolean): Promise<AccountLimits[]> {
       }
     })
   )
-  return readings.flat()
+  const local = readings.flat()
+  return relayed ? [...local, ...relayedLimits(local)] : local
+}
+
+// ---------------------------------------------------------------------------
+// Relayed readings (ADR-072 §4, slice S5c)
+// ---------------------------------------------------------------------------
+
+/**
+ * The accounts only ANOTHER machine holds a credential for, as that machine
+ * last read them.
+ *
+ * This is the direct answer to ADR-071 §6's refresh-grant problem: a reading
+ * costs the account one grant wherever it is taken, and the hub already has the
+ * one another machine paid for. So a key this machine cannot read shows that
+ * reading and spends nothing — the stored-account path above is untouched, and
+ * in particular nothing here can make it try a 401'd credential again.
+ *
+ * NOT SCOPED to the combined dashboard view. Limits are the account's state
+ * right now, which is one fact however many machines watch it (ADR-072 §4); the
+ * `local` / `all` switch is about whose SPEND is being added up, a different
+ * question. What the scope does decide is the machines column beside the row.
+ *
+ * A KEY WITH A LOCAL READING KEEPS IT, whatever its state. Even
+ * `needs-sign-in` — that says this machine's own credential is dead, which is
+ * something the person has to fix here, and replacing it with a healthy reading
+ * from elsewhere would hide the only place the problem shows.
+ */
+function relayedLimits(local: ReadonlyArray<AccountLimits>): AccountLimits[] {
+  let rows: RemoteLimitRow[]
+  try {
+    rows = listRemoteLimits()
+  } catch (err) {
+    // The remote cache being unreadable must not take the local readings down
+    // with it: they are the ones with meters on screen.
+    logger.debug('UsageProvider', `relayed limits unavailable: ${err}`)
+    return []
+  }
+  if (rows.length === 0) return []
+
+  const held = new Set(local.map((entry) => entry.accountKey))
+  // The hub's machine list, so a reading can say WHO took it rather than only
+  // which uuid did (R2). It is the same cache the machine card reads; a device
+  // the hub has since dropped leaves the id as the only honest answer.
+  let deviceNames = new Map<string, string>()
+  try {
+    deviceNames = new Map(listRemoteDevices().map((device) => [device.deviceId, device.deviceName]))
+  } catch (err) {
+    logger.debug('UsageProvider', `relayed device names unavailable: ${err}`)
+  }
+  // The ledger's own label wins over the hub's masked one: if this machine has
+  // ever recorded a turn for the key it knows what the account is called, and
+  // showing `d•••@e•••.com` beside spend attributed to a name would read as two
+  // different accounts.
+  const ledgerLabels = latestAccountLabels()
+
+  const byAccount = new Map<
+    string,
+    { vendorId: string; plan: string | null; rows: RemoteLimitRow[] }
+  >()
+  for (const row of rows) {
+    // `unknown` is the bucket every unattributable row shares, never an account
+    // (ADR-071 §3) — the same rule the local readings follow.
+    if (row.accountKey === UNKNOWN_ACCOUNT_KEY || held.has(row.accountKey)) continue
+    const entry = byAccount.get(row.accountKey)
+    if (entry) entry.rows.push(row)
+    else byAccount.set(row.accountKey, { vendorId: row.vendorId, plan: row.plan, rows: [row] })
+  }
+
+  const out: AccountLimits[] = []
+  for (const [accountKey, entry] of byAccount) {
+    // One reading per kind, so the window order is the vendor's rather than the
+    // order the pull happened to write the rows in.
+    const windows: AccountLimitWindow[] = entry.rows
+      .slice()
+      .sort((a, b) => a.windowKind.localeCompare(b.windowKind))
+      .map((row) => ({
+        kind: row.windowKind,
+        label: windowKindLabel(row.windowKind),
+        usedPercent: row.usedPercent,
+        resetsAt: row.resetsAt,
+        windowMinutes: row.windowMinutes
+      }))
+    // The newest observation across the kinds: the age a surface shows is the
+    // age of the freshest thing on the row.
+    const observedAt = Math.max(...entry.rows.map((row) => row.observedAt))
+    const newest = entry.rows.find((row) => row.observedAt === observedAt) ?? entry.rows[0]
+    const ledgerLabel = ledgerLabels.get(accountKey)
+    out.push({
+      accountKey,
+      label: ledgerLabel ?? newest.labelMasked ?? accountKey,
+      vendorId: entry.vendorId,
+      plan: entry.plan,
+      windows,
+      observedAt,
+      source: {
+        deviceId: newest.deviceId,
+        deviceName: deviceNames.get(newest.deviceId)?.trim() || newest.deviceId
+      },
+      ...(ledgerLabel === undefined && newest.labelMasked !== null ? { labelMasked: true } : {}),
+      // `ok` rather than `stale`: the reading is as current as the account's
+      // state gets, and `stale` means "this machine did not spend a grant",
+      // which is a claim about a credential it does not hold. How old it is
+      // travels as `observedAt`, which is what the `via <machine>` tag reads.
+      state: 'ok'
+    })
+  }
+  return out
 }

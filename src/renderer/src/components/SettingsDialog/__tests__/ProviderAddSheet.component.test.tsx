@@ -4,7 +4,8 @@
  * It replaced three add flows — the shared vault's custom-provider form,
  * opencode's catalog picker and pi's "Add API key" select — so what is pinned
  * here is that each of them still lands in the SAME store it always did:
- * `vendor-auth:set-key` per selected engine for a catalog pick,
+ * one `catalog` definition plus ONE `shared-provider:set-key` for a catalog pick
+ * (ADR-074 §6 — the key is stored once and delivered to each engine),
  * `shared-provider:save` (+ `:set-key`) for a custom endpoint, and the ADR-057
  * OAuth pair for a subscription (that half lives in
  * `remote-oauth-settings.component.test.tsx`, which owns both platform
@@ -26,7 +27,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { ProviderList } from '../ProviderList'
-import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -122,12 +122,14 @@ beforeEach(async () => {
   snapshot = { entries: [chatgptRow, piXai], opencodeInstalled: true }
   catalog = [
     catalogEntry({ id: 'openai', name: 'OpenAI', authMethods: ['api', 'oauth'] }),
+    catalogEntry({ id: 'deepseek', name: 'DeepSeek' }),
     catalogEntry({ id: 'groq', name: 'Groq' }),
     // Already set up: a ROW of the list, never a candidate here.
     catalogEntry({ id: 'openrouter', name: 'OpenRouter', authState: 'authenticated' })
   ]
   piOptions = {
     openai: [{ type: 'api', label: 'OpenAI API key' }],
+    deepseek: [{ type: 'api', label: 'DeepSeek API key' }],
     radius: [{ type: 'api', label: 'Radius API key' }],
     // Keyed already (a `pi:xai` row), and owned by the vault — both excluded.
     xai: [{ type: 'api', label: 'xAI API key' }],
@@ -146,6 +148,7 @@ beforeEach(async () => {
   app.bridge.ipcMain.handle('session:get-engine-models', async () => [])
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
   stub('config:save-opencode-settings')
+  stub('models:set-provider-allowlist')
   stub('shared-provider:save')
   stub('shared-provider:set-key')
 
@@ -167,7 +170,7 @@ afterEach(() => {
 
 /** Render the list and open the Add sheet the way the group header does. */
 async function openAddSheet(): Promise<HTMLElement> {
-  render(<ProviderList navigate={vi.fn()} />)
+  render(<ProviderList />)
   await screen.findAllByTestId('ProviderList.row')
   await act(async () => {
     window.dispatchEvent(new CustomEvent('settings:add-provider'))
@@ -238,15 +241,17 @@ describe('opening', () => {
 describe('the list', () => {
   it('offers the UNCONFIGURED union, with a chip per engine that offers it', async () => {
     await openAddSheet()
-    // openai: both engines. groq: opencode only. radius: pi only (it is in pi's
-    // option catalog and in no opencode one).
-    expect(catalogIds()).toEqual(['groq', 'openai', 'radius'])
+    // deepseek: both engines. groq: opencode only. radius: pi only (it is in pi's
+    // option catalog and in no opencode one). openai: pi only — ChatGPT's
+    // ENABLED opencode route already delivers to opencode's `openai`.
+    expect(catalogIds()).toEqual(['deepseek', 'groq', 'openai', 'radius'])
 
     const chips = (id: string): (string | undefined)[] =>
       within(catalogRow(id))
         .getAllByTestId('ProviderAddSheet.engineChip')
         .map((el) => el.dataset.id)
-    expect(chips('openai')).toEqual(['opencode', 'pi'])
+    expect(chips('deepseek')).toEqual(['opencode', 'pi'])
+    expect(chips('openai')).toEqual(['pi'])
     expect(chips('groq')).toEqual(['opencode'])
     expect(chips('radius')).toEqual(['pi'])
   })
@@ -264,17 +269,29 @@ describe('the list', () => {
     await openAddSheet()
     await typeInto('ProviderAddSheet.search', 'gro')
     expect(catalogIds()).toEqual(['groq'])
-    expect(screen.queryAllByTestId('ProviderAddSheet.subscription')).toHaveLength(0)
+    expect(screen.queryAllByTestId('ProviderAddSheet.engineSignIn')).toHaveLength(0)
     // …and the section itself goes, rather than leaving an empty card.
     expect(
       screen.queryAllByTestId('ProviderAddSheet.group').map((el) => el.dataset.id)
-    ).not.toContain('subscriptions')
+    ).not.toContain('engine-sign-ins')
 
-    await typeInto('ProviderAddSheet.search', 'chatgpt')
+    await typeInto('ProviderAddSheet.search', 'claude')
     expect(catalogIds()).toEqual([])
     expect(
-      screen.getAllByTestId('ProviderAddSheet.subscription').map((el) => el.dataset.id)
-    ).toEqual(['chatgpt'])
+      screen.getAllByTestId('ProviderAddSheet.engineSignIn').map((el) => el.dataset.id)
+    ).toEqual(['claude-pi'])
+  })
+
+  // ADR-074 §7: a sign-in subscription has its own card, with its accounts; the
+  // Add sheet is for API providers and engine-owned sign-ins only.
+  it('offers no sign-in subscription — ChatGPT is added from its card', async () => {
+    await openAddSheet()
+    await typeInto('ProviderAddSheet.search', 'chatgpt')
+    expect(
+      screen.queryAllByTestId('ProviderAddSheet.group').map((el) => el.dataset.id)
+    ).not.toContain('subscriptions')
+    expect(screen.queryByTestId('ProviderAddSheet.chatgptSignIn')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderAddSheet')).not.toHaveTextContent('ChatGPT · Codex')
   })
 
   it('hides the catalog entirely when nothing offers one', async () => {
@@ -310,100 +327,116 @@ describe('the list', () => {
     await click(screen.getByTestId('ProviderAddSheet.copyCommand'))
     expect(writeText).toHaveBeenCalledWith('"/opt/pi/bin/pi"')
   })
-
-  it('shows ChatGPT as Connected, with no sign-in, once it is', async () => {
-    snapshot = {
-      ...snapshot,
-      entries: [{ ...chatgptRow, credential: 'connected' }, piXai]
-    }
-    await openAddSheet()
-    const row = screen
-      .getAllByTestId('ProviderAddSheet.subscription')
-      .find((el) => el.dataset.id === 'chatgpt')!
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
-      'data-id',
-      'connected'
-    )
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
-  })
-
-  it('keeps the sign-in control once accounts exist, as "Add another account" (ADR-068 §2)', async () => {
-    // The Manage sheet's "+ Add account" hands over to THIS row. Hiding the flow
-    // the moment the first account lands made adding a second one impossible:
-    // one account already makes the row `connected`.
-    snapshot = {
-      ...snapshot,
-      entries: [
-        {
-          ...chatgptRow,
-          credential: 'connected' as const,
-          accounts: {
-            activeId: 'acc-1',
-            perSession: false,
-            list: [{ id: 'acc-1', email: 'daniel@example.com' }, { id: 'acc-2' }]
-          }
-        },
-        piXai
-      ]
-    }
-    await openAddSheet()
-    const row = screen
-      .getAllByTestId('ProviderAddSheet.subscription')
-      .find((el) => el.dataset.id === 'chatgpt')!
-    // Still connected, and the chip counts what is already there.
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
-      'data-id',
-      'connected'
-    )
-    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveTextContent('2 accounts')
-    // ADR-068 §3: a button that opens the ONE dialog, never a flow of its own.
-    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
-    const button = screen.getByTestId('ProviderAddSheet.chatgptSignIn')
-    expect(button).toHaveTextContent('Add another account')
-    fireEvent.click(button)
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'chatgpt',
-      mode: 'add'
-    })
-  })
 })
 
 // ── The setup step ───────────────────────────────────────────────────
 
 describe('the setup step', () => {
-  it('writes the key into EVERY selected engine’s own auth store', async () => {
+  /** The catalog definition the sheet saves for a pick, routes per chosen engine. */
+  const catalogDefinition = (
+    id: string,
+    name: string,
+    routes: { pi: boolean; opencode: boolean }
+  ): SharedProviderDefinition => ({
+    id,
+    name,
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: routes.pi }, opencode: { enabled: routes.opencode } }
+  })
+
+  it('stores the key ONCE: a catalog definition with a route per engine, then one set-key', async () => {
     await openAddSheet()
-    await click(catalogRow('openai'))
-    expect(screen.getByTestId('ProviderAddSheet.setup')).toHaveAttribute('data-id', 'openai')
+    expect(screen.getByTestId('ProviderAddSheet.steps')).toHaveAttribute('data-id', '1')
+    await click(catalogRow('deepseek'))
+    expect(screen.getByTestId('ProviderAddSheet.setup')).toHaveAttribute('data-id', 'deepseek')
+    expect(screen.getByTestId('ProviderAddSheet.steps')).toHaveAttribute('data-id', '2')
+    expect(screen.getByTestId('ProviderAddSheet.key')).toHaveTextContent(
+      'Entered once. ClaudeUI stores it and delivers it to each engine you pick.'
+    )
 
     await typeInto('ProviderAddSheet.keyInput', 'sk-live')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([
-      ['opencode', 'openai', 'sk-live'],
-      ['pi', 'openai', 'sk-live']
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('deepseek', 'DeepSeek', { pi: true, opencode: true })]
     ])
+    expect(sent('shared-provider:set-key')).toEqual([['deepseek', 'sk-live']])
+    // No per-engine loop: the vault delivers the one key.
+    expect(called('vendorAuthSetKey')).toEqual([])
   })
 
-  it('writes only where the chips say, when one engine is de-selected', async () => {
+  it('routes only where the chips say, when one engine is de-selected', async () => {
     await openAddSheet()
-    await click(catalogRow('openai'))
+    await click(catalogRow('deepseek'))
     await click(
       screen.getAllByTestId('ProviderAddSheet.engines.chip').find((el) => el.dataset.id === 'pi')!
     )
     await typeInto('ProviderAddSheet.keyInput', 'sk-live')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([['opencode', 'openai', 'sk-live']])
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('deepseek', 'DeepSeek', { pi: false, opencode: true })]
+    ])
+    expect(sent('shared-provider:set-key')).toEqual([['deepseek', 'sk-live']])
   })
 
-  it('seeds an EMPTY opencode allowlist so a 300-model provider cannot flood the picker', async () => {
+  it('an id the vault cannot name keeps a copy per engine, as before', async () => {
+    catalog = [...catalog, catalogEntry({ id: 'io.net', name: 'io.net' })]
+    await openAddSheet()
+    await click(catalogRow('io.net'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-io')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('shared-provider:save')).toEqual([])
+    expect(called('vendorAuthSetKey')).toEqual([['opencode', 'io.net', 'sk-io']])
+  })
+
+  /** A catalog of `n` models, for the anti-flood threshold (ADR-074 §2: over 50). */
+  const catalogOf = (n: number): Array<{ id: string; name: string }> =>
+    Array.from({ length: n }, (_, i) => ({ id: `m-${i}`, name: `Model ${i}` }))
+
+  it('seeds an EMPTY opencode allowlist for a catalog over 50, so it cannot flood the picker', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(300))
     await openAddSheet()
     await click(catalogRow('groq'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(sent('config:save-opencode-settings')).toEqual([[{ modelAllowlist: { groq: [] } }]])
+    expect(sent('models:set-provider-allowlist')).toEqual([['opencode', 'groq', []]])
+    expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+
+  it('leaves a catalog of 50 or fewer on All models — no key at all', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(50))
+    await openAddSheet()
+    await click(catalogRow('groq'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('models:set-provider-allowlist')).toEqual([])
+  })
+
+  it('seeds each engine by ITS OWN catalog size', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(3))
+    app.bridge.ipcMain.handle('session:get-pi-model-catalog', async () => [
+      {
+        engineId: 'pi',
+        vendorId: 'openai',
+        vendorName: 'openai',
+        models: catalogOf(60).map((m) => ({
+          value: `openai/${m.id}`,
+          displayName: m.name,
+          description: '',
+          engineId: 'pi'
+        }))
+      }
+    ])
+    await openAddSheet()
+    await click(catalogRow('openai'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-live')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('models:set-provider-allowlist')).toEqual([['pi', 'openai', []]])
   })
 
   it('leaves an existing allowlist alone (re-keying must not wipe curation)', async () => {
+    app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => catalogOf(300))
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
       modelAllowlist: { groq: ['llama-4'] }
     }))
@@ -411,16 +444,31 @@ describe('the setup step', () => {
     await click(catalogRow('groq'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-groq')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(sent('config:save-opencode-settings')).toEqual([])
+    expect(sent('models:set-provider-allowlist')).toEqual([])
   })
 
-  it('writes nothing for a pi-only provider beyond pi’s own store', async () => {
+  it('routes a pi-only provider to pi alone', async () => {
     await openAddSheet()
     await click(catalogRow('radius'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-radius')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([['pi', 'radius', 'sk-radius']])
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('radius', 'radius', { pi: true, opencode: false })]
+    ])
+    expect(sent('shared-provider:set-key')).toEqual([['radius', 'sk-radius']])
+    expect(called('vendorAuthSetKey')).toEqual([])
+    expect(sent('models:set-provider-allowlist')).toEqual([])
     expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+
+  it('never offers an id a shared definition already owns — not even with its routes off', async () => {
+    definitions = [
+      chatgptDefinition,
+      catalogDefinition('groq', 'Groq', { pi: false, opencode: false })
+    ]
+    await openAddSheet()
+    expect(catalogIds()).not.toContain('groq')
+    expect(catalogIds()).toContain('openai')
   })
 
   it('Back returns to the list without writing anything', async () => {
@@ -505,12 +553,16 @@ describe('after a write', () => {
   it('re-reads the registry, closes, and lands on the new row’s Manage sheet', async () => {
     await openAddSheet()
     const before = registryReads
+    // The pick became a shared catalog definition, so its row is `groq` itself.
     const added: ProviderEntry = {
-      id: 'opencode:groq',
+      id: 'groq',
       name: 'Groq',
-      origin: 'opencode-native',
+      origin: 'shared',
       credential: 'api-key',
-      engines: { opencode: { enabled: true, modelCount: 0, curated: true, native: true } }
+      engines: {
+        opencode: { enabled: true, modelCount: 0, curated: true, native: true },
+        pi: { enabled: false }
+      }
     }
 
     await click(catalogRow('groq'))
@@ -520,12 +572,10 @@ describe('after a write', () => {
 
     expect(registryReads).toBe(before + 1)
     expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toContain(
-      'opencode:groq'
-    )
+    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toContain('groq')
     // Curation is the next thing on screen — the row was added with an empty
     // allowlist, so a list that just said "0 models" would be a dead end.
-    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'opencode:groq')
+    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'groq')
   })
 
   it('keeps the sheet open and reports a rejected write', async () => {

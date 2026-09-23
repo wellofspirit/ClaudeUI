@@ -115,7 +115,8 @@ function sample(accountKey: string, ts: number): WindowSampleRow {
     usedPercent: 20,
     canonicalEnd: ts + HOUR,
     accountKey,
-    windowKind: '5h'
+    windowKind: '5h',
+    windowMinutes: null
   }
 }
 
@@ -177,6 +178,7 @@ function seedLedger(db: DbModule): void {
       windowKind: '5h',
       canonicalEnd: SINCE + 2 * HOUR,
       windowStart: SINCE - 3 * HOUR,
+      windowMinutes: null,
       peakPercent: 30,
       apiCostUsd: 2,
       billedCostUsd: 0,
@@ -194,6 +196,7 @@ function seedLedger(db: DbModule): void {
       windowKind: '5h',
       canonicalEnd: SINCE - 2 * HOUR,
       windowStart: SINCE - 7 * HOUR,
+      windowMinutes: null,
       peakPercent: 10,
       apiCostUsd: 1,
       billedCostUsd: 0,

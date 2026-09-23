@@ -12,11 +12,12 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { AccountsPanel } from '../AccountsPanel'
 import { SEVERITY_ICON, buildProviderColorMap } from '../usage-utils'
-import type { BlockUsageData } from '../../../../../shared/types'
+import type { AccountLimits, BlockUsageData } from '../../../../../shared/types'
 import {
   makeAccount,
   makeDashboard,
   makeLimits,
+  makeMachine,
   makeProvider,
   makeTotals,
   makeWindow
@@ -145,6 +146,112 @@ describe('AccountsPanel — limit meters', () => {
     expect(sevenDay.getAttribute('title')).toContain('(in ')
     expect(within(fiveHour).getByTestId('AccountsPanel.meter.reset')).toHaveTextContent('in 1h 30m')
     expect(within(sevenDay).getByTestId('AccountsPanel.meter.reset')).toHaveTextContent('Thu 09:00')
+  })
+
+  /**
+   * S3c — a ChatGPT plan whose ONLY limit is weekly delivers it in the
+   * `primary` slot. Kinded by position it arrived here as `5h` / `5-hour` and
+   * its reset was drawn as a countdown ("in 28h 55m"); kinded by the duration
+   * the backend states, it is the weekly window it always was.
+   */
+  it('renders a lone weekly ChatGPT window as 7-day, with a weekday reset', () => {
+    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            accountKey: 'chatgpt:ws-1:user-1',
+            label: 'chat@example.test',
+            vendorId: 'openai',
+            windows: [
+              makeWindow({
+                kind: '7d',
+                label: '7-day',
+                usedPercent: 63,
+                resetsAt: weekly.toISOString(),
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    const meter = screen.getByTestId('AccountsPanel.meter')
+    expect(meter).toHaveAttribute('data-kind', '7d')
+    expect(meter).toHaveTextContent('7-day')
+    expect(meter.getAttribute('title')).toContain('resets Thu 09:00')
+    expect(within(meter).getByTestId('AccountsPanel.meter.reset')).toHaveTextContent('Thu 09:00')
+  })
+
+  /**
+   * Round 2 — a plan whose two limits are the same length. The meters are keyed
+   * by kind, so `7d` twice would be a duplicate React key and one row standing
+   * for two windows; `7d:secondary` keeps them distinct and labelled.
+   */
+  it('draws two same-length windows as two meters with distinct kinds', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            accountKey: 'chatgpt:ws-1:user-1',
+            vendorId: 'openai',
+            windows: [
+              makeWindow({ kind: '7d', label: '7-day', usedPercent: 63, windowMinutes: 10_080 }),
+              makeWindow({
+                kind: '7d:secondary',
+                label: '7-day secondary',
+                usedPercent: 12,
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    const meters = screen.getAllByTestId('AccountsPanel.meter')
+    expect(meters.map((m) => m.getAttribute('data-kind'))).toEqual(['7d', '7d:secondary'])
+    expect(meters[1]).toHaveTextContent('7-day secondary')
+    expect(meters[1]).toHaveTextContent('12%')
+  })
+
+  /**
+   * The meter has to PASS the stated length on, not just the kind: the reset
+   * form is chosen by length now, and a row whose kind and duration disagree —
+   * a reading kinded before S3c, refreshed after it — must follow the duration.
+   */
+  it('chooses the reset form from the stated minutes, not the kind', () => {
+    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [
+              makeWindow({
+                kind: '5h',
+                label: '5-hour',
+                resetsAt: weekly.toISOString(),
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    expect(
+      within(screen.getByTestId('AccountsPanel.meter')).getByTestId('AccountsPanel.meter.reset')
+    ).toHaveTextContent('Thu 09:00')
   })
 
   it('keeps the icon and the percent at every width, and only folds the reset', () => {
@@ -636,5 +743,315 @@ describe('AccountsPanel — a provider that priced nothing', () => {
     )
     expect(screen.getByTestId('AccountsPanel.provider')).not.toHaveAttribute('data-collapsed')
     expect(screen.getByTestId('AccountsPanel.account')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Relayed readings and the machines column (ADR-072 §4, slice S5c)
+// ---------------------------------------------------------------------------
+
+describe('AccountsPanel — a relayed reading', () => {
+  const PEER_KEY = 'chatgpt:w9:u9'
+  /**
+   * A uuid, not a word. The name has to come from the READING, and an id that
+   * happened to read like a name would have hidden the round-1 defect: under
+   * `local` the machine list is empty, so the tag printed the id's prefix.
+   */
+  const PEER_ID = '3f2a1b9c-7e42-4a51-9a10-6c0d5b8e2f31'
+
+  /** A reading another machine took, as `readAccountLimits` relays it. */
+  function relayed(overrides: Partial<AccountLimits> = {}): AccountLimits {
+    return makeLimits({
+      accountKey: PEER_KEY,
+      label: 'p•••@e•••.test',
+      labelMasked: true,
+      vendorId: 'openai',
+      source: { deviceId: PEER_ID, deviceName: 'studio-mac' },
+      observedAt: Date.now() - 6 * 60_000,
+      windows: [makeWindow({ kind: '7d', label: '7-day', usedPercent: 61 })],
+      ...overrides
+    })
+  }
+
+  it('tags every meter it feeds with the machine that took it and how old it is', () => {
+    const data = makeDashboard({ providers: [] })
+    render(
+      <AccountsPanel
+        data={data}
+        limits={[
+          relayed({
+            windows: [
+              makeWindow({ kind: '5h', label: '5-hour', usedPercent: 13 }),
+              makeWindow({ kind: '7d', label: '7-day', usedPercent: 61 })
+            ]
+          })
+        ]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+
+    // One per meter, not one per row: a reader scanning a single meter must not
+    // have to look elsewhere to learn who read it.
+    const tags = screen.getAllByTestId('AccountsPanel.relayed')
+    expect(tags).toHaveLength(2)
+    expect(tags.map((t) => t.getAttribute('data-device-id'))).toEqual([PEER_ID, PEER_ID])
+    // The NAME, on a `local` payload whose machine list is empty (R2).
+    expect(tags[0]).toHaveTextContent('via studio-mac · 6m')
+    expect(tags[0].textContent).not.toContain(PEER_ID.slice(0, 8))
+  })
+
+  it('falls back to the id only when the hub no longer lists the device', () => {
+    // What the relay itself writes when `remote_device` holds no row: the id IS
+    // the name by then, so nothing on this side has to guess.
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[relayed({ source: { deviceId: PEER_ID, deviceName: PEER_ID } })]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.relayed')).toHaveTextContent(`via ${PEER_ID}`)
+  })
+
+  it('says a masked label is masked, and explains why in the title', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[relayed()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    const tag = screen.getByTestId('AccountsPanel.masked')
+    expect(tag).toHaveTextContent('masked')
+    expect(tag.getAttribute('title')).toContain('Only another machine holds a credential')
+  })
+
+  it('shows the masked tag on a LEDGER row too, so the scopes read alike', () => {
+    // Under `all` the peer's account has buckets, so it is a ledger row and its
+    // name comes from the query rather than from the reading. Reading only the
+    // reading's flag made the tag appear under `local` and vanish under `all`
+    // for one and the same account (round 3, item 3).
+    const data = makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          accounts: [
+            makeAccount({
+              accountKey: 'anthropic:org-9:acct-9',
+              label: 'a•••@e•••.test',
+              labelMasked: true,
+              machines: ['dev-peer'],
+              remoteOnly: true
+            })
+          ]
+        })
+      ],
+      machines: [
+        makeMachine({ deviceId: 'dev-self', self: true }),
+        makeMachine({ deviceId: 'dev-peer', deviceName: 'studio', self: false })
+      ]
+    })
+    render(
+      <AccountsPanel
+        data={data}
+        limits={[]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+
+    expect(screen.getByTestId('AccountsPanel.account')).toHaveTextContent('a•••@e•••.test')
+    expect(screen.getByTestId('AccountsPanel.masked')).toBeInTheDocument()
+  })
+
+  it('tags nothing on a local reading', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[makeLimits()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.queryByTestId('AccountsPanel.relayed')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('AccountsPanel.masked')).not.toBeInTheDocument()
+  })
+})
+
+describe('AccountsPanel — the machines column', () => {
+  const SHARED = 'anthropic:org-1:acct-1'
+  const PEER_ONLY = 'anthropic:org-2:acct-2'
+
+  function combined() {
+    return makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          totals: makeTotals({ displayCostUsd: 100 }),
+          accounts: [
+            makeAccount({
+              accountKey: SHARED,
+              machines: ['dev-self', 'dev-peer'],
+              remoteOnly: false,
+              totals: makeTotals({ displayCostUsd: 60 })
+            }),
+            makeAccount({
+              accountKey: PEER_ONLY,
+              label: 'other@example.test',
+              machines: ['dev-peer'],
+              remoteOnly: true,
+              totals: makeTotals({ displayCostUsd: 40 })
+            })
+          ]
+        })
+      ],
+      totals: makeTotals({ displayCostUsd: 100 }),
+      machines: [
+        makeMachine({ deviceId: 'dev-self', deviceName: 'desk', self: true }),
+        makeMachine({ deviceId: 'dev-peer', deviceName: 'studio', self: false })
+      ]
+    })
+  }
+
+  it('counts the machines an account is used on, and names a single one', () => {
+    render(
+      <AccountsPanel
+        data={combined()}
+        limits={[]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+
+    const cells = screen.getAllByTestId('AccountsPanel.account.machines')
+    expect(cells[0]).toHaveTextContent('2 machines')
+    expect(cells[0].getAttribute('title')).toBe('desk, studio')
+    // A single machine that is not this one is NAMED; this machine's own row
+    // needs no name at all.
+    expect(cells[1]).toHaveTextContent('studio only')
+  })
+
+  it('reads `this machine` for an account only this machine spent on', () => {
+    const data = makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          accounts: [makeAccount({ machines: ['dev-self'], remoteOnly: false })]
+        })
+      ],
+      machines: [makeMachine({ deviceId: 'dev-self', deviceName: 'desk', self: true })]
+    })
+    render(
+      <AccountsPanel
+        data={data}
+        limits={[]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.account.machines')).toHaveTextContent('this machine')
+  })
+
+  it('is hidden below the tablet breakpoint, where the row has no room for it', () => {
+    // jsdom has no layout, so what is assertable here is the RULE; the verifier
+    // measures the 406px row. The column was 100px of it and pushed the spend
+    // figure and the relayed tag out of reach (F2).
+    render(
+      <AccountsPanel
+        data={combined()}
+        limits={[]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    for (const cell of screen.getAllByTestId('AccountsPanel.account.machines')) {
+      expect(cell.className).toContain('hidden')
+      expect(cell.className).toContain('md:block')
+    }
+  })
+
+  it('is absent under local — one machine needs no column', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[makeLimits()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.queryByTestId('AccountsPanel.account.machines')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Narrow widths (S5c round 3, item 2)
+//
+// jsdom has no layout, so what is assertable here is the RULE the layout rests
+// on — the card contains no horizontal scroller at all, and the meters are a
+// full-width row that follows the label and the spend below `lg` and rejoins
+// them at `lg`. The verifier measures the result at 348 CSS px.
+// ---------------------------------------------------------------------------
+
+describe('AccountsPanel — the narrow layout', () => {
+  it('contains no horizontal scroller, at any width', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[makeLimits()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    // Round 2 put one of these on every row: six scrollbars on one card, and
+    // the relayed tag still ended up outside it.
+    expect(
+      screen.getByTestId('AccountsPanel').querySelectorAll('[class*="overflow-x-auto"]')
+    ).toHaveLength(0)
+    expect(
+      screen.getByTestId('AccountsPanel').querySelectorAll('[class*="min-w-max"]')
+    ).toHaveLength(0)
+  })
+
+  it('puts the meters on their own line below lg and back in the row at lg', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[makeLimits()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    const meters = screen.getByTestId('AccountsPanel.account.meters')
+    // Below `lg`: last in the flex order, and the full width — which is what
+    // forces the wrap, so the line above it is the label and the spend.
+    expect(meters.className).toContain('order-last')
+    expect(meters.className).toContain('w-full')
+    // At `lg`: back to its DOM position, sharing the line.
+    expect(meters.className).toContain('lg:order-none')
+    expect(meters.className).toContain('lg:w-auto')
+    expect(meters.className).toContain('lg:flex-1')
+    // And the row itself wraps rather than scrolling.
+    expect(meters.parentElement?.className).toContain('flex-wrap')
+  })
+
+  it('keeps the spend on the first line, before the meters wrap', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[makeLimits()]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    // No `order-last`, so it stays with the label whatever the meters do.
+    const spend = screen.getByTestId('AccountsPanel.account.spend')
+    expect(spend.className).not.toContain('order-last')
+    expect(spend.className).toContain('shrink-0')
   })
 })

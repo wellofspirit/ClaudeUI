@@ -34,9 +34,12 @@ export type ProviderOrigin = 'anthropic' | 'shared' | 'opencode-native' | 'pi-na
  * - `custom`     — configured OUTSIDE ClaudeUI's stores: opencode reports the
  *                  provider as usable but no `auth.json` entry backs it, so the
  *                  key comes from an env var or another config file.
+ * - `keyless`    — a shared CUSTOM endpoint with no stored key (ADR-074 §4):
+ *                  used without one, which is a state rather than a failure.
  * - `none`       — nothing configured.
  */
-export type ProviderCredential = 'signed-in' | 'connected' | 'api-key' | 'free' | 'custom' | 'none'
+export type ProviderCredential =
+  'signed-in' | 'connected' | 'api-key' | 'free' | 'custom' | 'keyless' | 'none'
 
 /** What one engine's chip on the row says. */
 export interface ProviderEngineFacts {
@@ -52,6 +55,37 @@ export interface ProviderEngineFacts {
   curated?: boolean
   /** The engine's OWN store holds an entry for this provider (not only ClaudeUI's). */
   native?: boolean
+  /**
+   * The id this engine's catalog and model allowlist key the provider by —
+   * `openai` for ChatGPT in opencode, `openai-codex` in pi, the native id on a
+   * native row. Set for opencode and pi only; a disabled shared route owns no
+   * native entry, so it has none.
+   */
+  providerId?: string
+  /**
+   * How many models the engine's own catalog lists for this provider, when a
+   * source can say without a discovery pass — the "of m" in `4 of 382`.
+   */
+  catalogCount?: number
+  /** A shared route's last delivery failure (`SharedProviderStatus`), for the engine row. */
+  error?: string
+  /**
+   * An ENABLED shared route: whether the engine's own store actually holds the
+   * credential now (`SharedProviderStatus.routes[r].delivered`). A route with no
+   * error can still be undelivered — the file was changed outside ClaudeUI.
+   */
+  delivered?: boolean
+  /**
+   * A DISABLED catalog route whose engine holds its OWN credential for the
+   * vendor: turning the route on replaces it with the stored key.
+   */
+  ownCredential?: true
+  /**
+   * A provider switched OFF (ADR-074 slice 10) whose route to this engine is on
+   * in its settings: `enabled` is false, and switching the provider on delivers
+   * it again.
+   */
+  routeOn?: true
 }
 
 export interface ProviderEntry {
@@ -63,6 +97,56 @@ export interface ProviderEntry {
   engines: Partial<Record<EngineId, ProviderEngineFacts>>
   /** One line under the name, e.g. `"2 of 300 models shown in the picker"`. */
   detail?: string
+  /**
+   * What KIND of provider this is, as the API-providers list subtitles it
+   * (ADR-074 §7): `Catalog`, `Catalog · free tier`, `Custom endpoint · <url>`,
+   * `Custom pi provider`. Absent on subscriptions, which have their own cards.
+   */
+  kindLabel?: string
+  /**
+   * Both engines hold their OWN, DIFFERENT key for this vendor and no shared
+   * definition owns it (ADR-074 §6): set on both native rows until the user
+   * keeps one. Last four characters of each and nothing more — the keys are
+   * compared in the main process and never cross the wire.
+   */
+  keyConflict?: { opencode: string; pi: string }
+  /**
+   * An API key only this engine holds, for a vendor the OTHER engine's catalog
+   * also knows: adopting it (`shared-provider:adopt-native` with this engine as
+   * `keep`) delivers it to both.
+   */
+  adoptable?: 'opencode' | 'pi'
+  /**
+   * A second key's entry (ADR-074 slice 10): the catalog vendor id it was made
+   * from. The list places it right after its origin's row.
+   */
+  derivedFrom?: string
+  /**
+   * A shared API provider switched OFF (ADR-074 slice 10): it reaches no engine,
+   * so every engine's facts read `enabled: false`, while its key and settings
+   * are kept for switching it back on.
+   */
+  disabled?: true
+  /**
+   * A sign-in SUBSCRIPTION rather than an API provider (ADR-074 §7): the
+   * Anthropic row and every shared `kind: 'subscription'` definition. The
+   * renderer files these under Subscriptions and everything else under API
+   * providers — on this fact, never on ids.
+   */
+  subscription?: true
+  /**
+   * The Anthropic row only: who Claude is signed in as, when anything says so —
+   * the active file-based account while Multiple accounts is on, else the probed
+   * sign-in; label and plan always from the same one. Structured so the Subscriptions card can
+   * render the single-account row without parsing `detail`.
+   */
+  identity?: { label?: string; plan?: string }
+  /**
+   * The Anthropic row only: nothing has checked the Claude sign-in yet (the
+   * probe cache is empty until a Claude session starts), so neither "signed
+   * in" nor "not signed in" would be true.
+   */
+  signInUnknown?: true
   /**
    * A shared SUBSCRIPTION row's stored accounts (ADR-068 §2): which one is
    * active, whether per-session pinning is on, and the list itself. Absent on

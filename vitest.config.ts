@@ -38,6 +38,9 @@ export default defineConfig({
             '**/node_modules/**',
             '**/dist/**',
             '**/.{idea,git,cache,output,temp}/**',
+            // `*.test.*` above also matches `*.component.test.*`; those belong
+            // to the `component` project alone, or every one runs twice.
+            '**/*.component.test.{ts,tsx}',
             'src/main/services/__tests__/git-service*.test.ts',
             'src/main/services/__tests__/worktree.test.ts'
           ],
@@ -78,22 +81,6 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
           include: ['src/e2e/**/*.e2e.test.{ts,tsx}'],
           testTimeout: 30000
-        }
-      },
-      {
-        resolve: { alias: sharedAlias },
-        test: {
-          name: 'layout',
-          environment: 'jsdom',
-          globals: true,
-          setupFiles: ['./src/test/setup/jsdom.setup.ts'],
-          include: ['src/layout/**/*.layout.test.tsx'],
-          globalSetup: ['./src/layout/global-setup.ts'],
-          // Builds the app's real Tailwind CSS with vite and drives a real
-          // Chromium — seconds, not milliseconds, and it needs a browser
-          // binary, so it is gated out of `test` / `test:ci` exactly like
-          // `integration`. `src/layout/harness.ts` says why it has to.
-          testTimeout: 120000
         }
       },
       {

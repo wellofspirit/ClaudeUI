@@ -1410,6 +1410,173 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].taskNotifications).toHaveLength(1)
   })
 
+  it('folds the two terminal events of one run into one entry, whichever arrives first', () => {
+    const empty = {
+      taskId: 'a',
+      toolUseId: 't1',
+      status: 'completed',
+      outputFile: '',
+      summary: '',
+      runIndex: 1
+    }
+    const full = {
+      taskId: 'a',
+      toolUseId: 't1',
+      status: 'completed',
+      outputFile: '/tmp/out.txt',
+      summary: 'found it',
+      usage: { totalTokens: 9, toolUses: 2, durationMs: 300 },
+      runIndex: 1
+    }
+    const started: Array<[string, string, unknown]> = [
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }]
+    ]
+    // The wire's usual order: the task_updated patch first, then the notification.
+    const usual = fold([
+      created(),
+      ...started,
+      ['session:task-notification', 'rid', empty],
+      ['session:task-notification', 'rid', full]
+    ])
+    expect(usual.sessions['rid'].taskNotifications).toEqual([full])
+    // The other order must read the same — nothing may depend on which came last.
+    const flipped = fold([
+      created(),
+      ...started,
+      ['session:task-notification', 'rid', full],
+      ['session:task-notification', 'rid', empty]
+    ])
+    expect(flipped.sessions['rid'].taskNotifications).toEqual([full])
+  })
+
+  it('appends a later run instead of folding it, so the runs stay distinguishable', () => {
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      [
+        'session:task-notification',
+        'rid',
+        {
+          taskId: 'a',
+          toolUseId: 't1',
+          status: 'completed',
+          outputFile: '',
+          summary: 'run one',
+          runIndex: 1
+        }
+      ],
+      [
+        'session:task-started',
+        'rid',
+        { toolUseId: 't1', taskId: 'a', taskType: 'local_agent', runIndex: 2 }
+      ],
+      [
+        'session:task-notification',
+        'rid',
+        {
+          taskId: 'a',
+          toolUseId: 't1',
+          status: 'failed',
+          outputFile: '',
+          summary: 'run two',
+          runIndex: 2
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].taskNotifications.map((n) => [n.runIndex, n.summary])).toEqual([
+      [1, 'run one'],
+      [2, 'run two']
+    ])
+    // A notification with no tool_use id (the legacy XML path with nothing to match) always appends.
+    const t = fold([
+      created(),
+      [
+        'session:task-notification',
+        'rid',
+        { taskId: 'z', toolUseId: null, status: 'completed', outputFile: '', summary: '' }
+      ],
+      [
+        'session:task-notification',
+        'rid',
+        { taskId: 'z', toolUseId: null, status: 'completed', outputFile: '', summary: '' }
+      ]
+    ])
+    expect(t.sessions['rid'].taskNotifications).toHaveLength(2)
+  })
+
+  it('carries runIndex on the active record, so a resumed agent can say so', () => {
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      // The resume arrives under the ORIGIN id, normalized by ClaudeSession.
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'a',
+          taskType: 'local_agent',
+          runToolUseId: 'toolu_sendmessage',
+          runIndex: 2
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'a', taskType: 'local_agent', runIndex: 2 }
+    })
+  })
+
+  it('merges the two task-progress sources instead of letting them blank each other', () => {
+    // tool_progress knows the clock; system/task_progress knows the usage and
+    // the current tool. Each sends only its half (ADR-073).
+    const s = fold([
+      created(),
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 42 }
+      ],
+      [
+        'session:task-progress',
+        'rid',
+        {
+          toolUseId: 't1',
+          lastToolName: 'Grep',
+          usage: { totalTokens: 34000, toolUses: 12, durationMs: 42000 }
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].taskProgressMap['t1']).toEqual({
+      toolUseId: 't1',
+      toolName: 'Task',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 42,
+      lastToolName: 'Grep',
+      usage: { totalTokens: 34000, toolUses: 12, durationMs: 42000 }
+    })
+
+    // And the clock keeps ticking without wiping the usage back out.
+    const later = fold([
+      created(),
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', usage: { totalTokens: 1, toolUses: 1, durationMs: 1 } }
+      ],
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 99 }
+      ]
+    ])
+    expect(later.sessions['rid'].taskProgressMap['t1'].usage).toEqual({
+      totalTokens: 1,
+      toolUses: 1,
+      durationMs: 1
+    })
+    expect(later.sessions['rid'].taskProgressMap['t1'].elapsedTimeSeconds).toBe(99)
+  })
+
   it('drops activeTasks on `disconnected` — they lived in the dead process', () => {
     const s = fold([
       created(),

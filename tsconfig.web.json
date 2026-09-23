@@ -10,8 +10,7 @@
     "src/core/**/*",
     "src/test/**/*",
     "src/e2e/**/*",
-    "src/integration/**/*",
-    "src/layout/**/*"
+    "src/integration/**/*"
   ],
   "compilerOptions": {
     "composite": true,

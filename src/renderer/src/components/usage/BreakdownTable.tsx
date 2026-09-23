@@ -21,15 +21,24 @@
  * ADR-030 runs down the cost columns: a turn nothing could price is never added
  * as `$0.00`. The count of those turns is shown beside the figure they are
  * missing from, at every level.
+ *
+ * ONE GROUPING READS A DIFFERENT LIST (S5c). `machine` cannot be folded out of
+ * the provider tree: a bucket's device id survives into `machines`, not into the
+ * accounts and models under a provider, and spreading a machine's range total
+ * across the models it might have run would be a table of an assumption. So the
+ * machine hierarchy reads `data.machines` — the same fold, sliced by device —
+ * and every OTHER grouping still reads the provider tree unchanged, which is why
+ * their subtotals continue to agree with each other and with the hero.
  */
 
 import { useMemo, useState } from 'react'
-import type { CostTotals, UsageDashboardData } from '../../../../shared/types'
+import type { CostTotals, DashboardMachine, UsageDashboardData } from '../../../../shared/types'
 import type { DashboardGroupBy } from './UsageView'
 import { ENGINE_META } from '../../../../shared/engine-meta'
 import {
   PROVIDER_OVERFLOW_COLOR,
   buildSeriesColorMap,
+  formatBehind,
   formatCost,
   formatTokenCount,
   shortModelName
@@ -72,6 +81,8 @@ interface Leaf {
   modelId: string
   totals: CostTotals
   dispatched: CostTotals | null
+  /** Set only on a machine leaf — the row its `machine` rung is drawn from. */
+  machine?: DashboardMachine
 }
 
 function toLeaves(data: UsageDashboardData): Leaf[] {
@@ -94,6 +105,44 @@ function toLeaves(data: UsageDashboardData): Leaf[] {
   }
   return leaves
 }
+
+/**
+ * The machine grouping's leaves: one per (machine, provider, account).
+ *
+ * A machine with no spend in the range contributes NO leaf and therefore no
+ * root, deliberately: the machines card above is where "it synced and spent
+ * nothing" is said, and an empty root here would be a tree row with nothing
+ * under it. Labels come from the provider tree, which is the one place they are
+ * resolved (limits → ledger → the key's own fallback).
+ */
+function toMachineLeaves(data: UsageDashboardData): Leaf[] {
+  const providerLabels = new Map(data.providers.map((p) => [p.providerId, p.label]))
+  const accountLabels = new Map(
+    data.providers.flatMap((p) => p.accounts.map((a) => [a.accountKey, a.label] as const))
+  )
+  const leaves: Leaf[] = []
+  for (const machine of data.machines) {
+    for (const slice of machine.accounts) {
+      leaves.push({
+        providerId: slice.providerId,
+        providerLabel: providerLabels.get(slice.providerId) ?? slice.providerId,
+        accountKey: slice.accountKey,
+        accountLabel: accountLabels.get(slice.accountKey) ?? slice.accountKey,
+        // The buckets keep no per-machine engine or model split, and these two
+        // rungs are never reached under this hierarchy.
+        engineId: '',
+        modelId: '',
+        totals: slice.totals,
+        dispatched: slice.dispatched,
+        machine
+      })
+    }
+  }
+  return leaves
+}
+
+/** How long a machine may go without pushing before its row says so (ADR-072 §7). */
+const BEHIND_MS = 24 * 60 * 60 * 1000
 
 function engineLabel(engineId: string): string {
   // Engine ids in the ledger are free strings (a bucket written by a build that
@@ -144,11 +193,19 @@ interface Level {
   label: (leaf: Leaf) => string
 }
 
-const LEVEL: Record<'provider' | 'account' | 'engine' | 'model', Level> = {
+const LEVEL: Record<DashboardGroupBy, Level> = {
   provider: { name: 'provider', key: (l) => l.providerId, label: (l) => l.providerLabel },
   account: { name: 'account', key: (l) => l.accountKey, label: (l) => l.accountLabel },
   engine: { name: 'engine', key: (l) => l.engineId, label: (l) => engineLabel(l.engineId) },
-  model: { name: 'model', key: (l) => l.modelId, label: (l) => shortModelName(l.modelId) }
+  model: { name: 'model', key: (l) => l.modelId, label: (l) => shortModelName(l.modelId) },
+  machine: {
+    name: 'machine',
+    key: (l) => l.machine?.deviceId ?? '',
+    label: (l) =>
+      l.machine === undefined || l.machine.deviceName.trim() === ''
+        ? (l.machine?.deviceId.slice(0, 8) ?? '')
+        : l.machine.deviceName
+  }
 }
 
 /**
@@ -160,7 +217,10 @@ const HIERARCHY: Record<DashboardGroupBy, Level[]> = {
   provider: [LEVEL.provider, LEVEL.account, LEVEL.model],
   account: [LEVEL.account, LEVEL.model],
   engine: [LEVEL.engine, LEVEL.model],
-  model: [LEVEL.model, LEVEL.account]
+  model: [LEVEL.model, LEVEL.account],
+  // Three rungs, like `provider`: the question a reader brings to this pill is
+  // "what did that machine spend it ON", and provider alone does not answer it.
+  machine: [LEVEL.machine, LEVEL.provider, LEVEL.account]
 }
 
 interface Node {
@@ -173,6 +233,8 @@ interface Node {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, null when nothing was. */
   dispatched: CostTotals | null
+  /** Set on a machine ROOT only — what the `remote` and `behind` tags read. */
+  machine: DashboardMachine | null
   children: Node[]
 }
 
@@ -211,6 +273,7 @@ function buildNodes(
       color: depth === 0 ? colorOf(members[0]) : null,
       totals,
       dispatched,
+      machine: depth === 0 ? (members[0].machine ?? null) : null,
       children:
         depth + 1 < levels.length ? buildNodes(members, levels, depth + 1, path, colorOf) : []
     })
@@ -238,21 +301,23 @@ export function BreakdownTable({
   const [overrides, setOverrides] = useState<Record<string, boolean>>({})
 
   const roots = useMemo(() => {
-    const leaves = toLeaves(data)
+    const leaves = groupBy === 'machine' ? toMachineLeaves(data) : toLeaves(data)
     const levels = HIERARCHY[groupBy]
-    // Provider and account rows wear the provider's pinned colour; engine and
-    // model rows have no cross-profile identity, so they take a slot from the
-    // same palette instead (see `buildSeriesColorMap`).
-    const seriesColors =
+    // Provider and account rows wear the provider's pinned colour; engine, model
+    // and machine rows have no cross-profile identity, so they take a slot from
+    // the same palette instead (see `buildSeriesColorMap`).
+    const seriesKey =
       groupBy === 'engine'
-        ? buildSeriesColorMap(leaves.map((l) => l.engineId))
+        ? (l: Leaf) => l.engineId
         : groupBy === 'model'
-          ? buildSeriesColorMap(leaves.map((l) => l.modelId))
-          : null
+          ? (l: Leaf) => l.modelId
+          : groupBy === 'machine'
+            ? (l: Leaf) => l.machine?.deviceId ?? ''
+            : null
+    const seriesColors = seriesKey ? buildSeriesColorMap(leaves.map(seriesKey)) : null
     const colorOf = (leaf: Leaf): string =>
-      seriesColors
-        ? (seriesColors.get(groupBy === 'engine' ? leaf.engineId : leaf.modelId) ??
-          PROVIDER_OVERFLOW_COLOR)
+      seriesColors && seriesKey
+        ? (seriesColors.get(seriesKey(leaf)) ?? PROVIDER_OVERFLOW_COLOR)
         : (providerColors.get(leaf.providerId) ?? PROVIDER_OVERFLOW_COLOR)
     return buildNodes(leaves, levels, 0, groupBy, colorOf)
   }, [data, groupBy, providerColors])
@@ -394,6 +459,7 @@ function Row({
           <span data-testid="BreakdownTable.row.label" className={root ? 'font-medium' : ''}>
             {node.label}
           </span>
+          {node.machine && <MachineTags machine={node.machine} />}
           {node.dispatched && <DispatchedMarker totals={node.dispatched} />}
         </span>
       </td>
@@ -410,6 +476,41 @@ function Row({
         <ShareCell usd={node.totals.displayCostUsd} grandTotal={grandTotal} />
       </td>
     </tr>
+  )
+}
+
+/**
+ * Whose machine a root row is, when the tree is rooted on machines.
+ *
+ * `remote` and nothing at all, rather than `remote` and `local`: this machine is
+ * the reader's default assumption, and labelling every row would make the split
+ * harder to see rather than easier. `behind` is measured against the reader's
+ * clock for the reason `MachinesPanel` measures it there — see its header.
+ */
+function MachineTags({ machine }: { machine: DashboardMachine }): React.JSX.Element {
+  const behindMs =
+    machine.retired || machine.lastPushAt === null ? null : Date.now() - machine.lastPushAt
+  return (
+    <>
+      {!machine.self && (
+        <span
+          data-testid="BreakdownTable.row.remote"
+          className="text-[9px] px-1 py-px rounded bg-bg-tertiary text-text-secondary whitespace-nowrap"
+          title="Relayed from this machine through the usage hub, as the last pull left it."
+        >
+          remote
+        </span>
+      )}
+      {behindMs !== null && behindMs > BEHIND_MS && (
+        <span
+          data-testid="BreakdownTable.row.behind"
+          className="text-[9px] px-1 py-px rounded border border-warning/50 text-warning whitespace-nowrap"
+          title="It has not pushed for more than a day, so its spend since then is missing from these figures."
+        >
+          behind {formatBehind(behindMs)}
+        </span>
+      )}
+    </>
   )
 }
 

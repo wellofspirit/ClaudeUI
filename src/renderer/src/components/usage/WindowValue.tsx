@@ -24,6 +24,12 @@
  * footnote says so once for the card rather than as a caveat per number
  * (ADR-071 §7; ADR-072's usage hub closes the other-machines half of it).
  *
+ * UNDER THE COMBINED SCOPE (S5c) the read asks for `all` and the query prefers
+ * the HUB's row for any window it holds, whose numerator is summed over every
+ * machine (ADR-072 §4). That narrows the bias to the part nothing can close —
+ * claude.ai and the provider's own web use — so the footnote stays exactly as it
+ * was and the subtitle says how many machines went into the figures.
+ *
  * ADR-030 runs through it: a window with unpriced turns says how many are
  * MISSING from its dollars rather than quietly summing them as zero.
  *
@@ -41,8 +47,28 @@ import type {
   UsageWindowSummaryRow
 } from '../../../../shared/types'
 import { providerIdForBucket, providerLabel } from '../../../../shared/provider-label'
-import { PROVIDER_OVERFLOW_COLOR, formatCost, rangeWords } from './usage-utils'
+import { windowKindLabel, windowKindMinutes } from '../../../../shared/window-kind'
+import {
+  PROVIDER_OVERFLOW_COLOR,
+  combinedMachineCount,
+  formatCost,
+  rangeWords
+} from './usage-utils'
 import { SelectMenu } from '../shared/SelectMenu'
+
+/**
+ * How many machines the hub summed the numerators over — the SAME count the sync
+ * chip and the summary print, so a reader is never told "3 machines" here and
+ * "2 machines" on the card above.
+ */
+function CombinedNote({ data }: { data: UsageDashboardData }): React.JSX.Element {
+  const n = combinedMachineCount(data.machines.filter((m) => !m.self))
+  return (
+    <span data-testid="WindowValue.combined">
+      {' · '}combined across {n} {n === 1 ? 'machine' : 'machines'}
+    </span>
+  )
+}
 
 /**
  * ADR-071 §7's noise floor. Under this peak the denominator is small enough that
@@ -89,13 +115,14 @@ function windowScope(range: DashboardRange): string {
 
 /**
  * A window kind as a person says it. A scoped weekly's slug comes from the
- * provider's own display name (`7d:fable`) and arrives lower-cased (S3a).
+ * provider's own display name (`7d:fable`) and arrives lower-cased (S3a), and
+ * is title-cased here beside the base label the shared rule gives.
  */
 function kindLabel(kind: string): string {
-  if (kind === '5h') return '5-hour'
-  if (kind === '7d') return '7-day'
-  if (kind.startsWith('7d:')) return `7-day · ${titleCase(kind.slice(3))}`
-  return kind
+  const [base, ...rest] = kind.split(':')
+  const scope = rest.join(':')
+  const label = windowKindLabel(base)
+  return scope ? `${label} · ${titleCase(scope)}` : label
 }
 
 function titleCase(slug: string): string {
@@ -106,12 +133,23 @@ function titleCase(slug: string): string {
     .join(' ')
 }
 
-/** 5-hour first, then the plain weekly, then the scoped weeklies, then anything new. */
+/**
+ * Shortest window first, and a scoped weekly after the plain window of the same
+ * length — the reading order the owner's plans produce (5-hour, 7-day, then the
+ * per-model weeklies).
+ *
+ * Ordering by LENGTH rather than by the two literals, so a `3d` or `1h` window
+ * (a ChatGPT plan can carry any duration, S3c) lands where it belongs instead of
+ * in the "anything new" bucket at the end. A kind that names no length — a
+ * window the vendor described only by position — sorts last, since there is
+ * nothing to compare it by.
+ */
 function kindRank(kind: string): number {
-  if (kind === '5h') return 0
-  if (kind === '7d') return 1
-  if (kind.startsWith('7d:')) return 2
-  return 3
+  const [base, ...rest] = kind.split(':')
+  const minutes = windowKindMinutes(base)
+  if (minutes === null) return Number.MAX_SAFE_INTEGER
+  // Two ranks per length: the plain window, then its scoped variants.
+  return minutes * 2 + (rest.length > 0 ? 1 : 0)
 }
 
 function orderedKinds(rows: readonly UsageWindowSummaryRow[]): string[] {
@@ -161,10 +199,11 @@ export function WindowValue({
   // card would be worse than a figure two seconds stale.
   const sinceTs = data.fromTs
   const generatedAt = data.generatedAt
+  const scope = data.scope
   useEffect(() => {
     let cancelled = false
     window.api
-      .fetchUsageWindows({ sinceTs })
+      .fetchUsageWindows({ sinceTs, ...(scope === 'all' ? { scope } : {}) })
       .then((r) => {
         if (cancelled) return
         setRows(r)
@@ -177,7 +216,7 @@ export function WindowValue({
     return () => {
       cancelled = true
     }
-  }, [sinceTs, generatedAt])
+  }, [sinceTs, generatedAt, scope])
 
   // An account with windows but no spend in range is absent from the dashboard
   // and present in the credentials, so both name accounts. `unknown` is never
@@ -212,6 +251,7 @@ export function WindowValue({
         </h3>
         <span className="text-[9px] text-text-muted">
           what a subscription window delivers · {windowScope(range)}
+          {data.scope === 'all' && <CombinedNote data={data} />}
         </span>
       </div>
 

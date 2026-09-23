@@ -18,6 +18,7 @@ import { useMemo } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
 import { TerminalView } from '../../TerminalView'
 import { getLang } from '../../../../lib/lang'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 /** A file and what was found in it. `hits` is absent for a bare path list. */
@@ -107,7 +108,10 @@ export function SearchBody({
       )}
 
       {result && (
-        <div className={`px-3 py-2.5 ${showInput ? 'border-t border-border' : ''}`}>
+        <div
+          {...TOOL_OUTPUT_SCOPE}
+          className={`px-3 py-2.5 ${showInput ? 'border-t border-border' : ''}`}
+        >
           {result.isError ? (
             <pre className="text-[12px] font-mono whitespace-pre-wrap break-words overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border text-danger">
               {text.slice(0, toolOutputMaxChars)}

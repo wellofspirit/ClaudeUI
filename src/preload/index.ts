@@ -370,7 +370,16 @@ const api: ClaudeAPI = {
   // The metering dashboard (ADR-071 §6/§7/§8)
   fetchAccountLimits: (refresh?: boolean) => ipcRenderer.invoke('usage:limits', refresh ?? false),
   fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
-  fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
+  fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
+
+  // The usage hub (ADR-072). `setUsageHubSecret` is write-only — no channel here
+  // reads a device credential back.
+  usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
+  configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
+  setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),
+  syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
+  resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
+  forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
 
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
@@ -475,6 +484,11 @@ const api: ClaudeAPI = {
   readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
   patchPiModels: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-models', patches),
+  setProviderModelAllowlist: (
+    engine: 'opencode' | 'pi',
+    providerId: string,
+    models: string[] | null
+  ) => unwrap('models:set-provider-allowlist', engine, providerId, models),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (
     name: string,
@@ -518,6 +532,10 @@ const api: ClaudeAPI = {
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
   setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
+  adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+  setSharedProviderCuration: (id, curation) => unwrap('shared-provider:set-curation', id, curation),
+  setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+    unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>

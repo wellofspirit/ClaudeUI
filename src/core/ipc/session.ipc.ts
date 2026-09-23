@@ -45,7 +45,11 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
-import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-dashboard'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -53,6 +57,7 @@ import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
+import { deliveredDefinition } from '../../shared/shared-provider'
 import {
   accountState,
   hostIsPackaged,
@@ -95,6 +100,7 @@ import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
+import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -464,7 +470,7 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS])
+  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS, ...USAGE_HUB_CHANNELS])
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -1742,7 +1748,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'config',
     kind: 'query',
     handler: async (opts?: unknown) => {
-      return buildUsageDashboard({ range: sanitizeDashboardRange(opts) })
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
     }
   })
 
@@ -1772,6 +1781,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async () => accountState()
   })
   for (const cmd of authCommands(authDeps)) {
+    handleIpc(cmd)
+  }
+
+  // The usage hub (ADR-072 §7), from the same shared declarations the remote
+  // transport spreads. Not inline like the `usage:*` family above: six channels,
+  // one of them a credential write, and one declaration is what keeps the
+  // capability and the sanitiser identical on both transports.
+  for (const cmd of usageHubCommands()) {
     handleIpc(cmd)
   }
 
@@ -1920,7 +1937,8 @@ function decorateSharedProviderClaims(
     claims = new Map(
       sharedProviderService
         .listDefinitions()
-        .filter((definition) => definition.routes.opencode.enabled)
+        // Switched off, a provider feeds nothing (ADR-074 slice 10).
+        .filter((definition) => deliveredDefinition(definition).routes.opencode.enabled)
         .map((definition) => [
           opencodeProviderId(definition),
           { id: definition.id, name: definition.name }

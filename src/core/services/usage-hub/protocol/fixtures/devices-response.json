@@ -1,0 +1,29 @@
+{
+  "epoch": 3,
+  "devices": [
+    {
+      "deviceId": "9f1c7a42-3b18-4d55-9e0a-6c21f4b8ad30",
+      "deviceName": "workshop",
+      "os": "win32",
+      "appVersion": "3.3.0",
+      "lastPushAt": 1758414180000,
+      "retired": false
+    },
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "deviceName": "studio",
+      "os": "darwin",
+      "appVersion": "3.2.0",
+      "lastPushAt": 1758410400000,
+      "retired": false
+    },
+    {
+      "deviceId": "7c3d5e90-41ab-4f2e-8d16-b0a4c98e2f55",
+      "deviceName": "old laptop",
+      "os": "linux",
+      "appVersion": "3.0.0",
+      "lastPushAt": 1735689600000,
+      "retired": true
+    }
+  ]
+}

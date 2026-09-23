@@ -21,7 +21,7 @@ upstream SDK:   @anthropic-ai/claude-code 2.1.268 (Bun 1.4.1 standalone binary, 
 > Char anchors recorded in these docs before 2.1.261 refer to the old monolithic
 > bundle — re-locate by string literal.
 
-The doc should be re-verified each time `package.json#claudeCliVersion` bumps. See `12-maintenance.md` for the drift check workflow.
+The doc should be re-verified each time `package.json#claudeCliVersion` bumps. See `12-maintenance.md` for the drift check workflow. **2.1.280 verification:** all 14 patch application/upstream-detection steps and all 12 patch test suites passed on Windows. Live tests used the app-selected account directory through `CLAUDE_SECURESTORAGE_CONFIG_DIR` and `SKIP_SECURESTORAGE=1`, not the system login. The localhost SSE ordering and per-request usage fixtures passed (6 tests); the native binary's top-level `--help` catalog (66 long flags) was compared with 02-cli-flags; the production OAuth URL/client ID and JSON refresh-body shape were checked in the native binary. The context catalog drift check found an `opus` alias/pricing change, mirrored in `src/shared/`. The banner remains at 2.1.268 because these checks do not establish full wire-catalog, hidden-flag, or provider-specific manual verification.
 
 ---
 

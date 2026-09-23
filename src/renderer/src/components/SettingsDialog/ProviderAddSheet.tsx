@@ -8,8 +8,9 @@
  * two questions in three vocabularies, and none of them could say that one
  * credential can serve BOTH engines. This sheet asks those two questions once:
  *
- *   1. WHICH provider — a subscription, a models.dev catalog entry, or a custom
- *      OpenAI-compatible endpoint;
+ *   1. WHICH provider — a models.dev catalog entry, a custom OpenAI-compatible
+ *      endpoint, or an engine-owned sign-in (sign-in SUBSCRIPTIONS are not
+ *      added here: each has its own card, ADR-074 §7);
  *   2. WHICH engines get it — the footer's "Pick one, then choose which engines
  *      get it."
  *
@@ -27,12 +28,11 @@
  * WHERE EACH SAVE GOES — every one is an EXISTING writer, as in the Manage
  * sheet; this file introduces no channel of its own:
  *
- *  · subscription (ChatGPT)   → the same vault sign-in (pi's `openai-codex`,
- *                               ADR-036), but run in `SignInDialog` since
- *                               ADR-068 §3 — this row only opens it
- *  · subscription (Claude/pi) → nothing: pi's login is a terminal command, so the
- *                               row COPIES it (`pi:binary-path`)
- *  · catalog, API key         → `vendor-auth:set-key` once per selected engine
+ *  · engine sign-in (Claude/pi) → nothing: pi's login is a terminal command, so
+ *                                 the row COPIES it (`pi:binary-path`)
+ *  · catalog, API key         → `shared-provider:save` (a `catalog` definition,
+ *                               ADR-074 §6) + ONE `shared-provider:set-key`: the
+ *                               key is stored once and delivered to each engine
  *  · catalog, OAuth           → `vendor-auth:oauth-authorize` + `:oauth-callback`
  *  · custom endpoint          → `shared-provider:save` (+ `shared-provider:set-key`)
  *
@@ -46,22 +46,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { OpencodeProviderCatalogEntry, VendorAuthOption } from '../../../../shared/types'
 import type { ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition
+import {
+  validateSharedProviderId,
+  type ConfigurableHarnessId,
+  type SharedProviderDefinition
 } from '../../../../shared/shared-provider'
 import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
-import { CredentialChip, EngineChip } from './ProviderSheet'
+import { LARGE_CATALOG, opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
+import { EngineChip } from './ProviderSheet'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
-import { useSessionStore } from '../../stores/session-store'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderAddSheet'
 
-/** The shared vault's id for the ChatGPT subscription (`shared-providers/index.ts`). */
-const CHATGPT_ID = 'chatgpt'
 /** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
 const CODEX_VENDOR_ID = 'openai-codex'
 
@@ -83,8 +82,6 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 export interface ProviderAddSheetProps {
   /** What the user already HAS — this sheet offers the complement. */
   snapshot: ProviderRegistrySnapshot
-  /** Open straight on a subscription's sign-in (the Manage sheet's "Sign in"). */
-  focusId?: string | null
   onClose: () => void
   /**
    * A credential or definition was written. The argument is the registry row id
@@ -96,14 +93,10 @@ export interface ProviderAddSheetProps {
 
 export function ProviderAddSheet({
   snapshot,
-  focusId,
   onClose,
   onAdded
 }: ProviderAddSheetProps): React.JSX.Element {
-  // Seeded from the focus id (the Manage sheet's "Sign in" hands ChatGPT over):
-  // the sheet opens with that row the only one in view, and the box is right
-  // there to clear — a filter the user cannot see is a list that looks broken.
-  const [search, setSearch] = useState(focusId ?? '')
+  const [search, setSearch] = useState('')
   const [step, setStep] = useState<
     { kind: 'list' } | { kind: 'setup'; candidate: Candidate } | { kind: 'custom' }
   >({ kind: 'list' })
@@ -122,8 +115,6 @@ export function ProviderAddSheet({
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  /** ADR-068 §3 — the subscription row opens the one dialog, not a flow. */
-  const openSignIn = useSessionStore((s) => s.openSignIn)
 
   const { entries, opencodeInstalled } = snapshot
 
@@ -163,8 +154,14 @@ export function ProviderAddSheet({
   const managed = useMemo(() => {
     const owned = { opencode: new Set<string>(), pi: new Set<string>([CODEX_VENDOR_ID]) }
     for (const definition of definitions) {
-      owned.opencode.add(definition.routes.opencode.providerId ?? definition.id)
-      owned.pi.add(definition.routes.pi.providerId ?? definition.id)
+      // The definition's own id always (a catalog provider with its routes off
+      // is still set up), and the native id each ENABLED route delivers to.
+      owned.opencode.add(definition.id)
+      owned.pi.add(definition.id)
+      if (definition.routes.opencode.enabled)
+        owned.opencode.add(definition.routes.opencode.providerId ?? definition.id)
+      if (definition.routes.pi.enabled)
+        owned.pi.add(definition.routes.pi.providerId ?? definition.id)
     }
     return owned
   }, [definitions])
@@ -186,6 +183,9 @@ export function ProviderAddSheet({
     if (opencodeInstalled) {
       for (const entry of catalog) {
         if (entry.authState !== 'unauthenticated' || entry.disabled) continue
+        // A shared definition already names this id — a catalog provider with its
+        // routes off, say. Re-adding it here would replace that definition.
+        if (managed.opencode.has(entry.id)) continue
         const oauth = (opencodeOptions[entry.id] ?? []).find((o) => o.type === 'oauth')
         byId.set(entry.id, {
           id: entry.id,
@@ -213,24 +213,10 @@ export function ProviderAddSheet({
   /** Nothing offers a catalog at all — the section is not rendered empty. */
   const hasCatalogSource = opencodeInstalled || Object.keys(piOptions).length > 0
 
-  const chatgptEntry = entries.find((entry) => entry.id === CHATGPT_ID) ?? null
-  const chatgptConnected = chatgptEntry?.credential === 'connected'
-  /**
-   * How many ChatGPT accounts the vault already holds (ADR-068 §2).
-   *
-   * The sign-in control is gated on this, not on `connected`: one stored account
-   * already makes the row connected, so hiding the flow there would leave the
-   * Manage sheet's "+ Add account" opening a sheet with nothing to click. This
-   * row IS the add-an-account flow — the same vault PKCE sign-in, relabelled.
-   */
-  const chatgptAccounts = chatgptEntry?.accounts?.list.length ?? 0
-
   const query = search.trim().toLowerCase()
   const matches = (...text: string[]): boolean =>
     !query || text.some((value) => value.toLowerCase().includes(query))
   const shownCandidates = candidates.filter((c) => matches(c.id, c.name))
-  // Gated per ROW, so a search that matches neither leaves no empty card behind.
-  const showChatgpt = chatgptEntry !== null && matches('chatgpt', 'codex', chatgptEntry.name)
   const showClaudeForPi = piCommand !== null && matches('claude', 'pro', 'max', 'pi')
 
   /** Run one write: report a rejection here rather than closing on a failure. */
@@ -272,65 +258,24 @@ export function ProviderAddSheet({
         className="w-full h-8 bg-bg-input border border-border rounded-md px-3 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
       />
 
-      {(showChatgpt || showClaudeForPi) && (
+      {/* Sign-in SUBSCRIPTIONS are not added here — each has its card under
+          Models & providers › Subscriptions (ADR-074 §7). What stays is an
+          ENGINE-OWNED sign-in: pi's own Claude login, which pi keeps and runs in
+          a terminal, so it belongs with the providers that engine owns. */}
+      {showClaudeForPi && (
         <div className="mt-4">
-          <SheetGroup testid={`${SHEET}.group`} id="subscriptions" label="Subscriptions">
-            {showChatgpt && chatgptEntry && (
-              <div>
-                <SettingRow
-                  testid={`${SHEET}.subscription`}
-                  dataId={CHATGPT_ID}
-                  label="ChatGPT · Codex"
-                  description="Sign in once in ClaudeUI; shared with pi and opencode."
-                >
-                  <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
-                  <EngineChip engine="opencode" enabled testid={`${SHEET}.engineChip`} />
-                  {chatgptConnected && (
-                    <CredentialChip
-                      credential="connected"
-                      // What is already there, so "Add another account" reads as
-                      // an addition rather than a re-login.
-                      label={chatgptAccounts > 1 ? `${chatgptAccounts} accounts` : undefined}
-                      testid={`${SHEET}.credential`}
-                    />
-                  )}
-                </SettingRow>
-                {(!chatgptConnected || chatgptAccounts > 0) && (
-                  <div className="px-3.5 pb-3 -mt-1">
-                    {/* ADR-068 §3: the flow itself lives in `SignInDialog`, so
-                        this is a button that opens it — `add` once there is an
-                        account to add to, `reauth` for the first sign-in. */}
-                    <Button
-                      variant="tinted"
-                      testid={`${SHEET}.chatgptSignIn`}
-                      dataId={CHATGPT_ID}
-                      disabled={busy}
-                      onClick={() =>
-                        openSignIn({
-                          providerId: 'chatgpt',
-                          mode: chatgptAccounts > 0 ? 'add' : 'reauth'
-                        })
-                      }
-                    >
-                      {chatgptAccounts > 0 ? 'Add another account' : 'Sign in'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-            {showClaudeForPi && (
-              <SettingRow
-                testid={`${SHEET}.subscription`}
-                dataId="claude-pi"
-                label="Claude Pro / Max for pi"
-                description="pi’s OAuth login runs in a terminal. Copies the command."
-              >
-                <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
-                <Button variant="link" testid={`${SHEET}.copyCommand`} onClick={copyCommand}>
-                  {copied ? 'Copied' : 'Copy command'}
-                </Button>
-              </SettingRow>
-            )}
+          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Engine sign-ins">
+            <SettingRow
+              testid={`${SHEET}.engineSignIn`}
+              dataId="claude-pi"
+              label="Claude Pro / Max for pi"
+              description="pi’s OAuth login runs in a terminal. Copies the command."
+            >
+              <EngineChip engine="pi" enabled testid={`${SHEET}.engineChip`} />
+              <Button variant="link" testid={`${SHEET}.copyCommand`} onClick={copyCommand}>
+                {copied ? 'Copied' : 'Copy command'}
+              </Button>
+            </SettingRow>
           </SheetGroup>
         </div>
       )}
@@ -421,15 +366,25 @@ export function ProviderAddSheet({
         busy={busy}
         onSave={(engines, key) =>
           void run(async () => {
-            for (const engine of engines)
-              await window.api.vendorAuthSetKey(engine, step.candidate.id, key)
-            if (engines.includes('opencode')) await seedOpencodeAllowlist(step.candidate.id)
-            await onAdded(registryIdFor(engines[0], step.candidate.id))
+            const { id, name } = step.candidate
+            if (isSharedProviderId(id)) {
+              // One key per provider (ADR-074 §6): a catalog definition with a
+              // route per chosen engine, then the key ONCE — the vault stores it
+              // and delivers it to each enabled engine.
+              await window.api.saveSharedProvider(catalogDefinition(id, name, engines))
+              await window.api.setSharedProviderApiKey(id, key)
+            } else {
+              // An id the vault cannot name (models.dev ids are not all
+              // `[a-z0-9-]`): each engine keeps its own copy, as before.
+              for (const engine of engines) await window.api.vendorAuthSetKey(engine, id, key)
+            }
+            await seedLargeCatalogAllowlists(engines, id)
+            await onAdded(registryIdFor(engines[0], id))
           })
         }
         onOAuthDone={() =>
           void run(async () => {
-            await seedOpencodeAllowlist(step.candidate.id)
+            await seedLargeCatalogAllowlists(['opencode'], step.candidate.id)
             await onAdded(`opencode:${step.candidate.id}`)
           })
         }
@@ -484,30 +439,109 @@ export function ProviderAddSheet({
         </>
       }
     >
+      <StepIndicator current={step.kind === 'list' ? 1 : 2} />
       {body}
     </SheetFrame>
   )
 }
 
-/** The registry row id a fresh native credential produces. */
+/**
+ * The registry row id an API-key add produces: the definition's own id when it
+ * became a shared catalog definition, else the native `<engine>:<id>` row.
+ */
 function registryIdFor(engine: ConfigurableHarnessId, providerId: string): string {
-  return `${engine}:${providerId}`
+  return isSharedProviderId(providerId) ? providerId : `${engine}:${providerId}`
+}
+
+function isSharedProviderId(id: string): boolean {
+  try {
+    validateSharedProviderId(id)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A catalog definition: no endpoint, no models — the engines' catalogs have them. */
+function catalogDefinition(
+  id: string,
+  name: string,
+  engines: readonly ConfigurableHarnessId[]
+): SharedProviderDefinition {
+  return {
+    id,
+    name,
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: {
+      pi: { enabled: engines.includes('pi') },
+      opencode: { enabled: engines.includes('opencode') }
+    }
+  }
+}
+
+/** Provider → Key & engines → Models (mockup D); the last step is the Manage sheet. */
+const STEPS = ['Provider', 'Key & engines', 'Models'] as const
+
+function StepIndicator({ current }: { current: 1 | 2 }): React.JSX.Element {
+  return (
+    <div
+      data-testid={`${SHEET}.steps`}
+      data-id={String(current)}
+      className="flex flex-wrap items-center gap-2 mb-3 text-[12px] text-text-secondary"
+    >
+      {STEPS.map((label, i) => {
+        const on = i + 1 === current
+        return (
+          <span key={label} className="inline-flex items-center gap-2">
+            <span
+              className={`w-5 h-5 rounded-full border text-[11px] flex items-center justify-center ${
+                on
+                  ? 'bg-accent border-accent text-bg-secondary font-bold'
+                  : 'border-border bg-bg-tertiary'
+              }`}
+            >
+              {i + 1}
+            </span>
+            <span className={on ? 'text-text-primary' : undefined}>{label}</span>
+            {i < STEPS.length - 1 && <span className="text-text-muted">—</span>}
+          </span>
+        )
+      })}
+    </div>
+  )
 }
 
 /**
- * Seed an EMPTY opencode allowlist for a freshly added provider — the
- * anti-flood rule `VendorOpencodeSection.finishAdd` carried. A provider that
- * already has one keeps it (re-adding a credential must not wipe curation).
+ * The anti-flood rule, per engine (ADR-074 §2): a freshly added provider whose
+ * catalog in an engine is over {@link LARGE_CATALOG} models starts on "Only the
+ * ones I pick" with nothing picked, so 300 OpenRouter models cannot land in the
+ * picker at once. A smaller one is left on All models (no key at all).
+ *
+ * A provider that already has a key keeps it — re-adding a credential must not
+ * wipe curation. A read that fails seeds nothing, and a write that fails is
+ * logged and skipped: a missing key is All models, which is the safe way to be
+ * wrong here.
  */
-async function seedOpencodeAllowlist(providerId: string): Promise<void> {
-  const settings = await window.api.loadOpencodeSettings().catch(() => null)
-  if (!settings) return
-  const allowlist = settings.modelAllowlist ?? {}
-  if (allowlist[providerId]) return
-  await window.api.saveOpencodeSettings({
-    ...settings,
-    modelAllowlist: { ...allowlist, [providerId]: [] }
-  })
+async function seedLargeCatalogAllowlists(
+  engines: readonly ConfigurableHarnessId[],
+  providerId: string
+): Promise<void> {
+  for (const engine of engines) {
+    const adapter =
+      engine === 'opencode' ? opencodeCurationAdapter(providerId) : piCurationAdapter(providerId)
+    const [catalog, current] = await Promise.all([
+      adapter.loadCatalog().catch(() => []),
+      adapter.loadSelection().catch(() => null)
+    ])
+    if (current !== undefined || catalog.length <= LARGE_CATALOG) continue
+    // The credential is already written: a failed seed must not fail the add.
+    // The provider then starts on All models, which curation can still change.
+    await adapter.save([]).catch((err: unknown) => {
+      console.warn(`[ProviderAddSheet] seeding ${engine} allowlist for ${providerId} failed:`, err)
+    })
+  }
 }
 
 // ── Step 2a: a catalog pick ──────────────────────────────────────────
@@ -537,8 +571,8 @@ function CatalogSetup({
         <SettingRow
           testid={`${SHEET}.enableFor`}
           layout="stacked"
-          label="Enable for"
-          description="The credential is written into each selected engine’s own auth file, never into ClaudeUI’s config."
+          label="Use it in"
+          description="The key is delivered to each selected engine’s own auth file."
         >
           <ChipSet
             testid={`${SHEET}.engines`}
@@ -557,7 +591,7 @@ function CatalogSetup({
         <SettingRow
           testid={`${SHEET}.key`}
           label="API key"
-          description={`Stored in ${selected.length === 0 ? 'the selected engine' : selected.join(' and ')}’s own auth store.`}
+          description="Entered once. ClaudeUI stores it and delivers it to each engine you pick."
         >
           <TextField
             type="password"

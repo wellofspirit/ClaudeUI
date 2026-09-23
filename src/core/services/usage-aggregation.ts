@@ -24,7 +24,7 @@ import type {
   UsageBlock,
   EngineUsageSummary
 } from '../../shared/types'
-import { accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import { accountForTimestamp, type AccountLogEntry } from './usage-windows'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { displayCostFromRow } from '../../shared/cost-rule'
 
@@ -312,7 +312,7 @@ function buildBlock(
 export function groupEntriesIntoBlocks(
   entries: AggEntry[],
   knownWindows: ApiWindow[],
-  accountLog: AccountLogRecord[],
+  accountLog: AccountLogEntry[],
   now: number = Date.now()
 ): UsageBlock[] {
   if (entries.length === 0) return []

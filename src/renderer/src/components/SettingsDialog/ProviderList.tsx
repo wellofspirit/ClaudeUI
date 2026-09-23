@@ -6,7 +6,8 @@
  * Claude account, opencode's catalog + auth.json, pi's auth.json + models.json.
  * The rows come from `provider-registry:list` (phase 6a) and this component
  * renders them and nothing else — it derives no state beyond the rows it is
- * given, and every edit happens in the Manage sheet.
+ * given, and every edit happens in the Manage sheet — except a shared API
+ * provider's on/off switch (ADR-074 slice 10), which sits on its row as well.
  *
  * IT RE-READS AFTER EVERY WRITE. The registry publishes no change event, so a
  * write is only visible once `listProviderRegistry()` is called again; that is
@@ -23,11 +24,10 @@
  * lives, land on these rows. Only the ERROR is local: keeping the previous rows
  * on a failed re-read is this card's own behaviour.
  *
- * NO PROVIDER'S ACCOUNTS ARE MANAGED HERE (F14). The Anthropic row's action
- * navigates to Models & providers › Accounts, and since every provider's stored
- * accounts live on that one page, the Manage sheet's own Accounts card became a
- * link to the same place — which is why `navigate` is threaded into the sheet
- * rather than kept for the Anthropic row.
+ * SUBSCRIPTIONS ARE NOT LISTED HERE (ADR-074 §7). The Anthropic row and every
+ * sign-in subscription (`entry.subscription`) have their own cards under
+ * Models & providers › Subscriptions, with their accounts on them; this list is
+ * API providers — keys and self-hosted endpoints — only.
  *
  * ONE DEGRADED CASE (owner ruling 2, 2026-09-08): the opencode BINARY is
  * missing. A stopped server is not degraded — catalog discovery starts one — so
@@ -42,15 +42,21 @@
  * here rather than in the sheet so the sheet has no existence to subscribe with.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
-import type { SharedProviderRouteDiagnosis } from '../../../../shared/shared-provider'
-import { Button, SettingRow } from './settings-controls'
-import { CredentialChip, EngineChip, ProviderSheet } from './ProviderSheet'
+import { Button, SettingRow, ToggleSwitch } from './settings-controls'
+import { diagnosisText } from './provider-diagnosis'
+import {
+  CredentialChip,
+  ProviderSheet,
+  ownKeysReplacedOnSwitchOn,
+  ownKeysReplacedText
+} from './ProviderSheet'
+import { EnginePill, Pill, factsCount } from './provider-pills'
+import { isConflictDismissed } from './key-conflicts'
 import { ProviderAddSheet } from './ProviderAddSheet'
-import type { SettingsTarget } from './settings-target'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const LIST = 'ProviderList'
@@ -72,35 +78,26 @@ const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalle
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 /**
- * Why an enabled, credentialed route still surfaces nothing — appended to the
- * row's own line. The wording is `SharedProviders`': each string names the CAUSE
- * first, so it stays legible truncated, and says where the fix is. A bare
- * "0 models" is what made this class of failure opaque.
+ * The row's one line: the provider's KIND (`Catalog`, `Custom endpoint · <url>`,
+ * ADR-074 §7) where the registry names one — the engine pills already say which
+ * engines it reaches and how many models — else the registry's detail; plus the
+ * diagnosis when there is one.
  */
-function diagnosisText(diagnosis: SharedProviderRouteDiagnosis): string {
-  switch (diagnosis) {
-    case 'provider-disabled':
-      return 'Disabled in the engine — turn it back on below.'
-    case 'models-restricted':
-      return 'Every model is filtered out — adjust the model list below.'
-    case 'no-models-discovered':
-      return 'The engine reported no models — check it is installed and reachable.'
-  }
-}
-
-/** The row's one line: what the registry says, plus the diagnosis when there is one. */
 function describe(entry: ProviderEntry): string | undefined {
-  const parts = [entry.detail, entry.diagnosis ? diagnosisText(entry.diagnosis) : undefined]
+  const parts = [
+    entry.kindLabel ?? entry.detail,
+    entry.diagnosis ? diagnosisText(entry.diagnosis) : undefined
+  ]
   const text = parts.filter((part): part is string => !!part).join(' · ')
   return text || undefined
 }
 
-export function ProviderList({
-  navigate
-}: {
-  /** The render context's navigator — the Anthropic row's Manage uses it. */
-  navigate?: (target: SettingsTarget) => void
-}): React.JSX.Element {
+/** The first engine whose shared delivery failed, for the row's danger pill. */
+function failedEngine(entry: ProviderEntry): EngineId | undefined {
+  return ENGINE_ORDER.find((engine) => entry.engines[engine]?.error)
+}
+
+export function ProviderList(): React.JSX.Element {
   /** null until the first read resolves — the card shows one loading row. */
   const stored = useSessionStore((s) => s.providerRegistry)
   const [error, setError] = useState<string | null>(null)
@@ -114,12 +111,14 @@ export function ProviderList({
   const snapshot = stored ?? (failedEmpty ? EMPTY_SNAPSHOT : null)
   /** The provider whose Manage sheet is open. */
   const [openId, setOpenId] = useState<string | null>(null)
-  /**
-   * The Add sheet, and the row it should open on (the Manage sheet's "Sign in"
-   * hands ChatGPT over). `null` = closed; a state object with `focusId: null` is
-   * the plain "+ Add provider" case, which is why this is not a bare string.
-   */
-  const [adding, setAdding] = useState<{ focusId: string | null } | null>(null)
+  /** Whether the Add sheet is open. */
+  const [adding, setAdding] = useState(false)
+  /** The row whose on/off switch is being written, and the last such write's failure. */
+  const [switching, setSwitching] = useState<string | null>(null)
+  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null)
+  /** A row whose switch-on would replace an engine's own key, asking first. */
+  const [confirmOn, setConfirmOn] = useState<string | null>(null)
+  const [, setRenderTick] = useState(0)
 
   /**
    * Read the registry. Returns the snapshot so a write can close the sheet on an
@@ -152,16 +151,34 @@ export function ProviderList({
 
   // The group header's action, which cannot hold a callback (see the header).
   useEffect(() => {
-    const open = (): void => setAdding({ focusId: null })
+    const open = (): void => setAdding(true)
     window.addEventListener(ADD_EVENT, open)
     return () => window.removeEventListener(ADD_EVENT, open)
   }, [])
 
-  /** After a sheet write: re-read, and close the sheet if its provider is gone. */
-  const handleWrote = useCallback(async (): Promise<void> => {
-    const next = await reload()
-    if (next && !next.entries.some((entry) => entry.id === openId)) setOpenId(null)
-  }, [reload, openId])
+  /**
+   * After a sheet write: re-read, and close the sheet if its provider is gone.
+   * A write that names a shared row to `follow` opens that row instead: an ADOPT
+   * folds `opencode:openrouter` into the definition `openrouter` (ADR-074 §6),
+   * and "+ Add another key" makes a new entry the sheet moves to (slice 10). Any
+   * other write that makes the row vanish — a removal — closes it.
+   */
+  const handleWrote = useCallback(
+    async (follow?: string): Promise<void> => {
+      // Some of what a row shows is renderer-side state the sheet just changed
+      // (a dismissed key conflict), so re-render even when the re-read returns
+      // the same snapshot.
+      setRenderTick((n) => n + 1)
+      const next = await reload()
+      if (!next || openId === null) return
+      const successor = follow
+        ? next.entries.find((entry) => entry.id === follow && entry.origin === 'shared')
+        : undefined
+      if (successor) setOpenId(successor.id)
+      else if (!next.entries.some((entry) => entry.id === openId)) setOpenId(null)
+    },
+    [reload, openId]
+  )
 
   /**
    * After an ADD: re-read, close the Add sheet, and open the new row's Manage
@@ -173,12 +190,33 @@ export function ProviderList({
   const handleAdded = useCallback(
     async (registryId: string | null): Promise<void> => {
       const next = await reload()
-      setAdding(null)
+      setAdding(false)
       const row = registryId && next?.entries.some((entry) => entry.id === registryId)
       setOpenId(row ? registryId : null)
     },
     [reload]
   )
+
+  /**
+   * A shared API provider's row switch (ADR-074 slice 10): off takes it out of
+   * every engine and keeps its key and settings; on restores them. The model
+   * picker changes either way, and a failure — including a switch back on that
+   * could not deliver — is said on the list, where the switch is.
+   */
+  const toggleProvider = async (entry: ProviderEntry, replaceOwn = false): Promise<void> => {
+    setSwitching(entry.id)
+    setSwitchError(null)
+    setConfirmOn(null)
+    try {
+      await window.api.setSharedProviderDisabled(entry.id, entry.disabled !== true, replaceOwn)
+    } catch (e) {
+      setSwitchError({ id: entry.id, message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      useSessionStore.getState().reloadModels()
+      await reload()
+      setSwitching(null)
+    }
+  }
 
   // Mounted from BOTH returns: the header action can fire before the first read
   // resolves, and a button that silently does nothing for a second is worse than
@@ -186,8 +224,7 @@ export function ProviderList({
   const addSheet = adding && (
     <ProviderAddSheet
       snapshot={snapshot ?? EMPTY_SNAPSHOT}
-      focusId={adding.focusId}
-      onClose={() => setAdding(null)}
+      onClose={() => setAdding(false)}
       onAdded={handleAdded}
     />
   )
@@ -201,7 +238,10 @@ export function ProviderList({
     )
   }
 
-  const { entries, opencodeInstalled } = snapshot
+  const { opencodeInstalled } = snapshot
+  // Subscriptions are the section above (see the header); filtered on the
+  // registry's own fact, never on ids.
+  const entries = snapshot.entries.filter((entry) => !entry.subscription)
   const open = entries.find((entry) => entry.id === openId) ?? null
 
   return (
@@ -211,55 +251,146 @@ export function ProviderList({
           <span className="text-[12px] text-danger truncate">{error}</span>
         </SettingRow>
       )}
+      {switchError && (
+        <SettingRow
+          testid={`${LIST}.switchError`}
+          dataId={switchError.id}
+          label={`Could not switch ${
+            entries.find((entry) => entry.id === switchError.id)?.name ?? switchError.id
+          }`}
+        >
+          <span className="text-[12px] text-danger truncate">{switchError.message}</span>
+        </SettingRow>
+      )}
 
       {entries.map((entry) => (
-        <SettingRow
-          key={entry.id}
-          testid={`${LIST}.row`}
-          dataId={entry.id}
-          label={entry.name}
-          labelBadge={
-            <CredentialChip
-              credential={entry.credential}
-              // A subscription with several accounts: the COUNT is what the row
-              // has to say, and "Connected" would hide that there are others.
-              label={
-                (entry.accounts?.list.length ?? 0) > 1
-                  ? `${entry.accounts!.list.length} accounts`
-                  : undefined
-              }
-              testid={`${LIST}.credential`}
-            />
-          }
-          description={describe(entry)}
-        >
-          {ENGINE_ORDER.filter(
-            (engine) =>
-              entry.engines[engine] !== undefined &&
-              // The degraded case: with no opencode binary there is no opencode
-              // picker for anything to reach, whatever the route says.
-              (engine !== 'opencode' || opencodeInstalled)
-          ).map((engine) => (
-            <EngineChip
-              key={engine}
-              engine={engine}
-              enabled={entry.engines[engine]!.enabled}
-              testid={`${LIST}.engine`}
-            />
-          ))}
-          <Button
-            variant="link"
-            testid={`${LIST}.manage`}
+        <Fragment key={entry.id}>
+          <SettingRow
+            testid={`${LIST}.row`}
             dataId={entry.id}
-            onClick={() =>
-              entry.origin === 'anthropic'
-                ? navigate?.({ page: 'models', group: 'accounts' })
-                : setOpenId(entry.id)
+            label={entry.name}
+            // Switched off: kept, reaching no engine — its main column dimmed, and
+            // saying so; the switch and Manage stay live.
+            dimmed={entry.disabled === true}
+            dimControls={false}
+            labelBadge={
+              <>
+                {entry.disabled ? (
+                  <Pill testid={`${LIST}.off`} dataId={entry.id}>
+                    Off
+                  </Pill>
+                ) : (
+                  <CredentialChip
+                    credential={entry.credential}
+                    // A subscription with several accounts: the COUNT is what the row
+                    // has to say, and "Connected" would hide that there are others.
+                    label={
+                      (entry.accounts?.list.length ?? 0) > 1
+                        ? `${entry.accounts!.list.length} accounts`
+                        : undefined
+                    }
+                    testid={`${LIST}.credential`}
+                  />
+                )}
+                {entry.keyConflict &&
+                  !isConflictDismissed(
+                    entry.id.slice(entry.id.indexOf(':') + 1),
+                    entry.keyConflict
+                  ) && (
+                    <Pill tone="warn" testid={`${LIST}.keyConflict`} dataId={entry.id}>
+                      2 different keys
+                    </Pill>
+                  )}
+                {failedEngine(entry) && (
+                  <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failedEngine(entry)}>
+                    Not delivered to {failedEngine(entry)}
+                  </Pill>
+                )}
+              </>
             }
+            description={describe(entry)}
           >
-            Manage
-          </Button>
-        </SettingRow>
+            {ENGINE_ORDER.filter(
+              (engine) =>
+                entry.engines[engine] !== undefined &&
+                // The degraded case: with no opencode binary there is no opencode
+                // picker for anything to reach, whatever the route says.
+                (engine !== 'opencode' || opencodeInstalled)
+            ).map((engine) => (
+              // The same pill the Subscriptions Engines row wears, counting from
+              // the registry's facts — no catalog read per row.
+              <EnginePill
+                key={engine}
+                engine={engine}
+                on={entry.engines[engine]!.enabled}
+                count={factsCount(entry.engines[engine])}
+                testid={`${LIST}.engine`}
+              />
+            ))}
+            {/* A key or endpoint provider can be switched off whole; a native row
+              is the engine's own entry, and has the sheet's per-engine controls. */}
+            {entry.origin === 'shared' && (
+              <button
+                type="button"
+                role="switch"
+                data-testid={`${LIST}.onOff`}
+                data-id={entry.id}
+                aria-checked={!entry.disabled}
+                aria-label={entry.name}
+                title={entry.disabled ? 'Turn on' : 'Turn off'}
+                disabled={switching !== null}
+                onClick={() =>
+                  ownKeysReplacedOnSwitchOn(entry).length > 0
+                    ? setConfirmOn(entry.id)
+                    : void toggleProvider(entry)
+                }
+                className="cursor-default disabled:opacity-40"
+              >
+                <ToggleSwitch checked={!entry.disabled} />
+              </button>
+            )}
+            <Button
+              variant="link"
+              testid={`${LIST}.manage`}
+              dataId={entry.id}
+              onClick={() => setOpenId(entry.id)}
+            >
+              Manage
+            </Button>
+          </SettingRow>
+          {/* Switching on would replace a key an engine holds of its own: asked
+            in place, under the row, before anything is written. */}
+          {confirmOn === entry.id && (
+            <SettingRow
+              testid={`${LIST}.switchOnConfirm`}
+              dataId={entry.id}
+              indent
+              description={
+                <span className="text-warning">
+                  {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
+                </span>
+              }
+            >
+              <Button
+                variant="primary"
+                testid={`${LIST}.switchOnReplace`}
+                dataId={entry.id}
+                disabled={switching !== null}
+                onClick={() => void toggleProvider(entry, true)}
+              >
+                Replace it
+              </Button>
+              <Button
+                variant="link"
+                testid={`${LIST}.switchOnCancel`}
+                dataId={entry.id}
+                onClick={() => setConfirmOn(null)}
+              >
+                Cancel
+              </Button>
+            </SettingRow>
+          )}
+        </Fragment>
       ))}
 
       {!opencodeInstalled && (
@@ -273,9 +404,11 @@ export function ProviderList({
 
       {open && (
         <ProviderSheet
+          // One sheet per provider: switching rows must remount, or provider
+          // A's loaded curation state renders under provider B's adapters.
+          key={open.id}
           entry={open}
           opencodeInstalled={opencodeInstalled}
-          navigate={navigate}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
         />

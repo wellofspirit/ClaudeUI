@@ -27,7 +27,7 @@ import { readOpencodeSessionRows } from './db'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 import { cwdToProjectKey } from '../../shared/project-key'
-import type { ChatMessage, EngineHistoryLoad, SessionInfo } from '../../shared/types'
+import type { ChatMessage, EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
 
 /**
  * Resolve the path to opencode's global session DB. Mirrors opencode's own
@@ -157,15 +157,21 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
     // failure cost the user their transcript — an unwarmed vendor simply reads
     // as `unknown`, which prices the history at its list-price equivalent.
     await opencodeAuthProvider.warmCache().catch(() => {})
+    const last = lastOpencodeModel(stored)
     const statusLine =
       stored.length > 0
-        ? opencodeHistoryStatusLine(
-            stored,
-            lastOpencodeModel(stored),
-            dispatchedCostEntriesFor(sessionId)
-          )
+        ? opencodeHistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId))
         : null
-    return { messages, statusLine }
+    // The same last-assistant model the pricing uses, in ModelRef form: a
+    // session opencode created on its own has no model persisted here, and the
+    // transcript is the only place it is written down. Either id empty means
+    // there is nothing to seed — the picker value is `vendorId/modelId`, and a
+    // half-formed one would name no model at all.
+    const lastModel: ModelRef | null =
+      last.providerID && last.modelID
+        ? { engineId: 'opencode', vendorId: last.providerID, modelId: last.modelID }
+        : null
+    return { messages, statusLine, lastModel }
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',

@@ -694,6 +694,60 @@ Per-window `utilization` is 0–100 (percentage), same scale as the direct
 
 Empty `{}` when the user isn't OAuth-authenticated.
 
+#### The `limits[]` array (read from 2.1.268, 2026-09-21)
+
+`limits` sits beside the named windows in the same object, and it is where a
+weekly PER-MODEL bucket lives — an account that has one reports
+`seven_day_opus` / `seven_day_sonnet` as null and describes the bucket here
+instead. cli.js's own Zod schema for the block it caches
+(`grep -a -o 'limits:Tn(Je({kind.\{0,460\}'` on the pinned binary) types the
+whole utilization object as:
+
+```js
+// window = { utilization: number|null, resets_at: string|null } (passthrough)
+{
+  five_hour: window|null, seven_day: window|null, seven_day_oauth_apps: window|null,
+  seven_day_opus: window|null, seven_day_sonnet: window|null, cinder_cove: window|null,
+  extra_usage: { is_enabled: boolean, monthly_limit: number|null, used_credits: number|null,
+                 utilization: number|null, currency?: string|null, disabled_reason?: string|null },
+  limits: Array<{
+    kind: string,                 // "weekly_scoped" is the only value observed
+    group: string,                // "weekly" for a weekly_scoped entry
+    percent: number,              // 0-100, NOT a fraction (see below)
+    resets_at: string|null,
+    scope?: {                     // passthrough, nullish
+      model?:   { display_name: string }|null,
+      surface?: { display_name: string }|null
+    }|null
+  }>|null
+}
+```
+
+Every object is `passthrough()`, so unknown keys survive; the recognised
+top-level window keys are enumerated in the binary as `["five_hour",
+"seven_day", "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet",
+"cinder_cove", "extra_usage", "limits"]` (`cinder_cove` is a one-time credit,
+shown as "Claude Code and Cowork credit").
+
+Which entries cli.js consumes, and how:
+
+- `aFn(e)` is the predicate: the entry's `kind` must be `"weekly_scoped"` and
+  `scope.model.display_name` must be a string. An entry failing either half is
+  ignored, and `scope.surface` is never read.
+- `zoe(limits, modelNames)` filters by `aFn`, then keeps the entries whose
+  `scope.model.display_name` case-insensitively matches one of the names the
+  caller passes (`GB()`, the session's models), and maps each to a row whose
+  title is `Current week (<display_name>)` and whose limit is
+  `{ utilization: o.percent, resets_at: o.resets_at }`. So `percent` IS the
+  0–100 utilization: cli.js assigns it straight into the field it renders as a
+  percentage, and the builder that SYNTHESISES an entry from response headers
+  writes `percent: e.utilization * 100` from the header's fraction.
+- `group` is carried but nothing branches on it.
+
+There is no model ID anywhere in an entry — the server's `display_name` is the
+only handle — which is why `weeklyScopedKind()` slugs that name for the window
+kind (`7d:fable`) rather than keying on a model id (ADR-071 §6).
+
 **Timing:** slow (HTTPS, 5 s timeout).
 
 **QueryHandle:** `q.getUsage()`.

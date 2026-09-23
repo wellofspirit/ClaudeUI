@@ -21,7 +21,7 @@ Six render in the chat, and they are not mutually exclusive — a single Codex t
 | `AuthRequiredRow`                                                                    | `ChatPanel.tsx:412`                                                                                                                     | `session:auth-required`                                         |
 | `FloatingError` (×N)                                                                 | `ChatPanel.tsx:413`                                                                                                                     | each engine's **duplicate** `session:error`                     |
 | `AuthErrorBlock`                                                                     | `MessageBubble.tsx:175`                                                                                                                 | Claude's `api_error` / `errorType: 'authentication'`            |
-| Model picker, mobile config sheet, four Settings rows, the dialog's own account list | `InlinePickers.tsx`, `MobileConfigSheet.tsx`, `ProviderSheet.tsx`, `ChatgptAccountsSetting.tsx`, `CodexAccount.tsx`, `SignInDialog.tsx` | `providerAuth`, `provider-registry:list`                        |
+| Model picker, mobile config sheet, four Settings rows, the dialog's own account list | `InlinePickers.tsx`, `MobileConfigSheet.tsx`, `ProviderSheet.tsx`, `SubscriptionsSection.tsx` (was `ChatgptAccountsSetting.tsx`, ADR-074 §7), `CodexAccount.tsx`, `SignInDialog.tsx` | `providerAuth`, `provider-registry:list`                        |
 
 **The duplicate is deliberate and it is the root cause.** Every engine emits the generalized event _and_ re-sends its own words as an ordinary error, on the reasoning that dropping the vendor's text would lose information:
 
@@ -161,8 +161,9 @@ by it. **Two were ruled on by the owner (2026-09-19) and closed by slice F; the 
 
   The thresholds are the measured cost of each tier plus a 96px floor for the title and the pill's
   34px reservation (948.4 and 604.4), rounded up; tier 2's is raised to `MOBILE_BREAKPOINT` (768) so
-  that every phone viewport is inside the collapsed tier by construction. `src/layout/` sweeps the
-  real bar in Chromium and pins all of it. What remains bounded rather than solved: the three "never"
+  that every phone viewport is inside the collapsed tier by construction. A Chromium measuring
+  harness (`src/layout/`, removed 2026-09-22 with its CI job by owner ruling; the numbers stand as
+  measured) swept the real bar and pinned all of it. What remains bounded rather than solved: the three "never"
   children still want 302px of content in the worst case (~275px typically), so at `minWidth: 600`
   with a 280px sidebar the bar is ~8px short — an owner decision about that row, not a leak.
 
@@ -192,7 +193,7 @@ by it. **Two were ruled on by the owner (2026-09-19) and closed by slice F; the 
 3. **Slice C — the dialog.** §5: the copy cuts, the retry relocation, the provider-list mode.
 4. **Slice D — the remote Claude sign-in.** §6.
 5. **Slice E — the pill must not eat the title.** §4's containment, plus the `src/layout/` measuring
-   harness the geometry claims are pinned by.
+   harness the geometry claims were pinned by (removed 2026-09-22, see the residuals).
 6. **Slice F — the two owner rulings above.** The confirm stage, and the bar that collapses in tiers.
 7. **Slice G — the pasted code is `code#state`.** The owner's own re-auth attempt, not a test, found
    it: claude.ai joins the authorization code and the CSRF state with a `#`, cli.js splits that in
@@ -281,11 +282,11 @@ earlier text stands as the record and this section is the current truth.
   runtime and the page lookup throws from inside render, so one unknown page id took the whole
   window to the error boundary. `settingsTargetFromEvent` now accepts only a known page; anything
   else opens Settings where it was.
-- **Verification.** `src/layout` now runs in CI, as its own `windows-2022` job — the platform its
-  thresholds were measured on — and its one absolute-pixel assertion became relational so host fonts
-  cannot fail it. `src/layout` fails fast, naming `bunx playwright install chromium`, when the
-  browser is missing, and is documented as a layer in `docs/testing-strategy.md`. It still measures
-  Playwright's Chromium rather than the shipped Electron.
+- **Verification.** `src/layout` ran in CI as its own `windows-2022` job, the platform its
+  thresholds were measured on, with relational assertions so host fonts could not fail it. **Removed
+  2026-09-22 by owner ruling**, job and layer together: the measurements were taken once and stand in
+  `top-bar-tiers.ts`, and the layer cost a browser install on every PR. `TopBar.component.test.tsx`
+  keeps the tier-gating assertions jsdom can make.
 - **Pre-existing, fixed alongside:** a stale `authState: success` finished `mode: 'add'` before it
   began; the add row was live before the account read answered; a blamed non-active account got a
   second Re-authorize that acted on the active credential; the ⋯ menu dismissed itself outside the

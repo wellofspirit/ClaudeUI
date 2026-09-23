@@ -320,6 +320,8 @@ export interface FixtureProviderOptions {
    * within seconds (seen live 2026-09-16 on macOS).
    */
   chatgpt?: boolean
+  /** Synthetic workspaces returned by the isolated accounts-check endpoint. */
+  chatgptWorkspaceIds?: string[]
   /**
    * Replaces the default `426 Upgrade Required` answer. The integration suite's
    * native-session probes speak the WebSocket wire and install their own; every
@@ -402,6 +404,7 @@ export async function startFixtureProvider(
     script = () => fixtureAssistantMessage(),
     statusFor,
     chatgpt = false,
+    chatgptWorkspaceIds,
     onUpgrade,
     requests = [],
     errors = [],
@@ -427,6 +430,26 @@ export async function startFixtureProvider(
     req.on('error', () => {})
     req.on('end', () => {
       clearTimeout(bodyTimeout)
+      if (
+        chatgpt &&
+        chatgptWorkspaceIds &&
+        req.method === 'GET' &&
+        req.url === '/backend-api/wham/accounts/check'
+      ) {
+        backend.push(`${req.method} ${req.url}`)
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(
+          JSON.stringify({
+            accounts: chatgptWorkspaceIds.map((id) => ({
+              id,
+              workspace_backend_origin: 'https://127.0.0.1',
+              account_routing_override: 'NO_CONSTRAINT'
+            })),
+            account_ordering: chatgptWorkspaceIds,
+            default_account_id: chatgptWorkspaceIds[0]
+          })
+        )
+        return
+      }
       // The binary's own calls under an injected identity. Answered, recorded,
       // and never counted as a rejection — the turn is the POST below.
       if (
@@ -552,6 +575,8 @@ export interface FixtureConfigOptions {
    *    ordinary failure — without it nothing would ever ask the host to refresh.
    */
   chatgpt?: boolean
+  /** Separate bootstrap origin keeps explicit model requests independent of workspace routing. */
+  chatgptPort?: number
   /**
    * What `[features]` the fixture home declares.
    *
@@ -611,6 +636,7 @@ export function renderFixtureConfigToml(options: FixtureConfigOptions): string {
     openaiBaseUrl = null,
     approvalsReviewer = 'user',
     chatgpt = false,
+    chatgptPort = port,
     features = 'fixture',
     extraToml = ''
   } = options
@@ -619,7 +645,7 @@ export function renderFixtureConfigToml(options: FixtureConfigOptions): string {
   return `${model ? `model = "${model}"` : ''}
 model_provider = "${provider}"
 ${openaiBaseUrl ? `openai_base_url = "${openaiBaseUrl}"` : ''}
-${chatgpt ? `chatgpt_base_url = "http://127.0.0.1:${port}/backend-api"\n` : ''}approval_policy = "on-request"
+${chatgpt ? `chatgpt_base_url = "http://127.0.0.1:${chatgptPort}/backend-api"\n` : ''}approval_policy = "on-request"
 approvals_reviewer = "${approvalsReviewer}"
 sandbox_mode = "read-only"
 cli_auth_credentials_store = "file"

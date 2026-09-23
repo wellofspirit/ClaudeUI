@@ -1,12 +1,35 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { SharedProviderDefinition, SharedProviderModel } from '../../shared/shared-provider'
+import {
+  deliveredDefinition,
+  type SharedProviderDefinition,
+  type SharedProviderModel,
+  type SharedProviderRouteDiagnosis
+} from '../../shared/shared-provider'
+import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
 import { piAgentDir } from '../services/pi-session-list'
-import { invalidatePiModelCache } from '../pi/model-discovery'
+import { loadEngineConfig } from '../services/ui-config'
+import { getPiModelCatalog, invalidatePiModelCache } from '../pi/model-discovery'
+import type { PiModel } from '../pi/pi-protocol'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 16_384
+
+/**
+ * The `apiKey` written into a keyless custom provider's models.json entry
+ * (ADR-074 §4). pi omits a provider with no usable credential from
+ * `get_available_models` (`vendor/pi-cli/pi/docs/models.md`: "The dummy key
+ * makes the model available"), so a self-hosted endpoint added with the key
+ * left blank would never reach pi's picker without one.
+ *
+ * Safe because pi resolves credentials `--api-key` → `auth.json` →
+ * models.json `apiKey` → env: a real key vended to auth.json by
+ * {@link PiSharedProviderAdapter.vendApiKey} still wins. It never goes into
+ * auth.json itself — `hasCredential` reads auth.json ids, and a placeholder
+ * there would report a keyless provider as connected.
+ */
+export const CLAUDEUI_KEYLESS_PLACEHOLDER = 'claudeui-no-key'
 
 export interface PiOauthCredential {
   access: string
@@ -26,6 +49,10 @@ export interface PiSharedProviderAdapterDeps {
   modelsPath?: string
   auth: PiSharedProviderAuthTarget
   invalidateModelCache?: () => void
+  /** pi's UNFILTERED catalog — `getPiModelCatalog()` (cached, [] on failure). */
+  loadCatalog?: () => Promise<PiModel[]>
+  /** `piConfig.modelAllowlist`, as `loadEngineConfig('pi')` normalises it. */
+  readModelAllowlist?: () => Readonly<Record<string, readonly string[]>> | undefined
 }
 
 interface PiModelConfig {
@@ -48,10 +75,30 @@ type PiModelsFile = Record<string, unknown> & { providers?: Record<string, unkno
 export class PiSharedProviderAdapter {
   private readonly modelsPath: string
   private readonly invalidateModelCache: () => void
+  private readonly loadCatalog: () => Promise<PiModel[]>
+  private readonly readModelAllowlist: () => Readonly<Record<string, readonly string[]>> | undefined
 
   constructor(private readonly deps: PiSharedProviderAdapterDeps) {
     this.modelsPath = deps.modelsPath ?? path.join(piAgentDir(), 'models.json')
     this.invalidateModelCache = deps.invalidateModelCache ?? invalidatePiModelCache
+    this.loadCatalog = deps.loadCatalog ?? getPiModelCatalog
+    this.readModelAllowlist =
+      deps.readModelAllowlist ?? (() => loadEngineConfig('pi').piConfig?.modelAllowlist)
+  }
+
+  /**
+   * Why an enabled pi route surfaces zero models (ADR-074 §5) — the question
+   * `OpencodeSharedProviderAdapter.diagnoseZeroModels` answers for opencode,
+   * asked of pi's unfiltered catalog and its per-provider allowlist.
+   */
+  async diagnoseZeroModels(
+    definition: SharedProviderDefinition
+  ): Promise<SharedProviderRouteDiagnosis> {
+    return diagnosePiZeroModels(
+      nativeProviderId(definition),
+      await this.loadCatalog(),
+      this.readModelAllowlist()
+    )
   }
 
   applyDefinition(
@@ -132,8 +179,11 @@ export class PiSharedProviderAdapter {
   }
 
   async vendApiKey(definition: SharedProviderDefinition, key: string): Promise<void> {
-    if (definition.kind !== 'custom') {
-      throw new Error('Pi API keys are only supported for custom providers')
+    // A catalog provider's key lands on the built-in vendor id it names — that
+    // is the point of it (ADR-074 §6) — so the built-in collision guard below
+    // stays custom-only. ChatGPT is OAuth and never takes a key.
+    if (definition.kind === 'subscription') {
+      throw new Error('Pi API keys are only supported for custom and catalog providers')
     }
     if (!definition.routes.pi.enabled) return
     assertNoPiBuiltinCollision(definition)
@@ -247,6 +297,35 @@ function compileModel(model: SharedProviderModel): PiModelConfig {
   }
 }
 
+/**
+ * The pure half of {@link PiSharedProviderAdapter.diagnoseZeroModels}, most
+ * general cause last:
+ *
+ * - pi reported nothing at all → `no-models-discovered` (not installed, no
+ *   auth anywhere, or the probe failed);
+ * - it reported models, none under this provider id → `no-credential` (pi
+ *   omits a provider it has no usable key for, and a broken `models.json`
+ *   entry looks the same from here);
+ * - the provider has models but its allowlist key admits none of them →
+ *   `models-restricted`.
+ *
+ * Anything else — pi offers models the allowlist admits, yet the route counts
+ * zero — has no more precise answer than `no-models-discovered`.
+ */
+export function diagnosePiZeroModels(
+  providerId: string,
+  catalog: readonly PiModel[],
+  allowlist: Readonly<Record<string, readonly string[]>> | undefined
+): SharedProviderRouteDiagnosis {
+  if (catalog.length === 0) return 'no-models-discovered'
+  const own = catalog.filter((model) => model.provider === providerId)
+  if (own.length === 0) return 'no-credential'
+  if (!own.some((model) => isPiModelAllowed(allowlist, providerId, model.id))) {
+    return 'models-restricted'
+  }
+  return 'no-models-discovered'
+}
+
 export function nativeProviderId(definition: SharedProviderDefinition): string {
   return (
     definition.routes.pi.providerId ??
@@ -261,7 +340,9 @@ export function nativeProviderId(definition: SharedProviderDefinition): string {
  * The membership test is {@link PiSharedProviderAdapter.applyDefinition}'s own
  * first three lines, in its order: ChatGPT is vended as a native credential and
  * never projected, a disabled pi route is removed rather than written, and a
- * non-custom provider writes no entry at all. Exported (rather than reproduced
+ * non-custom provider writes no entry at all. A provider switched off as a
+ * whole has every route disabled (`deliveredDefinition`), as the service
+ * applies it. Exported (rather than reproduced
  * by the caller) so the raw models.json editor's ownership guard — which must
  * refuse to hand-edit exactly these entries, since the next projection sync
  * would clobber the edit — cannot drift from what the writer actually owns.
@@ -274,7 +355,9 @@ export function managedPiProviderIds(definitions: readonly SharedProviderDefinit
   return [
     ...new Set(
       definitions.flatMap((definition) =>
-        definition.id !== 'chatgpt' && definition.kind === 'custom' && definition.routes.pi.enabled
+        definition.id !== 'chatgpt' &&
+        definition.kind === 'custom' &&
+        deliveredDefinition(definition).routes.pi.enabled
           ? [nativeProviderId(definition)]
           : []
       )
@@ -302,6 +385,10 @@ function assertNoPiBuiltinCollision(definition: SharedProviderDefinition): void 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
@@ -335,7 +422,25 @@ function managedProviderProjection(value: unknown): unknown {
   }
 }
 
+/**
+ * `compiled` over `existing`, keeping every native field ClaudeUI does not own.
+ *
+ * `apiKey` is one of those: an existing value of any shape (a literal, `$ENV`,
+ * `!command`) is left untouched, and only an entry with none gains
+ * {@link CLAUDEUI_KEYLESS_PLACEHOLDER}. It stays outside
+ * {@link managedProviderProjection}, so entries written before the placeholder
+ * existed still read as unchanged.
+ */
 function mergeProvider(existing: unknown, compiled: PiProviderConfig): Record<string, unknown> {
+  const merged = mergeManagedFields(existing, compiled)
+  if (!isNonEmptyString(merged.apiKey)) merged.apiKey = CLAUDEUI_KEYLESS_PLACEHOLDER
+  return merged
+}
+
+function mergeManagedFields(
+  existing: unknown,
+  compiled: PiProviderConfig
+): Record<string, unknown> {
   if (!isRecord(existing)) return { ...compiled }
   const existingModels = new Map(
     Array.isArray(existing.models)

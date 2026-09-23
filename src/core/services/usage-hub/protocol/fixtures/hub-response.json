@@ -1,0 +1,8 @@
+{
+  "epoch": 3,
+  "schemaVersion": 2,
+  "recomputedAt": 1758414600000,
+  "retentionDays": 360,
+  "archiveBound": false,
+  "deviceCount": 3
+}

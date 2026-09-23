@@ -11,6 +11,7 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { DiagramGalleryProvider } from './DiagramGallery'
 import { ToolCallBlock } from './ToolCallBlock'
+import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
 interface Props {
   messages: ChatMessage[]
@@ -125,6 +126,7 @@ export const SubagentMessages = memo(function SubagentMessages({
   return (
     <div
       data-testid="SubagentMessages"
+      {...TOOL_OUTPUT_SCOPE}
       className="flex flex-col gap-2 overflow-y-auto"
       style={{ maxHeight }}
     >

@@ -3,7 +3,7 @@
 This is the transport reference. Codex is registered as the fourth engine and
 runs under the shared permission model (ADR-067); the phase-1 release gates in
 the [handoff](../codex-integration-handoff.md) are still open.
-The pin is `package.json#codexCliVersion`, currently `0.154.0`. No Codex command
+The pin is `package.json#codexCliVersion`, currently `0.156.0` ([stable release](https://github.com/openai/codex/releases/tag/rust-v0.156.0)). The generated protocol and per-host digest manifest track this release; the dated 0.154.0 probes below remain historical evidence. The Windows x64 isolated integration run passed 30 tests with 56 platform-gated tests skipped using `CODEX_INTEGRATION=1 bun run test:integration src/integration/codex --maxWorkers=1`. Parallel execution hit process-disposal deadlines. The fixtures now answer workspace-routing discovery on a separate loopback origin and assert that projectless threads do not persist trust. No Codex command
 is hooked into postinstall, ordinary builds or release packaging yet.
 
 ## Acquisition

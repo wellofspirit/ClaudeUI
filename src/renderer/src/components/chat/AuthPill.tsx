@@ -14,8 +14,8 @@ const RESOLVED_LINGER_MS = 15_000
  * The pill's SLOT: a shrinkable, clipping box holding nothing but the pill,
  * sitting in `TopBar`'s left group after the title.
  *
- * It is the whole of the geometric fix (see `src/layout/TopBar.layout.test.tsx`
- * for the measurements). `min-w-0` + `overflow-hidden` make "the pill never
+ * It is the whole of the geometric fix (the measurements were taken once in a
+ * Chromium harness, since removed; `top-bar-tiers.ts` records them). `min-w-0` + `overflow-hidden` make "the pill never
  * paints outside its group" a guarantee rather than an arithmetic hope — a
  * `shrink-0` pill in a squeezed group painted over the VS Code button, and the
  * overlapped slice stopped being clickable because the button comes later in
@@ -31,9 +31,8 @@ const SLOT = 'min-w-0 overflow-hidden flex items-center'
  *
  * 140px is the threshold, against a widest label of ~123px measured in
  * Chromium ("2 sign-ins needed"); the headroom covers the other platforms'
- * system fonts. The layout test asserts at every width that the pill is never
- * CUT OFF, so a label that outgrows this number fails there rather than
- * shipping as "Sign-in nee…". Written out literally because Tailwind extracts
+ * system fonts. A label that outgrows this number ships as "Sign-in nee…", so
+ * a new label has to be measured against it. Written out literally because Tailwind extracts
  * class names from source text — a composed string would generate no CSS.
  */
 const COMPACT =

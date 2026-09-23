@@ -32,7 +32,29 @@ const chatgpt: SharedProviderDefinition = {
   }
 }
 
+/** What opencode's config reads for a declared model with no stated facts. */
+const CAPS = {
+  reasoning: false,
+  attachment: false,
+  toolCall: true,
+  inputModalities: ['text'],
+  limit: { context: 0, output: 0 }
+}
+
 function compiledProvider() {
+  return {
+    name: 'Local API',
+    npm: '@ai-sdk/openai-compatible',
+    baseURL: 'http://localhost/v1',
+    models: [
+      { id: 'base', name: 'Base', ...CAPS },
+      { id: 'native-mapped', ...CAPS }
+    ]
+  }
+}
+
+/** The same block as ClaudeUI wrote it before slice 10: ids and names only. */
+function oldShapeProvider() {
   return {
     name: 'Local API',
     npm: '@ai-sdk/openai-compatible',
@@ -324,5 +346,133 @@ describe('OpencodeSharedProviderAdapter', () => {
       })
       expect(adapter.diagnoseZeroModels(chatgpt)).toBe('no-models-discovered')
     })
+  })
+})
+
+describe('OpencodeSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
+  const catalog: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  it('projects nothing: apply, remove and the collision probe are no-ops', () => {
+    // A native `openrouter` block the user wrote must survive every call.
+    const current: NativeOpencodeFields = {
+      providers: { openrouter: { name: 'Mine', baseURL: 'https://mine' } }
+    }
+    const { adapter, writeConfig, invalidateModelCache } = setup(current)
+    expect(() => adapter.applyDefinitionRoute({ definition: catalog })).not.toThrow()
+    adapter.applyDefinitionRoute({
+      definition: { ...catalog, routes: { ...catalog.routes, opencode: { enabled: false } } },
+      previouslyManaged: true,
+      previousDefinition: catalog
+    })
+    adapter.removeDefinitionRoute(catalog)
+    expect(adapter.inspectCollision(catalog)).toBe(false)
+    expect(adapter.hasDefinition(catalog)).toBe(true)
+    expect(writeConfig).not.toHaveBeenCalled()
+    expect(invalidateModelCache).not.toHaveBeenCalled()
+  })
+
+  it('vends the key under the catalog id', async () => {
+    const { adapter, authTarget } = setup()
+    await adapter.vendApiKey(catalog, 'sk-or')
+    expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('openrouter', 'sk-or')
+  })
+})
+
+describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10)', () => {
+  const described: SharedProviderDefinition = {
+    ...definition,
+    models: [
+      {
+        id: 'base',
+        name: 'Base',
+        reasoning: true,
+        vision: true,
+        contextWindow: 262144,
+        maxTokens: 32768
+      },
+      { id: 'mapped', harnessOverrides: { opencode: { id: 'native-mapped' } } }
+    ]
+  }
+
+  it('declares what each model can do and how large it is', () => {
+    const { adapter, writeConfig } = setup()
+    adapter.applyDefinitionRoute({ definition: described })
+    expect(writeConfig.mock.calls[0][0].providers?.['local-api']?.models).toEqual([
+      {
+        id: 'base',
+        name: 'Base',
+        reasoning: true,
+        attachment: true,
+        toolCall: true,
+        inputModalities: ['text', 'image'],
+        limit: { context: 262144, output: 32768 }
+      },
+      { id: 'native-mapped', ...CAPS }
+    ])
+  })
+
+  it('re-applies over a block written before capabilities existed, without calling it changed', () => {
+    const { adapter, writeConfig } = setup({ providers: { 'local-api': oldShapeProvider() } })
+    expect(adapter.hasDefinition(definition)).toBe(true)
+    expect(() =>
+      adapter.applyDefinitionRoute({
+        definition,
+        previouslyManaged: true,
+        previousDefinition: definition
+      })
+    ).not.toThrow()
+    expect(writeConfig).toHaveBeenCalledWith({ providers: { 'local-api': compiledProvider() } })
+  })
+
+  it('keeps a hand-edited capability through a sync, and updates the ones nobody touched', () => {
+    const edited = compiledProvider()
+    // Someone raised the context window in opencode's model editor.
+    edited.models[0] = { ...edited.models[0], limit: { context: 999, output: 0 } }
+    const { adapter, writeConfig } = setup({ providers: { 'local-api': edited } })
+
+    // A sync re-applies the same definition: the edit is kept, nothing written.
+    adapter.applyDefinitionRoute({ definition, previouslyManaged: true })
+    expect(writeConfig).not.toHaveBeenCalled()
+
+    // A refresh that changes the model's details: the edit still wins over the
+    // limit, and reasoning — untouched in the file — takes the new value.
+    adapter.applyDefinitionRoute({
+      definition: {
+        ...definition,
+        models: [
+          { id: 'base', name: 'Base', reasoning: true, contextWindow: 5000 },
+          definition.models[1],
+          definition.models[2]
+        ]
+      },
+      previouslyManaged: true,
+      previousDefinition: definition
+    })
+    expect(writeConfig.mock.calls[0][0].providers?.['local-api']?.models?.[0]).toEqual({
+      id: 'base',
+      name: 'Base',
+      reasoning: true,
+      attachment: false,
+      toolCall: true,
+      inputModalities: ['text'],
+      limit: { context: 999, output: 0 }
+    })
+  })
+
+  it('still calls a renamed model or endpoint changed outside ClaudeUI', () => {
+    const { adapter } = setup({
+      providers: { 'local-api': { ...compiledProvider(), baseURL: 'http://elsewhere/v1' } }
+    })
+    expect(adapter.hasDefinition(definition)).toBe(false)
+    expect(() => adapter.applyDefinitionRoute({ definition, previouslyManaged: true })).toThrow(
+      'changed outside ClaudeUI'
+    )
   })
 })

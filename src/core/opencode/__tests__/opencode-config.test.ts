@@ -663,6 +663,101 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
     })
   })
 
+  it('writes capability leaves one by one, creating parents and keeping unmodelled siblings (ADR-074 slice 10)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify(
+          {
+            provider: {
+              spark: {
+                name: 'Spark',
+                options: { baseURL: 'http://127.0.0.1:8888/v1' },
+                models: {
+                  // As ClaudeUI wrote it before slice 10, plus two hand edits.
+                  old: { name: 'Old' },
+                  edited: {
+                    modalities: { output: ['text'] },
+                    limit: { context: 1000, output: 10, input: 900 },
+                    cost: { input: 1, output: 2 }
+                  }
+                }
+              }
+            }
+          },
+          null,
+          2
+        )
+      )
+      const cur = readOpencodeNativeConfig()
+      expect(cur.providers?.spark.models).toEqual([
+        { id: 'old', name: 'Old' },
+        { id: 'edited', limit: { context: 1000, output: 10 } }
+      ])
+      const caps = {
+        reasoning: true,
+        attachment: true,
+        toolCall: true,
+        inputModalities: ['text', 'image'],
+        limit: { context: 262144, output: 32768 }
+      }
+      writeOpencodeNativeConfig({
+        providers: {
+          spark: {
+            ...cur.providers!.spark,
+            models: [
+              { id: 'old', name: 'Old', ...caps },
+              { id: 'edited', ...caps },
+              { id: 'new-one', ...caps }
+            ]
+          }
+        }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      const models = parsed.provider.spark.models
+      expect(models.old).toEqual({
+        name: 'Old',
+        reasoning: true,
+        attachment: true,
+        tool_call: true,
+        modalities: { input: ['text', 'image'] },
+        limit: { context: 262144, output: 32768 }
+      })
+      // Leaf by leaf: output modalities, limit.input and cost are not ours.
+      expect(models.edited.modalities).toEqual({ output: ['text'], input: ['text', 'image'] })
+      expect(models.edited.limit).toEqual({ context: 262144, output: 32768, input: 900 })
+      expect(models.edited.cost).toEqual({ input: 1, output: 2 })
+      expect(models['new-one'].tool_call).toBe(true)
+      expect(readOpencodeNativeConfig().providers?.spark.models?.[1]).toEqual({
+        id: 'edited',
+        ...caps
+      })
+    })
+  })
+
+  it('a caller that does not model capabilities leaves them as the file has them', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify({
+          provider: {
+            spark: {
+              models: { m: { name: 'M', reasoning: true, limit: { context: 5, output: 1 } } }
+            }
+          }
+        })
+      )
+      // The opencode provider pane rebuilds models as `{ id, name }` only.
+      writeOpencodeNativeConfig({
+        providers: { spark: { models: [{ id: 'm', name: 'Renamed' }] } }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider.spark.models.m).toEqual({
+        name: 'Renamed',
+        reasoning: true,
+        limit: { context: 5, output: 1 }
+      })
+    })
+  })
+
   it('no-op save leaves the file byte-identical', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const original = [

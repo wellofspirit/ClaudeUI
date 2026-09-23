@@ -281,3 +281,9 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 | `README.md` | This document            |
 | `apply.mjs` | Patch script             |
 | `test.mjs`  | Behavioural test harness |
+
+## 2.1.280 maintenance note
+
+2.1.280: The composer `U(primary,fallback)` has three zero-arg callers. The actual getter has a credman gate and both `return U(...)` and `return <fallback>`; filter candidates and splice by the selected offset, not a first-match replace. Find `"CLAUDE_CODE_FORCE_WINDOWS_CREDMAN"` via bundle-analyzer.
+
+**Scope to the composer's chunk, anchor on backend identity.** The body-shape filter above was Windows-only: the darwin-arm64 getter is `function $n(){if(U)return U;return x(I,w)}` (no bare `return <fallback>`), and the composer's one-letter name (`U` on Windows, `x` on macOS) is reused by unrelated chunks (`x` is also a GrowthBook getter elsewhere). The getter search is now limited to the `// @bun-chunk` holding the composer, and a candidate must pass the chunk-local backends — fallback `{name:"plaintext"}`, primary `{name:"keychain"}` / `{name:"windows-credman"}`. Verified on both the darwin-arm64 and win32-x64 2.1.280 bundles (Windows getter: `function $n(){if(Y)return Y;if(nHn())return U(x,D);return D}`).

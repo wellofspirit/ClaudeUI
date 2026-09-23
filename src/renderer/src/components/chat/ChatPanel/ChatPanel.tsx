@@ -24,6 +24,7 @@ import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
+import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
 
 /** One-time discovery hint for the mobile-web double-tap fullscreen gesture. */
 const FULLSCREEN_HINT_KEY = 'claudeui.hint.fullscreenDoubleTap'
@@ -77,6 +78,10 @@ export function ChatPanel(): React.JSX.Element {
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  // Read by the mutation-driven auto-scroll, which must not re-arm while the
+  // find bar is open (it would yank the view off a search jump mid-stream).
+  const searchOpenRef = useRef(false)
+  searchOpenRef.current = searchOpen
 
   const shouldAutoScroll = useRef(true)
   const lastScrollTop = useRef(0)
@@ -188,7 +193,7 @@ export function ChatPanel(): React.JSX.Element {
         if (!el) return
         const dist = el.scrollHeight - el.scrollTop - el.clientHeight
         setIsAtBottom(dist < 100)
-        if (!shouldAutoScroll.current && wasNearBottom.current) {
+        if (!shouldAutoScroll.current && wasNearBottom.current && !searchOpenRef.current) {
           shouldAutoScroll.current = true
         }
         if (shouldAutoScroll.current) doAutoScroll(el, true)
@@ -322,7 +327,7 @@ export function ChatPanel(): React.JSX.Element {
                 <ImageGalleryProvider messages={messages}>
                   <DiagramGalleryProvider messages={messages}>
                     {messages.map((msg) => (
-                      <div key={msg.id} className="cv-auto">
+                      <div key={msg.id} className="cv-auto" {...SEARCH_ANCHOR}>
                         <MessageBubble
                           message={msg}
                           pendingApprovals={pendingApprovals}

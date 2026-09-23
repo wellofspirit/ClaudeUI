@@ -14,7 +14,7 @@
  * The two therefore agree on messages, not necessarily to the cent.
  */
 
-import type { ModelCostEntry, StatusLineData } from '../../shared/types'
+import type { ModelCostEntry, ModelRef, StatusLineData } from '../../shared/types'
 import { totalCosts } from '../../shared/cost-rule'
 import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { peekPiModelContextWindow } from './model-discovery'
@@ -80,6 +80,18 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
   }
 
   return { costInputs, tokens, lastContextLength, lastModel }
+}
+
+/**
+ * {@link piHistorySeed}'s `lastModel` as a ModelRef, for seeding a reopened
+ * session's model. A session pi created on its own has nothing persisted on
+ * our side, so the transcript is the only place its model is written down.
+ * Null when no assistant message names one.
+ */
+export function piLastModelRef(entries: PiSessionEntry[]): ModelRef | null {
+  const { lastModel } = piHistorySeed(entries)
+  if (!lastModel?.vendorId || !lastModel.modelId) return null
+  return { engineId: 'pi', vendorId: lastModel.vendorId, modelId: lastModel.modelId }
 }
 
 /**

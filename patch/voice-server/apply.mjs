@@ -291,7 +291,7 @@ if (src.includes(PATCH_A_MARKER)) {
   console.log('\n--- Extracting success response function ---')
 
   const escMsg = msgVar.replace(/\$/g, '\\$')
-  const successRe = new RegExp(`\\),(${V})\\(${escMsg},\\{\\}\\)\\}catch`, 'g')
+  const successRe = new RegExp(`(${V})\\(${escMsg},\\{\\}\\)`, 'g')
   const successMatches = [...src.matchAll(successRe)]
   if (successMatches.length === 0) {
     console.error('ERROR: Cannot find success response helper')

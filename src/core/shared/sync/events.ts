@@ -306,6 +306,13 @@ export interface SyncEventMap {
    */
   'usage:limits-changed': () => void
   /**
+   * The usage hub client's state or its cached remote rows moved (ADR-072 §7) —
+   * a push landed, a pull stored rows, a credential was refused. PAYLOAD-FREE
+   * like the two usage nudges above it: `usage-hub:status` is the one shape, and
+   * it carries figures a fan-out has no business duplicating.
+   */
+  'usage-hub:changed': () => void
+  /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
    * credential is good now", so every auth surface invented its own clear

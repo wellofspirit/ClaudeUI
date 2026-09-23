@@ -38,7 +38,7 @@ import type {
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
-import { piHistoryStatusLine } from '../pi/history-status-line'
+import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
@@ -454,7 +454,7 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     await piAuthProvider.probe().catch(() => {})
     const statusLine =
       active.length > 0 ? piHistoryStatusLine(active, dispatchedCostEntriesFor(sessionId)) : null
-    return { messages, statusLine }
+    return { messages, statusLine, lastModel: piLastModelRef(active) }
   } catch (err) {
     logger.debug(
       'PiSessionList',

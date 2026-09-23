@@ -13,7 +13,13 @@ import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { BreakdownTable } from '../BreakdownTable'
 import { buildProviderColorMap } from '../usage-utils'
-import { makeAccount, makeDashboard, makeProvider, makeTotals } from './dashboard-fixtures'
+import {
+  makeAccount,
+  makeDashboard,
+  makeMachine,
+  makeProvider,
+  makeTotals
+} from './dashboard-fixtures'
 import type { DashboardModel, UsageDashboardData } from '../../../../../shared/types'
 
 const COLORS = buildProviderColorMap(['anthropic', 'openai'])
@@ -315,5 +321,121 @@ describe('BreakdownTable — the honest columns', () => {
     render(<BreakdownTable data={empty} groupBy="provider" providerColors={COLORS} />)
     expect(screen.getByTestId('BreakdownTable.empty')).toBeInTheDocument()
     expect(screen.queryAllByTestId('BreakdownTable.row')).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The machine grouping (S5c)
+// ---------------------------------------------------------------------------
+
+describe('BreakdownTable — group by machine', () => {
+  const now = Date.now()
+  const HOUR = 60 * 60 * 1000
+
+  /** Two machines, each with its own (provider, account) slices. */
+  function combined() {
+    return makeDashboard({
+      scope: 'all',
+      providers: [
+        makeProvider({
+          providerId: 'anthropic',
+          label: 'Anthropic',
+          totals: makeTotals({ displayCostUsd: 80 }),
+          accounts: [
+            makeAccount({
+              accountKey: 'anthropic:o:a',
+              label: 'work@example.test',
+              totals: makeTotals({ displayCostUsd: 80 })
+            })
+          ]
+        })
+      ],
+      totals: makeTotals({ displayCostUsd: 100 }),
+      machines: [
+        makeMachine({
+          deviceId: 'dev-self',
+          deviceName: 'desk',
+          self: true,
+          lastPushAt: now - 60_000,
+          totals: makeTotals({ displayCostUsd: 60 }),
+          share: 0.6,
+          accounts: [
+            {
+              providerId: 'anthropic',
+              accountKey: 'anthropic:o:a',
+              totals: makeTotals({ displayCostUsd: 60, apiCostUsd: 60 }),
+              dispatched: null
+            }
+          ]
+        }),
+        makeMachine({
+          deviceId: 'dev-late',
+          deviceName: 'laptop',
+          self: false,
+          lastPushAt: now - 31 * HOUR,
+          totals: makeTotals({ displayCostUsd: 40 }),
+          share: 0.4,
+          accounts: [
+            {
+              providerId: 'anthropic',
+              accountKey: 'anthropic:o:a',
+              totals: makeTotals({ displayCostUsd: 40, apiCostUsd: 40 }),
+              dispatched: null
+            }
+          ]
+        })
+      ]
+    })
+  }
+
+  it('roots on the machine and keeps provider and account under it', () => {
+    render(<BreakdownTable data={combined()} groupBy="machine" providerColors={COLORS} />)
+
+    expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'machine')
+    expect(screen.getByTestId('BreakdownTable')).toHaveTextContent('machine → provider → account')
+
+    const roots = screen
+      .getAllByTestId('BreakdownTable.row')
+      .filter((r) => r.getAttribute('data-level') === '0')
+    // Highest spend first, as every other grouping sorts.
+    expect(roots.map((r) => r.textContent)).toHaveLength(2)
+    expect(roots[0]).toHaveTextContent('desk')
+    expect(roots[1]).toHaveTextContent('laptop')
+
+    // Roots open, one level of provider under each.
+    const providers = screen
+      .getAllByTestId('BreakdownTable.row')
+      .filter((r) => r.getAttribute('data-level') === '1')
+    expect(providers.every((r) => r.textContent?.includes('Anthropic'))).toBe(true)
+  })
+
+  it('tags a peer remote, and one that has gone quiet as behind', () => {
+    render(<BreakdownTable data={combined()} groupBy="machine" providerColors={COLORS} />)
+
+    const remote = screen.getAllByTestId('BreakdownTable.row.remote')
+    expect(remote).toHaveLength(1)
+    // This machine carries no tag: it is the reader's default assumption.
+    const roots = screen
+      .getAllByTestId('BreakdownTable.row')
+      .filter((r) => r.getAttribute('data-level') === '0')
+    expect(roots[0].querySelector('[data-testid="BreakdownTable.row.remote"]')).toBeNull()
+    expect(roots[1].querySelector('[data-testid="BreakdownTable.row.remote"]')).not.toBeNull()
+    expect(screen.getByTestId('BreakdownTable.row.behind')).toHaveTextContent('behind 31h')
+  })
+
+  it('leaves the total row alone: it is still the hero', () => {
+    render(<BreakdownTable data={combined()} groupBy="machine" providerColors={COLORS} />)
+    expect(screen.getByTestId('BreakdownTable.total')).toHaveTextContent('$100.00')
+    // The machine subtotals add up to it, like every other grouping's roots.
+    const roots = screen
+      .getAllByTestId('BreakdownTable.row')
+      .filter((r) => r.getAttribute('data-level') === '0')
+    expect(roots).toHaveLength(2)
+  })
+
+  it('carries no machine tag on any other grouping, combined or not', () => {
+    render(<BreakdownTable data={combined()} groupBy="provider" providerColors={COLORS} />)
+    expect(screen.queryByTestId('BreakdownTable.row.remote')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('BreakdownTable.row.behind')).not.toBeInTheDocument()
   })
 })

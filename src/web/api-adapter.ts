@@ -347,6 +347,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
     setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
+    setSharedProviderCuration: (id, curation) =>
+      unwrap('shared-provider:set-curation', id, curation),
+    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
+      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>
@@ -621,10 +626,24 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     fetchUsageWindows: (query) =>
       connection.invoke('usage:windows', query ?? {}) as ReturnType<ClaudeAPI['fetchUsageWindows']>,
-    fetchUsageDashboard: (range) =>
-      connection.invoke('usage:dashboard', { range }) as ReturnType<
+    fetchUsageDashboard: (range, scope) =>
+      connection.invoke('usage:dashboard', { range, scope }) as ReturnType<
         ClaudeAPI['fetchUsageDashboard']
       >,
+    usageHubStatus: () =>
+      connection.invoke('usage-hub:status') as ReturnType<ClaudeAPI['usageHubStatus']>,
+    configureUsageHub: (input) =>
+      connection.invoke('usage-hub:configure', input) as ReturnType<ClaudeAPI['configureUsageHub']>,
+    setUsageHubSecret: (secret) =>
+      connection.invoke('usage-hub:set-secret', secret) as ReturnType<
+        ClaudeAPI['setUsageHubSecret']
+      >,
+    syncUsageHubNow: () =>
+      connection.invoke('usage-hub:sync-now') as ReturnType<ClaudeAPI['syncUsageHubNow']>,
+    resyncUsageHub: () =>
+      connection.invoke('usage-hub:resync') as ReturnType<ClaudeAPI['resyncUsageHub']>,
+    forgetUsageHub: () =>
+      connection.invoke('usage-hub:forget') as ReturnType<ClaudeAPI['forgetUsageHub']>,
 
     // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
     // its own browser for these calls: it returns `manualUrl` on the state and
@@ -986,6 +1005,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
     readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
     patchPiModels: (patches) => unwrap('config:patch-pi-models', patches),
+    setProviderModelAllowlist: (engine, providerId, models) =>
+      unwrap('models:set-provider-allowlist', engine, providerId, models),
 
     // opencode agent CRUD — the same family, split across two capabilities:
     // `config` for the five file verbs, `chat` for `generate` because it spends

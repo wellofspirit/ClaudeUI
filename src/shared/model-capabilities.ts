@@ -55,8 +55,8 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.261):
- *   `opus` → `claude-opus-5`, `sonnet` → `claude-sonnet-5`,
+ * catalog aliases at the time of writing (2.1.280):
+ *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5`,
  *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
  *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
  *   `fable` value falls through to the unknown-family "assume modern"
@@ -70,9 +70,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
   if (!value) return ''
   switch (value) {
     case 'opus':
-      return 'claude-opus-5'
+      return 'claude-opus-5-5'
     case 'opus[1m]':
-      return 'claude-opus-5'
+      return 'claude-opus-5-5'
     case 'sonnet':
       return 'claude-sonnet-5'
     case 'sonnet[1m]':
@@ -82,6 +82,26 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     default:
       return normaliseModelId(value) || value
   }
+}
+
+/**
+ * The `modelEffortDefaults` key for a Claude picker row (ADR-074 §8) — the ONE
+ * rule both the settings table that writes the key and the composer that reads
+ * it at spawn use, so the row a user edits is the row a session reads.
+ *
+ * The concrete model cli.js says the row resolves to wins (`default` →
+ * `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku` target loses its
+ * date). `canonicalizeModelValue`'s baked alias table is only the fallback, for
+ * a row without `resolvedModel` — it cannot follow an account whose `opus` or
+ * `default` resolves somewhere else, and has no answer for `default` at all.
+ */
+export function claudeEffortKey(
+  model: { value: string; resolvedModel?: string } | undefined | null
+): string {
+  if (!model) return ''
+  const resolved = normaliseModelId(model.resolvedModel)
+  if (resolved.startsWith('claude-')) return resolved
+  return canonicalizeModelValue(model.value)
 }
 
 /**
@@ -363,7 +383,7 @@ const IMPLICIT_1M_BASE_MODELS = [
 
 /**
  * Picker aliases that cli.js currently resolves to an implicit-1M base model:
- * "fable" → claude-fable-5-1, "opus" → claude-opus-5 (both as of 2.1.261),
+ * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
  * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
  * Aliases track the latest model generation, so re-verify this set on
  * claudeCliVersion bumps.

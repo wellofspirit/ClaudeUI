@@ -7,12 +7,9 @@ import type {
   ClaudePermissions,
   ProxySettings,
   VoiceLanguageCode,
-  AccountsState,
   EngineId,
   EngineConfig,
   VendorConfig,
-  AnthropicEndpointSettings,
-  ModelOverrideSettings,
   SandboxSettings,
   AutoModeConfig,
   ModelInfo,
@@ -20,14 +17,10 @@ import type {
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
-  supportedEffortLevels,
-  defaultEffort,
-  type EffortLevel,
   type AutonomyMode,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
-import { accountDisplayName } from '../../utils/sign-in-provider'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -57,8 +50,10 @@ import {
   RemoteServerSection
 } from './RemoteServerSettings'
 import { ProviderList } from './ProviderList'
-import { CredentialChip } from './ProviderSheet'
-import { ChatgptAccountsSetting } from './ChatgptAccountsSetting'
+import { SubscriptionsSection } from './SubscriptionsSection'
+import { LastPickNote, NewSessionModelSetting } from './NewSessionModelSetting'
+import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
+import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
@@ -328,215 +323,6 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         initialTab="user"
       />
     </>
-  )
-}
-
-// ── Per-model effort default config ──────────────────────────────────
-
-const EFFORT_LEVEL_LABEL: Record<EffortLevel, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max'
-}
-
-const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'claude-sonnet-5', label: 'Sonnet 5' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
-  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { id: 'claude-fable-5', label: 'Fable 5' }
-]
-
-/**
- * One row per Claude model, on the ADR-065 vocabulary: the display name is the
- * label, the canonical model id is the config key under it (11px mono, not the
- * old 10px `text-muted/50` at the right edge), and the effort levels are a
- * `SelectField`.
- *
- * `modified` is passed in rather than derived from `current`: the phase-1
- * `appDefault` helper excludes `modelEffortDefaults` because it is object-valued,
- * so "changed from default" for THIS row means its key is present in that
- * object — which only the caller holding the whole object can answer.
- */
-function ModelEffortRow({
-  modelId,
-  modelLabel,
-  current,
-  modified,
-  onChange
-}: {
-  modelId: string
-  modelLabel: string
-  current: EffortLevel | undefined
-  modified: boolean
-  onChange: (next: EffortLevel | undefined) => void
-}): React.JSX.Element {
-  const levels = supportedEffortLevels(modelId)
-  const fallback = defaultEffort(modelId)
-  return (
-    <SettingRow
-      testid="ModelEffortRow"
-      dataId={modelId}
-      label={modelLabel}
-      keyText={modelId}
-      modified={modified}
-      onReset={() => onChange(undefined)}
-    >
-      <SelectField
-        testid="ModelEffortRow.effort"
-        dataId={modelId}
-        value={current ?? ''}
-        onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
-        options={[
-          { value: '', label: `Default (${EFFORT_LEVEL_LABEL[fallback]})` },
-          ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
-        ]}
-      />
-    </SettingRow>
-  )
-}
-
-// ── Accounts (multi-account support, ADR-015) ────────────────────────
-
-/**
- * The ANTHROPIC half of Models & providers › Accounts. Its ChatGPT neighbour is
- * `ChatgptAccountsSetting`; since F14 both providers' stored accounts live on
- * this one page, so this pane grew a provider heading (name + credential badge +
- * "+ Add account") and states its own switch RULE.
- *
- * The rule is stated per provider. Both DISCONNECT the sessions whose credential
- * changed and let each resume on its next message (Claude: `invalidateLiveSessions`
- * cancels every live Claude session, ADR-015 as built; Codex: a follower leaves
- * its host, ADR-069 §4); the difference is the ChatGPT-only per-session pin,
- * which a switch leaves alone.
- *
- * Switching and removing are writes this pane owns; ADDING is a sign-in, and
- * since ADR-068 §3 every sign-in runs in `SignInDialog` — the paste panel and
- * the outcome notice that used to live here are gone, along with the second copy
- * of the flow they implemented. `addAccount()` itself is unchanged; the dialog
- * is simply the thing that calls it now.
- */
-function AccountsSetting(): React.JSX.Element {
-  const accounts = useSessionStore((s) => s.accountsState)
-  const setAccounts = useSessionStore((s) => s.setAccountsState)
-  const openSignIn = useSessionStore((s) => s.openSignIn)
-  // The credential badge's word comes from the same read model the provider
-  // list badges from, so the two surfaces cannot disagree about one provider.
-  const registry = useSessionStore((s) => s.providerRegistry)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    void window.api.getAccounts().then(setAccounts)
-  }, [setAccounts])
-
-  const enabled = accounts?.enabled ?? false
-  const isMac = window.api.platform === 'darwin'
-  const entry = registry?.entries.find((candidate) => candidate.id === 'anthropic')
-
-  const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
-    setBusy(true)
-    try {
-      setAccounts(await fn())
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div data-testid="AccountsSetting" className="divide-y divide-border/55">
-      <SettingRow
-        testid="AccountsSetting.heading"
-        label="Anthropic"
-        labelBadge={
-          entry ? (
-            <CredentialChip credential={entry.credential} testid="AccountsSetting.credential" />
-          ) : undefined
-        }
-        description="The Claude subscription every Claude session runs under."
-      >
-        {enabled && (
-          <Button
-            testid="AccountsSetting.addAccount"
-            variant="tinted"
-            disabled={busy}
-            onClick={() => openSignIn({ providerId: 'anthropic', mode: 'add' })}
-          >
-            + Add account
-          </Button>
-        )}
-      </SettingRow>
-
-      <SettingsToggle
-        testid="AccountsSetting.multiAccount"
-        label="Multiple accounts"
-        checked={enabled}
-        onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
-        description="Hold several Claude subscriptions and switch between them; credentials are stored per account in plaintext files rather than the macOS Keychain."
-      />
-
-      {enabled && isMac && (
-        // A real row, not an 11px callout box: the warning colour rides on the
-        // row's background rather than on a type size ADR-065 retired.
-        <SettingRow
-          testid="AccountsSetting.keychainNotice"
-          className="bg-warning/10"
-          description="Multi-account mode uses file-based credentials, separate from your macOS Keychain login — you may need to sign in again for each account."
-        />
-      )}
-
-      {enabled &&
-        (accounts?.accounts ?? []).map((a) => {
-          const active = a.id === accounts?.activeId
-          return (
-            // `as="label"` rather than `as="button"`: the row carries a Remove
-            // BUTTON, and a button inside a button is invalid HTML (the same
-            // reason SettingRow's own Reset is a role="button" span). A click on
-            // an interactive descendant of a <label> does not activate the
-            // label's control, so Remove never doubles as "switch to this one".
-            <SettingRow
-              key={a.id}
-              as="label"
-              testid="AccountsSetting.accountRow"
-              dataId={a.id}
-              label={accountDisplayName(a.email)}
-              description={a.subscriptionType ?? undefined}
-              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
-              leading={
-                <input
-                  type="radio"
-                  name="claude-account"
-                  value={a.id}
-                  checked={active}
-                  disabled={busy}
-                  onChange={() => void run(() => window.api.switchAccount(a.id))}
-                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
-                />
-              }
-            >
-              <Button
-                testid="AccountsSetting.removeAccount"
-                dataId={a.id}
-                variant="danger"
-                disabled={busy}
-                onClick={() => void run(() => window.api.deleteAccount(a.id))}
-              >
-                Remove
-              </Button>
-            </SettingRow>
-          )
-        })}
-
-      {enabled && (
-        // ADR-015's switch semantics as built (`invalidateLiveSessions`), stated
-        // where the switch happens.
-        <SettingRow
-          testid="AccountsSetting.switchRule"
-          description="Switching disconnects every running Claude session; each resumes with the new account on its next message."
-        />
-      )}
-    </div>
   )
 }
 
@@ -1359,7 +1145,13 @@ export function CodexDefaultsSection(): React.JSX.Element {
         <SettingRow
           testid={`${testid}.defaultModelRow`}
           label="Default model"
-          description="The model new Codex sessions start with. Unset lets Codex pick from its own config for the working directory."
+          description={
+            <>
+              The model new Codex sessions start with. Unset lets Codex pick from its own config for
+              the working directory.
+              <LastPickNote />
+            </>
+          }
           keyText="engines/codex.json · codexConfig.defaultModel"
           modified={defaultModel !== ''}
           onReset={() => save({ defaultModel: '' })}
@@ -1412,150 +1204,6 @@ export function CodexDefaultsSection(): React.JSX.Element {
   )
 }
 
-// ── Vendor Anthropic editable form ───────────────────────────────────
-
-const DEFAULT_ENDPOINT: AnthropicEndpointSettings = { enabled: false, baseUrl: '', authToken: '' }
-const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
-  enabled: false,
-  model: '',
-  sonnetModel: '',
-  opusModel: '',
-  haikuModel: ''
-}
-
-/** The four `ANTHROPIC_DEFAULT_*_MODEL` env vars claude-spawn-prep writes. */
-const MODEL_OVERRIDE_FIELDS: ReadonlyArray<{
-  field: keyof ModelOverrideSettings
-  label: string
-  placeholder: string
-}> = [
-  { field: 'model', label: 'Model id', placeholder: 'claude-3-5-sonnet-latest' },
-  { field: 'sonnetModel', label: 'Sonnet alias', placeholder: 'claude-sonnet-latest' },
-  { field: 'opusModel', label: 'Opus alias', placeholder: 'claude-opus-latest' },
-  { field: 'haikuModel', label: 'Haiku alias', placeholder: 'claude-haiku-latest' }
-]
-
-/**
- * The Anthropic endpoint group, on the row vocabulary (ADR-065).
- *
- * The uppercase ENDPOINT / MODEL OVERRIDE sub-headers and the prose footer are
- * gone: a sub-header inside a card is a group boundary the page model expresses
- * itself, and "applies on next session start / persists to vendors/anthropic.json"
- * is the group's `appliesOn` badge plus its storage tag. Dependent fields stay
- * MOUNTED when their master toggle is off — indented, dimmed and disabled — so
- * what is configured is readable without flipping the switch to find out.
- *
- * Every write still goes through `updateVendorConfig` with the same whole-object
- * patch shape the pre-ADR-065 form used; nothing about the file changed.
- */
-function VendorAnthropicEditableForm({
-  vendorConfig,
-  updateVendorConfig
-}: {
-  vendorConfig: VendorConfig
-  updateVendorConfig: (p: Partial<VendorConfig>) => void
-}): React.JSX.Element {
-  const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
-  const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
-  /** Reveal is per-view and deliberately not persisted anywhere. */
-  const [revealToken, setRevealToken] = useState(false)
-
-  const endpointOff = !endpoint.enabled
-  const overrideOff = !modelOverride.enabled
-
-  return (
-    <div data-testid="VendorAnthropicEditableForm" className="divide-y divide-border/55">
-      <SettingsToggle
-        testid="VendorAnthropicEditableForm.endpointEnabled"
-        label="Custom endpoint"
-        checked={endpoint.enabled}
-        description="Route Claude through a gateway or proxy instead of api.anthropic.com."
-        onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
-      />
-
-      <SettingRow
-        testid="VendorAnthropicEditableForm.baseUrlRow"
-        layout="stacked"
-        indent
-        dimmed={endpointOff}
-        label="Base URL"
-        description="The gateway's Anthropic-compatible base address."
-      >
-        <TextField
-          className="w-full"
-          testid="VendorAnthropicEditableForm.baseUrl"
-          value={endpoint.baseUrl}
-          placeholder="https://api.anthropic.com"
-          disabled={endpointOff}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, baseUrl: v } })}
-        />
-      </SettingRow>
-
-      <SettingRow
-        testid="VendorAnthropicEditableForm.authTokenRow"
-        indent
-        dimmed={endpointOff}
-        label="Auth token"
-        description="Sent as the gateway's bearer credential; leave empty to use your Claude login."
-      >
-        <TextField
-          testid="VendorAnthropicEditableForm.authToken"
-          type={revealToken ? 'text' : 'password'}
-          className="w-[184px]"
-          value={endpoint.authToken}
-          placeholder="sk-ant-…"
-          disabled={endpointOff}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, authToken: v } })}
-        />
-        <Button
-          testid="VendorAnthropicEditableForm.revealToken"
-          variant="link"
-          disabled={endpointOff}
-          onClick={() => setRevealToken((v) => !v)}
-        >
-          {revealToken ? 'Hide' : 'Reveal'}
-        </Button>
-      </SettingRow>
-
-      <SettingsToggle
-        testid="VendorAnthropicEditableForm.modelOverrideEnabled"
-        label="Model override"
-        checked={modelOverride.enabled}
-        description="Pin every session to one model id regardless of the picker."
-        onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
-      />
-
-      {MODEL_OVERRIDE_FIELDS.map(({ field, label, placeholder }) => (
-        <SettingRow
-          key={String(field)}
-          testid="VendorAnthropicEditableForm.modelFieldRow"
-          dataId={String(field)}
-          indent
-          dimmed={overrideOff}
-          label={label}
-          description={
-            field === 'model'
-              ? 'Used for every session that does not hit one of the aliases below.'
-              : `Substituted wherever the ${label.replace(' alias', '')} alias is requested.`
-          }
-        >
-          <TextField
-            testid="VendorAnthropicEditableForm.modelField"
-            dataId={String(field)}
-            className="w-[240px]"
-            value={modelOverride[field] as string}
-            placeholder={placeholder}
-            disabled={overrideOff}
-            onChange={(v) =>
-              updateVendorConfig({ modelOverride: { ...modelOverride, [field]: v } })
-            }
-          />
-        </SettingRow>
-      ))}
-    </div>
-  )
-}
-
 // ── opencode Models section ──────────────────────────────────────────
 
 /**
@@ -1604,7 +1252,10 @@ function OpencodeModelsSection(): React.JSX.Element {
   const update = (patch: Partial<OpencodeConfigSettings>): void => {
     const next: OpencodeConfigSettings = { ...cfg, ...patch }
     setCfg(next)
-    window.api.saveOpencodeSettings(next).catch(() => {})
+    // Never the allowlist loaded at mount: the Manage sheet on this same page may
+    // have curated since, and `models:set-provider-allowlist` is its only writer.
+    const { modelAllowlist: _stale, ...settings } = next
+    window.api.saveOpencodeSettings(settings).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
     // The RAW value, not the constant — an empty string is what tells the store
@@ -1626,7 +1277,12 @@ function OpencodeModelsSection(): React.JSX.Element {
         <SettingRow
           testid="OpencodeModelsSection.modelRow"
           label="Default model"
-          description="Model a new opencode session starts with."
+          description={
+            <>
+              Model a new opencode session starts with.
+              <LastPickNote />
+            </>
+          }
           modified={cfg.model !== undefined}
           onReset={() => update({ model: undefined })}
         >
@@ -1958,6 +1614,59 @@ export const SECTIONS: Section[] = [
               { value: 'forest' as const, label: 'Forest' }
             ]}
             onChange={(v) => u({ mermaidTheme: v })}
+          />
+        )
+      }
+    ]
+  },
+  {
+    id: 'agents',
+    label: 'Agents',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <circle cx="5" cy="6" r="2" />
+        <circle cx="19" cy="6" r="2" />
+        <path d="M7 7.5 10 10.5M17 7.5 14 10.5M12 15v5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'showAgentPill',
+        label: 'Agent pill in the top bar',
+        keywords: 'agents subagents roster tasks running list top bar pill',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentPill"
+            label="Agent pill in the top bar"
+            description="Shows how many agents this session has and opens the Agents panel. Stays after they finish."
+            {...appDefault(s, u, 'showAgentPill')}
+            checked={s.showAgentPill}
+            onChange={(v) => u({ showAgentPill: v })}
+          />
+        )
+      },
+      {
+        key: 'showAgentTab',
+        label: 'Agent tab above the composer',
+        keywords: 'agents subagents roster tasks running list composer tab',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentTab"
+            label="Agent tab above the composer"
+            description="Appears only while agents are running; click it for the live list."
+            {...appDefault(s, u, 'showAgentTab')}
+            checked={s.showAgentTab}
+            onChange={(v) => u({ showAgentTab: v })}
           />
         )
       }
@@ -2704,8 +2413,11 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    id: 'accounts',
-    label: 'Accounts',
+    // ADR-074 §7: one card per sign-in subscription, with its accounts, the
+    // engines it reaches and its options in one place. Replaced the Accounts
+    // section (Anthropic's and ChatGPT's account panes); their keywords live on.
+    id: 'subscriptions',
+    label: 'Subscriptions',
     icon: (
       <svg
         width="14"
@@ -2723,28 +2435,21 @@ export const SECTIONS: Section[] = [
       </svg>
     ),
     items: [
-      // One page for every provider's accounts (F14), in rail order: Anthropic
-      // first, ChatGPT second. Each group states its OWN switch rule — they are
-      // not the same rule (ADR-015 vs ADR-068 §2).
       {
-        key: 'multiAccount',
-        label: 'Anthropic accounts',
+        key: 'subscriptions',
+        label: 'Subscriptions',
         keywords:
-          'anthropic claude account login subscription switch multi keychain credentials sign in',
-        render: () => <AccountsSetting />
-      },
-      {
-        key: 'chatgptAccounts',
-        label: 'ChatGPT accounts',
-        keywords:
-          'chatgpt openai codex account login subscription switch active workspace organisation organization per-session pin credentials sign in',
-        render: () => <ChatgptAccountsSetting />
+          'subscription anthropic claude chatgpt openai codex account accounts login sign in switch active multi multiple keychain plaintext credentials workspace organisation organization per-session pin engines',
+        render: () => <SubscriptionsSection />
       }
     ]
   },
   {
-    id: 'vendor-anthropic',
-    label: 'Anthropic',
+    // Claude › Endpoint and Claude › Model mapping (ADR-074 §9): both write
+    // `vendors/anthropic.json`, which only cli.js spawns ever read. The keywords
+    // keep the old "Anthropic endpoint & model override" searches landing here.
+    id: 'claude-endpoint',
+    label: 'Claude endpoint',
     icon: (
       <svg
         width="14"
@@ -2762,11 +2467,21 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'vendorAnthropicEndpoint',
-        label: 'Endpoint & model override',
-        keywords: 'anthropic endpoint model override vendor gateway custom url api token',
+        key: 'claudeEndpoint',
+        label: 'Endpoint',
+        keywords:
+          'anthropic endpoint gateway proxy custom base url api token auth bearer vendor ANTHROPIC_BASE_URL',
         render: (_s, _u, _e, _ue, v, uv) => (
-          <VendorAnthropicEditableForm vendorConfig={v} updateVendorConfig={uv} />
+          <ClaudeEndpointSection vendorConfig={v} updateVendorConfig={uv} />
+        )
+      },
+      {
+        key: 'claudeModelMapping',
+        label: 'Model mapping',
+        keywords:
+          'anthropic model override mapping pin alias rename sonnet opus haiku gateway ANTHROPIC_MODEL',
+        render: (_s, _u, _e, _ue, v, uv) => (
+          <ClaudeModelMappingSection vendorConfig={v} updateVendorConfig={uv} />
         )
       }
     ]
@@ -3436,16 +3151,45 @@ export const SECTIONS: Section[] = [
         // vault's own pane, opencode's `vendor-opencode` and pi's `vendor-pi`
         // were retired with 6c.
         key: 'sharedProviders',
-        label: 'Providers',
+        label: 'API providers',
         keywords:
-          'shared provider add chatgpt codex api key oauth credential subscription custom endpoint model pi opencode anthropic openrouter ollama',
-        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <ProviderList navigate={ctx?.navigate} />
+          'shared provider add api key oauth credential custom endpoint self-hosted model pi opencode openrouter ollama',
+        render: () => <ProviderList />
+      }
+    ]
+  },
+  {
+    // Providers-v3 slice 9: ONE engine-neutral row, reused at the top of every
+    // engine segment of Models & providers › Default models.
+    id: 'new-session-model',
+    label: 'New sessions start on',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'newSessionModel',
+        label: 'New sessions start on',
+        keywords:
+          'new session start model last picked sticky remembered default configured per engine composer',
+        render: (s, u) => <NewSessionModelSetting settings={s} update={u} />
       }
     ]
   },
   {
     id: 'effortDefaults',
-    label: 'Default effort',
+    label: 'Claude defaults',
     icon: (
       <svg
         width="14"
@@ -3461,33 +3205,22 @@ export const SECTIONS: Section[] = [
       </svg>
     ),
     items: [
-      ...EFFORT_MODELS.map((m) => ({
-        key: `effortDefault_${m.id}`,
-        label: `Default effort · ${m.label}`,
-        keywords: `effort default ${m.label} ${m.id} reasoning thinking`,
-        render: (s: AppSettings, u: (p: Partial<AppSettings>) => void) => (
-          <ModelEffortRow
-            modelId={m.id}
-            modelLabel={m.label}
-            current={s.modelEffortDefaults?.[m.id]}
-            modified={m.id in (s.modelEffortDefaults ?? {})}
-            onChange={(next) => {
-              const map = { ...(s.modelEffortDefaults ?? {}) }
-              if (next === undefined) delete map[m.id]
-              else map[m.id] = next
-              u({ modelEffortDefaults: map })
-            }}
-          />
-        )
-      })),
       {
-        key: 'effortDefaultsFooter',
-        label: 'Effort defaults info',
-        keywords: 'effort default fallback per-session',
-        render: () => (
-          <SettingRow
-            testid="EffortDefaultsNote"
-            description="Applied when a new session starts on the matching model or one of its aliases (picking opus uses the Opus 4.8 row); the per-session effort chip always wins."
+        // ONE item since ADR-074 §8: the rows are built from Claude's live model
+        // list inside the component, so they cannot be items of their own. The
+        // keywords carry the old per-model rows' terms.
+        key: 'claudeDefaults',
+        label: 'Claude default model & starting effort',
+        keywords:
+          'default model start new sessions effort default reasoning thinking per-model claude opus sonnet haiku fable alias picked as',
+        render: (s, u, e, ue, v, _uv, ctx) => (
+          <ClaudeDefaultsSection
+            settings={s}
+            update={u}
+            engineConfig={e}
+            updateEngineConfig={ue}
+            vendorConfig={v}
+            navigate={ctx?.navigate}
           />
         )
       }
@@ -3998,7 +3731,7 @@ export const SECTIONS: Section[] = [
         label: 'Models & thinking',
         keywords:
           'pi model default provider openai-codex anthropic allowlist defaultModel reasoning effort',
-        render: () => <PiModelsSection />
+        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <PiModelsSection navigate={ctx?.navigate} />
       }
     ]
   },

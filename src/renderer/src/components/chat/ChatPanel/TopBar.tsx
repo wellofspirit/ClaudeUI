@@ -11,6 +11,7 @@ import {
 import { BRANCH_MARK, GitBranchPill, useBranchPillName } from '../../git/GitBranchPill'
 import { GitBranchDropdown } from '../../git/GitBranchDropdown'
 import { GitChangesPill } from '../../git/GitChangesPill'
+import { AgentPill } from '../../agents/AgentPill'
 import { AuthPillSlot } from '../AuthPill'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
@@ -32,6 +33,7 @@ import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
 import { COST_UNKNOWN, formatCostOrUnknown, formatCostUsd } from '../../../utils/cost'
 import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
+import { displayCwd } from '../../../../../shared/display-path'
 import {
   ideUnavailableReason,
   isIdeUnavailableError,
@@ -211,6 +213,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const billingType = useActiveSession((s) => s.status.account?.billingType)
   const canUseMcp = useActiveSession((s) => s.status.capabilities.canUseMcp)
   const capSkills = useActiveSession((s) => s.status.capabilities.skills)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -639,9 +642,17 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the dispatched spend is real money and the row says the rest is unknown,
   // rather than silently reporting the dispatched part as the whole total.
   const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // A known zero on a FREE vendor is an answer, not an absence: without this
+  // the tile vanishes and a free session looks exactly like one nothing is
+  // known about. The billing type comes off the session, never from the
+  // figure — a known zero on any other billing type stays hidden, because an
+  // empty session also totals a known 0 (`totalCosts` docblock) and must not
+  // grow a `$0.00` tile before its first turn.
+  const costFree = billingType === 'free' && cost === 0
   // Show the Cost tile when there is something to say: a real figure, a
-  // dispatched figure, or an explicit "we could not price this".
-  const showCost = cost === null || cost > 0 || hasDispatchedCost
+  // dispatched figure, a free vendor's zero, or an explicit "we could not
+  // price this".
+  const showCost = cost === null || cost > 0 || hasDispatchedCost || costFree
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -864,14 +875,14 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                       <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
                         {cwd && (
                           <button
-                            onClick={() => handleCopy(cwd, 'cwd')}
+                            onClick={() => handleCopy(displayCwd(cwd), 'cwd')}
                             className="w-full text-left cursor-default group/row"
                           >
                             <div className="text-[10px] text-text-muted mb-0.5">
                               Working Directory
                             </div>
                             <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                              {copiedField === 'cwd' ? 'Copied!' : cwd}
+                              {copiedField === 'cwd' ? 'Copied!' : displayCwd(cwd)}
                             </div>
                           </button>
                         )}
@@ -904,6 +915,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                                       · nothing billed
                                     </span>
                                   )}
+                                  {costFree && <span data-testid="TopBar.costFree"> · free</span>}
                                   {unpricedMessages > 0 && (
                                     <span data-testid="TopBar.costUnpriced">
                                       {' '}
@@ -1062,6 +1074,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           <div className={`contents ${TIER1_HIDE}`}>
             <GitBranchPill />
           </div>
+          {/* Never dropped, for the same reason the changes pill is not: each is
+              a panel's only entry point. The agent pill also has no ⋯ row - a
+              menu row is the exact complement of a bar form, and this one has
+              no width at which it disappears. It self-hides in a session that
+              has spawned no agents (ADR-073). */}
+          <AgentPill />
           {/* Never dropped: the changes pill doubles as the git-panel entry
               point (MobileGitView) and self-hides outside a git repo. */}
           <GitChangesPill />

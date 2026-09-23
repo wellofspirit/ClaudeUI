@@ -4,8 +4,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SharedProviderDefinition } from '../../../shared/shared-provider'
+import type { PiModel } from '../../pi/pi-protocol'
 import {
+  CLAUDEUI_KEYLESS_PLACEHOLDER,
   PiSharedProviderAdapter,
+  diagnosePiZeroModels,
   type PiSharedProviderAuthTarget
 } from '../PiSharedProviderAdapter'
 
@@ -82,7 +85,8 @@ describe('PiSharedProviderAdapter', () => {
               contextWindow: 100_000,
               maxTokens: 8_000
             }
-          ]
+          ],
+          apiKey: CLAUDEUI_KEYLESS_PLACEHOLDER
         }
       },
       rootExtra: 'keep'
@@ -128,7 +132,7 @@ describe('PiSharedProviderAdapter', () => {
   })
   it('recreates a missing provider that remains centrally managed', () => {
     adapter().applyDefinition(provider, true, provider)
-    expect(readModels()).toEqual({ providers: { 'private-api': compiledProvider() } })
+    expect(readModels()).toEqual({ providers: { 'private-api': writtenProvider() } })
   })
   it('rejects a byte-identical external provider without claiming it', () => {
     mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
@@ -162,7 +166,7 @@ describe('PiSharedProviderAdapter', () => {
       providers: {
         foreign: { foreign: true },
         'renamed-api': {
-          ...compiledProvider(),
+          ...writtenProvider(),
           extension: 'keep',
           models: [{ ...compiledProvider().models[0], limit: 42 }]
         }
@@ -345,6 +349,161 @@ describe('PiSharedProviderAdapter — built-in vendor id collision (M-AT4)', () 
   })
 })
 
+// ---------------------------------------------------------------------------
+// ADR-074 §4: pi omits a models.json provider with no usable credential from
+// `get_available_models`, so a keyless custom endpoint gets a placeholder
+// `apiKey` — but only when the entry has none, and never inside the managed
+// projection (entries written before the placeholder must not read as changed).
+// ---------------------------------------------------------------------------
+describe('PiSharedProviderAdapter — keyless placeholder (ADR-074 §4)', () => {
+  const entry = (): Record<string, unknown> =>
+    (readModels().providers as Record<string, Record<string, unknown>>)['private-api']
+
+  it('writes the placeholder apiKey into a fresh entry', () => {
+    adapter().applyDefinition(provider)
+    expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+  })
+
+  it('keeps an existing apiKey of any shape on re-apply', () => {
+    for (const apiKey of ['$MY_KEY', '!pass show key', 'sk-literal']) {
+      mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+      writeFileSync(
+        modelsPath,
+        JSON.stringify({ providers: { 'private-api': { ...compiledProvider(), apiKey } } })
+      )
+      adapter().applyDefinition(provider, true, provider)
+      expect(entry().apiKey).toBe(apiKey)
+    }
+  })
+
+  it('replaces an empty or non-string apiKey with the placeholder', () => {
+    for (const apiKey of ['', null, 42]) {
+      mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+      writeFileSync(
+        modelsPath,
+        JSON.stringify({ providers: { 'private-api': { ...compiledProvider(), apiKey } } })
+      )
+      adapter().applyDefinition(provider, true, provider)
+      expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+    }
+  })
+
+  it('re-applies an entry written before the placeholder existed and adds it', () => {
+    mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'private-api': compiledProvider() } }))
+    expect(adapter().hasDefinition(provider)).toBe(true)
+    expect(() => adapter().applyDefinition(provider, true, provider)).not.toThrow()
+    expect(readModels()).toEqual({ providers: { 'private-api': writtenProvider() } })
+  })
+
+  it('carries the placeholder through a managed rename', () => {
+    mkdirSync(join(dir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'private-api': compiledProvider() } }))
+    const renamed = {
+      ...provider,
+      routes: { ...provider.routes, pi: { enabled: true, providerId: 'renamed-api' } }
+    }
+    adapter().applyDefinition(renamed, true, provider)
+    expect(readModels()).toEqual({ providers: { 'renamed-api': writtenProvider() } })
+  })
+
+  it('still recognises and removes an entry that carries the placeholder', () => {
+    adapter().applyDefinition(provider)
+    expect(entry().apiKey).toBe(CLAUDEUI_KEYLESS_PLACEHOLDER)
+    expect(adapter().hasDefinition(provider)).toBe(true)
+    adapter().removeDefinition(provider)
+    expect(readModels()).toEqual({ providers: {} })
+  })
+
+  it('never puts the placeholder into auth.json', async () => {
+    const subject = adapter()
+    subject.applyDefinition(provider)
+    expect(auth.setVendorApiKey).not.toHaveBeenCalled()
+    await subject.vendApiKey(provider, 'real-key')
+    expect(auth.setVendorApiKey).toHaveBeenCalledWith('private-api', 'real-key')
+    expect(auth.setVendorApiKey).not.toHaveBeenCalledWith(
+      expect.anything(),
+      CLAUDEUI_KEYLESS_PLACEHOLDER
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-074 §5: pi names why a route is empty instead of always reporting
+// `no-models-discovered` — the owner's ChatGPT row blamed the engine while the
+// real cause was the allowlist.
+// ---------------------------------------------------------------------------
+describe('PiSharedProviderAdapter — zero-model diagnosis (ADR-074 §5)', () => {
+  const model = (provider: string, id: string): PiModel =>
+    ({
+      id,
+      name: id,
+      api: 'openai-responses',
+      provider,
+      baseUrl: 'https://api.example.test/v1',
+      reasoning: false,
+      input: ['text'],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    }) as PiModel
+  const catalog = [model('openai-codex', 'gpt-5.6-luna'), model('openai-codex', 'gpt-5.6-sol')]
+
+  it('no-models-discovered when pi reported nothing at all', () => {
+    expect(diagnosePiZeroModels('openai-codex', [], undefined)).toBe('no-models-discovered')
+    expect(diagnosePiZeroModels('openai-codex', [], { 'openai-codex': [] })).toBe(
+      'no-models-discovered'
+    )
+  })
+
+  it('no-credential when pi reports models, but none for this provider id', () => {
+    expect(diagnosePiZeroModels('private-api', catalog, undefined)).toBe('no-credential')
+    // An allowlist key cannot be the cause of a provider pi does not report.
+    expect(diagnosePiZeroModels('private-api', catalog, { 'private-api': [] })).toBe(
+      'no-credential'
+    )
+  })
+
+  it('models-restricted when the provider key admits none of its catalog models', () => {
+    expect(diagnosePiZeroModels('openai-codex', catalog, { 'openai-codex': [] })).toBe(
+      'models-restricted'
+    )
+    expect(diagnosePiZeroModels('openai-codex', catalog, { 'openai-codex': ['gpt-retired'] })).toBe(
+      'models-restricted'
+    )
+  })
+
+  it('falls back to no-models-discovered when the allowlist admits something', () => {
+    expect(diagnosePiZeroModels('openai-codex', catalog, undefined)).toBe('no-models-discovered')
+    expect(diagnosePiZeroModels('openai-codex', catalog, { openrouter: [] })).toBe(
+      'no-models-discovered'
+    )
+  })
+
+  it('asks its injected catalog and allowlist under the native provider id', async () => {
+    const subject = new PiSharedProviderAdapter({
+      modelsPath,
+      auth,
+      loadCatalog: async () => catalog,
+      readModelAllowlist: () => ({ 'openai-codex': [] })
+    })
+    const chatgpt: SharedProviderDefinition = {
+      ...provider,
+      id: 'chatgpt',
+      kind: 'subscription',
+      models: [],
+      routes: { pi: { enabled: true }, opencode: { enabled: true } }
+    }
+    await expect(subject.diagnoseZeroModels(chatgpt)).resolves.toBe('models-restricted')
+    await expect(subject.diagnoseZeroModels(provider)).resolves.toBe('no-credential')
+  })
+})
+
+/** What the adapter writes: the compiled shape plus the keyless placeholder. */
+function writtenProvider() {
+  return { ...compiledProvider(), apiKey: CLAUDEUI_KEYLESS_PLACEHOLDER }
+}
+
 function compiledProvider() {
   return {
     baseUrl: 'https://api.example.test/v1',
@@ -361,3 +520,31 @@ function compiledProvider() {
     ]
   }
 }
+
+describe('PiSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
+  const catalog: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  it('vends the key onto the built-in vendor id it names — no collision refusal', async () => {
+    const subject = adapter()
+    await subject.vendApiKey(catalog, 'sk-or')
+    expect(auth.setVendorApiKey).toHaveBeenCalledWith('openrouter', 'sk-or')
+    // …and removing it removes that vendor's entry, which a custom collision may not.
+    await subject.removeCredential(catalog)
+    expect(auth.removeVendorAuth).toHaveBeenCalledWith('openrouter')
+  })
+
+  it('projects nothing into models.json', () => {
+    const subject = adapter()
+    subject.applyDefinition(catalog)
+    subject.removeDefinition(catalog)
+    expect(() => readModels()).toThrow()
+    expect(subject.hasDefinition(catalog)).toBe(true)
+  })
+})

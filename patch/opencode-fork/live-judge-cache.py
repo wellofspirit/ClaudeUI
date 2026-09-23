@@ -73,7 +73,7 @@ out_b = os.path.join(tempfile.gettempdir(), "judge-cache-b.txt")
 with open(render, "w", encoding="utf-8", newline="\n") as f:
     f.write(
         "import { buildPolicyPrompt } from "
-        f"{json.dumps(os.path.join(root, 'src/main/automode/rules/policy').replace(os.sep, '/'))}\n"
+        f"{json.dumps(os.path.join(root, 'src/core/automode/rules/policy').replace(os.sep, '/'))}\n"
         "const env = { cwd: 'D:\\\\WorkPlace\\\\ClaudeUI', platform: 'win32',\n"
         "  remotes: [{ name: 'origin', url: 'git@github.com:acme/app.git' }],\n"
         "  repoVisibility: 'private' }\n"
