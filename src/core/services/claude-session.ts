@@ -1470,11 +1470,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * entirely by `permissionDecisionBlock` in `claude-permission-decision.ts`,
    * which owns the wire contract; this method only narrows, logs and sends.
    *
-   * Frames from INSIDE a subagent carry `agent_id`. They are dropped here
-   * rather than emitted: the call they name lives in a subagent transcript, and
-   * `session:tool-review` binds against top-level messages only, so emitting
-   * one would be silently discarded by the reducer. Logged so the drop is
-   * visible if subagent verdicts are wired later.
+   * Frames from INSIDE a subagent carry `agent_id` and go out on the same two
+   * channels: the reducer binds by `tool_use_id`, searching the subagent
+   * buckets after the top-level transcript, so no owner id is needed. No hold
+   * is needed either. The subagent's `assistant` line carrying the `tool_use`
+   * precedes the frame on stdout (probed 2.1.280, same order as a top-level
+   * call), and every stdout line is handled synchronously and in order, so the
+   * call is already in `subagentMessages` when the frame folds.
    */
   private handlePermissionDecision(msg: SystemMessage): void {
     const frame = readPermissionDecisionFrame(msg as unknown as Record<string, unknown>)
@@ -1488,9 +1490,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (frame.agentId) {
       logger.debug(
         'ClaudeSession',
-        `${msg.subtype} for ${frame.toolUseId} dropped — decided inside subagent ${frame.agentId}`
+        `${msg.subtype} for ${frame.toolUseId} decided inside subagent ${frame.agentId}`
       )
-      return
     }
 
     const denied = msg.subtype === 'permission_denied'

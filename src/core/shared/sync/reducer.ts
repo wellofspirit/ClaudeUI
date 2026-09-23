@@ -143,6 +143,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * lands — and a reducer-side queue would be a second, divergent copy of that
  * rule.
  *
+ * The top-level transcript is searched first; on a miss, every subagent
+ * bucket, because a call made INSIDE a subagent lives in
+ * `subagentMessages[<Agent call id>]` and that is where its card renders
+ * (`SubagentMessages.tsx` already draws both block kinds). Tool-use ids are
+ * unique across the session, so the owning bucket needs no hint from the
+ * producer. The appended block survives a later upsert of the same message
+ * the way a `tool_result` does: `mergeContentBlocks` / `mergeItemContent`
+ * carry both kinds as auxiliary blocks.
+ *
  * `isDuplicate` is the caller's identity test (`reviewId` / `denialId`), which
  * is what makes a replayed catch-up a no-op.
  */
@@ -158,16 +167,43 @@ function attachToToolUse(
   const session = state.sessions[routingId]
   if (!session) return state
 
-  const messages = [...session.messages]
+  const top = appendToCall(session.messages, toolUseId, block, isDuplicate)
+  if (top === 'duplicate') return state
+  if (top) return withSession(state, routingId, () => ({ messages: top }))
+
+  for (const [owner, bucket] of Object.entries(session.subagentMessages)) {
+    const next = appendToCall(bucket, toolUseId, block, isDuplicate)
+    if (next === 'duplicate') return state
+    if (next) {
+      return withSession(state, routingId, (s) => ({
+        subagentMessages: { ...s.subagentMessages, [owner]: next }
+      }))
+    }
+  }
+  return state
+}
+
+/**
+ * {@link attachToToolUse}'s per-transcript step: the latest assistant message
+ * holding the call gets `block` appended. `'duplicate'` when it already carries
+ * this block, `null` when no message holds the call.
+ */
+function appendToCall(
+  messages: readonly ChatMessage[],
+  toolUseId: string,
+  block: ToolReviewBlock | PermissionDenialBlock,
+  isDuplicate: (b: ContentBlock) => boolean
+): ChatMessage[] | 'duplicate' | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg.role !== 'assistant') continue
     if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
-    if (msg.content.some(isDuplicate)) return state
-    messages[i] = { ...msg, content: [...msg.content, { ...block, toolUseId }] }
-    return withSession(state, routingId, () => ({ messages }))
+    if (msg.content.some(isDuplicate)) return 'duplicate'
+    const next = [...messages]
+    next[i] = { ...msg, content: [...msg.content, { ...block, toolUseId }] }
+    return next
   }
-  return state
+  return null
 }
 
 /**

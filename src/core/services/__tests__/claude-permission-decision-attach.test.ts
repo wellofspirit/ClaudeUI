@@ -81,7 +81,7 @@ vi.mock('../../../main/auth/ClaudeAuthProvider', () => ({
 // Import AFTER mocks.
 import { ClaudeSession } from '../claude-session'
 import { applyEvent } from '../../shared/sync/reducer'
-import { emptyCanonicalState } from '../../shared/sync/state'
+import { emptyCanonicalState, type CanonicalSessionState } from '../../shared/sync/state'
 import type { BrowserWindow } from 'electron'
 
 afterEach(() => {
@@ -119,6 +119,13 @@ function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]>
 
 /** Fold the captured events exactly as a replica or the renderer store does. */
 function foldCanonical(routingId: string, sent: Array<[string, string, unknown]>): ChatMessage[] {
+  return foldSession(routingId, sent)?.messages ?? []
+}
+
+function foldSession(
+  routingId: string,
+  sent: Array<[string, string, unknown]>
+): CanonicalSessionState | undefined {
   let state = emptyCanonicalState()
   let seq = 1
   state = applyEvent(state, {
@@ -129,7 +136,7 @@ function foldCanonical(routingId: string, sent: Array<[string, string, unknown]>
   for (const [channel, rid, data] of sent) {
     state = applyEvent(state, { channel, args: [rid, data], seq: seq++ } as never)
   }
-  return state.sessions[routingId]?.messages ?? []
+  return state.sessions[routingId]
 }
 
 const liveSessions: ClaudeSession[] = []
@@ -316,19 +323,101 @@ describe('a cli.js permission decision reaches the card it is about', () => {
   })
 
   /**
-   * A decision made inside a subagent names a call that lives in a SUBAGENT
-   * transcript, which `session:tool-review` does not search. Emitting it would
-   * be silently dropped by the reducer; dropping it at the producer keeps the
-   * boundary explicit and leaves one obvious place to wire subagent verdicts.
+   * A decision made inside a subagent carries `agent_id` and names a call that
+   * lives in the SUBAGENT transcript. Replayed in the order probed on 2.1.280:
+   * the parent's Agent call, the subagent's assistant line holding its own
+   * call (`parent_tool_use_id` = the Agent call), the frame, then the
+   * subagent's result. The verdict must land on the subagent's card — in
+   * `subagentMessages[<Agent call>]` — not be dropped and not leak top-level.
    */
-  it('drops a decision made inside a subagent rather than mis-binding it', async () => {
-    const { blocks, channels } = await decide(
-      'routing-subagent',
-      deniedFrame({ agent_id: 'agent-7', decision_reason_type: 'classifier', decision_reason: 'x' })
+  it('binds a decision made inside a subagent to the subagent card', async () => {
+    const routingId = 'routing-subagent'
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle([
+        {
+          type: 'assistant',
+          uuid: 'u-parent',
+          message: {
+            id: 'msg_parent',
+            role: 'assistant',
+            model: 'claude-opus-5',
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_agent',
+                name: 'Agent',
+                input: { subagent_type: 'general-purpose', prompt: 'curl it' }
+              }
+            ]
+          }
+        },
+        {
+          type: 'assistant',
+          uuid: 'u-sub',
+          parent_tool_use_id: 'toolu_agent',
+          message: {
+            id: 'msg_sub',
+            role: 'assistant',
+            model: 'claude-opus-5',
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_sub',
+                name: 'Bash',
+                input: { command: 'curl -sI https://example.com' }
+              }
+            ]
+          }
+        },
+        deniedFrame({
+          subtype: 'permission_allowed',
+          tool_use_id: 'toolu_sub',
+          uuid: 'frame-sub',
+          agent_id: 'agent-7',
+          decision_reason_type: 'classifier',
+          decision_reason: 'Reads a public page.'
+        }),
+        {
+          type: 'user',
+          parent_tool_use_id: 'toolu_agent',
+          message: {
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'toolu_sub',
+                is_error: false,
+                content: 'HTTP/2 200'
+              }
+            ]
+          }
+        }
+      ])
     )
-    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
-    expect(channels).not.toContain('session:tool-review')
-    expect(channels).not.toContain('session:permission-denial')
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession(routingId, win, '/tmp/proj')
+    liveSessions.push(session)
+    await session.run('delegate it')
+
+    const folded = foldSession(routingId, sent)
+    const bucket = folded?.subagentMessages['toolu_agent'] ?? []
+    const holder = bucket.find((m) =>
+      m.content.some((b) => b.type === 'tool_use' && b.toolUseId === 'toolu_sub')
+    )
+    expect(holder?.content.filter((b) => b.type === 'tool_review')).toEqual([
+      {
+        type: 'tool_review',
+        toolUseId: 'toolu_sub',
+        reviewId: 'frame-sub',
+        reviewer: 'auto-mode',
+        decision: 'approved',
+        rationale: 'Reads a public page.'
+      }
+    ])
+    // …and nothing leaked onto the top-level transcript.
+    expect(
+      (folded?.messages ?? []).flatMap((m) => m.content).filter((b) => b.type === 'tool_review')
+    ).toEqual([])
   })
 
   it('drops a frame that names no call, instead of parking it', async () => {
