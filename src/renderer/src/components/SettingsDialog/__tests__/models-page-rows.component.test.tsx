@@ -1,152 +1,23 @@
 /**
- * Layer 2: the two Models & providers groups ADR-065 phase 3A put on the row
- * vocabulary — Anthropic endpoint (`vendor-anthropic`) and Default models ›
- * Claude (`effortDefaults`).
+ * Layer 2: the Models & providers group ADR-065 phase 3A put on the row
+ * vocabulary — Default models › Claude (`effortDefaults`).
  *
- * Both used to be forms of their own: uppercase sub-headers with 10px labels
- * over bare inputs, dependent fields that VANISHED when their master toggle was
- * off, and a prose footer repeating what the group header now says. What is
- * guarded here is the behaviour that changed with the vocabulary, not the markup:
+ * It used to be a form of its own, with a prose footer repeating what the group
+ * header now says. What is guarded here is the behaviour that changed with the
+ * vocabulary, not the markup: an effort row is "modified" when its key is
+ * PRESENT in `modelEffortDefaults` (the object-valued setting the phase-1
+ * `appDefault` helper cannot compare), and Reset DELETES that key rather than
+ * writing the default level.
  *
- *  - a dependent row stays MOUNTED and readable when its parent is off, and is
- *    disabled rather than absent (ADR-065's dependent-row rule);
- *  - the auth token is masked until Reveal, which is a per-view toggle;
- *  - every write still goes through `updateVendorConfig` with the whole-object
- *    patch shape the pre-redesign form used — byte-identical to the file;
- *  - an effort row is "modified" when its key is PRESENT in
- *    `modelEffortDefaults` (the object-valued setting the phase-1 `appDefault`
- *    helper cannot compare), and Reset DELETES that key rather than writing the
- *    default level.
+ * The Anthropic endpoint rows that shared this file moved to the Claude page
+ * (ADR-074 §9); `ClaudeEndpointSettings.component.test.tsx` guards them.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
 import type { AppSettings } from '../../../stores/session-store'
-import type { VendorConfig } from '../../../../../shared/types'
 
 afterEach(cleanup)
-
-// ── Anthropic endpoint ───────────────────────────────────────────────
-
-function renderAnthropic(vendorConfig: VendorConfig): {
-  updateVendorConfig: ReturnType<typeof vi.fn>
-} {
-  const updateVendorConfig = vi.fn()
-  const item = SECTIONS.find((s) => s.id === 'vendor-anthropic')!.items[0]
-  render(
-    item.render(
-      {} as never,
-      () => {},
-      {} as never,
-      () => {},
-      vendorConfig,
-      updateVendorConfig as never
-    )
-  )
-  return { updateVendorConfig }
-}
-
-const V = 'VendorAnthropicEditableForm'
-
-const ENDPOINT_ON: VendorConfig = {
-  endpoint: { enabled: true, baseUrl: 'https://gw.example.com', authToken: 'sk-ant-secret' }
-}
-
-describe('Anthropic endpoint rows', () => {
-  it('keeps the dependent rows mounted and readable when the toggle is OFF', () => {
-    renderAnthropic({
-      endpoint: { enabled: false, baseUrl: 'https://gw.example.com', authToken: '' }
-    })
-
-    // The old form unmounted these entirely, so what was configured was
-    // invisible until you flipped the switch to find out (ADR-065).
-    const baseUrl = screen.getByTestId(`${V}.baseUrl`) as HTMLInputElement
-    expect(baseUrl.value).toBe('https://gw.example.com')
-    expect(baseUrl.disabled).toBe(true)
-    expect((screen.getByTestId(`${V}.authToken`) as HTMLInputElement).disabled).toBe(true)
-    // Dimmed, one nesting level in — never removed.
-    expect(screen.getByTestId(`${V}.baseUrlRow`).className).toContain('pl-[38px]')
-  })
-
-  it('enables them when the toggle is ON', () => {
-    renderAnthropic(ENDPOINT_ON)
-    expect((screen.getByTestId(`${V}.baseUrl`) as HTMLInputElement).disabled).toBe(false)
-    expect((screen.getByTestId(`${V}.authToken`) as HTMLInputElement).disabled).toBe(false)
-  })
-
-  it('masks the auth token until Reveal, and re-masks on a second press', () => {
-    renderAnthropic(ENDPOINT_ON)
-
-    const token = (): HTMLInputElement => screen.getByTestId(`${V}.authToken`) as HTMLInputElement
-    expect(token().type).toBe('password')
-
-    fireEvent.click(screen.getByTestId(`${V}.revealToken`))
-    expect(token().type).toBe('text')
-    expect(token().value).toBe('sk-ant-secret')
-
-    fireEvent.click(screen.getByTestId(`${V}.revealToken`))
-    expect(token().type).toBe('password')
-  })
-
-  it('writes the WHOLE endpoint object on every edit, exactly as before', () => {
-    const { updateVendorConfig } = renderAnthropic(ENDPOINT_ON)
-
-    fireEvent.change(screen.getByTestId(`${V}.baseUrl`), {
-      target: { value: 'https://other.example.com' }
-    })
-
-    expect(updateVendorConfig).toHaveBeenCalledWith({
-      endpoint: {
-        enabled: true,
-        baseUrl: 'https://other.example.com',
-        authToken: 'sk-ant-secret'
-      }
-    })
-  })
-
-  it('still edits all four model-override fields, each writing the whole object', () => {
-    // `claude-spawn-prep` maps every one of these onto an
-    // ANTHROPIC_DEFAULT_*_MODEL env var, so dropping three of them would orphan
-    // three live settings.
-    const { updateVendorConfig } = renderAnthropic({
-      modelOverride: {
-        enabled: true,
-        model: 'm',
-        sonnetModel: 's',
-        opusModel: 'o',
-        haikuModel: 'h'
-      }
-    })
-
-    const fields = screen.getAllByTestId(`${V}.modelField`).map((el) => el.getAttribute('data-id'))
-    expect(fields).toEqual(['model', 'sonnetModel', 'opusModel', 'haikuModel'])
-
-    const opus = screen
-      .getAllByTestId(`${V}.modelField`)
-      .find((el) => el.getAttribute('data-id') === 'opusModel')!
-    fireEvent.change(opus, { target: { value: 'claude-opus-4-8' } })
-
-    expect(updateVendorConfig).toHaveBeenCalledWith({
-      modelOverride: {
-        enabled: true,
-        model: 'm',
-        sonnetModel: 's',
-        opusModel: 'claude-opus-4-8',
-        haikuModel: 'h'
-      }
-    })
-  })
-
-  it('has no uppercase sub-headers and no prose footer left', () => {
-    renderAnthropic(ENDPOINT_ON)
-    // "Applies on next session start / persists to vendors/anthropic.json" is
-    // the group's applies-on badge plus its storage tag now — not a third copy
-    // in 10px muted type at the bottom of the card.
-    const text = screen.getByTestId(V).textContent ?? ''
-    expect(text).not.toContain('Persists to vendors/anthropic.json')
-    expect(text).not.toContain('ENDPOINT')
-  })
-})
 
 // ── Default models › Claude (per-model effort) ───────────────────────
 

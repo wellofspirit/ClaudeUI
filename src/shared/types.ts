@@ -443,9 +443,18 @@ export interface AnthropicEndpointSettings {
  * intact for the unset families. Useful when pointing cli.js at a custom
  * gateway whose model identifiers differ from Anthropic's canonical ones
  * (e.g. LM Studio, OpenRouter).
+ *
+ * The two jobs have their own switches (ADR-074 §9): `pinEnabled` gates
+ * `model` and `renameEnabled` gates the three aliases. Each falls back to
+ * `enabled` when absent, so a file written before the split behaves as it did;
+ * `effectiveModelOverride` (shared/model-override.ts) is that rule. The UI
+ * writes both flags and keeps `enabled = pinEnabled || renameEnabled` for
+ * older builds reading the same file.
  */
 export interface ModelOverrideSettings {
   enabled: boolean
+  pinEnabled?: boolean
+  renameEnabled?: boolean
   model: string
   sonnetModel: string
   opusModel: string

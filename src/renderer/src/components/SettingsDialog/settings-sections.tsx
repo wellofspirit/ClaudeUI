@@ -11,8 +11,6 @@ import type {
   EngineId,
   EngineConfig,
   VendorConfig,
-  AnthropicEndpointSettings,
-  ModelOverrideSettings,
   SandboxSettings,
   AutoModeConfig,
   ModelInfo,
@@ -59,6 +57,7 @@ import {
 import { ProviderList } from './ProviderList'
 import { CredentialChip } from './ProviderSheet'
 import { ChatgptAccountsSetting } from './ChatgptAccountsSetting'
+import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
@@ -1412,150 +1411,6 @@ export function CodexDefaultsSection(): React.JSX.Element {
   )
 }
 
-// ── Vendor Anthropic editable form ───────────────────────────────────
-
-const DEFAULT_ENDPOINT: AnthropicEndpointSettings = { enabled: false, baseUrl: '', authToken: '' }
-const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
-  enabled: false,
-  model: '',
-  sonnetModel: '',
-  opusModel: '',
-  haikuModel: ''
-}
-
-/** The four `ANTHROPIC_DEFAULT_*_MODEL` env vars claude-spawn-prep writes. */
-const MODEL_OVERRIDE_FIELDS: ReadonlyArray<{
-  field: keyof ModelOverrideSettings
-  label: string
-  placeholder: string
-}> = [
-  { field: 'model', label: 'Model id', placeholder: 'claude-3-5-sonnet-latest' },
-  { field: 'sonnetModel', label: 'Sonnet alias', placeholder: 'claude-sonnet-latest' },
-  { field: 'opusModel', label: 'Opus alias', placeholder: 'claude-opus-latest' },
-  { field: 'haikuModel', label: 'Haiku alias', placeholder: 'claude-haiku-latest' }
-]
-
-/**
- * The Anthropic endpoint group, on the row vocabulary (ADR-065).
- *
- * The uppercase ENDPOINT / MODEL OVERRIDE sub-headers and the prose footer are
- * gone: a sub-header inside a card is a group boundary the page model expresses
- * itself, and "applies on next session start / persists to vendors/anthropic.json"
- * is the group's `appliesOn` badge plus its storage tag. Dependent fields stay
- * MOUNTED when their master toggle is off — indented, dimmed and disabled — so
- * what is configured is readable without flipping the switch to find out.
- *
- * Every write still goes through `updateVendorConfig` with the same whole-object
- * patch shape the pre-ADR-065 form used; nothing about the file changed.
- */
-function VendorAnthropicEditableForm({
-  vendorConfig,
-  updateVendorConfig
-}: {
-  vendorConfig: VendorConfig
-  updateVendorConfig: (p: Partial<VendorConfig>) => void
-}): React.JSX.Element {
-  const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
-  const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
-  /** Reveal is per-view and deliberately not persisted anywhere. */
-  const [revealToken, setRevealToken] = useState(false)
-
-  const endpointOff = !endpoint.enabled
-  const overrideOff = !modelOverride.enabled
-
-  return (
-    <div data-testid="VendorAnthropicEditableForm" className="divide-y divide-border/55">
-      <SettingsToggle
-        testid="VendorAnthropicEditableForm.endpointEnabled"
-        label="Custom endpoint"
-        checked={endpoint.enabled}
-        description="Route Claude through a gateway or proxy instead of api.anthropic.com."
-        onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
-      />
-
-      <SettingRow
-        testid="VendorAnthropicEditableForm.baseUrlRow"
-        layout="stacked"
-        indent
-        dimmed={endpointOff}
-        label="Base URL"
-        description="The gateway's Anthropic-compatible base address."
-      >
-        <TextField
-          className="w-full"
-          testid="VendorAnthropicEditableForm.baseUrl"
-          value={endpoint.baseUrl}
-          placeholder="https://api.anthropic.com"
-          disabled={endpointOff}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, baseUrl: v } })}
-        />
-      </SettingRow>
-
-      <SettingRow
-        testid="VendorAnthropicEditableForm.authTokenRow"
-        indent
-        dimmed={endpointOff}
-        label="Auth token"
-        description="Sent as the gateway's bearer credential; leave empty to use your Claude login."
-      >
-        <TextField
-          testid="VendorAnthropicEditableForm.authToken"
-          type={revealToken ? 'text' : 'password'}
-          className="w-[184px]"
-          value={endpoint.authToken}
-          placeholder="sk-ant-…"
-          disabled={endpointOff}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, authToken: v } })}
-        />
-        <Button
-          testid="VendorAnthropicEditableForm.revealToken"
-          variant="link"
-          disabled={endpointOff}
-          onClick={() => setRevealToken((v) => !v)}
-        >
-          {revealToken ? 'Hide' : 'Reveal'}
-        </Button>
-      </SettingRow>
-
-      <SettingsToggle
-        testid="VendorAnthropicEditableForm.modelOverrideEnabled"
-        label="Model override"
-        checked={modelOverride.enabled}
-        description="Pin every session to one model id regardless of the picker."
-        onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
-      />
-
-      {MODEL_OVERRIDE_FIELDS.map(({ field, label, placeholder }) => (
-        <SettingRow
-          key={String(field)}
-          testid="VendorAnthropicEditableForm.modelFieldRow"
-          dataId={String(field)}
-          indent
-          dimmed={overrideOff}
-          label={label}
-          description={
-            field === 'model'
-              ? 'Used for every session that does not hit one of the aliases below.'
-              : `Substituted wherever the ${label.replace(' alias', '')} alias is requested.`
-          }
-        >
-          <TextField
-            testid="VendorAnthropicEditableForm.modelField"
-            dataId={String(field)}
-            className="w-[240px]"
-            value={modelOverride[field] as string}
-            placeholder={placeholder}
-            disabled={overrideOff}
-            onChange={(v) =>
-              updateVendorConfig({ modelOverride: { ...modelOverride, [field]: v } })
-            }
-          />
-        </SettingRow>
-      ))}
-    </div>
-  )
-}
-
 // ── opencode Models section ──────────────────────────────────────────
 
 /**
@@ -2796,8 +2651,11 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    id: 'vendor-anthropic',
-    label: 'Anthropic',
+    // Claude › Endpoint and Claude › Model mapping (ADR-074 §9): both write
+    // `vendors/anthropic.json`, which only cli.js spawns ever read. The keywords
+    // keep the old "Anthropic endpoint & model override" searches landing here.
+    id: 'claude-endpoint',
+    label: 'Claude endpoint',
     icon: (
       <svg
         width="14"
@@ -2815,11 +2673,21 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'vendorAnthropicEndpoint',
-        label: 'Endpoint & model override',
-        keywords: 'anthropic endpoint model override vendor gateway custom url api token',
+        key: 'claudeEndpoint',
+        label: 'Endpoint',
+        keywords:
+          'anthropic endpoint gateway proxy custom base url api token auth bearer vendor ANTHROPIC_BASE_URL',
         render: (_s, _u, _e, _ue, v, uv) => (
-          <VendorAnthropicEditableForm vendorConfig={v} updateVendorConfig={uv} />
+          <ClaudeEndpointSection vendorConfig={v} updateVendorConfig={uv} />
+        )
+      },
+      {
+        key: 'claudeModelMapping',
+        label: 'Model mapping',
+        keywords:
+          'anthropic model override mapping pin alias rename sonnet opus haiku gateway ANTHROPIC_MODEL',
+        render: (_s, _u, _e, _ue, v, uv) => (
+          <ClaudeModelMappingSection vendorConfig={v} updateVendorConfig={uv} />
         )
       }
     ]

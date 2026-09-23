@@ -453,9 +453,12 @@ describe('the page pane', () => {
   })
 
   it('hides a capability-gated group when the page engine lacks it', () => {
-    // Claude has both flags, so both groups show.
+    // Claude has both flags, so both gated groups show — after the two
+    // ungated endpoint groups (ADR-074 §9).
     renderView({ activePage: 'claude' })
     expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
+      'endpoint',
+      'model-mapping',
       'sandbox',
       'proxy'
     ])

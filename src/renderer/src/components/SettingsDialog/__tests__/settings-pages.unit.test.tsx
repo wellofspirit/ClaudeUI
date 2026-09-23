@@ -106,14 +106,15 @@ describe('PAGES structure', () => {
         // shared vault's bridge folded into the list and its two sheets.
         'providers',
         'defaults',
-        'anthropic',
+        // 'anthropic' moved to Claude › Endpoint / Model mapping (ADR-074 §9).
         'accounts'
       ],
       dispatch: ['concurrency', 'into', 'limits'],
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
-      claude: ['sandbox', 'proxy'],
+      // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
+      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
       opencode: [
         'session',
         'tool-output',
@@ -312,7 +313,7 @@ describe('PAGES structure', () => {
     // A fixed tag ignores the engine.
     expect(
       storageOf(
-        pageOf('models').groups.find((g) => g.id === 'anthropic')!,
+        pageOf('claude').groups.find((g) => g.id === 'endpoint')!,
         'claude'
       )
     ).toBe('vendors/anthropic.json')
@@ -442,14 +443,27 @@ describe('SECTION_TARGET', () => {
 
 describe('visibleGroups', () => {
   it('keeps every group when the engine has the capability', () => {
-    expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual(['sandbox', 'proxy'])
+    expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping',
+      'sandbox',
+      'proxy'
+    ])
   })
 
   it('drops a gated group when the engine lacks the capability', () => {
+    // The endpoint groups are ungated: every Claude build reads the env vars.
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
-    expect(visibleGroups(pageOf('claude'), caps)).toEqual([])
+    expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping'
+    ])
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
-    expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual(['proxy'])
+    expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
+      'endpoint',
+      'model-mapping',
+      'proxy'
+    ])
   })
 
   it('is unaffected on pages with no engine', () => {
@@ -483,6 +497,17 @@ describe('searchSettings', () => {
     const hits = searchSettings('whitelist')
     expect(hits.some((h) => h.page.id === 'claude' && h.group.id === 'sandbox')).toBe(true)
     expect(hits.every((h) => !h.item.label.toLowerCase().includes('whitelist'))).toBe(true)
+  })
+
+  it('lands the old Anthropic endpoint searches on the Claude page (ADR-074 §9)', () => {
+    const at = (q: string): Set<string> =>
+      new Set(searchSettings(q).map((h) => `${h.page.id}/${h.group.id}`))
+    expect(at('gateway').has('claude/endpoint')).toBe(true)
+    expect(at('model override').has('claude/model-mapping')).toBe(true)
+    expect(at('haiku').has('claude/model-mapping')).toBe(true)
+    for (const q of ['gateway', 'model override', 'anthropic endpoint']) {
+      expect(at(q).has('models/anthropic'), q).toBe(false)
+    }
   })
 
   it('matches nothing for a nonsense query', () => {

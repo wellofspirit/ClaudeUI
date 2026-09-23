@@ -534,15 +534,6 @@ export const PAGES: SettingsPage[] = [
           codex: itemsOf('codex-models')
         }
       },
-      {
-        id: 'anthropic',
-        label: 'Anthropic endpoint',
-        storage: 'vendors/anthropic.json',
-        // The old pane footer's "applies on next session start", as the badge.
-        appliesOn: 'next-session',
-        note: 'Applies to new Claude sessions.',
-        items: itemsOf('vendor-anthropic')
-      },
       { id: 'accounts', label: 'Accounts', items: itemsOf('accounts') }
     ]
   },
@@ -662,8 +653,29 @@ export const PAGES: SettingsPage[] = [
     rail: 'engines',
     icon: ICON_CLAUDE,
     engine: 'claude',
-    description: "Claude Code's launch parameters. Permission rules are on Sessions & autonomy.",
+    description:
+      'Where Claude Code sends requests, and its launch parameters. Permission rules are on Sessions & autonomy.',
     groups: [
+      // FIRST, and here rather than on Models & providers (ADR-074 §9):
+      // `vendors/anthropic.json` only ever reaches cli.js spawns, so the page of
+      // the engine it configures is its one home. No `requires` — every Claude
+      // build honours ANTHROPIC_BASE_URL and the model env vars.
+      {
+        id: 'endpoint',
+        label: 'Endpoint',
+        storage: 'vendors/anthropic.json',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions. Never reaches opencode or pi.',
+        items: itemsOf('claude-endpoint', ['claudeEndpoint'])
+      },
+      {
+        id: 'model-mapping',
+        label: 'Model mapping',
+        storage: 'vendors/anthropic.json',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions.',
+        items: itemsOf('claude-endpoint', ['claudeModelMapping'])
+      },
       {
         id: 'sandbox',
         label: 'Sandbox',
@@ -1065,7 +1077,6 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
   'codex-models': { page: 'models', group: 'defaults' },
-  'vendor-anthropic': { page: 'models', group: 'anthropic' },
   accounts: { page: 'models', group: 'accounts' },
 
   'dispatch-concurrency': { page: 'dispatch', group: 'concurrency' },
@@ -1078,6 +1089,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
 
   remote: { page: 'remote', group: 'server' },
 
+  'claude-endpoint': { page: 'claude', group: 'endpoint' },
   sandbox: { page: 'claude', group: 'sandbox' },
   proxy: { page: 'claude', group: 'proxy' },
 

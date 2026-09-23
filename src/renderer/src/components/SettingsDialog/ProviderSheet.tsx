@@ -794,7 +794,7 @@ export function ProviderSheet({
         <EngineRow
           engine="claude"
           label="Claude"
-          description="Claude only talks to Anthropic, or to the endpoint set under Anthropic endpoint."
+          description="Claude only talks to Anthropic, or to the gateway set on Claude › Endpoint."
           checked={entry.engines.claude?.enabled === true}
           disabled
           dimmed
