@@ -4,7 +4,8 @@
  * It replaced three add flows — the shared vault's custom-provider form,
  * opencode's catalog picker and pi's "Add API key" select — so what is pinned
  * here is that each of them still lands in the SAME store it always did:
- * `vendor-auth:set-key` per selected engine for a catalog pick,
+ * one `catalog` definition plus ONE `shared-provider:set-key` for a catalog pick
+ * (ADR-074 §6 — the key is stored once and delivered to each engine),
  * `shared-provider:save` (+ `:set-key`) for a custom endpoint, and the ADR-057
  * OAuth pair for a subscription (that half lives in
  * `remote-oauth-settings.component.test.tsx`, which owns both platform
@@ -121,12 +122,14 @@ beforeEach(async () => {
   snapshot = { entries: [chatgptRow, piXai], opencodeInstalled: true }
   catalog = [
     catalogEntry({ id: 'openai', name: 'OpenAI', authMethods: ['api', 'oauth'] }),
+    catalogEntry({ id: 'deepseek', name: 'DeepSeek' }),
     catalogEntry({ id: 'groq', name: 'Groq' }),
     // Already set up: a ROW of the list, never a candidate here.
     catalogEntry({ id: 'openrouter', name: 'OpenRouter', authState: 'authenticated' })
   ]
   piOptions = {
     openai: [{ type: 'api', label: 'OpenAI API key' }],
+    deepseek: [{ type: 'api', label: 'DeepSeek API key' }],
     radius: [{ type: 'api', label: 'Radius API key' }],
     // Keyed already (a `pi:xai` row), and owned by the vault — both excluded.
     xai: [{ type: 'api', label: 'xAI API key' }],
@@ -238,15 +241,17 @@ describe('opening', () => {
 describe('the list', () => {
   it('offers the UNCONFIGURED union, with a chip per engine that offers it', async () => {
     await openAddSheet()
-    // openai: both engines. groq: opencode only. radius: pi only (it is in pi's
-    // option catalog and in no opencode one).
-    expect(catalogIds()).toEqual(['groq', 'openai', 'radius'])
+    // deepseek: both engines. groq: opencode only. radius: pi only (it is in pi's
+    // option catalog and in no opencode one). openai: pi only — ChatGPT's
+    // ENABLED opencode route already delivers to opencode's `openai`.
+    expect(catalogIds()).toEqual(['deepseek', 'groq', 'openai', 'radius'])
 
     const chips = (id: string): (string | undefined)[] =>
       within(catalogRow(id))
         .getAllByTestId('ProviderAddSheet.engineChip')
         .map((el) => el.dataset.id)
-    expect(chips('openai')).toEqual(['opencode', 'pi'])
+    expect(chips('deepseek')).toEqual(['opencode', 'pi'])
+    expect(chips('openai')).toEqual(['pi'])
     expect(chips('groq')).toEqual(['opencode'])
     expect(chips('radius')).toEqual(['pi'])
   })
@@ -327,28 +332,62 @@ describe('the list', () => {
 // ── The setup step ───────────────────────────────────────────────────
 
 describe('the setup step', () => {
-  it('writes the key into EVERY selected engine’s own auth store', async () => {
+  /** The catalog definition the sheet saves for a pick, routes per chosen engine. */
+  const catalogDefinition = (
+    id: string,
+    name: string,
+    routes: { pi: boolean; opencode: boolean }
+  ): SharedProviderDefinition => ({
+    id,
+    name,
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: routes.pi }, opencode: { enabled: routes.opencode } }
+  })
+
+  it('stores the key ONCE: a catalog definition with a route per engine, then one set-key', async () => {
     await openAddSheet()
-    await click(catalogRow('openai'))
-    expect(screen.getByTestId('ProviderAddSheet.setup')).toHaveAttribute('data-id', 'openai')
+    expect(screen.getByTestId('ProviderAddSheet.steps')).toHaveAttribute('data-id', '1')
+    await click(catalogRow('deepseek'))
+    expect(screen.getByTestId('ProviderAddSheet.setup')).toHaveAttribute('data-id', 'deepseek')
+    expect(screen.getByTestId('ProviderAddSheet.steps')).toHaveAttribute('data-id', '2')
+    expect(screen.getByTestId('ProviderAddSheet.key')).toHaveTextContent(
+      'Entered once. ClaudeUI stores it and delivers it to each engine you pick.'
+    )
 
     await typeInto('ProviderAddSheet.keyInput', 'sk-live')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([
-      ['opencode', 'openai', 'sk-live'],
-      ['pi', 'openai', 'sk-live']
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('deepseek', 'DeepSeek', { pi: true, opencode: true })]
     ])
+    expect(sent('shared-provider:set-key')).toEqual([['deepseek', 'sk-live']])
+    // No per-engine loop: the vault delivers the one key.
+    expect(called('vendorAuthSetKey')).toEqual([])
   })
 
-  it('writes only where the chips say, when one engine is de-selected', async () => {
+  it('routes only where the chips say, when one engine is de-selected', async () => {
     await openAddSheet()
-    await click(catalogRow('openai'))
+    await click(catalogRow('deepseek'))
     await click(
       screen.getAllByTestId('ProviderAddSheet.engines.chip').find((el) => el.dataset.id === 'pi')!
     )
     await typeInto('ProviderAddSheet.keyInput', 'sk-live')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([['opencode', 'openai', 'sk-live']])
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('deepseek', 'DeepSeek', { pi: false, opencode: true })]
+    ])
+    expect(sent('shared-provider:set-key')).toEqual([['deepseek', 'sk-live']])
+  })
+
+  it('an id the vault cannot name keeps a copy per engine, as before', async () => {
+    catalog = [...catalog, catalogEntry({ id: 'io.net', name: 'io.net' })]
+    await openAddSheet()
+    await click(catalogRow('io.net'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-io')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(sent('shared-provider:save')).toEqual([])
+    expect(called('vendorAuthSetKey')).toEqual([['opencode', 'io.net', 'sk-io']])
   })
 
   /** A catalog of `n` models, for the anti-flood threshold (ADR-074 §2: over 50). */
@@ -408,14 +447,28 @@ describe('the setup step', () => {
     expect(sent('models:set-provider-allowlist')).toEqual([])
   })
 
-  it('writes nothing for a pi-only provider beyond pi’s own store', async () => {
+  it('routes a pi-only provider to pi alone', async () => {
     await openAddSheet()
     await click(catalogRow('radius'))
     await typeInto('ProviderAddSheet.keyInput', 'sk-radius')
     await click(screen.getByTestId('ProviderAddSheet.save'))
-    expect(called('vendorAuthSetKey')).toEqual([['pi', 'radius', 'sk-radius']])
+    expect(sent('shared-provider:save')).toEqual([
+      [catalogDefinition('radius', 'radius', { pi: true, opencode: false })]
+    ])
+    expect(sent('shared-provider:set-key')).toEqual([['radius', 'sk-radius']])
+    expect(called('vendorAuthSetKey')).toEqual([])
     expect(sent('models:set-provider-allowlist')).toEqual([])
     expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+
+  it('never offers an id a shared definition already owns — not even with its routes off', async () => {
+    definitions = [
+      chatgptDefinition,
+      catalogDefinition('groq', 'Groq', { pi: false, opencode: false })
+    ]
+    await openAddSheet()
+    expect(catalogIds()).not.toContain('groq')
+    expect(catalogIds()).toContain('openai')
   })
 
   it('Back returns to the list without writing anything', async () => {
@@ -500,12 +553,16 @@ describe('after a write', () => {
   it('re-reads the registry, closes, and lands on the new row’s Manage sheet', async () => {
     await openAddSheet()
     const before = registryReads
+    // The pick became a shared catalog definition, so its row is `groq` itself.
     const added: ProviderEntry = {
-      id: 'opencode:groq',
+      id: 'groq',
       name: 'Groq',
-      origin: 'opencode-native',
+      origin: 'shared',
       credential: 'api-key',
-      engines: { opencode: { enabled: true, modelCount: 0, curated: true, native: true } }
+      engines: {
+        opencode: { enabled: true, modelCount: 0, curated: true, native: true },
+        pi: { enabled: false }
+      }
     }
 
     await click(catalogRow('groq'))
@@ -515,12 +572,10 @@ describe('after a write', () => {
 
     expect(registryReads).toBe(before + 1)
     expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toContain(
-      'opencode:groq'
-    )
+    expect(screen.getAllByTestId('ProviderList.row').map((el) => el.dataset.id)).toContain('groq')
     // Curation is the next thing on screen — the row was added with an empty
     // allowlist, so a list that just said "0 models" would be a dead end.
-    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'opencode:groq')
+    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'groq')
   })
 
   it('keeps the sheet open and reports a rejected write', async () => {

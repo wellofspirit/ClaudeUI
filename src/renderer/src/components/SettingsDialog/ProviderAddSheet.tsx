@@ -30,7 +30,9 @@
  *
  *  · engine sign-in (Claude/pi) → nothing: pi's login is a terminal command, so
  *                                 the row COPIES it (`pi:binary-path`)
- *  · catalog, API key         → `vendor-auth:set-key` once per selected engine
+ *  · catalog, API key         → `shared-provider:save` (a `catalog` definition,
+ *                               ADR-074 §6) + ONE `shared-provider:set-key`: the
+ *                               key is stored once and delivered to each engine
  *  · catalog, OAuth           → `vendor-auth:oauth-authorize` + `:oauth-callback`
  *  · custom endpoint          → `shared-provider:save` (+ `shared-provider:set-key`)
  *
@@ -44,9 +46,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { OpencodeProviderCatalogEntry, VendorAuthOption } from '../../../../shared/types'
 import type { ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition
+import {
+  validateSharedProviderId,
+  type ConfigurableHarnessId,
+  type SharedProviderDefinition
 } from '../../../../shared/shared-provider'
 import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
@@ -151,8 +154,14 @@ export function ProviderAddSheet({
   const managed = useMemo(() => {
     const owned = { opencode: new Set<string>(), pi: new Set<string>([CODEX_VENDOR_ID]) }
     for (const definition of definitions) {
-      owned.opencode.add(definition.routes.opencode.providerId ?? definition.id)
-      owned.pi.add(definition.routes.pi.providerId ?? definition.id)
+      // The definition's own id always (a catalog provider with its routes off
+      // is still set up), and the native id each ENABLED route delivers to.
+      owned.opencode.add(definition.id)
+      owned.pi.add(definition.id)
+      if (definition.routes.opencode.enabled)
+        owned.opencode.add(definition.routes.opencode.providerId ?? definition.id)
+      if (definition.routes.pi.enabled)
+        owned.pi.add(definition.routes.pi.providerId ?? definition.id)
     }
     return owned
   }, [definitions])
@@ -174,6 +183,9 @@ export function ProviderAddSheet({
     if (opencodeInstalled) {
       for (const entry of catalog) {
         if (entry.authState !== 'unauthenticated' || entry.disabled) continue
+        // A shared definition already names this id — a catalog provider with its
+        // routes off, say. Re-adding it here would replace that definition.
+        if (managed.opencode.has(entry.id)) continue
         const oauth = (opencodeOptions[entry.id] ?? []).find((o) => o.type === 'oauth')
         byId.set(entry.id, {
           id: entry.id,
@@ -354,10 +366,20 @@ export function ProviderAddSheet({
         busy={busy}
         onSave={(engines, key) =>
           void run(async () => {
-            for (const engine of engines)
-              await window.api.vendorAuthSetKey(engine, step.candidate.id, key)
-            await seedLargeCatalogAllowlists(engines, step.candidate.id)
-            await onAdded(registryIdFor(engines[0], step.candidate.id))
+            const { id, name } = step.candidate
+            if (isSharedProviderId(id)) {
+              // One key per provider (ADR-074 §6): a catalog definition with a
+              // route per chosen engine, then the key ONCE — the vault stores it
+              // and delivers it to each enabled engine.
+              await window.api.saveSharedProvider(catalogDefinition(id, name, engines))
+              await window.api.setSharedProviderApiKey(id, key)
+            } else {
+              // An id the vault cannot name (models.dev ids are not all
+              // `[a-z0-9-]`): each engine keeps its own copy, as before.
+              for (const engine of engines) await window.api.vendorAuthSetKey(engine, id, key)
+            }
+            await seedLargeCatalogAllowlists(engines, id)
+            await onAdded(registryIdFor(engines[0], id))
           })
         }
         onOAuthDone={() =>
@@ -417,14 +439,78 @@ export function ProviderAddSheet({
         </>
       }
     >
+      <StepIndicator current={step.kind === 'list' ? 1 : 2} />
       {body}
     </SheetFrame>
   )
 }
 
-/** The registry row id a fresh native credential produces. */
+/**
+ * The registry row id an API-key add produces: the definition's own id when it
+ * became a shared catalog definition, else the native `<engine>:<id>` row.
+ */
 function registryIdFor(engine: ConfigurableHarnessId, providerId: string): string {
-  return `${engine}:${providerId}`
+  return isSharedProviderId(providerId) ? providerId : `${engine}:${providerId}`
+}
+
+function isSharedProviderId(id: string): boolean {
+  try {
+    validateSharedProviderId(id)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A catalog definition: no endpoint, no models — the engines' catalogs have them. */
+function catalogDefinition(
+  id: string,
+  name: string,
+  engines: readonly ConfigurableHarnessId[]
+): SharedProviderDefinition {
+  return {
+    id,
+    name,
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: {
+      pi: { enabled: engines.includes('pi') },
+      opencode: { enabled: engines.includes('opencode') }
+    }
+  }
+}
+
+/** Provider → Key & engines → Models (mockup D); the last step is the Manage sheet. */
+const STEPS = ['Provider', 'Key & engines', 'Models'] as const
+
+function StepIndicator({ current }: { current: 1 | 2 }): React.JSX.Element {
+  return (
+    <div
+      data-testid={`${SHEET}.steps`}
+      data-id={String(current)}
+      className="flex flex-wrap items-center gap-2 mb-3 text-[12px] text-text-secondary"
+    >
+      {STEPS.map((label, i) => {
+        const on = i + 1 === current
+        return (
+          <span key={label} className="inline-flex items-center gap-2">
+            <span
+              className={`w-5 h-5 rounded-full border text-[11px] flex items-center justify-center ${
+                on
+                  ? 'bg-accent border-accent text-bg-secondary font-bold'
+                  : 'border-border bg-bg-tertiary'
+              }`}
+            >
+              {i + 1}
+            </span>
+            <span className={on ? 'text-text-primary' : undefined}>{label}</span>
+            {i < STEPS.length - 1 && <span className="text-text-muted">—</span>}
+          </span>
+        )
+      })}
+    </div>
+  )
 }
 
 /**
@@ -485,8 +571,8 @@ function CatalogSetup({
         <SettingRow
           testid={`${SHEET}.enableFor`}
           layout="stacked"
-          label="Enable for"
-          description="The credential is written into each selected engine’s own auth file, never into ClaudeUI’s config."
+          label="Use it in"
+          description="The key is delivered to each selected engine’s own auth file."
         >
           <ChipSet
             testid={`${SHEET}.engines`}
@@ -505,7 +591,7 @@ function CatalogSetup({
         <SettingRow
           testid={`${SHEET}.key`}
           label="API key"
-          description={`Stored in ${selected.length === 0 ? 'the selected engine' : selected.join(' and ')}’s own auth store.`}
+          description="Entered once. ClaudeUI stores it and delivers it to each engine you pick."
         >
           <TextField
             type="password"

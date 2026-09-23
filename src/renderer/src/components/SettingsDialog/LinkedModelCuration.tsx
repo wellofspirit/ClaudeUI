@@ -125,6 +125,18 @@ export function LinkedModelCuration({
   )
   const saveChain = useRef<Promise<void>>(Promise.resolve())
   const latestEdit = useRef(0)
+  /** Saves not yet landed — while any are, the local record is newer than the prop. */
+  const pending = useRef(0)
+
+  // The definition is re-read after every write; follow it when nothing of ours
+  // is still in flight, so a record changed elsewhere (or a stale seed) never
+  // outlives the next read.
+  const storedCuration = JSON.stringify(definition.curation ?? null)
+  useEffect(() => {
+    if (pending.current === 0) setRecord(definition.curation)
+    // `storedCuration` is the record's value identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storedCuration])
 
   const adapterOf = (e: CuratedEngine): CurationAdapter | undefined =>
     adapters.find((a) => a.engine === e)
@@ -240,6 +252,7 @@ export function LinkedModelCuration({
   /** The one writer: persist the record, which the core projects while linked. */
   const writeCuration = (next: SharedProviderCuration, onFail: () => void): void => {
     const generation = ++latestEdit.current
+    pending.current += 1
     saveChain.current = saveChain.current.then(async () => {
       try {
         await window.api.setSharedProviderCuration(definition.id, next)
@@ -251,6 +264,8 @@ export function LinkedModelCuration({
         setToast(null)
         setError(message(e))
         if (latestEdit.current === generation) onFail()
+      } finally {
+        pending.current -= 1
       }
     })
   }

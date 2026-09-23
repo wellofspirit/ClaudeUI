@@ -684,8 +684,12 @@ function PiSessionDefaultModel({
   const { engineCfg: cfg, update: saveConfig } = useEngineConfigObject('pi')
   const [models, setModels] = useState<ModelInfo[]>([])
   const [customMode, setCustomMode] = useState(false)
-  /** The providers pi reports, unfiltered — the "of m" in the Model list summary. */
-  const [piProviders, setPiProviders] = useState<string[]>([])
+  /**
+   * The providers pi reports, unfiltered — the "of m" in the Model list summary.
+   * `null` until read, so a curated list is never called "no longer offered"
+   * just because the read has not landed yet.
+   */
+  const [piProviders, setPiProviders] = useState<string[] | null>(null)
   /**
    * Bumped by every `reloadModels()` — including the Manage sheet's curation
    * writes on this same page, which change what pi's picker offers. Both reads
@@ -696,7 +700,9 @@ function PiSessionDefaultModel({
   useEffect(() => {
     window.api
       .getPiModelCatalogGroups()
-      .then((groups) => setPiProviders(groups.map((g) => g.vendorId)))
+      // An EMPTY report is pi failing to answer (not installed, discovery
+      // failed), not pi offering nothing — "unknown", never "every list stale".
+      .then((groups) => setPiProviders(groups.length > 0 ? groups.map((g) => g.vendorId) : null))
       .catch(() => {})
   }, [modelReloadNonce])
 
@@ -735,10 +741,20 @@ function PiSessionDefaultModel({
     currentSplit !== null &&
     !isPiModelAllowed(allowlist, currentSplit.provider, currentSplit.modelId)
   // Curation is per provider, in each provider's Manage sheet (ADR-074 §2);
-  // this row only counts. A curated provider pi does not report right now
-  // (signed out) still counts, so `n` never exceeds `m`.
-  const curated = Object.keys(allowlist ?? {})
-  const providerCount = new Set([...piProviders, ...curated]).size
+  // this row only counts — over the providers pi REPORTS. A list kept for a
+  // provider pi no longer offers (signed out, removed) is said separately: it
+  // is not one of pi's providers, and counting it in "of m" misstated both.
+  const curatedIds = Object.keys(allowlist ?? {})
+  const reported = new Set(piProviders ?? [])
+  const curated = curatedIds.filter((id) => piProviders === null || reported.has(id))
+  const stale = piProviders === null ? [] : curatedIds.filter((id) => !reported.has(id))
+  const providerCount = piProviders === null ? curatedIds.length : reported.size
+  const staleText =
+    stale.length === 0
+      ? ''
+      : stale.length === 1
+        ? ' · 1 list for a provider pi no longer offers'
+        : ` · ${stale.length} lists for providers pi no longer offers`
 
   const update = (value: string): void => {
     saveConfig({ piConfig: { ...cfg.piConfig, defaultModel: value || undefined } })
@@ -857,7 +873,7 @@ function PiSessionDefaultModel({
           testid={`${PANE}.row`}
           dataId="piConfig.modelAllowlist"
           label="Model list"
-          description={`Curated per provider in Models & providers — ${curated.length} of ${providerCount} pi providers curated.`}
+          description={`Curated per provider in Models & providers — ${curated.length} of ${providerCount} pi providers curated${staleText}.`}
           keyText="engines/pi.json · modelAllowlist"
         >
           <Button variant="link" testid="PiDefaultModelSection.refresh" onClick={refreshModels}>

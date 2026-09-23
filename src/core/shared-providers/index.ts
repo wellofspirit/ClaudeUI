@@ -44,10 +44,10 @@ export const sharedProviderService = new SharedProviderService({
   nativeKeys: {
     pi: authJsonApiKeyReader(() => piAuthProvider.authFilePath(), 'api_key'),
     opencode: authJsonApiKeyReader(resolveOpencodeAuthJsonPath, 'api'),
-    loadCatalogs: async () => ({
+    loadCatalogs: async (options) => ({
       pi: new Set(PI_API_KEY_VENDOR_IDS),
       opencode: new Map(
-        (opencodeServerManager.isBinaryAvailable()
+        (!options?.skipOpencode && opencodeServerManager.isBinaryAvailable()
           ? await discoverOpencodeProviderCatalog()
           : []
         ).map((entry) => [entry.id, entry.name] as const)

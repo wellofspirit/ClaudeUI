@@ -47,7 +47,9 @@ import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
 import { Button, SettingRow } from './settings-controls'
 import { diagnosisText } from './provider-diagnosis'
-import { CredentialChip, EngineChip, ProviderSheet } from './ProviderSheet'
+import { CredentialChip, ProviderSheet } from './ProviderSheet'
+import { EnginePill, Pill, factsCount } from './provider-pills'
+import { isConflictDismissed } from './key-conflicts'
 import { ProviderAddSheet } from './ProviderAddSheet'
 
 /** Testid namespace (ADR-027 tier 1/2). */
@@ -69,11 +71,24 @@ const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalle
  */
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
-/** The row's one line: what the registry says, plus the diagnosis when there is one. */
+/**
+ * The row's one line: the provider's KIND (`Catalog`, `Custom endpoint · <url>`,
+ * ADR-074 §7) where the registry names one — the engine pills already say which
+ * engines it reaches and how many models — else the registry's detail; plus the
+ * diagnosis when there is one.
+ */
 function describe(entry: ProviderEntry): string | undefined {
-  const parts = [entry.detail, entry.diagnosis ? diagnosisText(entry.diagnosis) : undefined]
+  const parts = [
+    entry.kindLabel ?? entry.detail,
+    entry.diagnosis ? diagnosisText(entry.diagnosis) : undefined
+  ]
   const text = parts.filter((part): part is string => !!part).join(' · ')
   return text || undefined
+}
+
+/** The first engine whose shared delivery failed, for the row's danger pill. */
+function failedEngine(entry: ProviderEntry): EngineId | undefined {
+  return ENGINE_ORDER.find((engine) => entry.engines[engine]?.error)
 }
 
 export function ProviderList(): React.JSX.Element {
@@ -92,6 +107,7 @@ export function ProviderList(): React.JSX.Element {
   const [openId, setOpenId] = useState<string | null>(null)
   /** Whether the Add sheet is open. */
   const [adding, setAdding] = useState(false)
+  const [, setRenderTick] = useState(0)
 
   /**
    * Read the registry. Returns the snapshot so a write can close the sheet on an
@@ -129,11 +145,28 @@ export function ProviderList(): React.JSX.Element {
     return () => window.removeEventListener(ADD_EVENT, open)
   }, [])
 
-  /** After a sheet write: re-read, and close the sheet if its provider is gone. */
-  const handleWrote = useCallback(async (): Promise<void> => {
-    const next = await reload()
-    if (next && !next.entries.some((entry) => entry.id === openId)) setOpenId(null)
-  }, [reload, openId])
+  /**
+   * After a sheet write: re-read, and close the sheet if its provider is gone —
+   * unless the write was an ADOPT (`follow`): that folds `opencode:openrouter`
+   * into the definition `openrouter` (ADR-074 §6), and the sheet follows it
+   * there rather than closing on the user. Any other write that makes the row
+   * vanish — a removal — closes it.
+   */
+  const handleWrote = useCallback(
+    async (follow?: string): Promise<void> => {
+      // Some of what a row shows is renderer-side state the sheet just changed
+      // (a dismissed key conflict), so re-render even when the re-read returns
+      // the same snapshot.
+      setRenderTick((n) => n + 1)
+      const next = await reload()
+      if (!next || openId === null || next.entries.some((entry) => entry.id === openId)) return
+      const successor = follow
+        ? next.entries.find((entry) => entry.id === follow && entry.origin === 'shared')
+        : undefined
+      setOpenId(successor ? successor.id : null)
+    },
+    [reload, openId]
+  )
 
   /**
    * After an ADD: re-read, close the Add sheet, and open the new row's Manage
@@ -193,17 +226,33 @@ export function ProviderList(): React.JSX.Element {
           dataId={entry.id}
           label={entry.name}
           labelBadge={
-            <CredentialChip
-              credential={entry.credential}
-              // A subscription with several accounts: the COUNT is what the row
-              // has to say, and "Connected" would hide that there are others.
-              label={
-                (entry.accounts?.list.length ?? 0) > 1
-                  ? `${entry.accounts!.list.length} accounts`
-                  : undefined
-              }
-              testid={`${LIST}.credential`}
-            />
+            <>
+              <CredentialChip
+                credential={entry.credential}
+                // A subscription with several accounts: the COUNT is what the row
+                // has to say, and "Connected" would hide that there are others.
+                label={
+                  (entry.accounts?.list.length ?? 0) > 1
+                    ? `${entry.accounts!.list.length} accounts`
+                    : undefined
+                }
+                testid={`${LIST}.credential`}
+              />
+              {entry.keyConflict &&
+                !isConflictDismissed(
+                  entry.id.slice(entry.id.indexOf(':') + 1),
+                  entry.keyConflict
+                ) && (
+                  <Pill tone="warn" testid={`${LIST}.keyConflict`} dataId={entry.id}>
+                    2 different keys
+                  </Pill>
+                )}
+              {failedEngine(entry) && (
+                <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failedEngine(entry)}>
+                  Not delivered to {failedEngine(entry)}
+                </Pill>
+              )}
+            </>
           }
           description={describe(entry)}
         >
@@ -214,10 +263,13 @@ export function ProviderList(): React.JSX.Element {
               // picker for anything to reach, whatever the route says.
               (engine !== 'opencode' || opencodeInstalled)
           ).map((engine) => (
-            <EngineChip
+            // The same pill the Subscriptions Engines row wears, counting from
+            // the registry's facts — no catalog read per row.
+            <EnginePill
               key={engine}
               engine={engine}
-              enabled={entry.engines[engine]!.enabled}
+              on={entry.engines[engine]!.enabled}
+              count={factsCount(entry.engines[engine])}
               testid={`${LIST}.engine`}
             />
           ))}

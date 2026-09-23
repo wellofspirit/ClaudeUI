@@ -39,6 +39,7 @@ import type { AccountsState, EngineId } from '../../../../shared/types'
 import { accountDisplayName } from '../../utils/sign-in-provider'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { ProviderSheet } from './ProviderSheet'
+import { EnginePill as SharedEnginePill, Pill } from './provider-pills'
 import {
   curationCount,
   opencodeCurationAdapter,
@@ -149,38 +150,6 @@ export function removeConsequence(opts: {
 }
 
 // ── Atoms ────────────────────────────────────────────────────────────────────
-
-type Tone = 'ok' | 'warn' | 'plain'
-
-function Pill({
-  tone = 'plain',
-  testid,
-  dataId,
-  children
-}: {
-  tone?: Tone
-  testid?: string
-  dataId?: string
-  children: React.ReactNode
-}): React.JSX.Element {
-  const look =
-    tone === 'ok'
-      ? 'border-success/30 bg-success/5 text-success'
-      : tone === 'warn'
-        ? 'border-warning/30 bg-warning/5 text-warning'
-        : 'border-border text-text-secondary'
-  return (
-    <span
-      data-testid={testid}
-      data-id={dataId}
-      data-tone={tone}
-      className={`shrink-0 inline-flex items-center gap-1.5 rounded-full border px-2 text-[11px] leading-[18px] whitespace-nowrap ${look}`}
-    >
-      {tone !== 'plain' && <span className="w-1.5 h-1.5 rounded-full bg-current" />}
-      {children}
-    </span>
-  )
-}
 
 /** A stable colour per account, so one person's avatar does not change between renders. */
 const AVATAR_COLORS = ['#d97757', '#a78bfa', '#4ade80', '#6c9eff', '#f472b6', '#fbbf24']
@@ -708,37 +677,11 @@ function EnginesRow({
   )
 }
 
-/** One engine pill: accent when it gets the subscription, dim "off" when not. */
-function EnginePill({
-  engine,
-  count,
-  on,
-  warn = false
-}: {
-  engine: EngineId
-  count?: string
-  on: boolean
-  warn?: boolean
-}): React.JSX.Element {
-  return (
-    <span
-      data-testid={`${SUBS}.enginePill`}
-      data-id={engine}
-      data-on={on}
-      className={`inline-flex items-center gap-1 rounded-full border px-2 text-[11px] leading-[18px] whitespace-nowrap ${
-        !on
-          ? 'border-border text-text-muted opacity-60'
-          : warn
-            ? 'border-warning/30 bg-warning/5 text-warning'
-            : 'border-accent/30 bg-accent/5 text-accent'
-      }`}
-    >
-      {engineMeta(engine).label}
-      {(count ?? (!on ? 'off' : undefined)) && (
-        <span className="font-mono">{on ? count : 'off'}</span>
-      )}
-    </span>
-  )
+/** The shared engine pill, under this section's testid (ADR-027). */
+function EnginePill(
+  props: Omit<Parameters<typeof SharedEnginePill>[0], 'testid'>
+): React.JSX.Element {
+  return <SharedEnginePill {...props} testid={`${SUBS}.enginePill`} />
 }
 
 /** A controlled `<details>`: opening it programmatically shows the notice an action caused. */

@@ -64,7 +64,7 @@
  * theirs.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { engineMeta } from '../../../../shared/engine-meta'
 import type { ProviderCredential, ProviderEntry } from '../../../../shared/provider-registry'
@@ -74,12 +74,21 @@ import type {
   SharedProviderModel
 } from '../../../../shared/shared-provider'
 import type { EngineId, OpencodeProviderCatalogEntry } from '../../../../shared/types'
-import { Button, SelectField, SettingRow, TextField, ToggleSwitch } from './settings-controls'
+import { effectiveCuration } from '../../../../shared/provider-curation'
+import {
+  Button,
+  RadioRow,
+  SelectField,
+  SettingRow,
+  TextField,
+  ToggleSwitch
+} from './settings-controls'
+import { EnginePill, factsCount } from './provider-pills'
+import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
   opencodeCurationAdapter,
   piCurationAdapter,
-  curationCount,
   type CuratedEngine,
   type CurationAdapter,
   type CurationSummary
@@ -267,8 +276,12 @@ export interface ProviderSheetProps {
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
    * snapshot, and closes the sheet itself when this entry is gone from it.
+   *
+   * `follow` is set by an ADOPT only: the native row became the shared
+   * definition of that id, and the parent opens it rather than closing. No
+   * other write passes it — a removed provider must close, never re-open.
    */
-  onWrote: () => Promise<void>
+  onWrote: (follow?: string) => Promise<void>
 }
 
 export function ProviderSheet({
@@ -306,8 +319,28 @@ export function ProviderSheet({
   const [confirming, setConfirming] = useState<string | null>(null)
   /** Each engine's curation count for this provider, reported up by the curation block. */
   const [summaries, setSummaries] = useState<Partial<Record<CuratedEngine, CurationSummary>>>({})
-  /** The curation tab on show — lifted so an engine row's "Curate models ›" can pick it. */
+  /** The curation tab on show — lifted so an engine row's "Curate ›" can pick it. */
   const [curationEngine, setCurationEngine] = useState<CuratedEngine>('opencode')
+  /** The stacked "models in the picker" sheet is open (ADR-074 §7, mockup D). */
+  const [modelsOpen, setModelsOpen] = useState(false)
+  /**
+   * Each curating engine's allowlist entry for this provider (`undefined` = All
+   * models), for the summary row. `null` until read.
+   */
+  const [lists, setLists] = useState<Partial<Record<CuratedEngine, string[] | undefined>> | null>(
+    null
+  )
+  /** A key conflict: which engine's key the user means to keep, and the confirm step. */
+  const [keep, setKeep] = useState<'opencode' | 'pi'>('opencode')
+  const [confirmAdopt, setConfirmAdopt] = useState(false)
+  const conflictHeadingId = useId()
+  const confirmRef = useRef<HTMLSpanElement>(null)
+  const keepRef = useRef<HTMLSpanElement>(null)
+  /** Where focus goes when the confirm step closes: back to what opened it. */
+  const returnFocus = useRef(false)
+  /** Re-renders the sheet when a conflict is dismissed (the fact lives in `key-conflicts`). */
+  const [, setDismissTick] = useState(0)
+  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
   /**
    * The shared definition's own models — what a per-route DEFAULT can be. Only
    * a custom definition has any (a subscription's models come from the vendor),
@@ -333,7 +366,6 @@ export function ProviderSheet({
    */
   const [opencodeEntry, setOpencodeEntry] = useState<OpencodeProviderCatalogEntry | null>(null)
   const filterRef = useRef<HTMLInputElement>(null)
-  const modelsRef = useRef<HTMLDivElement>(null)
   /** "Curate models ›"'s deferred focus, cancelled if the sheet closes first. */
   const focusFrame = useRef<number | null>(null)
   useEffect(
@@ -346,6 +378,10 @@ export function ProviderSheet({
   const isShared = entry.origin === 'shared'
   const nativeId = nativeProviderId(entry)
 
+  // Re-read after EVERY write — the parent hands a fresh `entry` object per
+  // registry re-read — and on every model reload (curation writes bump it). The
+  // definition carries the curation record, and the stacked editor seeds from
+  // it on each open: a copy read once is how a split list reopened as linked.
   useEffect(() => {
     if (!isShared) return
     let cancelled = false
@@ -356,12 +392,14 @@ export function ProviderSheet({
           setShared({ resolved: true, definition: list.find((d) => d.id === entry.id) ?? null })
       })
       .catch(() => {
-        if (!cancelled) setShared({ resolved: true, definition: null })
+        // A failed RE-read keeps what was read; only a first failure is "none".
+        if (!cancelled)
+          setShared((prev) => (prev.resolved ? prev : { resolved: true, definition: null }))
       })
     return () => {
       cancelled = true
     }
-  }, [isShared, entry.id])
+  }, [isShared, entry, modelReloadNonce])
 
   useEffect(() => {
     if (definition?.kind !== 'custom') return
@@ -385,13 +423,13 @@ export function ProviderSheet({
    * no-op is exactly how a credential surface loses trust.
    */
   const run = useCallback(
-    async (action: () => Promise<void>): Promise<void> => {
+    async (action: () => Promise<void>, follow?: string): Promise<void> => {
       setBusy(true)
       setError(null)
       try {
         await action()
         useSessionStore.getState().reloadModels()
-        await onWrote()
+        await onWrote(follow)
       } catch (e) {
         setError(message(e))
       } finally {
@@ -400,6 +438,16 @@ export function ProviderSheet({
     },
     [onWrote]
   )
+
+  // The conflict confirm takes focus when it opens, and hands it back to the
+  // button that opened it on Cancel.
+  useEffect(() => {
+    if (confirmAdopt) confirmRef.current?.querySelector('button')?.focus()
+    else if (returnFocus.current) {
+      returnFocus.current = false
+      keepRef.current?.querySelector('button')?.focus()
+    }
+  }, [confirmAdopt])
 
   /**
    * A write this sheet did not make — an OAuth sign-in inside `VendorOAuthFlow`
@@ -437,7 +485,7 @@ export function ProviderSheet({
 
   const keyStore =
     entry.origin === 'shared'
-      ? "Kept in each enabled engine's own auth file, never in ClaudeUI's config."
+      ? "Stored once in ClaudeUI's vault, and delivered to each engine below."
       : entry.origin === 'pi-native'
         ? "Stored in pi's own auth.json, never in ClaudeUI's config."
         : "Stored in opencode's own auth.json, never in ClaudeUI's config."
@@ -481,10 +529,142 @@ export function ProviderSheet({
           >
             Save
           </Button>
+          <Button variant="link" testid={`${SHEET}.cancelKey`} onClick={() => setKeyDraft(null)}>
+            Cancel
+          </Button>
         </>
       )}
     </SettingRow>
   )
+
+  /**
+   * Both engines hold a DIFFERENT key for this vendor (ADR-074 §6). Keeping one
+   * makes it the provider's key and delivers it to both — replacing the other —
+   * so the choice is confirmed in place before anything is written. Each key is
+   * named only by its last four characters; the values never leave main.
+   */
+  function conflictPanel(hints: { opencode: string; pi: string }): React.JSX.Element {
+    const other = keep === 'opencode' ? 'pi' : 'opencode'
+    const label = (engine: 'opencode' | 'pi'): string => engineMeta(engine).label
+    // A key of eight characters or fewer has no hint (`…`): the options are then
+    // told apart by engine alone rather than by two identical "(…)".
+    const hinted = (engine: 'opencode' | 'pi'): string =>
+      hints[engine] === '…' ? '' : ` (${hints[engine]})`
+    return (
+      <div
+        role="group"
+        aria-labelledby={conflictHeadingId}
+        data-testid={`${SHEET}.keyConflict`}
+        className="m-3 rounded-lg border border-warning/30 bg-warning/5 overflow-hidden"
+      >
+        <div className="px-3.5 py-2.5">
+          <div id={conflictHeadingId} className="text-[13px] leading-[18px] text-warning">
+            {`opencode and pi hold different ${entry.name} keys.`}
+          </div>
+          <div className="text-[12px] leading-4 text-text-secondary mt-px">
+            Keep one — it becomes this provider’s key and is delivered to both engines. The other is
+            deleted.
+          </div>
+        </div>
+        {(['opencode', 'pi'] as const).map((engine) => (
+          <RadioRow
+            key={engine}
+            testid={`${SHEET}.keepKey`}
+            name={`${SHEET}-keep-${entry.id}`}
+            value={engine}
+            label={`Keep ${label(engine)}’s key${hinted(engine)}`}
+            description={`In ${label(engine)}’s auth.json`}
+            checked={keep === engine}
+            onSelect={() => {
+              setKeep(engine)
+              setConfirmAdopt(false)
+            }}
+          />
+        ))}
+        {confirmAdopt ? (
+          <SettingRow
+            testid={`${SHEET}.adoptConfirmRow`}
+            description={`${label(other)}’s key${hinted(other)} is deleted, and ${label(keep)}’s key${hinted(keep)} is delivered to both engines.`}
+          >
+            <span ref={confirmRef}>
+              <Button
+                variant="primary"
+                testid={`${SHEET}.adoptConfirm`}
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    setConfirmAdopt(false)
+                    await window.api.adoptSharedProviderNativeKey(nativeId, keep)
+                  }, nativeId)
+                }
+              >
+                Replace it
+              </Button>
+            </span>
+            <Button
+              variant="link"
+              testid={`${SHEET}.adoptCancel`}
+              onClick={() => {
+                returnFocus.current = true
+                setConfirmAdopt(false)
+              }}
+            >
+              Cancel
+            </Button>
+          </SettingRow>
+        ) : (
+          <div className="flex gap-2 px-3.5 py-2.5">
+            <span ref={keepRef}>
+              <Button
+                variant="primary"
+                testid={`${SHEET}.adoptKeep`}
+                disabled={busy}
+                onClick={() => setConfirmAdopt(true)}
+              >
+                Use this key for both
+              </Button>
+            </span>
+            <Button
+              variant="link"
+              testid={`${SHEET}.keepSeparate`}
+              onClick={() => {
+                dismissConflict(nativeId, hints)
+                setDismissTick((n) => n + 1)
+                // The list's "2 different keys" chip reads the same fact.
+                void onWrote()
+              }}
+            >
+              Keep them separate
+            </Button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  /** A key only this engine holds, for a vendor the other engine also knows. */
+  function adoptRow(engine: 'opencode' | 'pi'): React.JSX.Element {
+    const label = engineMeta(engine).label
+    return (
+      <SettingRow
+        testid={`${SHEET}.adoptable`}
+        dataId={engine}
+        label={`This key is only in ${label}.`}
+        description="Use it for both engines? ClaudeUI stores it once and delivers it to each."
+      >
+        <Button
+          variant="link"
+          testid={`${SHEET}.adopt`}
+          disabled={busy}
+          onClick={() =>
+            void run(() => window.api.adoptSharedProviderNativeKey(nativeId, engine), nativeId)
+          }
+        >
+          Use for both
+        </Button>
+      </SettingRow>
+    )
+  }
 
   /**
    * The stored subscription accounts (ADR-068 §2), or undefined when this row has
@@ -563,6 +743,16 @@ export function ProviderSheet({
         />
       )
     }
+    if (entry.keyConflict && !isConflictDismissed(nativeId, entry.keyConflict))
+      return conflictPanel(entry.keyConflict)
+    if (entry.adoptable) {
+      return (
+        <>
+          {keyRow}
+          {adoptRow(entry.adoptable)}
+        </>
+      )
+    }
     return keyRow
   }
 
@@ -615,7 +805,11 @@ export function ProviderSheet({
     return ` ${opencodeFacts.modelCount} models reach the picker.`
   }
 
-  /** "Curate models ›" on an engine row: that engine's tab, and its search box. */
+  /**
+   * "Curate ›" on an engine row: the stacked models sheet, on that engine's tab
+   * (a linked list has no tabs, and opens on the shared list), with its search
+   * box focused.
+   */
   function curateLink(engine: CuratedEngine): React.ReactNode {
     if (!curates(engine)) return undefined
     return (
@@ -625,8 +819,7 @@ export function ProviderSheet({
         dataId={engine}
         onClick={() => {
           setCurationEngine(engine)
-          // jsdom implements neither scrollIntoView nor layout.
-          modelsRef.current?.scrollIntoView?.({ block: 'start' })
+          setModelsOpen(true)
           filterRef.current?.focus()
           // Switching FROM a tab with no list (an empty pi catalog) mounts the
           // search box on the next render, so focus it again once it is there.
@@ -637,12 +830,132 @@ export function ProviderSheet({
           })
         }}
       >
-        Curate models ›
+        Curate ›
       </Button>
     )
   }
 
+  /**
+   * One engine's DELIVERY row on a shared API provider (ADR-074 §6, mockup D):
+   * the key is the provider's, and this row says whether — and as what id — it
+   * reached the engine's own store, with the route switch beside it. A failed
+   * write is shown here, where it happened, with Retry.
+   */
+  function deliveryRow(engine: 'opencode' | 'pi'): React.JSX.Element {
+    const facts = entry.engines[engine]
+    const on = facts?.enabled === true
+    const label = engineMeta(engine).label
+    const count = factsCount(facts)
+    const as = (
+      <>
+        as <span className="font-mono">{facts?.providerId ?? entry.id}</span>
+        {count ? ` · ${count} models` : ''}
+      </>
+    )
+    // Turning a catalog route on while the engine holds its OWN credential for
+    // the vendor replaces that credential — confirmed in place, as a conflict is.
+    const confirmingEnable = confirming === `enable-${engine}`
+    // Enabled, keyed, no error — and still not in the engine's store: the file
+    // was changed outside ClaudeUI. Retry re-delivers it.
+    const undelivered =
+      on && !facts?.error && entry.credential === 'api-key' && facts?.delivered === false
+    let status: React.ReactNode
+    if (confirmingEnable) {
+      status = (
+        <span className="text-warning">
+          {label}’s own key for {entry.name} will be replaced by the stored one.
+        </span>
+      )
+    } else if (!on) {
+      status =
+        entry.credential === 'api-key'
+          ? 'Off. Turning it on delivers the stored key; nothing to re-enter.'
+          : `Off. ${entry.name} is not offered to ${label}.`
+    } else if (facts?.error) {
+      status = <span className="text-danger">{facts.error}</span>
+    } else if (undelivered) {
+      status = <span className="text-warning">Not in {label}’s auth.json.</span>
+    } else if (entry.credential === 'keyless') {
+      status =
+        engine === 'pi' ? <>Placeholder key in models.json · {as}</> : <>No key sent · {as}</>
+    } else if (entry.credential === 'api-key') {
+      status = (
+        <>
+          Key delivered to {label}’s auth.json {as}
+        </>
+      )
+    } else {
+      status = <>No key yet — add one above. Delivered {as} once it is.</>
+    }
+    return (
+      <SettingRow
+        testid={`${SHEET}.engine`}
+        dataId={engine}
+        leading={<EnginePill engine={engine} on={on} testid={`${SHEET}.deliveryPill`} />}
+        description={status}
+      >
+        {on && (facts?.error || undelivered) && (
+          <Button
+            variant="link"
+            testid={`${SHEET}.retry`}
+            dataId={engine}
+            disabled={busy}
+            onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
+          >
+            Retry
+          </Button>
+        )}
+        {on && curateLink(engine)}
+        {confirmingEnable ? (
+          <>
+            <Button
+              variant="primary"
+              testid={`${SHEET}.enableConfirm`}
+              dataId={engine}
+              disabled={busy}
+              onClick={() => {
+                setConfirming(null)
+                void run(() => window.api.setSharedProviderRoute(entry.id, engine, true))
+              }}
+            >
+              Replace it
+            </Button>
+            <Button
+              variant="link"
+              testid={`${SHEET}.enableCancel`}
+              dataId={engine}
+              onClick={() => setConfirming(null)}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <button
+            type="button"
+            data-testid={`${SHEET}.engineToggle`}
+            data-id={engine}
+            aria-pressed={on}
+            aria-label={`${label}: ${on ? 'on' : 'off'}`}
+            disabled={busy}
+            onClick={() =>
+              !on && facts?.ownCredential
+                ? setConfirming(`enable-${engine}`)
+                : void run(() => window.api.setSharedProviderRoute(entry.id, engine, !on))
+            }
+            className="cursor-default disabled:opacity-40"
+          >
+            <ToggleSwitch checked={on} />
+          </button>
+        )}
+      </SettingRow>
+    )
+  }
+
+  /** A shared provider that is not a subscription: its engines are deliveries. */
+  const isApiShared = isShared && !entry.subscription
+
   function opencodeRow(): React.JSX.Element {
+    if (isApiShared && opencodeInstalled) return deliveryRow('opencode')
     if (!opencodeInstalled || !opencodeFacts) {
       return (
         <SettingRow
@@ -680,6 +993,7 @@ export function ProviderSheet({
   }
 
   function piRow(): React.JSX.Element {
+    if (isApiShared) return deliveryRow('pi')
     // A route the vault owns: reversible in one click, so no confirm.
     if (isShared) {
       const on = piFacts?.enabled === true
@@ -772,7 +1086,7 @@ export function ProviderSheet({
         testid={`${SHEET}.engine`}
         dataId="codex"
         label="Codex"
-        description="Codex always uses the active ChatGPT account. Pin a different one per session from the Accounts page."
+        description="Codex always uses the active ChatGPT account; per-session pinning is in the ChatGPT card’s Options, under Subscriptions."
       />
     )
   }
@@ -797,6 +1111,58 @@ export function ProviderSheet({
     return engine === 'opencode' ? opencodeRow() : piRow()
   }
 
+  // ── Models in the picker: the summary ─────────────────────────────────────
+
+  const adapterKey = curationAdapters.map((a) => `${a.engine}:${a.providerId}`).join(',')
+  useEffect(() => {
+    if (!adapterKey) return
+    let cancelled = false
+    void Promise.all(
+      curationAdapters.map(
+        async (adapter) =>
+          [adapter.engine, await adapter.loadSelection().catch(() => undefined)] as const
+      )
+    ).then((loaded) => {
+      if (!cancelled) setLists(Object.fromEntries(loaded))
+    })
+    return () => {
+      cancelled = true
+    }
+    // `adapterKey` is the adapters' identity; each write bumps the reload nonce.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapterKey, modelReloadNonce])
+
+  /**
+   * "One list · 4 picked" / "Separate per engine · opencode 4 picked · pi all"
+   * / "All models" (mockup D) — the same effective curation the editor shows.
+   */
+  function modelsSummary(): string {
+    if (lists === null) return 'Loading…'
+    // The editor's own count once it has reported one — it counts only ids the
+    // catalog still lists — else the stored list as read.
+    const picked = (engine: CuratedEngine): string => {
+      const summary = summaries[engine]
+      if (summary) return summary.picked === null ? 'all' : `${summary.picked} picked`
+      const list = lists[engine]
+      return list === undefined ? 'all' : `${list.length} picked`
+    }
+    if (definition && curationAdapters.length === 2) {
+      const curation = effectiveCuration(definition, lists)
+      if (curation.linked) {
+        return curation.models === undefined
+          ? 'One list · All models'
+          : `One list · ${curation.models.length} picked`
+      }
+      return `Separate per engine · ${curationAdapters
+        .map((a) => `${engineMeta(a.engine).label} ${picked(a.engine)}`)
+        .join(' · ')}`
+    }
+    const only = curationAdapters[0]
+    if (!only) return 'All models'
+    const count = picked(only.engine)
+    return count === 'all' ? 'All models' : count
+  }
+
   // ── Removal ────────────────────────────────────────────────────────────────
 
   /** Null when nothing here may legitimately remove this provider. */
@@ -804,7 +1170,9 @@ export function ProviderSheet({
     if (isShared) {
       // A built-in definition is ClaudeUI's own; only a user-declared one is the
       // user's to delete. Disconnect is the reversible verb for the other.
-      return definition?.kind === 'custom' ? () => window.api.removeSharedProvider(entry.id) : null
+      return definition?.kind === 'custom' || definition?.kind === 'catalog'
+        ? () => window.api.removeSharedProvider(entry.id)
+        : null
     }
     if (entry.origin === 'opencode-native') {
       const kind = entry.opencodeRemoveKind
@@ -943,78 +1311,89 @@ export function ProviderSheet({
    * than one row that changes meaning.
    */
   function modelSetupGroup(): React.ReactNode {
-    if (entry.origin === 'opencode-native') {
-      return (
-        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
-          <SettingRow
-            testid={`${SHEET}.modelSetup`}
-            dataId="opencode"
-            label="Model overrides"
-            description="Declared models, and the capabilities, cost and limits opencode reads for each — in opencode's own config file."
+    // opencode's own model overrides for this provider, under the id opencode
+    // knows it by: a native row's id, or a catalog definition's opencode route
+    // (a custom definition's models are edited in its endpoint instead).
+    const opencodeModelsId =
+      entry.origin === 'opencode-native'
+        ? nativeId
+        : isShared && definition?.kind === 'catalog' && opencodeFacts?.enabled
+          ? opencodeFacts.providerId
+          : undefined
+    const rows: React.ReactNode[] = []
+    if (opencodeModelsId) {
+      rows.push(
+        <SettingRow
+          key="opencode"
+          testid={`${SHEET}.modelSetup`}
+          dataId="opencode"
+          label="opencode models"
+          description="Declared models, and the capabilities, cost and limits opencode reads for each — in opencode's own config file."
+        >
+          <Button
+            variant="link"
+            testid={`${SHEET}.opencodeModels`}
+            disabled={busy || !opencodeInstalled}
+            onClick={() =>
+              void window.api
+                .getOpencodeProviders()
+                .then((catalog) => {
+                  setOpencodeEntry(catalog.find((p) => p.id === opencodeModelsId) ?? null)
+                  setModelEditor('opencode')
+                })
+                .catch((e: unknown) => setError(message(e)))
+            }
           >
-            <Button
-              variant="link"
-              testid={`${SHEET}.opencodeModels`}
-              disabled={busy || !opencodeInstalled}
-              onClick={() =>
-                void window.api
-                  .getOpencodeProviders()
-                  .then((catalog) => {
-                    setOpencodeEntry(catalog.find((p) => p.id === nativeId) ?? null)
-                    setModelEditor('opencode')
-                  })
-                  .catch((e: unknown) => setError(message(e)))
-              }
-            >
-              Model overrides ›
-            </Button>
-          </SettingRow>
-        </SheetGroup>
+            opencode models ›
+          </Button>
+        </SettingRow>
       )
     }
     if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
-      return (
-        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
-          <SettingRow
-            testid={`${SHEET}.modelSetup`}
-            dataId="pi"
-            label="pi models"
-            description="This provider's models.json entry: base URL, wire protocol, and the models pi may use with it."
+      rows.push(
+        <SettingRow
+          key="pi"
+          testid={`${SHEET}.modelSetup`}
+          dataId="pi"
+          label="pi models"
+          description="This provider's models.json entry: base URL, wire protocol, and the models pi may use with it."
+        >
+          <Button
+            variant="link"
+            testid={`${SHEET}.piModels`}
+            disabled={busy}
+            onClick={() => setModelEditor('pi')}
           >
-            <Button
-              variant="link"
-              testid={`${SHEET}.piModels`}
-              disabled={busy}
-              onClick={() => setModelEditor('pi')}
-            >
-              pi models ›
-            </Button>
-          </SettingRow>
-        </SheetGroup>
+            pi models ›
+          </Button>
+        </SettingRow>
+      )
+    } else if (entry.piBuiltinId) {
+      rows.push(
+        <SettingRow
+          key="pi-builtin"
+          testid={`${SHEET}.modelSetup`}
+          dataId="pi-builtin"
+          label="pi overrides"
+          description="Route this provider through a proxy, or change a built-in model’s context window, pricing or thinking map — in pi’s models.json."
+        >
+          <Button
+            variant="link"
+            testid={`${SHEET}.piOverrides`}
+            disabled={busy}
+            onClick={() => setModelEditor('pi-builtin')}
+          >
+            pi overrides ›
+          </Button>
+        </SettingRow>
       )
     }
-    if (entry.piBuiltinId) {
-      return (
-        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
-          <SettingRow
-            testid={`${SHEET}.modelSetup`}
-            dataId="pi-builtin"
-            label="pi overrides"
-            description="Route this provider through a proxy, or change a built-in model’s context window, pricing or thinking map — in pi’s models.json."
-          >
-            <Button
-              variant="link"
-              testid={`${SHEET}.piOverrides`}
-              disabled={busy}
-              onClick={() => setModelEditor('pi-builtin')}
-            >
-              pi overrides ›
-            </Button>
-          </SettingRow>
-        </SheetGroup>
-      )
-    }
-    return null
+    if (rows.length === 0) return null
+    return (
+      <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Engine-specific">
+        {rows}
+      </SheetGroup>
+    )
   }
 
   // ── Frame ──────────────────────────────────────────────────────────────────
@@ -1066,6 +1445,14 @@ export function ProviderSheet({
             >
               {error}
             </span>
+            {!error && isApiShared && remove !== null && entry.credential === 'api-key' && (
+              <span
+                data-testid={`${SHEET}.removeNote`}
+                className="min-w-0 truncate text-[12px] text-text-secondary"
+              >
+                Removing deletes the key from ClaudeUI and from each engine it’s delivered to.
+              </span>
+            )}
             <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>
               Done
             </Button>
@@ -1075,7 +1462,7 @@ export function ProviderSheet({
         {/* A subscription's credential IS its accounts, and they live on its
             Subscriptions card (ADR-074 §7) — the sheet is engines and models. */}
         {!entry.subscription && (
-          <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
+          <SheetGroup testid={`${SHEET}.group`} id="credential" label="Key">
             {credentialRows()}
           </SheetGroup>
         )}
@@ -1083,7 +1470,7 @@ export function ProviderSheet({
         <SheetGroup
           testid={`${SHEET}.group`}
           id="enabled"
-          label="Enabled for"
+          label={isApiShared ? 'Engines' : 'Enabled for'}
           trailing={
             // The vault re-delivers this definition to every enabled engine, so
             // only a shared row has anything to sync.
@@ -1103,7 +1490,11 @@ export function ProviderSheet({
               draws its separators with `divide-y`, so an empty wrapper would
               leave a stray rule under the last real row. */}
           {ENGINE_ORDER.filter(
-            (engine) => engine !== 'codex' || entry.engines.codex !== undefined
+            (engine) =>
+              (engine !== 'codex' || entry.engines.codex !== undefined) &&
+              // An API provider's rows are its deliveries (opencode, pi); Claude
+              // talks to Anthropic only, which the Claude page already says.
+              (engine !== 'claude' || !isApiShared)
           ).map((engine) => (
             <div key={engine}>{engineRow(engine)}</div>
           ))}
@@ -1111,54 +1502,77 @@ export function ProviderSheet({
         </SheetGroup>
 
         {curationAdapters.length > 0 && (
-          <div ref={modelsRef}>
-            <SheetGroup
-              testid={`${SHEET}.group`}
-              id="models"
+          <SheetGroup testid={`${SHEET}.group`} id="models" label="Models in the picker">
+            <SettingRow
+              testid={`${SHEET}.modelsSummary`}
               label="Models in the picker"
-              trailing={curationAdapters.map(({ engine }) => (
-                // The block's count, not the registry's: the same words the tab says.
-                <EngineChip
-                  key={engine}
-                  engine={engine}
-                  enabled
-                  label={`${engineMeta(engine).label} · ${curationCount(summaries[engine] ?? null)}`}
-                  testid={`${SHEET}.modelsEngine`}
-                />
-              ))}
+              description={modelsSummary()}
             >
-              {/* A shared provider both engines curate gets one list, split on request (ADR-074 §3). */}
-              {definition && curationAdapters.length === 2 ? (
-                <LinkedModelCuration
-                  testid={SHEET}
-                  providerName={entry.name}
-                  definition={definition}
-                  adapters={curationAdapters}
-                  engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
-                  onEngineChange={setCurationEngine}
-                  filterRef={filterRef}
-                  onSummary={onSummary}
-                  onWrote={onWrote}
-                />
-              ) : (
-                <ModelCuration
-                  testid={SHEET}
-                  providerName={entry.name}
-                  adapters={curationAdapters}
-                  engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
-                  onEngineChange={setCurationEngine}
-                  filterRef={filterRef}
-                  onSummary={onSummary}
-                  onWrote={onWrote}
-                />
-              )}
-            </SheetGroup>
-          </div>
+              <Button
+                variant="link"
+                testid={`${SHEET}.editModels`}
+                onClick={() => setModelsOpen(true)}
+              >
+                Edit models ›
+              </Button>
+            </SettingRow>
+          </SheetGroup>
         )}
 
         {endpointGroup()}
         {modelSetupGroup()}
       </SheetFrame>
+
+      {/* The curation editor (ADR-074 §2–3), stacked over the sheet rather than
+          embedded in it — a 382-row list is a place to go, not a section. */}
+      {modelsOpen && curationAdapters.length > 0 && (
+        <SheetFrame
+          testid={`${SHEET}.modelsSheet`}
+          dataId={entry.id}
+          title={`${entry.name} · models in the picker`}
+          onClose={() => setModelsOpen(false)}
+          footer={
+            <>
+              <span className="flex-1" />
+              <Button
+                variant="primary"
+                testid={`${SHEET}.modelsDone`}
+                onClick={() => setModelsOpen(false)}
+              >
+                Done
+              </Button>
+            </>
+          }
+        >
+          <SheetGroup testid={`${SHEET}.group`} id="curation" label="Models in the picker">
+            {/* A shared provider both engines curate gets one list, split on request (ADR-074 §3). */}
+            {definition && curationAdapters.length === 2 ? (
+              <LinkedModelCuration
+                testid={SHEET}
+                providerName={entry.name}
+                definition={definition}
+                adapters={curationAdapters}
+                engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
+                onEngineChange={setCurationEngine}
+                filterRef={filterRef}
+                onSummary={onSummary}
+                onWrote={onWrote}
+              />
+            ) : (
+              <ModelCuration
+                testid={SHEET}
+                providerName={entry.name}
+                adapters={curationAdapters}
+                engine={curates(curationEngine) ? curationEngine : curationAdapters[0].engine}
+                onEngineChange={setCurationEngine}
+                filterRef={filterRef}
+                onSummary={onSummary}
+                onWrote={onWrote}
+              />
+            )}
+          </SheetGroup>
+        </SheetFrame>
+      )}
 
       {endpointDraft && (
         <SheetFrame
@@ -1202,7 +1616,9 @@ export function ProviderSheet({
 
       {modelEditor === 'opencode' && (
         <OpencodeProviderConfigModal
-          providerId={nativeId}
+          providerId={
+            entry.origin === 'opencode-native' ? nativeId : (opencodeFacts?.providerId ?? nativeId)
+          }
           entry={opencodeEntry ?? undefined}
           onClose={() => {
             setModelEditor(null)

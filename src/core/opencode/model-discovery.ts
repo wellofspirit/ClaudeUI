@@ -226,6 +226,18 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
     // ONCE here rather than per entry: ~146 providers × three file reads would
     // otherwise hit the disk on every settings open.
     const ownership = await readProviderOwnership()
+    // A provider the user DECLARED as an endpoint (an adapter package or a base
+    // URL of its own in opencode's config) is a custom endpoint, not a catalog
+    // vendor — the one fact `source` cannot tell apart (a models.dev provider
+    // with a key in the config is `config` too).
+    const declaredEndpoints = new Set<string>()
+    try {
+      for (const [id, settings] of Object.entries(readOpencodeNativeConfig().providers ?? {})) {
+        if (settings.npm || settings.baseURL) declaredEndpoints.add(id)
+      }
+    } catch {
+      // opencode's own config files are optional.
+    }
 
     const entries = all.map((provider): OpencodeProviderCatalogEntry => {
       const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
@@ -252,6 +264,7 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
         // Anything reaching this branch came from GET /provider, which excludes
         // disabled ids outright — so these are all enabled by construction.
         disabled: false,
+        ...(declaredEndpoints.has(provider.id) ? { declaredEndpoint: true as const } : {}),
         ...describeProviderProvenance(provider.id, configured),
         actions: resolveProviderActions(
           buildActionInput(provider.id, isFree, configured, ownership)

@@ -201,10 +201,11 @@ describe('pi session-default model (Models & thinking pane)', () => {
     const row = screen
       .getAllByTestId('PiConfigPane.row')
       .find((el) => el.dataset.id === 'piConfig.modelAllowlist')!
-    // groq is curated but signed out right now — it still counts, in both.
+    // groq is curated but pi does not report it: it is not one of pi's
+    // providers, so it is counted apart rather than inflating "of m".
     await waitFor(() =>
       expect(row).toHaveTextContent(
-        'Curated per provider in Models & providers — 2 of 3 pi providers curated.'
+        'Curated per provider in Models & providers — 1 of 2 pi providers curated · 1 list for a provider pi no longer offers.'
       )
     )
 
@@ -260,6 +261,18 @@ describe('pi session-default model (Models & thinking pane)', () => {
     act(() => useSessionStore.getState().reloadModels())
     await waitFor(() => expect(getEngineModels.mock.calls.length).toBe(reads + 1))
     expect(getPiModelCatalogGroups.mock.calls.length).toBe(catalogReads + 1)
+  })
+
+  it('an EMPTY pi report is unknown — no list is called stale', async () => {
+    loadEngineConfig.mockResolvedValue({ piConfig: { modelAllowlist: { groq: ['llama-4'] } } })
+    getPiModelCatalogGroups.mockResolvedValue([])
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    const row = screen
+      .getAllByTestId('PiConfigPane.row')
+      .find((el) => el.dataset.id === 'piConfig.modelAllowlist')!
+    await waitFor(() => expect(row).toHaveTextContent('1 of 1 pi providers curated.'))
+    expect(row).not.toHaveTextContent('no longer offers')
   })
 
   it('counts nothing curated when there is no record', async () => {

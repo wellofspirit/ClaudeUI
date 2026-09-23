@@ -153,6 +153,19 @@ describe('catalog definitions', () => {
     expect(vended).toEqual(['pi:openrouter', 'opencode:openrouter'])
   })
 
+  it('a catalog route is never diagnosed as empty from its (empty) model list', async () => {
+    // `models: []` is the engines' catalogs' job, not a zero; counting it would
+    // label every enabled catalog route "the engine reported no models".
+    const { service, pi, opencode } = setup([chatgpt(), catalog()])
+    const status = await service.getStatus('openrouter')
+    for (const route of ['pi', 'opencode'] as const) {
+      expect(status.routes[route].modelCount).toBeUndefined()
+      expect(status.routes[route].diagnosis).toBeUndefined()
+    }
+    expect(pi.diagnoseZeroModels).not.toHaveBeenCalled()
+    expect(opencode.diagnoseZeroModels).not.toHaveBeenCalled()
+  })
+
   it('disabling pi removes only pi’s key', async () => {
     const { service, credentials, pi, opencode } = setup([chatgpt(), catalog()])
     credentials.set('openrouter', { type: 'api_key', key: KEY_A })
@@ -188,6 +201,18 @@ describe('catalog definitions', () => {
     )
   })
 
+  it('refuses to replace a stored catalog definition — no route loses its key that way', async () => {
+    const { service, records, pi, opencode } = setup([chatgpt(), catalog()])
+    records.set('openrouter', { ...catalog(), curation: { linked: true, models: ['a'] } })
+    await expect(service.saveDefinition(catalog('openrouter', { pi: false }))).rejects.toThrow(
+      /OpenRouter is already set up/
+    )
+    expect(records.get('openrouter')?.routes.pi.enabled).toBe(true)
+    expect(records.get('openrouter')?.curation).toEqual({ linked: true, models: ['a'] })
+    expect(pi.removeCredential).not.toHaveBeenCalled()
+    expect(opencode.removeCredential).not.toHaveBeenCalled()
+  })
+
   it('refuses to change an existing definition’s kind', async () => {
     const custom: SharedProviderDefinition = {
       ...catalog(),
@@ -204,7 +229,7 @@ describe('native-id collision guard', () => {
   it('refuses a catalog `openai` whose opencode route would land on ChatGPT’s `openai`', async () => {
     const { service, records, vended } = setup()
     await expect(service.saveDefinition(catalog('openai'))).rejects.toThrow(
-      /ChatGPT already delivers to opencode's "openai" provider/
+      /ChatGPT already uses opencode's "openai"\. Leave opencode unticked here, or turn opencode off for ChatGPT\./
     )
     expect(records.has('openai')).toBe(false)
     expect(vended).toEqual([])
@@ -223,7 +248,7 @@ describe('native-id collision guard', () => {
     await expect(service.setRouteEnabled('openai', 'opencode', true)).resolves.toBeUndefined()
     expect(records.get('openai')?.routes.opencode.enabled).toBe(true)
     await expect(service.setRouteEnabled('chatgpt', 'opencode', true)).rejects.toThrow(
-      /openai already delivers to opencode's "openai" provider/
+      /openai already uses opencode's "openai"/
     )
     expect(records.get('chatgpt')?.routes.opencode.enabled).toBe(false)
   })
@@ -234,7 +259,7 @@ describe('native-id collision guard', () => {
     codex.routes.pi = { enabled: true, providerId: 'openai-codex' }
     codex.routes.opencode = { enabled: false }
     await expect(service.saveDefinition(codex)).rejects.toThrow(
-      /ChatGPT already delivers to pi's "openai-codex" provider/
+      /ChatGPT already uses pi's "openai-codex"/
     )
   })
 })
@@ -297,6 +322,40 @@ describe('adoptNativeKeys (boot)', () => {
     })
     expect(opencode.vendApiKey).toHaveBeenCalledWith(expect.anything(), KEY_A)
     expect(await service.scanNativeKeys()).toEqual([])
+  })
+
+  it("keep='opencode' with nothing in pi: both routes on, and pi is delivered the key", async () => {
+    // "This key is only in opencode. Use it for both engines?" (ADR-074 §6).
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
+    const { service, records, pi } = setup()
+    await service.adoptNativeKey('openrouter', 'opencode')
+    expect(records.get('openrouter')?.routes).toEqual({
+      pi: { enabled: true },
+      opencode: { enabled: true }
+    })
+    expect(pi.vendApiKey).toHaveBeenCalledWith(expect.anything(), KEY_A)
+  })
+
+  it("keep='opencode' with pi holding its own credential for the vendor: pi stays off", async () => {
+    // pi's OAuth (or any key of its own) is never replaced without being asked.
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
+    const { service, records, pi } = setup()
+    vi.mocked(pi.hasCredential).mockResolvedValue(true)
+    await service.adoptNativeKey('openrouter', 'opencode')
+    expect(records.get('openrouter')?.routes).toEqual({
+      pi: { enabled: false },
+      opencode: { enabled: true }
+    })
+    expect(pi.vendApiKey).not.toHaveBeenCalled()
+  })
+
+  it('the boot pass never turns on an engine that held no key', async () => {
+    // Identical keys in both → both on; that is the only boot adoption. Here pi
+    // holds nothing, so there is no candidate at all.
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
+    const { service, records } = setup()
+    await service.adoptNativeKeys()
+    expect(records.has('openrouter')).toBe(false)
   })
 
   it('without keep, a conflict is refused', async () => {

@@ -201,8 +201,10 @@ describe('the rows', () => {
       .getAllByTestId('ProviderList.engine')
       .find((el) => el.dataset.id === 'codex')!
     expect(codex).toHaveTextContent('Codex')
-    expect(codex).toHaveAttribute('data-enabled', 'false')
-    expect(codex.className).toContain('opacity-50')
+    // The Subscriptions Engines row's pill (ADR-074 §7): dim, and it says "off".
+    expect(codex).toHaveAttribute('data-on', 'false')
+    expect(codex).toHaveTextContent('off')
+    expect(codex.className).toContain('opacity-60')
   })
 
   it('dims the chip of an engine the provider does not currently reach', async () => {
@@ -215,10 +217,10 @@ describe('the rows', () => {
       within(row('chatgpt'))
         .getAllByTestId('ProviderList.engine')
         .find((el) => el.dataset.id === engine)!
-    expect(chip('opencode')).toHaveAttribute('data-enabled', 'false')
-    expect(chip('opencode').className).toContain('opacity-50')
-    expect(chip('pi')).toHaveAttribute('data-enabled', 'true')
-    expect(chip('pi').className).not.toContain('opacity-50')
+    expect(chip('opencode')).toHaveAttribute('data-on', 'false')
+    expect(chip('opencode').className).toContain('opacity-60')
+    expect(chip('pi')).toHaveAttribute('data-on', 'true')
+    expect(chip('pi').className).not.toContain('opacity-60')
   })
 
   it('appends the diagnosis to the row line, naming the cause and the fix', async () => {
@@ -363,5 +365,72 @@ describe('the store’s provider-auth view', () => {
     await vi.waitFor(() =>
       expect(useSessionStore.getState().providerAuth.chatgpt).toBe('unauthenticated')
     )
+  })
+})
+
+describe('API provider rows (ADR-074 §7, mockup D)', () => {
+  const catalog: ProviderEntry = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    origin: 'shared',
+    credential: 'api-key',
+    kindLabel: 'Catalog',
+    detail: 'Catalog',
+    engines: {
+      opencode: { enabled: true, modelCount: 4, curated: true, catalogCount: 382 },
+      pi: { enabled: true, modelCount: 8, catalogCount: 8 }
+    }
+  }
+
+  const pill = (id: string, engine: string): HTMLElement =>
+    within(row(id))
+      .getAllByTestId('ProviderList.engine')
+      .find((el) => el.dataset.id === engine)!
+
+  it('subtitles the row with its kind and counts on the engine pills', async () => {
+    snapshot = { entries: [catalog], opencodeInstalled: true }
+    await renderList()
+    expect(row('openrouter')).toHaveTextContent('Catalog')
+    expect(pill('openrouter', 'opencode')).toHaveTextContent('opencode4 of 382')
+    expect(pill('openrouter', 'pi')).toHaveTextContent('piall 8')
+  })
+
+  it('marks a key conflict and a failed delivery on the row', async () => {
+    snapshot = {
+      entries: [
+        { ...openrouter, keyConflict: { opencode: '…a41f', pi: '…09c2' } },
+        {
+          ...catalog,
+          engines: { ...catalog.engines, pi: { enabled: true, error: 'permission denied' } }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await renderList()
+    expect(
+      within(row('opencode:openrouter')).getByTestId('ProviderList.keyConflict')
+    ).toHaveTextContent('2 different keys')
+    expect(within(row('openrouter')).getByTestId('ProviderList.deliveryFailed')).toHaveTextContent(
+      'Not delivered to pi'
+    )
+  })
+
+  it('follows an adopted native row to the shared definition it became', async () => {
+    snapshot = { entries: [{ ...openrouter, adoptable: 'opencode' }], opencodeInstalled: true }
+    app.bridge.ipcMain.handle('shared-provider:adopt-native', async () => {
+      snapshot = { entries: [catalog], opencodeInstalled: true }
+    })
+    await renderList()
+    await act(async () => {
+      fireEvent.click(
+        screen
+          .getAllByTestId('ProviderList.manage')
+          .find((el) => el.dataset.id === 'opencode:openrouter')!
+      )
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ProviderSheet.adopt'))
+    })
+    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'openrouter')
   })
 })

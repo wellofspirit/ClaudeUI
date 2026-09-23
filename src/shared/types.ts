@@ -704,6 +704,11 @@ export interface OpencodeProviderCatalogEntry {
   source?: OpencodeProviderSource
   /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
   envVarNames?: string[]
+  /**
+   * Declared in opencode's config with its own adapter package or base URL — a
+   * custom endpoint rather than a catalog vendor (ADR-074 §7's subtitle).
+   */
+  declaredEndpoint?: true
   /** Which row actions are legitimately available. See provider-actions.ts. */
   actions: ProviderActions
   /**

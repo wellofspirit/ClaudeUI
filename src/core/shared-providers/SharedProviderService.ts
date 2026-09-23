@@ -55,7 +55,10 @@ export interface NativeKeyAdoptionDeps {
    * name. Only called once a vendor holds a key in an engine, because opencode's
    * catalog costs a server spawn.
    */
-  loadCatalogs(): Promise<{ pi: ReadonlySet<string>; opencode: ReadonlyMap<string, string> }>
+  loadCatalogs(options?: {
+    /** The caller already holds opencode's catalog: do not fetch it. */
+    skipOpencode?: boolean
+  }): Promise<{ pi: ReadonlySet<string>; opencode: ReadonlyMap<string, string> }>
 }
 
 /**
@@ -151,6 +154,14 @@ export class SharedProviderService {
       // provider block, or a native key) owned by nobody.
       if (previous && previous.kind !== definition.kind)
         throw new Error(`Provider "${definition.id}" is already a ${previous.kind} provider`)
+      // A catalog definition is only ever CREATED by a save: its routes change
+      // through `setRouteEnabled` and its list through `setCuration`. Replacing a
+      // stored one wholesale would turn off a route (removing that engine's key)
+      // and drop its curation — the Add sheet re-adding it must not do that.
+      if (previous && definition.kind === 'catalog')
+        throw new Error(
+          `${previous.name} is already set up. Change its engines or key in its Manage sheet.`
+        )
       // Fail fast (M-AT4): a custom provider whose effective pi providerId
       // collides with a built-in native vendor (e.g. 'anthropic') would vend its
       // key over — and delete on removal — the user's real native pi credential.
@@ -571,6 +582,17 @@ export class SharedProviderService {
     error?: string
   ): Promise<SharedProviderStatus['routes'][Route]> {
     const enabled = definition.routes[route].enabled
+    // A catalog definition lists no models — each engine's own catalog does — so
+    // `definition.models` has nothing to count, and a zero there would diagnose
+    // every enabled catalog route as empty. The registry counts it from the
+    // engine's catalog instead.
+    if (definition.kind === 'catalog') {
+      return {
+        enabled,
+        delivered: enabled && configured && credential,
+        ...(error ? { error } : {})
+      }
+    }
     const modelCount = models.filter(
       (model) =>
         model.harnessOverrides?.[route]?.available !== false &&
@@ -645,7 +667,7 @@ export class SharedProviderService {
         )
       if (other) {
         throw new Error(
-          `${other.name} already delivers to ${route}'s "${nativeId}" provider; turn its ${route} route off first`
+          `${other.name} already uses ${route}'s "${nativeId}". Leave ${route} unticked here, or turn ${route} off for ${other.name}.`
         )
       }
     }
@@ -684,7 +706,13 @@ export class SharedProviderService {
    * and both engines' catalogs know. The keys are compared here, in the main
    * process; what comes back is a verdict and, for a conflict, last-four hints.
    */
-  async scanNativeKeys(): Promise<NativeKeyCandidate[]> {
+  async scanNativeKeys(
+    /**
+     * opencode's catalog as the caller already read it (the registry has), so a
+     * cold catalog is not fetched twice. pi's catalog is a constant list.
+     */
+    preloaded?: { opencode: ReadonlyMap<string, string> }
+  ): Promise<NativeKeyCandidate[]> {
     const native = this.deps.nativeKeys
     if (!native) return []
     const inPi = new Set(native.pi.listApiKeyVendorIds())
@@ -692,7 +720,8 @@ export class SharedProviderService {
       .listApiKeyVendorIds()
       .filter((id) => inPi.has(id) && isProviderId(id) && !this.claimsVendor(id))
     if (shared.length === 0) return []
-    const catalogs = await native.loadCatalogs()
+    const loaded = await native.loadCatalogs(preloaded ? { skipOpencode: true } : undefined)
+    const catalogs = preloaded ? { ...loaded, opencode: preloaded.opencode } : loaded
     const out: NativeKeyCandidate[] = []
     for (const id of shared) {
       if (!catalogs.pi.has(id) || !catalogs.opencode.has(id)) continue
@@ -706,6 +735,19 @@ export class SharedProviderService {
       )
     }
     return out
+  }
+
+  /**
+   * The vendor ids each engine holds a PLAIN API key for — exactly what
+   * {@link adoptNativeKey} can adopt from that engine. Ids only; no key leaves.
+   */
+  listPlainApiKeyVendorIds(): Record<Route, string[]> {
+    const native = this.deps.nativeKeys
+    if (!native) return { pi: [], opencode: [] }
+    return {
+      pi: native.pi.listApiKeyVendorIds(),
+      opencode: native.opencode.listApiKeyVendorIds()
+    }
   }
 
   /**
@@ -741,6 +783,11 @@ export class SharedProviderService {
    * engine's key wins (a conflict, or a key only one engine holds); without it,
    * both engines must hold the same key.
    *
+   * With `keep`, an engine that holds NO key of its own for the vendor is turned
+   * on too, when its catalog knows the vendor — "use it for both engines". One
+   * that holds any other credential for it (an OAuth sign-in) is left off: its
+   * credential is never replaced without being asked.
+   *
    * The key is read and compared HERE, in the main process, and goes to the
    * vault and the engines' own stores only. Nothing about it is logged or
    * returned.
@@ -768,16 +815,35 @@ export class SharedProviderService {
         key = keys.pi
       }
       const catalogs = await native.loadCatalogs()
-      const enabled = (route: Route): boolean =>
-        keys[route] !== null && (route === 'pi' ? catalogs.pi : catalogs.opencode).has(id)
-      if (keep && !enabled(keep)) throw new Error(`${keep} does not know a provider "${id}"`)
-      const definition: SharedProviderDefinition = {
+      const knows = (route: Route): boolean =>
+        (route === 'pi' ? catalogs.pi : catalogs.opencode).has(id)
+      if (keep && !(keys[keep] !== null && knows(keep)))
+        throw new Error(`${keep} does not know a provider "${id}"`)
+      const draft: SharedProviderDefinition = {
         id,
         name: catalogs.opencode.get(id) || id,
         kind: 'catalog',
         models: [],
         managed: true,
-        routes: { pi: { enabled: enabled('pi') }, opencode: { enabled: enabled('opencode') } }
+        routes: { pi: { enabled: true }, opencode: { enabled: true } }
+      }
+      // An engine that holds a plain key takes the kept one (a conflict is
+      // resolved by replacing it). One with nothing at all for the vendor gets
+      // it too, but only with `keep`: without it, adoption is the boot pass,
+      // which never touches an engine the user did not set up.
+      const enabled = async (route: Route): Promise<boolean> => {
+        if (!knows(route)) return false
+        if (keys[route] !== null) return true
+        if (!keep) return false
+        const other = route === 'pi' ? this.deps.pi : this.deps.opencode
+        return !(await other.hasCredential(draft))
+      }
+      const definition: SharedProviderDefinition = {
+        ...draft,
+        routes: {
+          pi: { enabled: await enabled('pi') },
+          opencode: { enabled: await enabled('opencode') }
+        }
       }
       this.assertNoNativeIdCollision(definition)
       await this.deps.vault.saveCredential(id, { type: 'api_key', key })

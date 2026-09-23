@@ -62,6 +62,24 @@ export interface ProviderEngineFacts {
    * native entry, so it has none.
    */
   providerId?: string
+  /**
+   * How many models the engine's own catalog lists for this provider, when a
+   * source can say without a discovery pass — the "of m" in `4 of 382`.
+   */
+  catalogCount?: number
+  /** A shared route's last delivery failure (`SharedProviderStatus`), for the engine row. */
+  error?: string
+  /**
+   * An ENABLED shared route: whether the engine's own store actually holds the
+   * credential now (`SharedProviderStatus.routes[r].delivered`). A route with no
+   * error can still be undelivered — the file was changed outside ClaudeUI.
+   */
+  delivered?: boolean
+  /**
+   * A DISABLED catalog route whose engine holds its OWN credential for the
+   * vendor: turning the route on replaces it with the stored key.
+   */
+  ownCredential?: true
 }
 
 export interface ProviderEntry {
@@ -73,6 +91,25 @@ export interface ProviderEntry {
   engines: Partial<Record<EngineId, ProviderEngineFacts>>
   /** One line under the name, e.g. `"2 of 300 models shown in the picker"`. */
   detail?: string
+  /**
+   * What KIND of provider this is, as the API-providers list subtitles it
+   * (ADR-074 §7): `Catalog`, `Catalog · free tier`, `Custom endpoint · <url>`,
+   * `Custom pi provider`. Absent on subscriptions, which have their own cards.
+   */
+  kindLabel?: string
+  /**
+   * Both engines hold their OWN, DIFFERENT key for this vendor and no shared
+   * definition owns it (ADR-074 §6): set on both native rows until the user
+   * keeps one. Last four characters of each and nothing more — the keys are
+   * compared in the main process and never cross the wire.
+   */
+  keyConflict?: { opencode: string; pi: string }
+  /**
+   * An API key only this engine holds, for a vendor the OTHER engine's catalog
+   * also knows: adopting it (`shared-provider:adopt-native` with this engine as
+   * `keep`) delivers it to both.
+   */
+  adoptable?: 'opencode' | 'pi'
   /**
    * A sign-in SUBSCRIPTION rather than an API provider (ADR-074 §7): the
    * Anthropic row and every shared `kind: 'subscription'` definition. The

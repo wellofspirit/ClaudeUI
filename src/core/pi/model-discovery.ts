@@ -256,6 +256,18 @@ export function peekPiModels(): EngineModelGroup[] | null {
   return cachedGroups
 }
 
+/**
+ * Models per provider in the ALREADY-WARM unfiltered catalog, or null on a cold
+ * cache. Never spawns the probe — the provider registry reads it on every
+ * settings open, and a missing count is "unknown", not a reason to start pi.
+ */
+export function peekPiCatalogCounts(): Record<string, number> | null {
+  if (!cachedCatalog) return null
+  const counts: Record<string, number> = {}
+  for (const model of cachedCatalog) counts[model.provider] = (counts[model.provider] ?? 0) + 1
+  return counts
+}
+
 /** Invalidate the model discovery cache (call on auth/config change — M3). */
 export function invalidatePiModelCache(): void {
   cachedCatalog = null

@@ -145,8 +145,23 @@ describe('dedupe — a shared definition owns the native row it routes to', () =
     expect(snapshot.entries.map((entry) => entry.id)).toEqual(['anthropic', 'chatgpt'])
     expect(byId(snapshot, 'chatgpt').engines).toEqual({
       // The id each engine's catalog and allowlist key the provider by.
-      pi: { enabled: true, providerId: 'openai-codex', modelCount: 4, native: true },
-      opencode: { enabled: true, providerId: 'openai', modelCount: 300, native: true },
+      // `catalogCount` is the "of m" an engine pill shows (ADR-074 §7).
+      pi: {
+        enabled: true,
+        providerId: 'openai-codex',
+        modelCount: 4,
+        catalogCount: 4,
+        native: true,
+        delivered: true
+      },
+      opencode: {
+        enabled: true,
+        providerId: 'openai',
+        modelCount: 300,
+        catalogCount: 300,
+        native: true,
+        delivered: true
+      },
       // Injection, not a route — and no account is stored here.
       codex: { enabled: false }
     })
@@ -502,6 +517,7 @@ describe('engine facts', () => {
       enabled: true,
       providerId: 'openrouter',
       modelCount: 300,
+      catalogCount: 300,
       native: true
     })
     expect(byId(snapshot, 'opencode:openrouter').detail).toBeUndefined()
@@ -769,7 +785,9 @@ describe('opencode not installed', () => {
     expect(byId(snapshot, 'chatgpt').engines.opencode).toEqual({
       enabled: true,
       providerId: 'openai',
-      modelCount: 6
+      modelCount: 6,
+      catalogCount: 6,
+      delivered: true
     })
   })
 
@@ -974,5 +992,223 @@ describe('the Codex chip on the ChatGPT row (F14)', () => {
       if (entry.id === 'chatgpt') continue
       expect(entry.engines.codex).toBeUndefined()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-074 §6–7 — one key per provider, API providers
+// ---------------------------------------------------------------------------
+
+describe('catalog definitions and key sharing (ADR-074 §6–7)', () => {
+  const openrouter: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+  const catalogStatus = (connected: boolean): SharedProviderStatus => ({
+    id: 'openrouter',
+    connected,
+    routes: {
+      pi: { enabled: true, delivered: connected },
+      opencode: { enabled: true, delivered: connected }
+    }
+  })
+  const PI_API = { openrouter: [{ type: 'api' as const, label: 'API key' }] }
+
+  it('a catalog definition reads Catalog, with an api-key credential only when the vault holds one', () => {
+    const withKey = buildProviderRegistry(
+      sources({
+        definitions: [openrouter],
+        statuses: [catalogStatus(true)],
+        opencodeCatalog: [catalogEntry({ id: 'openrouter', name: 'OpenRouter', modelCount: 382 })],
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: PI_API
+      })
+    )
+    const row = byId(withKey, 'openrouter')
+    expect(row).toMatchObject({ credential: 'api-key', kindLabel: 'Catalog', detail: 'Catalog' })
+    expect(row.detail).not.toMatch(/subscription/)
+    expect(row.subscription).toBeUndefined()
+    // It absorbs both native rows (the existing dedupe).
+    expect(withKey.entries.map((entry) => entry.id)).toEqual(['anthropic', 'openrouter'])
+    expect(row.engines.opencode).toMatchObject({ modelCount: 382, catalogCount: 382 })
+
+    const without = buildProviderRegistry(
+      sources({ definitions: [openrouter], statuses: [catalogStatus(false)] })
+    )
+    expect(byId(without, 'openrouter').credential).toBe('none')
+  })
+
+  it('a custom endpoint is subtitled with its base URL', () => {
+    const snapshot = buildProviderRegistry(
+      sources({ definitions: [localCustom], statuses: [status({ id: 'ollama-local' })] })
+    )
+    // The route default model stays on the line, after the kind.
+    expect(byId(snapshot, 'ollama-local').kindLabel).toBe(
+      'Custom endpoint · http://localhost:11434 · qwen3.8-27b'
+    )
+  })
+
+  it('carries a shared route’s delivery error onto its engine facts', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [openrouter],
+        statuses: [
+          {
+            ...catalogStatus(true),
+            routes: {
+              pi: { enabled: true, delivered: false, error: 'permission denied' },
+              opencode: { enabled: true, delivered: true }
+            }
+          }
+        ]
+      })
+    )
+    expect(byId(snapshot, 'openrouter').engines.pi?.error).toBe('permission denied')
+    expect(byId(snapshot, 'openrouter').engines.opencode?.error).toBeUndefined()
+  })
+
+  it('marks BOTH native rows of a key conflict, with the hints and nothing else', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [catalogEntry({ id: 'openrouter', name: 'OpenRouter' })],
+        opencodeCredentialKinds: { openrouter: 'api' },
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: PI_API,
+        keyConflicts: { openrouter: { opencode: '…a41f', pi: '…09c2' } }
+      })
+    )
+    for (const id of ['opencode:openrouter', 'pi:openrouter']) {
+      expect(byId(snapshot, id).keyConflict).toEqual({ opencode: '…a41f', pi: '…09c2' })
+      expect(byId(snapshot, id).adoptable).toBeUndefined()
+    }
+  })
+
+  it('offers adoption for a key only one engine holds, when the other engine knows the vendor', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter' }),
+          catalogEntry({ id: 'groq', name: 'Groq', authState: 'unauthenticated' }),
+          catalogEntry({ id: 'zen-only', name: 'Zen only' })
+        ],
+        opencodeCredentialKinds: { openrouter: 'api', 'zen-only': 'api' },
+        piVendors: { groq: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: { ...PI_API, groq: [{ type: 'api', label: 'API key' }] },
+        plainApiKeys: { opencode: ['openrouter', 'zen-only'], pi: ['groq'] }
+      })
+    )
+    expect(byId(snapshot, 'opencode:openrouter').adoptable).toBe('opencode')
+    expect(byId(snapshot, 'pi:groq').adoptable).toBe('pi')
+    // pi's catalog has no `zen-only`: nothing to deliver it to.
+    expect(byId(snapshot, 'opencode:zen-only').adoptable).toBeUndefined()
+  })
+
+  it('offers adoption only where the service would accept it', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter' }),
+          catalogEntry({ id: 'mistral', name: 'Mistral', authState: 'unauthenticated' })
+        ],
+        // opencode's entry is `wellknown` — a client id, not a plain key.
+        opencodeCredentialKinds: { openrouter: 'api' },
+        // pi holds a key for `mistral`, but pi ships no API-key option for it.
+        piVendors: { mistral: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: PI_API,
+        plainApiKeys: { opencode: [], pi: ['mistral'] }
+      })
+    )
+    expect(byId(snapshot, 'opencode:openrouter').adoptable).toBeUndefined()
+    expect(byId(snapshot, 'pi:mistral').adoptable).toBeUndefined()
+  })
+
+  it('a disabled catalog route says when the engine holds its own key there', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [
+          { ...openrouter, routes: { pi: { enabled: false }, opencode: { enabled: true } } }
+        ],
+        statuses: [catalogStatus(true)],
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } }
+      })
+    )
+    expect(byId(snapshot, 'openrouter').engines.pi).toEqual({ enabled: false, ownCredential: true })
+  })
+
+  it('counts a catalog definition’s pi models from the WARM pi catalog, never spawning', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [openrouter],
+        statuses: [catalogStatus(true)],
+        piCatalogCounts: { openrouter: 386 }
+      })
+    )
+    expect(byId(snapshot, 'openrouter').engines.pi).toMatchObject({
+      modelCount: 386,
+      catalogCount: 386
+    })
+    const cold = buildProviderRegistry(
+      sources({ definitions: [openrouter], statuses: [catalogStatus(true)], piCatalogCounts: null })
+    )
+    expect(byId(cold, 'openrouter').engines.pi?.modelCount).toBeUndefined()
+  })
+
+  it('carries whether an enabled route is actually delivered', () => {
+    const snapshot = buildProviderRegistry(
+      sources({ definitions: [openrouter], statuses: [catalogStatus(false)] })
+    )
+    expect(byId(snapshot, 'openrouter').engines.opencode?.delivered).toBe(false)
+  })
+
+  it('subtitles an opencode config-declared endpoint as a custom endpoint', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [catalogEntry({ id: 'spark', name: 'Spark', declaredEndpoint: true })]
+      })
+    )
+    expect(byId(snapshot, 'opencode:spark').kindLabel).toBe('Custom endpoint')
+  })
+
+  it('never offers adoption for OAuth, or for a vendor a definition already claims', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [
+          { ...openrouter, routes: { pi: { enabled: false }, opencode: { enabled: false } } }
+        ],
+        statuses: [catalogStatus(false)],
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter' }),
+          catalogEntry({ id: 'github-copilot', name: 'GitHub Copilot' })
+        ],
+        opencodeCredentialKinds: { openrouter: 'api', 'github-copilot': 'oauth' },
+        piAuthOptions: { ...PI_API, 'github-copilot': [{ type: 'api', label: 'API key' }] }
+      })
+    )
+    expect(byId(snapshot, 'opencode:openrouter').adoptable).toBeUndefined()
+    expect(byId(snapshot, 'opencode:github-copilot').adoptable).toBeUndefined()
+  })
+
+  it('subtitles native rows by kind', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'opencode', name: 'OpenCode Zen', authState: 'free' }),
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter' })
+        ],
+        piVendors: {
+          groq: { authState: 'authenticated', billingType: 'apiKey' },
+          spark: { authState: 'authenticated', billingType: 'apiKey' }
+        },
+        piAuthOptions: { groq: [{ type: 'api', label: 'API key' }] }
+      })
+    )
+    expect(byId(snapshot, 'opencode:opencode').kindLabel).toBe('Catalog · free tier')
+    expect(byId(snapshot, 'opencode:openrouter').kindLabel).toBe('Catalog')
+    expect(byId(snapshot, 'pi:groq').kindLabel).toBe('Catalog')
+    expect(byId(snapshot, 'pi:spark').kindLabel).toBe('Custom pi provider')
   })
 })
