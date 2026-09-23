@@ -532,6 +532,7 @@ const api: ClaudeAPI = {
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
   setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
+  adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>

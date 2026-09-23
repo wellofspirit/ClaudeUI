@@ -178,8 +178,11 @@ export class PiSharedProviderAdapter {
   }
 
   async vendApiKey(definition: SharedProviderDefinition, key: string): Promise<void> {
-    if (definition.kind !== 'custom') {
-      throw new Error('Pi API keys are only supported for custom providers')
+    // A catalog provider's key lands on the built-in vendor id it names — that
+    // is the point of it (ADR-074 §6) — so the built-in collision guard below
+    // stays custom-only. ChatGPT is OAuth and never takes a key.
+    if (definition.kind === 'subscription') {
+      throw new Error('Pi API keys are only supported for custom and catalog providers')
     }
     if (!definition.routes.pi.enabled) return
     assertNoPiBuiltinCollision(definition)

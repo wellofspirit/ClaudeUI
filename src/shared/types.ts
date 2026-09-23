@@ -1556,6 +1556,11 @@ interface SharedProviderAPI {
     enabled: boolean
   ): Promise<void>
   setSharedProviderApiKey(id: string, key: string): Promise<void>
+  /**
+   * Adopt a key an engine already holds into a catalog definition (ADR-074 §6).
+   * `keep` names the engine whose key wins; omitted, both must hold the same key.
+   */
+  adoptSharedProviderNativeKey(id: string, keep?: ConfigurableHarnessId): Promise<void>
   syncSharedProvider(id: string): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(

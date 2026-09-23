@@ -106,3 +106,43 @@ describe('SharedProviderRepository nested validation', () => {
     ).toThrow(/models/)
   })
 })
+
+describe('SharedProviderRepository — catalog kind (ADR-074 §6)', () => {
+  const catalog = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog' as const,
+    models: [],
+    managed: true as const,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  it('validates, round-trips, and list() keeps it', () => {
+    const repo = new SharedProviderRepository()
+    repo.save(catalog)
+    expect(repo.get('openrouter')).toEqual(catalog)
+    // list() silently drops a file validation rejects — the trap a new kind falls into.
+    expect(new SharedProviderRepository().list().map((p) => p.id)).toContain('openrouter')
+  })
+
+  it('rejects an endpoint or a model list on a catalog definition', () => {
+    const repo = new SharedProviderRepository()
+    expect(() => repo.save({ ...catalog, baseUrl: 'https://openrouter.ai/api/v1' })).toThrow(
+      /Catalog providers take no protocol, baseUrl or models/
+    )
+    expect(() => repo.save({ ...catalog, protocol: 'openai-completions' })).toThrow(/Catalog/)
+    expect(() => repo.save({ ...catalog, models: [{ id: 'm' }] })).toThrow(/Catalog/)
+    // A hand-edited file with an endpoint is skipped, not half-trusted.
+    repo.save(catalog)
+    writeFileSync(
+      sharedProviderPath('openrouter'),
+      JSON.stringify({ ...catalog, baseUrl: 'https://x' })
+    )
+    expect(repo.get('openrouter')).toBeNull()
+  })
+
+  it('still rejects an unknown kind', () => {
+    const repo = new SharedProviderRepository()
+    expect(() => repo.save({ ...catalog, kind: 'mystery' as never })).toThrow(/kind/)
+  })
+})

@@ -520,3 +520,31 @@ function compiledProvider() {
     ]
   }
 }
+
+describe('PiSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
+  const catalog: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  it('vends the key onto the built-in vendor id it names — no collision refusal', async () => {
+    const subject = adapter()
+    await subject.vendApiKey(catalog, 'sk-or')
+    expect(auth.setVendorApiKey).toHaveBeenCalledWith('openrouter', 'sk-or')
+    // …and removing it removes that vendor's entry, which a custom collision may not.
+    await subject.removeCredential(catalog)
+    expect(auth.removeVendorAuth).toHaveBeenCalledWith('openrouter')
+  })
+
+  it('projects nothing into models.json', () => {
+    const subject = adapter()
+    subject.applyDefinition(catalog)
+    subject.removeDefinition(catalog)
+    expect(() => readModels()).toThrow()
+    expect(subject.hasDefinition(catalog)).toBe(true)
+  })
+})

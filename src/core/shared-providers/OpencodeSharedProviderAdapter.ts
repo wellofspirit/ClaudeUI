@@ -82,8 +82,11 @@ export class OpencodeSharedProviderAdapter {
     return 'no-models-discovered'
   }
 
+  // Only a CUSTOM definition projects a provider block into opencode's config.
+  // ChatGPT and a catalog provider (ADR-074 §6) name one opencode already knows,
+  // so there is nothing of ours to write, collide with, or remove — only a key.
   inspectCollision(definition: SharedProviderDefinition): boolean {
-    if (definition.kind === 'subscription') return false
+    if (definition.kind !== 'custom') return false
     return this.readConfig().providers?.[opencodeProviderId(definition)] !== undefined
   }
 
@@ -92,7 +95,7 @@ export class OpencodeSharedProviderAdapter {
     previouslyManaged = false,
     previousDefinition
   }: ApplyOpencodeSharedProviderInput): void {
-    if (definition.kind === 'subscription') return
+    if (definition.kind !== 'custom') return
     if (!definition.routes.opencode.enabled) {
       this.removeDefinitionRoute(previousDefinition ?? definition)
       return
@@ -142,7 +145,7 @@ export class OpencodeSharedProviderAdapter {
 
   /** Remove the exact native definition compiled from the prior shared definition. */
   removeDefinitionRoute(previousDefinition: SharedProviderDefinition): void {
-    if (previousDefinition.kind === 'subscription') return
+    if (previousDefinition.kind !== 'custom') return
 
     const providerId = opencodeProviderId(previousDefinition)
     const current = this.readConfig()

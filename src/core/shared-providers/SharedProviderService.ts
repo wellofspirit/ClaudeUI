@@ -2,16 +2,23 @@ import type { VaultCredentialRecord } from '../auth/vault/AuthVault'
 import type { CredentialSync } from '../auth/vault/CredentialSync'
 import { readOpencodeNativeConfig, writeOpencodeNativeConfig } from '../opencode/opencode-config'
 import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition,
-  SharedProviderModel,
-  SharedProviderRouteDiagnosis,
-  SharedProviderStatus
+import { logger } from '../services/logger'
+import {
+  validateSharedProviderId,
+  type ConfigurableHarnessId,
+  type SharedProviderDefinition,
+  type SharedProviderModel,
+  type SharedProviderRouteDiagnosis,
+  type SharedProviderStatus
 } from '../../shared/shared-provider'
-import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
-import { PiSharedProviderAdapter, isPiBuiltinCollision } from './PiSharedProviderAdapter'
+import { OpencodeSharedProviderAdapter, opencodeProviderId } from './OpencodeSharedProviderAdapter'
+import {
+  PiSharedProviderAdapter,
+  isPiBuiltinCollision,
+  nativeProviderId
+} from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
+import { keyHint, type NativeApiKeyReader } from './native-api-keys'
 
 type Route = ConfigurableHarnessId
 const routes: Route[] = ['pi', 'opencode']
@@ -33,6 +40,30 @@ export interface SharedProviderDefaultTargets {
   getOpencodeDefault(): string | undefined
   setOpencodeDefault(value: string | undefined): void
 }
+/**
+ * What adopting an engine's own API key needs (ADR-074 §6). Absent, adoption
+ * finds nothing — the service still works, it just never migrates.
+ */
+export interface NativeKeyAdoptionDeps {
+  pi: NativeApiKeyReader
+  opencode: NativeApiKeyReader
+  /**
+   * The vendor ids each engine's BUILT-IN catalog knows, with opencode's display
+   * name. Only called once a vendor holds a key in an engine, because opencode's
+   * catalog costs a server spawn.
+   */
+  loadCatalogs(): Promise<{ pi: ReadonlySet<string>; opencode: ReadonlyMap<string, string> }>
+}
+
+/**
+ * A vendor whose API key both engines hold natively and no definition shares.
+ * `identical` is adopted at boot without asking; `conflict` waits for the user
+ * to pick one, and carries only the last four characters of each key.
+ */
+export type NativeKeyCandidate =
+  | { id: string; state: 'identical' }
+  | { id: string; state: 'conflict'; hints: Record<Route, string> }
+
 export interface SharedProviderServiceDeps {
   repository?: Repository
   vault: Vault
@@ -41,6 +72,7 @@ export interface SharedProviderServiceDeps {
   credentialSync: Pick<CredentialSync, 'feedAll' | 'disconnectChatgpt'>
   defaults?: SharedProviderDefaultTargets
   getChatgptModels?: () => Promise<SharedProviderModel[]>
+  nativeKeys?: NativeKeyAdoptionDeps
 }
 
 /** Serializes shared-provider RMW across definitions, vault credentials, and native routes. */
@@ -97,13 +129,19 @@ export class SharedProviderService {
   async saveDefinition(definition: SharedProviderDefinition): Promise<void> {
     await this.enqueue(async () => {
       const previous = this.repository.get(definition.id)
+      this.assertNoNativeIdCollision(definition)
       if (definition.id === 'chatgpt') {
         this.repository.save(definition)
         this.clearCompetingDefaults(definition)
         await this.syncChatgpt(await this.withCatalogModels(definition))
         return
       }
-      if (definition.kind !== 'custom') throw new Error('Only custom providers can be saved')
+      if (definition.kind === 'subscription')
+        throw new Error('Only custom and catalog providers can be saved')
+      // A kind change would leave the old kind's native state (a projected
+      // provider block, or a native key) owned by nobody.
+      if (previous && previous.kind !== definition.kind)
+        throw new Error(`Provider "${definition.id}" is already a ${previous.kind} provider`)
       // Fail fast (M-AT4): a custom provider whose effective pi providerId
       // collides with a built-in native vendor (e.g. 'anthropic') would vend its
       // key over — and delete on removal — the user's real native pi credential.
@@ -129,7 +167,7 @@ export class SharedProviderService {
         this.rollbackDefinition(definition, previous, applied)
         throw error
       }
-      await this.reconcileCustomCredentials(definition)
+      await this.reconcileCustomCredentials(definition, previous)
       for (const route of routes) this.applyDefault(definition, route, previous ?? definition)
     })
   }
@@ -141,8 +179,9 @@ export class SharedProviderService {
       this.deps.pi.removeDefinition(definition)
       this.deps.opencode.removeDefinitionRoute(definition)
       await Promise.all([
-        this.deps.pi.removeCredential(definition),
-        this.deps.opencode.removeCredential(definition),
+        ...this.credentialRoutes(definition).map((route) =>
+          this.removeRouteCredential(definition, route)
+        ),
         this.deps.vault.removeCredential(id)
       ])
       for (const route of routes) this.clearOwnedDefault(definition, route)
@@ -156,6 +195,7 @@ export class SharedProviderService {
       const previous = this.requireDefinition(id)
       if (previous.routes[route].enabled === enabled) return
       const definition = withRoute(previous, route, { enabled })
+      if (enabled) this.assertNoNativeIdCollision(definition, route)
       if (!enabled) {
         this.repository.save(definition) // CredentialSync must observe disabled before native removal.
         try {
@@ -218,11 +258,11 @@ export class SharedProviderService {
   async setApiKey(id: string, key: string): Promise<void> {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)
-      if (definition.kind !== 'custom')
-        throw new Error('API keys are only supported for custom providers')
+      if (definition.kind === 'subscription')
+        throw new Error('API keys are only supported for custom and catalog providers')
       if (!key) throw new Error('API key is required')
       await this.deps.vault.saveCredential(id, { type: 'api_key', key })
-      await this.reconcileCustomCredentials(definition)
+      await this.reconcileCustomCredentials(definition, definition)
     })
   }
 
@@ -257,10 +297,11 @@ export class SharedProviderService {
         }
         return
       }
+      const owned = new Set(this.credentialRoutes(definition))
       const results = await Promise.allSettled([
         this.deps.vault.removeCredential(id),
-        this.deps.pi.removeCredential(definition),
-        this.deps.opencode.removeCredential(definition)
+        owned.has('pi') ? this.deps.pi.removeCredential(definition) : Promise.resolve(),
+        owned.has('opencode') ? this.deps.opencode.removeCredential(definition) : Promise.resolve()
       ])
       const failures: unknown[] = []
       const centralFailure = results[0].status === 'rejected' ? results[0].reason : undefined
@@ -284,6 +325,10 @@ export class SharedProviderService {
   async setRouteDefaultModel(id: string, route: Route, modelId: string | undefined): Promise<void> {
     await this.enqueue(async () => {
       const previous = this.requireDefinition(id)
+      // A catalog definition lists no models — the engines' own catalogs do —
+      // so there is nothing here to name as a route default.
+      if (previous.kind === 'catalog' && modelId)
+        throw new Error('Catalog providers take their default model from each engine')
       const models = await this.listProviderModels(id)
       const model = modelId ? models.find((candidate) => candidate.id === modelId) : undefined
       if (
@@ -330,7 +375,7 @@ export class SharedProviderService {
       try {
         this.applyRoute(definition, definition, route)
         if (definition.routes[route].enabled) await this.vendRouteCredential(definition, route)
-        else await this.removeRouteCredential(definition, route)
+        else if (definition.kind !== 'catalog') await this.removeRouteCredential(definition, route)
       } catch (error) {
         failed = true
         this.recordError(definition.id, route, error)
@@ -355,12 +400,16 @@ export class SharedProviderService {
       throw new AggregateError(failures, `Failed to sync shared provider ${definition.id}`)
   }
 
-  private async reconcileCustomCredentials(definition: SharedProviderDefinition): Promise<void> {
+  private async reconcileCustomCredentials(
+    definition: SharedProviderDefinition,
+    previous: SharedProviderDefinition | null
+  ): Promise<void> {
     const failures: unknown[] = []
     for (const route of routes) {
       try {
         if (definition.routes[route].enabled) await this.vendRouteCredential(definition, route)
-        else await this.removeRouteCredential(definition, route)
+        else if (definition.kind !== 'catalog' || previous?.routes[route].enabled)
+          await this.removeRouteCredential(definition, route)
         this.clearError(definition.id, route)
       } catch (error) {
         this.recordError(definition.id, route, error)
@@ -527,6 +576,179 @@ export class SharedProviderService {
       return 'no-models-discovered'
     }
   }
+  /**
+   * The engines whose native credential for this definition is OURS to delete.
+   *
+   * A custom definition's native id is one ClaudeUI made up, so both engines'
+   * entries are its own. A catalog definition's native id is a vendor the engine
+   * already knows (`openrouter`): a disabled route's entry is whatever the user
+   * keeps there natively, and ClaudeUI never delivered it — only an ENABLED
+   * route's entry is the one we wrote. Enabling or disabling a route is what
+   * moves the line (`setRouteEnabled`), never a sync.
+   */
+  private credentialRoutes(definition: SharedProviderDefinition): Route[] {
+    return definition.kind === 'catalog'
+      ? routes.filter((route) => definition.routes[route].enabled)
+      : routes
+  }
+
+  /**
+   * Refuse a definition whose ENABLED route lands on a native id another
+   * definition's enabled route already delivers to, on the same engine
+   * (ADR-074 §6). Without it a catalog `openai` with its opencode route on would
+   * vend an API key over ChatGPT's OAuth entry for opencode's `openai`, and
+   * removing either would delete the other's credential.
+   */
+  private assertNoNativeIdCollision(definition: SharedProviderDefinition, only?: Route): void {
+    for (const route of only ? [only] : routes) {
+      if (!definition.routes[route].enabled) continue
+      const nativeId = routeNativeId(definition, route)
+      const other = this.repository
+        .list()
+        .find(
+          (candidate) =>
+            candidate.id !== definition.id &&
+            candidate.routes[route].enabled &&
+            routeNativeId(candidate, route) === nativeId
+        )
+      if (other) {
+        throw new Error(
+          `${other.name} already delivers to ${route}'s "${nativeId}" provider; turn its ${route} route off first`
+        )
+      }
+    }
+  }
+
+  /** A vendor id some definition already claims: by its own id, or by an enabled route. */
+  private claimsVendor(vendorId: string): boolean {
+    return this.repository
+      .list()
+      .some(
+        (definition) =>
+          definition.id === vendorId ||
+          routes.some(
+            (route) =>
+              definition.routes[route].enabled && routeNativeId(definition, route) === vendorId
+          )
+      )
+  }
+
+  /**
+   * Vendors whose API key BOTH engines hold natively, that no definition claims
+   * and both engines' catalogs know. The keys are compared here, in the main
+   * process; what comes back is a verdict and, for a conflict, last-four hints.
+   */
+  async scanNativeKeys(): Promise<NativeKeyCandidate[]> {
+    const native = this.deps.nativeKeys
+    if (!native) return []
+    const inPi = new Set(native.pi.listApiKeyVendorIds())
+    const shared = native.opencode
+      .listApiKeyVendorIds()
+      .filter((id) => inPi.has(id) && isProviderId(id) && !this.claimsVendor(id))
+    if (shared.length === 0) return []
+    const catalogs = await native.loadCatalogs()
+    const out: NativeKeyCandidate[] = []
+    for (const id of shared) {
+      if (!catalogs.pi.has(id) || !catalogs.opencode.has(id)) continue
+      const pi = native.pi.readApiKey(id)
+      const opencode = native.opencode.readApiKey(id)
+      if (!pi || !opencode) continue
+      out.push(
+        pi === opencode
+          ? { id, state: 'identical' }
+          : { id, state: 'conflict', hints: { pi: keyHint(pi), opencode: keyHint(opencode) } }
+      )
+    }
+    return out
+  }
+
+  /**
+   * Boot migration (ADR-074 §6): adopt every vendor both engines hold the SAME
+   * key for. A differing pair is left alone for the user; single-engine keys and
+   * OAuth are never candidates. Safe to repeat — an adopted vendor is claimed —
+   * and never throws: every failure is logged by vendor id and skipped.
+   */
+  async adoptNativeKeys(): Promise<void> {
+    let candidates: NativeKeyCandidate[]
+    try {
+      candidates = await this.scanNativeKeys()
+    } catch (error) {
+      logger.warn('SharedProviders', `native key scan failed: ${errorMessage(error)}`)
+      return
+    }
+    for (const candidate of candidates) {
+      if (candidate.state !== 'identical') continue
+      try {
+        await this.adoptNativeKey(candidate.id)
+      } catch (error) {
+        logger.warn(
+          'SharedProviders',
+          `adopting the ${candidate.id} key failed: ${errorMessage(error)}`
+        )
+      }
+    }
+  }
+
+  /**
+   * Turn a vendor's native API key into a catalog definition: the key moves to
+   * the vault and is delivered to every engine that held one. With `keep`, that
+   * engine's key wins (a conflict, or a key only one engine holds); without it,
+   * both engines must hold the same key.
+   *
+   * The key is read and compared HERE, in the main process, and goes to the
+   * vault and the engines' own stores only. Nothing about it is logged or
+   * returned.
+   */
+  async adoptNativeKey(id: string, keep?: Route): Promise<void> {
+    await this.enqueue(async () => {
+      validateSharedProviderId(id)
+      const native = this.deps.nativeKeys
+      if (!native) throw new Error('Native key adoption is unavailable')
+      if (this.claimsVendor(id)) throw new Error(`Provider "${id}" is already shared`)
+      const keys: Record<Route, string | null> = {
+        pi: native.pi.readApiKey(id),
+        opencode: native.opencode.readApiKey(id)
+      }
+      let key: string
+      if (keep) {
+        const kept = keys[keep]
+        if (!kept) throw new Error(`${keep} holds no API key for ${id}`)
+        key = kept
+      } else {
+        if (!keys.pi || !keys.opencode)
+          throw new Error(`Only one engine holds a key for ${id}; choose it to adopt`)
+        if (keys.pi !== keys.opencode)
+          throw new Error(`The engines hold different keys for ${id}; choose which to keep`)
+        key = keys.pi
+      }
+      const catalogs = await native.loadCatalogs()
+      const enabled = (route: Route): boolean =>
+        keys[route] !== null && (route === 'pi' ? catalogs.pi : catalogs.opencode).has(id)
+      if (keep && !enabled(keep)) throw new Error(`${keep} does not know a provider "${id}"`)
+      const definition: SharedProviderDefinition = {
+        id,
+        name: catalogs.opencode.get(id) || id,
+        kind: 'catalog',
+        models: [],
+        managed: true,
+        routes: { pi: { enabled: enabled('pi') }, opencode: { enabled: enabled('opencode') } }
+      }
+      this.assertNoNativeIdCollision(definition)
+      await this.deps.vault.saveCredential(id, { type: 'api_key', key })
+      try {
+        this.repository.save(definition)
+      } catch (error) {
+        await this.deps.vault.removeCredential(id).catch(() => undefined)
+        throw error
+      }
+      logger.info(
+        'SharedProviders',
+        `adopted the ${id} API key into the vault (${keep ? `kept ${keep}'s` : 'identical in both engines'})`
+      )
+      await this.syncDefinition(definition)
+    })
+  }
+
   private requireDefinition(id: string): SharedProviderDefinition {
     const definition = this.repository.get(id)
     if (!definition) throw new Error(`Unknown shared provider: ${id}`)
@@ -564,6 +786,21 @@ export class SharedProviderService {
     delete errors[route]
     this.routeErrors.set(id, errors)
   }
+}
+/** The native provider id a definition's route delivers to on that engine. */
+function routeNativeId(definition: SharedProviderDefinition, route: Route): string {
+  return route === 'pi' ? nativeProviderId(definition) : opencodeProviderId(definition)
+}
+function isProviderId(id: string): boolean {
+  try {
+    validateSharedProviderId(id)
+    return true
+  } catch {
+    return false
+  }
+}
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 function withRoute(
   definition: SharedProviderDefinition,

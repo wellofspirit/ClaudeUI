@@ -64,10 +64,24 @@ export interface SharedProviderAccountList {
   accounts: SharedProviderAccountStatus[]
 }
 
+/**
+ * What a shared definition IS (ADR-074 §6):
+ *
+ * - `subscription` — ChatGPT: OAuth accounts in the vault, vended to each engine.
+ * - `custom` — an endpoint ClaudeUI projects into each engine's own provider
+ *   config (`protocol` + `baseUrl` + `models`), keyed by an id ClaudeUI owns.
+ * - `catalog` — a provider every engine ALREADY knows (`openrouter`,
+ *   `anthropic`, …): nothing is projected, only the API key, stored once in the
+ *   vault and delivered to each enabled engine under `routes.<engine>.providerId`
+ *   (default: `id`). No `protocol`, no `baseUrl`, `models: []` — the engines'
+ *   own catalogs list the models.
+ */
+export type SharedProviderKind = 'subscription' | 'custom' | 'catalog'
+
 export interface SharedProviderDefinition {
   id: string
   name: string
-  kind: 'subscription' | 'custom'
+  kind: SharedProviderKind
   protocol?: SharedProviderProtocol
   baseUrl?: string
   models: SharedProviderModel[]

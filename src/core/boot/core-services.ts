@@ -311,6 +311,17 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
         `sharedProviderService.syncAll() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
       )
     }
+    // After the sync, so a vendor an existing definition already delivers to is
+    // claimed and never re-adopted (ADR-074 §6). It logs per vendor and does not
+    // throw; the catch is for the boot contract, not for an expected failure.
+    try {
+      await sharedProviderService.adoptNativeKeys()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `sharedProviderService.adoptNativeKeys() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   })()
 
   registerTerminalIpc()

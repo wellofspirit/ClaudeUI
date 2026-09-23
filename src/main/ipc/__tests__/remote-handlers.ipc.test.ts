@@ -538,6 +538,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:remove',
       'shared-provider:set-route',
       'shared-provider:set-key',
+      'shared-provider:adopt-native',
       'shared-provider:sync',
       'shared-provider:disconnect',
       'shared-provider:set-default'
@@ -1719,6 +1720,8 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'auth:cancel',
   'auth:sign-in',
   'auth:submit-code',
+  // ADR-074 §6 — the key moves host-side; nothing about it comes back.
+  'shared-provider:adopt-native',
   'shared-provider:disconnect',
   'shared-provider:remove',
   'shared-provider:save',

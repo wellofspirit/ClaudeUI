@@ -326,3 +326,39 @@ describe('OpencodeSharedProviderAdapter', () => {
     })
   })
 })
+
+describe('OpencodeSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
+  const catalog: SharedProviderDefinition = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  }
+
+  it('projects nothing: apply, remove and the collision probe are no-ops', () => {
+    // A native `openrouter` block the user wrote must survive every call.
+    const current: NativeOpencodeFields = {
+      providers: { openrouter: { name: 'Mine', baseURL: 'https://mine' } }
+    }
+    const { adapter, writeConfig, invalidateModelCache } = setup(current)
+    expect(() => adapter.applyDefinitionRoute({ definition: catalog })).not.toThrow()
+    adapter.applyDefinitionRoute({
+      definition: { ...catalog, routes: { ...catalog.routes, opencode: { enabled: false } } },
+      previouslyManaged: true,
+      previousDefinition: catalog
+    })
+    adapter.removeDefinitionRoute(catalog)
+    expect(adapter.inspectCollision(catalog)).toBe(false)
+    expect(adapter.hasDefinition(catalog)).toBe(true)
+    expect(writeConfig).not.toHaveBeenCalled()
+    expect(invalidateModelCache).not.toHaveBeenCalled()
+  })
+
+  it('vends the key under the catalog id', async () => {
+    const { adapter, authTarget } = setup()
+    await adapter.vendApiKey(catalog, 'sk-or')
+    expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('openrouter', 'sk-or')
+  })
+})

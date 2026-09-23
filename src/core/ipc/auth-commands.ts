@@ -472,6 +472,20 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       )
     },
     {
+      // ADR-074 §6: turn a key an engine already holds into a catalog definition.
+      // `keep` names the engine whose key wins (a conflict, or a key only one
+      // engine holds); omitted, both engines must hold the same key. The key is
+      // read and moved host-side — nothing about it comes back.
+      channel: 'shared-provider:adopt-native',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, keep?: ConfigurableHarnessId | null) => {
+        if (keep != null && keep !== 'pi' && keep !== 'opencode')
+          throw new Error(`Unknown engine: ${String(keep)}`)
+        await sharedProviderService.adoptNativeKey(id, opt(keep))
+      })
+    },
+    {
       channel: 'shared-provider:sync',
       capability: 'config',
       kind: 'command',

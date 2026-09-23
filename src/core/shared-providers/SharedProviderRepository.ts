@@ -9,6 +9,7 @@ import {
 } from '../../shared/shared-provider'
 
 const PROTOCOLS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages'])
+const KINDS: ReadonlySet<string> = new Set(['subscription', 'custom', 'catalog'])
 
 export function sharedProvidersDir(): string {
   return path.join(os.homedir(), '.claude', 'ui', 'providers')
@@ -140,8 +141,7 @@ function validateDefinition(provider: SharedProviderDefinition): void {
   if (!provider || provider.managed !== true || typeof provider.name !== 'string' || !provider.name)
     throw new Error('Invalid shared provider definition')
   validateSharedProviderId(provider.id)
-  if (provider.kind !== 'subscription' && provider.kind !== 'custom')
-    throw new Error('Invalid shared provider kind')
+  if (!KINDS.has(provider.kind)) throw new Error('Invalid shared provider kind')
   if (
     !Array.isArray(provider.models) ||
     !provider.models.every(isModel) ||
@@ -161,6 +161,14 @@ function validateDefinition(provider: SharedProviderDefinition): void {
       !provider.baseUrl)
   )
     throw new Error('Custom providers require protocol and baseUrl')
+  // A catalog provider is one every engine already knows: there is no endpoint
+  // to project, so an endpoint on one is a malformed file, not a variant — and no
+  // models either: the engines' own catalogs list them.
+  if (
+    provider.kind === 'catalog' &&
+    (provider.protocol !== undefined || provider.baseUrl !== undefined || provider.models.length)
+  )
+    throw new Error('Catalog providers take no protocol, baseUrl or models')
 }
 
 /** `{ perSession: boolean }` and nothing else — ADR-068 §2. */
