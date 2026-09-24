@@ -24,6 +24,10 @@ interface MessageState {
   timestamp: number
   blocks: BlockState[]
   terminalSealed?: boolean
+  /** `message_delta`'s `stop_reason`; absent until one arrives (or never, when the stream is cut). */
+  stopReason?: string | null
+  /** tool_use ids some `assistant` snapshot of this message carried — calls cli.js really made. */
+  confirmedToolUseIds: Set<string>
 }
 
 export interface ClaudeItemStreamSink {
@@ -45,6 +49,15 @@ export interface ClaudeItemStreamSink {
    * whatever the wire order, and shows the card the moment the call starts.
    */
   publish(message: ChatMessage, owner: Owner): void
+  /**
+   * Tool calls that were streamed but will never run, removed from the message
+   * before its final seal. An output-limit cut (`stop_reason: "max_tokens"`) or
+   * an interrupted stream leaves the half-streamed `tool_use` with no snapshot;
+   * {@link publish} already put its `{}`-input scaffold on every client, and the
+   * reducer's merges keep a block the final seal omits, so only an explicit
+   * retraction removes it. Called at most once per message, before that seal.
+   */
+  retractToolUses(messageId: string, toolUseIds: string[], owner: Owner): void
 }
 
 const ownerKey = (owner: Owner): string => JSON.stringify(owner ?? null)
@@ -84,7 +97,13 @@ export class ClaudeItemStreamLifecycle {
       if (!messageId || this.invalidated.has(messageKey(owner, messageId))) return
       const previous = this.messages.get(key)
       if (previous && previous.messageId !== messageId) this.finish(key, previous)
-      this.messages.set(key, { owner, messageId, timestamp: Date.now(), blocks: [] })
+      this.messages.set(key, {
+        owner,
+        messageId,
+        timestamp: Date.now(),
+        blocks: [],
+        confirmedToolUseIds: new Set()
+      })
       return
     }
 
@@ -166,6 +185,11 @@ export class ClaudeItemStreamLifecycle {
       this.sealBlock(state, event.index!)
       return
     }
+    if (event.type === 'message_delta') {
+      const stopReason = event.delta?.stop_reason
+      if (typeof stopReason === 'string' || stopReason === null) state.stopReason = stopReason
+      return
+    }
     if (event.type === 'message_stop') this.finish(key, state)
   }
 
@@ -185,6 +209,11 @@ export class ClaudeItemStreamLifecycle {
     if (this.invalidated.has(messageKey(owner, message.id))) return 'drop'
     const state = this.messages.get(ownerKey(owner))
     if (!state || state.messageId !== message.id) return 'none'
+    // Before any placement can fail: a snapshot that falls through to the
+    // caller's ordinary upsert still proves the call is real.
+    for (const block of message.content) {
+      if (block.type === 'tool_use') state.confirmedToolUseIds.add(block.toolUseId)
+    }
     let replaced = false
     if (message.content.length === state.blocks.length) {
       message.content.forEach((block, index) => {
@@ -262,12 +291,42 @@ export class ClaudeItemStreamLifecycle {
       this.messages.delete(key)
       return
     }
+    // Item seals first, while every block still sits at its native index.
     for (let index = 0; index < state.blocks.length; index++) this.sealBlock(state, index)
+    if (this.retractTruncatedToolUses(state) && state.blocks.length === 0) {
+      // Nothing but the cut call: the retraction removed the message outright.
+      this.messages.delete(key)
+      return
+    }
     const final = this.message(state)
     this.sink.seal(undefined, final, state.owner)
     this.sink.updateLocal(final, state.owner)
     if (retainForNativeStop) state.terminalSealed = true
     else this.messages.delete(key)
+  }
+
+  /**
+   * Drop the tool calls that will never run, reporting them first. A message
+   * that stopped for `"tool_use"` retracts nothing — its calls all run, and a
+   * sub-agent's snapshot may legitimately lag `message_stop` (Patch E stream
+   * events and the native relay's snapshots take different paths). Any other
+   * outcome — `max_tokens`, `end_turn`, `refusal`, or no `stop_reason` at all
+   * because the stream was cut — means a call no snapshot confirmed was
+   * truncated mid-stream (`docs/protocol-cc/05-stream-events.md` §5.9).
+   */
+  private retractTruncatedToolUses(state: MessageState): boolean {
+    if (state.stopReason === 'tool_use') return false
+    const truncated = state.blocks.filter(
+      (entry) =>
+        entry.block.type === 'tool_use' && !state.confirmedToolUseIds.has(entry.block.toolUseId)
+    )
+    if (truncated.length === 0) return false
+    const toolUseIds = truncated.map((entry) =>
+      entry.block.type === 'tool_use' ? entry.block.toolUseId : ''
+    )
+    state.blocks = state.blocks.filter((entry) => !truncated.includes(entry))
+    this.sink.retractToolUses(state.messageId, toolUseIds, state.owner)
+    return true
   }
 
   /** True when the incoming block actually landed on `entry`. */

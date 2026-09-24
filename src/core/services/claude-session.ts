@@ -50,6 +50,7 @@ import { createCollabServer } from './collab-tool'
 import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../host'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
 import {
   resolveThinkingMode,
@@ -237,6 +238,16 @@ export class ClaudeSession extends BaseSession {
       }
       this.upsertMessage(message)
       this.send('session:message', message)
+    },
+    // Only the root transcript is kept main-side; a sub-agent's messages live in
+    // canonical state alone, which the channel's reducer fold covers.
+    retractToolUses: (messageId, toolUseIds, ownerToolUseId) => {
+      if (!ownerToolUseId) this.retractToolUsesFromHistory(messageId, toolUseIds)
+      this.send('session:tool-uses-retracted', {
+        messageId,
+        toolUseIds,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      })
     }
   })
   private abortController: AbortController | null = null
@@ -3266,6 +3277,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     for (const [origin, runs] of identity.runCounts) {
       if (!this.runCountByOrigin.has(origin)) this.runCountByOrigin.set(origin, runs)
     }
+  }
+
+  /** Drop retracted tool calls from a history message; a message left empty goes too. */
+  private retractToolUsesFromHistory(messageId: string, toolUseIds: string[]): void {
+    const idx = this.messageHistory.findIndex((m) => m.id === messageId)
+    if (idx < 0) return
+    const content = withoutToolUses(this.messageHistory[idx].content, toolUseIds)
+    if (content.length === 0) this.messageHistory.splice(idx, 1)
+    else this.messageHistory[idx] = { ...this.messageHistory[idx], content }
   }
 
   /** Upsert a message into the in-memory history (same dedup as the renderer). */

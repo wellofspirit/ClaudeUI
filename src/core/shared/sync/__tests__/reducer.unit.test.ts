@@ -95,6 +95,7 @@ describe('reducer — session registry', () => {
     ['session:queue-changed', ['rid', { items: [] }]],
     ['session:result', ['rid', {}]],
     ['session:messages-retracted', ['rid', { messageIds: ['m1'] }]],
+    ['session:tool-uses-retracted', ['rid', { messageId: 'm1', toolUseIds: ['t1'] }]],
     ['session:approval-dismiss', ['rid', { requestId: 'r1' }]],
     ['session:subagent-tool-result', ['rid', { toolUseId: 't1', toolResultToolUseId: 'x' }]]
   ])('%s for an unknown id is an honest no-op (no ghost session)', (channel, args) => {
@@ -763,6 +764,130 @@ describe('reducer — transcript', () => {
       expect(blocksOf(s, 'tool_result')).toHaveLength(1)
       expect(blocksOf(s, 'tool_review')).toEqual([review()])
       expect(blocksOf(s, 'permission_denial')).toEqual([denial])
+    })
+  })
+
+  /**
+   * A tool call cut off mid-stream (an output-limit cut, an interrupt): its
+   * scaffold was published, the final seal's merge kept it, and it will never
+   * run. The retraction removes it and anything keyed to it — and nothing else.
+   */
+  describe('session:tool-uses-retracted', () => {
+    const cut = { type: 'tool_use' as const, toolUseId: 't-cut', toolName: 'Write', toolInput: {} }
+    const kept = { type: 'tool_use' as const, toolUseId: 't-ok', toolName: 'Read', toolInput: {} }
+    const aux: ChatMessage['content'] = [
+      { type: 'tool_result', toolUseId: 't-cut', toolResult: 'x' },
+      {
+        type: 'tool_review',
+        toolUseId: 't-cut',
+        reviewId: 'rv',
+        reviewer: 'auto-mode',
+        decision: 'approved'
+      },
+      { type: 'permission_denial', toolUseId: 't-cut', denialId: 'dn', source: 'rule' },
+      { type: 'tool_result', toolUseId: 't-ok', toolResult: 'fine' }
+    ]
+    const retracted = (owner?: string): [string, ...unknown[]] => [
+      'session:tool-uses-retracted',
+      'rid',
+      { messageId: 'm1', toolUseIds: ['t-cut'], ...(owner ? { ownerToolUseId: owner } : {}) }
+    ]
+
+    it('removes the call and its keyed blocks from the root transcript', () => {
+      const s = fold([
+        created(),
+        [
+          'session:message',
+          'rid',
+          assistant('m1', [{ type: 'thinking', text: 'hm' }, kept, cut, ...aux])
+        ],
+        retracted()
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([
+        { type: 'thinking', text: 'hm' },
+        kept,
+        { type: 'tool_result', toolUseId: 't-ok', toolResult: 'fine' }
+      ])
+    })
+
+    it('removes it from the owner bucket, leaving the root alone', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [cut])],
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-1', message: assistant('m1', [{ type: 'text', text: 'a' }, cut]) }
+        ],
+        retracted('agent-1')
+      ])
+      expect(s.sessions['rid'].subagentMessages['agent-1'][0].content).toEqual([
+        { type: 'text', text: 'a' }
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([cut])
+    })
+
+    it('drops a message the retraction leaves empty', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m0', [{ type: 'text', text: 'before' }])],
+        ['session:message', 'rid', assistant('m1', [cut])],
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-1', message: assistant('m1', [cut, aux[0]]) }
+        ],
+        retracted(),
+        retracted('agent-1')
+      ])
+      expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m0'])
+      expect(s.sessions['rid'].subagentMessages['agent-1']).toEqual([])
+    })
+
+    it('is an identity-stable no-op on replay, and for an unknown message or owner', () => {
+      const once = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [kept, cut])],
+        retracted()
+      ])
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: retracted().slice(1),
+          seq: 9
+        })
+      ).toBe(once)
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: ['rid', { messageId: 'nope', toolUseIds: ['t-ok'] }],
+          seq: 9
+        })
+      ).toBe(once)
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: retracted('ghost').slice(1),
+          seq: 9
+        })
+      ).toBe(once)
+    })
+
+    it('retires an item stream at or after the removed slot, keeping earlier ones', () => {
+      const text = (t: string) => ({ type: 'text' as const, text: t })
+      const open = (blockIndex: number): [string, ...unknown[]] => [
+        'session:item-open',
+        'rid',
+        {
+          target: { messageId: 'm1', blockIndex, kind: 'text' },
+          message: assistant('m1', [text('a'), cut, text('b')])
+        }
+      ]
+      const s = fold([created(), open(0), open(2), retracted()])
+      expect(Object.values(s.sessions['rid'].itemStreams).map((i) => i.target.blockIndex)).toEqual([
+        0
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([text('a'), text('b')])
     })
   })
 

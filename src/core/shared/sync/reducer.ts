@@ -44,7 +44,7 @@ import type {
   ToolReviewBlock,
   PermissionDenialBlock
 } from '../../../shared/types'
-import { mergeContentBlocks } from '../../../shared/content-blocks'
+import { mergeContentBlocks, withoutToolUses } from '../../../shared/content-blocks'
 import { applyItemLifecycle, mergeItemContent, type ItemStreamTarget } from './item-stream'
 import {
   buildTodosFromMessages,
@@ -773,6 +773,54 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         itemStreamRevision: event.seq ?? 0,
         messages:
           messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages
+      }))
+    }
+
+    case 'session:tool-uses-retracted': {
+      // A tool call cut off mid-stream (docs/protocol-cc/05-stream-events.md
+      // §5.9): its scaffold was published, the final seal's merge preserved it,
+      // and no result will ever come. Removed with every block keyed to it.
+      const routingId = routingIdOf(event)
+      const data = arg<{ messageId?: string; toolUseIds?: string[]; ownerToolUseId?: string }>(
+        event,
+        1
+      )
+      if (!routingId || typeof data?.messageId !== 'string' || !Array.isArray(data.toolUseIds))
+        return state
+      const session = state.sessions[routingId]
+      if (!session || data.toolUseIds.length === 0) return state
+      const { messageId, toolUseIds, ownerToolUseId: owner } = data
+      const messages = owner ? session.subagentMessages[owner] : session.messages
+      const index = messages?.findIndex((m) => m.id === messageId) ?? -1
+      if (!messages || index < 0) return state
+      const content = withoutToolUses(messages[index].content, toolUseIds)
+      // A replay finds nothing left to remove — identity-stable.
+      if (content.length === messages[index].content.length) return state
+      const next =
+        content.length === 0
+          ? messages.filter((_, i) => i !== index)
+          : messages.map((m, i) => (i === index ? { ...m, content } : m))
+      // Items are text/thinking — and `plan`, a tool_use, on other engines — so
+      // one can address a removed slot, and every slot after the first removed
+      // one has shifted. Claude retracts only after the message's items are
+      // sealed, so in practice there is none; any that remains is retired
+      // rather than left pointing at the wrong block.
+      const firstRemoved = messages[index].content.findIndex((b) => !content.includes(b))
+      const itemStreams = Object.fromEntries(
+        Object.entries(session.itemStreams).filter(
+          ([, stream]) =>
+            stream.target.messageId !== messageId ||
+            stream.target.ownerToolUseId !== owner ||
+            stream.target.blockIndex < firstRemoved
+        )
+      )
+      const streamsChanged =
+        Object.keys(itemStreams).length !== Object.keys(session.itemStreams).length
+      return withSession(state, routingId, (s) => ({
+        ...(owner
+          ? { subagentMessages: { ...s.subagentMessages, [owner]: next } }
+          : { messages: next }),
+        ...(streamsChanged ? { itemStreams, itemStreamRevision: event.seq ?? 0 } : {})
       }))
     }
 

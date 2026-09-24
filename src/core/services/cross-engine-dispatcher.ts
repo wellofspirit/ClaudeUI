@@ -3932,6 +3932,13 @@ export class CrossEngineDispatcher {
         const ownerToolUseId = entry.ctx.toolUseId
         if (ownerToolUseId)
           entry.ctx.emit('session:subagent-message', { toolUseId: ownerToolUseId, message })
+      },
+      // A cut-off call was published to the caller's card like any other, so it
+      // has to be taken back there too (see ClaudeItemStreamSink.retractToolUses).
+      retractToolUses: (messageId, toolUseIds) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:tool-uses-retracted', { messageId, toolUseIds, ownerToolUseId })
       }
     })
     const canUseTool: CanUseTool = async (

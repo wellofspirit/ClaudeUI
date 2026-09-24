@@ -320,6 +320,25 @@ index/type.
 Verified on 2.1.268, 2026-09-18, localhost SSE fixture. `src/integration/sdk-contract/stream-order.integration.test.ts`
 re-checks this on every CLI bump (`12-maintenance.md` §12.1).
 
+### A `tool_use` cut off mid-stream gets no snapshot
+
+When the output limit ends a message while a `tool_use` block is still streaming, that block
+never gets its per-block `assistant` line — and never runs. Observed in session
+`efa47532-932f-4598-b750-5263dea1c46d`: message `dn74DfqZ` ended with `message_delta
+{stop_reason:"max_tokens"}` mid-`Write`, and its only snapshots were its two thinking blocks.
+The transcript on disk never contains the call, so a reload is already correct. A stream cut by an
+interrupt or abort (no `message_delta` at all) is treated the same way; that case is inferred, not
+yet observed on the wire.
+
+A consumer that shows a `tool_use` at `content_block_start` (ClaudeUI does, so a result always has
+a call to attach to) must take it back. `ClaudeItemStreamLifecycle` records `message_delta`'s
+`stop_reason` and every `tool_use` id any snapshot of the message carried. When the message ends
+with a stop reason other than `"tool_use"` (including none), each unconfirmed `tool_use` is removed
+before the final seal and reported as `session:tool-uses-retracted { messageId, toolUseIds,
+ownerToolUseId? }` (`docs/architecture/sync-channels.md`). A message that stopped for `"tool_use"`
+never retracts anything: every call in it runs, and a sub-agent's snapshot can lag `message_stop`
+because Patch E's stream events and the native relay's snapshots take different paths (§5.11).
+
 ---
 
 ## 5.10 Consumer guidance
