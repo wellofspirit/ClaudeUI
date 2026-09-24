@@ -180,7 +180,9 @@ export abstract class VoiceStreamClient {
 
   /** Stop the current recording session */
   async stopRecording(): Promise<void> {
-    if (this.state === 'idle') return
+    // `processing` is already stopping: a second `voice_stop` is noise to the
+    // server, and a second finalize timer would orphan the first one's handle.
+    if (this.state === 'idle' || this.state === 'processing') return
 
     // Stop audio capture immediately
     this.stopAudioSource()

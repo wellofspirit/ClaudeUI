@@ -356,4 +356,23 @@ describe('VoiceClient', () => {
     expect(win.webContents.send).not.toHaveBeenCalled()
   })
 
+  it('a second stop while processing is a no-op — one voice_stop, no timer left behind', async () => {
+    vi.useFakeTimers()
+    const win = makeWin()
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+
+    const startP = client.startRecording('en')
+    fireConnect()
+    await startP
+    lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
+
+    await client.stopRecording()
+    await client.stopRecording()
+    expect(sentMessages().filter((m) => m.type === 'voice_stop')).toHaveLength(1)
+
+    lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
+    expect(client.currentState()).toBe('idle')
+    // cleanup() cleared the one finalize timer; nothing is left to fire.
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })
