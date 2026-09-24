@@ -2274,6 +2274,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       emitEvent('voice:state', [this.routingId, 'idle'])
       return
     }
+    if (this.voiceClient.currentState() === 'idle') {
+      // Nothing to stop, but the renderer may still be showing the `connecting`
+      // this session told it — report the real state so a release always clears it.
+      emitEvent('voice:state', [this.routingId, 'idle'])
+      return
+    }
     await this.voiceClient.stopRecording()
   }
 

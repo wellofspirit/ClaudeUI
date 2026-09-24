@@ -13,6 +13,8 @@
  *  - a stop→start pair does not let the first start's cancellation clobber the
  *    second;
  *  - a cancelled start whose spawn then fails does not throw at the renderer;
+ *  - a stop with nothing to stop still reports idle (the renderer was told
+ *    `connecting` by this session, not by the client);
  *  - the client reads the session's LIVE routing id (a rekey mid-capture).
  *
  * Mock scaffold mirrors claude-session-compact-boundary.test.ts; `VoiceClient`
@@ -247,6 +249,21 @@ describe('ClaudeSession voice — cancel() during a pending start', () => {
     await startP
 
     expect(voiceClients).toHaveLength(0)
+  })
+})
+
+describe('ClaudeSession voice — stop always reports the real state', () => {
+  it('an idle client after `connecting` was announced: the stop emits idle', async () => {
+    const { session, sent } = makeSession('r-voice-heal')
+    gateVoiceServer(session, [Promise.resolve()])
+
+    // The session told the renderer `connecting`; the client never left idle.
+    await session.voiceStartRecording('en')
+    expect(voiceClients).toHaveLength(1)
+    expect(voiceStates(sent).at(-1)).toEqual(['r-voice-heal', 'connecting'])
+
+    await session.voiceStopRecording()
+    expect(voiceStates(sent).at(-1)).toEqual(['r-voice-heal', 'idle'])
   })
 })
 
