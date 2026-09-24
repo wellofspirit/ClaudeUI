@@ -2191,9 +2191,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // seconds of speech while the SDK spawns and the voice server starts.
     const earlyBuffer: Buffer[] = []
     let earlyCaptureStopped = false
+    // Owned by this session until the VoiceClient takes the microphone over, so
+    // this session's stops can never cut off another session's capture.
     const captureStarted = startRecording((chunk) => {
       if (!earlyCaptureStopped) earlyBuffer.push(chunk)
-    })
+    }, this)
     if (!captureStarted) {
       this.send('voice:error', 'Failed to start audio capture. Check microphone access.')
       return
@@ -2204,7 +2206,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // host-local surface a session owns, so it is also the only thing a WS-created
     // session cannot do.
     if (!this.win) {
-      stopRecording()
+      stopRecording(this)
       this.send(
         'voice:error',
         'Voice input needs the desktop window (this app is running windowless).'
@@ -2250,6 +2252,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // Hand off early buffer and start streaming through VoiceClient
       earlyCaptureStopped = true
       await this.voiceClient.startRecording(language, earlyBuffer)
+      // A client that ended before taking the microphone over (a failed connect,
+      // a stop in the connect window) left it with this session: release it.
+      if (this.voiceClient?.currentState() === 'idle') stopRecording(this)
     } catch (err) {
       earlyCaptureStopped = true
       if (pending) {
@@ -2258,7 +2263,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         if (this.voicePendingStart !== gen) return
         this.voicePendingStart = null
       }
-      stopRecording()
+      stopRecording(this)
       emitEvent('voice:state', [this.routingId, 'idle'])
       throw err
     }
@@ -2266,11 +2271,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   /** Stop the current voice recording session. */
   async voiceStopRecording(): Promise<void> {
+    // Close this session's early capture if it still holds the microphone — a
+    // start awaiting the server, or one handed to a client that has not taken
+    // it over yet. Owner-scoped: a no-op when the client or another session has it.
+    stopRecording(this)
     if (this.voicePendingStart !== null || !this.voiceClient) {
       // Still in early capture (the start is awaiting the voice server, or never
-      // got a client): cancel that start and close the microphone it opened.
+      // got a client): cancel that start.
       this.voicePendingStart = null
-      stopRecording()
       emitEvent('voice:state', [this.routingId, 'idle'])
       return
     }
@@ -2717,11 +2725,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     crossEngineDispatcher.disposeFor(this.routingId)
 
     // Clean up voice resources. A start still awaiting the voice server is
-    // cancelled like a stop would, closing the microphone it opened.
-    if (this.voicePendingStart !== null) {
-      this.voicePendingStart = null
-      stopRecording()
-    }
+    // cancelled like a stop would, and the microphone closed if this session
+    // (rather than its client, destroyed below) still holds it.
+    this.voicePendingStart = null
+    stopRecording(this)
     if (this.voiceClient) {
       this.voiceClient.destroy()
       this.voiceClient = null

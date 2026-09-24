@@ -27,7 +27,14 @@ import { setHostWindow } from '../../../core/services/host-window'
 
 const { mockQuery, capture, voiceClients } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
-  capture: { start: vi.fn(() => true), stop: vi.fn() },
+  // The facade's owner contract (voice-capture.test.ts pins the real one): a
+  // start takes the microphone over, and only its owner's stop releases it.
+  capture: {
+    owner: undefined as object | undefined,
+    start: vi.fn((_owner?: object) => true),
+    stop: vi.fn((_owner?: object) => {}),
+    nativeStop: vi.fn()
+  },
   voiceClients: [] as Array<{
     getRoutingId: () => string
     startRecording: ReturnType<typeof vi.fn>
@@ -72,8 +79,16 @@ vi.mock('../../../core/services/session-history', () => ({
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: () => capture.start(),
-  stopRecording: () => capture.stop()
+  startRecording: (_onData: unknown, owner?: object) => {
+    capture.owner = owner
+    return capture.start(owner)
+  },
+  stopRecording: (owner?: object) => {
+    capture.stop(owner)
+    if (owner !== capture.owner) return
+    capture.owner = undefined
+    capture.nativeStop()
+  }
 }))
 vi.mock('../../../core/services/voice-client', () => ({
   // A client that never leaves idle — enough to see whether a start reached it.
@@ -172,6 +187,7 @@ function makeSession(routingId: string): {
 beforeEach(() => {
   vi.clearAllMocks()
   voiceClients.length = 0
+  capture.owner = undefined
 })
 
 afterEach(() => {
@@ -249,6 +265,39 @@ describe('ClaudeSession voice — cancel() during a pending start', () => {
     await startP
 
     expect(voiceClients).toHaveLength(0)
+  })
+})
+
+describe('ClaudeSession voice — the microphone is owned per session', () => {
+  it("another session's stop never closes this session's live capture", async () => {
+    const a = makeSession('r-voice-owner-a')
+    const b = makeSession('r-voice-owner-b')
+    const gate = deferred()
+    gateVoiceServer(a.session, [gate.promise])
+
+    // A is mid-press (early capture, spawning); B is released with nothing live.
+    const startA = a.session.voiceStartRecording('en')
+    await b.session.voiceStopRecording()
+    expect(capture.nativeStop).not.toHaveBeenCalled()
+
+    // A's own release still closes it.
+    await a.session.voiceStopRecording()
+    expect(capture.nativeStop).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    await startA
+  })
+})
+
+describe('ClaudeSession voice — a client that never took the microphone over', () => {
+  it('leaves it with the session, which releases it (a failed connect / a stop mid-connect)', async () => {
+    const { session } = makeSession('r-voice-handback')
+    gateVoiceServer(session, [Promise.resolve()])
+
+    // The recorder client ends idle without ever starting its audio source, so
+    // the session's early capture is still the one holding the microphone.
+    await session.voiceStartRecording('en')
+    expect(capture.nativeStop).toHaveBeenCalledTimes(1)
+    expect(capture.owner).toBeUndefined()
   })
 })
 

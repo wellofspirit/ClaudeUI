@@ -27,15 +27,16 @@ import { EventEmitter } from 'node:events'
 
 let capturedOnData: ((buf: Buffer) => void) | null = null
 let startRecordingShouldSucceed = true
-const startRecordingMock = vi.fn((onData: (buf: Buffer) => void) => {
+const startRecordingMock = vi.fn((onData: (buf: Buffer) => void, _owner: object) => {
   capturedOnData = onData
   return startRecordingShouldSucceed
 })
-const stopRecordingMock = vi.fn()
+const stopRecordingMock = vi.fn((_owner: object) => {})
 
 vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: (onData: (buf: Buffer) => void) => startRecordingMock(onData),
-  stopRecording: () => stopRecordingMock(),
+  startRecording: (onData: (buf: Buffer) => void, owner: object) =>
+    startRecordingMock(onData, owner),
+  stopRecording: (owner: object) => stopRecordingMock(owner),
   isVoiceCaptureAvailable: () => true,
   getMicrophoneStatus: () => 3,
   isRecording: () => false
@@ -194,9 +195,10 @@ describe('VoiceClient', () => {
       .map((c) => c[2])
     expect(states).toContain('connecting')
 
-    // Microphone was re-armed via the voice-capture facade.
-    expect(stopRecordingMock).toHaveBeenCalled()
+    // The client took the microphone over via the voice-capture facade, as its
+    // owner (the facade restarts an active capture itself).
     expect(startRecordingMock).toHaveBeenCalledTimes(1)
+    expect(startRecordingMock).toHaveBeenCalledWith(expect.any(Function), client)
   })
 
   it('audio chunks pushed through the captured onData callback are forwarded as base64 audio frames once the server reports ready', async () => {
@@ -353,4 +355,5 @@ describe('VoiceClient', () => {
     expect(startRecordingMock).not.toHaveBeenCalled()
     expect(win.webContents.send).not.toHaveBeenCalled()
   })
+
 })

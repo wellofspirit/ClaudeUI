@@ -43,15 +43,15 @@ export class VoiceClient extends VoiceStreamClient {
   /**
    * Take over live audio capture. Native recording is already active (started by
    * `ClaudeSession.voiceStartRecording` for zero-latency buffering while the SDK
-   * spawns), so this swaps the callback rather than starting from cold.
+   * spawns), so this swaps the callback rather than starting from cold — and the
+   * microphone's ownership with it (`startRecording` restarts an active capture).
    */
   protected startAudioSource(): boolean {
-    stopRecording()
-    return startRecording((buffer) => this.pushAudio(buffer))
+    return startRecording((buffer) => this.pushAudio(buffer), this)
   }
 
   protected stopAudioSource(): void {
-    stopRecording()
+    stopRecording(this)
   }
 
   /** The shipped desktop wording — "restart", because capture was already running. */
