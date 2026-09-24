@@ -12,7 +12,8 @@
  *
  * Test 2 (background): Prompt asks Claude to use the Agent tool with
  *   run_in_background=true. Waits for streaming to appear then closes.
- *   Checks for stream_event and/or assistant messages with parent_tool_use_id.
+ *   Checks for stream_event and/or assistant messages with parent_tool_use_id,
+ *   and that Patch E's stream_events carry `agent_id` (the task_started id).
  */
 
 import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
@@ -122,6 +123,22 @@ async function testBackground(t) {
     '[BG] Background sub-agent stream_event received (parent_tool_use_id != null)',
     messages,
     (m) => m.type === 'stream_event' && !!m.parent_tool_use_id
+  )
+
+  // 2b. Patch E stamps the agent id on every background stream_event, so a
+  //     frame whose context has no toolUseId (an idle self-resume) can still
+  //     be placed on the agent's card. It must be the id task_started reported.
+  //     (Foreground frames come through Patches B/C and carry no agent_id.)
+  const bgTaskIds = new Set(
+    messages
+      .filter((m) => m.type === 'system' && m.subtype === 'task_started' && m.task_id)
+      .map((m) => m.task_id)
+  )
+  const stamped = messages.filter((m) => m.type === 'stream_event' && 'agent_id' in m)
+  t.assert(
+    `[BG] Background stream_events carry agent_id = the task_started task_id ` +
+      `(${stamped.length} stamped, task ids ${[...bgTaskIds].join(',') || 'none'})`,
+    stamped.length > 0 && stamped.every((m) => bgTaskIds.has(m.agent_id))
   )
 
   // 3. Background sub-agent assistant with parent_tool_use_id (Patch G)

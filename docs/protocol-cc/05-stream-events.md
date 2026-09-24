@@ -26,7 +26,7 @@ Verified against cli.js 2.1.114. Emission at main path char `~12805167`; subagen
 
 **`ttft_ms`** — time-to-first-token. Present only on the FIRST `stream_event` of each assistant turn. Use for startup latency metrics.
 
-**`parent_tool_use_id`** — non-null for subagent stream events (patch `subagent-streaming-C` and friends). Teammate variants use `teammate_id`.
+**`parent_tool_use_id`** — non-null for subagent stream events (patch `subagent-streaming-C` and friends). Teammate variants use `teammate_id`. A background sub-agent's events also carry `agent_id`, and on an idle self-resume ONLY `agent_id` (§5.11).
 
 ---
 
@@ -365,10 +365,15 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
   "type": "stream_event",
   "event": {...},
   "parent_tool_use_id": "toolu_parent_Task",
+  "agent_id": "ab9368ec953c764ac",   // Patch E (background runner) only, v2.1.280+
   "session_id": "...",
   "uuid": "..."
 }
 ```
+
+**`agent_id`** — the background runner's `taskId` (= the agent id, = `task_started.task_id`). Patch E stamps it on every frame it writes; the foreground path (Patches B/C) does not.
+
+**Idle self-resume: `agent_id` without `parent_tool_use_id`.** A background agent may stop while its own background children still run; when a child reports while the session is idle, cli.js resumes the agent itself with `_buildIdleToolUseContext()` — a main-loop context with **no `toolUseId`**. Patch E's `parent_tool_use_id:CTX.toolUseId` is then `undefined` and `JSON.stringify` drops the key, so the frame looks like the main agent's except for `agent_id`. That run's completed `assistant`/`user` frames (the native relay) are NOT affected: the relay stamps the `toolUseId` the agent's sidecar recorded at spawn, i.e. the ORIGIN Agent call's id (ADR-073), and cli.js's own task-notifications for such a run lack `<tool-use-id>`. A consumer must therefore place such a stream_event by `agent_id` on the same owner the snapshots use — `ClaudeSession.handleStreamEvent` maps it through `originByTaskId` → `resolveTaskOwner` — and must never treat a frame that carries `agent_id` as the main agent's (an unknown `agent_id` is dropped). Evidence and char offsets: `patch/subagent-streaming/README.md`, Patch E § "v2.1.280 — `agent_id`".
 
 ### Teammate (patch team-streaming-B)
 

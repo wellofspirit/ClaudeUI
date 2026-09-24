@@ -1299,7 +1299,8 @@ Injection is inserted **before** the watchdog call (`GATE` = the extracted alias
 if(ce.type==="stream_event"){
   if(GATE())try{process.stdout.write(JSON.stringify({
     type:"stream_event", event:ce.event,
-    parent_tool_use_id:CTX.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
+    parent_tool_use_id:CTX.toolUseId, agent_id:TASKID,  // agent_id: v2.1.280+, see below
+    session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
   })+"\n")}catch(_e){}
   continue  // ← skip h.push for stream_events regardless of sync/async state
 }
@@ -1355,6 +1356,105 @@ watchdog defers while tool uses are in flight, and a single turn streaming for
 long-thinking sub-agent is ever aborted with
 `[AsyncAgent …] stall watchdog fired … with no progress`, move the injection to
 _after_ the `api_error` `continue;` instead of before the watchdog.
+
+#### v2.1.280 — `agent_id` on every stream_event (the idle self-resume)
+
+**Symptom.** Tool cards with `{}` input spun "running" forever in the MAIN
+transcript while a background agent worked (live: session
+`176bc5a7-f4e8-4e91-a8aa-d884bd3241e9`, agent `ab9368ec953c764ac`, 2026-09-24).
+
+**Root cause.** 2.1.280 lets a background agent stop while its OWN background
+children still run; when a child reports, the parent agent resumes itself. With
+the session idle, that resume is dispatched from the session host with a generic
+main-loop context:
+
+```js
+// char ~26842982 (session host, chunk-ad1vsmtp.js)
+dispatchWake:async(Re,Pe,Ie)=>{await jG({agentId:Re,prompt:Pe,onDeliveryCommitted:Ie,
+  promptOrigin:{kind:"task-notification"},toolUseContext:this._buildIdleToolUseContext(),...})}
+// _buildIdleToolUseContext(){return this.turn.buildToolUseContext(this.transcript.getSnapshot(),[],new AbortController,...)}
+//   → no toolUseId
+```
+
+`jG` → `Ne(e,"notification")` → the resume function `Wt` → `GG({...,toolUseContext:s,...})`,
+so the runner's `CTX.toolUseId` is `undefined`, `JSON.stringify` drops the key,
+and Patch E's frames arrive with no `parent_tool_use_id` — indistinguishable from
+the main agent's. The consumer opened them on the ROOT lane.
+
+The completed snapshots did NOT follow them there: the native relay stamps its
+`parent_tool_use_id` from a different source that is still the ORIGIN Agent
+call's id (see below), so the snapshots reached the agent's card and the root
+scaffolds never got their input or a result.
+
+**Where the native relay's `parent_tool_use_id` comes from (verified 2.1.280).**
+In the sub-agent query generator (`async function*Lw({...,toolUseId:_e,...})`, char
+~13797483):
+
+```js
+// char ~13814353 — the relay for async/backgrounded sub-agents
+let J=n.taskRegistry.get(ie),de=Rn(J)&&J.isBackgrounded;
+if((g||de)&&_e){let xe=hk.of(n.session).active;
+  if(xe&&(M.type==="assistant"||M.type==="user"))for(let Re of Hp([M])){
+    let ct=bXe({toolUseID:`agent_${ie}`,parentToolUseID:_e,data:{message:Re,type:"agent_progress",agentId:ie,...}});
+    for(let $e of gTe(ct,...))xe.write($e)...}}
+// → the SDK converter (f9n, char ~13718988) yields parent_tool_use_id:e.parentToolUseID
+```
+
+`_e` is `Lw`'s own `toolUseId` param, NOT the runner's context. At spawn it is
+`toolUseId:e.toolUseId` (the Agent call; `Ge={...}`, char ~14041022) and `Lw`
+writes it into the agent's sidecar metadata (`Ol(ie,on,{...,..._e&&{toolUseId:_e}})`).
+On every resume (`Wt`, char ~23324829) it is read back from that sidecar:
+
+```js
+i("tengu_subagent_resume_sidecar_read",{...});let Fe=Nye(n?.toolUseId),...   // n = sidecar metadata
+Xe={agentDefinition:b,...,toolUseId:Fe,...}                                  // → Lw({...Xe,...})
+```
+
+So the relay's `parent_tool_use_id` is the ORIGIN Agent call's id on an idle
+self-resume (and on a SendMessage resume). The task registry's `toolUseId`
+(`s.toolUseId??Nye(I?.toolUseId)??Fe`) is the current RUN's — not what the relay uses.
+
+**Fix.** Stamp the runner's `taskId` param (the agent id) on every injected
+stream_event as `agent_id`, beside the unchanged `parent_tool_use_id`:
+
+```js
+// 2.1.280 output (GG: taskId e, ctx y, gate z, session K, msg le)
+/*PATCHED:subagent-E*/if(le.type==="stream_event"){if(z())try{process.stdout.write(JSON.stringify({type:"stream_event",event:le.event,parent_tool_use_id:y.toolUseId,agent_id:e,session_id:K(),uuid:globalThis.crypto.randomUUID()})+"\n")}catch(_e){}continue}if(rt(),le.type==="system"&&le.subtype==="api_error")continue;...
+```
+
+Idle self-resume frame on the wire:
+
+```json
+{"type":"stream_event","event":{...},"agent_id":"ab9368ec953c764ac","session_id":"...","uuid":"..."}
+```
+
+**Extraction.** `taskId` is bound from the SAME signature match that yields the
+`toolUseContext` var (so it is the runner's param, not a neighbour's): the
+destructured param list runs from that `async function NAME({` to its first
+`}){` (must lie before the anchor, i.e. in the same chunk), and must contain
+`[{,]taskId:(V)[,}=]` exactly once — else fail closed. GG's callers all pass
+`taskId:<agentId>` (spawn `w.agentId`, resume `K.agentId`, fork `u.agentId`), and
+the loop body itself uses the same binding as the task id right after the anchor
+(`h.update(e,...)`, `dl({tracker:ge,taskId:e,...})`).
+
+**Consumer.** `ClaudeSession.handleStreamEvent` (`src/core/services/claude-session.ts`)
+routes by `parent_tool_use_id` when present; otherwise by `agent_id` through
+`originByTaskId` (then `taskIdMap`) and `resolveTaskOwner` — the same owner the
+relay's snapshots resolve to. A frame with an `agent_id` it cannot place is
+dropped (logged once per agent), never routed to the root.
+
+**Stale-patch guard.** A cli.js patched before this change carries the same
+marker. The "already applied" branch fails loudly if the marker's injection has
+no `agent_id:` (and is not the legacy `_ptu` form) instead of skipping — re-run
+`bun run ensure-cli`, which re-extracts a pristine cli.js.
+
+**Find it:**
+
+```bash
+bundle-analyzer find vendor/claude-cli/cli.js 'toolUseContext:this._buildIdleToolUseContext()' --compact   # the idle resumes
+bundle-analyzer find vendor/claude-cli/cli.js 'tengu_subagent_resume_sidecar_read' --compact             # sidecar → Lw toolUseId
+bundle-analyzer find vendor/claude-cli/cli.js 'bg-subagent progress write failed' --compact              # the native relay
+```
 
 #### v2.1.196 and earlier — Legacy re-background for-await loops
 
@@ -1655,7 +1755,9 @@ For a sub-agent that thinks, writes text, calls Read tool, then responds:
       ← parent continues with sub-agent's text summary
 ```
 
-Messages from sub-agents carry `parent_tool_use_id` for attribution.
+Messages from sub-agents carry `parent_tool_use_id` for attribution. Patch E's
+background stream_events also carry `agent_id` (v2.1.280+) — the only attribution
+they have on an idle self-resume, where `parent_tool_use_id` is absent.
 
 ## Where Thinking Tokens Exist After Patching
 
@@ -1995,6 +2097,23 @@ selected by the `isNtCallback` flag).
 Always run `node --check` on the modified chunk after applying (extract it by its
 `// @bun-chunk` delimiters and check it as an `.mjs` file — the whole concat will
 not parse as a single module).
+
+## Discovery Method (v2.1.280 — `agent_id`)
+
+1. **Observed the symptom** in a live session: `{}`-input tool cards on the main
+   transcript that never sealed and never got results, during a background agent's
+   run that started AFTER the agent had already stopped once.
+2. **Found the resume trigger** by grepping `_buildIdleToolUseContext()`: the
+   session host wakes a parked agent from a child's task-notification with a
+   context that has no `toolUseId`; Patch E read `CTX.toolUseId` → `undefined`.
+3. **Checked why the snapshots were not also on the root**: the native relay
+   (`bg-subagent progress write failed`) stamps `Lw`'s own `toolUseId` param, which
+   `Wt` reads from the agent's sidecar (`tengu_subagent_resume_sidecar_read`) — the
+   origin Agent call. So partials and snapshots split between two owners; any fix
+   has to land the partials on the SAME owner the snapshots resolve to.
+4. **Rejected** reading the sidecar from the injection (async I/O inside a hot
+   loop, another chunk's helper) in favour of stamping the id the runner already
+   has (`taskId`) and letting the consumer map it through its agent-id maps.
 
 ## Discovery Method (v2.1.261 re-anchor — chunked bundle)
 

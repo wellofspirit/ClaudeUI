@@ -283,6 +283,8 @@ export class ClaudeSession extends BaseSession {
    * `--resume` reaps them. `settleOrphanedTasks` reports them stopped.
    */
   private liveTasks = new Map<string, string>()
+  /** Agent ids whose stream events were dropped unplaced — logged once each. */
+  private unplacedAgentIds = new Set<string>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -1349,9 +1351,40 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleStreamEvent(msg: StreamEventMessage): void {
-    const routingId = this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined)
     const event = msg.event
-    if (event) this.itemStreams.handleEvent(event, routingId)
+    if (!event) return
+    const owner = this.streamEventOwner(msg)
+    if (owner === null) return
+    this.itemStreams.handleEvent(event, owner)
+  }
+
+  /**
+   * The item lane a stream event belongs to: a sub-agent's card, `undefined`
+   * for the main agent, or `null` for a sub-agent frame nothing can place.
+   *
+   * A background agent that cli.js resumes on its own while the session is
+   * idle (a child of its reported) runs with no `toolUseId` on its context, so
+   * Patch E's frames carry no `parent_tool_use_id` — only `agent_id`. Its
+   * completed messages still arrive under the ORIGIN Agent call's id (the
+   * relay reads the agent's sidecar), so the partials must go to that same
+   * owner or `handleSnapshot` never finds their state. A frame with an
+   * `agent_id` is never the main agent's: unplaceable, it is dropped rather
+   * than leaked onto the root as a card that never gets its input or result.
+   */
+  private streamEventOwner(msg: StreamEventMessage): string | undefined | null {
+    if (msg.parent_tool_use_id) return this.resolveTaskOwner(msg.parent_tool_use_id)
+    const agentId = msg.agent_id
+    if (!agentId) return undefined
+    const toolUseId = this.originByTaskId.get(agentId) ?? this.taskIdMap.get(agentId)
+    if (toolUseId) return this.resolveTaskOwner(toolUseId)
+    if (!this.unplacedAgentIds.has(agentId)) {
+      this.unplacedAgentIds.add(agentId)
+      logger.debug(
+        'ClaudeSession',
+        `dropping stream events of unknown agent ${agentId} (no parent_tool_use_id)`
+      )
+    }
+    return null
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {

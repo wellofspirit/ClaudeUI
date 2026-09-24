@@ -92,6 +92,10 @@ export interface StreamEventMessage extends BaseSDKMessage {
     [k: string]: unknown
   }
   parent_tool_use_id?: string | null
+  /** The sub-agent that produced the event (Patch E, background runs). Present
+   *  even when `parent_tool_use_id` is not — an idle self-resume has no
+   *  tool_use id on its context. */
+  agent_id?: string
 }
 
 export interface SystemMessage extends BaseSDKMessage {

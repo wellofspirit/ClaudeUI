@@ -557,3 +557,142 @@ describe('ClaudeSession — agent identity survives the process', () => {
     expect(mockReadAgentIdentity).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * An agent that resumes ITSELF while the session is idle (ADR-073).
+ *
+ * cli.js 2.1.280 lets a background agent stop while its own background
+ * children still run; a child's report wakes it, and with the session idle the
+ * resume runs on `_buildIdleToolUseContext()` — no `toolUseId`. Patch E's
+ * stream events then carry no `parent_tool_use_id`, only `agent_id`, while the
+ * native relay still parents the completed snapshots to the ORIGIN Agent call
+ * (it reads the agent's sidecar). Before the fix the partials opened on the
+ * ROOT lane: `{}`-input tool cards the snapshots never reached, spinning forever.
+ */
+describe('ClaudeSession — an idle self-resume streams onto its own card', () => {
+  const CHILD_CALL = 'toolu_child_bash_call'
+  const MSG_ID = 'msg_self_resume'
+
+  /** Patch E's frame for an idle self-resume: agent_id, no parent_tool_use_id. */
+  const resumeEvent = (
+    event: Record<string, unknown>,
+    agentId = TASK_ID
+  ): Record<string, unknown> => ({
+    type: 'stream_event',
+    agent_id: agentId,
+    event
+  })
+
+  const resumedTurn = (agentId = TASK_ID): Array<Record<string, unknown>> => [
+    resumeEvent({ type: 'message_start', message: { id: MSG_ID } }, agentId),
+    resumeEvent(
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      agentId
+    ),
+    resumeEvent(
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child done' } },
+      agentId
+    ),
+    resumeEvent({ type: 'content_block_stop', index: 0 }, agentId),
+    resumeEvent(
+      {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: CHILD_CALL, name: 'Bash', input: {} }
+      },
+      agentId
+    ),
+    // The relay's per-block snapshot: parented to the ORIGIN (cli.js fact).
+    {
+      type: 'assistant',
+      uuid: 'u-self-resume-tool',
+      parent_tool_use_id: ORIGIN,
+      message: {
+        id: MSG_ID,
+        role: 'assistant',
+        model: 'claude-sonnet-4-6',
+        content: [{ type: 'tool_use', id: CHILD_CALL, name: 'Bash', input: { command: 'ls' } }]
+      }
+    },
+    resumeEvent({ type: 'content_block_stop', index: 1 }, agentId),
+    resumeEvent({ type: 'message_stop' }, agentId)
+  ]
+
+  const messageIdOf = (d: unknown): string | undefined =>
+    (d as { message?: { id?: string } }).message?.id ?? (d as { id?: string }).id
+
+  const onRoot = (sent: Array<[string, string, unknown]>): Array<[string, string, unknown]> =>
+    sent.filter(
+      ([c, , d]) =>
+        (c === 'session:message' && messageIdOf(d) === MSG_ID) ||
+        (c.startsWith('session:item-') &&
+          !(d as { ownerToolUseId?: string; target?: { ownerToolUseId?: string } })
+            .ownerToolUseId &&
+          !(d as { target?: { ownerToolUseId?: string } }).target?.ownerToolUseId)
+    )
+
+  const toolInputOf = (message: { content?: Array<Record<string, unknown>> }): unknown =>
+    message.content?.find((b) => b.type === 'tool_use')?.toolInput
+
+  it("opens the resumed run's partials under the agent's origin, never the root", async () => {
+    const sent = await runWire('routing-idle-self-resume', [taskStarted(ORIGIN), ...resumedTurn()])
+
+    expect(onRoot(sent)).toEqual([])
+
+    // The tool_use scaffold is published to the agent's card.
+    const cardMessages = sent
+      .filter(([c]) => c === 'session:subagent-message')
+      .map(([, , d]) => d as { toolUseId: string; message: { id: string; content: [] } })
+      .filter((d) => d.message.id === MSG_ID)
+    expect(cardMessages.length).toBeGreaterThan(0)
+    expect(new Set(cardMessages.map((d) => d.toolUseId))).toEqual(new Set([ORIGIN]))
+
+    // The text item opens on the same owner.
+    const opens = sent
+      .filter(([c]) => c === 'session:item-open')
+      .map(([, , d]) => (d as { target: { ownerToolUseId?: string } }).target)
+    expect(opens).toEqual([expect.objectContaining({ messageId: MSG_ID, ownerToolUseId: ORIGIN })])
+
+    // The ORIGIN-parented snapshot lands on that same state: the final seal
+    // carries the real input, not the `{}` scaffold.
+    const seals = sent
+      .filter(([c]) => c === 'session:item-seal')
+      .map(([, , d]) => d as { target?: unknown; ownerToolUseId?: string; message: never })
+    const final = seals.find((s) => s.target === undefined)
+    expect(final).toMatchObject({ ownerToolUseId: ORIGIN })
+    expect(toolInputOf(final!.message)).toEqual({ command: 'ls' })
+  })
+
+  it('places a self-resume after a SendMessage run on the origin too', async () => {
+    const sent = await runWire('routing-idle-self-resume-run2', [
+      taskStarted(ORIGIN),
+      taskNotification(ORIGIN),
+      taskStarted(RUN2), // taskIdMap now holds RUN2 for this agent
+      taskNotification(RUN2),
+      ...resumedTurn()
+    ])
+
+    expect(onRoot(sent)).toEqual([])
+    const owners = sent
+      .filter(([c]) => c === 'session:subagent-message')
+      .map(([, , d]) => (d as { toolUseId: string }).toolUseId)
+    expect(owners.length).toBeGreaterThan(0)
+    expect(new Set(owners)).toEqual(new Set([ORIGIN]))
+  })
+
+  it('drops the partials of an agent it cannot place instead of leaking them to the root', async () => {
+    const sent = await runWire('routing-idle-self-resume-unknown', [
+      taskStarted(ORIGIN),
+      ...resumedTurn('a-never-started').filter((m) => m.type === 'stream_event')
+    ])
+
+    expect(onRoot(sent)).toEqual([])
+    expect(
+      sent.filter(
+        ([c, , d]) =>
+          (c === 'session:subagent-message' || c.startsWith('session:item-')) &&
+          JSON.stringify(d).includes(MSG_ID)
+      )
+    ).toEqual([])
+  })
+})
