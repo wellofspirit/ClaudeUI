@@ -1,6 +1,6 @@
 # ADR-025 — projectKey as a derived render-identity + engine-neutral persisted-session delete
 
-**Status:** Accepted
+**Status:** Accepted. Amended by [ADR-077](adr-077_worktree-relocated-transcripts.md) (2026-09-24): a Claude group's key is the session's HOME (first-prompt cwd), while `SessionInfo.projectKey` stays the dir the file lives in. cli.js's `EnterWorktree` moves a transcript between the two, so they can differ.
 **Relates to:** ADR-018 (engine/vendor/account model), ADR-019 (opencode backend), ADR-020 (persistence)
 
 ## Context
