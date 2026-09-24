@@ -22,6 +22,7 @@ import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
 import {
   agentIdOf,
@@ -459,6 +460,26 @@ export async function computeTokenMetrics(
  * Scan ~/.claude/projects/ for session directories and build DirectoryGroup[].
  * Uses a disk-based metadata cache (~/.claude/ui/directory-cache.json) keyed by
  * file path + mtime. Only re-parses files whose mtime has changed.
+ *
+ * ## Groups are keyed by a session's HOME, not by the dir its file sits in
+ *
+ * cli.js's `EnterWorktree` relocates the live transcript into the worktree
+ * path's project dir (`-…-<repo>--claude-worktrees-<name>`), but the
+ * transcript's first user entry keeps the ORIGINAL cwd. Keyed by directory,
+ * that session became a second group with the same `cwd` (and so the same
+ * label) as its real project. So a session's home key is
+ * `cwdToProjectKey(meta.cwd)` — falling back to the dir it lives in when the
+ * cwd is unknown — and the group is built under that key.
+ *
+ * `SessionInfo.projectKey` stays the dir the file ACTUALLY lives in: loading
+ * history, watching, renaming and single-session delete all address the file
+ * through it. Only the GROUP's key is the home key, so a home group can exist
+ * with every member relocated and no directory of its own on disk (project
+ * delete handles that — see `handlers-core.deleteProject`).
+ *
+ * Scope: keys are only compared, never resolved through git. A session whose
+ * FIRST prompt was already inside a worktree (ClaudeUI's "new session in
+ * worktree") has the worktree as its home and keeps its own group.
  */
 export async function listDirectories(): Promise<DirectoryGroup[]> {
   let projectDirs: string[]
@@ -475,7 +496,13 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
   const cache = loadDiskCache()
   let cacheChanged = false
 
-  const groups: DirectoryGroup[] = []
+  // Keyed by HOME key (see the doc comment). `cwd` comes from a member whose
+  // file lives in the home dir; `relocatedCwd` is the fallback for a home group
+  // whose members were all relocated. They are equal by construction (up to the
+  // key's lossiness — the home key IS derived from that cwd), but preferring the
+  // home dir's own sessions keeps the label identical to what it was before
+  // relocated members merged in.
+  const byHome = new Map<string, { cwd: string; relocatedCwd: string; sessions: SessionInfo[] }>()
 
   for (const projectKey of projectDirs) {
     const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectKey)
@@ -538,9 +565,6 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     }
 
     // Build sessions from cache
-    const sessions: SessionInfo[] = []
-    let groupCwd = ''
-
     for (const f of fileEntries) {
       const meta = cache[f.filePath]
       if (!meta) continue
@@ -548,15 +572,28 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
       // Skip sessions with no user or assistant messages
       if (meta.hasConversation === false) continue
 
-      if (!groupCwd && meta.cwd) groupCwd = meta.cwd
+      const homeKey = (meta.cwd && cwdToProjectKey(meta.cwd)) || projectKey
+      let home = byHome.get(homeKey)
+      if (!home) {
+        home = { cwd: '', relocatedCwd: '', sessions: [] }
+        byHome.set(homeKey, home)
+      }
+      if (meta.cwd) {
+        if (homeKey === projectKey) {
+          if (!home.cwd) home.cwd = meta.cwd
+        } else if (!home.relocatedCwd) {
+          home.relocatedCwd = meta.cwd
+        }
+      }
 
       // Priority: custom-title (user override) > ai-title (cli.js auto) > summary (compact) > first user prompt title
       const displayTitle =
         meta.customTitle || meta.aiTitle || meta.summary || meta.title || 'Untitled'
 
-      sessions.push({
+      home.sessions.push({
         sessionId: f.sessionId,
         cwd: meta.cwd || '',
+        // The dir the file lives in — NOT the home key (see the doc comment).
         projectKey,
         title: displayTitle,
         timestamp: meta.timestamp || f.mtime,
@@ -565,16 +602,19 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
         engineId: 'claude'
       })
     }
+  }
 
-    if (sessions.length === 0) continue
-
+  const groups: DirectoryGroup[] = []
+  for (const [homeKey, home] of byHome) {
+    const { sessions } = home
     sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 
-    const folderName = groupCwd ? groupCwd.split(/[\\/]/).pop() || groupCwd : projectKey
+    const groupCwd = home.cwd || home.relocatedCwd
+    const folderName = groupCwd ? groupCwd.split(/[\\/]/).pop() || groupCwd : homeKey
 
     groups.push({
       cwd: groupCwd,
-      projectKey,
+      projectKey: homeKey,
       folderName,
       sessions
     })
@@ -864,9 +904,11 @@ export async function resolveForkAnchor(
   if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
   if (engineId !== 'claude') throw new Error(`Session fork is unsupported for engine "${engineId}"`)
 
-  const projectKey = cwdToProjectKey(cwd)
-  const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
-  if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
+  // Located, not derived from `cwd`: a transcript cli.js relocated into a
+  // worktree's project dir (`EnterWorktree`) does not live under the key its
+  // session cwd derives, and branching from such a session used to fail here.
+  const filePath = locateClaudeTranscript(sessionId, cwd, CLAUDE_PROJECTS_DIR)
+  if (!filePath) return { anchorUuid: null, reason: 'transcript-not-found' }
 
   let raw: string
   try {

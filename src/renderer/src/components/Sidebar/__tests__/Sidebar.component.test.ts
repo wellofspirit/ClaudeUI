@@ -505,6 +505,36 @@ describe('Sidebar FC', () => {
     expect(writeCalls[0][3]).toBe('My New Title')
   })
 
+  it('writes a relocated session’s title into the dir its FILE lives in, not its group’s', async () => {
+    // cli.js's `EnterWorktree` moved this transcript into the worktree's
+    // project dir; the listing still groups it under its home project. The
+    // write appends, so the group key would CREATE a stray one-line transcript
+    // under the home dir instead of titling the real one.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      { ...makeSessionInfo('moved-sess'), projectKey: worktreeKey }
+    ])
+
+    const writeCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:write-custom-title', async (...args) => {
+      writeCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+
+    act(() => {
+      viewProps.onFinishRename('moved-sess', 'Moved Title')
+    })
+
+    expect(writeCalls).toHaveLength(1)
+    expect(writeCalls[0][2]).toBe(worktreeKey)
+  })
+
   // -------------------------------------------------------------------------
   // 7. onAutoRename — generateTitle IPC + applyTitle
   // -------------------------------------------------------------------------

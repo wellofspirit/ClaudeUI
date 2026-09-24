@@ -4,6 +4,7 @@ import { emitEvent } from '../services/sync-host'
 import { syncCore } from '../services/sync-host'
 import { readSessionHistory as loadSessionHistory } from '../services/engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { claudeProjectKeyFor } from '../services/claude-transcript-locator'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../shared/derive-session'
 import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
@@ -53,9 +54,17 @@ async function seedCanonicalTranscript(
   engineId?: EngineId
 ): Promise<void> {
   try {
+    // Claude's transcript is LOCATED: cli.js relocates it into a worktree's
+    // project dir on `EnterWorktree`, a key `cwd` does not derive. The other
+    // engines read by their own id and ignore projectKey, so they keep the
+    // plain derivation (and skip the lookup's filesystem scan).
+    const projectKey =
+      (engineId ?? 'claude') === 'claude'
+        ? claudeProjectKeyFor(resumeSessionId, cwd)
+        : cwdToProjectKey(cwd)
     const { messages, taskNotifications, statusLine } = await loadSessionHistory(
       resumeSessionId,
-      cwdToProjectKey(cwd),
+      projectKey,
       resumeSessionAt,
       engineId
     )

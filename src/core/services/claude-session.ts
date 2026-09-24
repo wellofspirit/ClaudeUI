@@ -19,6 +19,7 @@ import * as path from 'path'
 import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
@@ -2555,14 +2556,23 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *  non-alphanumeric char with '-', matching cli.js's on-disk naming) — the
    *  old inline `/`+`.`-only replace produced a nonexistent path for every
    *  Windows cwd (and any cwd with `_`/space), silently no-opping
-   *  reconciliation and resume seeding. */
+   *  reconciliation and resume seeding.
+   *
+   *  LOCATED first, derived only as the fallback: cli.js's `EnterWorktree`
+   *  moves the live transcript into the worktree's project dir, which
+   *  `this.cwd` does not derive — and it can do that MID-session, so this is
+   *  resolved on every call rather than once. The derived path is kept for a
+   *  transcript that does not exist yet; every caller tolerates a missing file. */
   private transcriptPathFor(sessionId: string): string {
-    return path.join(
-      os.homedir(),
-      '.claude',
-      'projects',
-      cwdToProjectKey(this.cwd),
-      `${sessionId}.jsonl`
+    return (
+      locateClaudeTranscript(sessionId, this.cwd) ??
+      path.join(
+        os.homedir(),
+        '.claude',
+        'projects',
+        cwdToProjectKey(this.cwd),
+        `${sessionId}.jsonl`
+      )
     )
   }
 

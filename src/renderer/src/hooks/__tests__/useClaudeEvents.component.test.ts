@@ -413,4 +413,46 @@ describe('useClaudeEvents component tests', () => {
       expect(useSessionStore.getState().sessions['route-2'].errors).toHaveLength(1)
     })
   })
+
+  describe('a session another client resumed', () => {
+    /**
+     * cli.js's `EnterWorktree` relocated this transcript into the worktree's
+     * project dir; the listing groups it under its HOME project. The cold read
+     * must address the file by the SESSION's key — the group key names a dir
+     * the file is not in, and the replica rendered an empty conversation.
+     */
+    it('reads a relocated transcript by the session’s own projectKey', async () => {
+      const loadCalls: unknown[][] = []
+      app.bridge.ipcMain.handle('session:load-history', async (...args) => {
+        loadCalls.push(args)
+        return { messages: [], taskNotifications: [], customTitle: null, statusLine: null }
+      })
+      useSessionStore.setState({
+        directories: [
+          {
+            cwd: '/r/repo',
+            projectKey: '-r-repo',
+            folderName: 'repo',
+            sessions: [
+              {
+                sessionId: 'moved-sess',
+                cwd: '/r/repo',
+                projectKey: '-r-repo--claude-worktrees-wt',
+                title: 't',
+                timestamp: 1,
+                lastActivityAt: 1
+              }
+            ]
+          }
+        ]
+      })
+
+      app.emit('session:created', 'remote-rid', { cwd: '/r/repo', resumeSessionId: 'moved-sess' })
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(loadCalls).toHaveLength(1)
+      expect(loadCalls[0][1]).toBe('moved-sess')
+      expect(loadCalls[0][2]).toBe('-r-repo--claude-worktrees-wt')
+    })
+  })
 })

@@ -170,11 +170,16 @@ export function Sidebar({
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
   const hasAnyHidden = hiddenSessionIds.length > 0 || hiddenProjectKeys.length > 0
 
-  // Find the projectKey for a session from directories
+  // Find the projectKey for a session from directories. The SESSION's key, not
+  // its group's: a transcript cli.js relocated into a worktree's project dir is
+  // listed under its home group, so the group key names a dir the file is not in
+  // — and `writeCustomTitle` appends, so it would CREATE a stray one-line
+  // transcript there.
   const findProjectKey = useCallback(
     (sessionId: string): string | undefined => {
       for (const group of directories) {
-        if (group.sessions.some((s) => s.sessionId === sessionId)) return group.projectKey
+        const info = group.sessions.find((s) => s.sessionId === sessionId)
+        if (info) return info.projectKey
       }
       return undefined
     },
