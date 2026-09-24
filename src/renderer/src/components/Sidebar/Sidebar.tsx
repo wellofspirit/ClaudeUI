@@ -13,6 +13,7 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
+import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
@@ -637,15 +638,22 @@ export function Sidebar({
     })
   }, [])
 
-  const handleDeleteProjectRequest = useCallback((group: DirectoryGroup) => {
-    if (!group.projectKey) return
-    setDeleteTarget({
-      kind: 'project',
-      projectKey: group.projectKey,
-      folderName: group.folderName,
-      sessionCount: group.sessions.length
-    })
-  }, [])
+  const handleDeleteProjectRequest = useCallback(
+    (group: DirectoryGroup) => {
+      if (!group.projectKey) return
+      setDeleteTarget({
+        kind: 'project',
+        projectKey: group.projectKey,
+        folderName: group.folderName,
+        sessionCount: group.sessions.length,
+        // From the LISTING (`directories`), not the rendered group: that is what
+        // main plans from when the delete runs, and the in-memory rows merged
+        // into the rendered group have no file to name yet.
+        claudeFiles: planClaudeProjectDelete(directories, group.projectKey)
+      })
+    },
+    [directories]
+  )
 
   /**
    * What deleting the pending CODEX target would actually remove.

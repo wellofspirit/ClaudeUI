@@ -18,8 +18,7 @@ import type {
   ClaudePermissions,
   EngineId,
   ListPlacesResult,
-  PermissionScope,
-  SessionInfo
+  PermissionScope
 } from '../../shared/types'
 import {
   saveSessionConfig,
@@ -38,6 +37,7 @@ import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-sessi
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
@@ -410,45 +410,27 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
     }
   })
 
-  // Claude files, and WHICH of them. The listing groups a session under its
-  // HOME project (its first-prompt cwd) even when cli.js's `EnterWorktree` moved
-  // its file into a worktree's project dir, so the directory a project's key
-  // names and the set of files its members live in are no longer the same thing:
-  //
-  //  - A member RELOCATED out of this dir: `deleteProjectFiles` (this dir only)
-  //    would leave it behind and the next listing would bring it straight back.
-  //    It goes by its own `projectKey` — one session, never its whole dir, which
-  //    can hold sessions that are not members of this project.
-  //  - A dir that HOLDS another project's relocated member (deleting a worktree
-  //    project whose dir a home-project session was moved into): removing the
-  //    dir wholesale would silently delete a session the sidebar shows under a
-  //    different project. Then every member goes one by one and the dir stays.
-  //
-  // `allSettled` for the same reason as the engine sweep above — one stuck file
-  // must not abandon the rest of the delete.
-  const isClaude = (s: SessionInfo): boolean => !s.engineId || s.engineId === 'claude'
-  const dirShared = state.directories.some(
-    (g) =>
-      g.projectKey !== projectKey &&
-      g.sessions.some((s) => isClaude(s) && s.projectKey === projectKey)
-  )
-  const oneByOne = (group?.sessions ?? []).filter(
-    (s) => isClaude(s) && (dirShared || s.projectKey !== projectKey)
-  )
+  // Claude files, and WHICH of them: the home dir wholesale, members relocated
+  // into a worktree's project dir one by one, and — when this dir also holds
+  // another project's relocated member — every member one by one with the dir
+  // kept. The rule is `planClaudeProjectDelete`'s (shared), so the confirmation
+  // dialog describes exactly what runs here. `allSettled` for the same reason as
+  // the engine sweep above — one stuck file must not abandon the rest.
+  const { removeDir, sessionFiles } = planClaudeProjectDelete(state.directories, projectKey)
   const fileResults = await Promise.allSettled(
-    oneByOne.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
+    sessionFiles.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
   )
   fileResults.forEach((result, i) => {
     if (result.status === 'rejected') {
       logger.warn(
         'IPC',
-        `session:delete-project: session ${oneByOne[i].sessionId} (${oneByOne[i].projectKey}) survived the delete`,
+        `session:delete-project: session ${sessionFiles[i].sessionId} (${sessionFiles[i].projectKey}) survived the delete`,
         result.reason
       )
     }
   })
 
-  if (!dirShared) await deleteProjectFiles(projectKey)
+  if (removeDir) await deleteProjectFiles(projectKey)
   void refreshCanonicalDirectories()
 }
 

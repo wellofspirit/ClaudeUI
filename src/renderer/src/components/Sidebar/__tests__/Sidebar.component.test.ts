@@ -1010,6 +1010,35 @@ describe('Sidebar FC', () => {
     expect(deleteProjectCalls[0][1]).toBe(PROJECT_KEY)
   })
 
+  it('the project delete request names the relocated sessions the delete removes', async () => {
+    // cli.js's `EnterWorktree` moved `moved` into the worktree's project folder;
+    // the listing keeps it under this project, and main deletes it by its own
+    // key (`planClaudeProjectDelete`). The dialog must say so up front.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      makeSessionInfo('home-1'),
+      { ...makeSessionInfo('moved'), projectKey: worktreeKey, engineId: 'claude' }
+    ])
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+    act(() => {
+      viewProps.onDeleteProject(group)
+    })
+
+    const target = viewProps.deleteTarget
+    expect(target?.kind).toBe('project')
+    if (target?.kind !== 'project') return
+    expect(target.claudeFiles).toEqual({
+      removeDir: true,
+      sessionFiles: [{ sessionId: 'moved', projectKey: worktreeKey }]
+    })
+  })
+
   // -------------------------------------------------------------------------
   // 16. onDirectoriesChanged push event refreshes the sidebar
   // -------------------------------------------------------------------------

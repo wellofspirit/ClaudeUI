@@ -6,6 +6,7 @@ import type {
   ActiveView
 } from '../../../../shared/types'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
+import type { ClaudeProjectDeletePlan } from '../../../../shared/claude-project-delete'
 import { WorktreesModal } from '../WorktreesModal'
 import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
 import { NavItem, SafeSvgIcon } from './NavItem'
@@ -23,7 +24,15 @@ export type DeleteTarget =
       title: string
       engineId?: import('../../../../shared/types').EngineId
     }
-  | { kind: 'project'; projectKey: string; folderName: string; sessionCount: number }
+  | {
+      kind: 'project'
+      projectKey: string
+      folderName: string
+      sessionCount: number
+      /** Which Claude files the delete removes — the rule main runs, computed
+       *  from the same listing, so the dialog can name them. */
+      claudeFiles: ClaudeProjectDeletePlan
+    }
 
 export interface SidebarViewProps {
   style?: React.CSSProperties
@@ -462,6 +471,14 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               ? (deletePlan?.nodes.filter((node) => node.depth > 0) ?? [])
               : undefined
           }
+          sessionPaths={
+            deleteTarget.kind === 'project'
+              ? deleteTarget.claudeFiles.sessionFiles.map(
+                  (f) => `~/.claude/projects/${f.projectKey}/${f.sessionId}.jsonl`
+                )
+              : undefined
+          }
+          folderKept={deleteTarget.kind === 'project' && !deleteTarget.claudeFiles.removeDir}
           onConfirm={onConfirmDelete}
           onCancel={onCancelDelete}
         />
