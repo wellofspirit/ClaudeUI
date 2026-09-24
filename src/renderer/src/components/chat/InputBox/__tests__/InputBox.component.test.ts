@@ -1273,6 +1273,76 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['voice:stop-recording'][0][0]).toBe(FC_ROUTE)
   })
 
+  /**
+   * Push-to-talk released while `ensureSession()` is still spawning the engine.
+   * The stop goes out first; a start sent after it would open a capture nobody
+   * is holding. `session:create` is held open so the release lands inside it.
+   */
+  function holdSessionCreate(): () => void {
+    let release!: () => void
+    const created = new Promise<null>((resolve) => {
+      release = () => resolve(null)
+    })
+    app.bridge.ipcMain.handle('session:create', () => created)
+    return release
+  }
+
+  const tabEvent = (repeat = false): React.KeyboardEvent =>
+    ({ key: 'Tab', repeat, preventDefault: () => {} }) as unknown as React.KeyboardEvent
+
+  it('onVoiceStart: a release during the session spawn never sends the start', async () => {
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    const startP = viewProps.onVoiceStart() as unknown as Promise<void>
+    await viewProps.onVoiceStop()
+    releaseCreate()
+    await startP
+
+    expect(ipcCalls['voice:stop-recording']).toHaveLength(1)
+    expect(ipcCalls['voice:start-recording']).toBeUndefined()
+  })
+
+  it('release then re-press during ONE session spawn starts voice exactly once', async () => {
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    const start1 = viewProps.onVoiceStart() as unknown as Promise<void>
+    await viewProps.onVoiceStop()
+    const start2 = viewProps.onVoiceStart() as unknown as Promise<void>
+    releaseCreate()
+    await Promise.all([start1, start2])
+
+    expect(ipcCalls['voice:start-recording']).toHaveLength(1)
+  })
+
+  it('Tab released during the session spawn still stops, and never starts', async () => {
+    useSessionStore.setState((state) => ({ settings: { ...state.settings, voiceEnabled: true } }))
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    viewProps.onKeyDown(tabEvent())
+    viewProps.onKeyUp(tabEvent())
+    releaseCreate()
+    await vi.waitFor(() => expect(ipcCalls['voice:stop-recording'] ?? []).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ipcCalls['voice:start-recording']).toBeUndefined()
+  })
+
+  it('a held Tab auto-repeat does not start voice again', async () => {
+    useSessionStore.setState((state) => ({ settings: { ...state.settings, voiceEnabled: true } }))
+    renderFC()
+
+    viewProps.onKeyDown(tabEvent())
+    viewProps.onKeyDown(tabEvent(true))
+    viewProps.onKeyDown(tabEvent(true))
+    await vi.waitFor(() => expect(ipcCalls['voice:start-recording']).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ipcCalls['voice:start-recording']).toHaveLength(1)
+  })
+
   it('onSend does nothing when text is empty (noop)', async () => {
     // draftText defaults to '' for a fresh session
     renderFC()

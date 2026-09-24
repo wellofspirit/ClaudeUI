@@ -713,10 +713,22 @@ export function InputBox(): React.JSX.Element {
     }
   }, [activeSessionId, sdkActive, markSdkActive])
 
+  /**
+   * Is the push-to-talk still held? `ensureSession()` can spawn the engine first,
+   * and a release during that await sends its stop BEFORE the start — which main
+   * would then honor by opening a capture nobody is holding.
+   */
+  const voiceHeldRef = useRef(false)
+  /** Numbers each press, so a release-then-repress during one spawn starts once. */
+  const voicePressRef = useRef(0)
+
   const handleVoiceStart = useCallback(async () => {
     if (!activeSessionId || isDisabled || voiceState !== 'idle') return
+    const press = ++voicePressRef.current
+    voiceHeldRef.current = true
     try {
       await ensureSession()
+      if (!voiceHeldRef.current || voicePressRef.current !== press) return
       await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
     } catch (err) {
       window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
@@ -724,6 +736,7 @@ export function InputBox(): React.JSX.Element {
   }, [activeSessionId, isDisabled, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
+    voiceHeldRef.current = false
     if (!activeSessionId) return
     await window.api.voiceStopRecording(activeSessionId)
   }, [activeSessionId])
@@ -847,13 +860,22 @@ export function InputBox(): React.JSX.Element {
     if (e.key === 'Escape' && isRunning) handleCancel()
     if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault()
+      // Auto-repeat of a held Tab is not a new press: while the renderer's state
+      // still lags at idle, each repeat would start again and re-point the
+      // native capture at a callback that drops the audio.
+      if (e.repeat) return
       if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
         handleVoiceStart()
     }
   }
 
   const handleKeyUp = (e: React.KeyboardEvent): void => {
-    if (e.key === 'Tab' && (voiceState === 'recording' || voiceState === 'connecting')) {
+    // `voiceHeldRef`: released before main reported `connecting` (the session
+    // was still spawning) — the stop still has to cancel that pending start.
+    if (
+      e.key === 'Tab' &&
+      (voiceState === 'recording' || voiceState === 'connecting' || voiceHeldRef.current)
+    ) {
       e.preventDefault()
       handleVoiceStop()
     }

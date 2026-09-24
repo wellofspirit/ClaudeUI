@@ -343,8 +343,12 @@ function VoiceButton({
         onVoiceStart()
       }}
       onMouseUp={onVoiceStop}
-      onMouseLeave={() => {
-        if (voiceState === 'recording' || voiceState === 'connecting') onVoiceStop()
+      onMouseLeave={(e) => {
+        // Primary button still down: the press is being abandoned, even if it is
+        // still spawning the session and the state has not left idle yet — a
+        // release elsewhere would never reach this button's mouseup.
+        if (voiceState === 'recording' || voiceState === 'connecting' || (e.buttons & 1) === 1)
+          onVoiceStop()
       }}
       // The release half stays on React's synthetic events: only `touchstart` is
       // passive, and only the start needs to preventDefault.

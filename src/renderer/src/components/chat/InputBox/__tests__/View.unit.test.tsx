@@ -403,6 +403,18 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     expect(onVoiceStop).toHaveBeenCalledTimes(2)
   })
 
+  it('leaving with the button still down stops a press that is still spawning (idle)', () => {
+    const { button, onVoiceStop } = renderVoice()
+
+    // Moved off without pressing: nothing to abandon.
+    fireEvent.mouseLeave(button, { buttons: 0 })
+    expect(onVoiceStop).not.toHaveBeenCalled()
+
+    // Dragged off mid-press: the release will land elsewhere, so stop now.
+    fireEvent.mouseLeave(button, { buttons: 1 })
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+
   it('a cancelled gesture (incoming call, system swipe) still stops the capture', () => {
     const { button, onVoiceStart, onVoiceStop } = renderVoice()
 

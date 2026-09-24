@@ -49,6 +49,12 @@ export abstract class VoiceStreamClient {
   private streamReady = false
   /** The finalization safety net; cleared by {@link VoiceStreamClient.cleanup}. */
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Bumped by every start and every {@link VoiceStreamClient.cleanup}, so a start
+   * whose connect resolves after a stop (or after a newer start) can tell it has
+   * been superseded. See {@link VoiceStreamClient.startRecording}.
+   */
+  private startGen = 0
 
   /** Log tag — the concrete client's name, so the two sources stay separable. */
   protected readonly logSource: string
@@ -123,13 +129,25 @@ export abstract class VoiceStreamClient {
       return
     }
 
+    const gen = ++this.startGen
     this.setState('connecting')
     this.audioBuffer = [...earlyBuffer]
     this.streamReady = false
 
     try {
       // Connect to the voice server in cli.js
-      this.conn = await this.connect()
+      const conn = await this.connect()
+
+      // A stop during the connect window already cleaned up and reported idle.
+      // Adopting this socket would resurrect a capture nobody is holding, so drop
+      // it — before any handler is attached, so its 'close' cannot tear down a
+      // newer capture.
+      if (gen !== this.startGen) {
+        conn.rl.close()
+        conn.socket.destroy()
+        return
+      }
+      this.conn = conn
 
       // Set up message handling
       this.conn.rl.on('line', (line) => this.handleMessage(line))
@@ -151,6 +169,8 @@ export abstract class VoiceStreamClient {
 
       // Will transition to 'recording' on 'ready' message from voice server
     } catch (err) {
+      // A superseded start's failed connect is not this capture's failure.
+      if (gen !== this.startGen) return
       const msg = err instanceof Error ? err.message : String(err)
       logger.error(this.logSource, `Failed to start recording: ${msg}`)
       this.emitError(`Failed to connect to voice server: ${msg}`)
@@ -322,6 +342,7 @@ export abstract class VoiceStreamClient {
   }
 
   protected cleanup(): void {
+    this.startGen++
     this.stopAudioSource()
     this.streamReady = false
     this.audioBuffer = []

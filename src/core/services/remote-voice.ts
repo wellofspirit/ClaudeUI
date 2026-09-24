@@ -142,6 +142,14 @@ interface Entry {
 
 export class RemoteVoiceRegistry {
   private entries = new Map<string, Entry>()
+  /**
+   * Per connection, the generation of a start still awaiting the voice server
+   * (a first start spawns cli.js — seconds). {@link RemoteVoiceRegistry.stop}
+   * deletes it, so a start that wakes without its generation here was cancelled
+   * and must not open a capture nobody is holding.
+   */
+  private pendingStarts = new Map<string, number>()
+  private startGen = 0
 
   /**
    * Bind this connection's audio to `routingId`'s voice server and start
@@ -167,14 +175,33 @@ export class RemoteVoiceRegistry {
       throw new Error('Provider does not support voice')
     }
 
+    // Registered before anything awaits, so a `voice:stop` that lands at any point
+    // from here on cancels this start. Overwriting also cancels an older start
+    // still pending on this connection.
+    const connectionId = connection.connectionId
+    const gen = ++this.startGen
+    this.pendingStarts.set(connectionId, gen)
+
     // One microphone per connection (rule 1). Stopping first also means a client
     // that lost track of its own state can always recover by starting again.
-    await this.stop(connection.connectionId)
+    // `endCapture`, not `stop`: that would cancel this very start.
+    await this.endCapture(connectionId)
 
-    const { port } = await session.voiceStartServer()
+    let server: { port: number }
+    try {
+      server = await session.voiceStartServer()
+    } catch (err) {
+      // Cancelled while spawning: the stop already answered; this is not its failure.
+      if (this.pendingStarts.get(connectionId) !== gen) return
+      this.pendingStarts.delete(connectionId)
+      throw err
+    }
+    // A `voice:stop`, a newer start or the socket closing landed during the spawn.
+    if (this.pendingStarts.get(connectionId) !== gen) return
+    this.pendingStarts.delete(connectionId)
+    const { port } = server
     if (!port) throw new Error('Voice server failed to return a port')
 
-    const connectionId = connection.connectionId
     const liveRoutingId = (): string => session.routingId
     const client = new RemoteVoiceClient(port, connectionId, liveRoutingId, () => {
       // Retire only if we are still the live entry: a stop-then-start in the same
@@ -232,6 +259,12 @@ export class RemoteVoiceRegistry {
    * transcripts still arrive asynchronously, exactly as they do on the desktop.
    */
   async stop(connectionId: string): Promise<void> {
+    this.pendingStarts.delete(connectionId)
+    await this.endCapture(connectionId)
+  }
+
+  /** Finalize this connection's live capture, leaving any pending start alone. */
+  private async endCapture(connectionId: string): Promise<void> {
     const entry = this.entries.get(connectionId)
     if (!entry) return
     this.entries.delete(connectionId)
@@ -244,6 +277,7 @@ export class RemoteVoiceRegistry {
    * transcript to, and the point is that no authority outlives the socket.
    */
   releaseConnection(connectionId: string): void {
+    this.pendingStarts.delete(connectionId)
     const entry = this.entries.get(connectionId)
     if (!entry) return
     this.entries.delete(connectionId)
@@ -258,6 +292,7 @@ export class RemoteVoiceRegistry {
   /** Drop every capture. Test seam only. */
   clearForTests(): void {
     for (const connectionId of [...this.entries.keys()]) this.releaseConnection(connectionId)
+    this.pendingStarts.clear()
   }
 }
 

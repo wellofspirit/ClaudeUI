@@ -371,6 +371,14 @@ export class ClaudeSession extends BaseSession {
   private sandboxConfig: SandboxSettings | null = null
   private voiceClient: VoiceClient | null = null
   private voiceServerPort: number | null = null
+  /** Bumped by every {@link ClaudeSession.voiceStartRecording}; identifies one start. */
+  private voiceStartGen = 0
+  /**
+   * The generation of the start still awaiting the voice server, or null. A stop
+   * clears it and a newer start overwrites it, so a start that wakes to find a
+   * different value was cancelled and must not open the capture.
+   */
+  private voicePendingStart: number | null = null
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -2210,6 +2218,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // or hand-rolled send is one refactor away from being invisible).
     emitEvent('voice:state', [this.routingId, 'connecting'])
 
+    const gen = ++this.voiceStartGen
+    this.voicePendingStart = gen
+    let pending = true
     try {
       // Ensure voice server is running (may spawn SDK + create TCP server)
       if (!this.voiceServerPort) {
@@ -2218,6 +2229,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           throw new Error('Voice server failed to return a port')
         }
       }
+
+      // Released while the server was starting (a spawn can take seconds): the
+      // stop already closed the microphone and reported idle, and a newer start
+      // owns the capture now — either way this one must not reopen it.
+      if (this.voicePendingStart !== gen) {
+        earlyCaptureStopped = true
+        return
+      }
+      this.voicePendingStart = null
+      pending = false
 
       const port = this.voiceServerPort!
       if (!this.voiceClient) {
@@ -2231,6 +2252,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       await this.voiceClient.startRecording(language, earlyBuffer)
     } catch (err) {
       earlyCaptureStopped = true
+      if (pending) {
+        // Cancelled while pending — including a spawn that then timed out: the
+        // stop already ended it idle, so there is no error to report.
+        if (this.voicePendingStart !== gen) return
+        this.voicePendingStart = null
+      }
       stopRecording()
       emitEvent('voice:state', [this.routingId, 'idle'])
       throw err
@@ -2239,8 +2266,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   /** Stop the current voice recording session. */
   async voiceStopRecording(): Promise<void> {
-    if (!this.voiceClient) {
-      // If voiceClient never started (still in early capture), just stop recording
+    if (this.voicePendingStart !== null || !this.voiceClient) {
+      // Still in early capture (the start is awaiting the voice server, or never
+      // got a client): cancel that start and close the microphone it opened.
+      this.voicePendingStart = null
       stopRecording()
       emitEvent('voice:state', [this.routingId, 'idle'])
       return
@@ -2681,7 +2710,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // Tear down any cross-engine dispatch targets owned by this session (ADR-033).
     crossEngineDispatcher.disposeFor(this.routingId)
 
-    // Clean up voice resources
+    // Clean up voice resources. A start still awaiting the voice server is
+    // cancelled like a stop would, closing the microphone it opened.
+    if (this.voicePendingStart !== null) {
+      this.voicePendingStart = null
+      stopRecording()
+    }
     if (this.voiceClient) {
       this.voiceClient.destroy()
       this.voiceClient = null

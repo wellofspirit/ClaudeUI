@@ -327,4 +327,30 @@ describe('VoiceClient', () => {
     ])
   })
 
+  it('a stop during the connect window ends the capture — the late connect is dropped', async () => {
+    const win = makeWin()
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+
+    // Start, then release before the TCP handshake completes.
+    const startP = client.startRecording('en')
+    const socket = lastSocket!
+    const rl = lastReadline!
+    await client.stopRecording()
+    expect(client.currentState()).toBe('idle')
+    startRecordingMock.mockClear()
+    win.webContents.send.mockClear()
+
+    // The handshake lands late, and the server even answers `ready`.
+    fireConnect()
+    await startP
+    rl.emit('line', JSON.stringify({ type: 'ready' }))
+
+    expect(client.currentState()).toBe('idle')
+    expect(socket.destroyed).toBe(true)
+    expect(rl.closed).toBe(true)
+    expect(sentMessages().some((m) => m.type === 'voice_start')).toBe(false)
+    // The microphone is not reopened, and the renderer hears nothing more.
+    expect(startRecordingMock).not.toHaveBeenCalled()
+    expect(win.webContents.send).not.toHaveBeenCalled()
+  })
 })
