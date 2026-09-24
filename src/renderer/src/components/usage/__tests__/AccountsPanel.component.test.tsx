@@ -8,7 +8,7 @@
  * still has to render honestly.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { AccountsPanel } from '../AccountsPanel'
 import { SEVERITY_ICON, buildProviderColorMap } from '../usage-utils'
@@ -95,6 +95,17 @@ describe('AccountsPanel — grouping', () => {
 })
 
 describe('AccountsPanel — limit meters', () => {
+  // The weekly resets below are a fixed Thursday 09:00; pin "now" to the Tuesday
+  // before it so they stay in the future (a weekday reset with an `(in …)`
+  // countdown) whatever day the suite runs. Only `Date` is faked.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 8, 22, 12, 0, 0))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it.each([
     [20, 'ok'],
     [70, 'warn'],
