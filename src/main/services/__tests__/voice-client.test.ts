@@ -65,8 +65,11 @@ class FakeSocket extends EventEmitter {
     return true
   }
   destroy(): void {
+    if (this.destroyed) return
     this.destroyed = true
-    this.emit('close')
+    // Asynchronous, like net.Socket's: a synchronous 'close' re-entered
+    // cleanup() from inside itself, which a real socket never does.
+    process.nextTick(() => this.emit('close'))
   }
   setTimeout(ms: number): void {
     this.timeoutMs = ms
@@ -168,7 +171,7 @@ describe('VoiceClient', () => {
 
   it('startRecording() connects to the voice server on the configured port and sends voice_start with the language', async () => {
     const win = makeWin()
-    const client = new VoiceClient(12345, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(12345, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
 
@@ -198,7 +201,7 @@ describe('VoiceClient', () => {
 
   it('audio chunks pushed through the captured onData callback are forwarded as base64 audio frames once the server reports ready', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
@@ -228,7 +231,7 @@ describe('VoiceClient', () => {
 
   it('rejects a second startRecording() while the first is still connecting (no orphan socket)', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     // First call: enters 'connecting' and awaits the TCP handshake (not fired).
     const p1 = client.startRecording('en')
@@ -247,7 +250,7 @@ describe('VoiceClient', () => {
 
   it('does not call webContents.send when the window is destroyed', async () => {
     const win = makeWin(true)
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     // startRecording transitions state (which would send 'voice:state') — every
     // send must be suppressed against a destroyed window rather than throwing.
@@ -260,7 +263,7 @@ describe('VoiceClient', () => {
 
   it('stopRecording() sends voice_stop and cleans up after the server closes, restoring idle state', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
@@ -296,4 +299,32 @@ describe('VoiceClient', () => {
       .map((c) => c[2])
     expect(finalStates[finalStates.length - 1]).toBe('idle')
   })
+
+  it('emits under the LIVE routing id when the session is rekeyed mid-capture', async () => {
+    // A brand-new session's first press spawns cli.js and creates this client;
+    // the first prompt then rekeys the session. Everything the client emits
+    // afterwards must follow the new id, or the renderer drops it.
+    const win = makeWin()
+    let routingId = 'routing-temp'
+    const client = new VoiceClient(4000, win as unknown as never, () => routingId)
+
+    const startP = client.startRecording('en')
+    fireConnect()
+    await startP
+
+    routingId = 'routing-minted'
+    win.webContents.send.mockClear()
+
+    lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
+    lastReadline!.emit('line', JSON.stringify({ type: 'transcript', text: 'hi', isFinal: true }))
+    lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
+
+    const calls = win.webContents.send.mock.calls
+    expect(calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+      ['voice:state', 'routing-minted', 'recording'],
+      ['voice:transcript', 'routing-minted', { text: 'hi', isFinal: true }],
+      ['voice:state', 'routing-minted', 'idle']
+    ])
+  })
+
 })

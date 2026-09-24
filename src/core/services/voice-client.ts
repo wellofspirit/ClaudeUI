@@ -26,12 +26,18 @@ import type { VoiceState } from '../../shared/types'
 
 export class VoiceClient extends VoiceStreamClient {
   private win: HostWindowHandle
-  private routingId: string
+  /**
+   * Read on every emit, never copied: the client lives as long as its session,
+   * and a brand-new session's routing id is REKEYED when cli.js mints its id —
+   * usually mid-capture, because the first press is what spawns cli.js. A
+   * copied id keeps emitting on the old key, which the renderer drops.
+   */
+  private getRoutingId: () => string
 
-  constructor(port: number, win: HostWindowHandle, routingId: string) {
+  constructor(port: number, win: HostWindowHandle, getRoutingId: () => string) {
     super(port, 'VoiceClient')
     this.win = win
-    this.routingId = routingId
+    this.getRoutingId = getRoutingId
   }
 
   /**
@@ -54,11 +60,11 @@ export class VoiceClient extends VoiceStreamClient {
   }
 
   protected emitState(state: VoiceState): void {
-    this.send('voice:state', this.routingId, state)
+    this.send('voice:state', this.getRoutingId(), state)
   }
 
   protected emitTranscript(text: string, isFinal: boolean): void {
-    this.send('voice:transcript', this.routingId, { text, isFinal })
+    this.send('voice:transcript', this.getRoutingId(), { text, isFinal })
   }
 
   /**
@@ -78,7 +84,7 @@ export class VoiceClient extends VoiceStreamClient {
    * `shared/sync/channels.ts`.
    */
   protected emitError(message: string): void {
-    emitEvent('voice:error', [this.routingId, message])
+    emitEvent('voice:error', [this.getRoutingId(), message])
   }
 
   /**

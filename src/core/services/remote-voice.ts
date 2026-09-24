@@ -72,7 +72,8 @@ class RemoteVoiceClient extends VoiceStreamClient {
   constructor(
     port: number,
     private readonly connectionId: string,
-    private readonly routingId: string,
+    /** Read per emit — the session can be rekeyed mid-capture (see `VoiceClient`). */
+    private readonly getRoutingId: () => string,
     /** Called on every transition to `idle`, so the registry can retire us. */
     private readonly onIdle: () => void
   ) {
@@ -103,12 +104,12 @@ class RemoteVoiceClient extends VoiceStreamClient {
   }
 
   protected emitState(state: VoiceState): void {
-    this.deliver('voice:state', [this.routingId, state])
+    this.deliver('voice:state', [this.getRoutingId(), state])
     if (state === 'idle') this.onIdle()
   }
 
   protected emitTranscript(text: string, isFinal: boolean): void {
-    this.deliver('voice:transcript', [this.routingId, { text, isFinal }])
+    this.deliver('voice:transcript', [this.getRoutingId(), { text, isFinal }])
   }
 
   /**
@@ -118,7 +119,7 @@ class RemoteVoiceClient extends VoiceStreamClient {
    * without reducing ring membership.
    */
   protected emitError(message: string): void {
-    this.deliver('voice:error', [this.routingId, message])
+    this.deliver('voice:error', [this.getRoutingId(), message])
   }
 
   /**
@@ -137,7 +138,6 @@ class RemoteVoiceClient extends VoiceStreamClient {
 
 interface Entry {
   client: RemoteVoiceClient
-  routingId: string
 }
 
 export class RemoteVoiceRegistry {
@@ -175,13 +175,14 @@ export class RemoteVoiceRegistry {
     if (!port) throw new Error('Voice server failed to return a port')
 
     const connectionId = connection.connectionId
-    const client = new RemoteVoiceClient(port, connectionId, routingId, () => {
+    const liveRoutingId = (): string => session.routingId
+    const client = new RemoteVoiceClient(port, connectionId, liveRoutingId, () => {
       // Retire only if we are still the live entry: a stop-then-start in the same
       // tick would otherwise have the OLD client's idle transition delete the new
       // one's registration and silently drop every frame that follows.
       if (this.entries.get(connectionId)?.client === client) this.entries.delete(connectionId)
     })
-    this.entries.set(connectionId, { client, routingId })
+    this.entries.set(connectionId, { client })
 
     try {
       await client.startRecording(language && language !== '' ? language : 'en')

@@ -2221,7 +2221,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
       const port = this.voiceServerPort!
       if (!this.voiceClient) {
-        this.voiceClient = new VoiceClient(port, win, this.routingId)
+        this.voiceClient = new VoiceClient(port, win, () => this.routingId)
       } else {
         this.voiceClient.updatePort(port)
       }

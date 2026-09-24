@@ -257,6 +257,27 @@ describe('remote voice capture', () => {
     expect(deliveries.every((d) => d.connectionId === CONNECTION_ID)).toBe(true)
   })
 
+  it('follows the session across a rekey — frames go out under the LIVE routing id', async () => {
+    // A brand-new session is rekeyed when cli.js mints its id; a capture that
+    // spans it must keep reaching the client under the id the client now uses.
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: async () => ({ port: voiceServer.port })
+    }
+    await startCapture(CONNECTION_ID, { get: () => session } as unknown as SessionManager)
+
+    session.routingId = 'rid-minted'
+    voiceServer.push({ type: 'ready' })
+    voiceServer.push({ type: 'transcript', text: 'after the rekey.', isFinal: true })
+
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:transcript').length === 1)
+    expect(framesFor(CONNECTION_ID, 'voice:transcript')).toEqual([
+      ['rid-minted', { text: 'after the rekey.', isFinal: true }]
+    ])
+    expect(framesFor(CONNECTION_ID, 'voice:state')).toContainEqual(['rid-minted', 'recording'])
+  })
+
   it('refuses an oversized frame without forwarding it', async () => {
     await startCapture()
     voiceServer.push({ type: 'ready' })
