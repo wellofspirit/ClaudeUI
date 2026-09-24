@@ -407,6 +407,34 @@ export class ClaudeSession extends BaseSession {
     this.resumeSessionId = resumeSessionId
     this.resumeSessionAt = resumeSessionAt
     this.forkSession = !!forkSession && !!resumeSessionAt
+
+    // Never `--resume` a transcript that does not exist. A cli.js that was
+    // spawned but never prompted — or whose first prompt died before it wrote
+    // anything — leaves no transcript, yet every renderer path that respawns a
+    // session with history (doSend, ensureSession, restartSdkSession,
+    // retrySend) asks to resume it, and cli.js then exits `No conversation
+    // found with session ID …` on every attempt. Decided here, once, rather
+    // than in each caller: the spawn goes out fresh, cli.js mints its own id,
+    // and the post-init rekey moves this session onto it exactly as it does for
+    // any brand-new session. The seeds below key off `resumeSessionId`, so they
+    // are skipped with it — they would only have read a missing file.
+    //
+    // Forks are exempt on purpose: a missing fork SOURCE is a real error, and
+    // quietly turning a branch into an unrelated empty session would hide it.
+    // Located, not derived from cwd, so a transcript cli.js relocated into a
+    // worktree's project dir still counts as existing.
+    if (
+      this.resumeSessionId &&
+      !this.forkSession &&
+      !locateClaudeTranscript(this.resumeSessionId, cwd)
+    ) {
+      logger.warn(
+        'ClaudeSession',
+        `Resume target ${this.resumeSessionId} has no transcript on disk — starting fresh`
+      )
+      this.resumeSessionId = undefined
+    }
+
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig

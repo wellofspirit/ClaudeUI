@@ -14,7 +14,9 @@
  * Mock scaffold mirrors claude-session-collab-gating.component.test.ts —
  * everything touching disk/processes is stubbed; only construction is driven.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
+import * as fs from 'fs'
+import * as nodePath from 'path'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
@@ -22,6 +24,32 @@ import type { StatusLineData } from '../../../shared/types'
 const { mockComputeTokenMetrics } = vi.hoisted(() => ({
   mockComputeTokenMetrics: vi.fn()
 }))
+
+// A temp home, so a resume target's transcript can EXIST: ClaudeSession spawns a
+// resume whose transcript is missing fresh, and skips the seed with it. Created
+// while mocks are hoisted — the import graph reads os.homedir() at load.
+const { TEMP_HOME } = await vi.hoisted(async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  return { TEMP_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-resume-seed-')) }
+})
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
+
+/** Put a resume target's transcript on disk where cli.js would have written it.
+ *  Its content is irrelevant — computeTokenMetrics is mocked. */
+function seedTranscript(projectKey: string, sessionId: string): void {
+  const dir = nodePath.join(TEMP_HOME, '.claude', 'projects', projectKey)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(nodePath.join(dir, `${sessionId}.jsonl`), '{}\n')
+}
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
@@ -86,6 +114,11 @@ import type { BrowserWindow } from 'electron'
 // file does not fan every event out to hundreds of dead stubs.
 afterEach(() => {
   clearSyncSubscribersForTests()
+  fs.rmSync(nodePath.join(TEMP_HOME, '.claude', 'projects'), { recursive: true, force: true })
+})
+
+afterAll(() => {
+  fs.rmSync(TEMP_HOME, { recursive: true, force: true })
 })
 
 /**
@@ -134,6 +167,7 @@ beforeEach(() => {
 
 describe('ClaudeSession — resume seeding of accumulators', () => {
   it('seeds from the resume transcript at construction and emits the seeded status line', async () => {
+    seedTranscript('-tmp-proj', 'sess-123')
     const { win, sent } = makeWin()
     new ClaudeSession('routing-seed', win, '/tmp/proj', { resumeSessionId: 'sess-123' })
     await tick()
@@ -164,6 +198,7 @@ describe('ClaudeSession — resume seeding of accumulators', () => {
     // The pre-fix derivation only replaced / and ., producing a nonexistent
     // path for every Windows cwd — the seed (and all reconciliation) silently
     // no-opped on Windows while POSIX cwds worked.
+    seedTranscript('D--Work-Proj', 'sess-win')
     const { win } = makeWin()
     new ClaudeSession('routing-win', win, 'D:\\Work\\Proj', { resumeSessionId: 'sess-win' })
     await tick()
@@ -198,6 +233,8 @@ describe('ClaudeSession — resume seeding of accumulators', () => {
       totalCostUsd: 0,
       totalTokens: 0
     })
+    // On disk, but it yields no metrics.
+    seedTranscript('-tmp-proj', 'sess-gone')
     const { win, sent } = makeWin()
     new ClaudeSession('routing-empty', win, '/tmp/proj', { resumeSessionId: 'sess-gone' })
     await tick()

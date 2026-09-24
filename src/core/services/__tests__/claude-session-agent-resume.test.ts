@@ -16,10 +16,30 @@
  *
  * Mock scaffold mirrors `claude-session-snapshot-fallback.test.ts`.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
+import * as fs from 'fs'
+import * as nodePath from 'path'
 import type { TaskNotification, TaskStartedData } from '../../../shared/types'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../sync-host'
+
+// A temp home, so a resume target's transcript can EXIST: ClaudeSession spawns a
+// resume whose transcript is missing fresh (no `--resume`, no identity seed).
+// Created while mocks are hoisted — the import graph reads os.homedir() at load.
+const { TEMP_HOME } = await vi.hoisted(async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  return { TEMP_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-agent-resume-')) }
+})
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
 
 const { mockQuery } = vi.hoisted(() => ({ mockQuery: vi.fn() }))
 
@@ -395,6 +415,17 @@ describe('ClaudeSession — a resumed agent keeps its identity', () => {
  */
 describe('ClaudeSession — agent identity survives the process', () => {
   const RESUME_SID = 'sess-resumed-0001'
+
+  // The resume target's transcript is on disk (its CONTENT is the mocked
+  // readAgentIdentity's to supply) — a missing one would spawn fresh.
+  beforeEach(() => {
+    const dir = nodePath.join(TEMP_HOME, '.claude', 'projects', '-tmp-proj')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(nodePath.join(dir, `${RESUME_SID}.jsonl`), '{}\n')
+  })
+  afterAll(() => {
+    fs.rmSync(TEMP_HOME, { recursive: true, force: true })
+  })
   const RUN3 = 'toolu_01ResumeAfterRespawnxxxxx'
 
   /** The `task_updated` patch cli.js sends alongside a run's terminal notification. */
