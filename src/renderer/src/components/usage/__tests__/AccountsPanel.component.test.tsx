@@ -37,6 +37,18 @@ function emptyBlockUsage(): BlockUsageData {
   } as unknown as BlockUsageData
 }
 
+/**
+ * 09:00 on the next Thursday at least a day away — the "Thu 09:00" the weekday
+ * assertions below expect, without pinning a calendar date that goes stale.
+ */
+function nextThursdayNine(): Date {
+  const d = new Date()
+  d.setHours(9, 0, 0, 0)
+  do d.setDate(d.getDate() + 1)
+  while (d.getDay() !== 4 || d.getTime() - Date.now() < 24 * 3_600_000)
+  return d
+}
+
 describe('AccountsPanel — grouping', () => {
   it('renders one provider header per provider, with its subtotal', () => {
     const data = makeDashboard({
@@ -116,7 +128,7 @@ describe('AccountsPanel — limit meters', () => {
   })
 
   it('shows a 5-hour reset as a countdown and a weekly one as a weekday', () => {
-    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    const weekly = nextThursdayNine()
     render(
       <AccountsPanel
         data={makeDashboard()}
@@ -155,7 +167,7 @@ describe('AccountsPanel — limit meters', () => {
    * the backend states, it is the weekly window it always was.
    */
   it('renders a lone weekly ChatGPT window as 7-day, with a weekday reset', () => {
-    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    const weekly = nextThursdayNine()
     render(
       <AccountsPanel
         data={makeDashboard()}
@@ -228,7 +240,7 @@ describe('AccountsPanel — limit meters', () => {
    * a reading kinded before S3c, refreshed after it — must follow the duration.
    */
   it('chooses the reset form from the stated minutes, not the kind', () => {
-    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    const weekly = nextThursdayNine()
     render(
       <AccountsPanel
         data={makeDashboard()}
