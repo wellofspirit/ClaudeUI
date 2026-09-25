@@ -832,9 +832,15 @@ Start the internal voice-transcription TCP server. Added by `patch/voice-server/
 
 ### `mcp_status`
 
-List all MCP servers with status. **Patched** to await in-flight reconnects.
+List all MCP servers with status. Native and unpatched since the `mcp-status` patch was deleted
+at 2.1.280: the headless handler (`Ie` in the routed handler table, `.cache/pristine-cli.js`
+@22347465) answers `{mcpServers: JMt(mcpConnections())}`, a snapshot of the current
+connections. A server still connecting reads `pending`; nothing waits.
 
-**Anchor:** `~12845000`. Schema `_c1`. Response schema `J3Y`.
+The patch existed because the MCP servers of plugins enabled in settings never showed up (on
+the official 2.1.280 binary they were still absent after 12 s, warm or cold). `--mcp-config`
+servers are fine. The fix is now the `reload_plugins` that `query()` sends after initialize
+(below).
 
 **Request:**
 
@@ -859,7 +865,7 @@ List all MCP servers with status. **Patched** to await in-flight reconnects.
 }
 ```
 
-**Timing:** slow — awaits `D8()` refresh and patched `ZH` promise. Multi-second under heavy MCP contention.
+**Timing:** instant.
 
 **QueryHandle:** `q.mcpServerStatus()`.
 
@@ -1096,11 +1102,54 @@ Reload plugins + commands + agents + MCP from disk.
 }
 ```
 
-**Timing:** slow (disk walk + MCP reconnect). Multi-second under load.
+**Timing:** fast on the wire. Observed 30 ms from request to response on the official 2.1.280
+binary (`probes/mcp-status/official.plugin-B-reload_plugins.jsonl` lines 6→9). The plugin MCP
+servers connect afterwards: `pending` in `mcpServers`, then `connected` about 2 s later.
 
 **QueryHandle:** `q.reloadPlugins()`.
 
 **Note:** This is the ONLY source of `plugins` (and the authoritative refresh source for `skills` which aren't in initialize response either).
+
+**`hold_on_cache_impact: true`** (optional): when the reload would add or remove MCP servers or
+change LSP tools, and so invalidate the prompt cache, cli.js answers `held: true` plus
+`cache_impact: {mcp_servers_added, mcp_servers_removed, lsp_tool_change}` and applies nothing.
+ClaudeUI does not send it.
+
+#### ClaudeUI sends it once after initialize
+
+`query()` sends `{subtype:"reload_plugins"}` once the initialize response arrives, unless
+`strictMcpConfig` is set. It is fire-and-forget: the first prompt was already written at spawn,
+and a failure is only logged (`console.warn` plus the `stderr` callback). Without it, the MCP
+servers of settings-enabled plugins never connect in a headless session (§7.4 `mcp_status`).
+
+The headless handler (`.cache/pristine-cli.js` @22790141,
+`else if(y.request.subtype==="reload_plugins")`) runs these steps. None of them reaches the
+network for a local ClaudeUI spawn, except to fetch an enabled plugin missing from the cache:
+
+1. **Marketplace install pass** (`_y` @22669351): returns `{ran:false, reason:"not_admitted"}`
+   unless `pluginForwardingAdmission.admitted`, before it reads its feature flag or installs
+   anything. Admission (`Bon` @22114644, computed @22683672) requires `--sdk-url` and
+   `CLAUDE_CODE_REMOTE_SESSION_ID` without `CLAUDE_CODE_ENVIRONMENT_KIND`, i.e. a managed cloud
+   worker. ClaudeUI sets none of them.
+2. **Plugin sync** (`t7n`): runs only when `z_n(e)` (@7533509), i.e.
+   `(CLAUDE_CODE_SYNC_PLUGINS || CLAUDE_CODE_SYNC_SESSION_REFS…) && !pluginsSyncVetoed`.
+   ClaudeUI sets neither variable.
+3. **Reload definitions** (`ZI`, refreshActivePlugins @18666782) → `lb` → the non-cache-only
+   loader `JFe({cacheOnly:false})`. It walks only the plugins enabled in settings and the
+   marketplaces they name. Per plugin (`i2t` @10756873): a plugin whose versioned cache dir
+   exists loads from disk, and so does a marketplace-relative plugin (copied from the local
+   marketplace clone). Only a plugin with no cache dir is downloaded. With no plugin enabled
+   there is nothing to walk.
+4. **MCP diff** (`ri(Zd(),"reload_plugins")`) connects the plugins' MCP servers: a stdio
+   server spawns a process, an http/sse server is contacted. That connection is the point of
+   the call. **Plugin list** (`Gi`) is cache-only unless `CLAUDE_CODE_SYNC_PLUGIN_INSTALL`.
+
+So the call is unconditional. With every enabled plugin installed, or none enabled, it fetches
+nothing, and a gate on `enabledPlugins` would not prevent the one fetch it can make.
+
+Caveat for other `query()` callers: the reload re-reads agent definitions from disk and plugins
+and installs them (`Hd(ue.agentDefinitions.allAgents)`). Whether agents passed in initialize
+survive that was not checked. ClaudeUI passes none.
 
 ---
 

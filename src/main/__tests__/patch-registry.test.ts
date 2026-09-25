@@ -40,12 +40,12 @@ describe('patchesPresent', () => {
   it('names the patches whose markers occur, in registry order', () => {
     const src =
       'a();/*PATCHED:voice-server*/b();/*PATCHED:subagent-F2*/c();' +
-      '/*PATCHED:bash-early-poll*/d();/*PATCHED:mcp-status-await-refresh*/'
+      '/*PATCHED:bash-early-poll*/d();/*PATCHED:skip-securestorage*/'
     expect(patchesPresent(src)).toEqual([
       'subagent-streaming',
-      'mcp-status',
       'voice-server',
-      'bash-output-streaming'
+      'bash-output-streaming',
+      'skip-securestorage'
     ])
   })
 

@@ -283,10 +283,12 @@ export function query(input: QueryInput): QueryHandle {
   }
   // Initialize can stall indefinitely on pathological cli.js states; bound
   // it with a generous timeout so consumers don't hang forever on spawn.
+  let initialized = false
   const initPromise: Promise<Record<string, unknown>> = control
     .request(initPayload, { timeoutMs: 60_000 })
     .then((r) => {
       stamp('initialize response')
+      initialized = true
       return (r ?? {}) as Record<string, unknown>
     })
     .catch((err: Error) => {
@@ -303,6 +305,39 @@ export function query(input: QueryInput): QueryHandle {
   // the inevitable EPIPE / "write after end" that occurs when the streaming
   // input iterator races child teardown. Those aren't user-facing failures.
   let childClosed = false
+
+  // Plugin MCP servers. cli.js's headless startup never connects the MCP
+  // servers of plugins enabled in settings: on the official 2.1.280 binary they
+  // were still absent from `mcp_status` after 12 s. `reload_plugins` connects
+  // them (`pending`, then `connected` about 2 s later); cli.js answers in tens
+  // of milliseconds and connects in the background (docs/protocol-cc/
+  // 07-control-outbound.md, `reload_plugins`).
+  //
+  // Sent once, after the initialize response, so it cannot race cli.js's own
+  // setup. Nothing waits for it: the first prompt was written at spawn, so the
+  // reload lands early in the first turn, where a tool-list change costs at
+  // most one prompt-cache rewrite.
+  //
+  // Unconditional: for a local spawn the handler's marketplace install pass is
+  // never admitted (managed cloud workers only) and a cached plugin loads from
+  // disk, so the only fetch is an ENABLED plugin missing from the cache, which
+  // a gate on `enabledPlugins` would not prevent anyway. With `strictMcpConfig`
+  // the caller wants only the `--mcp-config` servers, so no plugin servers are
+  // added.
+  if (!options.strictMcpConfig) {
+    void initPromise.then(() => {
+      if (!initialized || childClosed) return
+      control.request({ subtype: 'reload_plugins' }).then(
+        () => stamp('reload_plugins response'),
+        (err: Error) => {
+          if (childClosed) return // the session ended first; nothing failed
+          const text = `[sdk] reload_plugins after initialize failed: ${err?.message ?? err}`
+          console.warn(text)
+          options.stderr?.(Buffer.from(`${text}\n`))
+        }
+      )
+    })
+  }
 
   // Forward initial prompt(s) — do NOT await initPromise. cli.js queues
   // incoming messages and processes them in order after initialize completes,

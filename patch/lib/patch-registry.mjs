@@ -35,7 +35,6 @@ export const PATCH_REGISTRY = Object.freeze(
     // subagent-A … subagent-G, plus subagent-F2.
     { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
     { name: 'queue-control', marker: markerRe('queue-control-(?:dequeue|consumed|drained)') },
-    { name: 'mcp-status', marker: markerRe('mcp-status-(?:store-promise|await-refresh)') },
     { name: 'voice-server', marker: markerRe('voice-server') },
     { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') },
     { name: 'subprocess-proxy-strip', marker: markerRe('subprocess-proxy-strip') },
@@ -46,7 +45,8 @@ export const PATCH_REGISTRY = Object.freeze(
     // incomplete-session-resume-fix (fixed upstream; their apply scripts had
     // been no-ops). background-task and rate-limit-relay: native
     // `background_tasks` and `rate_limit_event.rate_limit_info.unifiedWindows`
-    // replaced them.
+    // replaced them. mcp-status: query() sends `reload_plugins` after
+    // initialize, which connects plugin MCP servers.
     // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
     // which resolves baked file:// URLs natively via its module graph. The
     // Node-compatibility shim is no longer needed.

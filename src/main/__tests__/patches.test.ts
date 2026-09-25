@@ -46,8 +46,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         // and is now covered by Patch E — its marker is intentionally absent.
         '/*PATCHED:queue-control-dequeue*/',
         '/*PATCHED:queue-control-consumed*/',
-        '/*PATCHED:mcp-status-store-promise*/',
-        '/*PATCHED:mcp-status-await-refresh*/',
         '/*PATCHED:voice-server*/',
         '/*PATCHED:bash-output-streaming*/',
         '/*PATCHED:bash-early-poll*/'
@@ -78,20 +76,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
   // ---------------------------------------------------------------------------
   describe('queue-control', () => {
     for (const name of ['queue-control-dequeue', 'queue-control-consumed']) {
-      it(`marker ${name} present in cli.js`, () => {
-        expect(hasMarker(src, name)).toBe(true)
-      })
-      it(`marker ${name} appears exactly once`, () => {
-        expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
-      })
-    }
-  })
-
-  // ---------------------------------------------------------------------------
-  // mcp-status — 2 markers
-  // ---------------------------------------------------------------------------
-  describe('mcp-status', () => {
-    for (const name of ['mcp-status-store-promise', 'mcp-status-await-refresh']) {
       it(`marker ${name} present in cli.js`, () => {
         expect(hasMarker(src, name)).toBe(true)
       })

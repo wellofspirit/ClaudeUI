@@ -644,10 +644,10 @@ export class ClaudeSession extends BaseSession {
         }
       }
       // Load MCP servers from config files and pass explicitly via mcpServers.
-      // This supplements the SDK's own settingSources config loading. While the
-      // mcp-status patch ensures plugin MCP servers are properly awaited before
-      // mcp_status responds, passing config-file servers via mcpServers ensures
-      // they're always available even if settingSources parsing differs.
+      // This supplements the SDK's own settingSources config loading. Plugin MCP
+      // servers are connected by the `reload_plugins` query() sends after
+      // initialize; passing config-file servers via mcpServers ensures they're
+      // always available even if settingSources parsing differs.
       // The SDK deduplicates by name, so there are no duplicate connections.
       this._mcpAllServers = {}
       this._mcpDisabledServers.clear()
