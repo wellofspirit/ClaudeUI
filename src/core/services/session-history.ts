@@ -30,6 +30,7 @@ import {
   type TranscriptTerminal
 } from './agent-identity'
 import { parseTaskNotificationXml, type ParsedTaskNotification } from './task-notification-xml'
+import { queuedCommandText } from '../sdk/queued-command-text'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -1254,6 +1255,42 @@ export async function loadSessionHistory(
             const notif = readTaskNotification(content)
             if (notif) pushNotification(notif)
           }
+        } else if (type === 'attachment') {
+          // A message cli.js folded into a RUNNING turn at a tool boundary — a
+          // steer. It is persisted at the fold, between the boundary's
+          // tool_result and the answer, as
+          //   {type:'attachment', attachment:{type:'queued_command', prompt,
+          //    source_uuid, commandMode, …}}
+          // and never as a `user` line (a message that STARTS a turn is one),
+          // so without this branch every steer vanished from a reopened
+          // session (docs/protocol-cc/03-inbound-messages.md §3.21). The live
+          // bubble is `steer-<itemId>`; this one is keyed by the uuid its frame
+          // carried, which for a ClaudeUI send IS the itemId.
+          const att = obj.attachment as Record<string, unknown> | undefined
+          if (att?.type !== 'queued_command') return
+          // cli.js's own injections (forwarded intent, peer notes) are meta.
+          if (att.isMeta === true) return
+          const text = queuedCommandText(att.prompt)
+          // A task notification absorbed mid-turn rides the same attachment;
+          // its queue-operation `enqueue` already recorded it (deduped by text).
+          const notif = text ? readTaskNotification(text) : null
+          if (notif) {
+            pushNotification(notif)
+            return
+          }
+          if (att.commandMode !== undefined && att.commandMode !== 'prompt') return
+          const attachments = extractAttachmentBlocks(att.prompt)
+          if (!text.trim() && attachments.length === 0) return
+          messages.push({
+            id:
+              typeof att.source_uuid === 'string' && att.source_uuid
+                ? att.source_uuid
+                : obj.uuid || `queued-${messages.length}`,
+            role: 'user',
+            // Attachments first, then the text — the live steer bubble's order.
+            content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+          })
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
           if (subtype === 'compact_boundary') {
