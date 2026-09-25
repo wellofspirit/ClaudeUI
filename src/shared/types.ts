@@ -1086,7 +1086,25 @@ export interface TaskStartedData {
   runToolUseId?: string
   /** 1-based run counter for this agent. `> 1` means it was resumed. */
   runIndex?: number
+  /**
+   * cli.js's `is_backgrounded` (Claude only): `false` for a task running in the
+   * foreground — the only kind "Send to background" can move — and `true` once
+   * it runs in the background, from the start or after a `background_tasks`
+   * flip, which ClaudeSession reports by re-sending this event for the same
+   * run. Absent when the engine or task type has no such notion.
+   */
+  isBackgrounded?: boolean
 }
+
+/**
+ * One `activeTasks` entry: a task that has started and not yet ended (ADR-040),
+ * keyed by its origin tool_use id. The fields of the {@link TaskStartedData}
+ * that armed it.
+ */
+export type ActiveTask = Pick<
+  TaskStartedData,
+  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded'
+>
 
 /** The terminal states an engine reports for a task run. */
 export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'

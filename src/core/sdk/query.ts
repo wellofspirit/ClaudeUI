@@ -717,8 +717,14 @@ export function makeHandle(
     launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
       control.request({ subtype: 'ultrareview_launch', args, confirm: opts?.confirm }),
     stopTask: (task_id: string) => control.request({ subtype: 'stop_task', task_id }),
+    // Native `background_tasks` (the control-request Ctrl+B). With a
+    // tool_use_id the SUCCESS payload is `{backgrounded}`: false when no
+    // foreground task with that id is registered — not yet (a foreground Bash
+    // registers seconds after its tool_use), already backgrounded, or finished.
     backgroundTask: (tool_use_id: string) =>
-      control.request({ subtype: 'background_task', tool_use_id }),
+      control
+        .request<{ backgrounded?: boolean } | null>({ subtype: 'background_tasks', tool_use_id })
+        .then((r) => ({ backgrounded: r?.backgrounded === true })),
     dequeueMessage: (value: string) =>
       control
         .request<{ removed?: number } | null>({ subtype: 'dequeue_message', value })

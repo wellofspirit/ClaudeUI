@@ -608,46 +608,64 @@ Remove a queued command by text match. Added by `patch/queue-control/`.
 
 ---
 
-### `background_task` (patched)
+### `background_tasks`
 
-Convert a running foreground task to background. Added by `patch/background-task/`.
+Move running foreground tasks to the background. Native, with a Zod schema; the 2.1.280 schema
+describes it as "the control-request equivalent of pressing Ctrl+B in the terminal". It
+replaced the `background-task` patch, whose `background_task` (singular) subtype the official
+binary rejects as `Unsupported control request subtype`. The patch was also broken: after it
+backgrounded a task, cli.js never saw the task finish.
 
-**Anchor:** `~12857897`. **No Zod schema** (patch-injected).
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** schema `xo` @2367750, success schema `bM`
+@2368682; headless handler `St` @22374077, registered in the routed handler table as
+`background_tasks:St`.
 
 **Request:**
 
 ```json
-{
-  "subtype": "background_task",
-  "tool_use_id": "toolu_xxx"
-}
+{ "subtype": "background_tasks", "tool_use_id": "toolu_xxx" }
 ```
+
+`tool_use_id` is optional. Without it, every foreground task is backgrounded (Ctrl+B) and the
+answer is `{}`. ClaudeUI always sends one.
 
 **Response (success):**
 
 ```json
-{
-  "task_id": "<id>",
-  "tool_use_id": "toolu_xxx"
-}
+{ "backgrounded": true }
 ```
 
-**Errors:**
+`backgrounded` is `gBe(toolUseId, registry)` (@10908614). It looks for the task whose
+`toolUseId` equals the request's and answers `false`, still as a **success**, when there is no
+such task or it cannot be backgrounded (the eligibility predicate `v$e`: a Bash needs a live
+shell command and must not already be in the background; an agent must be running, not in the
+background, and not a fork worker). In practice `false` means one of three things:
 
-- `"No task found with toolUseId: <id>"`
-- `"Task <id> is not running"`
-- `"Task <id> is already backgrounded"`
-- `"Failed to background bash task <id>"`
-- `"Unsupported task type for backgrounding"`
+- **not registered yet**: a foreground Bash registers only after it has run for 2 s (04 §4.5),
+  and a request before then answers `false` (observed at +0 s and +1.5 s after the assistant's tool_use frame; the `task_started` came at +4.5 s);
+- **already in the background**: a second request for the same id answers `false`;
+- **finished.**
 
-**Side effects:**
+`tool_use_id` is matched against the task's CURRENT run. For a resumed agent that is the
+`SendMessage` call's id, not the origin Agent call's (04 §4.5, ADR-073), and
+`ClaudeSession.backgroundTask` maps a card's origin id to the current run's id before sending.
 
-- Local bash: `shellCommand.background(taskId)` — spills stdout to disk, flips `isBackgrounded:true`.
-- Local agent: flips `isBackgrounded:true`, resolves `VuH.get(taskId)` stop-signal.
+**Errors:** `background_tasks: tool_use_id must be a string`; `Background tasks are disabled in
+this session.` (when `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` or the `backgroundTasksDisabled`
+setting is on).
+
+**Side effects:** the task's record gets `isBackgrounded: true`, which cli.js reports as
+`system/task_updated {patch:{is_backgrounded:true}}` before it answers (04 §4.6). The blocked
+tool call returns about a second later with a "Command was manually backgrounded by user with
+ID: …" tool_result (an agent's returns immediately), the turn continues, and the task ends with
+a normal `task_notification`.
 
 **Timing:** instant.
 
-**QueryHandle:** `q.backgroundTask(toolUseId)`.
+**QueryHandle:** `q.backgroundTask(toolUseId)` → `{ backgrounded: boolean }`.
+`ClaudeSession.backgroundTask` turns `false` into
+`{ success: false, error: 'Task is not registered yet — try again in a moment' }` and posts a
+session warning.
 
 ---
 
@@ -1255,7 +1273,7 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 | `askSideQuestion(q)`                        | `side_question`                       |
 | `launchUltrareview(args, {confirm})`        | `ultrareview_launch`                  |
 | `stopTask(id)`                              | `stop_task`                           |
-| `backgroundTask(toolUseId)`                 | `background_task`                     |
+| `backgroundTask(toolUseId)`                 | `background_tasks`                    |
 | `dequeueMessage(value)`                     | `dequeue_message`                     |
 | `voiceServerStart()`                        | `voice_server_start`                  |
 | `voiceServerStop()`                         | `voice_server_stop`                   |

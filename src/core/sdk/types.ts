@@ -120,10 +120,19 @@ export interface SystemMessage extends BaseSDKMessage {
   tool_use_id?: string
   description?: string
   task_type?: string
-  /** task_updated patch — partial update to the task's state record */
+  /**
+   * task_started-only: whether the task started in the background. `false` for
+   * a foreground Bash or subagent (the only kind `background_tasks` can move);
+   * absent for task types without the notion (docs/protocol-cc/
+   * 04-system-subtypes.md §4.5).
+   */
+  is_backgrounded?: boolean
+  /** task_updated patch — the fields of the task's record that changed */
   patch?: {
     status?: string
     end_time?: number
+    /** Set when the task moved to the background (`background_tasks`, Ctrl+B). */
+    is_backgrounded?: boolean
     [k: string]: unknown
   }
   /** task_progress-only: the tool the task ran most recently (§4.7). */
@@ -685,7 +694,13 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   askSideQuestion(question: string): Promise<string | null>
   launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>
   stopTask(taskId: string): Promise<unknown>
-  backgroundTask(toolUseId: string): Promise<unknown>
+  /**
+   * Move the foreground task started by this tool_use to the background.
+   * `backgrounded: false` is an answer, not an error: cli.js has no running
+   * foreground task with that id (not registered yet, already backgrounded,
+   * or finished).
+   */
+  backgroundTask(toolUseId: string): Promise<{ backgrounded: boolean }>
   dequeueMessage(value: string): Promise<{ removed: number }>
   voiceServerStart(): Promise<{ port: number }>
   voiceServerStop(): Promise<{ stopped: boolean }>

@@ -105,7 +105,6 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   )
   const bgNotification = latestNotification(taskNotifications, toolUseId)
   const hasSubagentOutput = msgs.length > 0
-  const isBackground = !!view.background
   // Has this task received a task_started wire event with no matching
   // task_notification yet? If so it is DEFINITELY still running, regardless
   // of tool_result/background-flag state — see PerSessionState.activeTasks.
@@ -117,7 +116,15 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   // opencode/pi child sessions and historical transcripts never emit
   // task_started, so they have no activeTasks record and fall through to the
   // unchanged legacy heuristic below.
-  const hasActiveTask = !isHistorical && !!activeTasks[toolUseId]
+  const activeTask = isHistorical ? undefined : activeTasks[toolUseId]
+  const hasActiveTask = !!activeTask
+  // The input asked for the background, or cli.js reports the running task
+  // there: from the start, or since a "Send to background" flip.
+  const isBackground = !!view.background || activeTask?.isBackgrounded === true
+  // cli.js has registered this task as running in the FOREGROUND — the only
+  // state `background_tasks` can act on. Before task_started it answers "no
+  // such task", and a background task has nothing to move.
+  const isForegroundTask = activeTask?.isBackgrounded === false
   // Background tasks get a tool_result immediately ("agent launched") but keep
   // running until task_notification. In historical mode, tasks without results
   // show as "loaded" (neutral state) rather than running.
@@ -195,28 +202,23 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
     block.toolName === 'claudeui_dispatch_agent' ||
     block.toolName === 'dispatch_agent'
   // Gated on capabilities.backgroundTasks — engines without background execution
-  // never offer "Send to background". Claude: true → unchanged.
-  // !hasActiveTask: a task with an activeTasks record is ALREADY running
-  // async (background-by-default, 2.1.219+) — offering to "send it to
-  // background" is meaningless since it's already there. Only the residual
-  // synchronous-foreground path (no activeTasks record, isRunning via the
-  // legacy !hasResult heuristic) can still be manually backgrounded.
-  const canBackground =
-    isRunning &&
-    !isBackground &&
-    !hasActiveTask &&
-    !isStopping &&
-    backgroundTasksEnabled &&
-    !isDispatch
+  // never offer "Send to background" — and on a registered foreground task:
+  // an agent launched in the background (the 2.1.219+ default) and a task
+  // cli.js has not registered yet both answer `background_tasks` with
+  // `{backgrounded:false}`, so the button would only ever produce a warning.
+  const canBackground = isForegroundTask && !isStopping && backgroundTasksEnabled && !isDispatch
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
   const handleBackgroundTask = async (): Promise<void> => {
     if (!activeSessionId) return
     setIsBackgrounding(true)
     const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    // Success needs no local state: the task's record flips to the background
+    // (ClaudeSession relays cli.js's task_updated), which hides the button on
+    // every client. A failure also arrives as a session warning.
+    setIsBackgrounding(false)
     if (!bgResult.success) {
       window.api.logError('TaskCard', `Failed to background task: ${bgResult.error}`)
-      setIsBackgrounding(false)
     }
   }
 
@@ -355,7 +357,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
             Send to background
           </button>
         )}
-        {isBackgrounding && (
+        {isBackgrounding && isForegroundTask && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
             sending to background…
           </span>

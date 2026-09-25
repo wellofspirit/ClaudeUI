@@ -24,7 +24,7 @@ interface QueryControlMethods {
   setPermissionMode(mode: string): Promise<void>
   setModel(model?: string): Promise<void>
   stopTask(taskId: string): Promise<void>
-  backgroundTask(taskId: string): Promise<unknown>
+  backgroundTask(toolUseId: string): Promise<{ backgrounded: boolean }>
   dequeueMessage(value: string): Promise<{ removed: number }>
   askSideQuestion(question: string): Promise<string | null>
   getUsage(): Promise<Record<string, unknown>>
@@ -115,9 +115,9 @@ export function createSdkStub(options: SdkStubOptions): {
       stopTask: async (taskId) => {
         tracker.stoppedTasks.push(taskId)
       },
-      backgroundTask: async (taskId) => {
-        tracker.backgroundedTasks.push(taskId)
-        return {}
+      backgroundTask: async (toolUseId) => {
+        tracker.backgroundedTasks.push(toolUseId)
+        return { backgrounded: true }
       },
       dequeueMessage: async (value) => {
         tracker.dequeuedMessages.push(value)

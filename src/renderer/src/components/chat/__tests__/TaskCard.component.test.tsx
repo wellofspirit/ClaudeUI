@@ -175,6 +175,107 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// "Send to background" — native `background_tasks` (docs/protocol-cc/07 §7.3)
+// ---------------------------------------------------------------------------
+//
+// cli.js can only background a task it has REGISTERED as running in the
+// FOREGROUND (`task_started` with `is_backgrounded: false`); for anything else
+// it answers `{backgrounded:false}`. The button used to show exactly when that
+// was the answer — a running card with no task record — and hide once the task
+// registered, which is when it would have worked.
+describe('TaskCard — "Send to background" gate', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const started = (isBackgrounded?: boolean): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-fg',
+      taskType: 'local_agent',
+      runIndex: 1,
+      ...(isBackgrounded === undefined ? {} : { isBackgrounded })
+    })
+
+  it('is absent while the running task is not registered yet', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('shows for a task registered in the foreground', () => {
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+  })
+
+  it('is absent for a task registered in the background', () => {
+    started(true)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('goes away, and the card reads "background", when the task flips', () => {
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+    expect(screen.queryByText('background')).not.toBeInTheDocument()
+
+    act(() => started(true))
+
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+    expect(screen.getByText('background')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+
+  it('clears "sending to background…" once the task flips, without waiting for the reply', async () => {
+    const calls: string[] = []
+    app.bridge.ipcMain.handle('session:background-task', (_e, _rid: string, id: string) => {
+      calls.push(id)
+      return new Promise(() => {}) // the reply never matters to the card
+    })
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.sendToBackground'))
+    })
+    expect(calls).toEqual(['call_task_1'])
+    expect(screen.getByText('sending to background…')).toBeInTheDocument()
+
+    act(() => started(true))
+
+    expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+
+  it('comes back after a failed attempt', async () => {
+    app.bridge.ipcMain.handle('session:background-task', async () => ({
+      success: false,
+      error: 'Task is not registered yet — try again in a moment'
+    }))
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.sendToBackground'))
+    })
+
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+    expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // "Open in panel" — the mobile task-takeover entry point (see MobileTaskView)
 // ---------------------------------------------------------------------------
 //
@@ -432,7 +533,13 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
   })
 
-  it('native task card unchanged: running → both Stop and "Send to background" render', () => {
+  it('native task card unchanged: running in the foreground → both Stop and "Send to background" render', () => {
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-fg',
+      taskType: 'local_agent',
+      isBackgrounded: false
+    })
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
     expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()

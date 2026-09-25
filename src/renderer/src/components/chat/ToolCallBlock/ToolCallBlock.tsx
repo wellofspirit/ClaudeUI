@@ -62,6 +62,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
+  // The live task record (session:task-started), when cli.js has registered this
+  // call as a task — a foreground Bash does so a few seconds after it starts.
+  const activeTask = useActiveSession((s) => (isHistorical ? undefined : s.activeTasks[toolUseId]))
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const watchBackgroundOutput = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
@@ -117,9 +120,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({
     if (!activeSessionId) return
     setIsBackgrounding(true)
     const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    // Success needs no local state: the task's record flips to the background,
+    // which hides the button on every client. A failure also arrives as a
+    // session warning.
+    setIsBackgrounding(false)
     if (!bgResult.success) {
       window.api.logError('ToolCallBlock', `Failed to background task: ${bgResult.error}`)
-      setIsBackgrounding(false)
     }
   }
 
@@ -165,6 +171,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       bgOutput={bgOutput}
       bgNotification={bgNotification}
       isStopping={isStopping}
+      activeTask={activeTask}
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
       backgroundTasksEnabled={backgroundTasksEnabled}

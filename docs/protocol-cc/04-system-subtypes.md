@@ -246,6 +246,10 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "tool_use_id": "...",
   "description": "...",
   "task_type": "local_bash"|"local_agent"|"in_process_teammate"|"local_workflow",
+  "is_backgrounded": false,                 // see below; absent for types without the notion
+  "subagent_type": "general-purpose",       // local_agent only
+  "spawn_depth": 1,                          // local_agent only
+  "owned_by_subagent": true,                 // local_bash started inside a subagent only
   "workflow_name": "...",                  // optional
   "prompt": "...",                          // optional
   "skip_transcript": false,
@@ -253,6 +257,34 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "uuid": "..."
 }
 ```
+
+### `is_backgrounded` — foreground or background (2.1.280)
+
+The registry record's `isBackgrounded` at registration, read as
+`is_backgrounded:"isBackgrounded"in g?g.isBackgrounded:void 0` (`.cache/pristine-cli.js`
+@10112444), so it is absent for task types whose record has no such field.
+
+- `false`: the task runs in the FOREGROUND and blocks its tool call — a Bash command without
+  `run_in_background`, or an agent the model launched synchronously. Only such a task can be
+  moved with `background_tasks` (07 §7.3).
+- `true`: it started in the background (`run_in_background: true`, an async agent launch, or a
+  Bash started inside a subagent).
+
+**Registration timing.** An agent registers within milliseconds of its tool_use. A foreground
+Bash registers only once it has run for 2 s: the Bash progress loop calls the registrar (`Ovn`,
+which builds the record with `isBackgrounded:!1`) on the first progress tick at or past
+`j6t=2000` ms (@10959996; call site @10987988). Observed 4.5–4.6 s after the assistant's
+tool_use frame on the official 2.1.280 binary (two probes). A command that finishes sooner never registers, so it emits no
+`task_started` and no `task_notification`. Until the `task_started` arrives, `background_tasks`
+answers `{backgrounded:false}` for that tool_use id. A foreground Bash that does register gets
+a `task_notification` (`status:"completed"`, `output_file:""`) when it finishes, like a
+background one.
+
+When a foreground task is backgrounded, `is_backgrounded` changes through `task_updated`
+(§4.6); `task_started` is not re-emitted. ClaudeUI relays the start as `session:task-started`
+with `isBackgrounded`, and re-sends that event for the same run with `isBackgrounded: true`
+when the `task_updated` flip arrives. `TaskCard` and `ToolCard` offer "Send to background" only
+for a record with `isBackgrounded === false`.
 
 ### `task_type` values (2.1.241)
 
@@ -343,6 +375,21 @@ Patch diff of a task's state changes.
   "session_id": "...",
   "uuid": "..."
 }
+```
+
+At 2.1.280 the patch builder (`MMr`, `.cache/pristine-cli.js` @10110830) compares the old and
+new registry record and emits only these keys: `status`, `description`, `end_time`,
+`total_paused_ms`, `error`, and `is_backgrounded`. `is_backgrounded: true` is how a
+foreground task reports that it moved to the background; it is sent before cli.js answers the
+`background_tasks` request that caused it. Observed for Bash and for an agent:
+
+```
+system/background_tasks_changed  tasks=[{task_id:"bvup3m1hz", task_type:"local_bash", …}]
+system/task_updated              task_id="bvup3m1hz"  patch={is_backgrounded:true}
+control_response                 {backgrounded:true}
+user (tool_result, ~1 s later)   "Command was manually backgrounded by user with ID: bvup3m1hz. Output is being written to: …"
+…
+system/task_notification         task_id="bvup3m1hz"  status="completed"   (when the command ends)
 ```
 
 ---

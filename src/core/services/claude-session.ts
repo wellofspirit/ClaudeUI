@@ -279,11 +279,12 @@ export class ClaudeSession extends BaseSession {
   private identitySeed: Promise<AgentIdentity> | null = null
   /**
    * Tasks the CURRENT process has started and not yet ended: task id → the
-   * tool_use id its card is keyed by. They run inside cli.js, so when the
-   * process goes they go with it — and nothing else will ever say so until a
-   * `--resume` reaps them. `settleOrphanedTasks` reports them stopped.
+   * tool_use id its card is keyed by, and the task's type. They run inside
+   * cli.js, so when the process goes they go with it — and nothing else will
+   * ever say so until a `--resume` reaps them. `settleOrphanedTasks` reports
+   * them stopped.
    */
-  private liveTasks = new Map<string, string>()
+  private liveTasks = new Map<string, { owner: string; taskType: string }>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -1472,18 +1473,28 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.taskIdMap.set(taskId, toolUseId)
 
     const taskType = msg.task_type || ''
+    // Foreground or background, when cli.js says: only a foreground task can
+    // be sent to the background, so this gates the card's button.
+    const background =
+      typeof msg.is_backgrounded === 'boolean' ? { isBackgrounded: msg.is_backgrounded } : {}
     const origin = this.originByTaskId.get(taskId)
 
     // First run: this call IS the agent's identity.
     if (origin === undefined) {
       this.originByTaskId.set(taskId, toolUseId)
       this.runCountByOrigin.set(toolUseId, 1)
-      this.liveTasks.set(taskId, toolUseId)
-      this.send('session:task-started', { toolUseId, taskId, taskType, runIndex: 1 })
+      this.liveTasks.set(taskId, { owner: toolUseId, taskType })
+      this.send('session:task-started', {
+        toolUseId,
+        taskId,
+        taskType,
+        runIndex: 1,
+        ...background
+      })
       return
     }
 
-    this.liveTasks.set(taskId, origin)
+    this.liveTasks.set(taskId, { owner: origin, taskType })
 
     // A start we have already counted — the same call re-reported. Re-arm the
     // card (the record may have been dropped by a notification) without
@@ -1494,7 +1505,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         toolUseId: origin,
         taskId,
         taskType,
-        runIndex: this.runCountByOrigin.get(origin) ?? 1
+        runIndex: this.runCountByOrigin.get(origin) ?? 1,
+        ...background
       })
       return
     }
@@ -1510,7 +1522,29 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskId,
       taskType,
       runToolUseId: toolUseId,
-      runIndex
+      runIndex,
+      ...background
+    })
+  }
+
+  /**
+   * A running task moved to the background: "Send to background" on any
+   * client, or any other path cli.js takes to background it. cli.js reports
+   * the flip as a `task_updated` patch (`is_backgrounded: true`) and sends it
+   * before it answers `background_tasks` (docs/protocol-cc/04-system-subtypes.md
+   * §4.6). Re-arm the task's record as backgrounded so every client's card
+   * leaves the foreground state. It is the same run, so the run counter is
+   * unchanged (ADR-073).
+   */
+  private reportBackgrounded(taskId: string): void {
+    const live = this.liveTasks.get(taskId)
+    if (!live) return
+    this.send('session:task-started', {
+      toolUseId: live.owner,
+      taskId,
+      taskType: live.taskType,
+      runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
+      isBackgrounded: true
     })
   }
 
@@ -1573,7 +1607,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleTaskUpdated(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const patch = msg.patch
-    if (!taskId || !patch || typeof patch.status !== 'string') return
+    if (!taskId || !patch) return
+    if (patch.is_backgrounded === true) this.reportBackgrounded(taskId)
+    if (typeof patch.status !== 'string') return
 
     const status = patch.status
     // Only act on terminal states. Intermediate transitions (e.g. running →
@@ -2638,17 +2674,43 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
   }
 
+  /**
+   * "Send to background" for the task a card shows. cli.js's `background_tasks`
+   * finds the task by the tool_use id that started its CURRENT run: the card's
+   * own id, except for a resumed agent, whose run was started by the
+   * SendMessage call (ADR-073). A foreground Bash has no mapping until
+   * `task_started` registers it, and then the card's id is the one to send.
+   *
+   * The card's flip to the background state rides the wire (`task_updated`,
+   * see reportBackgrounded), so success sends nothing here. A failure is also
+   * posted as a session warning: whoever clicked may be on another client, and
+   * would otherwise only see the button come back.
+   */
   async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
-    // Pass toolUseId directly — the CLI handler searches tasks by toolUseId property.
-    // We don't use taskIdMap here because foreground tasks may not have a mapping yet
-    // (detectTaskMapping runs on tool results, which haven't arrived for running tasks).
+    const result = await this.requestBackground(toolUseId)
+    if (!result.success) {
+      logger.warn('ClaudeSession', `backgroundTask(${toolUseId}) failed: ${result.error}`)
+      this.send('session:warning', `Could not send the task to the background: ${result.error}`)
+    }
+    return result
+  }
+
+  private async requestBackground(
+    toolUseId: string
+  ): Promise<{ success: boolean; error?: string }> {
     if (!this.activeQuery) {
       return { success: false, error: 'No active session' }
     }
-
+    const taskId = this.taskIdForOwner(toolUseId)
+    const runToolUseId = (taskId && this.taskIdMap.get(taskId)) || toolUseId
     try {
-      await this.activeQuery.backgroundTask(toolUseId)
-      return { success: true }
+      const { backgrounded } = await this.activeQuery.backgroundTask(runToolUseId)
+      // `false` is cli.js finding no foreground task with that id: not
+      // registered yet (a Bash command registers seconds after it starts),
+      // already in the background, or finished.
+      return backgrounded
+        ? { success: true }
+        : { success: false, error: 'Task is not registered yet — try again in a moment' }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { success: false, error: msg }
@@ -3003,7 +3065,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * the two into one entry.
    */
   private settleOrphanedTasks(): void {
-    for (const [taskId, owner] of this.liveTasks) {
+    for (const [taskId, { owner }] of this.liveTasks) {
       this.taskIdMap.delete(taskId)
       this.send('session:task-notification', {
         taskId,

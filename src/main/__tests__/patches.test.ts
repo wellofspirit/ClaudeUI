@@ -48,7 +48,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
         '/*PATCHED:mcp-status-await-refresh*/',
-        '/*PATCHED:background-task*/',
         '/*PATCHED:rate-limit-relay*/',
         '/*PATCHED:voice-server*/',
         '/*PATCHED:bash-output-streaming*/',
@@ -101,18 +100,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
       })
     }
-  })
-
-  // ---------------------------------------------------------------------------
-  // background-task — single marker in cli.js (-sdk is in sdk.mjs)
-  // ---------------------------------------------------------------------------
-  describe('background-task', () => {
-    it('marker background-task present in cli.js', () => {
-      expect(hasMarker(src, 'background-task')).toBe(true)
-    })
-    it('marker background-task appears exactly once', () => {
-      expect(countOccurrences(src, '/*PATCHED:background-task*/')).toBe(1)
-    })
   })
 
   // ---------------------------------------------------------------------------

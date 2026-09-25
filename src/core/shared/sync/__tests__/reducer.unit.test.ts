@@ -1429,6 +1429,66 @@ describe('reducer — subagents', () => {
     })
   })
 
+  it('records whether a task runs in the foreground, and re-arms it as backgrounded on the flip', () => {
+    const foreground = fold([
+      created(),
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'b1',
+          taskType: 'local_bash',
+          runIndex: 1,
+          isBackgrounded: false
+        }
+      ]
+    ])
+    expect(foreground.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: false }
+    })
+
+    // "Send to background": ClaudeSession re-sends the start for the same run.
+    const flipped = applyEvent(foreground, {
+      channel: 'session:task-started',
+      args: [
+        'rid',
+        { toolUseId: 't1', taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: true }
+      ],
+      seq: 3
+    })
+    expect(flipped.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: true }
+    })
+
+    // A start that does not say (another engine, a task type without the notion) records nothing.
+    const silent = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't2', taskId: 'c', taskType: 'local_agent' }]
+    ])
+    expect(silent.sessions['rid'].activeTasks.t2).not.toHaveProperty('isBackgrounded')
+  })
+
+  it('carries isBackgrounded through a snapshot round-trip', () => {
+    const s = fold([
+      created(),
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'b1',
+          taskType: 'local_bash',
+          runIndex: 1,
+          isBackgrounded: false
+        }
+      ]
+    ])
+    expect(fromSnapshot(toSnapshot(s, 1)).sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: false }
+    })
+  })
+
   it('merges the two task-progress sources instead of letting them blank each other', () => {
     // tool_progress knows the clock; system/task_progress knows the usage and
     // the current tool. Each sends only its half (ADR-073).
