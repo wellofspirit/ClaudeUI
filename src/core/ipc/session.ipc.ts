@@ -173,7 +173,9 @@ async function generateTitle(conversationText: string): Promise<string | null> {
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // A control request, then abort: no turn to use a plugin's tools.
+      reloadPlugins: false
     }
   })
 
@@ -215,6 +217,8 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
         ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
+        // One tool-less turn: plugin MCP servers would connect for nothing.
+        reloadPlugins: false,
         systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
         model: 'claude-haiku-4-5-20251001',
         maxTurns: 1,
@@ -266,7 +270,9 @@ async function fetchModels(): Promise<ModelInfo[]> {
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // Init-only: killed right after the initialize response.
+      reloadPlugins: false
     }
   })
 

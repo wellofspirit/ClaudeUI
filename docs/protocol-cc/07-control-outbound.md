@@ -683,6 +683,16 @@ tool call returns about a second later with a "Command was manually backgrounded
 ID: …" tool_result (an agent's returns immediately), the turn continues, and the task ends with
 a normal `task_notification`.
 
+That tool_result is not the command's result. ClaudeUI's Bash card treats the call as a
+background command from the flip on (`ToolCallBlock.tsx`): the `activeTasks` record says so
+while the task runs, and once the terminal event has dropped the record, the tool_result's
+wording plus that event do, so the card completes (or fails) on the notification. The text is
+`Command was manually backgrounded by user with ID: <id>. Output is being written to: <path>.`,
+ending in the sentence's period; for `run_in_background`, guidance for the model follows on the
+same line. `src/shared/claude-background-bash.ts` reads the id and the path, which ends at
+`<id>.output`, in all four phrasings cli.js builds (`mEn`, `.cache/pristine-cli.js` @8213182:
+run_in_background, manual, a timeout, a message that arrived), so the card can tail the file.
+
 **Timing:** instant.
 
 **QueryHandle:** `q.backgroundTask(toolUseId)` → `{ backgrounded: boolean }`.
@@ -1141,9 +1151,20 @@ ClaudeUI does not send it.
 #### ClaudeUI sends it once after initialize
 
 `query()` sends `{subtype:"reload_plugins"}` once the initialize response arrives, unless
-`strictMcpConfig` is set. It is fire-and-forget: the first prompt was already written at spawn,
-and a failure is only logged (`console.warn` plus the `stderr` callback). Without it, the MCP
-servers of settings-enabled plugins never connect in a headless session (§7.4 `mcp_status`).
+`strictMcpConfig` is set or the caller passes `reloadPlugins: false`. It is fire-and-forget: the
+first prompt was already written at spawn, and a failure is only logged (`console.warn` plus the
+`stderr` callback). Without it, the MCP servers of settings-enabled plugins never connect in a
+headless session (§7.4 `mcp_status`).
+
+`reloadPlugins: false` is for a process that never runs a turn that could use a plugin's tools.
+Three callers pass it, each in `src/core/ipc/session.ipc.ts` and again in its remote twin
+`remote-handlers.ts`: the model-list probe (`fetchModels` / `claudeSupportedModels`), killed
+right after the initialize response; title generation (a `generate_session_title` control
+request, then abort); and the tool-less commit-message one-shot. `ServiceSession` passes it too:
+it serves `get_usage` and the OAuth control requests and never runs a turn. Chat sessions
+(`ClaudeSession`), automation runs and cross-engine dispatch targets keep the default. Before
+the option existed, the boot-time `fetchModels` probe sent the reload as well, and it failed with
+"cli.js exited" when the probe was torn down.
 
 The headless handler (`.cache/pristine-cli.js` @22790141,
 `else if(y.request.subtype==="reload_plugins")`) runs these steps. None of them reaches the

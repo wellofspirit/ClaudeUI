@@ -637,6 +637,16 @@ export interface QueryOptions {
    *  reference), but stream_event deltas can arrive at 100+ per turn, so
    *  bump this only when a debug dump actually needs the history. */
   wireLogCapacity?: number
+  /**
+   * Send `reload_plugins` after the initialize response (default true). It is
+   * what connects the MCP servers of settings-enabled plugins in a headless
+   * session. False for a process that never runs a turn that could use them:
+   * an init-only probe (model list, title), a control-only service process, a
+   * tool-less one-shot. Otherwise it would connect those servers, or download
+   * an enabled plugin missing from its cache, for nothing — in a probe, while
+   * the process is being shut down.
+   */
+  reloadPlugins?: boolean
 
   // --- Initialize-payload fields (not CLI flags) --------------------------
   /** Hook callbacks, registered at initialize and fired via hook_callback. */

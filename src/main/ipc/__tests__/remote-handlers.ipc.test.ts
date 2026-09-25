@@ -454,6 +454,18 @@ describe('registerRemoteHandlers', () => {
     )
   })
 
+  // The model probe, title and commit message never run a turn that could use
+  // a plugin's tools, so their processes skip the post-initialize reload.
+  it.each([
+    ['session:get-models', []],
+    ['session:generate-title', ['a conversation']],
+    ['session:generate-commit-message', ['diff --git a/x b/x']]
+  ])('%s spawns its process without a plugin reload', async (channel, args) => {
+    await dispatcher.handle(makeRequest(channel, ...args), remoteConn)
+    expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
+  })
+
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
     await dispatcher.handle(
       makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' }),

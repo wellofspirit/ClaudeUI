@@ -315,6 +315,7 @@ import { hostConnection } from '../../../core/ipc/command-registry'
 import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { query } from '../../../core/sdk'
 
 // Fill in the stub's capabilities now that the top-level import is available
 // (it can't be referenced inside the vi.hoisted() factory above).
@@ -807,8 +808,30 @@ describe('session.ipc', () => {
     })
 
     it('session:get-models is registered', async () => {
-      const res = await harness.call<any[]>('session:get-models')
-      expect(Array.isArray(res)).toBe(true)
+      // Past the 2-minute model cache, so this call spawns its probe.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60 * 60_000)
+      try {
+        const res = await harness.call<any[]>('session:get-models')
+        expect(Array.isArray(res)).toBe(true)
+      } finally {
+        now.mockRestore()
+      }
+      // Init-only probe: no reload_plugins in a process killed after initialize.
+      expect(vi.mocked(query)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: '',
+          options: expect.objectContaining({ reloadPlugins: false })
+        })
+      )
+    })
+
+    it.each([
+      ['session:generate-title', 'a conversation'],
+      ['session:generate-commit-message', 'diff --git a/x b/x']
+    ])('%s spawns its one-shot without a plugin reload', async (channel, arg) => {
+      await harness.call(channel, arg)
+      expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
     })
 
     it('session:set-permission-mode routes to session.setPermissionMode', async () => {

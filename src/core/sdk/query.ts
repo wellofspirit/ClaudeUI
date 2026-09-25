@@ -323,8 +323,10 @@ export function query(input: QueryInput): QueryHandle {
   // disk, so the only fetch is an ENABLED plugin missing from the cache, which
   // a gate on `enabledPlugins` would not prevent anyway. With `strictMcpConfig`
   // the caller wants only the `--mcp-config` servers, so no plugin servers are
-  // added.
-  if (!options.strictMcpConfig) {
+  // added. `reloadPlugins: false` is the caller saying the process never runs a
+  // turn that could use them (a model probe, the service session), so
+  // connecting them would be wasted work.
+  if (!options.strictMcpConfig && options.reloadPlugins !== false) {
     void initPromise.then(() => {
       if (!initialized || childClosed) return
       control.request({ subtype: 'reload_plugins' }).then(

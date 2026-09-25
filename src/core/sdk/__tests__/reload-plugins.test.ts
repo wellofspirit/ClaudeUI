@@ -133,6 +133,16 @@ describe('query — reload_plugins after initialize', () => {
     expect(child.subtypes()).toEqual(['initialize'])
   })
 
+  it('does not send it when reloadPlugins is false', async () => {
+    // An init-only probe: the boot-time model fetch is killed right after this.
+    const child = start({ reloadPlugins: false })
+    await tick()
+    answerInitialize(child)
+    await tick()
+    await tick()
+    expect(child.subtypes()).toEqual(['initialize'])
+  })
+
   it('only warns when reload_plugins fails', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const stderr: string[] = []

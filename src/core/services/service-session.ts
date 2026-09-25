@@ -115,7 +115,9 @@ class ServiceSession {
           allowDangerouslySkipPermissions: true,
           persistSession: false,
           settingSources: [],
-          abortController: ac
+          abortController: ac,
+          // Control requests only (usage, OAuth): never a turn.
+          reloadPlugins: false
         }
       })
 
