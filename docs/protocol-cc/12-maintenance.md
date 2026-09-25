@@ -80,9 +80,10 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run test:component
    bun run test:e2e
    bun run test:integration    # exercises real cli.js contracts
+   bun run test:patch          # the patches' own suites, against the rebuilt bun-claude
    ```
 
-   The integration project is the one that catches real-world wire drift.
+   The integration project is the one that catches real-world wire drift. `test:patch` runs four suites (`subagent-streaming`, `bash-output-streaming`, `subprocess-proxy-strip` live; `skip-securestorage` structural); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
 
 8. **Re-verify the context-window mirror**
 

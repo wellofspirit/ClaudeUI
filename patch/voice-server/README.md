@@ -192,7 +192,7 @@ Part B (sdk.mjs) was removed — `voiceServerStart()` / `voiceServerStop()` now 
 
 #### Anchor (unique, 1 match)
 
-The control-request fallback warning — the same anchor `queue-control`, `background-task` and `usage-relay` use:
+The control-request fallback warning. Until 2.1.280 `queue-control`, `background-task` and `usage-relay` injected at this anchor too; all three were deleted (ADR-077), and this is now the only patch that uses it:
 
 ```
 else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
@@ -564,7 +564,7 @@ There is no `test.mjs`; behavioural verification is the manual round-trip in ste
    - **TCP server in cli.js**: selected — dedicated channel for audio, cli.js keeps all API auth, minimal patch surface
 6. **Chose TCP over WebSocket**: `net` is a Node built-in; a WebSocket would mean finding the bundled `ws` (fragile) or hand-rolling the handshake (~80 lines)
 7. **Chose base64 over binary framing**: no length-prefix parser needed; ~33% overhead on a <50 KB/s localhost socket is irrelevant
-8. **Reused the control request pattern**: same anchor and success-function extraction as `queue-control`
+8. **Reused the control request pattern**: same anchor and success-function extraction as `queue-control` (a patch since deleted, at 2.1.280)
 
 ### 2.1.241 re-anchor
 
@@ -620,7 +620,7 @@ surfaced:
 
 ## Related Patches
 
-- `patch/queue-control/`, `patch/background-task/`, `patch/usage-relay/` — all three inject `else if` branches at the **same** fallback anchor with a byte-identical regex, so they need the same 2.1.261 widening. Apply order doesn't matter: each checks for its own marker, each inserts before the fallback, and the anchor stays unique after any of them run.
+- None today. Until 2.1.280, `patch/queue-control/`, `patch/background-task/` and `patch/usage-relay/` injected `else if` branches at the **same** fallback anchor with a byte-identical regex (so they took the same 2.1.261 widening), and the anchor stayed unique whichever ran first. All three were deleted in favour of cli.js's native `cancel_async_message` / `command_lifecycle`, `background_tasks` and `get_usage` (ADR-077; `docs/protocol-cc/07-control-outbound.md` §7.3, `03-inbound-messages.md` §3.21).
 
 ## Files
 

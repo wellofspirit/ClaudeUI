@@ -1,11 +1,25 @@
 ---
 name: patch-test-harness
-description: Write and run behavioral tests for SDK patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers subagent-streaming, taskstop-notification, team-streaming, queue-control, mcp-status, and mcp-tool-refresh patches.
+description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the five patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, subprocess-proxy-strip, skip-securestorage.
 ---
 
 # Patch Test Harness
 
 Write behavioral tests that verify cli.js patches work correctly by launching real sessions against the rebundled Bun binary (`vendor/claude-cli/bun-claude`) and asserting on the message stream.
+
+## The patch set
+
+The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-077). Five patches today:
+
+| Patch                    | Test                                                               |
+| ------------------------ | ------------------------------------------------------------------ |
+| `subagent-streaming`     | `patch/subagent-streaming/test.mjs` — live                         |
+| `bash-output-streaming`  | `patch/bash-output-streaming/test.mjs` — live                      |
+| `subprocess-proxy-strip` | `patch/subprocess-proxy-strip/test.mjs` — live                     |
+| `skip-securestorage`     | `patch/skip-securestorage/test.mjs` — structural, offline          |
+| `voice-server`           | none; its apply script's own checks are the only guard (see below) |
+
+The other nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-077; the list is in `docs/protocol-cc/01-transport.md` §1.12). Their tests went with them.
 
 ## Test Infrastructure
 
@@ -13,22 +27,23 @@ All test code lives in `patch/` alongside the patch apply scripts.
 
 ### Key Files
 
-| File                        | Purpose                                                                                                                                                                                                                                                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `patch/test-helpers.mjs`    | Shared utilities: spawns `bun-claude` directly, exposes stream-json iterator + control channel (`stopTask`, `mcpServerStatus`, `dequeueMessage`, `toggleMcpServer`, `getUsage`, `close`). Factories: `createQuery()`, `createStreamingQuery()`, helpers: `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()`. |
-| `patch/test-all.mjs`        | Sequential runner for all patch tests                                                                                                                                                                                                                                                                                                            |
-| `patch/mcp-test-server.mjs` | Minimal stdio MCP server for MCP-related tests                                                                                                                                                                                                                                                                                                   |
-| `patch/<name>/test.mjs`     | Individual patch test (one per patch)                                                                                                                                                                                                                                                                                                            |
+| File                     | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `patch/test-helpers.mjs` | Shared utilities: spawns `bun-claude` directly, exposes stream-json iterator + control channel (`stopTask`, `mcpServerStatus`, `toggleMcpServer`, `reconnectMcpServer`, `getUsage`, `getContextUsage`, `controlRequest(subtype, fields)` for anything else, `close`). Factories: `createQuery()`, `createStreamingQuery()`, helpers: `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()`. |
+| `patch/test-all.mjs`     | Runner for all patch tests (bounded pool, `PATCH_TEST_CONCURRENCY`, default 4; `=1` runs them one at a time)                                                                                                                                                                                                                                                                                                                 |
+| `patch/<name>/test.mjs`  | Individual patch test (one per patch that has one)                                                                                                                                                                                                                                                                                                                                                                           |
 
 **Prerequisite:** `vendor/claude-cli/bun-claude` must exist. Run `bun run ensure-cli` (or `bun run update-cli` after bumping `claudeCliVersion`). Tests auto-fail with a clear error if the binary is missing.
 
 **Debug stderr:** set `DEBUG_HARNESS=1` to forward cli.js stderr to the terminal — useful when a test returns 0 messages.
 
+**Overrides:** `CLAUDEUI_TEST_BIN=<path>` runs the tests against another binary (e.g. Anthropic's unpatched one, to see a patch's test fail without it), `CLAUDEUI_TEST_MODEL` replaces the default model, `CLAUDEUI_TEST_ENTRYPOINT` replaces `CLAUDE_CODE_ENTRYPOINT` (default `sdk-ts`).
+
 ### Running Tests
 
 ```bash
 # Run all patch tests
-node patch/test-all.mjs
+bun run test:patch        # = node patch/test-all.mjs
 
 # Run a single patch test
 node patch/<name>/test.mjs
@@ -130,13 +145,13 @@ t.assertSome(
 )
 ```
 
-**Check teammate messages:**
+**Check a patch-emitted message type:**
 
 ```js
 t.assertSome(
-  'assistant with teammate_id',
+  'bash_output received',
   messages,
-  (m) => m.type === 'assistant' && !!m.teammate_id
+  (m) => m.type === 'bash_output' && typeof m.tool_use_id === 'string'
 )
 ```
 
@@ -153,11 +168,12 @@ t.assert(
 **Check control request response shape** (SDK wraps in envelope):
 
 ```js
-// Control requests like dequeueMessage return a control_response envelope:
-//   { subtype: 'success', request_id: '...', response: { removed: 0 } }
-// Extract the inner value with fallback:
-const removedValue = result?.removed ?? result?.response?.removed ?? undefined
-t.assert('has removed field', typeof removedValue === 'number')
+// A control request resolves with the inner `response` of the control_response
+// envelope ({ subtype: 'success', request_id, response: {...} }). Read the
+// field with a fallback in case a caller hands you the envelope itself:
+const result = await q.controlRequest('voice_server_start')
+const port = result?.port ?? result?.response?.port
+t.assert('voice_server_start answered with a port', typeof port === 'number')
 ```
 
 ### 5. Prompt Design — Gotchas & Lessons Learned
@@ -205,7 +221,7 @@ const messages = await collectMessages(q, {
 
 ### 7. MCP Test Server
 
-For tests that need an MCP server, use `patch/mcp-test-server.mjs`:
+No current patch test uses an MCP server. `patch/mcp-test-server.mjs` — a minimal stdio server with one `patch_test_echo` tool — served only the `mcp-status` and `mcp-tool-refresh` tests and was deleted with them (commit 53809349, ADR-077). A new patch test that needs one has to recreate it first; `git show 53809349^:patch/mcp-test-server.mjs` prints the last version. `createQuery`'s `mcpServers` option passes the servers to cli.js as `--mcp-config`:
 
 ```js
 import { resolve, dirname } from 'node:path'
@@ -226,9 +242,9 @@ const { q, cleanup } = createQuery(
 )
 ```
 
-The test server provides one tool: `patch_test_echo` — takes `{ text: string }` and echoes it back. The model sees it as `mcp__test-server__patch_test_echo`.
+That server provided one tool: `patch_test_echo` — takes `{ text: string }` and echoes it back. The model sees it as `mcp__test-server__patch_test_echo`.
 
-**MCP server status shape** (returned by `q.mcpServerStatus()`):
+**MCP server status shape** (returned by `q.mcpServerStatus()`, as observed with that server):
 
 ```json
 {
@@ -246,13 +262,12 @@ After `toggleMcpServer(name, false)`: `status: "disabled"`, `tools: []`.
 ### 8. Handling Timeouts
 
 - Default timeout: 120s (sufficient for most single-turn tests)
-- Team tests: 180s (multi-agent coordination is slower)
-- MCP toggle tests: 180s (multiple turns + reconnection delays)
+- Multi-turn tests: 180s (several turns plus the gaps between them)
 - Background task tests: use `onMessage` callback to detect events and close early via `q.close()`
 
 ### 9. Registering New Tests
 
-Add new tests to `patch/test-all.mjs`:
+A new patch is registered twice. Its apply script goes into `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) with a `marker` regex matching every `/*PATCHED:…*/` comment it writes — the `/patch-readme` skill and `docs/protocol-cc/01-transport.md` §1.12 cover that, and `src/main/__tests__/patch-registry.test.ts` fails when the directory, the registry and the markers disagree. Its test goes into `patch/test-all.mjs`:
 
 ```js
 const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs') }]
@@ -262,37 +277,27 @@ const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs
 
 ### subagent-streaming
 
-**Trigger:** Forceful prompt to use Agent tool (synchronous). Must use `effort: 'medium'`.
-**Assert:** `stream_event` and `assistant` messages with non-null `parent_tool_use_id`. Check tool name with `b.name === 'Task' || b.name === 'Agent'` (name varies by SDK version).
+**Trigger:** two sessions. Foreground: a forceful prompt to delegate a small repo lookup to the Agent tool (synchronous), `effort: 'high'`. Background: the same with `run_in_background=true`; close the session shortly after the first `task_notification` once subagent output has been seen.
+**Assert:** `stream_event` with non-null `parent_tool_use_id` (the patch-only signal — an unpatched binary has none), and an `assistant` with non-null `parent_tool_use_id` carrying `thinking`/`text`. Check the tool name with `b.name === 'Task' || b.name === 'Agent'` (name varies by version). The harness does not pass `--forward-subagent-text` (the app always does; add it with `extraArgs` if a test needs the app's argv).
 
-### taskstop-notification
+### bash-output-streaming
 
-**Trigger:** Launch background Agent with `sleep 300`, detect `task_started` via `onMessage`, then call `q.stopTask(taskId)` after a 2s delay.
-**Assert:** `task_notification` with `status === 'stopped'`, matching `task_id` between started and notification.
+**Trigger:** one Bash command that prints a line every 0.2 s for 4 s, `effort: 'low'`.
+**Assert:** `bash_output` messages arrive, with `tool_use_id`, `output`, `total_lines`, `total_bytes`, and at least one carrying the expected `line-` text.
 
-### team-streaming
+### subprocess-proxy-strip
 
-**Trigger:** Prompt creates a team with one teammate via TeamCreate + Agent tools. Timeout 180s.
-**Assert:** `stream_event`/`assistant` with `teammate_id` (format: `name@team`), `task_notification` with `@` in task_id.
+**Trigger:** two sessions with `NO_PROXY` set to a non-matching sentinel host in the parent env, each running one Bash command that prints `${NO_PROXY:-MISSING}`: first with `CLAUDEUI_PROXY_SUBPROCESSES` unset, then with it set to `1`. (A non-matching `NO_PROXY` exercises the strip list without routing the model's own API traffic through an unreachable proxy.)
+**Assert:** default phase — the probe prints `MISSING`, never the sentinel; opt-in phase — the probe prints the sentinel. Read probes only from `bash_output` / `user` tool results, never assistant text. Restore the parent env in a `finally`.
 
-### queue-control
+### skip-securestorage
 
-**Trigger:** Streaming query → prompt asks for `sleep 8 && echo done` → on tool_use detection, push steer message via `channel.push(userMessage(...))` after 1s delay.
-**Assert:** `queued_command_consumed` system notification received. `dequeueMessage()` returns envelope with `response.removed` field (number). For non-existent message, `removed === 0`.
+**Trigger:** none — structural and offline. The credential backend leaves no signal on the message stream, and on a clean machine both backends read the same file.
+**Assert:** against `vendor/claude-cli/cli.js`: the marker occurs exactly once, the patched getter short-circuits to the plaintext backend when `SKIP_SECURESTORAGE` is set, and the rest of the getter still builds the fallback facade. On a Linux store-less bundle the correct state is the unpatched one (marker absent).
 
-### mcp-status
+### voice-server
 
-**Trigger:** Query with MCP test server configured → detect `init` → call `q.mcpServerStatus()`.
-**Assert:** Non-empty array, test server present with `status: 'connected'`, has tools array with entries.
-
-### mcp-tool-refresh
-
-**Trigger:** Streaming query with MCP test server → 3 turns:
-
-1. Ask model to call `patch_test_echo` (should succeed)
-2. Toggle OFF → verify `mcpServerStatus()` shows `disabled` + 0 tools → ask model to list tools
-3. Toggle ON → wait 2s for reconnection → verify status → ask model to call tool again (should succeed)
-   **Assert:** Tool used in turn 1 and turn 3, toggle states correct in `mcpServerStatus()`, session completes.
+No test. `voice_server_start` answers `{ port }` and opens a localhost TCP server; exercising the transcription path needs audio and Anthropic's voice backend. The apply script's own checks (anchor, reply helper, chunk export) and the rebundle's per-chunk syntax check are what guard it, and `docs/protocol-cc/07-control-outbound.md` documents the control subtypes. A test would start with `q.controlRequest('voice_server_start')` and a TCP client.
 
 ## Debugging Failures
 
@@ -306,22 +311,25 @@ const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs
 5. **MCP tool name mismatch?** MCP tools are prefixed as `mcp__<server-name>__<tool-name>`. Use `.includes()` or regex, never exact match on the bare tool name.
 6. **Control request returns unexpected shape?** The SDK wraps control_response in an envelope: `{ subtype, request_id, response: { ... } }`. Access the inner value with `result?.response?.fieldName` as fallback.
 7. **Timing issues with streaming tests?** The `onMessage` callback is not awaited, but this is OK because the SDK blocks on channel.next() between turns. If issues persist, add `await new Promise(r => setTimeout(r, N))` after toggle operations.
-8. **Verify patch marker in cli.js:**
+8. **Verify the patch is in the build:**
    ```bash
    grep -c "PATCHED:patch-name" vendor/claude-cli/cli.js
    ```
-   (cli.js is the extracted source; `bun-claude` embeds its patched form. Run `bun run ensure-cli` after any patch edits.)
+   (cli.js is the extracted source; `bun-claude` embeds its patched form. Run `bun run ensure-cli` after any patch edits.) `vendor/claude-cli/version.json` `patches` lists every registry entry whose marker was found after the last `apply-all.mjs` run; a patch missing from it applied nothing.
 
 ## SDK Message Type Reference
 
-| Type               | Subtype                   | Key Fields                                                                                             | When                                            |
-| ------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| `system`           | `init`                    | `slash_commands`, `mcp_servers`                                                                        | Session start (once per turn in streaming mode) |
-| `assistant`        | —                         | `message.content[]`, `parent_tool_use_id`, `teammate_id`                                               | Model response                                  |
-| `stream_event`     | —                         | `event.type` (content_block_start/delta/stop, message_delta/stop), `parent_tool_use_id`, `teammate_id` | Streaming delta                                 |
-| `user`             | —                         | `message`, `parent_tool_use_id`, `teammate_id`                                                         | Synthetic tool_result                           |
-| `system`           | `task_started`            | `task_id`                                                                                              | Background agent/task launched                  |
-| `system`           | `task_notification`       | `task_id`, `status` (completed/stopped/failed)                                                         | Background agent/task ended                     |
-| `system`           | `queued_command_consumed` | —                                                                                                      | Steer message was consumed by CLI               |
-| `rate_limit_event` | —                         | —                                                                                                      | API rate limit info (ignore in tests)           |
-| `result`           | `success`/`error_*`       | `total_cost_usd`, `num_turns`                                                                          | Turn/session completed                          |
+| Type                | Subtype             | Key Fields                                                                              | When                                                                                                                      |
+| ------------------- | ------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `system`            | `init`              | `slash_commands`, `mcp_servers`                                                         | Session start (once per turn in streaming mode)                                                                           |
+| `assistant`         | —                   | `message.content[]`, `parent_tool_use_id`                                               | Model response                                                                                                            |
+| `stream_event`      | —                   | `event.type` (content_block_start/delta/stop, message_delta/stop), `parent_tool_use_id` | Streaming delta (subagent ones only with `subagent-streaming`)                                                            |
+| `user`              | —                   | `message`, `parent_tool_use_id`                                                         | Synthetic tool_result                                                                                                     |
+| `bash_output`       | —                   | `tool_use_id`, `output`, `total_lines`, `total_bytes`                                   | Live Bash output (only with `bash-output-streaming`)                                                                      |
+| `system`            | `task_started`      | `task_id`                                                                               | Background agent/task launched                                                                                            |
+| `system`            | `task_notification` | `task_id`, `status` (completed/stopped/failed)                                          | Background agent/task ended                                                                                               |
+| `command_lifecycle` | —                   | `command_uuid`, `state`                                                                 | Fate of a queued command: a user frame sent with a `uuid` (the harness's frames carry none) or one cli.js enqueued itself |
+| `rate_limit_event`  | —                   | `rate_limit_info`                                                                       | API rate limit info (ignore in tests)                                                                                     |
+| `result`            | `success`/`error_*` | `total_cost_usd`, `num_turns`                                                           | Turn/session completed                                                                                                    |
+
+Full catalog: `docs/protocol-cc/03-inbound-messages.md` and `04-system-subtypes.md`.

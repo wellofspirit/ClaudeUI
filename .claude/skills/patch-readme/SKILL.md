@@ -1,13 +1,13 @@
 ---
 name: patch-readme
-description: Write README.md files for SDK patches in patch/. Use when creating or updating a patch README. The README is a reverse-engineering guide that enables an agent with zero context to rebuild the patch from scratch when the SDK updates and all minified names change.
+description: Write README.md files for cli.js patches in patch/ (the five in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, subprocess-proxy-strip, skip-securestorage — or a new one). Use when creating or updating a patch README. The README is a reverse-engineering guide that enables an agent with zero context to rebuild the patch from scratch when Claude Code updates and all minified names change.
 ---
 
 # Writing Patch READMEs
 
 ## Purpose
 
-Each patch in `patch/` modifies `cli.js` — a minified ~11MB single-file bundle where **every function name changes on every SDK release**. The README.md is NOT user documentation. It is a **reverse-engineering survival guide** that enables a future agent (with zero prior context) to:
+Each patch in `patch/` modifies `vendor/claude-cli/cli.js` — the minified Claude Code bundle extracted from Anthropic's binary (since 2.1.261 a concatenation of ~2,000 ESM chunks, ~37 MB at 2.1.280), where **every function name changes on every release**. The README.md is NOT user documentation. It is a **reverse-engineering survival guide** that enables a future agent (with zero prior context) to:
 
 1. Understand why the patch exists and whether it's still needed
 2. Verify the bug persists in a new SDK version
@@ -20,11 +20,12 @@ Each patch in `patch/` modifies `cli.js` — a minified ~11MB single-file bundle
 ## Before Writing
 
 1. **Read the patch's `apply.mjs`** — understand every regex, every injection, every safety check
-2. **Read the existing READMEs** in `patch/` for style and depth reference:
+2. **Read the existing READMEs** in `patch/` for style and depth reference. The five patches in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) each have one:
    - `subagent-streaming/README.md` — exemplar for multi-patch coordination, architecture diagrams, message flow
-   - `team-streaming/README.md` — exemplar for syntax pitfall documentation, comma-vs-semicolon analysis
-   - `mcp-tool-refresh/README.md` — exemplar for two-path comparison (CLI React vs SDK), data flow diagrams
-   - `queue-control/README.md` — exemplar for concise single-concern patches
+   - `bash-output-streaming/README.md` — exemplar for unpatched/patched data-flow diagrams, a "Why it's safe" argument, and syntax pitfalls in the chunked bundle
+   - `voice-server/README.md` — exemplar for a control-request injection that reaches across chunks, with re-anchor history per version
+   - `subprocess-proxy-strip/README.md` — exemplar for matching one function across many version shapes, with a Discovery Method per re-anchor
+   - `skip-securestorage/README.md` — exemplar for a concise single-concern patch
 3. **Use `/bundle-analyzer`** to verify your understanding of the code sites
 
 ## Required Sections
@@ -41,19 +42,19 @@ Every patch README MUST include all of these sections. The order below is the ca
 
 ### 2. Affected Component
 
-- State the exact file: `@anthropic-ai/claude-agent-sdk` — bundled `cli.js`
-- Version table: SDK package version + bundled CLI version at time of discovery
-- Note that the SDK bundles its own CLI, independent of the native `claude` binary
+- State the exact file: `vendor/claude-cli/cli.js`, the bundle extracted from Anthropic's binary and rebundled into `bun-claude` (ADR-006)
+- Version table: CLI version at time of discovery + the version it was last re-anchored for
+- Say what Anthropic's unpatched binary does without the patch; the app has to run on it too (ADR-077)
 
 ```markdown
 ## Affected Component
 
-`@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file.
+`vendor/claude-cli/cli.js` — the Claude Code bundle `bun-claude` embeds.
 
-| Component              | Version at time of discovery |
-| ---------------------- | ---------------------------- |
-| SDK package            | 0.2.XX                       |
-| Bundled CLI (`cli.js`) | 2.1.XX                       |
+| Component        | Version |
+| ---------------- | ------- |
+| Discovered on    | 2.1.XX  |
+| Last re-anchored | 2.1.XX  |
 ```
 
 ### 3. The Problem(s)
@@ -109,6 +110,8 @@ For each patch (A, B, C, etc.):
 ```markdown
 **Marker**: `/*PATCHED:<name>-<letter>*/`
 ```
+
+The patch's `marker` regex in `PATCH_REGISTRY` must match every marker its apply script writes and no other patch's (`src/main/__tests__/patch-registry.test.ts` checks this). After a build, `apply-all.mjs` writes the patches whose markers it finds into `vendor/claude-cli/version.json` `patches`, and the app gates patch-dependent features on that list (ADR-077). A new marker family therefore needs the registry entry updated in the same change, or the build will report the patch as absent.
 
 #### Anchor (the unique string that locates the injection site)
 
@@ -231,7 +234,7 @@ im(K, fn, M);if(\_6.type === "assistant") ...
 ASI does NOT help here because...
 ```
 
-Always end with: **"Always run `node --check cli.js` after applying patches."**
+Always end with a syntax-check instruction. Since 2.1.261 `vendor/claude-cli/cli.js` is a concatenation of ESM chunks, so `node --check` on the whole file proves nothing: check the chunk the patch modified (`bash-output-streaming/README.md` § "Syntax Pitfalls" has a one-liner that extracts it), and rely on `scripts/rebundle-cli.mjs`, which syntax-checks every changed chunk during `bun run ensure-cli`.
 
 ### 9. What's NOT Changed
 
@@ -265,9 +268,10 @@ Concrete steps to verify the patch works:
 
 1. `node patch/<name>/apply.mjs` — should apply all patches
 2. Run again — should report "already applied"
-3. `node --check node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — no syntax errors
-4. `node patch/apply-all.mjs` — all patches pass
-5. <Manual test steps specific to this patch>
+3. `node --check` on the modified chunk — no syntax errors
+4. `bun run ensure-cli` — every patch applies, the rebundle's per-chunk syntax check passes, and the `patches:` line lists `<name>`
+5. `node patch/<name>/test.mjs` (if the patch has a test)
+6. <Manual test steps specific to this patch>
 ```
 
 ### 12. Discovery Method
@@ -287,7 +291,7 @@ Write as a numbered narrative — the detective story of how you found each piec
 6. **Verified full round-trip**: <how you confirmed end-to-end>
 ```
 
-Include failed attempts! They prevent future agents from repeating the same mistakes. The B2 semicolon bug in team-streaming and the Part-A-only insufficient fix in mcp-tool-refresh are perfect examples.
+Include failed attempts! They prevent future agents from repeating the same mistakes. `subprocess-proxy-strip`'s re-anchor narratives (both anchors dying at once in the 2.1.261 chunked bundle) and `voice-server`'s 2.1.261 cross-chunk re-anchor are good examples.
 
 ### 13. Key Functions Reference Table
 
@@ -329,7 +333,7 @@ Cross-reference other patches that interact with or complement this one:
 
 ### Depth over Brevity
 
-A patch README should be 200-700 lines. The `team-streaming` README is 724 lines and covers 3 sub-patches with full architecture analysis. The `mcp-status` README is 84 lines for a simple 2-part fix. Scale depth to complexity, but never skip sections — even short patches benefit from architecture context.
+A patch README should be 200-700 lines. The `voice-server` README is about 630 lines and covers the injection, the TCP protocol and three re-anchors; the `skip-securestorage` README is under 300 for a single getter. (`subagent-streaming`, at about 2,100 lines across eight sub-patches, A–G plus F2, is the outlier.) Scale depth to complexity, but never skip sections — even short patches benefit from architecture context.
 
 ### Exact Code Over Paraphrasing
 
@@ -414,7 +418,8 @@ When a patch spans multiple SDK versions, track what changed:
 - [ ] Before/after code uses real minified names (not pseudocode)
 - [ ] Variable mapping table covers all variables used in injected code
 - [ ] Syntax pitfalls documented with WRONG/CORRECT examples
-- [ ] `node --check` mentioned as validation step
+- [ ] Per-chunk syntax check mentioned as validation step
+- [ ] Registry `marker` matches every marker the apply script writes
 - [ ] Discovery Method includes failed attempts
 - [ ] Related patches cross-referenced
 - [ ] Message format documented (if patch emits new messages)

@@ -35,7 +35,6 @@ vi.mock('../../../core/services/logger', () => ({
 // and the real module would reach for the developer's own usage cache.
 vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: {
-    updateFromRateLimitEvent: vi.fn(),
     fetch: vi.fn(async () => null),
     getLastUsage: () => null,
     getActiveAccount: () => null,

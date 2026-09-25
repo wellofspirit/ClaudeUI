@@ -401,10 +401,12 @@ destructuring.
 
 ## Gate env vars
 
-| Env var                         | Set by                                                   | Effect                                    |
-| ------------------------------- | -------------------------------------------------------- | ----------------------------------------- |
-| `CLAUDEUI_PROXY_SUBPROCESSES=1` | ClaudeUI when `ProxySettings.proxySubprocesses === true` | Helper no-ops; subprocesses inherit proxy |
-| (unset)                         | default                                                  | Helper strips proxy from subprocess env   |
+| Env var                         | Set by                                                                                                                                    | Effect                                    |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `CLAUDEUI_PROXY_SUBPROCESSES=1` | ClaudeUI when `ProxySettings.proxySubprocesses === true`, and (since 2026-09-25) whenever no in-app proxy is set (`src/core/sdk/args.ts`) | Helper no-ops; subprocesses inherit proxy |
+| (unset)                         | ClaudeUI when an in-app proxy is set without `proxySubprocesses`                                                                          | Helper strips proxy from subprocess env   |
+
+With no in-app proxy, any proxy in the environment is the user's own (inherited from the shell), and Anthropic's unpatched binary passes it to children; the marker keeps the patched binary doing the same. The strip exists only to keep the in-app proxy, which may carry credentials, out of child processes (ADR-077).
 
 ## What's NOT changed
 

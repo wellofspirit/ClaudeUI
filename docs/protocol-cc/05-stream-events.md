@@ -354,7 +354,7 @@ ClaudeUI uses a hybrid: stream_events drive the typewriter effect; assistant sna
 
 ## 5.11 Subagent and teammate variants
 
-Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
+Via patches (see `patch/subagent-streaming/`; `team-streaming`, which produced the teammate variant, is retired and its directory removed — 01 §1.12):
 
 ### Subagent (patches C, E, G)
 
@@ -370,7 +370,7 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
 }
 ```
 
-### Teammate (patch team-streaming-B)
+### Teammate (patch team-streaming-B — retired)
 
 `teammate_id` instead of `parent_tool_use_id`:
 
@@ -392,3 +392,5 @@ Subagent/teammate variants require both:
 - The corresponding ClaudeUI patch applied
 
 Without the patch, subagent stream events are swallowed by upstream's internal aggregation.
+
+On a harness without `subagent-streaming` (Anthropic's unpatched binary, ADR-077) ClaudeUI still gets a foreground subagent's text and thinking as complete `assistant` messages with `parent_tool_use_id` set, because it always passes `--forward-subagent-text` (02); only the token deltas are missing.

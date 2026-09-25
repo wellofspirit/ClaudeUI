@@ -475,6 +475,8 @@ After T2 (snapshot taken), even removing from `queueArray` doesn't help — the 
 
 **Key gap**: ClaudeUI has no way to know when a steer transitions from "editable" to "consumed."
 
+> **2026-09-25:** closed natively for any user frame that carries a `uuid` — see the note at the top of [§11](#11-implications-for-claudeui).
+
 ---
 
 ## 7. The SDK Session Class (`SessionQuery`)
@@ -733,6 +735,8 @@ const popAllEditableToInput = useCallback(() => {
 
 ## 11. Implications for ClaudeUI
 
+> **2026-09-25 (Claude Code 2.1.280, ADR-077):** this section describes SDK 0.2.50 and the `queue-control` patch it led to; that patch is deleted. ClaudeUI now sends every user frame with a client `uuid`, and cli.js reports the fate of such a frame natively as top-level `command_lifecycle` frames keyed by it — `queued` when it enters the queue, `started` when it drains into a turn (the consumption signal), and a terminal `completed` / `cancelled` / `discarded` / `refused` (`docs/protocol-cc/03-inbound-messages.md` §3.21). `cancel_async_message {message_uuid}` takes a still-queued message back and answers `{cancelled: true|false}` (`docs/protocol-cc/07-control-outbound.md` § `cancel_async_message`). Neither `system/queued_command_consumed` nor `dequeue_message` exists any more (04 §4.10 and 07 § `dequeue_message`, both marked retired). For a frame sent without a `uuid`, cli.js still emits no lifecycle frame at all.
+
 ### What ClaudeUI Can See
 
 | Event                        | Available? | How                                                          |
@@ -750,7 +754,7 @@ const popAllEditableToInput = useCallback(() => {
 2. **Dequeue capability** — to withdraw before consumption
 3. **Value-based matching** — native queue items don't have UUIDs
 
-### Patch Requirements
+### Patch Requirements (historical — the `queue-control` patch, deleted 2026-09-25)
 
 1. **In `SessionQuery.submitMessage`**: When a `queued_command` attachment is encountered, yield a new event type (e.g., `{type: "system", subtype: "queued_command_consumed", ...}`) regardless of `replayUserMessages`. This gives ClaudeUI the notification.
 

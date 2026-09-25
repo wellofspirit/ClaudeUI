@@ -6,8 +6,9 @@ internally but the SDK stream only receives the final summarized result.
 
 ## Affected Component
 
-`@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file (same file patched
-by `task-notification`).
+`@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file (in this repo:
+`vendor/claude-cli/cli.js`, the bundle `bun-claude` embeds; every patch in
+`PATCH_REGISTRY` edits it).
 
 The SDK bundles its own copy of Claude Code CLI as `cli.js` in the package
 directory. This file is executed by the SDK via `node` or `bun` when you call
@@ -1856,8 +1857,9 @@ downstream crashes.
 Patch D handles the `.output` file writer (used by background agents for
 the `Read` tool to tail output).
 
-Background agent completion notifications are handled by the separate
-`task-notification` patch.
+Background agent completion notifications arrive natively as
+`system/task_notification` (`docs/protocol-cc/04-system-subtypes.md` §4.4).
+The separate `task-notification` patch that once handled them is retired.
 
 ### SDK transport protocol
 
@@ -1933,11 +1935,18 @@ handles all content types. No change needed to `et()`.
 
 ## Related Patches
 
-- `patch/task-notification/` — Fixes task completion notifications not
-  reaching headless/SDK mode. That patch makes `Z_6()` drain HST into
-  queuedCommands. This patch addresses a different problem: the sub-agent's
-  individual messages (thinking, text, stream events) never being forwarded
-  through the progress callback.
+- `patch/bash-output-streaming/` — different code path, same theme: output
+  the GUI renders while the work is still running.
+- `patch/task-notification/` (retired; the directory is gone) — fixed task
+  completion notifications not reaching headless/SDK mode by making `Z_6()`
+  drain HST into queuedCommands. This patch addresses a different problem:
+  the sub-agent's individual messages (thinking, text, stream events) never
+  being forwarded through the progress callback.
+- `--forward-subagent-text` (a cli.js flag, not a patch; the app passes it on
+  every spawn) forwards a foreground subagent's complete text and thinking
+  messages on an unpatched binary too. Patch A already removes the same
+  filter, so on a patched binary nothing arrives twice
+  (`docs/protocol-cc/02-cli-flags.md`, ADR-077).
 
 ## Syntax & scope pitfalls
 

@@ -144,8 +144,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
     startPolling: vi.fn(),
-    fetch: vi.fn(async () => null),
-    updateFromRateLimitEvent: vi.fn()
+    fetch: vi.fn(async () => null)
   }
 }))
 vi.mock('../../core/services/service-session', () => ({

@@ -12,7 +12,7 @@ cli.js has **three** paths that reach stdout:
 
 1. **Main generator pipeline** (`Ts1` → `M.write(line)`) at char `~12822400`. Everything yielded by the turn generator passes through here.
 2. **Control channel** (`h.enqueue`) at char `~12843100+`. Control responses/cancels plus some out-of-band system events (auth_status, rate_limit_event native, permission-mode status, prompt_suggestion, transcript_mirror).
-3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`bash-output-streaming`, subagent-streaming E/G, team-streaming B).
+3. **Direct `process.stdout.write`** — used by the ClaudeUI patches that emit messages (`bash-output-streaming`, subagent-streaming E/G; formerly the retired team-streaming B).
 
 A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task_started`, `task_updated`, `task_progress`, `notification`) through `JtH`, flushed by `ZtH()` at char `~12838006` / `~12840696` (which injects `uuid` + `session_id` at flush time).
 
@@ -86,7 +86,7 @@ Anthropic-shaped assistant message. Fires on every assistant response, including
 }
 ```
 
-### Teammate variant (patch `team-streaming-B`)
+### Teammate variant (patch `team-streaming-B` — retired)
 
 ```jsonc
 {
@@ -193,7 +193,7 @@ unanswered is re-run when nothing else is queued. A host must therefore never re
 
 ### Teammate variant (`teammate_id`)
 
-Per patch `team-streaming-B` at char `8648903`:
+Per patch `team-streaming-B` (retired) at char `8648903`:
 
 ```jsonc
 {
@@ -682,9 +682,10 @@ Messages that exist ONLY because of ClaudeUI patches:
 
 - `bash_output` — `patch/bash-output-streaming`
 - Subagent `stream_event` with `parent_tool_use_id` — `patch/subagent-streaming` (filter 0 unblock)
-- All teammate-tagged messages — `patch/team-streaming`
 
-An unpatched upstream cli.js omits these. If the harness ever runs against unpatched cli.js, don't assume these exist.
+(Teammate-tagged messages came from `team-streaming`, retired with its directory — 01 §1.12.)
+
+An unpatched upstream cli.js omits these. The app does run against unpatched cli.js — Anthropic's own binary, via `CLAUDEUI_CLAUDE_CLI` (ADR-077) — so never assume these exist: the cards render what arrives and fall back to complete messages and the final tool result. The `voice_server_*` control subtypes (07) are the other patch-only surface; the app gates them on `version.json` `patches` (01 §1.12).
 
 ---
 

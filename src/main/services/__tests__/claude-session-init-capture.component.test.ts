@@ -80,7 +80,7 @@ vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} })
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to
 // a flat 200000). The whole point here is the real alias → window resolution.
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({

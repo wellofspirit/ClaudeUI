@@ -1708,7 +1708,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.endTask(taskId)
     }
 
-    // Extract usage from the patched system message (task-notification-usage patch)
+    // cli.js's task_notification carries the run's usage natively (04 §4.4).
     const rawUsage = msg.usage
     const usage = rawUsage
       ? {
