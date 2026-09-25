@@ -8,7 +8,9 @@
  */
 export { query } from './query'
 export { createSdkMcpServer, tool, sendProgress } from './create-sdk-mcp'
-export { locateBunClaude, locateCliJs, getCliVersion } from './locate'
+export { locateBunClaude, locateCliJs } from './locate'
+export { readHarnessInfo, harnessHasPatch, getCliVersion } from './harness'
+export type { HarnessInfo } from './harness'
 export type {
   SDKMessage,
   AssistantMessage,
