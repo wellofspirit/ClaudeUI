@@ -340,9 +340,14 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
     // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
     // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
-    // corporate/env proxy with no connectivity (M-CL4). Only clear our own
-    // marker so the default subprocess-proxy-strip behavior applies.
-    delete env.CLAUDEUI_PROXY_SUBPROCESSES
+    // corporate/env proxy with no connectivity (M-CL4).
+    //
+    // And let them reach cli.js's children too. The subprocess-proxy-strip patch
+    // exists to keep the IN-APP proxy, which may carry credentials, away from
+    // Bash/MCP/LSP children. An inherited proxy is the user's own, from the
+    // shell those commands would run in anyway, and the unpatched binary passes
+    // it through. The marker switches the strip off.
+    env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
   }
 
   // Scoped Anthropic endpoint: overlay base URL + auth token only onto this

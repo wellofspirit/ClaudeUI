@@ -16,18 +16,29 @@ describe('buildEnv proxy overlay', () => {
   it('no in-app proxy → inherited HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are PRESERVED (M-CL4)', () => {
     // A user behind an env-configured corporate proxy must keep connectivity —
     // cli.js honors these for its own API traffic. Deleting them (the old
-    // behavior) left such users with a dead cli.js. Only our own marker var is
-    // cleared when no in-app proxy is configured.
+    // behavior) left such users with a dead cli.js.
     const env = buildEnv({
       HTTP_PROXY: 'http://corp-proxy:8080',
       HTTPS_PROXY: 'http://corp-proxy:8080',
-      ALL_PROXY: 'http://corp-proxy:8080',
-      CLAUDEUI_PROXY_SUBPROCESSES: '1'
+      ALL_PROXY: 'http://corp-proxy:8080'
     })
     expect(env.HTTP_PROXY).toBe('http://corp-proxy:8080')
     expect(env.HTTPS_PROXY).toBe('http://corp-proxy:8080')
     expect(env.ALL_PROXY).toBe('http://corp-proxy:8080')
-    expect(env.CLAUDEUI_PROXY_SUBPROCESSES).toBeUndefined()
+  })
+
+  it("no in-app proxy → the strip patch is switched off, so Bash/MCP/LSP keep the user's own proxy", () => {
+    // The patch strips HTTP(S)_PROXY / ALL_PROXY / NO_PROXY from children unless
+    // CLAUDEUI_PROXY_SUBPROCESSES is set. It is there for the in-app proxy; with
+    // none configured it used to strip the user's inherited proxy too, so a
+    // `curl` or an http MCP server behind a corporate proxy lost connectivity
+    // that the unpatched binary (and the user's own shell) would have had.
+    const env = buildEnv({
+      HTTPS_PROXY: 'http://corp-proxy:8080',
+      NO_PROXY: 'localhost,.corp'
+    })
+    expect(env.CLAUDEUI_PROXY_SUBPROCESSES).toBe('1')
+    expect(env.NO_PROXY).toBe('localhost,.corp')
   })
 
   it('proxy set with default scope → overlays proxy, no CLAUDEUI_PROXY_SUBPROCESSES', () => {
