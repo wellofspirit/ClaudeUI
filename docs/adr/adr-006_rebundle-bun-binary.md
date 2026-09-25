@@ -152,3 +152,14 @@ scripts/rebundle-cli.mjs`).
 This ADR supersedes the approach documented via the `ci-path-remap` patch
 (added 2026-04-19, retired 2026-04-20). That patch was a band-aid over a
 fundamental mismatch; this ADR addresses the root cause.
+
+### 2026-09-25 — five patches, and the build says which
+
+The "13 behavioral patches" above became five
+([ADR-077](adr-077_claude-harness-capability-gating-and-patch-set.md)): four were
+replaced by cli.js's own surfaces and five had become no-ops or dead code.
+`apply-all.mjs` now records the patches a build carries in
+`vendor/claude-cli/version.json` (`patches`), read from the patched bytes, and
+the app gates patch-dependent surfaces on that list — so the rebundled binary
+is no longer the only Claude Code binary the app can run: `CLAUDEUI_CLAUDE_CLI`
+points it at Anthropic's unpatched one, on which chat works and voice goes dark.

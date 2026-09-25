@@ -49,8 +49,12 @@ tool input, tool results, or turn state.
   running-ness; it cannot regress engines that don't speak it.
 - `handleTaskNotification` falls back to the wire's own `tool_use_id` when the `taskIdMap`
   reverse-lookup misses (map evicted, or `task_started` never arrived).
-- "Send to background" is suppressed for tasks with an `activeTasks` record — they are already
-  async; the button remains only for the residual synchronous-foreground path.
+- ~~"Send to background" is suppressed for tasks with an `activeTasks` record — they are already
+  async; the button remains only for the residual synchronous-foreground path.~~ Superseded by
+  [ADR-077](adr-077_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the button
+  requires a record with `isBackgrounded === false`. cli.js's native `background_tasks` can only
+  move a task it has registered as running in the foreground, so the old gate showed the button
+  exactly when it could not work and hid it once it could.
 - `activeTasks` rides the remote `PerSessionSnapshot` (optional field), so a remote client that
   connects or re-syncs mid-task sees the running state instead of re-deriving it from the broken
   heuristic. Live updates need no relay change — the RemoteBridge forwards all session channels.
