@@ -169,8 +169,11 @@ per-channel listeners and their store writers.
 
 **Per-engine mechanics** (uniform events, per-engine transports — ADR-030 honesty):
 
-- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency). Core correlates per-item by text via the existing `dequeue_message` / `queued_command_consumed` patch surface — **no patch growth**; duplicate-text items are interchangeable, so text ambiguity is harmless.
-  - **"By text" needs normalizing, and that was a real defect.** `queued_command_consumed` carries the queued attachment's `prompt` **verbatim**, and that prompt is the pushed message's `message.content` — a plain string for a text-only prompt but a **content-block ARRAY** whenever the prompt carried an image or a PDF. Comparing the array against `item.text` never matched, so an attachment-carrying steer was never seen as consumed at the moment cli.js injected it; it survived to the turn-end `result` flush and its user bubble was synthesized **after the entire turn** — visibly below the answer it had prompted. The RECALL half never had the bug, which is why it survived: `dequeue_message` matches with cli.js's own extractor (`VV_(v) = typeof v === 'string' ? v : Lu(v,'\n')`, `Lu` keeping `text` blocks). `sdk/queued-command-text.ts` applies that same rule at the read site, which is where cli.js applies it too — still no patch growth.
+- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency), correlated **by id**, not by text (since 2026-09-25, ADR-077). Every user frame carries a client `uuid`, and a queued item's is its `itemId`; cli.js names the message back by it:
+  - **consumed** at `command_lifecycle` `started` (protocol-cc 03 §3.21) — at the tool boundary where the running turn folds it in (right after that boundary's tool_result), or when the between-turns drain makes it the next turn's prompt. Consuming there is what puts the steer bubble where the model actually read it. The turn-end `result` flush stays as a safety net: an item still queued at `result` is drained right after it, so the flush marks it at the same boundary a millisecond early.
+  - **recalled** by `cancel_async_message {message_uuid}` (protocol-cc 07) — `{cancelled:true}` takes it back, preceded by a `cancelled` frame; `{cancelled:false}` means cli.js already took it, so it stays queued until its `started`.
+  - **recalled with a warning** on `discarded` (the session ended with it queued) or `refused` (cli.js declined it). `cancelled` for an item already consumed (its turn was aborted) changes nothing.
+  - Duplicate texts are individually addressable. This replaced text correlation over the `queue-control` patch (`dequeue_message` / `system/queued_command_consumed`), which the official binary lacks: there recall silently failed and cards stayed QUEUED past consumption. That surface carried the queued `prompt` verbatim — a content-block ARRAY whenever the prompt had an image or PDF — so it also had to normalize text the way cli.js does (`sdk/queued-command-text.ts`).
 - **opencode / pi** — these engines commit-on-post (coalesce/steer; unrecallable instantly), so core **holds the item and forwards at the next observed tool/step boundary** in the engine's event stream. The commitment point moves from keypress to boundary — up to one tool-call of extra latency versus today's instant post, ratified as the price of a real take-back window and cross-engine consistency.
 
 Details and supersessions: ADR-053.
@@ -536,12 +539,12 @@ line is a named next step with the reason it is not phase-4 work.
   is documented as leaving the object usable for a later `run()` — and harmless
   because canonical no longer has the id, so nothing it emits is folded. Noted so
   it is not mistaken for a leak introduced by the delete path.
-- **Turn-end queue flush cannot position what it sweeps.** When a queue push lands
-  at/after a turn's `result`, cli.js takes it as the next turn's fresh prompt and no
-  `queued_command_consumed` ever arrives, so the item's position in the transcript is
-  genuinely unknowable — the flush marks it consumed at the boundary and the bubble
-  appears there. Attachment-carrying items no longer take this path by accident (that
-  was the correlation defect above); this is the residual, honest case.
+- ~~**Turn-end queue flush cannot position what it sweeps.**~~ **RESOLVED 2026-09-25
+  (ADR-077):** when a queue push lands at/after a turn's `result`, cli.js takes it as the
+  next turn's fresh prompt, and the uuid-keyed `command_lifecycle` `started` for it now
+  arrives right after that `result`. So the boundary where the flush marks it consumed
+  IS where cli.js takes it; the flush just runs a millisecond ahead, and the late
+  `started` no-ops.
 
 **Phase 5** — volatile-stream separation and per-client subscriptions: stream/PTY/log
 frames leave the ring entirely (`{streamId, turnId, offset, chunk}` with self-healing

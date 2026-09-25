@@ -29,7 +29,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `task_progress`           | Always                                           | vT queue                         |
 | `compact_boundary`        | On conversation compaction                       | Main generator                   |
 | `api_retry`               | On API error + auto-retry                        | Main generator                   |
-| `queued_command_consumed` | Patch `queue-control`                            | Main generator (patched)         |
+| `queued_command_consumed` | Retired with patch `queue-control` (§4.10)       | —                                |
 | `hook_started`            | `--include-hook-events`                          | Hook subscriber                  |
 | `hook_progress`           | `--include-hook-events`                          | Hook subscriber                  |
 | `hook_response`           | `--include-hook-events`                          | Hook subscriber                  |
@@ -67,7 +67,9 @@ mid-session model switch leaves it stale.
 **Gate:** Always.
 
 **Ordering:** First `system` message _of a session start_, but **not** the first message with a
-`session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
+`session_id` — a uuid-carrying prompt's `command_lifecycle` `queued` and `started`
+(03 §3.21) precede it on every turn and carry one; so did the retired `queued_command_consumed`
+(§4.10). A bootstrap latch on "the first `session_id`" must not gate reading init.
 Consumer uses this to resolve temp routingId → real session UUID.
 
 ### Shape
@@ -473,94 +475,29 @@ API error triggered automatic retry inside the streaming layer.
 
 ---
 
-## 4.10 `queued_command_consumed` (PATCHED)
+## 4.10 `queued_command_consumed` (RETIRED 2026-09-25)
 
-A queued command was taken off cli.js's queue and is now running.
+Emitted only by the `queue-control` patch, deleted at 2.1.280. It announced, by the queued text,
+that cli.js had taken a queued command: the patch hooked both the mid-turn fold (a `queued_command`
+attachment) and the between-turns drain, and yielded `{subtype:"queued_command_consumed", prompt,
+source_uuid}` from both. Its native replacement is `command_lifecycle` `started` (03 §3.21), keyed
+by the client `uuid` the user frame carried instead of by text, and emitted by the official binary.
 
-**Two emit sites**, because cli.js has two ways of taking an item off the queue —
-`patch/queue-control` hooks both (Parts A2 and A3), and they emit the same shape:
+Two lessons from it still apply to the replacement:
 
-| Site                                                         | When                                                                                 | Patch part |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------- |
-| Outbound normalizer, `case"attachment"`                      | A turn is RUNNING: the command is absorbed mid-turn as a `queued_command` attachment | A2         |
-| Headless `drainCommandQueue` loop, at the user-message stamp | cli.js is BETWEEN TURNS: the command is dequeued and run as the next turn's PROMPT   | A3         |
-
-The drain path builds **no attachment at all** (its turn-start attachment builder
-is called with an empty queued-command list), so before A3 existed a message
-picked up between turns produced no notification — the UI's queue card only
-cleared on the turn-end flush, after the whole answer. That state is reachable
-whenever the host still considers the session busy while cli.js is idle — most
-visibly while a background subagent streams.
-
-Because the drain is also how an ordinary never-queued prompt reaches its turn,
-A3 fires for those too. Consumers must correlate against their own queue and
-treat an uncorrelated notification as a no-op (ClaudeUI: `consumeByText` only
-matches items still in state `queued`).
-
-**Gate:** Requires `queue-control` patch.
-
-```jsonc
-{
-  "type": "system",
-  "subtype": "queued_command_consumed",
-  // string OR ContentBlockParam[] — see the warning below
-  "prompt": "the queued user text",
-  "source_uuid": "...",
-  "session_id": "...",
-  "uuid": "..."
-}
-```
-
-**`prompt` is NOT always a string.** A2 yields `prompt: <attachment>.prompt` verbatim
-and A3 yields `prompt: <command>.value` — the same value, since cli.js builds the
-attachment from the command (`{prompt: <command>.value, source_uuid: <command>.uuid}`).
-Either way it is whatever was pushed into the queue — the pushed message's
-`message.content`. That is a plain string for a text-only prompt and a
-**content-block array** (`[{type:'image',…}, {type:'text',text}]`) whenever the prompt
-carried an image or a PDF. cli.js branches on this at every read site rather than
-normalizing at the emit site:
-
-```js
-ZPe(e) = typeof e === "string" ? e
-       : Array.isArray(e) ? e.filter(t => t.type === "text" && typeof t.text === "string")
-                             .map(t => t.text).join("
-")
-       : ""
-```
-
-The `dequeue_message` matcher uses the same rule under a different name
-(`VV_(v) = typeof v === "string" ? v : Lu(v,"
-")`, `Lu` keeping `text` blocks), which
-is why taking an image-carrying queued message BACK always worked while noticing it had
-been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
-`src/core/sdk/queued-command-text.ts`.
-
-**Ordering:** From the attachment site (A2), followed by a `user` message with
-`isReplay: true` when `replayUserMessages=true`. From the drain site (A3), it is
-emitted before the turn it starts — i.e. before that turn's first `assistant` /
-`stream_event`. UI uses this to dismiss the "queued" card and show the text as a
-normal user message.
-
-**It carries `session_id`, and it lands before `system/init`.** Verified on 2.1.268, deterministic
-across repeated probes, on the first turn of a fresh session:
-
-```
-#1 control_response                                    (the initialize reply)
-#2 type=system subtype=queued_command_consumed  session_id=YES
-#3 type=system subtype=init                     session_id=YES  model=claude-opus-5[1m]
-#4 type=assistant …
-```
-
-Because A3 is the path an ordinary never-queued prompt takes to its turn, this is the normal
-ordering, not an edge case.
-
-**Consumer hazard.** A bootstrap latch keyed on "the first message carrying a `session_id`" will be
-tripped by this notification and never see `system/init`. ClaudeUI's `captureSessionBootstrap` had
-exactly that shape: the init capture was nested inside `if (msg.session_id && !this.sessionId)`, so
-`resolvedModelId`, `slash_commands`, `skills`, `mcp_servers` and the init permission-mode
-reconciliation were all silently dropped — most visibly, a `default` session sized its context
-window at 200K instead of the resolved model's 1M and rendered a 614K-token transcript as 307%.
-Latch the session id and read `system/init` **independently**.
+- **Normalize a queued prompt before reading its text.** `prompt` was the pushed message's
+  `message.content` verbatim — a string, or a block array whenever the prompt carried an image or a
+  PDF. Comparing the array with the queued text never matched, so an image-carrying steer was
+  only noticed at the turn-end flush and its bubble landed below its own answer. The same `prompt`
+  field is what a persisted `queued_command` attachment carries (03 §3.21, "Transcript"); cli.js's
+  rule (`rD` @2680178 on 2.1.280) is mirrored in `src/core/sdk/queued-command-text.ts`.
+- **The frame that carries the first `session_id` is not `system/init`.** The notification landed
+  before init on every turn, and a `captureSessionBootstrap` that nested its init capture inside
+  `if (msg.session_id && !this.sessionId)` silently dropped `resolvedModelId`, `slash_commands`,
+  `skills`, `mcp_servers` and the init permission-mode reconciliation — a `default` session sized
+  its context window at 200K instead of 1M and rendered a 614K-token transcript as 307%.
+  `command_lifecycle` `queued`/`started` land in the same place today. Latch the session id and
+  read `system/init` **independently**.
 
 ---
 
@@ -789,7 +726,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`task_*`** — correlate by `task_id` in the client. `task_started` → `task_progress` (many) → `task_notification`. An active (non-terminal) task of an auto-continuing type means the conversation is NOT waiting for the user even after a `result` — see §3.7 "`result` vs background tasks".
 - **`compact_boundary`** — preserve `compact_metadata` for session replay.
 - **`api_retry`** — show in UI if visible. `retry_delay_ms` tells the user how long they're waiting.
-- **`queued_command_consumed`** — dismiss the corresponding queued-card UI element.
+- **`queued_command_consumed`** — retired with its patch (§4.10); a queued card is dismissed on the native top-level `command_lifecycle` `started` (03 §3.21).
 - **`hook_*`** — expose in a debug panel; not typically user-facing.
 - **`bridge_state`** — update remote-control status UI.
 - **`session_state_changed`** — only handle when your workflow enables the env var; otherwise ignore.

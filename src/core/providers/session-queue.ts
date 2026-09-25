@@ -9,9 +9,9 @@ type Attachments = QueuedItem['attachments']
  *
  * Composed into {@link BaseSession} rather than inlined there: the list is
  * engine-neutral policy with invariants of its own (FIFO order, first-match
- * text correlation, exactly one broadcast per terminal transition), and keeping
- * it in its own object lets those invariants be tested without an Electron
- * BrowserWindow or a live engine.
+ * text or exact-id correlation, exactly one broadcast per terminal transition),
+ * and keeping it in its own object lets those invariants be tested without an
+ * Electron BrowserWindow or a live engine.
  *
  * {@link SessionQueue.emit} broadcasts the FULL list — idempotent and
  * replay-safe — and only afterwards prunes the terminal (`consumed`/`recalled`)
@@ -62,11 +62,11 @@ export class SessionQueue {
 
   /**
    * Consume the FIRST pending item whose text matches — the correlation ADR-053
-   * pins, because neither cli.js's native queue entries nor an opencode/pi post
-   * carry an id we chose. Duplicate texts are interchangeable, so taking the
-   * oldest is both deterministic and harmless. Returns undefined (a no-op) for
-   * a prompt that was never queued, which is what makes it safe to call from
-   * every engine's post-send ack path.
+   * pins for opencode and pi, whose posts carry no id we chose (claude and
+   * Codex correlate by id, {@link consumeById}). Duplicate texts are
+   * interchangeable, so taking the oldest is both deterministic and harmless.
+   * Returns undefined (a no-op) for a prompt that was never queued, which is
+   * what makes it safe to call from every engine's post-send ack path.
    */
   consumeByText(text: string): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.text === text)
@@ -76,14 +76,29 @@ export class SessionQueue {
 
   /**
    * Consume ONE named item — the correlation for an engine that carries a
-   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066). Text
-   * never enters into it, so duplicate texts stay individually addressable.
-   * Returns undefined for an id that is unknown or already terminal, so it is
-   * as safe to fire unconditionally as {@link consumeByText}.
+   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066;
+   * Claude's user-frame `uuid`, whose `command_lifecycle` frames name it back).
+   * Text never enters into it, so duplicate texts stay individually
+   * addressable. Returns undefined for an id that is unknown or already
+   * terminal, so it is as safe to fire unconditionally as {@link consumeByText}.
    */
   consumeById(itemId: string): QueuedItem | undefined {
+    return this.settleById(itemId, 'consumed')
+  }
+
+  /**
+   * Recall ONE named item the engine reports it will never run (Claude's
+   * `command_lifecycle` `cancelled` / `discarded` / `refused`). Same contract as
+   * {@link consumeById}: undefined, and no change, for an id that is unknown or
+   * already terminal — a consumed item stays consumed.
+   */
+  recallById(itemId: string): QueuedItem | undefined {
+    return this.settleById(itemId, 'recalled')
+  }
+
+  private settleById(itemId: string, state: 'consumed' | 'recalled'): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.itemId === itemId)
-    if (item) item.state = 'consumed'
+    if (item) item.state = state
     return item
   }
 

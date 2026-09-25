@@ -286,14 +286,14 @@ interface EngineHandle {
   /** Push one stream-json message into the run's for-await loop. */
   emit: (msg: unknown) => void
   end: () => void
-  dequeueMessage: ReturnType<typeof vi.fn>
+  cancelAsyncMessage: ReturnType<typeof vi.fn>
 }
 
 function makeEngineHandle(): EngineHandle {
   const pending: unknown[] = []
   let wake: (() => void) | null = null
   let done = false
-  const dequeueMessage = vi.fn(async () => ({ removed: 1 }))
+  const cancelAsyncMessage = vi.fn(async (_uuid: string) => ({ cancelled: true }))
   const handle = {
     async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
       for (;;) {
@@ -306,7 +306,7 @@ function makeEngineHandle(): EngineHandle {
     },
     initializationResult: (): Promise<never> => new Promise<never>(() => {}),
     interrupt: vi.fn(async () => {}),
-    dequeueMessage
+    cancelAsyncMessage
   }
   return {
     handle,
@@ -320,7 +320,7 @@ function makeEngineHandle(): EngineHandle {
       wake?.()
       wake = null
     },
-    dequeueMessage
+    cancelAsyncMessage
   }
 }
 
@@ -605,13 +605,16 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     ])
 
     // Take-back: the ArrowUp gesture's invoke. cli.js's queue is the holder for
-    // the claude engine, so recall goes out to the engine handle per item.
+    // the claude engine, so recall goes out to the engine handle per item, by
+    // the item id the message's frame carried as its uuid.
     const result = await client.invoke<{ recalled: string[]; notRecalled: number }>(
       'session:recall-queued',
       ROUTING_ID
     )
     expect(result).toEqual({ recalled: ['also update the tests'], notRecalled: 0 })
-    expect(engines[0].dequeueMessage.mock.calls.map((c) => c[0])).toEqual(['also update the tests'])
+    expect(engines[0].cancelAsyncMessage.mock.calls.map((c) => c[0])).toEqual([
+      queued.items[0].itemId
+    ])
 
     // Every client converges on the same queue, including the taken-back item's
     // terminal state.

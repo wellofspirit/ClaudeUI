@@ -1,5 +1,4 @@
 import { query as sdkQuery } from '../sdk'
-import { queuedCommandText } from '../sdk/queued-command-text'
 import type {
   QueryHandle,
   SDKMessage,
@@ -10,6 +9,7 @@ import type {
   ToolProgressMessage,
   RateLimitEventMessage,
   BashOutputMessage,
+  CommandLifecycleMessage,
   ControlResponseMessage
 } from '../sdk'
 import { v4 as uuid } from 'uuid'
@@ -518,9 +518,19 @@ export class ClaudeSession extends BaseSession {
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
   }
 
+  /**
+   * `wireUuid` becomes the user frame's `uuid` — the id cli.js names the
+   * message by in its `command_lifecycle` frames and in `cancel_async_message`,
+   * and the transcript uuid it persists the message under. A queued item passes
+   * its `itemId` so both sides key the same message the same way; every other
+   * send gets a fresh one. It must be unique per message: cli.js skips an
+   * inbound frame whose uuid it has already received or persisted as a
+   * duplicate.
+   */
   async run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    wireUuid?: string
   ): Promise<void> {
     this.clearInactivityTimer()
     // A fresh run reactivates a session a prior cancel() retired — re-enable the
@@ -578,7 +588,10 @@ export class ClaudeSession extends BaseSession {
         type: 'user' as const,
         session_id: this.sessionId || '',
         message: { role: 'user' as const, content },
-        parent_tool_use_id: null
+        parent_tool_use_id: null,
+        // Without a uuid cli.js emits no command_lifecycle frames for the
+        // message and cancel_async_message cannot name it (03 §3.21).
+        uuid: wireUuid ?? uuid()
       }
     }
 
@@ -1154,6 +1167,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       case 'bash_output':
         this.handleBashOutput(msg)
         return
+      case 'command_lifecycle':
+        this.handleCommandLifecycle(msg)
+        return
       case 'result':
         this.handleResultMessage(msg, stderrChunks)
         return
@@ -1171,10 +1187,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *
    * The session_id latch and the system/init capture are INDEPENDENT. They used
    * to be nested — init metadata was only read from the first message that also
-   * established the session id — and `system/queued_command_consumed` (which
-   * carries a `session_id` and, because the drain path is how every prompt
-   * reaches its turn, always lands BEFORE `system/init`) tripped that latch
-   * first, so the init branch never ran at all.
+   * established the session id — and a frame that carries a `session_id` and
+   * lands BEFORE `system/init` on every turn tripped that latch first, so the
+   * init branch never ran at all. The retired `queue-control` patch's
+   * `queued_command_consumed` was that frame; today `command_lifecycle`
+   * `queued`/`started` are, since every user frame carries a uuid.
    */
   private captureSessionBootstrap(msg: SDKMessage, type: string): void {
     const isInit = type === 'system' && (msg as SystemMessage).subtype === 'init'
@@ -1358,28 +1375,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleTaskUpdated(msg)
       return
     }
-    if (msg.subtype === 'queued_command_consumed') {
-      // cli.js has taken this text off its queue (docs/protocol-cc/
-      // 04-system-subtypes.md §4.10). Either it absorbed the item into the
-      // running turn as an attachment, or — when cli.js was between turns —
-      // it dequeued the item and is starting a fresh turn with it as the
-      // prompt; `queue-control` Parts A2 and A3 emit the same message for both,
-      // so this handler does not have to tell them apart. Text correlation is
-      // all the wire gives us — ADR-053 pins first-match, duplicates being
-      // interchangeable — and a prompt that was never queued here (every
-      // ordinary send travels the drain too) is a no-op in `consumeByText`.
-      //
-      // `msg.prompt` is the queued attachment's prompt VERBATIM, so it is an
-      // ARRAY of content blocks whenever the queued message carried images or a
-      // PDF. Passing that straight to `consumeByText` could never match (the
-      // comparison is `item.text === text`), so an attachment-carrying steer was
-      // only ever detected as consumed by the turn-end flush — and its bubble
-      // appeared after the whole turn, below the answer it had prompted.
-      // `queuedCommandText` is cli.js's own normalization, which the recall half
-      // of this protocol (`dequeue_message`) has always applied.
-      this.onPromptDelivered(queuedCommandText(msg.prompt))
-      return
-    }
     if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {
       this.handleModelFallback(msg)
       return
@@ -1407,6 +1402,60 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     // Unknown / init — init is already consumed in captureSessionBootstrap.
     // Fall through silently.
+  }
+
+  /**
+   * The fate of a message we sent, keyed by the `uuid` its user frame carried
+   * (docs/protocol-cc/03-inbound-messages.md §3.21). Only a queued item's uuid
+   * is known to the queue — it is the item's `itemId` — so the frames for an
+   * ordinary send, and for commands cli.js enqueues itself, fall through the
+   * lookups as no-ops.
+   *
+   * - `started` is the consumption point: cli.js folded the message into the
+   *   running turn at a tool boundary (the frame follows that boundary's
+   *   tool_result), or drained it as a fresh turn's prompt. The reducer appends
+   *   the steer bubble when the consumed item is broadcast, so consuming HERE
+   *   is what puts the bubble where the model actually read the message.
+   * - `cancelled` / `discarded` / `refused` mean the message will not run.
+   *   Only a still-queued item changes: `cancelled` also arrives after
+   *   `started` when the consuming turn is aborted, and a consumed item stays
+   *   consumed. Our own `cancel_async_message` emits `cancelled` too, before its
+   *   response — `recallById` makes that a single transition either way.
+   * - `discarded` (the session ended with it queued) and `refused` (cli.js
+   *   declined it) happen without the user asking, so they say so.
+   * - `queued` and `completed` change nothing here.
+   */
+  private handleCommandLifecycle(msg: CommandLifecycleMessage): void {
+    const itemId = msg.command_uuid
+    if (typeof itemId !== 'string') return
+    switch (msg.state) {
+      case 'started':
+        if (this.queue.consumeById(itemId)) this.queue.emit()
+        return
+      case 'cancelled':
+        if (this.queue.recallById(itemId)) this.queue.emit()
+        return
+      case 'discarded':
+      case 'refused': {
+        const item = this.queue.recallById(itemId)
+        if (!item) return
+        this.queue.emit()
+        const preview = item.text.length > 60 ? `${item.text.slice(0, 57)}...` : item.text
+        const why =
+          msg.state === 'refused'
+            ? 'Claude Code refused it'
+            : 'the session ended before it could run'
+        this.send(
+          'session:warning',
+          preview
+            ? `Queued message "${preview}" was not delivered: ${why}.`
+            : `A queued message was not delivered: ${why}.`
+        )
+        return
+      }
+      default:
+        return
+    }
   }
 
   /**
@@ -1838,30 +1887,31 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * lands, and a push that races the turn's `result` is taken by cli.js as the
    * NEXT turn's fresh prompt.
    *
-   * A SAFETY NET, not the mechanism. `queue-control` Part A3 (2026-09-13) made
-   * the between-turns drain emit `queued_command_consumed` too, so the drain
-   * normally consumes the item — with the right text, at the right moment —
-   * before this ever sees it. What is left for this flush is the ordering
-   * residue: a push whose drain notification has not reached us by the time
-   * `result` does, and any item cli.js loses track of.
+   * A SAFETY NET, not the mechanism. `command_lifecycle` `started` consumes an
+   * item at the moment cli.js takes it ({@link handleCommandLifecycle}): at the
+   * tool boundary where a running turn folds it in, or when the between-turns
+   * drain makes it the next turn's prompt. The drain runs AFTER this `result`,
+   * so an item still queued here — the turn ended with no further tool
+   * boundary to fold it at, or the push raced the turn's end — has its
+   * `started` in flight behind this frame (verified on 2.1.280: the drained
+   * message's `queued`/`started` follow the previous `result`).
    *
-   * Marking everything still pending 'consumed' here is truthful in BOTH states
-   * a `result` can find:
-   *  a) cli.js still holds the item in its queueArray — its between-turns drain
-   *     runs it next turn, and the late `queued_command_consumed` no-ops against
-   *     our already-consumed item (`consumeByText` matches `state === 'queued'`
-   *     only, and `emit()` has already pruned it);
-   *  b) the push landed after `result` and is already running as a fresh prompt,
-   *     its A3 notification still in flight behind this `result`.
-   * Either way the text WILL run, which is exactly what 'consumed' asserts. One
-   * broadcast covers the whole list, and renderer synthesis stays exactly-once
-   * because the chat message id is derived from the item id (`steer-${itemId}`).
+   * Marking it 'consumed' now is truthful — cli.js runs it next turn — and puts
+   * the steer bubble exactly where its `started` would: after this turn's
+   * answer, ahead of the turn it starts. The late `started` then no-ops
+   * (`consumeById` matches `state === 'queued'` only, and `emit()` has pruned
+   * the item). Consuming here rather than waiting also takes the item off the
+   * card the moment the turn ends, and covers an item whose frame never
+   * arrives. One broadcast covers the whole list, and renderer synthesis stays
+   * exactly-once because the chat message id is derived from the item id
+   * (`steer-${itemId}`).
    *
    * KNOWN MICRO-RACE (accepted; documented, not fixed): a `recallQueued` in
-   * flight at this exact instant can dequeue an item from cli.js AFTER we marked
-   * it consumed — the item then never runs but is shown as a chat message. The
-   * window is one IPC round trip at turn end, and the card empties on this flush
-   * so the take-back affordance disappears immediately.
+   * flight at this exact instant can `cancel_async_message` an item AFTER we
+   * marked it consumed — the item then never runs but is shown as a chat
+   * message (its `cancelled` frame finds nothing to recall). The window is one
+   * IPC round trip at turn end, and the card empties on this flush so the
+   * take-back affordance disappears immediately.
    */
   private flushQueueAtTurnEnd(): void {
     const pending = this.queue.pending()
@@ -2017,28 +2067,33 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     return { type: 'enabled', display: 'summarized' }
   }
 
-  async dequeueMessage(value: string): Promise<{ removed: number }> {
-    if (!this.activeQuery) return { removed: 0 }
-    return await this.activeQuery.dequeueMessage(value)
-  }
-
   /**
    * cli.js's own queue already has native sub-turn timing AND a real per-item
-   * dequeue, so a claude item is pushed the moment it is queued — core holds
-   * nothing (ADR-053).
+   * take-back, so a claude item is pushed the moment it is queued — core holds
+   * nothing (ADR-053). The frame carries the item's id as its `uuid`, which is
+   * how `command_lifecycle` and `cancel_async_message` name it.
    */
   protected override onPromptQueued(item: QueuedItem): void {
-    void this.run(item.text, item.attachments)
+    void this.run(item.text, item.attachments, item.itemId)
   }
 
   /**
-   * Ask cli.js to drop this exact text from its queue. `removed: 0` means the
-   * item is already being consumed, so it stays put and its
-   * `queued_command_consumed` will arrive — never a silent clear (ADR-053).
+   * Ask cli.js to drop this exact message from its queue, by id.
+   * `cancelled: false` means cli.js no longer holds it — folded into the turn
+   * or drained — so it stays put and its `started` will arrive, never a silent
+   * clear (ADR-053). A failed request is not a take-back either: the message
+   * is still in cli.js's queue as far as anyone knows.
    */
   protected override async tryRecallQueuedItem(item: QueuedItem): Promise<boolean> {
-    const { removed } = await this.dequeueMessage(item.text)
-    return removed > 0
+    // Consumed while an earlier item of the same recall was in flight.
+    if (item.state !== 'queued' || !this.activeQuery) return false
+    try {
+      const { cancelled } = await this.activeQuery.cancelAsyncMessage(item.itemId)
+      return cancelled
+    } catch (err) {
+      logger.warn('ClaudeSession', 'cancel_async_message failed; item left queued', err)
+      return false
+    }
   }
 
   async askSideQuestion(question: string): Promise<string | null> {

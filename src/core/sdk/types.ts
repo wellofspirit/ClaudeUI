@@ -31,6 +31,7 @@ export type SDKMessage =
   | RateLimitEventMessage
   | BashOutputMessage
   | AuthStatusMessage
+  | CommandLifecycleMessage
   | ControlRequestMessage
   | ControlResponseMessage
   | ControlCancelRequestMessage
@@ -102,7 +103,6 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'task_updated'
     | 'task_notification'
     | 'task_progress'
-    | 'queued_command_consumed'
     | 'compact_boundary'
     | 'model_refusal_fallback'
     | 'model_fallback'
@@ -146,14 +146,6 @@ export interface SystemMessage extends BaseSDKMessage {
     tool_uses?: number
     duration_ms?: number
   } | null
-  /**
-   * `queued_command_consumed`-only. NOT always a string: it is the queued
-   * attachment's `prompt` verbatim, which is the pushed message's
-   * `message.content` — an array of content blocks whenever the queued prompt
-   * carried images or a PDF. Normalize with `sdk/queued-command-text.ts`
-   * (cli.js's own `ZPe`/`VV_` rule) before comparing it to anything.
-   */
-  prompt?: string | Array<{ type?: string; text?: string }>
   /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
@@ -247,6 +239,27 @@ export interface AuthStatusMessage extends BaseSDKMessage {
   isAuthenticating?: boolean
   output?: string
   error?: string
+  uuid?: string
+}
+
+/**
+ * The fate of one inbound user message that carried a client `uuid`
+ * (docs/protocol-cc/03-inbound-messages.md §3.21). cli.js emits nothing for a
+ * message sent without one.
+ *
+ * `started` is the consumption signal: the message was folded into the running
+ * turn at a tool boundary, or drained as the prompt of a fresh turn. Every other
+ * state is either informational (`queued`, `completed`) or means the message
+ * will not run (`cancelled`, `discarded`, `refused`). A terminal state can
+ * arrive without a preceding `started`, and `cancelled` can FOLLOW `started`
+ * (a turn that consumed it was aborted).
+ */
+export interface CommandLifecycleMessage extends BaseSDKMessage {
+  type: 'command_lifecycle'
+  /** The client uuid of the user frame this is about. */
+  command_uuid?: string
+  state?: 'queued' | 'started' | 'completed' | 'cancelled' | 'discarded' | 'refused' | string
+  /** The frame's own uuid — unrelated to `command_uuid`. */
   uuid?: string
 }
 
@@ -708,7 +721,13 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   applyFlagSettings(settings: Record<string, unknown>): Promise<unknown>
   getSettings(): Promise<unknown>
   rewindFiles(userMessageId: string, opts?: { dryRun?: boolean }): Promise<unknown>
-  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean } | unknown>
+  /**
+   * Take a queued user message back by the `uuid` its frame carried.
+   * `cancelled: false` is an answer, not an error: cli.js does not hold it
+   * (already folded into a turn or drained, being folded right now, or not
+   * received yet) — docs/protocol-cc/07-control-outbound.md.
+   */
+  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean }>
   seedReadState(path: string, mtime: number): Promise<unknown>
   enableRemoteControl(enabled: boolean, opts?: { name?: string }): Promise<unknown>
   generateSessionTitle(
@@ -725,7 +744,6 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
    * or finished).
    */
   backgroundTask(toolUseId: string): Promise<{ backgrounded: boolean }>
-  dequeueMessage(value: string): Promise<{ removed: number }>
   voiceServerStart(): Promise<{ port: number }>
   voiceServerStop(): Promise<{ stopped: boolean }>
   getUsage(): Promise<Record<string, unknown>>

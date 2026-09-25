@@ -25,7 +25,6 @@ const { sessionManagerSpies } = vi.hoisted(() => {
     readBackgroundRange: vi.fn(() => ''),
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
-    dequeueMessage: vi.fn(async () => ({ removed: 0 })),
     askSideQuestion: vi.fn(async () => null),
     setPermissionMode: vi.fn(async () => {}),
     setModel: vi.fn(async () => {}),

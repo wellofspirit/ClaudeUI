@@ -25,7 +25,7 @@ interface QueryControlMethods {
   setModel(model?: string): Promise<void>
   stopTask(taskId: string): Promise<void>
   backgroundTask(toolUseId: string): Promise<{ backgrounded: boolean }>
-  dequeueMessage(value: string): Promise<{ removed: number }>
+  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean }>
   askSideQuestion(question: string): Promise<string | null>
   getUsage(): Promise<Record<string, unknown>>
   mcpServerStatus(): Promise<unknown[]>
@@ -48,7 +48,7 @@ export interface SdkStubCallTracker {
   models: (string | undefined)[]
   stoppedTasks: string[]
   backgroundedTasks: string[]
-  dequeuedMessages: string[]
+  cancelledMessages: string[]
   sideQuestions: string[]
 }
 
@@ -59,7 +59,7 @@ function createCallTracker(): SdkStubCallTracker {
     models: [],
     stoppedTasks: [],
     backgroundedTasks: [],
-    dequeuedMessages: [],
+    cancelledMessages: [],
     sideQuestions: []
   }
 }
@@ -119,9 +119,9 @@ export function createSdkStub(options: SdkStubOptions): {
         tracker.backgroundedTasks.push(toolUseId)
         return { backgrounded: true }
       },
-      dequeueMessage: async (value) => {
-        tracker.dequeuedMessages.push(value)
-        return { removed: 1 }
+      cancelAsyncMessage: async (messageUuid) => {
+        tracker.cancelledMessages.push(messageUuid)
+        return { cancelled: true }
       },
       askSideQuestion: async (question) => {
         tracker.sideQuestions.push(question)

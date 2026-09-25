@@ -10,7 +10,7 @@
  *
  * Protocol mirrors src/main/sdk/: newline-delimited JSON on stdio, with a
  * control channel for request/response pairs (stopTask, mcpServerStatus,
- * dequeueMessage, toggleMcpServer, …).
+ * toggleMcpServer, …).
  *
  * Usage:
  *   import { createQuery, collectMessages, TestRunner, dumpMessages,
@@ -110,7 +110,7 @@ function buildArgs(options) {
 
 /**
  * Spawn bun-claude and return an async-iterable query handle with control
- * methods (close/stopTask/mcpServerStatus/dequeueMessage/toggleMcpServer).
+ * methods (close/stopTask/mcpServerStatus/toggleMcpServer).
  *
  * The handle iterates stream-json data messages. Control responses are
  * intercepted and routed to the pending request map instead of being yielded.
@@ -338,10 +338,6 @@ function spawnQuery({ prompt, options, ac }) {
     // --- Control-channel methods (mirror src/main/sdk/query.ts) -----------
     async stopTask(task_id) {
       return controlRequest('stop_task', { task_id })
-    },
-    async dequeueMessage(value) {
-      const r = await controlRequest('dequeue_message', { value })
-      return { removed: r?.removed ?? 0 }
     },
     async mcpServerStatus() {
       const r = await controlRequest('mcp_status', {})

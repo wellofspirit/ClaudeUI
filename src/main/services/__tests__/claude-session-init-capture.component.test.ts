@@ -5,12 +5,12 @@
  *
  * The bug this pins: `captureSessionBootstrap` nested its init capture inside
  * the `if (msg.session_id && !this.sessionId)` latch. But `system/init` is not
- * the first message carrying a `session_id` — `system/queued_command_consumed`
- * is (our own `patch/queue-control` Part A3 emits it for EVERY prompt, because
- * the drain path is how an ordinary never-queued prompt reaches its turn, and
- * it lands ahead of init on every turn; see docs/protocol-cc/04-system-subtypes.md
- * §4.2 / §4.10). So the consume message tripped the latch and the init branch
- * never ran.
+ * the first message carrying a `session_id`. It was the retired `queue-control`
+ * patch's `system/queued_command_consumed` when the bug was found; today it is
+ * `command_lifecycle` `queued` and `started`, which cli.js emits for every user
+ * frame that carries a uuid — and every one does — ahead of init on every turn
+ * (docs/protocol-cc/03-inbound-messages.md §3.21, 04-system-subtypes.md §4.2).
+ * Either way the earlier frame tripped the latch and the init branch never ran.
  *
  * Consequences, all guarded below:
  *  - `resolvedModelId` stayed null, so a `default` session sized its context
@@ -119,7 +119,7 @@ function makeControlledHandle(): {
     },
     initializationResult: (): Promise<never> => new Promise<never>(() => {}),
     interrupt: vi.fn(async () => {}),
-    dequeueMessage: vi.fn(async () => ({ removed: 1 }))
+    cancelAsyncMessage: vi.fn(async () => ({ cancelled: true }))
   }
   return {
     handle,
@@ -216,19 +216,34 @@ async function startSession(routingId: string): Promise<{
   return { session, sent, handle: handles[0] }
 }
 
-describe('ClaudeSession system/init capture (behind queued_command_consumed)', () => {
+/**
+ * THE wire order (official 2.1.280, probes/queue-control/official.uuid.jsonl
+ * L198–L200): a user frame's `queued` and `started` lifecycle frames carry a
+ * session_id and precede that turn's init.
+ */
+function emitLifecycleAheadOfInit(
+  handle: ReturnType<typeof makeControlledHandle>,
+  sessionId: string
+): void {
+  for (const [state, uuid] of [
+    ['queued', 'f61e6d9b-1700-402d-b796-4242ef8db404'],
+    ['started', 'be7006e9-764b-49d2-aa18-4f4b702f6095']
+  ]) {
+    handle.emit({
+      type: 'command_lifecycle',
+      command_uuid: '8c3b9635-1a49-4bdc-9ca8-d63c5a205ab3',
+      state,
+      uuid,
+      session_id: sessionId
+    })
+  }
+}
+
+describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
   it('sizes the context window from the resolved model id, not the `default` alias', async () => {
     const { sent, handle } = await startSession('r-init-window')
 
-    // THE wire order (verified on 2.1.268): the consume notification carries a
-    // session_id and precedes init on every turn.
-    handle.emit({
-      type: 'system',
-      subtype: 'queued_command_consumed',
-      prompt: 'hello',
-      session_id: 's-init-1',
-      uuid: 'u1'
-    })
+    emitLifecycleAheadOfInit(handle, 's-init-1')
     handle.emit({
       type: 'system',
       subtype: 'init',
@@ -270,13 +285,7 @@ describe('ClaudeSession system/init capture (behind queued_command_consumed)', (
   it('re-captures the resolved model on a LATER init, resizing the window', async () => {
     const { sent, handle } = await startSession('r-init-recapture')
 
-    handle.emit({
-      type: 'system',
-      subtype: 'queued_command_consumed',
-      prompt: 'hello',
-      session_id: 's-init-2',
-      uuid: 'u1'
-    })
+    emitLifecycleAheadOfInit(handle, 's-init-2')
     handle.emit({
       type: 'system',
       subtype: 'init',

@@ -22,6 +22,7 @@ export type {
   RateLimitEventMessage,
   BashOutputMessage,
   AuthStatusMessage,
+  CommandLifecycleMessage,
   ControlRequestMessage,
   ControlResponseMessage,
   ControlCancelRequestMessage,

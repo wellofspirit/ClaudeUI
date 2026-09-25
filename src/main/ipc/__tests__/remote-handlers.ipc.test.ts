@@ -348,7 +348,6 @@ const sessionStub: any = {
   readBackgroundRange: vi.fn(() => ''),
   stopTask: vi.fn(async () => ({ success: true })),
   backgroundTask: vi.fn(async () => ({ success: true })),
-  dequeueMessage: vi.fn(async () => ({ removed: 1 })),
   queuedItems: [],
   enqueuePrompt: vi.fn(),
   recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),

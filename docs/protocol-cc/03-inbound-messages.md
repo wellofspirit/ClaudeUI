@@ -34,6 +34,7 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 | `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
 | `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                           | §3.14                                      |
 | `transcript_mirror`      | Direct write from file watcher                  | `sessionMirror: true` (ClaudeUI doesn't use)                                      | §3.15                                      |
+| `command_lifecycle`      | Native lifecycle forwarder (`mw`, at 22677075)  | The inbound `user` frame carried a `uuid` (ClaudeUI: every frame)                 | §3.21                                      |
 | `control_request`        | Control channel                                 | Per inbound subtype — see `08-control-inbound.md`                                 | §3.16                                      |
 | `control_response`       | Control channel                                 | One per inbound outbound control_request                                          | §3.17                                      |
 | `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                       | §3.18                                      |
@@ -160,15 +161,23 @@ When `shouldQuery=false` or during session resume, cli.js re-yields past user me
 }
 ```
 
-### Trigger 3 — Queued command consumed (patch `queue-control`)
+### Trigger 3 — Echo of a user frame we sent (`--replay-user-messages` only)
 
-When a mid-turn steer is consumed, cli.js re-emits the prompt as a `user` message with `isReplay: true` (char `~12805950`).
+With `--replay-user-messages`, an inbound `user` frame that carried a `uuid` is echoed back as
+`{type:"user", message, uuid: <client uuid>, isReplay: true, …}` as soon as cli.js accepts it
+into its command queue (2.1.280, `.cache/pristine-cli.js` @22833639). ClaudeUI does not pass the
+flag; it learns what happened to a message from `command_lifecycle` (§3.21).
 
 Shape same as Trigger 2.
 
 ### Trigger 4 — Duplicate message ACK
 
-When a `user` with a pre-existing `uuid` arrives, cli.js emits an `isReplay: true` ack to preserve client ordering (char `~12861187`).
+An inbound `user` frame whose `uuid` cli.js has already received in this process, or finds
+already persisted in the session transcript, is skipped as a duplicate (`skipDuplicate` @22456715,
+called from the stdin loop @22829853). With `--replay-user-messages` the skip is acknowledged by
+an `isReplay: true` echo; a duplicate that was persisted but not received by this process also
+gets a `command_lifecycle` `completed`. The one exception: a persisted message whose turn went
+unanswered is re-run when nothing else is queued. A host must therefore never reuse a uuid.
 
 ### Subagent variant (`parent_tool_use_id`)
 
@@ -659,6 +668,10 @@ Typical sequence within one user turn:
 
 Subagent messages nest inside step 10 (each with `parent_tool_use_id`). Teammate messages use `teammate_id`.
 
+A user frame that carried a `uuid` adds `command_lifecycle` frames (§3.21): `queued` + `started`
+ahead of step 1 when it starts the turn, and `started` right after a step-10 tool_result when a
+running turn folds it in.
+
 Control-channel messages (`control_request`/`control_response`/`control_cancel_request`, `auth_status`, `prompt_suggestion`, `bridge_state`) interleave freely — no turn-boundary correlation.
 
 ---
@@ -668,8 +681,93 @@ Control-channel messages (`control_request`/`control_response`/`control_cancel_r
 Messages that exist ONLY because of ClaudeUI patches:
 
 - `bash_output` — `patch/bash-output-streaming`
-- `system/queued_command_consumed` — `patch/queue-control`
 - Subagent `stream_event` with `parent_tool_use_id` — `patch/subagent-streaming` (filter 0 unblock)
 - All teammate-tagged messages — `patch/team-streaming`
 
 An unpatched upstream cli.js omits these. If the harness ever runs against unpatched cli.js, don't assume these exist.
+
+---
+
+## 3.21 `command_lifecycle`
+
+What happened to one inbound `user` frame, named by the client `uuid` that frame carried. Native;
+it replaced the `queue-control` patch's `system/queued_command_consumed` (04 §4.10) for ClaudeUI
+on 2026-09-25. cli.js emits **nothing** for a frame sent without a `uuid` — which is why, on the
+official binary, a uuid-less queued message sat QUEUED on the card past the point the model read
+it. It also emits frames for commands it enqueues itself (cron triggers, teammate shutdown
+prompts, deferred-turn resume): those mint a fresh uuid and emit `started` and a terminal state
+without `queued`.
+
+**Anchors (2.1.280, `.cache/pristine-cli.js`):** schema `Ev` @2234189 (described as "@internal
+Fate of a queued command"); the stdout forwarder `mw` @22677075, which stamps the frame's own
+`uuid` and `session_id`; mid-turn fold `started` @14791535; between-turns drain `startBatch`
+@22454143.
+
+**Gate:** the inbound `user` frame carries `uuid` (06 §6.2). The inbound schema types it as a plain
+string (`ns` @2125908, `uuid: m().optional()` with `m = o()`), so nothing checks its format; it
+must be unique (§3.4 Trigger 4).
+
+```jsonc
+{
+  "type": "command_lifecycle",
+  "command_uuid": "d6a3baa8-e2c7-4b64-89ae-87dd294bece0", // the uuid OUR user frame carried
+  "state": "queued" | "started" | "completed" | "cancelled" | "discarded" | "refused",
+  "uuid": "504cc05e-ef36-48fc-bf70-8f81b19fcc30",         // this frame's own id
+  "session_id": "903d5166-8025-4343-b927-eddd67c69bfb"
+}
+```
+
+| `state`     | Meaning (from the schema description)                                                                                                                                                                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`    | The message entered the command queue.                                                                                                                                                                                                                                |
+| `started`   | It drained into a turn: folded into the running turn at a tool boundary, or taken as the prompt of a fresh turn. **The consumption signal.**                                                                                                                          |
+| `completed` | The turn that consumed it ended cleanly. For a fold, before that turn's `result`; for a message that started a turn, after it.                                                                                                                                        |
+| `cancelled` | Removed by `cancel_async_message`, swept by an `interrupt` with `cancel_queued: true`, caught by a pending cancel just before dispatch (07, `cancel_async_message`), or consumed into a turn that was aborted or died on a hard failure — so it can FOLLOW `started`. |
+| `discarded` | The session ended (`end_session`) with the message still queued.                                                                                                                                                                                                      |
+| `refused`   | Declined by the session's receive-side policy before entering the queue. Never preceded by `queued`; it will not run.                                                                                                                                                 |
+
+Not a strict pairing: a terminal state can arrive without a `started`, and a turn that fails by
+throwing can leave `started` without a terminal state.
+
+**Observed ordering** (official 2.1.280, Haiku, 2026-09-24; `probes/queue-control/official.uuid.jsonl`):
+
+```
+mid-turn — sent while a foreground Bash ran
+t=5817   → user {uuid: d6a3…}
+t=5818   command_lifecycle queued        (1 ms after the frame)
+t=17199  user (tool_result of that Bash)
+t=17204  command_lifecycle started       (the fold, 5 ms after the tool_result)
+         … assistant, answering it
+t=20052  command_lifecycle completed
+t=20054  result
+
+between turns — sent 1.5 s after the previous result
+t=21554  → user {uuid: 8c3b…}
+t=21555  command_lifecycle queued
+t=21556  command_lifecycle started
+t=21561  system/init
+         … the turn
+t=23615  result
+t=23616  command_lifecycle completed
+```
+
+A message still queued when a turn ends — the turn reached no further tool boundary to fold it at —
+is drained the same way immediately after that turn's `result`, so its `started` follows the
+`result`.
+
+**Consumer hazard.** The frames carry `session_id`, and `queued`/`started` precede the turn's
+`system/init`. A bootstrap latch keyed on "the first message carrying a `session_id`" is tripped by
+them (04 §4.2).
+
+**Transcript.** A message drained as a fresh turn is persisted as the `user` line, with `uuid` = the
+client uuid. A message folded mid-turn is persisted at the fold as
+`{type:"attachment", attachment:{type:"queued_command", prompt, source_uuid: <client uuid>, commandMode:"prompt", …}}`,
+where `prompt` is the frame's `message.content` (a string, or a block array when it carried images
+or a PDF).
+
+**ClaudeUI.** `ClaudeSession` sends a queued item under its `itemId` and every other prompt under a
+fresh uuid. `handleCommandLifecycle`: `started` → `SessionQueue.consumeById(command_uuid)`, which
+places the steer bubble at the true consumption point; `cancelled` → `recallById` (no-op for an
+item already consumed); `discarded`/`refused` → `recallById` + `session:warning`; `queued` and
+`completed` change nothing. A uuid the queue never saw — every ordinary send, every command cli.js
+enqueues itself — is a no-op.

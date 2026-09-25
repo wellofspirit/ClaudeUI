@@ -76,7 +76,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     readBackgroundRange: vi.fn(() => ''),
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
-    dequeueMessage: vi.fn(async () => ({ removed: 0 })),
     queuedItems: [],
     enqueuePrompt: vi.fn(),
     recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
@@ -878,8 +877,8 @@ describe('session.ipc', () => {
         enqueuePrompt: vi.fn(),
         recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
-        // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
-        // mcpToggleServer, setEffort, etc.
+        // getPlanContent, getSessionLogPath, mcpServerStatus, mcpToggleServer,
+        // setEffort, etc.
       }
       sessionManagerSpies.get.mockReturnValue(minimalStub)
 

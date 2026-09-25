@@ -728,10 +728,13 @@ export function makeHandle(
         user_message_id,
         dry_run: opts?.dryRun
       }),
+    // Native take-back of a queued user message by the `uuid` its frame
+    // carried. `{cancelled:false}` is a SUCCESS answer (cli.js does not hold
+    // that uuid), so anything short of an explicit `true` reads as not taken.
     cancelAsyncMessage: (message_uuid: string) =>
       control
-        .request({ subtype: 'cancel_async_message', message_uuid })
-        .then((r) => (r ?? {}) as { cancelled: boolean }),
+        .request<{ cancelled?: boolean } | null>({ subtype: 'cancel_async_message', message_uuid })
+        .then((r) => ({ cancelled: r?.cancelled === true })),
     seedReadState: (path: string, mtime: number) =>
       control.request({ subtype: 'seed_read_state', path, mtime }),
     enableRemoteControl: (enabled: boolean, opts?: { name?: string }) =>
@@ -760,10 +763,6 @@ export function makeHandle(
       control
         .request<{ backgrounded?: boolean } | null>({ subtype: 'background_tasks', tool_use_id })
         .then((r) => ({ backgrounded: r?.backgrounded === true })),
-    dequeueMessage: (value: string) =>
-      control
-        .request<{ removed?: number } | null>({ subtype: 'dequeue_message', value })
-        .then((r) => ({ removed: r?.removed ?? 0 })),
     voiceServerStart: () =>
       control
         .request<{ port?: number } | null>({ subtype: 'voice_server_start' })

@@ -44,8 +44,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:subagent-F2*/',
         // subagent-G (iu8 background streaming) was merged into BVe() in 2.1.197
         // and is now covered by Patch E — its marker is intentionally absent.
-        '/*PATCHED:queue-control-dequeue*/',
-        '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:voice-server*/',
         '/*PATCHED:bash-output-streaming*/',
         '/*PATCHED:bash-early-poll*/'
@@ -62,20 +60,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
   describe('subagent-streaming', () => {
     for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'F2']) {
       const name = `subagent-${letter}`
-      it(`marker ${name} present in cli.js`, () => {
-        expect(hasMarker(src, name)).toBe(true)
-      })
-      it(`marker ${name} appears exactly once`, () => {
-        expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
-      })
-    }
-  })
-
-  // ---------------------------------------------------------------------------
-  // queue-control — 2 markers in cli.js (the -sdk one lives in sdk.mjs)
-  // ---------------------------------------------------------------------------
-  describe('queue-control', () => {
-    for (const name of ['queue-control-dequeue', 'queue-control-consumed']) {
       it(`marker ${name} present in cli.js`, () => {
         expect(hasMarker(src, name)).toBe(true)
       })

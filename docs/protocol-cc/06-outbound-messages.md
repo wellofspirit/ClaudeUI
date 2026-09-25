@@ -61,6 +61,7 @@ The only type that triggers an actual agent turn. All others are control/bookkee
 - **`parent_tool_use_id`** — null for a normal user turn. Populated when the message is a tool_result in a subagent context. Despite being checked later (not by `processLine`), leaving it out triggers downstream Zod errors.
 - **`shouldQuery: false`** appends the message to the transcript without triggering a model API call. Used for transcript replay / warmup.
 - **`priority`** — `"now"` jumps the queue, `"next"` is the default, `"later"` waits until idle. See `docs/cli-message-loop-internals.md` for the full queue semantics.
+- **`uuid`** — the host's name for this message. cli.js reports the message's fate under it (`command_lifecycle`, 03 §3.21), takes it back by it (`cancel_async_message`, 07), persists it as the transcript line's `uuid` (or a mid-turn fold's `source_uuid`), and skips a frame whose uuid it has already received or persisted as a duplicate (03 §3.4 Trigger 4). Without one, none of that happens. The schema types it as a plain string. ClaudeUI sends one on every frame: a queued item's `itemId`, otherwise a fresh v4 uuid.
 
 ### Tool_result content block (inside `content` array)
 
@@ -77,7 +78,7 @@ cli.js passes these through to the Anthropic API verbatim. The API enforces tool
 
 ### When we send this
 
-Once per user turn, via `writer.write({type:'user', message:{role:'user', content: prompt}})`. See `src/core/sdk/query.ts` around the first-prompt forwarding block. Tool_result replies typically arrive by a DIFFERENT path — see Section 6.4 — but the wire shape when they come through stdin is the same as above.
+Once per user prompt, as `{type:'user', session_id, message:{role:'user', content}, parent_tool_use_id:null, uuid}` built by `ClaudeSession.run` and written by `src/core/sdk/query.ts`'s prompt-forwarding loop. Tool_result replies typically arrive by a DIFFERENT path — see Section 6.4 — but the wire shape when they come through stdin is the same as above.
 
 ---
 

@@ -366,30 +366,68 @@ Dry run always responds with the diff. Real run responds with error if `canRewin
 
 ### `cancel_async_message`
 
-Remove a queued message before it's consumed.
+Take a queued user message back, by the `uuid` its `user` frame carried. Native; ClaudeUI's
+take-back since 2026-09-25, replacing the `queue-control` patch's text-matched `dequeue_message`
+(below), which the official binary rejects.
 
-**Anchor:** `~12845570`. Schema `Oc1`. Response schema `v3Y`.
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** request schema `_o` @2322818 ("Drops a pending
+async user message from the command queue by uuid. No-op if already dequeued for execution"),
+response schema `Qv` right after it; headless handler @22780459, which calls
+`Cu({targetUuid, sender:"host", messageQueue, …})` @22534471.
 
 **Request:**
 
 ```json
 {
   "subtype": "cancel_async_message",
-  "message_uuid": "<uuid>"
+  "message_uuid": "<the uuid the user frame carried>"
 }
 ```
 
 **Response (success):**
 
 ```json
-{ "cancelled": true } // false if already dequeued for execution
+{ "cancelled": true }
 ```
 
-**Side effects:** Removes from command queue via `tNH(item => item.uuid === uuid)`.
+`{ "cancelled": false }` is also a SUCCESS: cli.js does not hold that uuid. Three reasons, from
+`Cu`:
 
-**Timing:** instant.
+- it already left the queue — folded into a turn or drained as a turn's prompt;
+- it is being folded right now (`isFoldInFlight`): nothing is removed and its `started` follows;
+- cli.js has not received it (yet). For the host sender `Cu` then calls
+  `markCancelPending(uuid)`, which records the uuid in a bounded set; if a message with that uuid
+  later reaches the **between-turns** dispatch, the dispatch drops it and emits `cancelled`
+  instead of `started`. The mid-turn fold does not consult that set: in the probe a mid-turn
+  message sent under a uuid cancelled beforehand ran normally.
 
-**QueryHandle:** `q.cancelAsyncMessage(uuid)`.
+**Side effects:** on `true`, the message is removed from the command queue and a
+`command_lifecycle` `cancelled` frame (03 §3.21) is emitted for it — **before** the response:
+
+```
+official.cancel.jsonl (2.1.280, Haiku, 2026-09-24)
+L99   → control_request cancel_async_message {message_uuid: 3f13…}   (300 ms after the frame)
+L100  command_lifecycle {command_uuid: 3f13…, state: "cancelled"}
+L101  control_response {cancelled: true}
+L103  → control_request cancel_async_message {message_uuid: 3f13…}   (again)
+L104  control_response {cancelled: false}                           (no second frame)
+```
+
+The model provably never saw the cancelled message: asked at the end to quote every user message
+it had received, it listed the others and not that one. A cancel sent after the message was
+consumed (L372) answers `{cancelled: false}`.
+
+**Timing:** instant (≤1 ms in the probe).
+
+**QueryHandle:** `q.cancelAsyncMessage(uuid)` → `{ cancelled: boolean }`; only an explicit `true`
+reads as cancelled.
+
+**ClaudeUI:** `ClaudeSession.tryRecallQueuedItem` sends it with the item's `itemId` — the uuid the
+item's frame carried (06 §6.2). `true` → the item is recalled; `false`, or a failed request → it
+stays queued, reported as not recalled, and its `started` settles it. An item already consumed
+while an earlier item of the same recall was in flight is not asked about. The `cancelled` frame
+that precedes the response recalls the item first; `SessionQueue.recallById` makes the second
+transition a no-op.
 
 ---
 
@@ -581,30 +619,15 @@ Enable/disable remote-control bridging (peer-to-peer mirror).
 
 ---
 
-### `dequeue_message` (patched)
+### `dequeue_message` (RETIRED 2026-09-25)
 
-Remove a queued command by text match. Added by `patch/queue-control/`.
-
-**Anchor:** `~12857658`. **No Zod schema** (patch-injected).
-
-**Request:**
-
-```json
-{
-  "subtype": "dequeue_message",
-  "value": "the text content" // after m$4() attachment extraction
-}
-```
-
-**Response (success):**
-
-```json
-{ "removed": 2 } // count of matching queue entries removed
-```
-
-**Timing:** instant.
-
-**QueryHandle:** `q.dequeueMessage(value)`.
+Removed a queued command by TEXT match, answering `{removed: N}`. It existed only in the
+`queue-control` patch, deleted at 2.1.280; the official binary answers it with
+`Unsupported control request subtype: dequeue_message` (`official.cancel.jsonl` L93–L94), so
+take-back silently failed there. Replaced by `cancel_async_message` (above), which names the
+message by the `uuid` its frame carried. `QueryHandle.dequeueMessage` is gone. The app-level
+`session:dequeue-message` IPC channel survives as a deprecated shim over `session:recall-queued`
+for cached `/remote` bundles, so it now reaches cli.js as `cancel_async_message` too.
 
 ---
 
@@ -1323,7 +1346,6 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 | `launchUltrareview(args, {confirm})`        | `ultrareview_launch`                  |
 | `stopTask(id)`                              | `stop_task`                           |
 | `backgroundTask(toolUseId)`                 | `background_tasks`                    |
-| `dequeueMessage(value)`                     | `dequeue_message`                     |
 | `voiceServerStart()`                        | `voice_server_start`                  |
 | `voiceServerStop()`                         | `voice_server_stop`                   |
 | `getUsage()`                                | `get_usage`                           |
