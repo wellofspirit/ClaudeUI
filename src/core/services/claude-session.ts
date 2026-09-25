@@ -19,6 +19,7 @@ import * as path from 'path'
 import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
@@ -174,8 +175,6 @@ class MessageChannel<T> {
 }
 
 const TASK_ID_RE = /task_id:\s*(\S+)/
-const BG_CMD_ID_RE = /Command running in background with ID:\s*([\w-]+)/
-const OUTPUT_FILE_RE = /Output is being written to:\s*(.+)/
 
 const TAIL_SIZE = 64 * 1024
 
@@ -2946,8 +2945,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private detectTaskMapping(toolUseId: string, resultText: string): void {
     const agentMatch = resultText.match(AGENT_ID_RE)
     const taskIdMatch = resultText.match(TASK_ID_RE)
-    const bgCmdMatch = resultText.match(BG_CMD_ID_RE)
-    const agentId = agentMatch?.[1] || taskIdMatch?.[1] || bgCmdMatch?.[1] || ''
+    // Every backgrounded Bash, however it got there: run_in_background, "Send
+    // to background", a timeout, a message that arrived while it ran.
+    const agentId = agentMatch?.[1] || taskIdMatch?.[1] || backgroundBashTaskId(resultText) || ''
 
     if (agentId) {
       this.taskIdMap.set(agentId, toolUseId)
@@ -2960,10 +2960,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     // Record output file path for background commands (permanent — survives completion).
-    // This works for both Task tools (with agentId) and background Bash (may lack agentId).
-    const outputMatch = resultText.match(OUTPUT_FILE_RE)
-    if (outputMatch) {
-      const filePath = outputMatch[1].trim()
+    // Only a backgrounded Bash's tool_result names its file this way.
+    const filePath = backgroundBashOutputFile(resultText)
+    if (filePath) {
       this.backgroundFilePaths.set(toolUseId, filePath)
       // Create dormant poller entry (no interval until the renderer calls
       // watchBackground). Agent task output files are JSONL transcripts

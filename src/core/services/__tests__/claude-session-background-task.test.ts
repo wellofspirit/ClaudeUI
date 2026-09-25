@@ -16,11 +16,17 @@
  *      official.main.jsonl:104,115; official.agent.jsonl:70,83).
  *   3. It reads `{backgrounded:false}` — a success answer — as a failure the
  *      user is told about, instead of a silent no-op.
+ *   4. It reads the tool_result that follows the flip ("Command was manually
+ *      backgrounded by user with ID: …") like a run_in_background one, so the
+ *      card can tail the command's output file.
  *
  * Mock scaffold mirrors `claude-session-agent-resume.test.ts`; the parked
  * handle mirrors `claude-session-queue.component.test.ts`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { TaskStartedData } from '../../../shared/types'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../sync-host'
@@ -178,6 +184,53 @@ const taskNotification = (toolUseId: string, taskId: string): Record<string, unk
   summary: ''
 })
 
+/**
+ * The Bash call's tool_result, as the official 2.1.280 binary sent it after a
+ * "Send to background" (probes/background-task/official.main.jsonl:121). Only
+ * the output path is the test's own; the trailing period is cli.js's.
+ */
+const manualBackgroundResult = (outputPath: string): Record<string, unknown> => ({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: [
+      {
+        tool_use_id: BASH,
+        type: 'tool_result',
+        content: `Command was manually backgrounded by user with ID: ${BASH_TASK}. Output is being written to: ${outputPath}.`,
+        is_error: false
+      }
+    ]
+  },
+  parent_tool_use_id: null,
+  tool_use_result: {
+    stdout: '',
+    stderr: '',
+    interrupted: false,
+    isImage: false,
+    noOutputExpected: false,
+    backgroundTaskId: BASH_TASK,
+    backgroundedByUser: true
+  }
+})
+
+/** The same call started with run_in_background: the path is followed by guidance. */
+const runInBackgroundResult = (outputPath: string): Record<string, unknown> => ({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: [
+      {
+        tool_use_id: BASH,
+        type: 'tool_result',
+        content: `Command running in background with ID: ${BASH_TASK}. Output is being written to: ${outputPath}. You will be notified when it completes. To check interim output, use Read on that file path.`,
+        is_error: false
+      }
+    ]
+  },
+  parent_tool_use_id: null
+})
+
 const handles: Array<ReturnType<typeof makeControlledHandle>> = []
 const liveSessions: ClaudeSession[] = []
 
@@ -318,6 +371,68 @@ describe('ClaudeSession — the task_updated flip', () => {
       runIndex: 2,
       isBackgrounded: true
     })
+  })
+})
+
+describe('ClaudeSession — the tool_result of a backgrounded Bash', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeui-bg-result-'))
+  })
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  const backgroundOutputs = (sent: Array<[string, string, unknown]>): unknown[] =>
+    sent.filter(([c]) => c === 'session:background-output').map(([, , d]) => d)
+
+  it.each([
+    [
+      'after "Send to background"',
+      'routing-bg-tail-manual',
+      [
+        taskStarted(BASH, BASH_TASK, 'local_bash', false),
+        taskUpdated(BASH_TASK, { is_backgrounded: true })
+      ],
+      manualBackgroundResult
+    ],
+    [
+      'started with run_in_background',
+      'routing-bg-tail-rib',
+      [taskStarted(BASH, BASH_TASK, 'local_bash', true)],
+      runInBackgroundResult
+    ]
+  ])(
+    'tails the output file the tool_result names, %s',
+    async (_, routingId, before, toolResult) => {
+      const outputPath = path.join(dir, `${BASH_TASK}.output`)
+      fs.writeFileSync(outputPath, 'tick 1\ntick 2\n')
+      const { session, sent, handle } = await startSession(routingId)
+      await feed(handle, ...before)
+      // The card starts watching as soon as it reads as a background command,
+      // before the tool_result has named the file.
+      session.watchBackground(BASH)
+      expect(backgroundOutputs(sent)).toEqual([])
+
+      await feed(handle, toolResult(outputPath))
+      expect(backgroundOutputs(sent)).toEqual([
+        { toolUseId: BASH, tail: 'tick 1\ntick 2\n', totalSize: 14, done: false }
+      ])
+    }
+  )
+
+  it('maps the task to the call when task_started never arrived', async () => {
+    const { sent, handle } = await startSession('routing-bg-manual-map')
+    await feed(handle, manualBackgroundResult(path.join(dir, `${BASH_TASK}.output`)), {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: BASH_TASK,
+      status: 'completed',
+      output_file: '',
+      summary: ''
+    })
+    const notified = sent.filter(([c]) => c === 'session:task-notification').map(([, , d]) => d)
+    expect(notified).toEqual([expect.objectContaining({ taskId: BASH_TASK, toolUseId: BASH })])
   })
 })
 
