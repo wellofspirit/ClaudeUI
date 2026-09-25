@@ -53,6 +53,10 @@ import {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
 import { locateBunClaude } from '../sdk'
+// Straight from the module, not the '../sdk' barrel: several suites replace the
+// barrel with a factory that lists only `query`, and `capabilities` is read on
+// every status emission.
+import { harnessHasPatch } from '../sdk/harness'
 
 export { getCliVersion } from '../sdk'
 
@@ -190,9 +194,12 @@ export class ClaudeSession extends BaseSession {
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
     // but the HONEST per-session value also requires the opencode binary to
     // actually be vendored — otherwise there is no possible dispatch target.
+    // Voice likewise: the voice server is our cli.js patch, so an unpatched
+    // Claude Code binary (CLAUDEUI_CLAUDE_CLI) has nothing to talk to.
     return {
       ...base,
-      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude')
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude'),
+      voice: base.voice && harnessHasPatch('voice-server')
     }
   }
 

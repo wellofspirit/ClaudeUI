@@ -1273,6 +1273,68 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['voice:stop-recording'][0][0]).toBe(FC_ROUTE)
   })
 
+  // Voice needs the user's setting AND the session's capability. The capability
+  // is false on engines without voice and on a Claude Code binary that lacks the
+  // voice-server patch (ClaudeSession.capabilities), and every way into a
+  // capture must honour it, not just the button.
+  describe('voice gate', () => {
+    function setVoice(setting: boolean, capability: boolean): void {
+      useSessionStore.setState((state) => ({
+        settings: { ...state.settings, voiceEnabled: setting },
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            // Live session: the Tab path must not have to spawn one first.
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              capabilities: { ...state.sessions[FC_ROUTE].status.capabilities, voice: capability }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+
+    function pressTab(): void {
+      viewProps.onKeyDown({
+        key: 'Tab',
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn()
+      } as unknown as Parameters<InputBoxViewProps['onKeyDown']>[0])
+    }
+
+    it.each([
+      [true, true, true],
+      [true, false, false],
+      [false, true, false]
+    ])('setting=%s capability=%s → mic shown=%s', (setting, capability, shown) => {
+      setVoice(setting, capability)
+      renderFC()
+      expect(viewProps.voiceEnabled).toBe(shown)
+    })
+
+    it('Tab starts a capture when the session can take voice', async () => {
+      setVoice(true, true)
+      renderFC()
+      await act(async () => pressTab())
+      await vi.waitFor(() => expect(ipcCalls['voice:start-recording']).toHaveLength(1))
+    })
+
+    it('Tab starts nothing on a session that cannot, even with the setting on', async () => {
+      setVoice(true, false)
+      renderFC()
+      await act(async () => pressTab())
+      // Let any fire-and-forget start settle before asserting its absence.
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)))
+      expect(ipcCalls['voice:start-recording']).toBeUndefined()
+    })
+  })
+
   it('onSend does nothing when text is empty (noop)', async () => {
     // draftText defaults to '' for a fresh session
     renderFC()

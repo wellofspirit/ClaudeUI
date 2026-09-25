@@ -24,6 +24,7 @@ import {
   loadBackgroundOutput
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { voiceRefusal } from '../services/voice-gate'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import {
   loadSettings,
@@ -707,7 +708,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
-  // Voice input handlers (Claude-only: capabilities.voice)
+  // Voice input handlers (Claude-only, and only on a binary carrying the
+  // voice-server patch: capabilities.voice)
   handleIpc({
     channel: 'voice:start-server',
     capability: 'host',
@@ -716,7 +718,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      const refusal = voiceRefusal(session)
+      if (refusal) throw new Error(refusal)
       await session.voiceStartServer?.()
     })
   })
@@ -742,7 +745,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      const refusal = voiceRefusal(session)
+      if (refusal) throw new Error(refusal)
       await session.voiceStartRecording?.(language)
     })
   })

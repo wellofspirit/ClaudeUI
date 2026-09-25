@@ -774,6 +774,28 @@ describe('session.ipc', () => {
       expect(res.ok).toBe(false)
       expect(res.error).toBe('No active session')
     })
+
+    it('refuses both start verbs on a Claude binary without the voice-server patch', async () => {
+      // ClaudeSession.capabilities.voice is false exactly then.
+      const caps = sessionStub.capabilities
+      sessionStub.capabilities = { ...caps, voice: false }
+      sessionStub.voiceStartServer.mockClear()
+      sessionStub.voiceStartRecording.mockClear()
+      try {
+        for (const [channel, ...args] of [
+          ['voice:start-server', 'rid-1'],
+          ['voice:start-recording', 'rid-1', 'en']
+        ]) {
+          const res = await harness.call<any>(channel, ...args)
+          expect(res.ok, channel).toBe(false)
+          expect(res.error, channel).toMatch(/voice-server patch/)
+        }
+        expect(sessionStub.voiceStartServer).not.toHaveBeenCalled()
+        expect(sessionStub.voiceStartRecording).not.toHaveBeenCalled()
+      } finally {
+        sessionStub.capabilities = caps
+      }
+    })
   })
 
   // -------------------------------------------------------------------------

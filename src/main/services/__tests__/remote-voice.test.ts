@@ -134,13 +134,14 @@ function makeConnection(connectionId: string): CommandConnection {
 
 function makeManager(
   port: number,
-  opts: { voice?: boolean; missingSession?: boolean } = {}
+  opts: { voice?: boolean; missingSession?: boolean; engineId?: string } = {}
 ): SessionManager {
   return {
     get: (routingId: string) => {
       if (opts.missingSession) return undefined
       return {
         routingId,
+        engineId: opts.engineId,
         capabilities: { voice: opts.voice ?? true },
         voiceStartServer: async () => ({ port })
       }
@@ -389,6 +390,22 @@ describe('remote voice capture', () => {
       remoteVoice.start(makeManager(voiceServer.port), makeConnection(CONNECTION_ID), '', 'en')
     ).rejects.toThrow(/requires a session id/)
 
+    expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(false)
+  })
+
+  it('tells a Claude session on an unpatched binary why, and opens no voice socket', async () => {
+    // ClaudeSession.capabilities.voice is false exactly when the spawned Claude
+    // Code binary lacks the voice-server patch; "provider does not support
+    // voice" would send the user looking at the wrong thing.
+    await expect(
+      remoteVoice.start(
+        makeManager(voiceServer.port, { voice: false, engineId: 'claude' }),
+        makeConnection(CONNECTION_ID),
+        ROUTING_ID,
+        'en'
+      )
+    ).rejects.toThrow(/voice-server patch/)
+    expect(voiceServer.connections).toBe(0)
     expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(false)
   })
 
