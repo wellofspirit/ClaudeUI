@@ -18,7 +18,6 @@ const tests = [
   { name: 'subagent-streaming', script: resolve(__dirname, 'subagent-streaming/test.mjs') },
   { name: 'queue-control', script: resolve(__dirname, 'queue-control/test.mjs') },
   { name: 'mcp-status', script: resolve(__dirname, 'mcp-status/test.mjs') },
-  { name: 'rate-limit-relay', script: resolve(__dirname, 'rate-limit-relay/test.mjs') },
   { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') },
   { name: 'subprocess-proxy-strip', script: resolve(__dirname, 'subprocess-proxy-strip/test.mjs') },
   { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') }

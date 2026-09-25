@@ -1693,11 +1693,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   private handleRateLimitEvent(msg: RateLimitEventMessage): void {
     // Real-time rate limit data from inference response headers — no extra
-    // API call needed. The rate-limit-relay patch injects these after every
-    // streaming API call.
-    if (msg.header_utilization) {
-      usageFetcher.updateFromHeaderUtilization(msg.header_utilization)
-    }
+    // API call needed. cli.js sends one whenever a window's rounded percentage
+    // or reset time moves (docs/protocol-cc/03-inbound-messages.md §3.11).
+    const windows = msg.rate_limit_info?.unifiedWindows
+    if (windows) usageFetcher.updateFromRateLimitWindows(windows)
   }
 
   private handleBashOutput(msg: BashOutputMessage): void {

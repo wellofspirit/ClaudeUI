@@ -12,7 +12,7 @@ cli.js has **three** paths that reach stdout:
 
 1. **Main generator pipeline** (`Ts1` → `M.write(line)`) at char `~12822400`. Everything yielded by the turn generator passes through here.
 2. **Control channel** (`h.enqueue`) at char `~12843100+`. Control responses/cancels plus some out-of-band system events (auth_status, rate_limit_event native, permission-mode status, prompt_suggestion, transcript_mirror).
-3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`rate-limit-relay`, `bash-output-streaming`, subagent-streaming E/G, team-streaming B).
+3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`bash-output-streaming`, subagent-streaming E/G, team-streaming B).
 
 A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task_started`, `task_updated`, `task_progress`, `notification`) through `JtH`, flushed by `ZtH()` at char `~12838006` / `~12840696` (which injects `uuid` + `session_id` at flush time).
 
@@ -29,7 +29,7 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 | `result`                 | Generator                                       | Always (once per turn)                                                            | §3.7                                       |
 | `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8                                       |
 | `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                  | §3.9                                       |
-| `rate_limit_event`       | Patch `rate-limit-relay` or native G_H listener | Patched path: always; native: rare                                                | §3.11                                      |
+| `rate_limit_event`       | Native, print loop (builder `bKe`, at 22241254) | OAuth sessions; when a window's rounded percentage or reset time moves            | §3.11                                      |
 | `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                    | §3.12                                      |
 | `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
 | `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                           | §3.14                                      |
@@ -446,49 +446,56 @@ Emitted only by the deleted `request-usage` patch; no build since 2.1.280 writes
 
 ## 3.11 `rate_limit_event`
 
-Two shape variants.
+Subscription rate-limit state, parsed from the `anthropic-ratelimit-unified-*` headers of the
+inference responses. Native; the `rate-limit-relay` patch that used to add a
+`header_utilization` field was deleted at 2.1.280.
 
-### Patched variant (`patch/rate-limit-relay`) — primary path in ClaudeUI
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** `rate_limit_info` schema `nSr` @2128537; the
+builder `bKe` (@22241254) fills `unifiedWindows` from the account state via `Xr`, and the print
+loop enqueues the event (`let I=bKe(h);if(!I)return;if(Ee.enqueue(I),…` @22708343).
 
-**Anchor:** `11176048`.
-
-**Gate:** Patch applied. Always fires after streaming API calls.
-
-```jsonc
-{
-  "type": "rate_limit_event",
-  "header_utilization": {
-    "five_hour": { "utilization": 0.35, "resets_at": 1711500000 },
-    "seven_day": { "utilization": 0.12, "resets_at": 1712100000 }
-  }
-}
-```
-
-- `utilization` is **fractional (0.0–1.0)**, NOT percent.
-- `resets_at` is epoch seconds.
-- Omits `uuid`/`session_id`.
-
-### Native variant (G_H listener)
-
-**Anchor:** `12825090`.
-
-**Gate:** OAuth user + unified rate-limit change. Rarely fires (dedup-gated).
+**Gate:** OAuth subscription sessions. `unifiedWindows` is absent until the first response
+carrying the headers, and always absent for API-key, Bedrock and Vertex sessions.
 
 ```jsonc
+// probes/rate-limit-relay/official.three-turn.jsonl:7 (official 2.1.280, Haiku 4.5)
 {
   "type": "rate_limit_event",
   "rate_limit_info": {
-    "status": "allowed"|"throttled"|...,
-    "resetsAt": 1711500000,
-    "rateLimitType": "...",
-    ...
+    "status": "allowed", // "allowed" | "allowed_warning" | "rejected" — the LIMITING window
+    "resetsAt": 1790209200, // epoch seconds, limiting window
+    "rateLimitType": "five_hour", // which window is limiting
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled_until",
+    "isUsingOverage": false,
+    "unifiedWindows": {
+      "five_hour": { "utilization": 0.77, "resetsAt": 1790209200 },
+      "seven_day": { "utilization": 0.29, "resetsAt": 1790398800 }
+      // "seven_day_overage_included": {…} — per-model weekly bucket, only for accounts that have one
+    }
   },
   "uuid": "...",
   "session_id": "..."
 }
 ```
 
-**Handle both.** Consumer must check which shape is present.
+- `unifiedWindows.<window>.utilization` is a **fraction**, usually 0–1. The schema says values
+  above 1 occur "when usage legitimately runs past a window's cap". `resetsAt` is epoch seconds.
+  cli.js drops a window whose `resetsAt` has already passed (`va` @13719730).
+- The top-level `status` / `resetsAt` / `rateLimitType` / `utilization` describe only the
+  currently limiting window. `utilization` there is present only in some states.
+  `unifiedWindows` tracks every window on every observation.
+
+**When it fires.** The schema describes it as: "events are emitted when a window's rounded
+percentage or reset time moves, not only on status transitions". Observed on the official binary
+(`probes/rate-limit-relay/probe-change.out.txt`): four turns 45 s apart, five-hour utilization
+0.78 → 0.79 → 0.79 → 0.80, produced three events. The turn that left every window at the same
+rounded percentage produced none. So expect at most one event per turn, and none for most turns
+of a long session.
+
+**Consumer:** `ClaudeSession.handleRateLimitEvent` → `usageFetcher.updateFromRateLimitWindows`
+(`five_hour` → `fiveHour`, `seven_day` → `sevenDay`, fraction × 100, epoch → ISO). The other
+windows keep their values from the last `/api/oauth/usage` read.
 
 ---
 
@@ -638,7 +645,7 @@ Typical sequence within one user turn:
 6.  assistant                           (partial, refined)
 7.  stream_event message_delta (usage)        [gate: includePartialMessages]
 8.  stream_event message_stop                 [gate: includePartialMessages]
-9.  rate_limit_event                    [PATCHED]
+9.  rate_limit_event                    [only when a window moved]
 10. user (synthetic tool_result)        (per tool_use in assistant)
 11. tool_progress (possibly many)       [gated]
 12. bash_output (possibly many)         [PATCHED]
@@ -660,7 +667,6 @@ Control-channel messages (`control_request`/`control_response`/`control_cancel_r
 
 Messages that exist ONLY because of ClaudeUI patches:
 
-- `rate_limit_event` (header_utilization variant) — `patch/rate-limit-relay`
 - `bash_output` — `patch/bash-output-streaming`
 - `system/queued_command_consumed` — `patch/queue-control`
 - Subagent `stream_event` with `parent_tool_use_id` — `patch/subagent-streaming` (filter 0 unblock)

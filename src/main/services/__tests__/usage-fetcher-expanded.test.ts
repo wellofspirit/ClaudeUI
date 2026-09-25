@@ -17,7 +17,7 @@
  *   1. 429 behavior     — current code has NO retry (pins as regression)
  *   2. Disk cache       — stale fallback + TTL contract
  *   3. Scale conversion — 0-1 header fraction vs 0-100 API percent
- *   4. Merge semantics  — header + rate-limit events compose into one AccountUsage
+ *   4. Merge semantics  — rate_limit_event windows compose into one AccountUsage
  *   5. Cache TTL        — startPolling() skips network when cache is fresh
  */
 
@@ -340,30 +340,46 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('updateFromRateLimitEvent converts 0-1 fraction to 0-100 percent', () => {
-    // Header path: fraction in → percent out (value * 100)
-    fetcher.updateFromRateLimitEvent({
-      utilization: 0.5,
-      rateLimitType: 'five_hour',
-      resetsAt: 1737000000
-    })
+  it('updateFromRateLimitWindows reads the native rate_limit_event frame', () => {
+    // Verbatim from the official 2.1.280 binary (probes/rate-limit-relay/
+    // official.three-turn.jsonl:7). Fraction in, percent out; epoch seconds in,
+    // ISO string out.
+    const frame = {
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'allowed',
+        resetsAt: 1790209200,
+        rateLimitType: 'five_hour',
+        overageStatus: 'rejected',
+        overageDisabledReason: 'org_level_disabled_until',
+        isUsingOverage: false,
+        unifiedWindows: {
+          five_hour: { utilization: 0.77, resetsAt: 1790209200 },
+          seven_day: { utilization: 0.29, resetsAt: 1790398800 }
+        }
+      },
+      uuid: '589ef592-9a89-465a-9264-d244c510e990',
+      session_id: '4352acdd-b0f1-414b-943a-12025adc465b'
+    }
+
+    fetcher.updateFromRateLimitWindows(frame.rate_limit_info.unifiedWindows)
 
     const usage = fetcher.getLastUsage()
     expect(usage).not.toBeNull()
-    expect(usage!.fiveHour!.usedPercent).toBe(50)
-    expect(usage!.fiveHour!.resetsAt).toBe(new Date(1737000000 * 1000).toISOString())
+    expect(usage!.fiveHour).toEqual({
+      usedPercent: 77,
+      resetsAt: new Date(1790209200 * 1000).toISOString()
+    })
+    expect(usage!.sevenDay?.usedPercent).toBeCloseTo(29)
+    expect(usage!.sevenDay?.resetsAt).toBe(new Date(1790398800 * 1000).toISOString())
   })
 
-  it('updateFromHeaderUtilization converts 0-1 fraction to 0-100 percent', () => {
-    fetcher.updateFromHeaderUtilization({
-      five_hour: { utilization: 0.5, resets_at: 1737000000 },
-      seven_day: { utilization: 0.25, resets_at: 1737600000 }
+  it('updateFromRateLimitWindows ignores a window AccountUsage has no field for', () => {
+    fetcher.updateFromRateLimitWindows({
+      seven_day_overage_included: { utilization: 0.5, resetsAt: 1790398800 }
     })
-
-    const usage = fetcher.getLastUsage()
-    expect(usage).not.toBeNull()
-    expect(usage!.fiveHour!.usedPercent).toBe(50)
-    expect(usage!.sevenDay?.usedPercent).toBe(25)
+    // Nothing it knows about moved, so there is nothing to publish.
+    expect(fetcher.getLastUsage()).toBeNull()
   })
 
   it('API response path keeps 0-100 percent verbatim (no multiplication)', async () => {
@@ -500,19 +516,15 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     fetcher = new UsageFetcher()
   })
 
-  it('header utilization + rate_limit_event merge into one AccountUsage by window', () => {
-    // Seed with a header-sourced five_hour window
-    fetcher.updateFromHeaderUtilization({
-      five_hour: { utilization: 0.4, resets_at: 1737000000 }
+  it('an event carrying one window leaves the other one as it was', () => {
+    fetcher.updateFromRateLimitWindows({
+      five_hour: { utilization: 0.4, resetsAt: 1737000000 }
     })
     expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(40)
     expect(fetcher.getLastUsage()!.sevenDay).toBeNull()
 
-    // Layer a seven_day update from a rate_limit_event — five_hour must survive
-    fetcher.updateFromRateLimitEvent({
-      utilization: 0.3,
-      rateLimitType: 'seven_day',
-      resetsAt: 1737600000
+    fetcher.updateFromRateLimitWindows({
+      seven_day: { utilization: 0.3, resetsAt: 1737600000 }
     })
 
     const usage = fetcher.getLastUsage()!
@@ -521,18 +533,14 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
   })
 
   it('later write to the same window overwrites the earlier one', () => {
-    fetcher.updateFromRateLimitEvent({
-      utilization: 0.2,
-      rateLimitType: 'five_hour',
-      resetsAt: 1737000000
+    fetcher.updateFromRateLimitWindows({
+      five_hour: { utilization: 0.2, resetsAt: 1737000000 }
     })
     expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(20)
 
     // Second event for the same window — newer value wins
-    fetcher.updateFromRateLimitEvent({
-      utilization: 0.9,
-      rateLimitType: 'five_hour',
-      resetsAt: 1737001000
+    fetcher.updateFromRateLimitWindows({
+      five_hour: { utilization: 0.9, resetsAt: 1737001000 }
     })
     expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(90)
     expect(fetcher.getLastUsage()!.fiveHour!.resetsAt).toBe(
@@ -541,18 +549,14 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
   })
 
   it('clears prior error field when a successful update arrives', () => {
-    // Seed an error state by driving a fake prior fetch result through the
-    // public merge surface: set lastUsage indirectly via a rate_limit_event,
-    // then corrupt the error via another event and verify it stays cleared.
-    fetcher.updateFromRateLimitEvent({
-      utilization: 0.1,
-      rateLimitType: 'five_hour'
+    fetcher.updateFromRateLimitWindows({
+      five_hour: { utilization: 0.1, resetsAt: 1737000000 }
     })
     const first = fetcher.getLastUsage()!
     expect(first.error).toBeNull()
 
-    fetcher.updateFromHeaderUtilization({
-      seven_day: { utilization: 0.2, resets_at: 1737600000 }
+    fetcher.updateFromRateLimitWindows({
+      seven_day: { utilization: 0.2, resetsAt: 1737600000 }
     })
     const second = fetcher.getLastUsage()!
     expect(second.error).toBeNull()

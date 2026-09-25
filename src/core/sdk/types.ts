@@ -205,9 +205,33 @@ export interface ToolProgressMessage extends BaseSDKMessage {
   elapsed_time_seconds?: number
 }
 
+/**
+ * One subscription rate-limit window as `rate_limit_event` reports it:
+ * `utilization` is a FRACTION (usually 0–1; above 1 when usage runs past the
+ * cap), `resetsAt` is unix epoch seconds.
+ */
+export interface RateLimitWindowInfo {
+  utilization: number
+  resetsAt: number
+}
+
+/** Native `rate_limit_event` (docs/protocol-cc/03-inbound-messages.md §3.11). */
 export interface RateLimitEventMessage extends BaseSDKMessage {
   type: 'rate_limit_event'
-  header_utilization?: Record<string, { utilization: number; resets_at: number }>
+  rate_limit_info?: {
+    /** The currently limiting window's state: `allowed` | `allowed_warning` | `rejected`. */
+    status?: string
+    resetsAt?: number
+    rateLimitType?: string
+    utilization?: number
+    /**
+     * Every window the account has, keyed `five_hour` / `seven_day` /
+     * `seven_day_overage_included`, whichever is limiting. Absent for API-key,
+     * Bedrock and Vertex sessions.
+     */
+    unifiedWindows?: Record<string, RateLimitWindowInfo>
+    [k: string]: unknown
+  }
 }
 
 export interface BashOutputMessage extends BaseSDKMessage {

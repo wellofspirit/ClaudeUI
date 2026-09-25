@@ -1,10 +1,11 @@
 /**
  * Fetches Claude account usage (5hr session / 7-day rate windows).
  *
- * Primary path (real-time): The SDK emits `rate_limit_event` messages after
- * every inference call, containing utilization and reset data parsed from
- * `anthropic-ratelimit-unified-*` response headers.  ClaudeSession forwards
- * these via `updateFromRateLimitEvent()` — zero extra API calls.
+ * Primary path (real-time): cli.js emits a `rate_limit_event` whenever a
+ * subscription window's rounded percentage or reset time moves, carrying every
+ * window's utilization and reset parsed from the `anthropic-ratelimit-unified-*`
+ * response headers (`rate_limit_info.unifiedWindows`). ClaudeSession forwards
+ * them via `updateFromRateLimitWindows()` — zero extra API calls.
  *
  * Secondary path (background poll every 30 min): Direct HTTP call to
  * GET /api/oauth/usage for supplementary data not in the headers
@@ -24,6 +25,7 @@ import { homedir, platform } from 'node:os'
 import { getCliVersion } from './claude-session'
 import { emitEvent } from './sync-host'
 import type { AccountUsage, BillingType, RateWindow } from '../../shared/types'
+import type { RateLimitWindowInfo } from '../sdk/types'
 import { logger } from './logger'
 import { getAccount, updateAccountIdentity } from './db'
 import {
@@ -1276,61 +1278,17 @@ export class UsageFetcher {
   // -------------------------------------------------------------------------
 
   /**
-   * Merge rate limit data from an SDK `rate_limit_event` into lastUsage.
-   * Called by ClaudeSession when it receives a rate_limit_event message.
+   * Merge a `rate_limit_event`'s `rate_limit_info.unifiedWindows` into
+   * lastUsage. cli.js tracks every window on every response, unlike the
+   * top-level `utilization`, which describes only the currently limiting one.
    *
-   * `resetsAt` is epoch seconds — convert to ISO string for consistency
-   * with the `/api/oauth/usage` API response format.
+   * Only `five_hour` and `seven_day` have an AccountUsage field;
+   * `seven_day_overage_included` (a per-model weekly bucket) does not and is
+   * ignored. Every other window keeps its value from the last full read.
+   * `utilization` is a fraction and `resetsAt` epoch seconds, converted to the
+   * `/api/oauth/usage` scale (percent) and format (ISO string).
    */
-  updateFromRateLimitEvent(info: Record<string, unknown>): void {
-    const utilization = info.utilization as number | undefined
-    const rateLimitType = info.rateLimitType as string | undefined
-    const resetsAt = info.resetsAt as number | undefined
-
-    // Skip events without utilization data (e.g. status-only events)
-    if (typeof utilization !== 'number') return
-
-    const window: RateWindow = {
-      usedPercent: toUsedPercent(utilization, 'fraction'),
-      resetsAt: typeof resetsAt === 'number' ? new Date(resetsAt * 1000).toISOString() : null
-    }
-
-    // Map rateLimitType to the AccountUsage field
-    const fieldMap: Record<string, keyof AccountUsage> = {
-      five_hour: 'fiveHour',
-      seven_day: 'sevenDay',
-      seven_day_sonnet: 'sevenDaySonnet',
-      seven_day_opus: 'sevenDayOpus'
-    }
-
-    const field = rateLimitType ? fieldMap[rateLimitType] : undefined
-    if (!field) return
-
-    // Build updated usage, preserving other windows from the last full API response
-    const base = this.lastUsage ?? this.defaultUsage()
-    this.lastUsage = {
-      ...base,
-      [field]: window,
-      fetchedAt: Date.now(),
-      error: null
-    }
-
-    this.publish(this.lastUsage)
-    this.scheduleCacheWrite()
-    this.scheduleExpiryFetch()
-  }
-
-  /**
-   * Update from the enriched header_utilization field (from our rate-limit-relay
-   * patch). This carries per-window utilization from the parsed response headers
-   * (hD4/pf8) — always present, unlike rate_limit_info.utilization which is
-   * only set when status is "allowed_warning".
-   *
-   * Shape: { five_hour?: { utilization: number, resets_at: number }, seven_day?: { ... } }
-   */
-  updateFromHeaderUtilization(
-    headerUtil: Record<string, { utilization: number; resets_at: number }>
-  ): void {
+  updateFromRateLimitWindows(windows: Record<string, RateLimitWindowInfo>): void {
     const base = this.lastUsage ?? this.defaultUsage()
     let updated = false
 
@@ -1340,13 +1298,13 @@ export class UsageFetcher {
     }
 
     for (const [key, field] of Object.entries(windowMap)) {
-      const data = headerUtil[key]
+      const data = windows[key]
       if (!data || typeof data.utilization !== 'number') continue
 
       const window: RateWindow = {
         usedPercent: toUsedPercent(data.utilization, 'fraction'),
         resetsAt:
-          typeof data.resets_at === 'number' ? new Date(data.resets_at * 1000).toISOString() : null
+          typeof data.resetsAt === 'number' ? new Date(data.resetsAt * 1000).toISOString() : null
       }
 
       ;(base as unknown as Record<string, unknown>)[field] = window

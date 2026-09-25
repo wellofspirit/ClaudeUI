@@ -48,7 +48,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
         '/*PATCHED:mcp-status-await-refresh*/',
-        '/*PATCHED:rate-limit-relay*/',
         '/*PATCHED:voice-server*/',
         '/*PATCHED:bash-output-streaming*/',
         '/*PATCHED:bash-early-poll*/'
@@ -100,18 +99,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
       })
     }
-  })
-
-  // ---------------------------------------------------------------------------
-  // rate-limit-relay — single marker
-  // ---------------------------------------------------------------------------
-  describe('rate-limit-relay', () => {
-    it('marker rate-limit-relay present in cli.js', () => {
-      expect(hasMarker(src, 'rate-limit-relay')).toBe(true)
-    })
-    it('marker rate-limit-relay appears exactly once', () => {
-      expect(countOccurrences(src, '/*PATCHED:rate-limit-relay*/')).toBe(1)
-    })
   })
 
   // ---------------------------------------------------------------------------
