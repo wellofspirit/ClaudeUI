@@ -94,7 +94,8 @@ scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure
                          build-server.mjs for the two server artifacts,
                          verify-bun-sqlite.ts for driver conformance,
                          app-shot.mjs for real-app verification)
-patch/                 — cli.js content-regex patches (registry: apply-all.mjs)
+patch/                 — cli.js content-regex patches (registry: lib/patch-registry.mjs,
+                         run by apply-all.mjs)
 ```
 
 ## Host seams
