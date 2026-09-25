@@ -79,6 +79,18 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Effect:** Emits `stream_event` deltas (per-token streaming) alongside `assistant` messages. Env fallback: `CLAUDE_CODE_INCLUDE_PARTIAL_MESSAGES`. Requires `--print` + `--output-format=stream-json`.
 - **Anchors:** parseOpt `12946280`, env `12955783`, validation `12964165`.
 
+### `--forward-subagent-text`
+
+- **Type:** boolean
+- **Default:** false. Env fallback: `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`.
+- **ClaudeUI:** always passed (`buildArgs` in `src/core/sdk/args.ts`), so foreground subagent text and thinking reach the app on any Claude Code binary.
+- **Precondition:** a non-interactive session with `--output-format=stream-json`. Otherwise an explicit flag fails with `Error: --forward-subagent-text requires --print and --output-format=stream-json.` and the env var is dropped silently. "Non-interactive" is wider than `--print`: the pre-parse treats `-p`, `--print`, `--init-only`, `--sdk-url`, or a stdout that is not a TTY as non-interactive (2.1.280: `return e||n||o||!process.stdout.isTTY`, §2.11). ClaudeUI pipes stdout, which is also why its `--input-format=stream-json` (same check, "requires --print") has always been accepted.
+- **Effect (2.1.280 source):**
+  1. Foreground Agent: the progress callback forwards every content block of the subagent's messages. Without the flag it skips all but tool_use/tool_result (`if(!Kt&&J.type!=="tool_use"&&J.type!=="tool_result")continue;`). The blocks arrive as complete `assistant`/`user` messages with `parent_tool_use_id` set to the Agent call's id, with no `stream_event` deltas (those still need patch/subagent-streaming).
+  2. The same callback forwards nested progress (`agent_progress`/`skill_progress` from the subagent's own Agent or Skill calls) instead of dropping it. Forked skills (`context: fork`) get the same two changes in their own loop, and background subagents write nested progress to their relay (their own messages are relayed without the flag).
+  3. Without the flag, a non-interactive session forces subagent thinking to `display:"omitted"` unless `--thinking-display` was explicit. ClaudeUI always passes `--thinking-display summarized`, so this changes nothing for us.
+- **On the patched binary:** subagent-streaming Patch A deletes the `continue` in (1), so the flag adds nothing there and nothing arrives twice; only the nested and forked-skill messages of (2) are new. Live check 2026-09-25 (2.1.280, Haiku 4.5, one foreground Agent turn whose subagent runs one Bash call): official with the flag, 4 subagent `assistant` frames (2 thinking, 1 text, 1 tool_use) and 0 subagent `stream_event`s; patched without it, 5 frames (the model wrote one more text block) and 112 `stream_event`s; patched with it, 4 frames and 101 `stream_event`s. In both patched runs each subagent API message produced as many forwarded blocks as streamed `content_block_start`s, with no repeated uuid or content.
+
 ### `--session-mirror` (hidden)
 
 - **Type:** boolean
@@ -719,6 +731,7 @@ Early-exits from the action handler (char `12963500+`):
 | `Error: --sdk-url requires both --input-format=stream-json and --output-format=stream-json`                    | sdk-url w/ text                           |
 | `Error: --replay-user-messages requires both --input-format=stream-json and --output-format=stream-json`       | bad combo                                 |
 | `Error: --include-partial-messages requires --print and --output-format=stream-json`                           | bad combo                                 |
+| `Error: --forward-subagent-text requires --print and --output-format=stream-json.`                             | bad combo                                 |
 | `Error: --no-session-persistence can only be used with --print mode`                                           | missing `--print`                         |
 | `Error: --session-id can only be used with --continue or --resume if --fork-session is also specified.`        | fork missing                              |
 | `Error: Invalid session ID. Must be a valid UUID.`                                                             | UUID parse fail                           |
@@ -823,7 +836,7 @@ Early-exits from the action handler (char `12963500+`):
 
 ## 2.14b Flags added between 2.1.115 and 2.1.261 (from `--help` diff)
 
-Compact catalog — none are wired into ClaudeUI yet. Descriptions from 2.1.261
+Compact catalog — only `--forward-subagent-text` is wired into ClaudeUI (§2.1). Descriptions from 2.1.261
 `--help`; none of the hidden flags the harness relies on (`--thinking`,
 `--max-thinking-tokens`, `--max-turns`, `--effort`, `--sdk-url`, `--agent-id`,
 `--parent-session-id`, `--session-id`, `--fork-session`) were removed.
@@ -835,7 +848,7 @@ subcommand options and tool-description text, not CLI flags.)
 
 | Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires `--print` + `--output-format=stream-json`. Overlaps patch/subagent-streaming's message visibility (NOT its stream_event deltas — the patch stays load-bearing for those). |
+| `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires a non-interactive session + `--output-format=stream-json`. ClaudeUI always passes it (see §2.1); patch/subagent-streaming still supplies the `stream_event` token deltas. |
 | `--prompt-suggestions [bool]`                 | optional bool      | In print/SDK mode emits a `prompt_suggestion` message after each turn with a predicted next user prompt (new outbound message type).                                                                                                                                                 |
 | `--permission-prompts <target>`               | `host` \| `none`   | Who answers permission prompts under `--print`: the SDK host / `--permission-prompt-tool`, or nobody.                                                                                                                                                                                |
 | `--autocompact <auto\|tokens>`                | `auto` or 100k–1M  | Auto-compact window size override.                                                                                                                                                                                                                                                   |

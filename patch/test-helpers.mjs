@@ -98,6 +98,9 @@ function buildArgs(options) {
       typeof options.settings === 'string' ? options.settings : JSON.stringify(options.settings)
     )
   }
+  // Verbatim argv tail for flags this builder does not model, e.g.
+  // `extraArgs: ['--forward-subagent-text']` (which the app always passes).
+  if (Array.isArray(options.extraArgs)) args.push(...options.extraArgs)
   return args
 }
 

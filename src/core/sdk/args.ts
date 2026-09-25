@@ -174,6 +174,16 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.includeHookEvents) args.push('--include-hook-events')
   if (options.includePartialMessages) args.push('--include-partial-messages')
   if (options.sessionMirror) args.push('--session-mirror')
+  // Always on, so a foreground subagent's text and thinking reach us on ANY
+  // Claude Code binary: without it an unpatched binary forwards only the
+  // subagent's tool_use/tool_result blocks. Upstream's precondition is a
+  // non-interactive session (stdout not a TTY — ours is a pipe) plus
+  // `--output-format stream-json`, the same one `--input-format stream-json`
+  // above already needs. On our patched binary, subagent-streaming Patch A
+  // removed the very `continue` this flag skips, so nothing arrives twice; the
+  // flag only adds what no patch forwards (a nested subagent's and a forked
+  // skill's messages). docs/protocol-cc/02-cli-flags.md §2.1.
+  args.push('--forward-subagent-text')
 
   // --- Additional dirs & plugins ------------------------------------------
   for (const dir of options.additionalDirectories ?? []) args.push('--add-dir', dir)
