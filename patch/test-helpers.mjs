@@ -34,7 +34,9 @@ export const PROJECT_ROOT = resolve(__dirname, '..')
  * are tested in the exact form they ship.
  */
 const BIN_NAME = process.platform === 'win32' ? 'bun-claude.exe' : 'bun-claude'
-export const BUN_CLAUDE_PATH = resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
+export const BUN_CLAUDE_PATH = process.env.CLAUDEUI_TEST_BIN
+  ? resolve(process.env.CLAUDEUI_TEST_BIN)
+  : resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
 
 /** @deprecated Kept for legacy imports — prefer BUN_CLAUDE_PATH. */
 export const CLI_JS_PATH = BUN_CLAUDE_PATH
@@ -119,7 +121,10 @@ function spawnQuery({ prompt, options, ac }) {
 
   const child = spawn(BUN_CLAUDE_PATH, buildArgs(options), {
     cwd: options.cwd ?? PROJECT_ROOT,
-    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: {
+      ...process.env,
+      CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDEUI_TEST_ENTRYPOINT || 'sdk-ts'
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -373,7 +378,7 @@ const DEFAULT_OPTIONS = {
   settingSources: [],
   thinking: { type: 'enabled', budgetTokens: 10_000 },
   effort: 'low',
-  model: 'claude-sonnet-4-6'
+  model: process.env.CLAUDEUI_TEST_MODEL || 'claude-sonnet-4-6'
 }
 
 /**
