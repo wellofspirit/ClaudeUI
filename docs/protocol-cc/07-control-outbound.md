@@ -651,23 +651,33 @@ Convert a running foreground task to background. Added by `patch/background-task
 
 ---
 
-### `get_usage` (native as of v2.1.177; previously patched)
+### `get_usage` (native as of v2.1.177)
 
-Expose cli.js's `/usage` data. Originally added by `patch/usage-relay/` (a
+Expose cli.js's `/usage` data. Originally added by the `usage-relay` patch (a
 patch-injected `else if` branch returning the raw `/api/oauth/usage` body).
 
 **As of cli.js v2.1.177 this is a _native_ control** with its own Zod schema
 (subtype `get_usage`, described "Requests the structured /usage data… the
-response shape may change"). The native handler runs ahead of the patch's
-injected branch, so the patch is now effectively dead code — retire it on the
-next patch sweep. The response is **no longer the flat API body**; it is a
-structured envelope.
+response shape may change"). The native handler ran ahead of the patch's
+injected branch, so the patch was dead code; it was deleted at 2.1.280. The
+response is **no longer the flat API body**; it is a structured envelope.
 
 **Request:**
 
 ```json
-{ "subtype": "get_usage" }
+{ "subtype": "get_usage", "skip_behaviors": true }
 ```
+
+`skip_behaviors` (optional boolean; anything else is rejected with
+`get_usage: skip_behaviors must be a boolean`) skips the scan of local
+transcripts that fills `behaviors`, which is then `null`. The 2.1.280 schema
+describes it as "For callers that need only the plan rate limits, such as a
+usage meter; the scan reads every transcript touched in the last seven days",
+and the handler passes `includeBehaviors: !redacted && skip_behaviors !== true`
+(`.cache/pristine-cli.js` @2296291 schema, @22348815 handler). Measured at
+2.1.280: ~600 ms with the scan, ~1 ms without. `q.getUsage()` always sends
+it: its only consumer, `parseUsageResponse` (`claude-usage-api.ts`), never
+reads `behaviors`.
 
 **Response (success):** structured envelope (NOT the raw API body):
 
@@ -839,7 +849,7 @@ List all MCP servers with status. **Patched** to await in-flight reconnects.
 
 ### `mcp_toggle`
 
-Enable/disable an MCP server. **Does** propagate to the model's tool list (patched via `patch/mcp-tool-refresh/`).
+Enable/disable an MCP server. **Does** propagate to the model's tool list: since 2.1.114 the turn loop calls `options.refreshTools()` before each API call (`if(so.options.refreshTools){let j=so.options.refreshTools();…` at 2.1.280), which retired the `mcp-tool-refresh` patch.
 
 **Anchor:** `~12848500`. Schema `Lc1`.
 

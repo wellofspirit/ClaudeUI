@@ -731,9 +731,13 @@ export function makeHandle(
       control
         .request<{ stopped?: boolean } | null>({ subtype: 'voice_server_stop' })
         .then((r) => ({ stopped: r?.stopped ?? true })),
+    // Native since 2.1.177. `skip_behaviors` skips cli.js's scan of every
+    // transcript touched in the last seven days (~600 ms → ~1 ms); the scan
+    // only fills the response's `behaviors`, which parseUsageResponse never
+    // reads — the usage meter needs the rate limits alone.
     getUsage: () =>
       control
-        .request<Record<string, unknown> | null>({ subtype: 'get_usage' })
+        .request<Record<string, unknown> | null>({ subtype: 'get_usage', skip_behaviors: true })
         .then((r) => r ?? {}),
     getContextUsage: () =>
       control

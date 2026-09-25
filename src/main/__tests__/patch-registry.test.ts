@@ -59,8 +59,8 @@ describe('patchesPresent', () => {
   })
 
   it('does not let one patch claim a sibling family with a shared prefix', () => {
-    expect(patchesPresent('/*PATCHED:mcp-tool-refresh-A*/')).toEqual(['mcp-tool-refresh'])
-    expect(patchesPresent('/*PATCHED:mcp-status-store-promise*/')).toEqual(['mcp-status'])
+    expect(patchesPresent('/*PATCHED:subprocess-proxy-strip*/')).toEqual(['subprocess-proxy-strip'])
+    expect(patchesPresent('/*PATCHED:subagent-A*/')).toEqual(['subagent-streaming'])
   })
 
   it('gives the same answer on every call, even for a global-flag marker', () => {

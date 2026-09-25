@@ -226,7 +226,7 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
 
 - `completed` — normal completion
 - `failed` — error exit
-- `stopped` — user-initiated stop (upstream `killed` is mapped to `stopped` in 2.1.114; the `taskstop-notification` patch is a no-op on recent versions)
+- `stopped` — user-initiated stop (upstream maps `killed` to `stopped` since 2.1.114; observed on the official 2.1.280 binary, which is why the `taskstop-notification` patch was deleted)
 
 ---
 

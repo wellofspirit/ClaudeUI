@@ -12,7 +12,7 @@ cli.js has **three** paths that reach stdout:
 
 1. **Main generator pipeline** (`Ts1` → `M.write(line)`) at char `~12822400`. Everything yielded by the turn generator passes through here.
 2. **Control channel** (`h.enqueue`) at char `~12843100+`. Control responses/cancels plus some out-of-band system events (auth_status, rate_limit_event native, permission-mode status, prompt_suggestion, transcript_mirror).
-3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`request-usage`, `rate-limit-relay`, `bash-output-streaming`, subagent-streaming E/G, team-streaming B).
+3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`rate-limit-relay`, `bash-output-streaming`, subagent-streaming E/G, team-streaming B).
 
 A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task_started`, `task_updated`, `task_progress`, `notification`) through `JtH`, flushed by `ZtH()` at char `~12838006` / `~12840696` (which injects `uuid` + `session_id` at flush time).
 
@@ -29,7 +29,6 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 | `result`                 | Generator                                       | Always (once per turn)                                                            | §3.7                                       |
 | `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8                                       |
 | `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                  | §3.9                                       |
-| `request_usage`          | Patch `request-usage` (direct stdout)           | Always (when patched)                                                             | §3.10                                      |
 | `rate_limit_event`       | Patch `rate-limit-relay` or native G_H listener | Patched path: always; native: rare                                                | §3.11                                      |
 | `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                    | §3.12                                      |
 | `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
@@ -439,32 +438,9 @@ Summary of a tool-use sequence. Emitted when a `tool_use_summary` attachment flo
 
 ---
 
-## 3.10 `request_usage` (PATCHED)
+## 3.10 `request_usage` (retired)
 
-Emitted after every `message_stop` — i.e., after each API call finishes within a turn.
-
-**Anchor:** `12804937` (patched by `patch/request-usage/`).
-
-**Gate:** Requires the `request-usage` ClaudeUI patch. Always fires when patched.
-
-```jsonc
-{
-  "type": "request_usage",
-  "usage": {
-    "input_tokens": 1234,
-    "output_tokens": 567,
-    "cache_creation_input_tokens": 890,
-    "cache_read_input_tokens": 100,
-    "cache_creation": {...},
-    "server_tool_use": {...}
-  },
-  "model": "claude-opus-4-7",
-  "uuid": "...",
-  "session_id": "..."
-}
-```
-
-**Ordering:** Arrives before the corresponding `assistant` line with `stop_reason`. Consumer can attribute per-call token costs incrementally.
+Emitted only by the deleted `request-usage` patch; no build since 2.1.280 writes it. The same per-request numbers arrive natively on `stream_event` `message_start` (`message.usage`) and `message_delta` (`usage`) — see `05-stream-events.md`.
 
 ---
 
@@ -660,7 +636,7 @@ Typical sequence within one user turn:
 4.  assistant                           (partial, shared id with stream_event)
 5.  stream_event content_block_* (many)       [gate: includePartialMessages]
 6.  assistant                           (partial, refined)
-7.  request_usage                       [PATCHED, after message_stop]
+7.  stream_event message_delta (usage)        [gate: includePartialMessages]
 8.  stream_event message_stop                 [gate: includePartialMessages]
 9.  rate_limit_event                    [PATCHED]
 10. user (synthetic tool_result)        (per tool_use in assistant)
@@ -684,7 +660,6 @@ Control-channel messages (`control_request`/`control_response`/`control_cancel_r
 
 Messages that exist ONLY because of ClaudeUI patches:
 
-- `request_usage` — `patch/request-usage`
 - `rate_limit_event` (header_utilization variant) — `patch/rate-limit-relay`
 - `bash_output` — `patch/bash-output-streaming`
 - `system/queued_command_consumed` — `patch/queue-control`

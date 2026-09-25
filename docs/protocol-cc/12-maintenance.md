@@ -22,7 +22,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run ensure-cli
    ```
 
-   If any of the 14 patches fail with "cannot locate anchor", those patches need updating.
+   If any patch in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) fails with "cannot locate anchor", that patch needs updating. The `patches:` line `apply-all.mjs` prints lists the patches the new build carries; one missing from it applied nothing.
 
 2. **Check patches that failed**
 

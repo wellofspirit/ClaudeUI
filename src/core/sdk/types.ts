@@ -28,7 +28,6 @@ export type SDKMessage =
   | SystemMessage
   | ResultMessage
   | ToolProgressMessage
-  | RequestUsageMessage
   | RateLimitEventMessage
   | BashOutputMessage
   | AuthStatusMessage
@@ -195,11 +194,6 @@ export interface ToolProgressMessage extends BaseSDKMessage {
   tool_name?: string
   parent_tool_use_id?: string | null
   elapsed_time_seconds?: number
-}
-
-export interface RequestUsageMessage extends BaseSDKMessage {
-  type: 'request_usage'
-  usage?: Record<string, unknown>
 }
 
 export interface RateLimitEventMessage extends BaseSDKMessage {

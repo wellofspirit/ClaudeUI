@@ -34,19 +34,19 @@ export const PATCH_REGISTRY = Object.freeze(
   [
     // subagent-A … subagent-G, plus subagent-F2.
     { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
-    { name: 'taskstop-notification', marker: markerRe('taskstop-notification-[AB]') },
     { name: 'queue-control', marker: markerRe('queue-control-(?:dequeue|consumed|drained)') },
     { name: 'mcp-status', marker: markerRe('mcp-status-(?:store-promise|await-refresh)') },
-    { name: 'mcp-tool-refresh', marker: markerRe('mcp-tool-refresh-[AB]') },
     { name: 'background-task', marker: markerRe('background-task') },
-    { name: 'usage-relay', marker: markerRe('usage-relay') },
-    { name: 'request-usage', marker: markerRe('request-usage') },
     { name: 'rate-limit-relay', marker: markerRe('rate-limit-relay') },
-    { name: 'incomplete-session-resume-fix', marker: markerRe('incomplete-session-resume-fix') },
     { name: 'voice-server', marker: markerRe('voice-server') },
     { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') },
     { name: 'subprocess-proxy-strip', marker: markerRe('subprocess-proxy-strip') },
     { name: 'skip-securestorage', marker: markerRe('skip-securestorage') }
+    // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
+    // answers first), request-usage (stream_event message_start/message_delta
+    // carry the same usage), and mcp-tool-refresh, taskstop-notification,
+    // incomplete-session-resume-fix (fixed upstream; their apply scripts had
+    // been no-ops).
     // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
     // which resolves baked file:// URLs natively via its module graph. The
     // Node-compatibility shim is no longer needed.

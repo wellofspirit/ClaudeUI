@@ -37,8 +37,9 @@ function createHangingInput(): AsyncIterable<string> {
 
 /**
  * The subset of the SDK QueryHandle we drive through the service session.
- * `getUsage` is patched in; the three `claude*` methods are native control
- * requests (see docs/protocol-cc/07-control-outbound.md §7.5, ADR-014).
+ * All four are native control requests: `getUsage` is `get_usage` (§7.3), the
+ * three `claude*` methods are §7.5 (docs/protocol-cc/07-control-outbound.md,
+ * ADR-014).
  */
 export interface ServiceControlHandle {
   getUsage(): Promise<Record<string, unknown>>
@@ -118,7 +119,7 @@ class ServiceSession {
         }
       })
 
-      // Cast to access patched getUsage() + native OAuth control requests
+      // Narrow to the control requests this session serves (usage + OAuth)
       this.activeQuery = q as unknown as ServiceControlHandle
 
       logger.debug('ServiceSession', 'Service session spawned (lazy, no prompt)')

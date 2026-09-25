@@ -224,13 +224,6 @@ describe('SDK assistant-snapshot ordering', () => {
         await removeIsolatedDir(isolated)
       }
 
-      const requestUsage = wire.filter((line) => line.type === 'request_usage')
-      expect(requestUsage).toHaveLength(1)
-      expect(requestUsage[0]).toMatchObject({
-        model: 'claude-sonnet-4-6',
-        usage: { input_tokens: 1, output_tokens: 8 }
-      })
-
       const assistantLines = wire.filter((line) => line.type === 'assistant')
       expect(assistantLines.length).toBeGreaterThan(0)
 
@@ -269,98 +262,6 @@ describe('SDK assistant-snapshot ordering', () => {
       // 5. The thinking snapshot carries the accumulated thinking text.
       const thinking = positions.snapshots.find((entry) => entry.block.type === 'thinking')!
       expect(thinking.block.thinking).toBe('think')
-    })
-
-    it('emits one request_usage per request with the actual response model and usage', async () => {
-      const { query } = await import('../../core/sdk')
-      const models = ['claude-sonnet-4-6', 'claude-opus-4-6']
-      const fixture = models.map((model, i): Array<[string, Record<string, unknown>]> => [
-        [
-          'message_start',
-          {
-            type: 'message_start',
-            message: {
-              id: `msg_fixture_${i}`,
-              type: 'message',
-              role: 'assistant',
-              content: [],
-              model,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: i + 3, output_tokens: 0 }
-            }
-          }
-        ],
-        [
-          'content_block_start',
-          {
-            type: 'content_block_start',
-            index: 0,
-            content_block: { type: 'text', text: '' }
-          }
-        ],
-        [
-          'content_block_delta',
-          {
-            type: 'content_block_delta',
-            index: 0,
-            delta: { type: 'text_delta', text: 'hello' }
-          }
-        ],
-        ['content_block_stop', { type: 'content_block_stop', index: 0 }],
-        [
-          'message_delta',
-          {
-            type: 'message_delta',
-            delta: { stop_reason: 'end_turn', stop_sequence: null },
-            usage: { output_tokens: i + 7 }
-          }
-        ],
-        ['message_stop', { type: 'message_stop' }]
-      ])
-      const { server, port } = await startFixtureServer(fixture)
-      const isolated = mkdtempSync(join(tmpdir(), 'claudeui-request-usage-'))
-      const env = { ...process.env }
-      delete env.CLAUDE_CODE_OAUTH_TOKEN
-      Object.assign(env, {
-        HOME: isolated,
-        USERPROFILE: isolated,
-        CLAUDE_CONFIG_DIR: join(isolated, '.claude'),
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        ANTHROPIC_API_KEY: 'fixture-key'
-      })
-      try {
-        for (const [i, model] of models.entries()) {
-          const wire: WireMessage[] = []
-          const q = query({
-            prompt: 'fixture',
-            options: {
-              cwd: isolated,
-              model,
-              maxTurns: 1,
-              tools: [],
-              persistSession: false,
-              env
-            }
-          })
-          for await (const message of q) {
-            wire.push(message as WireMessage)
-            if ((message as WireMessage).type === 'result') break
-          }
-          expect(wire.filter((line) => line.type === 'request_usage')).toEqual([
-            expect.objectContaining({
-              model,
-              usage: expect.objectContaining({
-                input_tokens: i + 3,
-                output_tokens: i + 7
-              })
-            })
-          ])
-        }
-      } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()))
-        await removeIsolatedDir(isolated)
-      }
     })
   })
 })

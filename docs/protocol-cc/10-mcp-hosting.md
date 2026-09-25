@@ -302,7 +302,7 @@ Control subtypes for managing MCP servers after session start:
 | Subtype                  | Purpose                                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------------------- |
 | `mcp_status`             | List all servers + status (connected/disabled/error)                                     |
-| `mcp_toggle`             | Enable/disable a server (propagates to model's tool list — see `patch/mcp-tool-refresh`) |
+| `mcp_toggle`             | Enable/disable a server (propagates to model's tool list — native `refreshTools()` call) |
 | `mcp_reconnect`          | Reconnect a server (e.g., after env/config change)                                       |
 | `mcp_set_servers`        | Replace the entire server config at runtime                                              |
 | `mcp_authenticate`       | Start an MCP OAuth flow (long-lived)                                                     |

@@ -56,7 +56,7 @@ Resolved by `locateBunClaude()` in `src/core/sdk/locate.ts`. `locateCliJs()` is 
 
 ### How the binary gets there
 
-`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (14 content-regex patches) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
+`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (the content-regex patches in `patch/`) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
 
 ---
 
@@ -316,7 +316,7 @@ vendor/claude-cli/cli.js                 (~1,630 minified ESM chunks joined by
                                           `// @bun-chunk <name>` delimiter lines)
           │
           ▼
-patch/apply-all.mjs                      (14 content-regex patches, idempotent;
+patch/apply-all.mjs                      (content-regex patches, idempotent;
                                           structural check, not a whole-file parse)
           │
           ▼
@@ -344,7 +344,7 @@ vendor/claude-cli/bun-claude[.exe]       (shipped artifact — spawned natively)
 | `vendor/claude-cli/version.json`     | Upstream version + extraction metadata + path to the cached source binary (`sourceBinary` feeds the rebundler in pipeline mode) + `patches`, the patches the build carries (§1.12).              |
 | `scripts/extract-cli.mjs`            | Downloads the per-platform Bun binary (SHA-verified against the manifest; cached under `.cache/claude-cli/` keyed on version), concatenates every JS chunk out of its Bun section.               |
 | `scripts/rebundle-cli.mjs`           | Splits the patched concat and re-injects each chunk into its module slot. PE writer shrinks the section + strips the Authenticode cert; Mach-O writer pads to original section size + codesigns. |
-| `patch/`                             | 14 content-regex patches against the concatenated `cli.js`. Idempotent; safe to re-run. Per-patch READMEs carry the bundle-analyzer anchors.                                                     |
+| `patch/`                             | Content-regex patches against the concatenated `cli.js` (the set is in §1.12). Idempotent; safe to re-run. Per-patch READMEs carry the bundle-analyzer anchors.                                  |
 
 ### Bun standalone serialization (reverse-engineered from Bun's `src/StandaloneModuleGraph.zig`)
 
@@ -448,7 +448,7 @@ Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631
 
 ### Patch registry
 
-14 content-regex patches under `patch/` (registry: `PATCH_REGISTRY` in `patch/lib/patch-registry.mjs`, run by `patch/apply-all.mjs`), applied between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11:
+Content-regex patches under `patch/` (registry: `PATCH_REGISTRY` in `patch/lib/patch-registry.mjs`, run by `patch/apply-all.mjs`), applied between the extract and rebundle steps. The current set:
 
 | Patch                    | What it adds to cli.js                                                                                                                                                                                                  |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -456,15 +456,13 @@ Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631
 | `queue-control`          | `dequeue_message` control subtype + `queued_command_consumed` notification                                                                                                                                              |
 | `mcp-status`             | Awaits MCP refresh before responding so `mcpServerStatus()` returns the full list                                                                                                                                       |
 | `background-task`        | `background_task` control subtype — convert foreground task to background                                                                                                                                               |
-| `usage-relay`            | `get_usage` control subtype — exposes cli.js's internal /usage API                                                                                                                                                      |
-| `request-usage`          | Emits per-request token usage events after each API call                                                                                                                                                                |
 | `rate-limit-relay`       | Emits rate limit headers after each API call                                                                                                                                                                            |
 | `voice-server`           | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`                                                                                                                              |
 | `bash-output-streaming`  | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                                  |
 | `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`)                 |
 | `skip-securestorage`     | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015) |
 
-Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed).
+Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed). Deleted at 2.1.280: `usage-relay` (the native `get_usage` handler answered before the injected branch, so the patch was dead code — 07 §7.3), `request-usage` (`stream_event` `message_start` / `message_delta` carry the same per-request usage, and nothing read its log), and `taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`, whose fixes are upstream and whose apply scripts had been no-ops.
 
 Patches operate on the chunk concat at `vendor/claude-cli/cli.js` — a plain text search-and-replace across all ~1,630 chunks at once, so a patch neither knows nor cares which chunk its anchor lives in. Two consequences of the 2.1.261 chunking worth remembering when re-anchoring: code that used to sit in one file is now split across chunks and crosses module boundaries as `import`/`export` bindings, and a single minified name may now be reused in several chunks — an anchor that was unique in the monolith may match more than once, so `verify pattern matches exactly once` earns its keep. When the minifier changes variable names between versions, a patch fails with "cannot locate anchor" — update that patch's regex using its README's bundle-analyzer anchors.
 
@@ -482,7 +480,7 @@ Register new patches in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`), with 
 
 ### version.json `patches`
 
-After the structure check, `apply-all.mjs` records which patches the build carries: it searches the patched `cli.js` for each registry entry's `marker` and merges the names it finds, in registry order, into `vendor/claude-cli/version.json` as `patches` (every other field kept; written to a temp file and renamed over the original). It prints the list as one `patches: a, b, c` line, `--quiet` included. The list comes from the bytes, not from the registry: a patch whose apply script found its fix already upstream (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh` at 2.1.280) writes no marker and is not listed. `extract-cli.mjs` rewrites version.json without the field on every run, so a binary rebundled without patching carries no `patches`. `rebundle-cli.mjs` reads only `sourceBinary` and ignores the rest.
+After the structure check, `apply-all.mjs` records which patches the build carries: it searches the patched `cli.js` for each registry entry's `marker` and merges the names it finds, in registry order, into `vendor/claude-cli/version.json` as `patches` (every other field kept; written to a temp file and renamed over the original). It prints the list as one `patches: a, b, c` line, `--quiet` included. The list comes from the bytes, not from the registry: a patch whose apply script finds its fix already upstream writes no marker and is not listed (`taskstop-notification`, `incomplete-session-resume-fix` and `mcp-tool-refresh` read that way at 2.1.280, before they were deleted). `extract-cli.mjs` rewrites version.json without the field on every run, so a binary rebundled without patching carries no `patches`. `rebundle-cli.mjs` reads only `sourceBinary` and ignores the rest.
 
 The app reads the list back through `src/core/sdk/harness.ts`: `readHarnessInfo(binaryPath)` parses the version.json beside whatever binary `locateBunClaude()` returns (cached per path until the file's mtime changes), and `harnessHasPatch(name)` answers for the binary the app spawns. A missing or malformed file, or a missing field, reads as version `'unknown'` with no patches, so a surface that needs a patch goes dark rather than failing on use (ADR-030). Anthropic's binary ships no version.json and reads as unpatched. Consumers today: `ClaudeSession.capabilities.voice` requires `voice-server`; `getCliVersion()` reads `version` from the same file.
 

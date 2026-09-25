@@ -1147,9 +1147,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         // forward-compat safety net if query.ts ever routes these up.
         this.handleControlResponse(msg)
         return
-      case 'request_usage':
-        this.logRequestUsage(msg)
-        return
       case 'rate_limit_event':
         this.handleRateLimitEvent(msg)
         return
@@ -2311,34 +2308,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
   discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
     return scanSkills(cwd)
-  }
-
-  /**
-   * Log per-request usage data from the request-usage patch to a JSONL file.
-   * Each line captures the token breakdown for a single API call, enabling
-   * analysis of cache effectiveness and rate-limit cost drivers.
-   */
-  private logRequestUsage(msg: Record<string, unknown>): void {
-    try {
-      const logDir = path.join(os.homedir(), '.claude', 'ui', 'usage')
-      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true })
-      const logPath = path.join(logDir, 'request-usage.jsonl')
-
-      const usage = msg.usage as Record<string, unknown> | undefined
-      if (!usage) return
-
-      const entry = {
-        timestamp: new Date().toISOString(),
-        sessionId: this.sessionId,
-        model: (msg.model as string) || this.model || 'unknown',
-        usage,
-        cwd: this.cwd
-      }
-
-      fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', { mode: 0o600 })
-    } catch (err) {
-      logger.warn('ClaudeSession', `Failed to log request_usage: ${err}`)
-    }
   }
 
   /**

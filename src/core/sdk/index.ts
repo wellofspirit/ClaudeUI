@@ -19,7 +19,6 @@ export type {
   SystemMessage,
   ResultMessage,
   ToolProgressMessage,
-  RequestUsageMessage,
   RateLimitEventMessage,
   BashOutputMessage,
   AuthStatusMessage,
