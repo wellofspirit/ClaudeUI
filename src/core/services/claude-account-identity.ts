@@ -26,7 +26,7 @@
 
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import type { BillingType } from '../../shared/types'
-import { authorizedOAuthGet, type ClaudeUsageFailure } from './claude-usage-api'
+import { authorizedOAuthGet, CLI_OAUTH, type ClaudeUsageFailure } from './claude-usage-api'
 import { getMeta, repairClaudeAccountKey, setMeta } from './db'
 import { logger } from './logger'
 import {
@@ -37,7 +37,7 @@ import {
   type AccountLogRecord
 } from './usage-windows'
 
-const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
+const PROFILE_URL = CLI_OAUTH.profileUrl
 /** cli.js's own timeout for this call — twice the usage read's. */
 const PROFILE_TIMEOUT_MS = 10_000
 

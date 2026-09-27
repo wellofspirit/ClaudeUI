@@ -67,8 +67,13 @@ const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
  *
  * `docs/protocol-cc/12-maintenance.md` §12.1 tells a CLI bump to re-check all
  * three: the URL, the id, and the body's encoding.
+ *
+ * The LOGIN fields below (`core/auth/claude-oauth.ts`, the in-app multi-account
+ * sign-in) come out of the same production config object (`nn()`'s `prod`
+ * branch, cli.js 2.1.280 @431216) and the scope lists just above it. §12.1
+ * lists them for re-checking too.
  */
-const CLI_OAUTH = {
+export const CLI_OAUTH = {
   tokenUrl: 'https://platform.claude.com/v1/oauth/token',
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   /** cli.js's default scope list, sent when the stored credential names none. */
@@ -78,6 +83,31 @@ const CLI_OAUTH = {
     'user:sessions:claude_code',
     'user:mcp_servers',
     'user:file_upload'
+  ],
+  /** `CLAUDE_AI_AUTHORIZE_URL` — the claude.ai login (`loginWithClaudeAi: true`). */
+  authorizeUrl: 'https://claude.com/cai/oauth/authorize',
+  /** `MANUAL_REDIRECT_URL` — the page that shows the pasteable `code#state`. */
+  manualRedirectUrl: 'https://platform.claude.com/oauth/code/callback',
+  /** `CLAUDEAI_SUCCESS_URL` — where the loopback listener sends the browser. */
+  claudeAiSuccessUrl: 'https://platform.claude.com/oauth/code/success?app=claude-code',
+  /** `${BASE_API_URL}/api/oauth/profile` — cli.js's `YOe`. */
+  profileUrl: 'https://api.anthropic.com/api/oauth/profile',
+  /** `ROLES_URL` — cli.js's `jRt`, the source of the organization NAME. */
+  rolesUrl: 'https://api.anthropic.com/api/oauth/claude_cli/roles',
+  /**
+   * `kCr()`: `U([...c, ...gqe()])` with `c = [org:create_api_key, user:profile]`
+   * and `gqe()` = the five scopes of `r` plus `user:plugins` (production has
+   * `PLUGINS_SCOPE_REGISTERED: true`). `U` is an order-keeping dedupe, which
+   * drops the second `user:profile`.
+   */
+  loginScopes: [
+    'org:create_api_key',
+    'user:profile',
+    'user:inference',
+    'user:sessions:claude_code',
+    'user:mcp_servers',
+    'user:file_upload',
+    'user:plugins'
   ]
 } as const
 

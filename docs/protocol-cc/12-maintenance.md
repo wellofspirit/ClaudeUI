@@ -117,6 +117,19 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
     the default scope list are all part of the request, and cli.js's own refresh
     posts JSON (the form-encoded one nearby is the unrelated gateway refresh).
 
+    The same `CLI_OAUTH` block also carries the **login** the in-app multi-account
+    sign-in performs (`src/core/auth/claude-oauth.ts`). Re-check, in the same
+    production config object: `CLAUDE_AI_AUTHORIZE_URL`, `MANUAL_REDIRECT_URL`,
+    `CLAUDEAI_SUCCESS_URL`, `ROLES_URL` and `BASE_API_URL` (→ `/api/oauth/profile`);
+    the login scope list `kCr()` = `U([...c, ...gqe()])` just above it (and whether
+    `PLUGINS_SCOPE_REGISTERED` still adds `user:plugins`); the authorize params and
+    their append order in `_Ln` (find it by `searchParams.append("code","true")`);
+    the exchange body in `M_r` (by `grant_type:"authorization_code"`); PKCE/state in
+    the class with `startOAuthFlow(` (verifier + state = base64url of 32 random
+    bytes, loopback `/callback` on `127.0.0.1`); and what `ILn`/`ab` store under
+    `claudeAiOauth` plus `bLn`'s `organization_type` → `subscriptionType` map.
+    `src/core/auth/__tests__/claude-oauth.test.ts` pins every one of these.
+
 ---
 
 ## 12.2 When the SDK layer changes

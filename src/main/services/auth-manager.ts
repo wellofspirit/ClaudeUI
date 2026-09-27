@@ -1,13 +1,20 @@
 /**
  * Native Anthropic OAuth ("Log in with Claude") orchestration — see ADR-014.
  *
- * cli.js owns the entire subscription OAuth flow (PKCE, browser, loopback
- * listener, token exchange, Keychain storage). We merely drive its native
- * control requests through the long-lived `serviceSession` handle:
+ * Single-account: cli.js owns the entire subscription OAuth flow (PKCE,
+ * browser, loopback listener, token exchange, Keychain storage). We merely
+ * drive its native control requests through the long-lived `serviceSession`
+ * handle:
  *
  *   claude_authenticate              → { manualUrl, automaticUrl }
  *   claude_oauth_wait_for_completion → { account }   (loopback auto-complete)
  *   claude_oauth_callback(code,state) → { account }  (manual paste fallback)
+ *
+ * Multi-account (ADR-015): the app runs the same flow itself
+ * (`core/auth/claude-oauth.ts`) and writes the active account dir's
+ * `.credentials.json`. Both sit behind `ClaudeLoginBackend`
+ * (`claude-login-backend.ts`), chosen when a flow starts; everything below —
+ * flow ids, settle/replay, remote vs desktop — is the same for both.
  *
  * The pasted "Authentication code" is ONE `<code>#<state>` string and this
  * control request takes the two halves separately — see `submitOAuthCode`.
@@ -31,27 +38,17 @@
 import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
-import { serviceSession } from '../../core/services/service-session'
 import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from '../../core/services/logger'
 import { emitEvent } from '../../core/services/sync-host'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../../core/auth/auth-providers'
-
-interface AuthorizeUrls {
-  manualUrl?: string
-  automaticUrl?: string
-}
-
-interface OAuthResult {
-  account?: {
-    email?: string | null
-    organization?: string | null
-    subscriptionType?: string | null
-    tokenSource?: string | null
-    apiKeySource?: string | null
-    apiProvider?: string | null
-  }
-}
+import {
+  backendForPaste,
+  openLoginBackend,
+  type AuthorizeUrls,
+  type ClaudeLoginBackend,
+  type OAuthResult
+} from './claude-login-backend'
 
 const IDLE: AuthFlowState = { status: 'idle', account: null, error: null }
 
@@ -83,6 +80,8 @@ class AuthManager {
   private pendingManualUrl: string | null = null
   /** Monotonic flow id — stale completions (after cancel/restart) are ignored. */
   private flowId = 0
+  /** The backend the current flow was started on (cli.js or in-app). */
+  private backend: ClaudeLoginBackend | null = null
   /** Guards against finalizing the same flow twice (loopback + manual race). */
   private settled = false
   /**
@@ -143,9 +142,10 @@ class AuthManager {
    * `opts.remote` (ADR-057) is the ONLY behavioural fork: a remote-initiated
    * sign-in must NOT open a browser on the HOST — the remote user opens the URL
    * on their own device — so `shell.openExternal` is skipped and the returned
-   * snapshot carries `manualUrl` for the remote UI to display. cli.js still
-   * performs the token EXCHANGE host-side either way (that is correct and
-   * unchanged). The desktop path (`opts` absent) is byte-identical to before.
+   * snapshot carries `manualUrl` for the remote UI to display. The token
+   * EXCHANGE still happens host-side either way — in cli.js, or in the in-app
+   * backend, which binds no loopback listener at all for a remote flow. The
+   * desktop path (`opts` absent) is byte-identical to before.
    */
   async signIn(opts?: { remote?: boolean }): Promise<AuthFlowState> {
     const remote = opts?.remote === true
@@ -154,13 +154,17 @@ class AuthManager {
     // rejection would be an unhandled rejection AND the renderer would get no
     // auth:state error. getControlHandle() and openExternal() below can throw,
     // so both are guarded and funnel into broadcastError() instead.
-    let handle: Awaited<ReturnType<typeof serviceSession.getControlHandle>>
+    //
+    // The backend is picked HERE, per flow: multi-account (an active account
+    // dir) signs in in-app, single-account through cli.js, whose service
+    // session handle `openLoginBackend` acquires exactly as this used to.
+    let backend: ClaudeLoginBackend | null
     try {
-      handle = await serviceSession.getControlHandle()
+      backend = await openLoginBackend()
     } catch (err) {
       return this.broadcastError(`Could not start the login service session: ${errText(err)}`)
     }
-    if (!handle) {
+    if (!backend) {
       return this.broadcastError('Could not start the login service session.')
     }
 
@@ -168,10 +172,14 @@ class AuthManager {
     this.settled = false
     this.pendingState = null
     this.pendingManualUrl = null
+    // A new flow supersedes the old one: an in-app flow closes its listener
+    // (a cli.js flow is replaced by cli.js itself, so that cancel is a no-op).
+    this.backend?.cancel()
+    this.backend = backend
 
     let urls: AuthorizeUrls
     try {
-      urls = (await handle.claudeAuthenticate(true)) as AuthorizeUrls
+      urls = await backend.authenticate({ remote })
     } catch (err) {
       return this.broadcastError(`Failed to start login: ${errText(err)}`)
     }
@@ -209,9 +217,9 @@ class AuthManager {
     // so that invoke return is a remote caller's only outcome channel: the
     // login had actually succeeded host-side and the web UI was told `idle`.
     if (!remote) {
-      handle
-        .claudeOAuthWaitForCompletion()
-        .then((res) => this.finalize(myFlow, res as OAuthResult))
+      backend
+        .waitForCompletion()
+        .then((res) => this.finalize(myFlow, res))
         .catch((err) => this.fail(myFlow, err))
     }
 
@@ -251,8 +259,8 @@ class AuthManager {
    * repairs the broken path without touching one that may work.
    */
   async submitOAuthCode(code: string): Promise<AuthFlowState> {
-    const handle = await serviceSession.getControlHandle()
-    if (!handle || !this.pendingState) {
+    const backend = await backendForPaste(this.backend)
+    if (!backend || !this.pendingState) {
       return this.broadcastError('No active login flow. Start login again.')
     }
     const myFlow = this.flowId
@@ -274,7 +282,7 @@ class AuthManager {
       return this.broadcastError(HALF_COPIED, this.pendingManualUrl ?? undefined)
     }
     try {
-      const res = (await handle.claudeOAuthCallback(authorizationCode, state)) as OAuthResult
+      const res = await backend.submitCode(authorizationCode, state)
       return this.finalize(myFlow, res)
     } catch (err) {
       return this.fail(myFlow, err)
@@ -287,6 +295,9 @@ class AuthManager {
     this.settled = true
     this.pendingState = null
     this.pendingManualUrl = null
+    // In-app: close the listener and drop the verifier. cli.js: a no-op, as before.
+    this.backend?.cancel()
+    this.backend = null
     this.broadcast(IDLE)
   }
 

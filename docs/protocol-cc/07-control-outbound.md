@@ -1201,6 +1201,12 @@ survive that was not checked. ClaudeUI passes none.
 
 All three are long-lived (user-driven). Always pass `timeoutMs: 0` to disable the 30 s default.
 
+**Single-account only.** Multi-account sign-in (ADR-015) no longer drives these: the app runs
+the same claude.ai OAuth flow itself (`src/core/auth/claude-oauth.ts`, chosen per flow by
+`src/main/services/claude-login-backend.ts`) and writes the active account dir's
+`.credentials.json`. See [architecture/engines.md](../architecture/engines.md) → "In-app
+Claude sign-in".
+
 ### `claude_authenticate`
 
 **Anchor:** `~12851790`. **No Zod schema.**
