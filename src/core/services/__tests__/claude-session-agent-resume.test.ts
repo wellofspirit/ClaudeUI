@@ -492,6 +492,38 @@ describe('ClaudeSession — agent identity survives the process', () => {
     ])
   })
 
+  it("places an agent_id-only frame from the seed alone, before any of the agent's own frames", async () => {
+    // The agent was spawned by the previous process: this one never sees its
+    // task_started. Only the transcript seed can place its self-resume frames.
+    mockReadAgentIdentity.mockResolvedValue(seededIdentity())
+    const selfResume = (event: Record<string, unknown>): Record<string, unknown> => ({
+      type: 'stream_event',
+      agent_id: TASK_ID,
+      event
+    })
+    const sent = await runWire(
+      'routing-respawn-self-resume',
+      [
+        selfResume({ type: 'message_start', message: { id: 'msg_seeded' } }),
+        selfResume({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+        selfResume({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'seeded' }
+        })
+      ],
+      { resumeSessionId: RESUME_SID }
+    )
+
+    const items = sent
+      .filter(([c]) => c === 'session:item-open' || c === 'session:item-delta')
+      .map(([c, , d]) => [c, (d as { target: { ownerToolUseId?: string } }).target.ownerToolUseId])
+    expect(items).toEqual([
+      ['session:item-open', ORIGIN],
+      ['session:item-delta', ORIGIN]
+    ])
+  })
+
   it('keeps agent identity across cancel() for the same object’s next run', async () => {
     const { win, sent } = makeWin()
     const session = new ClaudeSession('routing-cancel-respawn', win, '/tmp/proj')
