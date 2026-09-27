@@ -7,8 +7,9 @@ carries the patch; voice is disabled on an unpatched harness.
 cli.js's children, as a shell-set proxy does on the unpatched binary); `skip-securestorage`
 removed by [ADR-079](adr-079_host-owned-claude-credentials.md) (multi-account credentials are
 host-owned); `automode-verdict` ([ADR-076](adr-076_claude-automode-verdict-on-the-wire.md), merged
-from pre-release) joined the registry. The set is now `subagent-streaming`, `voice-server`,
-`bash-output-streaming`, `automode-verdict`.
+from pre-release) joined the registry. **Amended 2026-09-28:** `automode-verdict` removed again
+(owner ruling: auto-mode ALLOW verdicts are not worth a patch; denials are native and still render).
+The set is now `subagent-streaming`, `voice-server`, `bash-output-streaming`.
 **Relates to:** [ADR-006](adr-006_rebundle-bun-binary.md) (the rebundled `bun-claude`),
 [ADR-030](adr-030_capability-honesty.md) (a capability is true only when the full path works),
 [ADR-037](adr-037_engine-fork-patch-policy.md) (patch policy and per-bump verification),
@@ -43,7 +44,6 @@ what each patch was still worth:
 | `voice-server`                                                               | No upstream equivalent; the control request is rejected.                                                                                                                                                                                                                                      |
 | `subprocess-proxy-strip`                                                     | Without it the in-app proxy — credentials included — reaches every Bash/MCP/LSP child (`env` puts them in the transcript). `CLAUDE_ENV_FILE` covers Bash only. The patch also had a regression of its own: it stripped an INHERITED env proxy from children whenever no in-app proxy was set. |
 | `skip-securestorage`                                                         | Windows: no effect while `tengu_windows_credman` is off. macOS 2.1.280 (source): the Keychain is primary and the first successful write deletes the per-account `.credentials.json` the app reads; multi-account breaks. Linux: none.                                                         |
-| `automode-verdict`                                                           | **Joined 2026-09-27 (ADR-076).** Emits `system/permission_allowed` for an auto-mode classifier ALLOW; upstream emits only the denial half.                                                                                                                                                    |
 
 Raw wire logs and the real-app screenshots are in the 2026-09-24 session's scratchpad; the
 decisive lines are cited in `docs/protocol-cc/` where each surface is documented.
@@ -117,6 +117,7 @@ split will use; the user-facing chooser and download channel are a later ADR.
 | `voice-server`           | Voice input; the only terms-of-service-safe route is through cli.js's own voice pipeline.                                                                                                                                                                                          |
 | `subprocess-proxy-strip` | **Removed 2026-09-27 (owner ruling).** Keeps a credential-bearing in-app proxy out of child processes. Its inherited-proxy regression is fixed: with no in-app proxy the marker is set and children keep the user's own proxy, as the unpatched binary does.                       |
 | `skip-securestorage`     | **Removed 2026-09-27 (ADR-079).** Per-account plaintext credential files (ADR-015) on macOS, where the Keychain is otherwise primary and deletes the file on first write. A host-owned token path exists upstream (`oauth_token_refresh`) and is a spike, not a decision, for now. |
+| `automode-verdict`       | **Joined 2026-09-27 (ADR-076); removed 2026-09-28 (owner ruling).** Emitted `system/permission_allowed` for an auto-mode classifier ALLOW; allow verdicts were judged not worth a patch. Denials are native.                                                                       |
 
 ### 6. What a user on an unpatched harness gets
 
@@ -124,7 +125,7 @@ Chat, tools, approvals, MCP, plugins, queueing and take-back, background tasks, 
 all working through native surfaces. Foreground subagents show complete messages instead of a
 token stream; Bash output appears when the command finishes; the mic is hidden and voice verbs
 refuse with a message naming the missing patch. Since 2026-09-27 also: multi-account works on it
-(ADR-079), and auto-mode ALLOW verdicts are absent (`automode-verdict`); denials still show.
+(ADR-079). Auto-mode ALLOW verdicts are absent on every binary since 2026-09-28; denials show.
 
 ## Consequences
 
