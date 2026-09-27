@@ -2533,6 +2533,96 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     expect(core.getSnapshot().seq - before).toBe(reliableItemEvents)
   })
 
+  /**
+   * An idle self-resume of a background agent INSIDE the target (Patch E):
+   * its stream events carry `agent_id` and no `parent_tool_use_id`, while its
+   * snapshots arrive under the agent's ORIGIN Agent call. Before the fix they
+   * opened on the target's ROOT lane — the agent's `message_start` finished
+   * the root message in flight, whose later deltas then streamed into the
+   * agent's message.
+   */
+  it("routes an agent_id-only frame to its agent's origin lane, and drops one no task_started placed", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-agent-id' } as SDKMessage)
+    const frame = (agentId: string | undefined, event: Record<string, unknown>): SDKMessage =>
+      ({
+        type: 'stream_event',
+        ...(agentId ? { agent_id: agentId } : {}),
+        event
+      }) as unknown as SDKMessage
+    const textStart = { type: 'content_block_start', index: 0, content_block: { type: 'text' } }
+    const text = (t: string): Record<string, unknown> => ({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: t }
+    })
+
+    // The agent's first run: the origin, then a SendMessage run of it.
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-origin'
+    } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-run-2'
+    } as SDKMessage)
+    target.push(frame(undefined, { type: 'message_start', message: { id: 'root-message' } }))
+    target.push(frame(undefined, textStart))
+    target.push(frame(undefined, text('root ')))
+    target.push(frame('agent-x', { type: 'message_start', message: { id: 'agent-message' } }))
+    target.push(frame('agent-x', textStart))
+    target.push(frame('agent-x', text('agent')))
+    target.push(frame('agent-unknown', { type: 'message_start', message: { id: 'lost-message' } }))
+    target.push(frame('agent-unknown', textStart))
+    target.push(frame('agent-unknown', text('lost')))
+    target.push(frame(undefined, text('continues')))
+    // The relay parents the agent's snapshot to the origin: same lane as its partials.
+    target.push({
+      type: 'assistant',
+      parent_tool_use_id: 'native-origin',
+      message: {
+        id: 'agent-message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'agent' }]
+      }
+    } as unknown as SDKMessage)
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const chunksByMessage = new Map<string, string>()
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      if (channel !== 'session:item-delta') continue
+      const { target: t, chunk } = payload as { target: { messageId: string }; chunk: string }
+      chunksByMessage.set(t.messageId, (chunksByMessage.get(t.messageId) ?? '') + chunk)
+    }
+    expect(Object.fromEntries(chunksByMessage)).toEqual({
+      'root-message': 'root continues',
+      'agent-message': 'agent'
+    })
+    // The unplaceable agent reaches nothing, the root included.
+    expect(JSON.stringify(ctx.emit.mock.calls)).not.toContain('lost-message')
+    // The snapshot found the partials' state instead of arriving as a stray message.
+    expect(
+      ctx.emit.mock.calls.filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: { id: string } }).message.id === 'agent-message'
+      )
+    ).toEqual([])
+  })
+
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({

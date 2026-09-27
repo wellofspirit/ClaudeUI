@@ -52,7 +52,7 @@ import { loadEngineConfig, loadSettings } from './ui-config'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
-import { ClaudeItemStreamLifecycle } from './claude-item-stream'
+import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 // event-mapper.ts is a leaf module (no cycle risk — it does not import
 // OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
@@ -946,6 +946,14 @@ interface ClaudeTargetEntry {
    *  forwarded repeatedly under the same betaMessage id). */
   turnToolUseIds: Set<string>
   itemStreams: ClaudeItemStreamLifecycle
+  /**
+   * task_id → the tool_use id that first started it, learned from the
+   * target's own `system/task_started` frames — the ORIGIN, which is what the
+   * relay parents a resumed agent's snapshots to. Lets an agent_id-only
+   * `stream_event` (an idle self-resume inside the target) reach the lane its
+   * snapshots use. Lives as long as the target's process, like the agents.
+   */
+  agentOrigins: Map<string, string>
 }
 
 /**
@@ -3809,24 +3817,31 @@ export class CrossEngineDispatcher {
    * subagent events (ADR-033 M3), keyed by the CURRENT dispatching tool_use
    * id (`entry.ctx.toolUseId` — refreshed on every continuation call, so a
    * mid-turn message always lands on whichever call is actively driving it).
-   * No-ops entirely when the id is unset — never fail a dispatch over it.
+   * Emits nothing when the id is unset — never fail a dispatch over it.
    *
    * `includePartialMessages: true` (set in `defaultSpawnClaudeQuery`) makes
    * cli.js emit `stream_event` deltas exactly like a native subagent's
    * `parent_tool_use_id`-routed frames (claude-session.ts's
-   * `handleStreamEvent`) — this mirrors that mapping verbatim, just re-keyed.
+   * `handleStreamEvent`) — this mirrors that mapping, just re-keyed: an
+   * agent_id-only frame resolves through `entry.agentOrigins` to the same lane
+   * key its snapshots use, and one no task_started placed is dropped.
    */
   private forwardClaudeTargetMessage(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    // Learned whether or not a card is listening: it is the target's own
+    // identity, and a later turn's card needs it.
+    if (msg.type === 'system' && msg.subtype === 'task_started') {
+      if (msg.task_id && msg.tool_use_id && !entry.agentOrigins.has(msg.task_id))
+        entry.agentOrigins.set(msg.task_id, msg.tool_use_id)
+      return
+    }
+
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
     if (msg.type === 'stream_event') {
-      const envelope = msg as {
-        parent_tool_use_id?: string | null
-        event?: Parameters<ClaudeItemStreamLifecycle['handleEvent']>[0]
-      }
-      if (envelope.event)
-        entry.itemStreams.handleEvent(envelope.event, envelope.parent_tool_use_id ?? undefined)
+      if (!msg.event) return
+      const owner = streamEventParent(msg, (agentId) => entry.agentOrigins.get(agentId))
+      if (owner !== null) entry.itemStreams.handleEvent(msg.event, owner)
       return
     }
 
@@ -3895,7 +3910,8 @@ export class CrossEngineDispatcher {
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
       turnToolUseIds: new Set(),
-      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
+      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle,
+      agentOrigins: new Map()
     }
     entry.itemStreams = new ClaudeItemStreamLifecycle({
       open: (target, message, startedAt) => {

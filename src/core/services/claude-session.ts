@@ -21,7 +21,7 @@ import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
-import { ClaudeItemStreamLifecycle } from './claude-item-stream'
+import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
@@ -1371,23 +1371,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   /**
    * The item lane a stream event belongs to: a sub-agent's card, `undefined`
-   * for the main agent, or `null` for a sub-agent frame nothing can place.
-   *
-   * A background agent that cli.js resumes on its own while the session is
-   * idle (a child of its reported) runs with no `toolUseId` on its context, so
-   * Patch E's frames carry no `parent_tool_use_id` — only `agent_id`. Its
-   * completed messages still arrive under the ORIGIN Agent call's id (the
-   * relay reads the agent's sidecar), so the partials must go to that same
-   * owner or `handleSnapshot` never finds their state. A frame with an
-   * `agent_id` is never the main agent's: unplaceable, it is dropped rather
-   * than leaked onto the root as a card that never gets its input or result.
+   * for the main agent, or `null` for a sub-agent frame nothing can place
+   * (see {@link streamEventParent}). An agent_id-only frame goes through the
+   * same origin the agent's snapshots resolve to — `originByTaskId` first,
+   * then `taskIdMap` (which the spawn's tool_result also feeds).
    */
   private streamEventOwner(msg: StreamEventMessage): string | undefined | null {
-    if (msg.parent_tool_use_id) return this.resolveTaskOwner(msg.parent_tool_use_id)
-    const agentId = msg.agent_id
-    if (!agentId) return undefined
-    const toolUseId = this.originByTaskId.get(agentId) ?? this.taskIdMap.get(agentId)
-    if (toolUseId) return this.resolveTaskOwner(toolUseId)
+    const toolUseId = streamEventParent(
+      msg,
+      (agentId) => this.originByTaskId.get(agentId) ?? this.taskIdMap.get(agentId)
+    )
+    if (toolUseId !== null) return this.resolveTaskOwner(toolUseId)
+    const agentId = msg.agent_id ?? ''
     if (!this.unplacedAgentIds.has(agentId)) {
       this.unplacedAgentIds.add(agentId)
       logger.debug(

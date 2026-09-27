@@ -60,6 +60,30 @@ export interface ClaudeItemStreamSink {
   retractToolUses(messageId: string, toolUseIds: string[], owner: Owner): void
 }
 
+/**
+ * The tool_use id a `stream_event` frame belongs under, before any run
+ * aliasing: `undefined` for the main agent, `null` for a sub-agent frame
+ * nothing can place.
+ *
+ * A background agent that cli.js resumes on its own while the session is idle
+ * (a child of its reported) runs with no `toolUseId` on its context, so Patch
+ * E's frames carry no `parent_tool_use_id` — only `agent_id`. Its completed
+ * snapshots still arrive under the ORIGIN Agent call's id (the relay reads the
+ * agent's sidecar), so `originOf` must answer with that origin or the partials
+ * and the snapshots land on different lanes. A frame with an `agent_id` is
+ * never the main agent's: unplaceable, it is dropped rather than leaked onto
+ * the root as a card that never gets its input or result.
+ */
+export function streamEventParent(
+  frame: { parent_tool_use_id?: string | null; agent_id?: unknown },
+  originOf: (agentId: string) => string | undefined
+): string | undefined | null {
+  if (frame.parent_tool_use_id) return frame.parent_tool_use_id
+  const agentId = frame.agent_id
+  if (typeof agentId !== 'string' || !agentId) return undefined
+  return originOf(agentId) ?? null
+}
+
 const ownerKey = (owner: Owner): string => JSON.stringify(owner ?? null)
 const messageKey = (owner: Owner, messageId: string): string =>
   JSON.stringify([owner ?? null, messageId])
