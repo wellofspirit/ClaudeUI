@@ -35,8 +35,7 @@ export const PATCH_REGISTRY = Object.freeze(
     // subagent-A … subagent-G, plus subagent-F2.
     { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
     { name: 'voice-server', marker: markerRe('voice-server') },
-    { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') },
-    { name: 'automode-verdict', marker: markerRe('automode-verdict') }
+    { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') }
     // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
     // answers first), request-usage (stream_event message_start/message_delta
     // carry the same usage), and mcp-tool-refresh, taskstop-notification,
@@ -55,6 +54,8 @@ export const PATCH_REGISTRY = Object.freeze(
     // skip-securestorage removed 2026-09-27 by owner ruling: multi-account
     // hands cli.js the active account's token through CLAUDE_CODE_OAUTH_TOKEN
     // (Claude Desktop's contract), so cli.js no longer reads the account file.
+    // automode-verdict removed 2026-09-28 by owner ruling: auto-mode allow
+    // verdicts are not worth a patch; denials are native (permission_denied).
   ].map((entry) => Object.freeze({ ...entry, apply: applyScript(entry.name) }))
 )
 

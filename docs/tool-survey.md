@@ -36,7 +36,7 @@ Codex reaches seven of fourteen kinds. pi cannot reach web, todo, question or mc
 | Claude   | `system/compact_boundary`                                                | live + JSONL  | separator on reload only; dropped live                                |
 | Claude   | `isCompactSummary` user line                                             | JSONL         | summary attached to the separator                                     |
 | Claude   | `attachment` lines (23 subtypes; 2,628 of 9,173 lines in a local census) | JSONL         | all dropped                                                           |
-| Claude   | `system/permission_denied` + patched `permission_allowed`                | live          | **consumed** — auto-mode verdict / pre-ask denial on the card         |
+| Claude   | `system/permission_denied`                                               | live          | **consumed** — auto-mode block / pre-ask denial on the card           |
 | Claude   | `commands_changed`, `api_retry`, `hook_*`                                | live          | dropped (hooks never requested)                                       |
 | Claude   | `tool_use_summary`                                                       | live          | dropped, not in the SDK union                                         |
 | opencode | `compaction` part                                                        | SSE + history | dropped                                                               |

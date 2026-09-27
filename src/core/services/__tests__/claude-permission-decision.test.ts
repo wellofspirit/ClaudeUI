@@ -58,21 +58,6 @@ describe('readPermissionDecisionFrame', () => {
     expect(readPermissionDecisionFrame(frame(over))).toBeNull()
   })
 
-  // The `automode-verdict` patch's flag: present only when cli.js's decision
-  // carried `noVerdict: true`, so only an exact `true` may set it.
-  it('reads the patch no_verdict flag', () => {
-    expect(readPermissionDecisionFrame(frame({ no_verdict: true }))?.noVerdict).toBe(true)
-  })
-
-  it.each([[false], ['true'], [1], [undefined]])(
-    'ignores a no_verdict that is not exactly true (%p)',
-    (value) => {
-      expect(readPermissionDecisionFrame(frame({ no_verdict: value }))).not.toHaveProperty(
-        'noVerdict'
-      )
-    }
-  )
-
   it('omits decision_reason fields that are absent, rather than emitting empty ones', () => {
     const read = readPermissionDecisionFrame(frame({ decision_reason_type: 'subcommandResults' }))
     expect(read).not.toHaveProperty('decisionReason')
@@ -152,8 +137,7 @@ describe('classifierReviewBlock', () => {
   it('builds the block ClaudeUI own judge builds for pi and opencode', () => {
     expect(
       classifierReviewBlock(
-        read({ decision_reason: '[Git Destructive] Discards uncommitted work.' }),
-        'denied'
+        read({ decision_reason: '[Git Destructive] Discards uncommitted work.' })
       )
     ).toEqual({
       type: 'tool_review',
@@ -167,69 +151,27 @@ describe('classifierReviewBlock', () => {
   })
 
   it('reuses the frame uuid as the review id, so a replay is idempotent', () => {
-    const a = classifierReviewBlock(read({ decision_reason: 'x' }), 'approved')
-    const b = classifierReviewBlock(read({ decision_reason: 'x' }), 'approved')
+    const a = classifierReviewBlock(read({ decision_reason: 'x' }))
+    const b = classifierReviewBlock(read({ decision_reason: 'x' }))
     expect(a.reviewId).toBe(b.reviewId)
   })
 
-  it('still renders an allow that carried no reason at all', () => {
-    expect(classifierReviewBlock(read({}), 'approved')).toEqual({
+  it('still renders a block that carried no reason at all', () => {
+    expect(classifierReviewBlock(read({}))).toEqual({
       type: 'tool_review',
       toolUseId: 'toolu_01',
       reviewId: 'frame-uuid-1',
       reviewer: 'auto-mode',
-      decision: 'approved'
+      decision: 'denied'
     })
   })
 
-  /**
-   * cli.js's allow reasons are fixed constants naming the stage that cleared
-   * the action — they restate the card's own "Auto mode allowed this action"
-   * and say nothing pi or opencode would show either. Dropped at the producer
-   * so the strip does not print the same claim twice (verifier, 2026-09-21).
-   */
-  it.each([
-    ['Allowed by classifier'],
-    ['Allowed by fast classifier'],
-    ['  Allowed by classifier  ']
-  ])('drops the content-free allow reason %p', (reason) => {
-    expect(classifierReviewBlock(read({ decision_reason: reason }), 'approved')).toEqual({
-      type: 'tool_review',
-      toolUseId: 'toolu_01',
-      reviewId: 'frame-uuid-1',
-      reviewer: 'auto-mode',
-      decision: 'approved'
-    })
-  })
-
-  // The drop is by exact string, not "every allow reason": an allow that says
-  // anything else is carrying real information and must survive.
-  it('keeps an allow reason that is not one of the two constants', () => {
-    expect(
-      classifierReviewBlock(
-        read({ decision_reason: 'Allowed because the path is inside cwd.' }),
-        'approved'
-      ).rationale
-    ).toBe('Allowed because the path is inside cwd.')
-  })
-
-  // …and the same constant on a DENIAL is not a constant at all — it would be
-  // the judge's own words, so the drop must not reach that branch.
+  // cli.js's allow-stage constant on a DENIAL is not a constant at all — it
+  // would be the judge's own words, so it is never dropped.
   it('never drops a reason from a denial', () => {
     expect(
-      classifierReviewBlock(read({ decision_reason: 'Allowed by classifier' }), 'denied').rationale
+      classifierReviewBlock(read({ decision_reason: 'Allowed by classifier' })).rationale
     ).toBe('Allowed by classifier')
-  })
-
-  it('carries the flagged-allow warning cli.js delivers with the tool', () => {
-    const block = classifierReviewBlock(
-      read({
-        decision_reason: 'Flagged by the classifier, delivered with its warning: touches prod.'
-      }),
-      'approved'
-    )
-    expect(block.decision).toBe('approved')
-    expect(block.rationale).toContain('touches prod')
   })
 })
 
@@ -281,19 +223,10 @@ describe('classifierReviewBlock — content-free reasons', () => {
   const read = (over: Record<string, unknown>) =>
     readPermissionDecisionFrame(frame({ decision_reason_type: 'classifier', ...over }))!
 
-  it.each([['Not flagged by the server-side auto mode classifier'], ['No reason provided']])(
-    'drops the content-free allow reason %p',
-    (reason) => {
-      const block = classifierReviewBlock(read({ decision_reason: reason }), 'approved')
-      expect(block.decision).toBe('approved')
-      expect(block).not.toHaveProperty('rationale')
-    }
-  )
-
   it.each([['Blocked by classifier'], ['No reason provided'], ['  No reason provided  ']])(
     'drops the content-free deny reason %p but keeps the decision',
     (reason) => {
-      const block = classifierReviewBlock(read({ decision_reason: reason }), 'denied')
+      const block = classifierReviewBlock(read({ decision_reason: reason }))
       expect(block.decision).toBe('denied')
       expect(block).not.toHaveProperty('rationale')
     }
@@ -301,10 +234,7 @@ describe('classifierReviewBlock — content-free reasons', () => {
 
   it('still parses the rule in front of a content-free deny reason', () => {
     expect(
-      classifierReviewBlock(
-        read({ decision_reason: '[Data Exfiltration] No reason provided' }),
-        'denied'
-      )
+      classifierReviewBlock(read({ decision_reason: '[Data Exfiltration] No reason provided' }))
     ).toEqual({
       type: 'tool_review',
       toolUseId: 'toolu_01',
@@ -319,19 +249,17 @@ describe('classifierReviewBlock — content-free reasons', () => {
   it('keeps a deny reason that only resembles a fallback', () => {
     expect(
       classifierReviewBlock(
-        read({ decision_reason: 'Blocked by classifier policy on prod hosts.' }),
-        'denied'
+        read({ decision_reason: 'Blocked by classifier policy on prod hosts.' })
       ).rationale
     ).toBe('Blocked by classifier policy on prod hosts.')
   })
 
-  // The two sets are separate: an allow-only constant is not dropped from a
-  // denial, where it would be the judge's own words.
+  // Only the deny fallbacks are dropped: cli.js's allow-stage constant on a
+  // denial would be the judge's own words.
   it('does not apply the allow-only constants to a denial', () => {
     expect(
       classifierReviewBlock(
-        read({ decision_reason: 'Not flagged by the server-side auto mode classifier' }),
-        'denied'
+        read({ decision_reason: 'Not flagged by the server-side auto mode classifier' })
       ).rationale
     ).toBe('Not flagged by the server-side auto mode classifier')
   })
@@ -347,52 +275,35 @@ describe('permissionDecisionBlock', () => {
   const classifier = (over: Record<string, unknown> = {}) =>
     read({ decision_reason_type: 'classifier', ...over })
 
-  it('classifier + allowed → an approved review', () => {
-    expect(
-      permissionDecisionBlock(classifier({ decision_reason: 'Reads only.' }), 'allowed')
-    ).toMatchObject({ type: 'tool_review', decision: 'approved', rationale: 'Reads only.' })
-  })
-
-  // Defensive: the patch gates on cli.js's classifierAllowed and never emits
-  // one. An allow nobody judged is just the tool running.
-  it('classifier + allowed with no verdict → nothing', () => {
-    expect(
-      permissionDecisionBlock(
-        classifier({
-          no_verdict: true,
-          decision_reason: 'Delivered with a note: the classifier could not review it'
-        }),
-        'allowed'
-      )
-    ).toBeNull()
-  })
-
   it('classifier + denied → a denied review', () => {
     expect(
-      permissionDecisionBlock(classifier({ decision_reason: '[Git Destructive] nope' }), 'denied')
+      permissionDecisionBlock(classifier({ decision_reason: '[Git Destructive] nope' }))
     ).toMatchObject({ type: 'tool_review', decision: 'denied', rule: 'Git Destructive' })
   })
 
-  // The refusal is real but nobody judged it: a denial, never a verdict.
-  it('classifier + denied with no verdict → an autoModeNoVerdict denial carrying the reason', () => {
+  // A `no_verdict` key on the wire is ignored: only a retired patch wrote it,
+  // so it must not route a block by itself (the reason here matches none of
+  // the native no-verdict signals).
+  it('ignores a no_verdict key on a classifier denial', () => {
     const reason = 'Auto mode classifier transcript exceeded context window'
     expect(
-      permissionDecisionBlock(classifier({ no_verdict: true, decision_reason: reason }), 'denied')
+      permissionDecisionBlock(classifier({ no_verdict: true, decision_reason: reason }))
     ).toEqual({
-      type: 'permission_denial',
+      type: 'tool_review',
       toolUseId: 'toolu_01',
-      denialId: 'frame-uuid-1',
-      source: 'autoModeNoVerdict',
-      reason
+      reviewId: 'frame-uuid-1',
+      reviewer: 'auto-mode',
+      decision: 'denied',
+      rationale: reason
     })
   })
 
-  // cli.js sends "Classifier unavailable" with NO noVerdict flag and tells it
-  // apart by the exact string itself, so the reason alone must route it.
+  // cli.js tells "Classifier unavailable" apart by the exact string itself, so
+  // the reason alone must route it.
   it.each([['Classifier unavailable'], ['  Classifier unavailable  ']])(
     'classifier + denied %p (no flag) → an autoModeNoVerdict denial',
     (reason) => {
-      expect(permissionDecisionBlock(classifier({ decision_reason: reason }), 'denied')).toEqual({
+      expect(permissionDecisionBlock(classifier({ decision_reason: reason }))).toEqual({
         type: 'permission_denial',
         toolUseId: 'toolu_01',
         denialId: 'frame-uuid-1',
@@ -402,23 +313,40 @@ describe('permissionDecisionBlock', () => {
     }
   )
 
+  // cli.js 2.1.280 sends this code on a classifier denial only for the
+  // transcript-overflow fallback (`qoe`), so the code alone routes it.
+  it('classifier + denied with the transcript-too-long code → an autoModeNoVerdict denial', () => {
+    expect(
+      permissionDecisionBlock(
+        classifier({
+          decision_reason_code: 'classifier_transcript_too_long',
+          decision_reason: 'Auto mode classifier transcript exceeded context window'
+        })
+      )
+    ).toMatchObject({ type: 'permission_denial', source: 'autoModeNoVerdict' })
+  })
+
+  it('classifier + denied with the no-verdict streak reason → an autoModeNoVerdict denial', () => {
+    expect(
+      permissionDecisionBlock(
+        classifier({
+          decision_reason:
+            'Auto mode unavailable — stopped after repeated responses with no safety verdict'
+        })
+      )
+    ).toMatchObject({ type: 'permission_denial', source: 'autoModeNoVerdict' })
+  })
+
   it('matches "Classifier unavailable" exactly, not as a prefix', () => {
     expect(
       permissionDecisionBlock(
-        classifier({ decision_reason: 'Classifier unavailable for this tool, judged on text.' }),
-        'denied'
+        classifier({ decision_reason: 'Classifier unavailable for this tool, judged on text.' })
       )?.type
     ).toBe('tool_review')
   })
 
-  it('non-classifier + allowed → nothing', () => {
-    expect(permissionDecisionBlock(read({ decision_reason_type: 'rule' }), 'allowed')).toBeNull()
-  })
-
   it('non-classifier + denied → a denial naming its source', () => {
-    expect(
-      permissionDecisionBlock(read({ decision_reason_type: 'subcommandResults' }), 'denied')
-    ).toEqual({
+    expect(permissionDecisionBlock(read({ decision_reason_type: 'subcommandResults' }))).toEqual({
       type: 'permission_denial',
       toolUseId: 'toolu_01',
       denialId: 'frame-uuid-1',
@@ -430,7 +358,7 @@ describe('permissionDecisionBlock', () => {
   // as its reason type is an unknown wire value like any other.
   it('never accepts autoModeNoVerdict from the wire', () => {
     expect(
-      permissionDecisionBlock(read({ decision_reason_type: 'autoModeNoVerdict' }), 'denied')
+      permissionDecisionBlock(read({ decision_reason_type: 'autoModeNoVerdict' }))
     ).toMatchObject({ type: 'permission_denial', source: 'other' })
   })
 })

@@ -45,7 +45,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `commands_changed`        | Mid-session slash-command list change            | stream-json module (§4.23)       |
 | `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
 | `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
-| `permission_allowed`      | Patch `automode-verdict`                         | Control channel (§4.25)          |
+| `permission_allowed`      | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
 | `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
 
@@ -739,7 +739,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`thinking_tokens`** — optional spinner/pill progress; not authoritative token counts.
 - **`commands_changed`** — REPLACE the cached slash-command list with the payload (a re-fetch returns the stale init list).
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
-- **`permission_denied`** / **`permission_allowed`** — render the decision on the tool call instead of only showing an `is_error` tool_result. ClaudeUI does: a `classifier` decision becomes a `tool_review` block (the same one pi and opencode produce), anything else becomes a `permission_denial` block. See `core/services/claude-permission-decision.ts`.
+- **`permission_denied`** — render the decision on the tool call instead of only showing an `is_error` tool_result. ClaudeUI does: a `classifier` decision becomes a `tool_review` block (the same one pi and opencode produce), except a recognisable no-verdict fallback (below), which becomes a `permission_denial` block like anything else. See `core/services/claude-permission-decision.ts`.
 - **`mirror_error`** — log; surfaces transcript-mirror data loss.
 - **`dev_intent`** — advisory only; safe to ignore. ClaudeUI does not handle it (unknown subtypes fall through `handleSystemMessage`'s if-chain). See §4.28.
 
@@ -891,26 +891,25 @@ Emitted when an MCP server confirms that a URL-mode elicitation is complete.
 
 ---
 
-## 4.25 `permission_denied` / `permission_allowed`
+## 4.25 `permission_denied`
 
 `permission_denied` is emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
 
-`permission_allowed` is the symmetric frame for an **auto-mode classifier allow** and is **not upstream** — it is added by the `automode-verdict` patch. Stock cli.js emits nothing when the classifier clears an action, which left Claude the only engine ClaudeUI runs that showed a judge's verdict on a block but not on an allow. Same fields minus `message` (an allow has no rejection text), and only emitted when the decision carries cli.js's own `decisionReason.classifierAllowed === true`. The auto-mode permission check stamps that flag only on a `classifier` allow where the classifier ran and reached a verdict (`noVerdict !== true`, `classifierRan !== false`). A rule/mode/fast-path allow, a no-verdict allow and the "no classifier-relevant input" allow never carry it and are deliberately silent, as is a classifier block delivered as an allow under a tool's `onBlock: "flag"` policy.
+No frame reports an **auto-mode classifier allow**: the emit site is gated on `behavior === "deny"`, so Claude shows a judge's verdict on a block and nothing on an allow. Internally cli.js stamps `decisionReason.classifierAllowed === true` on a `classifier` allow where the classifier ran and reached a verdict (`noVerdict !== true`, `classifierRan !== false`), but that flag never reaches the wire. ClaudeUI's `automode-verdict` patch emitted the allow half as `system/permission_allowed` until 2026-09-28, when the owner ruled allow verdicts not worth a patch; nothing on the stock wire carries that subtype.
 
-**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area). On 2.1.280 the emitter is the `emitPermissionDenied(n,e,s,r){…this.outbound.enqueue({…})}` method; see `patch/automode-verdict/README.md` for how to find it.
+**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area). On 2.1.280 the emitter is the `emitPermissionDenied(n,e,s,r){…this.outbound.enqueue({…})}` method on the control-channel class (see "Two emitters" below).
 
 ```jsonc
 {
   "type": "system",
-  "subtype": "permission_denied", // or "permission_allowed" (patched)
+  "subtype": "permission_denied",
   "tool_name": "Bash",
   "tool_use_id": "toolu_...",
   "agent_id": "...", // optional; subagent ID when decided inside a subagent
   "decision_reason_type": "rule", // optional; 'classifier'|'asyncAgent'|'mode'|'rule'|…
   "decision_reason_code": "...", // optional, 2.1.280+; machine code, see below
   "decision_reason": "...", // optional human-readable reason
-  "message": "...", // the rejection message returned to the model — DENIED ONLY
-  "no_verdict": true, // PATCHED; present only when the classifier reached no verdict
+  "message": "...", // the rejection message returned to the model
   "session_id": "...",
   "uuid": "..."
 }
@@ -932,7 +931,7 @@ Upstream added a machine-readable code beside `decision_reason`. It is set for a
 
 For `subcommandResults` it is taken from the subcommands, with `outside_reads_blocked` taking precedence.
 
-### `no_verdict` (patched) and the non-verdict classifier outcomes
+### The non-verdict classifier outcomes
 
 `decision_reason_type: "classifier"` does **not** always mean the classifier judged the action. cli.js (2.1.268 and 2.1.280) builds all of the following with `type: "classifier"`:
 
@@ -946,7 +945,7 @@ For `subcommandResults` it is taken from the subcommands, with `outside_reads_bl
 | allow    | `true`      | `"Delivered with a warning: the classifier request was refused by the safety safeguard"` / `"Delivered with a note: the classifier could not review it"` |
 | allow    | not set     | `"Tool declares no classifier-relevant input"` (the classifier never ran; its `classifierRan: false` is stripped before the decision leaves)             |
 
-Stock frames carry no `noVerdict`, so a host cannot tell "the judge blocked this" from "the judge was never reached". The `automode-verdict` patch adds `no_verdict: true` to **both** subtypes when `decisionReason.noVerdict === true` and omits the key otherwise. It never appears on `permission_allowed` in practice: the patch emits that frame only when `classifierAllowed` is set, so **neither allow row above is ever emitted**, with or without a flag. That leaves one row a consumer must recognise by its exact `decision_reason` string: the `"Classifier unavailable"` **deny**.
+The frame carries none of `noVerdict` / `classifierRan`, and `decision_reason` for a `classifier` decision is `decisionReason.reason` verbatim, so a host cannot tell "the judge blocked this" from "the judge was never reached" from the flags alone. The allow rows are never on the wire (no allow frame exists). Three deny rows are recognisable natively: `"Classifier unavailable"` and the no-verdict streak `"Auto mode unavailable — stopped after repeated responses with no safety verdict"` by exact reason, and the transcript overflow by `decision_reason_code: "classifier_transcript_too_long"` (2.1.280+, which cli.js sends on a `classifier` deny only for that fallback). ClaudeUI routes those three to a `permission_denial` with source `autoModeNoVerdict`; the rest (a safeguard refusal, an empty classifier-only action) have free-form reasons and render as a verdict carrying that reason.
 
 ### Two emitters — only one is on the wire (probed 2.1.268, 2026-09-21)
 
@@ -959,14 +958,14 @@ Verify by instrumenting both with `process.stderr.write(...)` before assuming.
 
 ### `decision_reason` is not symmetric between allow and deny
 
-- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it), `"Allowed by classifier"` (stage 2 did), or `"Not flagged by the server-side auto mode classifier"`. Useful — they say which stage decided — but they are not model prose.
+- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it), `"Allowed by classifier"` (stage 2 did), or `"Not flagged by the server-side auto mode classifier"`. They say which stage decided but are not model prose, and no frame carries them.
 - **Deny** reasons ARE model text, following the stage-2 grammar (§14 §2): `[Exact Rule Name]` optionally followed by one sentence. Observed live: `"[Create Unsafe Agents]"` with no sentence at all. A consumer must handle bracket-only, bracket-plus-sentence, and no-bracket (`fast` mode never asks for one). The content-free fallbacks are `"Blocked by classifier"` (category mode with no rule) and `"No reason provided"` (the model gave no `<reason>`).
 
 `cli.js`'s own rejection `message` restates the reason inline: _"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Create Unsafe Agents]. …"_ — so it is also the `tool_result` body, and a consumer that renders both will say the same thing twice.
 
-### Neither frame is persisted
+### The frame is not persisted
 
-Both subtypes are excluded from the "worth keeping" predicate that gates the accumulated message list, the `--output-format json` last-message pick, and the transcript mirror. They are live-only: a reopened session shows no verdicts, on any engine (ClaudeUI's own `tool_review` blocks are live-only too, so this is parity rather than a gap).
+`permission_denied` is excluded from the "worth keeping" predicate that gates the accumulated message list, the `--output-format json` last-message pick, and the transcript mirror. It is live-only: a reopened session shows no verdicts, on any engine (ClaudeUI's own `tool_review` blocks are live-only too, so this is parity rather than a gap).
 
 ---
 

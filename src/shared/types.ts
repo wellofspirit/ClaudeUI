@@ -97,11 +97,10 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
  * judges that answer the same question: ClaudeUI's own classifier on opencode
  * and pi, and cli.js's native one on Claude, whose verdict reaches us as
- * `system/permission_denied` (blocks) and, behind the `automode-verdict` patch,
- * `system/permission_allowed` (allows). A pre-ask denial that was NOT a judge's
- * call — a deny rule, a hook, the static safety checker — is a
- * {@link PermissionDenialBlock} instead, because it carries no verdict that
- * could have gone the other way.
+ * `system/permission_denied` — blocks only, since cli.js emits no frame for an
+ * allow. A pre-ask denial that was NOT a judge's call — a deny rule, a hook,
+ * the static safety checker — is a {@link PermissionDenialBlock} instead,
+ * because it carries no verdict that could have gone the other way.
  *
  * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
  * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
@@ -132,10 +131,10 @@ export type ToolReviewBlock = {
  *
  * One member is NOT cli.js's: `autoModeNoVerdict` is derived by the producer
  * (`core/services/claude-permission-decision.ts`) from a `classifier` denial
- * where the classifier reached no verdict — it was unavailable, the transcript
- * overflowed its context, a safeguard refused it. The action was refused, but
- * nobody judged it, so it is a denial rather than a review. It is never
- * accepted from the wire.
+ * where the classifier reached no verdict and the frame says so natively: it was
+ * unavailable, it gave no verdict repeatedly, or the transcript overflowed its
+ * context. The action was refused, but nobody judged it, so it is a denial
+ * rather than a review. It is never accepted from the wire.
  */
 export type PermissionDenialSource =
   | 'autoModeNoVerdict'

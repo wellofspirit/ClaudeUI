@@ -107,7 +107,6 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'model_refusal_fallback'
     | 'model_fallback'
     | 'permission_denied'
-    | 'permission_allowed'
     | string
   permissionMode?: string
   /** init-only fields */
@@ -140,8 +139,7 @@ export interface SystemMessage extends BaseSDKMessage {
   /** task_progress-only: the tool the task ran most recently (§4.7). */
   last_tool_name?: string
   /**
-   * `permission_denied` (stock) / `permission_allowed` (the `automode-verdict`
-   * patch) — a tool call decided before any prompt was raised
+   * `permission_denied` — a tool call refused before any prompt was raised
    * (docs/protocol-cc/04-system-subtypes.md §4.25). `tool_use_id` above binds
    * the decision to its call.
    */

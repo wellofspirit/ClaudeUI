@@ -1,6 +1,6 @@
 ---
 name: patch-test-harness
-description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the four patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, automode-verdict.
+description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the three patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming.
 ---
 
 # Patch Test Harness
@@ -9,16 +9,15 @@ Write behavioral tests that verify cli.js patches work correctly by launching re
 
 ## The patch set
 
-The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Four patches today:
+The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Three patches today:
 
 | Patch                   | Test                                                               |
 | ----------------------- | ------------------------------------------------------------------ |
 | `subagent-streaming`    | `patch/subagent-streaming/test.mjs` — live                         |
 | `bash-output-streaming` | `patch/bash-output-streaming/test.mjs` — live                      |
-| `automode-verdict`      | `patch/automode-verdict/test.mjs` — live                           |
 | `voice-server`          | none; its apply script's own checks are the only guard (see below) |
 
-Nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078), and `subprocess-proxy-strip` and `skip-securestorage` were removed on 2026-09-27; the list is in `docs/protocol-cc/01-transport.md` §1.12. Their tests went with them.
+Nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078), `subprocess-proxy-strip` and `skip-securestorage` were removed on 2026-09-27, and `automode-verdict` on 2026-09-28; the list is in `docs/protocol-cc/01-transport.md` §1.12. Their tests went with them.
 
 ## Test Infrastructure
 

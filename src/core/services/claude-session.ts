@@ -29,11 +29,7 @@ import { extractToolResultContent } from './tool-result-content'
 import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
-import {
-  isClassifierDecision,
-  permissionDecisionBlock,
-  readPermissionDecisionFrame
-} from './claude-permission-decision'
+import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -1430,7 +1426,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleModelFallback(msg)
       return
     }
-    if (msg.subtype === 'permission_denied' || msg.subtype === 'permission_allowed') {
+    if (msg.subtype === 'permission_denied') {
       this.handlePermissionDecision(msg)
       return
     }
@@ -1555,20 +1551,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   /**
-   * A tool call decided BEFORE any prompt was raised — cli.js's
-   * `permission_denied` (stock) and `permission_allowed` (the `automode-verdict`
-   * patch). Both are documented in docs/protocol-cc/04-system-subtypes.md §4.25.
+   * A tool call refused BEFORE any prompt was raised — cli.js's
+   * `permission_denied` (docs/protocol-cc/04-system-subtypes.md §4.25).
    *
    * Claude is the one engine whose auto-mode judge we do not run ourselves: the
-   * two-stage classifier lives inside cli.js, so these frames are the ONLY way
-   * its verdict reaches a card. Without them an auto-mode block showed up as a
-   * bare `is_error` tool_result with no reason and no reviewer — where pi,
-   * opencode and Codex all render a verdict — and an auto-mode allow showed
-   * nothing at all.
+   * two-stage classifier lives inside cli.js, so this frame is the ONLY way its
+   * verdict reaches a card. Without it an auto-mode block showed up as a bare
+   * `is_error` tool_result with no reason and no reviewer — where pi, opencode
+   * and Codex all render a verdict. cli.js emits no frame for an allow.
    *
-   * Which block a frame becomes — a verdict, a denial, or nothing — is decided
-   * entirely by `permissionDecisionBlock` in `claude-permission-decision.ts`,
-   * which owns the wire contract; this method only narrows, logs and sends.
+   * Which block a frame becomes — a verdict or a denial — is decided entirely by
+   * `permissionDecisionBlock` in `claude-permission-decision.ts`, which owns the
+   * wire contract; this method only narrows, logs and sends.
    *
    * Frames from INSIDE a subagent carry `agent_id` and go out on the same two
    * channels: the reducer binds by `tool_use_id`, searching the subagent
@@ -1594,30 +1588,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       )
     }
 
-    const denied = msg.subtype === 'permission_denied'
-    const block = permissionDecisionBlock(frame, denied ? 'denied' : 'allowed')
-    if (!block) {
-      // `permission_allowed` only ever carries a classifier verdict — the patch
-      // emits nothing for a rule/mode allow, because an allow nobody judged is
-      // just the tool running. A non-classifier one is a wire contract change.
-      if (!isClassifierDecision(frame)) {
-        logger.warn(
-          'ClaudeSession',
-          `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
-        )
-      } else {
-        logger.debug(
-          'ClaudeSession',
-          `permission_allowed for ${frame.toolUseId} with no verdict — nothing to render`
-        )
-      }
-      return
-    }
-
+    const block = permissionDecisionBlock(frame)
     if (block.type === 'tool_review') {
       logger.info(
         'ClaudeSession',
-        `auto-mode ${denied ? 'BLOCK' : 'allow'}${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
+        `auto-mode BLOCK${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
       )
       this.send('session:tool-review', { toolUseId: frame.toolUseId, review: block })
       return

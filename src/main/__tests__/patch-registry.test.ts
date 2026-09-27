@@ -40,12 +40,11 @@ describe('patchesPresent', () => {
   it('names the patches whose markers occur, in registry order', () => {
     const src =
       'a();/*PATCHED:voice-server*/b();/*PATCHED:subagent-F2*/c();' +
-      '/*PATCHED:bash-early-poll*/d();/*PATCHED:automode-verdict*/'
+      '/*PATCHED:bash-early-poll*/d();'
     expect(patchesPresent(src)).toEqual([
       'subagent-streaming',
       'voice-server',
-      'bash-output-streaming',
-      'automode-verdict'
+      'bash-output-streaming'
     ])
   })
 
@@ -59,7 +58,7 @@ describe('patchesPresent', () => {
   })
 
   it('does not let one patch claim a sibling family with a shared prefix', () => {
-    expect(patchesPresent('/*PATCHED:automode-verdict*/')).toEqual(['automode-verdict'])
+    expect(patchesPresent('/*PATCHED:bash-early-poll*/')).toEqual(['bash-output-streaming'])
     expect(patchesPresent('/*PATCHED:subagent-A*/')).toEqual(['subagent-streaming'])
   })
 
