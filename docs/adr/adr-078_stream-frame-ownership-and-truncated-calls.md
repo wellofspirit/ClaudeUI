@@ -1,6 +1,6 @@
 # ADR-078: Every Claude stream frame has one owner, and a call that never ran is taken back
 
-**Status:** Accepted (2026-09-27). Built on `pre-release`: §1 in `f24cc1dd` (ClaudeSession + Patch E), `6911024a` (dispatcher) and `fbbecd2b` (restart, pinned by test); §2 in `7bef7f2b`; §3 in `d22610dc`.
+**Status:** Accepted (2026-09-27). Built on `pre-release`: §1 in `f24cc1dd` (ClaudeSession + Patch E), `6911024a` (dispatcher) and `fbbecd2b` (restart, pinned by test); §2 in `7bef7f2b`; §3 in `d22610dc`. Both gaps the first version left open are closed: `5a448a0e` and `98280889`.
 **Amends:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) §1. Its table of which id each run-2 signal carries gains a third case: an agent that resumes **itself**. §5's identity seed is now also what places such a run's partials after a restart.
 **Relates to:** [ADR-055](adr-055_volatile-stream-lane.md) (item seals, which the retraction in §3 now precedes), [ADR-033](adr-033_cross-engine-dispatch.md) (the dispatcher's Claude-target lane, which follows §1 and §3 too), [ADR-006](adr-006_rebundle-bun-binary.md) (the patch pipeline Patch E lives in), [ADR-076](adr-076_claude-automode-verdict-on-the-wire.md) (whose verdict badges made the §1 leak visible, and did not cause it), `docs/protocol-cc/05-stream-events.md` §5.9 / §5.11
 
@@ -97,13 +97,13 @@ started, and the next prompt was queued behind a turn that did not exist.
 - A session whose only activity is a background agent now reads idle everywhere the main-turn flag
   is read, the sidebar spinner included. If that spinner is wanted, it belongs on the roster
   (`activeTasks`), not on the main turn.
-- Two gaps stay open, both outside this ADR's rule. First, the dispatcher's Claude lane has no run
-  aliasing, so a SendMessage-resumed run inside a dispatched target still streams under the
-  SendMessage id while its snapshots use the origin (ADR-073's split, which `ClaudeSession` closes
-  with `runAliasByToolUseId`). Second, a nested agent spawned by a previous process and then resumed
-  by SendMessage after a restart is not in the transcript seed, because its spawn lives in the
-  sub-agent's transcript. Its new `task_started` then makes the SendMessage id its origin. A
-  `.meta.json` sidecar lookup in `handleTaskStarted` for an unknown agent would close the second.
+- Two neighbouring gaps are closed. The dispatcher's Claude lane now aliases a SendMessage-resumed
+  run onto its origin, learned from a second `task_started` for the same task (`5a448a0e`, mirroring
+  `ClaudeSession`'s `runAliasByToolUseId`). In a session resumed from a transcript, an agent the
+  seed does not know, such as a nested agent whose spawn lives in a sub-agent's transcript, gets its
+  origin from its `.meta.json` sidecar (`readAgentSidecar`, `98280889`). The lookup happens at most
+  once per agent, and fresh sessions never read the disk. A run resumed this way reports
+  `runIndex` 2 even if the agent had earlier resumes: nothing records those.
 - Reload from JSONL needs no change: cli.js never persists a truncated call, and a resumed run's
   messages are already under the origin.
 

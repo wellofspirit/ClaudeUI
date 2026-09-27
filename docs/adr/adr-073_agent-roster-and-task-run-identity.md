@@ -162,6 +162,14 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   and the reducer **merges** rather than replaces, so a usage tick cannot blank the clock. A resumed
   run's `tool_progress` is reported against the SendMessage call, so its `tool_name` is withheld and
   the origin's is kept.
+  _Correction (2026-09-27, `a3c5d1c7`):_ in stock local use `tool_progress` carries **no clock for an
+  agent**. Its producers in 2.1.280 are Bash/PowerShell progress (only under `CLAUDE_CODE_REMOTE`),
+  REPL, API-retry frames (`elapsed_time_seconds: 0`), and a 30 s main-agent heartbeat keyed
+  `<id>-heartbeat-N`, which matches no card. A usage-only `task_progress` then left the reducer's
+  default `0`, and a running Task card read "0s" for its whole run. `session:task-started` now
+  carries the run's `startedAt`, stamped by the emitter; a re-reported start keeps it and a resume
+  starts a new one. The card and the Tasks panel count live from it and show the run's duration once
+  it ends.
 - The legacy user-message `<task-notification>` XML path, kept for pre-2.1.241 binaries, resolves
   through the origin exactly as the system-message path does.
 - `deriveTaskState` settles a **foreground** task on a terminal notification too (ADR-040 calls it
