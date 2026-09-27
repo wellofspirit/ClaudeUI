@@ -3,13 +3,19 @@
 **Status:** Accepted (2026-09-25). Owner ruling: chat must work on any Claude Code harness;
 streaming (subagent token deltas, live Bash output) and voice light up only when the harness
 carries the patch; voice is disabled on an unpatched harness.
+**Amended 2026-09-27:** `subprocess-proxy-strip` removed (owner ruling: the in-app proxy reaches
+cli.js's children, as a shell-set proxy does on the unpatched binary); `skip-securestorage`
+removed by [ADR-079](adr-079_host-owned-claude-credentials.md) (multi-account credentials are
+host-owned); `automode-verdict` ([ADR-076](adr-076_claude-automode-verdict-on-the-wire.md), merged
+from pre-release) joined the registry. The set is now `subagent-streaming`, `voice-server`,
+`bash-output-streaming`, `automode-verdict`.
 **Relates to:** [ADR-006](adr-006_rebundle-bun-binary.md) (the rebundled `bun-claude`),
 [ADR-030](adr-030_capability-honesty.md) (a capability is true only when the full path works),
 [ADR-037](adr-037_engine-fork-patch-policy.md) (patch policy and per-bump verification),
 [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) / [ADR-073](adr-073_agent-roster-and-task-run-identity.md)
 (task lifecycle — both amended below), [ADR-053](adr-053_queue-item-identity-cc-parity.md) (queue
-identity — amended below), [ADR-015](adr-015_multi-account-file-credentials.md) (why
-`skip-securestorage` stays).
+identity — amended below), [ADR-015](adr-015_multi-account-file-credentials.md) /
+[ADR-079](adr-079_host-owned-claude-credentials.md) (`skip-securestorage`, kept here, removed there).
 
 ## Context
 
@@ -37,6 +43,7 @@ what each patch was still worth:
 | `voice-server`                                                               | No upstream equivalent; the control request is rejected.                                                                                                                                                                                                                                      |
 | `subprocess-proxy-strip`                                                     | Without it the in-app proxy — credentials included — reaches every Bash/MCP/LSP child (`env` puts them in the transcript). `CLAUDE_ENV_FILE` covers Bash only. The patch also had a regression of its own: it stripped an INHERITED env proxy from children whenever no in-app proxy was set. |
 | `skip-securestorage`                                                         | Windows: no effect while `tengu_windows_credman` is off. macOS 2.1.280 (source): the Keychain is primary and the first successful write deletes the per-account `.credentials.json` the app reads; multi-account breaks. Linux: none.                                                         |
+| `automode-verdict`                                                           | **Joined 2026-09-27 (ADR-076).** Emits `system/permission_allowed` for an auto-mode classifier ALLOW; upstream emits only the denial half.                                                                                                                                                    |
 
 Raw wire logs and the real-app screenshots are in the 2026-09-24 session's scratchpad; the
 decisive lines are cited in `docs/protocol-cc/` where each surface is documented.
@@ -103,20 +110,21 @@ split will use; the user-facing chooser and download channel are a later ADR.
 
 ### 5. Five patches stay, each for a reason the owner ratified
 
-| Patch                    | Why it stays                                                                                                                                                                                                                                     |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `subagent-streaming`     | Token-level streaming inside subagent cards; upstream has none.                                                                                                                                                                                  |
-| `bash-output-streaming`  | Live Bash output; upstream has none on the wire, and a file tail is fragile.                                                                                                                                                                     |
-| `voice-server`           | Voice input; the only terms-of-service-safe route is through cli.js's own voice pipeline.                                                                                                                                                        |
-| `subprocess-proxy-strip` | Keeps a credential-bearing in-app proxy out of child processes. Its inherited-proxy regression is fixed: with no in-app proxy the marker is set and children keep the user's own proxy, as the unpatched binary does.                            |
-| `skip-securestorage`     | Per-account plaintext credential files (ADR-015) on macOS, where the Keychain is otherwise primary and deletes the file on first write. A host-owned token path exists upstream (`oauth_token_refresh`) and is a spike, not a decision, for now. |
+| Patch                    | Why it stays                                                                                                                                                                                                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subagent-streaming`     | Token-level streaming inside subagent cards; upstream has none.                                                                                                                                                                                                                    |
+| `bash-output-streaming`  | Live Bash output; upstream has none on the wire, and a file tail is fragile.                                                                                                                                                                                                       |
+| `voice-server`           | Voice input; the only terms-of-service-safe route is through cli.js's own voice pipeline.                                                                                                                                                                                          |
+| `subprocess-proxy-strip` | **Removed 2026-09-27 (owner ruling).** Keeps a credential-bearing in-app proxy out of child processes. Its inherited-proxy regression is fixed: with no in-app proxy the marker is set and children keep the user's own proxy, as the unpatched binary does.                       |
+| `skip-securestorage`     | **Removed 2026-09-27 (ADR-079).** Per-account plaintext credential files (ADR-015) on macOS, where the Keychain is otherwise primary and deletes the file on first write. A host-owned token path exists upstream (`oauth_token_refresh`) and is a spike, not a decision, for now. |
 
 ### 6. What a user on an unpatched harness gets
 
 Chat, tools, approvals, MCP, plugins, queueing and take-back, background tasks, the usage meter —
 all working through native surfaces. Foreground subagents show complete messages instead of a
 token stream; Bash output appears when the command finishes; the mic is hidden and voice verbs
-refuse with a message naming the missing patch.
+refuse with a message naming the missing patch. Since 2026-09-27 also: multi-account works on it
+(ADR-079), and auto-mode ALLOW verdicts are absent (`automode-verdict`); denials still show.
 
 ## Consequences
 
