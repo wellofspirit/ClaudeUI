@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Queue of record on the REAL ClaudeSession (ADR-053 / SyncCore phase 3),
- * over cli.js's native uuid-keyed queue surface (ADR-077).
+ * over cli.js's native uuid-keyed queue surface (ADR-078).
  *
  * Every user frame carries a client `uuid` — a queued item's `itemId` — and
  * cli.js names the message back by it:

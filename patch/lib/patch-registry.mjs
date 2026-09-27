@@ -37,7 +37,8 @@ export const PATCH_REGISTRY = Object.freeze(
     { name: 'voice-server', marker: markerRe('voice-server') },
     { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') },
     { name: 'subprocess-proxy-strip', marker: markerRe('subprocess-proxy-strip') },
-    { name: 'skip-securestorage', marker: markerRe('skip-securestorage') }
+    { name: 'skip-securestorage', marker: markerRe('skip-securestorage') },
+    { name: 'automode-verdict', marker: markerRe('automode-verdict') }
     // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
     // answers first), request-usage (stream_event message_start/message_delta
     // carry the same usage), and mcp-tool-refresh, taskstop-notification,

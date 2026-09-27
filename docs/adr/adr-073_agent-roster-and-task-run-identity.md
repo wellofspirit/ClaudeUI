@@ -87,7 +87,7 @@ so the renderer's tool_use-id keying is untouched everywhere.
   because `task_updated` is a patch diff that fires on transitions this code does not enumerate, and
   a non-terminal patch arriving after a notification (or out of order) would strand a finished card
   as running. The authoritative signal is handled; the speculative one is not. _Amended by
-  [ADR-077](adr-077_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the one
+  [ADR-078](adr-078_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the one
   non-terminal patch that does re-arm is `is_backgrounded: true` — cli.js's own report that a
   foreground task moved to the background — re-sent as the same run (same `runIndex`) with
   `isBackgrounded: true`, and only while the task is still live._

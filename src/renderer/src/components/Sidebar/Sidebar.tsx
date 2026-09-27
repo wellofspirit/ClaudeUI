@@ -13,6 +13,7 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
+import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
@@ -170,11 +171,16 @@ export function Sidebar({
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
   const hasAnyHidden = hiddenSessionIds.length > 0 || hiddenProjectKeys.length > 0
 
-  // Find the projectKey for a session from directories
+  // Find the projectKey for a session from directories. The SESSION's key, not
+  // its group's: a transcript cli.js relocated into a worktree's project dir is
+  // listed under its home group, so the group key names a dir the file is not in
+  // — and `writeCustomTitle` appends, so it would CREATE a stray one-line
+  // transcript there.
   const findProjectKey = useCallback(
     (sessionId: string): string | undefined => {
       for (const group of directories) {
-        if (group.sessions.some((s) => s.sessionId === sessionId)) return group.projectKey
+        const info = group.sessions.find((s) => s.sessionId === sessionId)
+        if (info) return info.projectKey
       }
       return undefined
     },
@@ -632,15 +638,22 @@ export function Sidebar({
     })
   }, [])
 
-  const handleDeleteProjectRequest = useCallback((group: DirectoryGroup) => {
-    if (!group.projectKey) return
-    setDeleteTarget({
-      kind: 'project',
-      projectKey: group.projectKey,
-      folderName: group.folderName,
-      sessionCount: group.sessions.length
-    })
-  }, [])
+  const handleDeleteProjectRequest = useCallback(
+    (group: DirectoryGroup) => {
+      if (!group.projectKey) return
+      setDeleteTarget({
+        kind: 'project',
+        projectKey: group.projectKey,
+        folderName: group.folderName,
+        sessionCount: group.sessions.length,
+        // From the LISTING (`directories`), not the rendered group: that is what
+        // main plans from when the delete runs, and the in-memory rows merged
+        // into the rendered group have no file to name yet.
+        claudeFiles: planClaudeProjectDelete(directories, group.projectKey)
+      })
+    },
+    [directories]
+  )
 
   /**
    * What deleting the pending CODEX target would actually remove.

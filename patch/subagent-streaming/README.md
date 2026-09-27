@@ -1946,7 +1946,7 @@ handles all content types. No change needed to `et()`.
   every spawn) forwards a foreground subagent's complete text and thinking
   messages on an unpatched binary too. Patch A already removes the same
   filter, so on a patched binary nothing arrives twice
-  (`docs/protocol-cc/02-cli-flags.md`, ADR-077).
+  (`docs/protocol-cc/02-cli-flags.md`, ADR-078).
 
 ## Syntax & scope pitfalls
 

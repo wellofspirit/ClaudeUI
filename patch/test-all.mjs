@@ -18,7 +18,8 @@ const tests = [
   { name: 'subagent-streaming', script: resolve(__dirname, 'subagent-streaming/test.mjs') },
   { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') },
   { name: 'subprocess-proxy-strip', script: resolve(__dirname, 'subprocess-proxy-strip/test.mjs') },
-  { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') }
+  { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') },
+  { name: 'automode-verdict', script: resolve(__dirname, 'automode-verdict/test.mjs') }
 ]
 
 // Tests are independent processes (separate CLI sessions, stdio MCP stubs, no

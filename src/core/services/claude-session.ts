@@ -20,12 +20,18 @@ import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
+import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
+import {
+  isClassifierDecision,
+  permissionDecisionBlock,
+  readPermissionDecisionFrame
+} from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -372,6 +378,14 @@ export class ClaudeSession extends BaseSession {
   private sandboxConfig: SandboxSettings | null = null
   private voiceClient: VoiceClient | null = null
   private voiceServerPort: number | null = null
+  /** Bumped by every {@link ClaudeSession.voiceStartRecording}; identifies one start. */
+  private voiceStartGen = 0
+  /**
+   * The generation of the start still awaiting the voice server, or null. A stop
+   * clears it and a newer start overwrites it, so a start that wakes to find a
+   * different value was cancelled and must not open the capture.
+   */
+  private voicePendingStart: number | null = null
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -408,6 +422,34 @@ export class ClaudeSession extends BaseSession {
     this.resumeSessionId = resumeSessionId
     this.resumeSessionAt = resumeSessionAt
     this.forkSession = !!forkSession && !!resumeSessionAt
+
+    // Never `--resume` a transcript that does not exist. A cli.js that was
+    // spawned but never prompted — or whose first prompt died before it wrote
+    // anything — leaves no transcript, yet every renderer path that respawns a
+    // session with history (doSend, ensureSession, restartSdkSession,
+    // retrySend) asks to resume it, and cli.js then exits `No conversation
+    // found with session ID …` on every attempt. Decided here, once, rather
+    // than in each caller: the spawn goes out fresh, cli.js mints its own id,
+    // and the post-init rekey moves this session onto it exactly as it does for
+    // any brand-new session. The seeds below key off `resumeSessionId`, so they
+    // are skipped with it — they would only have read a missing file.
+    //
+    // Forks are exempt on purpose: a missing fork SOURCE is a real error, and
+    // quietly turning a branch into an unrelated empty session would hide it.
+    // Located, not derived from cwd, so a transcript cli.js relocated into a
+    // worktree's project dir still counts as existing.
+    if (
+      this.resumeSessionId &&
+      !this.forkSession &&
+      !locateClaudeTranscript(this.resumeSessionId, cwd)
+    ) {
+      logger.warn(
+        'ClaudeSession',
+        `Resume target ${this.resumeSessionId} has no transcript on disk — starting fresh`
+      )
+      this.resumeSessionId = undefined
+    }
+
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
@@ -1378,6 +1420,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleModelFallback(msg)
       return
     }
+    if (msg.subtype === 'permission_denied' || msg.subtype === 'permission_allowed') {
+      this.handlePermissionDecision(msg)
+      return
+    }
     if (msg.subtype === 'compact_boundary') {
       // cli.js compacted the transcript (docs/protocol-cc/04-system-subtypes.md
       // § 4.8). It was dropped live and only ever appeared on a JSONL reload, so
@@ -1496,6 +1542,83 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.itemStreams.retract(messageIds)
       this.send('session:messages-retracted', { messageIds })
     }
+  }
+
+  /**
+   * A tool call decided BEFORE any prompt was raised — cli.js's
+   * `permission_denied` (stock) and `permission_allowed` (the `automode-verdict`
+   * patch). Both are documented in docs/protocol-cc/04-system-subtypes.md §4.25.
+   *
+   * Claude is the one engine whose auto-mode judge we do not run ourselves: the
+   * two-stage classifier lives inside cli.js, so these frames are the ONLY way
+   * its verdict reaches a card. Without them an auto-mode block showed up as a
+   * bare `is_error` tool_result with no reason and no reviewer — where pi,
+   * opencode and Codex all render a verdict — and an auto-mode allow showed
+   * nothing at all.
+   *
+   * Which block a frame becomes — a verdict, a denial, or nothing — is decided
+   * entirely by `permissionDecisionBlock` in `claude-permission-decision.ts`,
+   * which owns the wire contract; this method only narrows, logs and sends.
+   *
+   * Frames from INSIDE a subagent carry `agent_id` and go out on the same two
+   * channels: the reducer binds by `tool_use_id`, searching the subagent
+   * buckets after the top-level transcript, so no owner id is needed. No hold
+   * is needed either. The subagent's `assistant` line carrying the `tool_use`
+   * precedes the frame on stdout (probed 2.1.280, same order as a top-level
+   * call), and every stdout line is handled synchronously and in order, so the
+   * call is already in `subagentMessages` when the frame folds.
+   */
+  private handlePermissionDecision(msg: SystemMessage): void {
+    const frame = readPermissionDecisionFrame(msg as unknown as Record<string, unknown>)
+    if (!frame) {
+      logger.debug(
+        'ClaudeSession',
+        `${msg.subtype} with no tool_use_id/uuid — nothing to bind it to`
+      )
+      return
+    }
+    if (frame.agentId) {
+      logger.debug(
+        'ClaudeSession',
+        `${msg.subtype} for ${frame.toolUseId} decided inside subagent ${frame.agentId}`
+      )
+    }
+
+    const denied = msg.subtype === 'permission_denied'
+    const block = permissionDecisionBlock(frame, denied ? 'denied' : 'allowed')
+    if (!block) {
+      // `permission_allowed` only ever carries a classifier verdict — the patch
+      // emits nothing for a rule/mode allow, because an allow nobody judged is
+      // just the tool running. A non-classifier one is a wire contract change.
+      if (!isClassifierDecision(frame)) {
+        logger.warn(
+          'ClaudeSession',
+          `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
+        )
+      } else {
+        logger.debug(
+          'ClaudeSession',
+          `permission_allowed for ${frame.toolUseId} with no verdict — nothing to render`
+        )
+      }
+      return
+    }
+
+    if (block.type === 'tool_review') {
+      logger.info(
+        'ClaudeSession',
+        `auto-mode ${denied ? 'BLOCK' : 'allow'}${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
+      )
+      this.send('session:tool-review', { toolUseId: frame.toolUseId, review: block })
+      return
+    }
+
+    const denial = block
+    logger.info(
+      'ClaudeSession',
+      `pre-ask denial (${denial.source}) ${msg.tool_name ?? '?'}${denial.reason ? ` — ${denial.reason}` : ''}`
+    )
+    this.send('session:permission-denial', { toolUseId: frame.toolUseId, denial })
   }
 
   /**
@@ -2161,9 +2284,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // seconds of speech while the SDK spawns and the voice server starts.
     const earlyBuffer: Buffer[] = []
     let earlyCaptureStopped = false
+    // Owned by this session until the VoiceClient takes the microphone over, so
+    // this session's stops can never cut off another session's capture.
     const captureStarted = startRecording((chunk) => {
       if (!earlyCaptureStopped) earlyBuffer.push(chunk)
-    })
+    }, this)
     if (!captureStarted) {
       this.send('voice:error', 'Failed to start audio capture. Check microphone access.')
       return
@@ -2174,7 +2299,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // host-local surface a session owns, so it is also the only thing a WS-created
     // session cannot do.
     if (!this.win) {
-      stopRecording()
+      stopRecording(this)
       this.send(
         'voice:error',
         'Voice input needs the desktop window (this app is running windowless).'
@@ -2188,6 +2313,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // or hand-rolled send is one refactor away from being invisible).
     emitEvent('voice:state', [this.routingId, 'connecting'])
 
+    const gen = ++this.voiceStartGen
+    this.voicePendingStart = gen
+    let pending = true
     try {
       // Ensure voice server is running (may spawn SDK + create TCP server)
       if (!this.voiceServerPort) {
@@ -2197,9 +2325,19 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         }
       }
 
+      // Released while the server was starting (a spawn can take seconds): the
+      // stop already closed the microphone and reported idle, and a newer start
+      // owns the capture now — either way this one must not reopen it.
+      if (this.voicePendingStart !== gen) {
+        earlyCaptureStopped = true
+        return
+      }
+      this.voicePendingStart = null
+      pending = false
+
       const port = this.voiceServerPort!
       if (!this.voiceClient) {
-        this.voiceClient = new VoiceClient(port, win, this.routingId)
+        this.voiceClient = new VoiceClient(port, win, () => this.routingId)
       } else {
         this.voiceClient.updatePort(port)
       }
@@ -2207,9 +2345,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // Hand off early buffer and start streaming through VoiceClient
       earlyCaptureStopped = true
       await this.voiceClient.startRecording(language, earlyBuffer)
+      // A client that ended before taking the microphone over (a failed connect,
+      // a stop in the connect window) left it with this session: release it.
+      if (this.voiceClient?.currentState() === 'idle') stopRecording(this)
     } catch (err) {
       earlyCaptureStopped = true
-      stopRecording()
+      if (pending) {
+        // Cancelled while pending — including a spawn that then timed out: the
+        // stop already ended it idle, so there is no error to report.
+        if (this.voicePendingStart !== gen) return
+        this.voicePendingStart = null
+      }
+      stopRecording(this)
       emitEvent('voice:state', [this.routingId, 'idle'])
       throw err
     }
@@ -2217,9 +2364,20 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   /** Stop the current voice recording session. */
   async voiceStopRecording(): Promise<void> {
-    if (!this.voiceClient) {
-      // If voiceClient never started (still in early capture), just stop recording
-      stopRecording()
+    // Close this session's early capture if it still holds the microphone — a
+    // start awaiting the server, or one handed to a client that has not taken
+    // it over yet. Owner-scoped: a no-op when the client or another session has it.
+    stopRecording(this)
+    if (this.voicePendingStart !== null || !this.voiceClient) {
+      // Still in early capture (the start is awaiting the voice server, or never
+      // got a client): cancel that start.
+      this.voicePendingStart = null
+      emitEvent('voice:state', [this.routingId, 'idle'])
+      return
+    }
+    if (this.voiceClient.currentState() === 'idle') {
+      // Nothing to stop, but the renderer may still be showing the `connecting`
+      // this session told it — report the real state so a release always clears it.
       emitEvent('voice:state', [this.routingId, 'idle'])
       return
     }
@@ -2534,14 +2692,23 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *  non-alphanumeric char with '-', matching cli.js's on-disk naming) — the
    *  old inline `/`+`.`-only replace produced a nonexistent path for every
    *  Windows cwd (and any cwd with `_`/space), silently no-opping
-   *  reconciliation and resume seeding. */
+   *  reconciliation and resume seeding.
+   *
+   *  LOCATED first, derived only as the fallback: cli.js's `EnterWorktree`
+   *  moves the live transcript into the worktree's project dir, which
+   *  `this.cwd` does not derive — and it can do that MID-session, so this is
+   *  resolved on every call rather than once. The derived path is kept for a
+   *  transcript that does not exist yet; every caller tolerates a missing file. */
   private transcriptPathFor(sessionId: string): string {
-    return path.join(
-      os.homedir(),
-      '.claude',
-      'projects',
-      cwdToProjectKey(this.cwd),
-      `${sessionId}.jsonl`
+    return (
+      locateClaudeTranscript(sessionId, this.cwd) ??
+      path.join(
+        os.homedir(),
+        '.claude',
+        'projects',
+        cwdToProjectKey(this.cwd),
+        `${sessionId}.jsonl`
+      )
     )
   }
 
@@ -2622,7 +2789,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // Tear down any cross-engine dispatch targets owned by this session (ADR-033).
     crossEngineDispatcher.disposeFor(this.routingId)
 
-    // Clean up voice resources
+    // Clean up voice resources. A start still awaiting the voice server is
+    // cancelled like a stop would, and the microphone closed if this session
+    // (rather than its client, destroyed below) still holds it.
+    this.voicePendingStart = null
+    stopRecording(this)
     if (this.voiceClient) {
       this.voiceClient.destroy()
       this.voiceClient = null

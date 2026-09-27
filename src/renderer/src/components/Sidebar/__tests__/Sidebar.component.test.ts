@@ -505,6 +505,36 @@ describe('Sidebar FC', () => {
     expect(writeCalls[0][3]).toBe('My New Title')
   })
 
+  it('writes a relocated session’s title into the dir its FILE lives in, not its group’s', async () => {
+    // cli.js's `EnterWorktree` moved this transcript into the worktree's
+    // project dir; the listing still groups it under its home project. The
+    // write appends, so the group key would CREATE a stray one-line transcript
+    // under the home dir instead of titling the real one.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      { ...makeSessionInfo('moved-sess'), projectKey: worktreeKey }
+    ])
+
+    const writeCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:write-custom-title', async (...args) => {
+      writeCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+
+    act(() => {
+      viewProps.onFinishRename('moved-sess', 'Moved Title')
+    })
+
+    expect(writeCalls).toHaveLength(1)
+    expect(writeCalls[0][2]).toBe(worktreeKey)
+  })
+
   // -------------------------------------------------------------------------
   // 7. onAutoRename — generateTitle IPC + applyTitle
   // -------------------------------------------------------------------------
@@ -978,6 +1008,35 @@ describe('Sidebar FC', () => {
 
     expect(deleteProjectCalls).toHaveLength(1)
     expect(deleteProjectCalls[0][1]).toBe(PROJECT_KEY)
+  })
+
+  it('the project delete request names the relocated sessions the delete removes', async () => {
+    // cli.js's `EnterWorktree` moved `moved` into the worktree's project folder;
+    // the listing keeps it under this project, and main deletes it by its own
+    // key (`planClaudeProjectDelete`). The dialog must say so up front.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      makeSessionInfo('home-1'),
+      { ...makeSessionInfo('moved'), projectKey: worktreeKey, engineId: 'claude' }
+    ])
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+    act(() => {
+      viewProps.onDeleteProject(group)
+    })
+
+    const target = viewProps.deleteTarget
+    expect(target?.kind).toBe('project')
+    if (target?.kind !== 'project') return
+    expect(target.claudeFiles).toEqual({
+      removeDir: true,
+      sessionFiles: [{ sessionId: 'moved', projectKey: worktreeKey }]
+    })
   })
 
   // -------------------------------------------------------------------------

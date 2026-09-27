@@ -488,6 +488,284 @@ describe('reducer — transcript', () => {
     })
   })
 
+  /**
+   * A pre-ask refusal nothing judged (a deny rule, a hook, the safety checker)
+   * binds exactly as a verdict does, and for the same reason — it describes a
+   * call, so it belongs on that call's card. Its identity is `denialId`, the
+   * emitting frame's own uuid: cli.js decides each call once and never revises
+   * it, so unlike a review there is no second copy to append.
+   */
+  describe('session:permission-denial', () => {
+    const denial = (over: Record<string, unknown> = {}) => ({
+      type: 'permission_denial' as const,
+      toolUseId: 't1',
+      denialId: 'dn-1',
+      source: 'rule' as const,
+      ...over
+    })
+    const hostMessage = (): [string, ...unknown[]] => [
+      'session:message',
+      'rid',
+      assistant('m1', [{ type: 'tool_use', toolUseId: 't1', toolName: 'Bash', toolInput: {} }])
+    ]
+    const denials = (s: CanonicalState) =>
+      s.sessions['rid'].messages.flatMap((m) =>
+        m.content.filter((b) => b.type === 'permission_denial')
+      )
+
+    it('attaches the denial to the message holding its tool_use', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    it('is idempotent by denialId — a replayed catch-up appends once', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toHaveLength(1)
+    })
+
+    it('is dropped when no message holds the tool_use', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([])
+    })
+
+    it('survives an item-scoped upsert of its host message (mergeContentBlocks)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        hostMessage()
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    // The two channels share one binding helper; this pins that they still
+    // write DIFFERENT blocks, so a denial can never render as a judgment.
+    it('coexists with a verdict on the same transcript without merging', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        [
+          'session:message',
+          'rid',
+          assistant('m2', [{ type: 'tool_use', toolUseId: 't2', toolName: 'Bash', toolInput: {} }])
+        ],
+        [
+          'session:tool-review',
+          'rid',
+          {
+            toolUseId: 't2',
+            review: {
+              type: 'tool_review',
+              toolUseId: 't2',
+              reviewId: 'rv-9',
+              reviewer: 'auto-mode',
+              decision: 'denied'
+            }
+          }
+        ],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+      expect(
+        s.sessions['rid'].messages.flatMap((m) => m.content.filter((b) => b.type === 'tool_review'))
+      ).toHaveLength(1)
+    })
+  })
+
+  /**
+   * A call made INSIDE a subagent lives in `subagentMessages[<Agent call id>]`,
+   * and that bucket is where its card renders. A verdict or denial for it binds
+   * there when the top-level transcript has no such call: tool-use ids are
+   * unique, so the owning bucket is found by searching, never named by the
+   * producer. Every engine benefits — Codex, opencode and pi reviews of subagent
+   * calls used to be dropped here too.
+   */
+  describe('a decision on a call made inside a subagent', () => {
+    const review = (over: Record<string, unknown> = {}) => ({
+      type: 'tool_review' as const,
+      toolUseId: 'sub-t1',
+      reviewId: 'rv-sub',
+      reviewer: 'auto-mode' as const,
+      decision: 'approved' as const,
+      ...over
+    })
+    const denial = {
+      type: 'permission_denial' as const,
+      toolUseId: 'sub-t1',
+      denialId: 'dn-sub',
+      source: 'rule' as const
+    }
+    const subCall = (id = 'sm1', toolUseId = 'sub-t1'): [string, ...unknown[]] => [
+      'session:subagent-message',
+      'rid',
+      {
+        toolUseId: 'agent-1',
+        message: assistant(id, [{ type: 'tool_use', toolUseId, toolName: 'Bash', toolInput: {} }])
+      }
+    ]
+    const bucket = (s: CanonicalState, owner = 'agent-1') =>
+      s.sessions['rid'].subagentMessages[owner] ?? []
+    const blocksOf = (s: CanonicalState, type: string, owner = 'agent-1') =>
+      bucket(s, owner).flatMap((m) => m.content.filter((b) => b.type === type))
+
+    it('binds a verdict into the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+      expect(s.sessions['rid'].messages).toEqual([])
+    })
+
+    it('binds a denial into the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }]
+      ])
+      expect(blocksOf(s, 'permission_denial')).toEqual([denial])
+    })
+
+    it('searches every bucket, not just the first', () => {
+      const s = fold([
+        created(),
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-0', message: assistant('sm0', [{ type: 'text', text: 'hi' }]) }
+        ],
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review', 'agent-0')).toEqual([])
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+    })
+
+    it('annotates the LATEST message in the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall('sm1'),
+        subCall('sm2'),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      const [first, second] = bucket(s)
+      expect(first.content.some((b) => b.type === 'tool_review')).toBe(false)
+      expect(second.content.some((b) => b.type === 'tool_review')).toBe(true)
+    })
+
+    // Top-level is searched first and keeps its behaviour unchanged.
+    it('prefers a top-level message holding the call over a bucket', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        [
+          'session:message',
+          'rid',
+          assistant('m1', [
+            { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+          ])
+        ],
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(s.sessions['rid'].messages[0].content.filter((b) => b.type === 'tool_review')).toEqual(
+        [review()]
+      )
+      expect(blocksOf(s, 'tool_review')).toEqual([])
+    })
+
+    it('is idempotent by identity inside a bucket too', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toHaveLength(1)
+      expect(blocksOf(s, 'permission_denial')).toHaveLength(1)
+    })
+
+    it('is dropped when no bucket holds the call either', () => {
+      const s = fold([
+        created(),
+        subCall('sm1', 'other-call'),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toEqual([])
+      expect(s.sessions['rid'].messages).toEqual([])
+    })
+
+    /**
+     * The subagent message is upserted again after the decision lands (a later
+     * snapshot of the same message). The decision must survive it the way the
+     * call's `tool_result` does: `mergeContentBlocks` carries all three as
+     * auxiliary blocks, on every path that re-sends a subagent message.
+     */
+    it.each([
+      ['session:subagent-message', subCall()],
+      [
+        'session:subagent-message-batch',
+        [
+          'session:subagent-message-batch',
+          'rid',
+          {
+            toolUseId: 'agent-1',
+            messages: [
+              assistant('sm1', [
+                { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+              ])
+            ]
+          }
+        ] as [string, ...unknown[]]
+      ],
+      [
+        'session:item-seal (untargeted, subagent owner)',
+        [
+          'session:item-seal',
+          'rid',
+          {
+            ownerToolUseId: 'agent-1',
+            message: assistant('sm1', [
+              { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+            ])
+          }
+        ] as [string, ...unknown[]]
+      ]
+    ])('survives a re-send of its host message via %s, as the tool_result does', (_, resend) => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }],
+        [
+          'session:subagent-tool-result',
+          'rid',
+          { toolUseId: 'agent-1', toolResultToolUseId: 'sub-t1', result: 'ok', isError: false }
+        ],
+        resend
+      ])
+      expect(bucket(s)).toHaveLength(1)
+      expect(blocksOf(s, 'tool_result')).toHaveLength(1)
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+      expect(blocksOf(s, 'permission_denial')).toEqual([denial])
+    })
+  })
+
   it('retracts messages by id', () => {
     const s = fold([
       created(),

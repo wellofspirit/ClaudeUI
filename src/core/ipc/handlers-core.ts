@@ -33,10 +33,11 @@ import { blockUsageService } from '../services/block-usage'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { deleteSessionByEngine } from '../services/session-delete'
-import { deleteProjectFiles } from '../services/delete-session-files'
+import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
@@ -409,7 +410,27 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
     }
   })
 
-  await deleteProjectFiles(projectKey)
+  // Claude files, and WHICH of them: the home dir wholesale, members relocated
+  // into a worktree's project dir one by one, and — when this dir also holds
+  // another project's relocated member — every member one by one with the dir
+  // kept. The rule is `planClaudeProjectDelete`'s (shared), so the confirmation
+  // dialog describes exactly what runs here. `allSettled` for the same reason as
+  // the engine sweep above — one stuck file must not abandon the rest.
+  const { removeDir, sessionFiles } = planClaudeProjectDelete(state.directories, projectKey)
+  const fileResults = await Promise.allSettled(
+    sessionFiles.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
+  )
+  fileResults.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      logger.warn(
+        'IPC',
+        `session:delete-project: session ${sessionFiles[i].sessionId} (${sessionFiles[i].projectKey}) survived the delete`,
+        result.reason
+      )
+    }
+  })
+
+  if (removeDir) await deleteProjectFiles(projectKey)
   void refreshCanonicalDirectories()
 }
 

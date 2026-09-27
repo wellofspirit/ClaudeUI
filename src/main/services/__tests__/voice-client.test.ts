@@ -27,15 +27,16 @@ import { EventEmitter } from 'node:events'
 
 let capturedOnData: ((buf: Buffer) => void) | null = null
 let startRecordingShouldSucceed = true
-const startRecordingMock = vi.fn((onData: (buf: Buffer) => void) => {
+const startRecordingMock = vi.fn((onData: (buf: Buffer) => void, _owner: object) => {
   capturedOnData = onData
   return startRecordingShouldSucceed
 })
-const stopRecordingMock = vi.fn()
+const stopRecordingMock = vi.fn((_owner: object) => {})
 
 vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: (onData: (buf: Buffer) => void) => startRecordingMock(onData),
-  stopRecording: () => stopRecordingMock(),
+  startRecording: (onData: (buf: Buffer) => void, owner: object) =>
+    startRecordingMock(onData, owner),
+  stopRecording: (owner: object) => stopRecordingMock(owner),
   isVoiceCaptureAvailable: () => true,
   getMicrophoneStatus: () => 3,
   isRecording: () => false
@@ -65,8 +66,11 @@ class FakeSocket extends EventEmitter {
     return true
   }
   destroy(): void {
+    if (this.destroyed) return
     this.destroyed = true
-    this.emit('close')
+    // Asynchronous, like net.Socket's: a synchronous 'close' re-entered
+    // cleanup() from inside itself, which a real socket never does.
+    process.nextTick(() => this.emit('close'))
   }
   setTimeout(ms: number): void {
     this.timeoutMs = ms
@@ -168,7 +172,7 @@ describe('VoiceClient', () => {
 
   it('startRecording() connects to the voice server on the configured port and sends voice_start with the language', async () => {
     const win = makeWin()
-    const client = new VoiceClient(12345, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(12345, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
 
@@ -191,14 +195,15 @@ describe('VoiceClient', () => {
       .map((c) => c[2])
     expect(states).toContain('connecting')
 
-    // Microphone was re-armed via the voice-capture facade.
-    expect(stopRecordingMock).toHaveBeenCalled()
+    // The client took the microphone over via the voice-capture facade, as its
+    // owner (the facade restarts an active capture itself).
     expect(startRecordingMock).toHaveBeenCalledTimes(1)
+    expect(startRecordingMock).toHaveBeenCalledWith(expect.any(Function), client)
   })
 
   it('audio chunks pushed through the captured onData callback are forwarded as base64 audio frames once the server reports ready', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
@@ -228,7 +233,7 @@ describe('VoiceClient', () => {
 
   it('rejects a second startRecording() while the first is still connecting (no orphan socket)', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     // First call: enters 'connecting' and awaits the TCP handshake (not fired).
     const p1 = client.startRecording('en')
@@ -247,7 +252,7 @@ describe('VoiceClient', () => {
 
   it('does not call webContents.send when the window is destroyed', async () => {
     const win = makeWin(true)
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     // startRecording transitions state (which would send 'voice:state') — every
     // send must be suppressed against a destroyed window rather than throwing.
@@ -260,7 +265,7 @@ describe('VoiceClient', () => {
 
   it('stopRecording() sends voice_stop and cleans up after the server closes, restoring idle state', async () => {
     const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
@@ -295,5 +300,79 @@ describe('VoiceClient', () => {
       .filter((c) => c[0] === 'voice:state')
       .map((c) => c[2])
     expect(finalStates[finalStates.length - 1]).toBe('idle')
+  })
+
+  it('emits under the LIVE routing id when the session is rekeyed mid-capture', async () => {
+    // A brand-new session's first press spawns cli.js and creates this client;
+    // the first prompt then rekeys the session. Everything the client emits
+    // afterwards must follow the new id, or the renderer drops it.
+    const win = makeWin()
+    let routingId = 'routing-temp'
+    const client = new VoiceClient(4000, win as unknown as never, () => routingId)
+
+    const startP = client.startRecording('en')
+    fireConnect()
+    await startP
+
+    routingId = 'routing-minted'
+    win.webContents.send.mockClear()
+
+    lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
+    lastReadline!.emit('line', JSON.stringify({ type: 'transcript', text: 'hi', isFinal: true }))
+    lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
+
+    const calls = win.webContents.send.mock.calls
+    expect(calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+      ['voice:state', 'routing-minted', 'recording'],
+      ['voice:transcript', 'routing-minted', { text: 'hi', isFinal: true }],
+      ['voice:state', 'routing-minted', 'idle']
+    ])
+  })
+
+  it('a stop during the connect window ends the capture — the late connect is dropped', async () => {
+    const win = makeWin()
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+
+    // Start, then release before the TCP handshake completes.
+    const startP = client.startRecording('en')
+    const socket = lastSocket!
+    const rl = lastReadline!
+    await client.stopRecording()
+    expect(client.currentState()).toBe('idle')
+    startRecordingMock.mockClear()
+    win.webContents.send.mockClear()
+
+    // The handshake lands late, and the server even answers `ready`.
+    fireConnect()
+    await startP
+    rl.emit('line', JSON.stringify({ type: 'ready' }))
+
+    expect(client.currentState()).toBe('idle')
+    expect(socket.destroyed).toBe(true)
+    expect(rl.closed).toBe(true)
+    expect(sentMessages().some((m) => m.type === 'voice_start')).toBe(false)
+    // The microphone is not reopened, and the renderer hears nothing more.
+    expect(startRecordingMock).not.toHaveBeenCalled()
+    expect(win.webContents.send).not.toHaveBeenCalled()
+  })
+
+  it('a second stop while processing is a no-op — one voice_stop, no timer left behind', async () => {
+    vi.useFakeTimers()
+    const win = makeWin()
+    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+
+    const startP = client.startRecording('en')
+    fireConnect()
+    await startP
+    lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
+
+    await client.stopRecording()
+    await client.stopRecording()
+    expect(sentMessages().filter((m) => m.type === 'voice_stop')).toHaveLength(1)
+
+    lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
+    expect(client.currentState()).toBe('idle')
+    // cleanup() cleared the one finalize timer; nothing is left to fire.
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

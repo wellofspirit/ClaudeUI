@@ -97,12 +97,25 @@ export function getMicrophoneStatus(): number {
 }
 
 /**
+ * Who holds the microphone. The native module is ONE process-wide recorder, so
+ * an unscoped stop — a second session's release, a cancelled start — would cut
+ * off whoever is recording now. Stops are therefore owner-scoped; a start by a
+ * new owner is a takeover (the newest press wins).
+ */
+let currentOwner: object | null = null
+
+/**
  * Start recording audio from the default microphone.
  * @param onData Called with raw PCM chunks (~342 bytes each, ~11ms intervals)
+ * @param owner Who this capture belongs to; only it can {@link stopRecording} it
  * @param onSilence Called when silence is detected (optional, depends on platform)
  * @returns true if recording started successfully
  */
-export function startRecording(onData: (buffer: Buffer) => void, onSilence?: () => void): boolean {
+export function startRecording(
+  onData: (buffer: Buffer) => void,
+  owner: object,
+  onSilence?: () => void
+): boolean {
   const mod = loadNativeModule()
   if (!mod) {
     logger.error('VoiceCapture', 'Cannot start recording — native module not loaded')
@@ -113,11 +126,15 @@ export function startRecording(onData: (buffer: Buffer) => void, onSilence?: () 
     mod.stopRecording()
   }
 
-  return mod.startRecording((data) => onData(Buffer.from(data)), onSilence ?? (() => {}))
+  const started = mod.startRecording((data) => onData(Buffer.from(data)), onSilence ?? (() => {}))
+  currentOwner = started ? owner : null
+  return started
 }
 
-/** Stop recording */
-export function stopRecording(): void {
+/** Stop recording — only if `owner` still holds the microphone. */
+export function stopRecording(owner: object): void {
+  if (owner !== currentOwner) return
+  currentOwner = null
   const mod = loadNativeModule()
   if (!mod) return
   if (mod.isRecording()) {

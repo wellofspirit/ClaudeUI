@@ -685,7 +685,7 @@ Messages that exist ONLY because of ClaudeUI patches:
 
 (Teammate-tagged messages came from `team-streaming`, retired with its directory — 01 §1.12.)
 
-An unpatched upstream cli.js omits these. The app does run against unpatched cli.js — Anthropic's own binary, via `CLAUDEUI_CLAUDE_CLI` (ADR-077) — so never assume these exist: the cards render what arrives and fall back to complete messages and the final tool result. The `voice_server_*` control subtypes (07) are the other patch-only surface; the app gates them on `version.json` `patches` (01 §1.12).
+An unpatched upstream cli.js omits these. The app does run against unpatched cli.js — Anthropic's own binary, via `CLAUDEUI_CLAUDE_CLI` (ADR-078) — so never assume these exist: the cards render what arrives and fall back to complete messages and the final tool result. The `voice_server_*` control subtypes (07) are the other patch-only surface; the app gates them on `version.json` `patches` (01 §1.12).
 
 ---
 

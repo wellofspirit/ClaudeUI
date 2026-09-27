@@ -36,7 +36,8 @@ Codex reaches seven of fourteen kinds. pi cannot reach web, todo, question or mc
 | Claude   | `system/compact_boundary`                                                | live + JSONL  | separator on reload only; dropped live                                |
 | Claude   | `isCompactSummary` user line                                             | JSONL         | summary attached to the separator                                     |
 | Claude   | `attachment` lines (23 subtypes; 2,628 of 9,173 lines in a local census) | JSONL         | all dropped                                                           |
-| Claude   | `system/permission_denied`, `commands_changed`, `api_retry`, `hook_*`    | live          | dropped (hooks never requested)                                       |
+| Claude   | `system/permission_denied` + patched `permission_allowed`                | live          | **consumed** — auto-mode verdict / pre-ask denial on the card         |
+| Claude   | `commands_changed`, `api_retry`, `hook_*`                                | live          | dropped (hooks never requested)                                       |
 | Claude   | `tool_use_summary`                                                       | live          | dropped, not in the SDK union                                         |
 | opencode | `compaction` part                                                        | SSE + history | dropped                                                               |
 | opencode | `subtask` part                                                           | SSE + history | dropped; a slash command to a subagent vanishes from replayed history |
@@ -96,7 +97,7 @@ Tests: mapper guard tests per kind with wire-shaped fixtures (proven failing fir
 
 ## 5. Findings outside this item
 
-- **Claude**: `PowerShell` and `Skill` render generically; `permission_denied` and `commands_changed` are dropped against the protocol doc's explicit guidance; `compact_boundary` is dropped live; `stream_event` keeps only text and thinking deltas; the `attachment` JSONL family is undocumented and entirely dropped.
+- **Claude**: `PowerShell` and `Skill` render generically; `commands_changed` is dropped against the protocol doc's explicit guidance; `compact_boundary` is dropped live; `stream_event` keeps only text and thinking deltas; the `attachment` JSONL family is undocumented and entirely dropped.
 - **opencode**: `subtask` messages vanish from replayed history; `retry` is invisible; MCP names miss the `mcp__` path; the protocol snapshot is 1.18.9 against a 1.18.29 pin; `plan_exit` reads an input field the tool does not have.
 - **pi**: `powershell` is offered in settings but unmapped in both the renderer and the permission engine; `custom_message` is in the model's context but not the transcript; `extension_ui_request` is never answered; `ToolResultMessage.usage` is unsummed.
 - **Codex**: `commandExecution.commandActions` could route reads and searches to the read and search cards; `agentMessage.questions` are unread.

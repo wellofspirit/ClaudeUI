@@ -9,7 +9,7 @@ Write behavioral tests that verify cli.js patches work correctly by launching re
 
 ## The patch set
 
-The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-077). Five patches today:
+The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Five patches today:
 
 | Patch                    | Test                                                               |
 | ------------------------ | ------------------------------------------------------------------ |
@@ -19,7 +19,7 @@ The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `
 | `skip-securestorage`     | `patch/skip-securestorage/test.mjs` — structural, offline          |
 | `voice-server`           | none; its apply script's own checks are the only guard (see below) |
 
-The other nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-077; the list is in `docs/protocol-cc/01-transport.md` §1.12). Their tests went with them.
+The other nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078; the list is in `docs/protocol-cc/01-transport.md` §1.12). Their tests went with them.
 
 ## Test Infrastructure
 
@@ -221,7 +221,7 @@ const messages = await collectMessages(q, {
 
 ### 7. MCP Test Server
 
-No current patch test uses an MCP server. `patch/mcp-test-server.mjs` — a minimal stdio server with one `patch_test_echo` tool — served only the `mcp-status` and `mcp-tool-refresh` tests and was deleted with them (commit 53809349, ADR-077). A new patch test that needs one has to recreate it first; `git show 53809349^:patch/mcp-test-server.mjs` prints the last version. `createQuery`'s `mcpServers` option passes the servers to cli.js as `--mcp-config`:
+No current patch test uses an MCP server. `patch/mcp-test-server.mjs` — a minimal stdio server with one `patch_test_echo` tool — served only the `mcp-status` and `mcp-tool-refresh` tests and was deleted with them (commit 53809349, ADR-078). A new patch test that needs one has to recreate it first; `git show 53809349^:patch/mcp-test-server.mjs` prints the last version. `createQuery`'s `mcpServers` option passes the servers to cli.js as `--mcp-config`:
 
 ```js
 import { resolve, dirname } from 'node:path'

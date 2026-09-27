@@ -36,15 +36,22 @@ vi.mock('../../../core/services/ui-config', () => ({
 // F1's delete path: the FILE deletes and the directory re-read are collaborators
 // with real I/O, so they are stubbed — what these tests pin is the ORDER
 // (cancel → replicate the removal → unlink) and the project sweep's membership.
-const { deleteSessionByEngine, deleteProjectFiles, refreshCanonicalDirectories } = vi.hoisted(
-  () => ({
-    deleteSessionByEngine: vi.fn(async (_id: string, _key?: string, _engine?: string) => {}),
-    deleteProjectFiles: vi.fn(async () => {}),
-    refreshCanonicalDirectories: vi.fn(async () => {})
-  })
-)
+const {
+  deleteSessionByEngine,
+  deleteProjectFiles,
+  deleteSessionFiles,
+  refreshCanonicalDirectories
+} = vi.hoisted(() => ({
+  deleteSessionByEngine: vi.fn(async (_id: string, _key?: string, _engine?: string) => {}),
+  deleteProjectFiles: vi.fn(async () => {}),
+  deleteSessionFiles: vi.fn(async (_id: string, _key: string) => {}),
+  refreshCanonicalDirectories: vi.fn(async () => {})
+}))
 vi.mock('../../../core/services/session-delete', () => ({ deleteSessionByEngine }))
-vi.mock('../../../core/services/delete-session-files', () => ({ deleteProjectFiles }))
+vi.mock('../../../core/services/delete-session-files', () => ({
+  deleteProjectFiles,
+  deleteSessionFiles
+}))
 vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories }))
 
 // R1: a delete must UNWATCH before the file it watches disappears.
@@ -489,6 +496,145 @@ describe('handlers-core', () => {
       expect(deleteSessionByEngine).toHaveBeenCalledWith('pi-1', '-repo', 'pi')
       // Engine-owned storage first; the irreversible Claude unlink last.
       expect(order[order.length - 1]).toBe('unlink-claude')
+    })
+
+    /**
+     * A Claude session cli.js relocated into a worktree's project dir
+     * (`EnterWorktree`) is listed under its HOME project, but its file lives in
+     * `-repo--claude-worktrees-wt`. `deleteProjectFiles('-repo')` removes only
+     * the home dir, so the member came straight back on the next listing. It is
+     * deleted by its OWN key — one session, never the whole worktree dir, which
+     * can hold sessions that are not members of this project.
+     */
+    it('deletes relocated Claude members by their own key before the home dir', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        forEach: vi.fn()
+      } as any
+      const order: string[] = []
+      deleteSessionFiles.mockImplementation(async (id: string, key: string) => {
+        order.push(`session:${id}@${key}`)
+      })
+      deleteProjectFiles.mockImplementation(async () => {
+        order.push('unlink-claude')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'home-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' },
+            {
+              sessionId: 'moved-1',
+              cwd: '/repo',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            },
+            // Pre-engine rows carry no engineId — still Claude.
+            { sessionId: 'moved-2', cwd: '/repo', projectKey: '-repo--claude-worktrees-wt' },
+            { sessionId: 'oc-1', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' }
+          ]
+        },
+        // A session BORN in the worktree — its own project, not a member.
+        {
+          cwd: '/repo/.claude/worktrees/wt',
+          projectKey: '-repo--claude-worktrees-wt',
+          folderName: 'wt',
+          sessions: [
+            {
+              sessionId: 'wt-own',
+              cwd: '/repo/.claude/worktrees/wt',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      // PRE-FIX: nothing but `deleteProjectFiles('-repo')` touched Claude files.
+      expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]]).sort()).toEqual([
+        ['moved-1', '-repo--claude-worktrees-wt'],
+        ['moved-2', '-repo--claude-worktrees-wt']
+      ])
+      // The home-dir member goes with the directory; the worktree's own session
+      // and the worktree DIR are never touched.
+      expect(deleteProjectFiles).toHaveBeenCalledTimes(1)
+      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
+      expect(order[order.length - 1]).toBe('unlink-claude')
+      expect(manager.cancel.mock.calls.map((c: unknown[]) => c[0])).not.toContain('wt-own')
+    })
+
+    /**
+     * The other direction. Deleting the WORKTREE-born project must not remove
+     * its dir wholesale when a home-project session was relocated into it — the
+     * sidebar shows that session under a different project, so `rm -r` on the
+     * dir would delete it silently. Every member goes one by one instead.
+     */
+    it('deletes members one by one when their dir holds ANOTHER project’s relocated session', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() } as any
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            {
+              sessionId: 'moved-1',
+              cwd: '/repo',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            }
+          ]
+        },
+        {
+          cwd: '/repo/.claude/worktrees/wt',
+          projectKey: '-repo--claude-worktrees-wt',
+          folderName: 'wt',
+          sessions: [
+            {
+              sessionId: 'wt-own',
+              cwd: '/repo/.claude/worktrees/wt',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo--claude-worktrees-wt')
+
+      expect(deleteProjectFiles).not.toHaveBeenCalled()
+      expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+        ['wt-own', '-repo--claude-worktrees-wt']
+      ])
+      expect(manager.cancel.mock.calls.map((c: unknown[]) => c[0])).toEqual(['wt-own'])
+    })
+
+    it('a relocated member that fails to delete does not abandon the home dir', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() } as any
+      deleteSessionFiles.mockRejectedValueOnce(new Error('EPERM'))
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            {
+              sessionId: 'moved-1',
+              cwd: '/repo',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            }
+          ]
+        }
+      ] as never)
+
+      await expect(deleteProject(manager, '-repo')).resolves.toBeUndefined()
+      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
     })
 
     // -----------------------------------------------------------------------

@@ -258,6 +258,88 @@ describe('remote voice capture', () => {
     expect(deliveries.every((d) => d.connectionId === CONNECTION_ID)).toBe(true)
   })
 
+  it('follows the session across a rekey — frames go out under the LIVE routing id', async () => {
+    // A brand-new session is rekeyed when cli.js mints its id; a capture that
+    // spans it must keep reaching the client under the id the client now uses.
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: async () => ({ port: voiceServer.port })
+    }
+    await startCapture(CONNECTION_ID, { get: () => session } as unknown as SessionManager)
+
+    session.routingId = 'rid-minted'
+    voiceServer.push({ type: 'ready' })
+    voiceServer.push({ type: 'transcript', text: 'after the rekey.', isFinal: true })
+
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:transcript').length === 1)
+    expect(framesFor(CONNECTION_ID, 'voice:transcript')).toEqual([
+      ['rid-minted', { text: 'after the rekey.', isFinal: true }]
+    ])
+    expect(framesFor(CONNECTION_ID, 'voice:state')).toContainEqual(['rid-minted', 'recording'])
+  })
+
+  /**
+   * A session whose voice server comes up only when the test says so — a first
+   * start spawns cli.js, which is seconds a release can land in.
+   */
+  function gatedManager(): {
+    manager: SessionManager
+    spawning: Promise<void>
+    releaseServer: () => void
+  } {
+    let releaseServer!: () => void
+    let entered!: () => void
+    const serverUp = new Promise<void>((resolve) => {
+      releaseServer = resolve
+    })
+    const spawning = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: async () => {
+        entered()
+        await serverUp
+        return { port: voiceServer.port }
+      }
+    }
+    return { manager: { get: () => session } as unknown as SessionManager, spawning, releaseServer }
+  }
+
+  /** Nothing reached the engine and nothing was told to the client. */
+  async function expectNoCapture(): Promise<void> {
+    // Give a wrongly-opened capture every chance to reach the engine.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(false)
+    expect(voiceServer.connections).toBe(0)
+    expect(deliveries).toHaveLength(0)
+  }
+
+  it('a `voice:stop` while the voice server is still starting cancels the capture', async () => {
+    const { manager, spawning, releaseServer } = gatedManager()
+
+    const startP = remoteVoice.start(manager, makeConnection(CONNECTION_ID), ROUTING_ID, 'en')
+    await spawning
+    await remoteVoice.stop(CONNECTION_ID)
+    releaseServer()
+    await startP
+
+    await expectNoCapture()
+  })
+
+  it('a `voice:stop` landing before the start first yields cancels it too', async () => {
+    const { manager, releaseServer } = gatedManager()
+
+    const startP = remoteVoice.start(manager, makeConnection(CONNECTION_ID), ROUTING_ID, 'en')
+    await remoteVoice.stop(CONNECTION_ID)
+    releaseServer()
+    await startP
+
+    await expectNoCapture()
+  })
+
   it('refuses an oversized frame without forwarding it', async () => {
     await startCapture()
     voiceServer.push({ type: 'ready' })

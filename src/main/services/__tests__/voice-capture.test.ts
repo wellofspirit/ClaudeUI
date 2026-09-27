@@ -162,7 +162,7 @@ describe('voice-capture', () => {
     const { startRecording } = await import('../../../core/services/voice-capture')
 
     const onData = vi.fn()
-    const ok = startRecording(onData)
+    const ok = startRecording(onData, {})
 
     expect(ok).toBe(true)
     expect(currentFake!.startRecording).toHaveBeenCalledTimes(1)
@@ -185,14 +185,15 @@ describe('voice-capture', () => {
     const { startRecording, stopRecording, isRecording } =
       await import('../../../core/services/voice-capture')
 
+    const owner = {}
     // No active session — stop() must not throw and must not call the native.
-    stopRecording()
+    stopRecording(owner)
     expect(currentFake!.stopRecording).toHaveBeenCalledTimes(0)
 
     // Start a session, then stop it.
-    expect(startRecording(vi.fn())).toBe(true)
+    expect(startRecording(vi.fn(), owner)).toBe(true)
     expect(isRecording()).toBe(true)
-    stopRecording()
+    stopRecording(owner)
     expect(currentFake!.stopRecording).toHaveBeenCalledTimes(1)
     expect(isRecording()).toBe(false)
   })
@@ -204,7 +205,7 @@ describe('voice-capture', () => {
     const { startRecording } = await import('../../../core/services/voice-capture')
 
     const onData = vi.fn()
-    const ok = startRecording(onData)
+    const ok = startRecording(onData, {})
 
     expect(ok).toBe(false)
     expect(onData).not.toHaveBeenCalled()
@@ -218,6 +219,44 @@ describe('voice-capture', () => {
       await import('../../../core/services/voice-capture')
 
     expect(isVoiceCaptureAvailable()).toBe(false)
-    expect(startRecording(vi.fn())).toBe(false)
+    expect(startRecording(vi.fn(), {})).toBe(false)
+  })
+
+  describe('ownership — the recorder is one process-wide singleton', () => {
+    it("another owner's stop does not cut off the live capture; the owner's does", async () => {
+      const { startRecording, stopRecording, isRecording } =
+        await import('../../../core/services/voice-capture')
+      const sessionA = {}
+      const sessionB = {}
+
+      expect(startRecording(vi.fn(), sessionA)).toBe(true)
+      stopRecording(sessionB)
+      expect(currentFake!.stopRecording).not.toHaveBeenCalled()
+      expect(isRecording()).toBe(true)
+
+      stopRecording(sessionA)
+      expect(currentFake!.stopRecording).toHaveBeenCalledTimes(1)
+      expect(isRecording()).toBe(false)
+    })
+
+    it("a takeover by a new owner makes the previous owner's later stop a no-op", async () => {
+      const { startRecording, stopRecording, isRecording } =
+        await import('../../../core/services/voice-capture')
+      const sessionA = {}
+      const sessionB = {}
+
+      startRecording(vi.fn(), sessionA)
+      startRecording(vi.fn(), sessionB)
+      // The takeover itself restarts the recorder (newest press wins).
+      expect(currentFake!.stopRecording).toHaveBeenCalledTimes(1)
+
+      stopRecording(sessionA)
+      expect(currentFake!.stopRecording).toHaveBeenCalledTimes(1)
+      expect(isRecording()).toBe(true)
+
+      stopRecording(sessionB)
+      expect(currentFake!.stopRecording).toHaveBeenCalledTimes(2)
+      expect(isRecording()).toBe(false)
+    })
   })
 })

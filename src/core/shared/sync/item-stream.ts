@@ -171,7 +171,9 @@ export function mergeItemContent(
   preserveExistingNativeSlots = false
 ): ContentBlock[] {
   const isAuxiliary = (block: ContentBlock): boolean =>
-    block.type === 'tool_result' || block.type === 'tool_review'
+    block.type === 'tool_result' ||
+    block.type === 'tool_review' ||
+    block.type === 'permission_denial'
   const slots = nativeBlocks.map((incoming, index) => {
     const old = oldBlocks[index]
     if (preserveExistingNativeSlots && old && !isAuxiliary(old)) return old
@@ -188,9 +190,15 @@ export function mergeItemContent(
   const reviewIds = new Set(
     nativeBlocks.filter((block) => block.type === 'tool_review').map((block) => block.reviewId)
   )
+  const denialIds = new Set(
+    nativeBlocks
+      .filter((block) => block.type === 'permission_denial')
+      .map((block) => block.denialId)
+  )
   const auxiliary = oldBlocks.filter((block) => {
     if (block.type === 'tool_result') return !resultIds.has(block.toolUseId)
     if (block.type === 'tool_review') return !reviewIds.has(block.reviewId)
+    if (block.type === 'permission_denial') return !denialIds.has(block.denialId)
     return false
   })
   return [...slots.filter(Boolean), ...auxiliary]

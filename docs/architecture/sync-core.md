@@ -169,7 +169,7 @@ per-channel listeners and their store writers.
 
 **Per-engine mechanics** (uniform events, per-engine transports — ADR-030 honesty):
 
-- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency), correlated **by id**, not by text (since 2026-09-25, ADR-077). Every user frame carries a client `uuid`, and a queued item's is its `itemId`; cli.js names the message back by it:
+- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency), correlated **by id**, not by text (since 2026-09-25, ADR-078). Every user frame carries a client `uuid`, and a queued item's is its `itemId`; cli.js names the message back by it:
   - **consumed** at `command_lifecycle` `started` (protocol-cc 03 §3.21) — at the tool boundary where the running turn folds it in (right after that boundary's tool_result), or when the between-turns drain makes it the next turn's prompt. Consuming there is what puts the steer bubble where the model actually read it. The turn-end `result` flush stays as a safety net: an item still queued at `result` is drained right after it, so the flush marks it at the same boundary a millisecond early.
   - **recalled** by `cancel_async_message {message_uuid}` (protocol-cc 07) — `{cancelled:true}` takes it back, preceded by a `cancelled` frame; `{cancelled:false}` means cli.js already took it, so it stays queued until its `started`.
   - **recalled with a warning** on `discarded` (the session ended with it queued) or `refused` (cli.js declined it). `cancelled` for an item already consumed (its turn was aborted) changes nothing.
@@ -540,7 +540,7 @@ line is a named next step with the reason it is not phase-4 work.
   because canonical no longer has the id, so nothing it emits is folded. Noted so
   it is not mistaken for a leak introduced by the delete path.
 - ~~**Turn-end queue flush cannot position what it sweeps.**~~ **RESOLVED 2026-09-25
-  (ADR-077):** when a queue push lands at/after a turn's `result`, cli.js takes it as the
+  (ADR-078):** when a queue push lands at/after a turn's `result`, cli.js takes it as the
   next turn's fresh prompt, and the uuid-keyed `command_lifecycle` `started` for it now
   arrives right after that `result`. So the boundary where the flush marks it consumed
   IS where cli.js takes it; the flush just runs a millisecond ahead, and the late

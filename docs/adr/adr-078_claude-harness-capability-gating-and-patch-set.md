@@ -1,4 +1,4 @@
-# ADR-077 — Claude Code harness: capability gating on the patches a binary carries, and the reduced patch set
+# ADR-078 — Claude Code harness: capability gating on the patches a binary carries, and the reduced patch set
 
 **Status:** Accepted (2026-09-25). Owner ruling: chat must work on any Claude Code harness;
 streaming (subagent token deltas, live Bash output) and voice light up only when the harness

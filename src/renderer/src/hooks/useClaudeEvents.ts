@@ -512,9 +512,11 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // this replica has to read the same source for itself; `seedColdSession`
       // is idempotent and refuses to clobber live content.
       const resumeSessionId = data.resumeSessionId
-      const projectKey = store.directories.find((g) =>
-        g.sessions.some((s) => s.sessionId === resumeSessionId)
-      )?.projectKey
+      // The session's own key (the dir its file lives in), not its group's — a
+      // worktree-relocated transcript is listed under its home group.
+      const projectKey = store.directories
+        .flatMap((g) => g.sessions)
+        .find((s) => s.sessionId === resumeSessionId)?.projectKey
       if (!projectKey) return
       // The FORK anchor rides the birth event (F3) and is passed straight
       // through: without it this client painted the parent's post-anchor turns

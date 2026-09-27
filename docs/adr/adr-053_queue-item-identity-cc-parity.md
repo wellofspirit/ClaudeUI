@@ -29,7 +29,7 @@ The owner's original interaction design is Claude Code CLI's, deliberately: queu
 ## Amended 2026-09-25 — the claude transport is keyed by uuid
 
 Decision §3's claude bullet — correlate by text over the `queue-control` patch surface — is
-retired for the claude engine ([ADR-077](adr-077_claude-harness-capability-gating-and-patch-set.md)
+retired for the claude engine ([ADR-078](adr-078_claude-harness-capability-gating-and-patch-set.md)
 §3). The patch is deleted, and Anthropic's official binary never had it: there `dequeue_message`
 is rejected, so take-back silently failed, and no consumption signal arrived for a message with no
 client id, so the card stayed QUEUED past consumption and the steer bubble landed below its own
