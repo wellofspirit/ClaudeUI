@@ -681,6 +681,11 @@ export class ClaudeSession extends BaseSession {
       this.resolveActiveQuery = resolve
       this.rejectActiveQuery = reject
     })
+    // Handled here, not only by ensureActiveQuery(): a run that fails before
+    // sdkQuery() returns (no cli.js, or a multi-account spawn refused for want
+    // of a token) rejects this in the finally below with nobody awaiting it,
+    // which Node reports as an unhandled rejection. Awaiters still see it.
+    this.activeQueryPromise.catch(() => {})
 
     // Collect stderr chunks so we can include them in error messages. Bounded
     // to the last STDERR_MAX_CHUNKS entries (see the push site) so a chatty
