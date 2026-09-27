@@ -152,8 +152,7 @@ vi.mock('../../../core/services/git-service', () => ({
 }))
 
 vi.mock('../../../core/sdk/proxy', () => ({
-  setProxyEnv: vi.fn(),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn()
 }))
 
 vi.mock('../../../core/sdk/endpoint-env', () => ({

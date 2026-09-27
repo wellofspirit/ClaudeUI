@@ -59,7 +59,7 @@ describe('patchesPresent', () => {
   })
 
   it('does not let one patch claim a sibling family with a shared prefix', () => {
-    expect(patchesPresent('/*PATCHED:subprocess-proxy-strip*/')).toEqual(['subprocess-proxy-strip'])
+    expect(patchesPresent('/*PATCHED:automode-verdict*/')).toEqual(['automode-verdict'])
     expect(patchesPresent('/*PATCHED:subagent-A*/')).toEqual(['subagent-streaming'])
   })
 

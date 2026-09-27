@@ -36,7 +36,6 @@ export const PATCH_REGISTRY = Object.freeze(
     { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
     { name: 'voice-server', marker: markerRe('voice-server') },
     { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') },
-    { name: 'subprocess-proxy-strip', marker: markerRe('subprocess-proxy-strip') },
     { name: 'skip-securestorage', marker: markerRe('skip-securestorage') },
     { name: 'automode-verdict', marker: markerRe('automode-verdict') }
     // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
@@ -52,6 +51,8 @@ export const PATCH_REGISTRY = Object.freeze(
     // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
     // which resolves baked file:// URLs natively via its module graph. The
     // Node-compatibility shim is no longer needed.
+    // subprocess-proxy-strip removed 2026-09-27 by owner ruling: the in-app
+    // proxy now reaches children, as on the unpatched binary.
   ].map((entry) => Object.freeze({ ...entry, apply: applyScript(entry.name) }))
 )
 

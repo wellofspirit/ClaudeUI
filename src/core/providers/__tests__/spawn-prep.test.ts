@@ -9,8 +9,7 @@ const uiConfigMocks = vi.hoisted(() => ({
 vi.mock('../../services/ui-config', () => uiConfigMocks)
 
 const proxyMocks = vi.hoisted(() => ({
-  setProxyEnv: vi.fn(),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn()
 }))
 vi.mock('../../sdk/proxy', () => proxyMocks)
 

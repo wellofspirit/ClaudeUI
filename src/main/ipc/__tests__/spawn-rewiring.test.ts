@@ -233,8 +233,7 @@ vi.mock('../../../core/services/mockup-settings', () => ({
   invalidateMockupSecuritySettings: vi.fn()
 }))
 vi.mock('../../../core/sdk/proxy', () => ({
-  setProxyEnv: vi.fn(async () => {}),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn(async () => {})
 }))
 vi.mock('../../../core/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../core/sdk/model-env', () => ({ setModelEnv: vi.fn() }))

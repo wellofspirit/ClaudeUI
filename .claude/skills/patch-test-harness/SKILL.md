@@ -1,6 +1,6 @@
 ---
 name: patch-test-harness
-description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the five patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, subprocess-proxy-strip, skip-securestorage.
+description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the five patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, skip-securestorage, automode-verdict.
 ---
 
 # Patch Test Harness
@@ -11,15 +11,15 @@ Write behavioral tests that verify cli.js patches work correctly by launching re
 
 The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Five patches today:
 
-| Patch                    | Test                                                               |
-| ------------------------ | ------------------------------------------------------------------ |
-| `subagent-streaming`     | `patch/subagent-streaming/test.mjs` — live                         |
-| `bash-output-streaming`  | `patch/bash-output-streaming/test.mjs` — live                      |
-| `subprocess-proxy-strip` | `patch/subprocess-proxy-strip/test.mjs` — live                     |
-| `skip-securestorage`     | `patch/skip-securestorage/test.mjs` — structural, offline          |
-| `voice-server`           | none; its apply script's own checks are the only guard (see below) |
+| Patch                   | Test                                                               |
+| ----------------------- | ------------------------------------------------------------------ |
+| `subagent-streaming`    | `patch/subagent-streaming/test.mjs` — live                         |
+| `bash-output-streaming` | `patch/bash-output-streaming/test.mjs` — live                      |
+| `automode-verdict`      | `patch/automode-verdict/test.mjs` — live                           |
+| `skip-securestorage`    | `patch/skip-securestorage/test.mjs` — structural, offline          |
+| `voice-server`          | none; its apply script's own checks are the only guard (see below) |
 
-The other nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078; the list is in `docs/protocol-cc/01-transport.md` §1.12). Their tests went with them.
+Nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078), and `subprocess-proxy-strip` was removed on 2026-09-27; the list is in `docs/protocol-cc/01-transport.md` §1.12. Their tests went with them.
 
 ## Test Infrastructure
 
@@ -284,11 +284,6 @@ const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs
 
 **Trigger:** one Bash command that prints a line every 0.2 s for 4 s, `effort: 'low'`.
 **Assert:** `bash_output` messages arrive, with `tool_use_id`, `output`, `total_lines`, `total_bytes`, and at least one carrying the expected `line-` text.
-
-### subprocess-proxy-strip
-
-**Trigger:** two sessions with `NO_PROXY` set to a non-matching sentinel host in the parent env, each running one Bash command that prints `${NO_PROXY:-MISSING}`: first with `CLAUDEUI_PROXY_SUBPROCESSES` unset, then with it set to `1`. (A non-matching `NO_PROXY` exercises the strip list without routing the model's own API traffic through an unreachable proxy.)
-**Assert:** default phase — the probe prints `MISSING`, never the sentinel; opt-in phase — the probe prints the sentinel. Read probes only from `bash_output` / `user` tool results, never assistant text. Restore the parent env in a `finally`.
 
 ### skip-securestorage
 

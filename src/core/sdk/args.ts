@@ -8,7 +8,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
-import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
+import { getProxyEnv } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
 import { getSecurestorageEnv } from './securestorage-env'
@@ -325,30 +325,20 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   // so an explicit opt-out in the environment still wins.
   env.CLAUDE_CODE_ENABLE_TODO_TOOLS ??= 'true'
 
-  // Scoped proxy: overlay proxy env vars only onto this spawn, not the main
-  // Electron process. If `proxyAllSubprocesses` is off (default), the
-  // subprocess-proxy-strip patch in cli.js removes these from Bash/MCP/LSP
-  // child env so only cli.js's own API traffic is proxied.
+  // Scoped proxy: overlay the in-app proxy only onto this spawn, not the main
+  // Electron process. cli.js passes its env to every child it spawns (Bash,
+  // MCP stdio servers, LSP, hooks), so the in-app proxy reaches them too, as a
+  // shell-set proxy does with the unpatched binary.
   const proxy = getProxyEnv()
   if (proxy) {
     env.HTTP_PROXY = proxy.HTTP_PROXY
     env.HTTPS_PROXY = proxy.HTTPS_PROXY
     env.ALL_PROXY = proxy.ALL_PROXY
-    if (getProxyAllSubprocesses()) env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
-    else delete env.CLAUDEUI_PROXY_SUBPROCESSES
-  } else {
-    // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
-    // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
-    // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
-    // corporate/env proxy with no connectivity (M-CL4).
-    //
-    // And let them reach cli.js's children too. The subprocess-proxy-strip patch
-    // exists to keep the IN-APP proxy, which may carry credentials, away from
-    // Bash/MCP/LSP children. An inherited proxy is the user's own, from the
-    // shell those commands would run in anyway, and the unpatched binary passes
-    // it through. The marker switches the strip off.
-    env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
   }
+  // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
+  // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
+  // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
+  // corporate/env proxy with no connectivity (M-CL4).
 
   // Scoped Anthropic endpoint: overlay base URL + auth token only onto this
   // spawn so user-supplied gateway credentials never leak into PTYs, simple-git

@@ -1,6 +1,6 @@
 ---
 name: patch-readme
-description: Write README.md files for cli.js patches in patch/ (the five in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, subprocess-proxy-strip, skip-securestorage — or a new one). Use when creating or updating a patch README. The README is a reverse-engineering guide that enables an agent with zero context to rebuild the patch from scratch when Claude Code updates and all minified names change.
+description: Write README.md files for cli.js patches in patch/ (the five in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, skip-securestorage, automode-verdict — or a new one). Use when creating or updating a patch README. The README is a reverse-engineering guide that enables an agent with zero context to rebuild the patch from scratch when Claude Code updates and all minified names change.
 ---
 
 # Writing Patch READMEs
@@ -24,8 +24,8 @@ Each patch in `patch/` modifies `vendor/claude-cli/cli.js` — the minified Clau
    - `subagent-streaming/README.md` — exemplar for multi-patch coordination, architecture diagrams, message flow
    - `bash-output-streaming/README.md` — exemplar for unpatched/patched data-flow diagrams, a "Why it's safe" argument, and syntax pitfalls in the chunked bundle
    - `voice-server/README.md` — exemplar for a control-request injection that reaches across chunks, with re-anchor history per version
-   - `subprocess-proxy-strip/README.md` — exemplar for matching one function across many version shapes, with a Discovery Method per re-anchor
-   - `skip-securestorage/README.md` — exemplar for a concise single-concern patch
+   - `skip-securestorage/README.md` — exemplar for a concise single-concern patch, and for matching one function (the store getter) across several platform and version shapes
+   - `automode-verdict/README.md` — exemplar for documenting traps up front (two emitters, two wrappers, only one of each live) and an anchor chosen to survive a signature change between versions
 3. **Use `/bundle-analyzer`** to verify your understanding of the code sites
 
 ## Required Sections
@@ -291,7 +291,7 @@ Write as a numbered narrative — the detective story of how you found each piec
 6. **Verified full round-trip**: <how you confirmed end-to-end>
 ```
 
-Include failed attempts! They prevent future agents from repeating the same mistakes. `subprocess-proxy-strip`'s re-anchor narratives (both anchors dying at once in the 2.1.261 chunked bundle) and `voice-server`'s 2.1.261 cross-chunk re-anchor are good examples.
+Include failed attempts! They prevent future agents from repeating the same mistakes. `bash-output-streaming`'s 2.1.261 re-anchor (Part B's result-assignment regex dying in the chunked bundle, and the capture order it forced) and `voice-server`'s 2.1.261 cross-chunk re-anchor are good examples.
 
 ### 13. Key Functions Reference Table
 
