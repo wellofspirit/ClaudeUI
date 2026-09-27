@@ -954,6 +954,14 @@ interface ClaudeTargetEntry {
    * snapshots use. Lives as long as the target's process, like the agents.
    */
   agentOrigins: Map<string, string>
+  /**
+   * A later run's tool_use id (the SendMessage call that resumed an agent) →
+   * that agent's origin, learned from a second `task_started` for a known
+   * task_id (ADR-073 §1; `ClaudeSession.runAliasByToolUseId`). That run's
+   * stream events carry the run's id while its snapshots carry the origin's;
+   * resolving both through this map puts them on one item-lane state.
+   */
+  agentRunAliases: Map<string, string>
 }
 
 /**
@@ -3824,16 +3832,23 @@ export class CrossEngineDispatcher {
    * `parent_tool_use_id`-routed frames (claude-session.ts's
    * `handleStreamEvent`) — this mirrors that mapping, just re-keyed: an
    * agent_id-only frame resolves through `entry.agentOrigins` to the same lane
-   * key its snapshots use, and one no task_started placed is dropped.
+   * key its snapshots use, and one no task_started placed is dropped. A
+   * SendMessage-resumed run's frames and snapshots both resolve through
+   * `entry.agentRunAliases` onto the agent's origin.
    */
   private forwardClaudeTargetMessage(entry: ClaudeTargetEntry, msg: SDKMessage): void {
     // Learned whether or not a card is listening: it is the target's own
     // identity, and a later turn's card needs it.
     if (msg.type === 'system' && msg.subtype === 'task_started') {
-      if (msg.task_id && msg.tool_use_id && !entry.agentOrigins.has(msg.task_id))
-        entry.agentOrigins.set(msg.task_id, msg.tool_use_id)
+      if (msg.task_id && msg.tool_use_id) {
+        const origin = entry.agentOrigins.get(msg.task_id)
+        if (origin === undefined) entry.agentOrigins.set(msg.task_id, msg.tool_use_id)
+        else if (origin !== msg.tool_use_id) entry.agentRunAliases.set(msg.tool_use_id, origin)
+      }
       return
     }
+    const runOwner = (id: string | undefined): string | undefined =>
+      id === undefined ? id : (entry.agentRunAliases.get(id) ?? id)
 
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
@@ -3841,7 +3856,7 @@ export class CrossEngineDispatcher {
     if (msg.type === 'stream_event') {
       if (!msg.event) return
       const owner = streamEventParent(msg, (agentId) => entry.agentOrigins.get(agentId))
-      if (owner !== null) entry.itemStreams.handleEvent(msg.event, owner)
+      if (owner !== null) entry.itemStreams.handleEvent(msg.event, runOwner(owner))
       return
     }
 
@@ -3849,8 +3864,9 @@ export class CrossEngineDispatcher {
       const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
       if (chatMsg) {
         collectToolUseIds(chatMsg, entry.turnToolUseIds)
-        const nativeOwner =
+        const nativeOwner = runOwner(
           (msg as unknown as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined
+        )
         if (entry.itemStreams.handleSnapshot(chatMsg, nativeOwner) === 'none')
           entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
       }
@@ -3911,7 +3927,8 @@ export class CrossEngineDispatcher {
       lastActivityAt: 0,
       turnToolUseIds: new Set(),
       itemStreams: undefined as unknown as ClaudeItemStreamLifecycle,
-      agentOrigins: new Map()
+      agentOrigins: new Map(),
+      agentRunAliases: new Map()
     }
     entry.itemStreams = new ClaudeItemStreamLifecycle({
       open: (target, message, startedAt) => {
