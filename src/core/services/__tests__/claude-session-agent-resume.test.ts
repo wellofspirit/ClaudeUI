@@ -696,3 +696,81 @@ describe('ClaudeSession — an idle self-resume streams onto its own card', () =
     ).toEqual([])
   })
 })
+
+/**
+ * Only the main agent's frames start a turn.
+ *
+ * A background agent keeps streaming while the session is idle — an idle
+ * self-resume, or a child still working after the turn that spawned it ended.
+ * The turn-start check in dispatchMessage fired for ANY assistant/stream frame,
+ * so such a frame flipped the idle session to "running" (Stop button, typing
+ * indicator, turn clock, the next prompt queued behind no turn) until some
+ * later result reset it.
+ */
+describe('ClaudeSession — a sub-agent frame does not start a main turn', () => {
+  /** Spawn-only: the process is up, no turn is in flight. */
+  async function runIdle(
+    routingId: string,
+    wire: Array<Record<string, unknown>>
+  ): Promise<Array<[string, string, unknown]>> {
+    mockQuery.mockImplementation(() => makeFakeQueryHandle(wire))
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession(routingId, win, '/tmp/proj')
+    liveSessions.push(session)
+    await session.run(null)
+    return sent
+  }
+
+  const turnStarts = (sent: Array<[string, string, unknown]>): unknown[] => [
+    ...sent.filter(
+      ([c, , d]) => c === 'session:status' && (d as { state: string }).state === 'running'
+    ),
+    ...sent.filter(
+      ([c, , d]) =>
+        c === 'session:status-line' && (d as { turnStartedAtMs?: number | null }).turnStartedAtMs
+    )
+  ]
+
+  const streamEvent = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    type: 'stream_event',
+    ...extra,
+    event: { type: 'message_start', message: { id: 'msg_bg' } }
+  })
+
+  it("ignores a background agent's stream_event that names its parent call", async () => {
+    const sent = await runIdle('routing-idle-bg-parent', [
+      taskStarted(ORIGIN),
+      streamEvent({ parent_tool_use_id: ORIGIN })
+    ])
+    expect(turnStarts(sent)).toEqual([])
+  })
+
+  it("ignores an idle self-resume's agent_id-only stream_event", async () => {
+    const sent = await runIdle('routing-idle-bg-agent-id', [
+      taskStarted(ORIGIN),
+      streamEvent({ agent_id: TASK_ID })
+    ])
+    expect(turnStarts(sent)).toEqual([])
+  })
+
+  it("ignores a sub-agent's assistant snapshot", async () => {
+    const sent = await runIdle('routing-idle-bg-assistant', [
+      taskStarted(ORIGIN),
+      childMessage(ORIGIN, 'BG')
+    ])
+    expect(turnStarts(sent)).toEqual([])
+  })
+
+  it('still starts the turn on a root frame while idle (a queued prompt cli.js picked up)', async () => {
+    const sent = await runIdle('routing-idle-root', [streamEvent({})])
+    expect(
+      sent.filter(
+        ([c, , d]) => c === 'session:status' && (d as { state: string }).state === 'running'
+      )
+    ).toHaveLength(1)
+    const line = sent.find(([c]) => c === 'session:status-line')
+    expect((line?.[2] as { turnStartedAtMs?: number | null }).turnStartedAtMs).toEqual(
+      expect.any(Number)
+    )
+  })
+})

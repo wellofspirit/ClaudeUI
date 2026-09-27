@@ -1161,7 +1161,19 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // while the first was in flight doesn't get its own run() turn-start (the
     // channel push already happened), so this is where its turn actually
     // starts once cli.js begins working on it.
-    if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
+    //
+    // Only the MAIN agent's frames: a background agent keeps streaming while the
+    // session is idle (an idle self-resume, or a child still working after the
+    // turn ended), and its frames would otherwise flip the idle session to
+    // "running" — Stop button, typing indicator, turn clock, a prompt queued
+    // behind no turn — until some later result reset it. "An agent is working"
+    // is the task roster's to say, not the main turn's.
+    if (
+      (type === 'assistant' || type === 'stream_event') &&
+      !this.isProcessing &&
+      !msg.parent_tool_use_id &&
+      !msg.agent_id
+    ) {
       this.isProcessing = true
       this.turnStartedAtMs = Date.now()
       this.sendStatus()
