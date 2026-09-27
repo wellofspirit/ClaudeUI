@@ -6,6 +6,8 @@ import { readSessionHistory as loadSessionHistory, historyFor } from '../service
 import * as path from 'path'
 import * as os from 'os'
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
+import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
@@ -168,6 +170,7 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
@@ -211,6 +214,7 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
 
   try {
+    await ensureHostTokenFresh()
     const q = sdkQuery({
       prompt: diff,
       options: {
@@ -265,6 +269,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
   }
 
   const abort = new AbortController()
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
@@ -294,17 +299,10 @@ async function fetchModels(): Promise<ModelInfo[]> {
       reportHostLoginStatus(init?.account)
       // Also update the ClaudeAuthProvider probe cache so probe() and session.account
       // are accurate from the first model-fetch, before any chat session opens.
-      const acc = init?.account as Record<string, unknown> | undefined
-      if (acc) {
-        const loggedIn = !!acc.email
-        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', {
-          email: (acc.email as string | null) ?? null,
-          organization: (acc.organization as string | null) ?? null,
-          subscriptionType: (acc.subscriptionType as string | null) ?? null,
-          tokenSource: (acc.tokenSource as string | null) ?? null,
-          apiKeySource: (acc.apiKeySource as string | null) ?? null,
-          apiProvider: (acc.apiProvider as string | null) ?? null
-        })
+      // The same signal the banner reads (claude-login-state.ts).
+      if (init?.account) {
+        const { loggedIn, account } = claudeLoginSignal(init.account)
+        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
       }
     } catch {
       /* non-fatal — per-session init will still report status */

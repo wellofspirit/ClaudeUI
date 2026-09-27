@@ -816,6 +816,25 @@ Early-exits from the action handler (char `12963500+`):
 - `CLAUDE_CODE_BRIEF` — env toggle for brief mode
 - `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` — exported by `--remote-control-session-name-prefix`
 
+### Host-owned OAuth token (multi-account)
+
+What `buildEnv()` sets on every multi-account spawn that has no custom endpoint profile (`src/core/sdk/args.ts`, `applyHostTokenEnv`), matching Claude Desktop 2.9939.2's spawn env. Anchors are `.cache/pristine-cli.js` (2.1.280) offsets.
+
+| Variable                            | Value                                                      | What cli.js does with it                                                                                                                                                      |
+| ----------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_ENTRYPOINT`            | `claude-desktop` (every spawn)                             | Half of the `oauth_token_refresh` gate `Mnt()` @3069074 (`Avo` @3069008)                                                                                                      |
+| `CLAUDE_CODE_OAUTH_TOKEN`           | the active account's access token                          | `PM()` @3094847 makes it the credential: `{accessToken, refreshToken: null, expiresAt: null}`. No refresh token, so a 401 goes to the host (08 §8.7). Never written to a file |
+| `CLAUDE_CODE_OAUTH_SCOPES`          | the credential's granted scopes, space-separated (or `""`) | `cb()` @3094678 splits it; empty falls back to `["user:inference"]`                                                                                                           |
+| `CLAUDE_CODE_SUBSCRIPTION_TYPE`     | the credential's `subscriptionType`, or `""`               | `PM()`'s `subscriptionType` (`""` reads as null)                                                                                                                              |
+| `CLAUDE_CODE_RATE_LIMIT_TIER`       | the credential's `rateLimitTier`, or `""`                  | `PM()`'s `rateLimitTier` (`""` reads as null)                                                                                                                                 |
+| `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` | `1`                                                        | The other half of `Mnt()`: cli.js asks us for a fresh token instead of failing the turn                                                                                       |
+
+Removed from the spawn env at the same time: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS` (as Desktop does), an inherited `ANTHROPIC_BASE_URL` (Desktop pins the base URL to its own API host, so the account's token never goes to a gateway named in the user's shell), and any inherited `CLAUDE_CODE_OAUTH_TOKEN`, `SKIP_SECURESTORAGE` or `CLAUDE_SECURESTORAGE_CONFIG_DIR`. With multi-account on and no readable token the spawn is refused (`HostTokenUnavailableError`); it never falls through to the machine's default login. Under a custom endpoint profile the profile's `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` win and none of the above is set. Single-account spawns pass the inherited env through.
+
+What reaches cli.js's children (Bash, MCP stdio servers, hooks): its child-env builder `Zs()` @2440665 deletes `CLAUDE_CODE_OAUTH_TOKEN` (in `uPt` @767797) and `CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` (`Ne` @2441912). `CLAUDE_CODE_OAUTH_SCOPES` passes through. The orchestrator's live probe (official 2.1.280, Windows) confirmed both from a Bash child, and found the token in no file cli.js wrote.
+
+The initialize response's `account` is then `{tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "firstParty"}` with no email (the orchestrator's probe; 09 §`account`), which is why the app derives login state from the account's own credential in this mode (`src/core/services/claude-login-state.ts`).
+
 ### Anthropic SDK
 
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_AWS_BASE_URL`, `ANTHROPIC_CUSTOM_*`.

@@ -32,7 +32,10 @@
  * the `security` CLI triggers macOS Keychain trust prompts (the item's ACL does
  * not trust our spawned `security` process). Login state for the proactive
  * banner comes from the `account` in cli.js's initialize response instead
- * (claude-session broadcasts `session:auth-source`).
+ * (claude-session broadcasts `session:auth-source`). In multi-account mode that
+ * response names no account (sessions run on a token the app hands cli.js), so
+ * the app's OWN per-account file answers: it is the app's store, not cli.js's,
+ * and never the Keychain (`core/services/claude-login-state.ts`).
  */
 
 import { shell } from 'electron'
@@ -42,6 +45,7 @@ import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from '../../core/services/logger'
 import { emitEvent } from '../../core/services/sync-host'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../../core/auth/auth-providers'
+import { claudeLoginSignal } from '../../core/services/claude-login-state'
 import {
   backendForPaste,
   openLoginBackend,
@@ -115,13 +119,14 @@ class AuthManager {
   /**
    * Broadcast login status derived from an initialize-response `account`.
    * Called both at app load (the model-detection query) and per chat-session
-   * init, so the banner is accurate before any session is opened. A present
-   * `account.email` = logged in; absent = logged out. See ADR-014.
+   * init, so the banner is accurate before any session is opened. Single
+   * account: a present `account.email` = logged in; absent = logged out
+   * (ADR-014). Multi-account sessions run on a host token and report no email,
+   * so the active account's own credential decides (`claudeLoginSignal`).
    */
   reportLoginStatus(account: unknown): void {
     if (!this.window || this.window.isDestroyed()) return
-    const acc = account as Record<string, unknown> | undefined
-    const loggedIn = !!(acc && acc.email)
+    const { loggedIn } = claudeLoginSignal(account)
     // Matches the (routingId, source) shape of the session:auth-source event;
     // login is global so the id is a synthetic 'system'. Reaches every subscriber
     // since SyncCore phase 4c — the channel rings, so a reconnecting client

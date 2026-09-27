@@ -18,7 +18,7 @@
  * starts can display data immediately without an API call.
  */
 
-import { readFile, writeFile, mkdir, appendFile, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { homedir, platform } from 'node:os'
@@ -46,6 +46,7 @@ import {
   type OAuthCredentials
 } from './claude-usage-api'
 import { recordLimitSamples } from './window-samples'
+import { claudeRefreshGuard, credentialVersion } from './claude-refresh-guard'
 import { accountState, buildClaudeAccountRef } from '../host'
 import { getSecurestorageEnv, onSecurestorageEnvChange } from '../sdk/securestorage-env'
 import { apiKeyAccountKey } from './account-key-hash'
@@ -127,9 +128,10 @@ const ACCOUNT_LOG_PATH = join(ACCOUNT_LOG_DIR, 'account-log.jsonl')
  * A refusal never does — retrying it would spend grants on an account that has
  * said no — and neither does a 429, which has its own handling.
  *
- * Every attempt re-reads the credentials file first, because cli.js rewrites it
- * the moment the user sends a turn — so the usual recovery is that a later
- * attempt finds a fresh access token and spends nothing at all. The 30-minute
+ * Every attempt re-reads the credentials file first, because the token keeper
+ * (`claude-host-token.ts`) rotates it whenever a session needs a fresh token, so
+ * the usual recovery is that a later attempt finds a fresh access token and
+ * spends nothing at all. The 30-minute
  * poll is far too slow for this: on 2026-09-21 it left thirteen minutes of
  * turns keyed to the account the user had just switched AWAY from.
  *
@@ -301,22 +303,6 @@ export class UsageFetcher {
   private retryState: { dir: string | null; attempt: number; identityUnread: boolean } | null = null
   /** The retry loop's ONE timer. Cleared by a resolve, a new cause, and stop. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null
-  /**
-   * The credentials-file version a refresh grant has already been spent on and
-   * REFUSED by the endpoint (ADR-071 §6 applied to the retry loop).
-   *
-   * Keyed by mtime and size like {@link identityCache}, because that pair is
-   * what changes when cli.js rotates the file. While it has not changed, a
-   * second refresh would offer the endpoint the very token it just rejected.
-   *
-   * ONE slot, deliberately: the fetcher reads the ACTIVE credential and nothing
-   * else, so two paths hold a refusal at once only across a switch, where the
-   * new folder's first read is the one that matters. A dashboard sweep of
-   * STORED accounts does not come through here (it has its own reads, with
-   * `allowRefresh` decided per account), so the slot cannot be evicted by
-   * another account's failure mid-retry.
-   */
-  private refreshRefusedOn: { path: string; mtimeMs: number; size: number } | null = null
   /**
    * Why the direct read of THIS pass failed, or null when it succeeded.
    *
@@ -998,13 +984,14 @@ export class UsageFetcher {
    * The 30-minute poll must not ask the profile endpoint again for an answer
    * that cannot have moved: the only thing that puts a different account behind
    * this path is a re-login, and that rewrites the file. Whether a refresh grant
-   * may be spent is {@link refreshAllowedFor}'s answer — this is the ACTIVE
-   * account, so cli.js normally keeps its token fresh and a refresh here is the
-   * exception (ADR-071 §6).
+   * may be spent is `claudeRefreshGuard`'s answer (ADR-071 §6) — this is the
+   * ACTIVE account, so the token keeper normally keeps its token fresh and a
+   * refresh here is the exception.
    */
   private async resolveDirIdentity(dir: string): Promise<ClaudeDirIdentity | null> {
     const credentialsPath = join(dir, '.credentials.json')
-    const { mtimeMs, size } = await this.credentialVersion(credentialsPath)
+    const version = await credentialVersion(credentialsPath)
+    const { mtimeMs, size } = version
     const cached = this.identityCache
     if (
       mtimeMs > 0 &&
@@ -1018,11 +1005,11 @@ export class UsageFetcher {
 
     const result = await resolveClaudeDirIdentity({
       credentialsPath,
-      allowRefresh: this.refreshAllowedFor(credentialsPath, mtimeMs, size),
+      allowRefresh: claudeRefreshGuard.allowed(credentialsPath, version),
       userAgent: this.userAgent
     })
     if ('error' in result) {
-      this.noteRefreshResult(result, credentialsPath, mtimeMs, size)
+      claudeRefreshGuard.note(result, credentialsPath, version)
       logger.info(
         'UsageFetcher',
         `active account ${basename(dir)} identity not read: ${result.error} (${result.detail})`
@@ -1037,54 +1024,6 @@ export class UsageFetcher {
       `active account ${basename(dir)} is ${claudeDirAccountKey(result.identity)}`
     )
     return result.identity
-  }
-
-  /** A credentials file's version — `{ mtimeMs: 0, size: 0 }` when it is absent. */
-  private async credentialVersion(path: string): Promise<{ mtimeMs: number; size: number }> {
-    try {
-      const info = await stat(path)
-      return { mtimeMs: info.mtimeMs, size: info.size }
-    } catch {
-      // Not there: a read of it answers `needs-sign-in` without a request, and
-      // there is no version to cache or to charge a refresh against.
-      return { mtimeMs: 0, size: 0 }
-    }
-  }
-
-  /**
-   * May a read of this credentials file spend a refresh grant? (ADR-071 §6.)
-   *
-   * No, while a refresh for THIS version of the file has already been POSTed and
-   * refused: the endpoint has seen that token and said no, and cli.js has not
-   * rewritten the file since, so offering it again only spends grants. It turns
-   * back on by itself the moment the file changes — which is what cli.js does
-   * as soon as the user sends a turn on the account.
-   *
-   * Both reads of a credential go through here, the identity and the usage one:
-   * they share one file and one grant, and the switch that reaches this path
-   * used to POST a refused token twice in a single pass.
-   *
-   * A MISSING file has no version to latch (round 2, R4). `{0, 0}` is what
-   * `credentialVersion` answers for one, and latching it would mean that in
-   * single-account Keychain mode — where the credential lives in the Keychain
-   * and the file legitimately does not exist — one refused refresh disabled
-   * every later refresh for the life of the process.
-   */
-  private refreshAllowedFor(path: string, mtimeMs: number, size: number): boolean {
-    if (mtimeMs <= 0) return true
-    const refused = this.refreshRefusedOn
-    return !(refused?.path === path && refused.mtimeMs === mtimeMs && refused.size === size)
-  }
-
-  /** Remember a refused refresh, so {@link refreshAllowedFor} stops offering it. */
-  private noteRefreshResult(
-    result: { refreshFailed?: boolean },
-    path: string,
-    mtimeMs: number,
-    size: number
-  ): void {
-    if (mtimeMs <= 0) return
-    if (result.refreshFailed) this.refreshRefusedOn = { path, mtimeMs, size }
   }
 
   /**
@@ -1496,18 +1435,21 @@ export class UsageFetcher {
    */
   private async fetchDirect(): Promise<AccountUsage | null> {
     const credentialsPath = this.credentialsPath()
-    const { mtimeMs, size } = await this.credentialVersion(credentialsPath)
+    const version = await credentialVersion(credentialsPath)
     const result = await fetchClaudeUsage({
       credentialsPath,
       // Still the ACTIVE account, which may refresh — but not with a grant this
-      // version of the file has already had refused (see refreshAllowedFor).
-      allowRefresh: this.refreshAllowedFor(credentialsPath, mtimeMs, size),
+      // version of the file has already had refused (ADR-071 §6). Both reads of
+      // a credential, the identity and the usage one, go through the one guard:
+      // they share one file and one grant, and the switch that reaches this path
+      // used to POST a refused token twice in a single pass.
+      allowRefresh: claudeRefreshGuard.allowed(credentialsPath, version),
       userAgent: this.userAgent,
       fallbackCredentials: () => this.readKeychainCredentials()
     })
     this.lastDirectFailure = 'usage' in result ? null : result.error
     if ('usage' in result) return result.usage
-    this.noteRefreshResult(result, credentialsPath, mtimeMs, size)
+    claudeRefreshGuard.note(result, credentialsPath, version)
     if (result.error === 'rate-limited') {
       logger.debug(
         'UsageFetcher',
@@ -1524,15 +1466,14 @@ export class UsageFetcher {
   // -------------------------------------------------------------------------
 
   /**
-   * Resolve the `.credentials.json` cli.js is actually reading from.
+   * Resolve the `.credentials.json` the active account's sessions run on.
    *
-   * Multi-account (ADR-015) points cli.js at a per-account directory via
-   * `CLAUDE_SECURESTORAGE_CONFIG_DIR` (set by AccountManager.applyActive()),
-   * and the running session refreshes/rotates the token in THAT file — the
-   * root `~/.claude/.credentials.json` goes stale and its refresh token gets
-   * invalidated. Reading the same dir cli.js uses keeps the direct usage call
-   * on the live access token instead of silently failing into the SDK relay.
-   * Returns the root path in single-account / Keychain mode (env unset).
+   * Multi-account (ADR-015): the active account's own directory
+   * (`AccountManager.applyActive()` publishes it), whose token the app hands
+   * every cli.js spawn and the token keeper rotates. Reading the same file keeps
+   * the direct usage call on the live access token instead of silently failing
+   * into the SDK relay. Returns the root path in single-account / Keychain mode
+   * (no active dir), where cli.js owns the login.
    */
   private credentialsPath(): string {
     const dir = getSecurestorageEnv()?.dir
@@ -1543,7 +1484,7 @@ export class UsageFetcher {
    * The macOS Keychain credential, when it applies at all.
    *
    * Keychain storage only exists in single-account mode. When multi-account is
-   * active, credentials are file-based per ADR-015 (SKIP_SECURESTORAGE) — never
+   * active, credentials are the app's own per-account files (ADR-015) — never
    * the Keychain — so this answers null and the file is the only source.
    */
   private async readKeychainCredentials(): Promise<OAuthCredentials | null> {

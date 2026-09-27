@@ -2,10 +2,11 @@
  * Multiple-account support (ADR-015 / Phase 4 ADR-021).
  *
  * Each account is a directory `~/.claude/ui/accounts/<id>/` holding only its
- * own `.credentials.json`. cli.js is pointed at the active account's dir via
- * `CLAUDE_SECURESTORAGE_CONFIG_DIR` + `SKIP_SECURESTORAGE=1` (the
- * skip-securestorage patch forces file-based storage), so credentials are
- * per-account while settings / history stay shared in `~/.claude`.
+ * own `.credentials.json`, written by the app's in-app sign-in. Every cli.js
+ * spawn is handed the active account's access token through the environment
+ * (`CLAUDE_CODE_OAUTH_TOKEN`, `core/sdk/host-token.ts`), and the app's token
+ * keeper keeps it fresh, so credentials are per-account while settings /
+ * history stay shared in `~/.claude`.
  *
  * Phase 4 change: AccountInfo metadata (email, subscriptionType, organization,
  * createdAt) moves into the operational DB (v2 migration). Credentials NEVER
@@ -13,7 +14,7 @@
  * a lightweight pointer file — avoids a DB read on the hot spawn-env path.
  * accounts.json is kept as a one-release fallback (data imported to DB on init).
  *
- * Switch mechanism (env re-point + respawn) is unchanged.
+ * Switch mechanism (re-point the active dir + respawn) is unchanged.
  */
 
 import type { BrowserWindow } from 'electron'
@@ -215,7 +216,7 @@ class AccountManager {
     return join(ACCOUNTS_DIR, id)
   }
 
-  /** Point cli.js spawns at the active account dir (or clear for Keychain mode). */
+  /** Publish the active account dir for cli.js spawns (or clear it for single-account mode). */
   private applyActive(): void {
     if (this.state.enabled && this.state.activeId) {
       const dir = this.accountDir(this.state.activeId)

@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -643,6 +644,11 @@ export class AutomationManager {
       const desiredEffort =
         (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
       const resolvedEffort = resolveEffort(modelValue, desiredEffort) ?? undefined
+
+      // Multi-account: renew the active account's token, or fail the run with
+      // HostTokenUnavailableError (executeRun records its message as the run's
+      // error). A no-op in single-account mode.
+      await ensureHostTokenFresh()
 
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.

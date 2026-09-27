@@ -7,9 +7,12 @@
  *
  * probe() — builds a VendorAuthMap with a single 'anthropic' entry derived from
  * the cached auth-source signal (set by ClaudeSession.run → initializationResult →
- * session:auth-source). NO credential-file reads (preserves ADR-014 Keychain-
- * prompt avoidance). billingType is inferred from the active account's
- * OAuthAccount subscriptionType / apiKeySource.
+ * session:auth-source). NO credential-file reads here (preserves ADR-014
+ * Keychain-prompt avoidance); in multi-account mode that signal is derived from
+ * the active account's own credential and account row, because cli.js reports
+ * no email for a host token (`core/services/claude-login-state.ts`). billingType
+ * is inferred from the active account's OAuthAccount subscriptionType /
+ * apiKeySource.
  */
 
 import type { BrowserWindow } from 'electron'

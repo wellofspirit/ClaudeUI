@@ -18,6 +18,7 @@
  * the same refresh rules.
  */
 
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import type { AccountLimitWindow, AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { writeJsonAtomicAsync } from './write-json-atomic'
@@ -60,10 +61,15 @@ const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
  * WHAT WAS HERE BEFORE S2g: `console.anthropic.com/v1/oauth/token`,
  * `client_id: 'cli'` and a form-encoded body, unchanged since `6cde0e7c`. Both
  * refresh attempts in 14 days of the owner's logs were rejected with a 400, so
- * that request had probably never worked. It is rarely reached because cli.js
- * keeps the ACTIVE folder's token fresh; a switch to a folder left idle longer
- * than its token's life is exactly the case that reaches it. A rejected
- * `client_id` does not consume the grant, so nothing was lost.
+ * that request had probably never worked. A rejected `client_id` does not
+ * consume the grant, so nothing was lost.
+ *
+ * Under multi-account this exchange is the ONLY thing that keeps an account's
+ * token fresh: sessions run on a token the app hands cli.js through
+ * `CLAUDE_CODE_OAUTH_TOKEN`, and cli.js never refreshes or writes back an
+ * env-supplied token. The token keeper (`claude-host-token.ts`) calls it before
+ * a spawn, on its renewal timer and on cli.js's `oauth_token_refresh`; the
+ * usage reads call it too.
  *
  * `docs/protocol-cc/12-maintenance.md` §12.1 tells a CLI bump to re-check all
  * three: the URL, the id, and the body's encoding.
@@ -168,13 +174,35 @@ export interface ClaudeUsageOptions {
   fallbackCredentials?: () => Promise<OAuthCredentials | null>
 }
 
-/** Read `claudeAiOauth` out of a credentials file. Null when absent or unreadable. */
-export async function readCredentialsFile(path: string): Promise<OAuthCredentials | null> {
+/** `claudeAiOauth` out of a credentials file's text. Null when absent or unparseable. */
+function parseCredentials(raw: string): OAuthCredentials | null {
   try {
-    const raw = await readFile(path, 'utf-8')
     const parsed = JSON.parse(raw) as CredentialsFile
     if (!parsed.claudeAiOauth?.accessToken) return null
     return parsed.claudeAiOauth
+  } catch {
+    return null
+  }
+}
+
+/** Read `claudeAiOauth` out of a credentials file. Null when absent or unreadable. */
+export async function readCredentialsFile(path: string): Promise<OAuthCredentials | null> {
+  try {
+    return parseCredentials(await readFile(path, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * {@link readCredentialsFile}, synchronously, for the one caller that cannot
+ * await: `buildEnv()`, which puts the active account's token on a spawn's env
+ * (through `claude-host-token.ts`). The file is a few hundred bytes the app
+ * owns, so the read costs about what a stat would.
+ */
+export function readCredentialsFileSync(path: string): OAuthCredentials | null {
+  try {
+    return parseCredentials(readFileSync(path, 'utf-8'))
   } catch {
     return null
   }
@@ -196,6 +224,26 @@ class RefreshRejectedError extends Error {
 }
 
 /**
+ * Did this failed refresh REFUSE the grant, or only fail to get an answer?
+ *
+ * A refusal is the endpoint's answer about the token: a status no retry could
+ * change. A 408, a 429 or a 5xx says "not now" rather than "no", and so does
+ * anything that never produced a status (a timeout, a dropped connection, an
+ * unparseable body). The grant may well still be good, and latching on it would
+ * leave a healthy account marked for a sign-in until its file happened to change
+ * (round 2, M2). Shared with the token keeper, whose answer to cli.js's
+ * `oauth_token_refresh` draws the same line (`refresh_failed` against
+ * `transient`).
+ */
+export function isRefreshRefusal(err: unknown): boolean {
+  return err instanceof RefreshRejectedError && !isRetryableStatus(err.status)
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500
+}
+
+/**
  * What a failed refresh answers.
  *
  * `needs-sign-in` ONLY for a refusal, because that is the answer the UI acts
@@ -206,14 +254,65 @@ class RefreshRejectedError extends Error {
  * arms the retry in `usage-fetcher.ts` (owner ruling, round 3).
  */
 function refreshFailure(err: unknown): ClaudeUsageFailure {
-  if (err instanceof RefreshRejectedError) {
+  if (isRefreshRefusal(err)) {
     return { error: 'needs-sign-in', detail: `token refresh failed: ${err}`, refreshFailed: true }
   }
   return { error: 'unavailable', detail: `token refresh failed: ${err}` }
 }
 
+/** Told about every successful refresh: the file, and the credential now in it. */
+export type ClaudeTokenRotationListener = (path: string, creds: OAuthCredentials) => void
+
+const rotationListeners = new Set<ClaudeTokenRotationListener>()
+
+/**
+ * Be told whenever {@link refreshClaudeToken} rotates a file's token, whoever
+ * called it. Returns the unsubscribe.
+ *
+ * The token keeper listens: a session running on the ACTIVE account's token
+ * must be handed the new one whichever caller spent the grant (the keeper's
+ * own renewal timer, cli.js's `oauth_token_refresh`, or a usage read that found
+ * the token expired). Every writer of a rotated token in this process comes
+ * through here, so nothing has to watch the file.
+ */
+export function onClaudeTokenRotated(listener: ClaudeTokenRotationListener): () => void {
+  rotationListeners.add(listener)
+  return () => {
+    rotationListeners.delete(listener)
+  }
+}
+
+function announceRotation(path: string, creds: OAuthCredentials): void {
+  for (const listener of rotationListeners) {
+    try {
+      listener(path, creds)
+    } catch {
+      // A listener that throws must not fail the refresh it is only observing.
+    }
+  }
+}
+
 /** Refresh exchanges in flight, keyed by the file whose grant they are spending. */
 const refreshInFlight = new Map<string, Promise<OAuthCredentials>>()
+
+/**
+ * Each file's last SUCCESSFUL exchange: the refresh token it spent, and what it
+ * returned.
+ *
+ * The in-flight map above covers two callers that overlap. It does not cover a
+ * caller that read the file before an exchange wrote it back and asks for a
+ * refresh after that exchange has finished: a usage read that sent the old
+ * access token, waited out a 401 and now refreshes with what it read, while the
+ * token keeper rotated the file in between. Its credential names a refresh
+ * token that has already been spent, and POSTing it again is the reuse this
+ * module exists to prevent. That caller gets the rotated credential instead.
+ */
+const lastExchange = new Map<string, { spent: string; result: OAuthCredentials }>()
+
+/** Forget every {@link lastExchange} (test isolation only). */
+export function resetClaudeRefreshMemo(): void {
+  lastExchange.clear()
+}
 
 /**
  * Exchange the refresh token for a fresh access token and PERSIST the result to
@@ -237,6 +336,8 @@ export function refreshClaudeToken(
   // the same spent token twice.
   const existing = refreshInFlight.get(path)
   if (existing) return existing
+  const done = lastExchange.get(path)
+  if (done && done.spent === creds.refreshToken) return Promise.resolve(done.result)
   const exchange = exchangeRefreshToken(creds, path).finally(() => {
     refreshInFlight.delete(path)
   })
@@ -291,6 +392,8 @@ async function exchangeRefreshToken(
     /* best effort */
   }
 
+  lastExchange.set(path, { spent: creds.refreshToken, result: newCreds })
+  announceRotation(path, newCreds)
   return newCreds
 }
 

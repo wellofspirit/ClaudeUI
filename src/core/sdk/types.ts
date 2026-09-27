@@ -416,7 +416,29 @@ export type ElicitationCallback = (
   opts: { signal: AbortSignal }
 ) => Promise<unknown>
 
-export type GetOAuthTokenCallback = (opts: { signal: AbortSignal }) => Promise<string | null>
+/**
+ * Why the host returned no token to cli.js's `oauth_token_refresh` — cli.js
+ * 2.1.280's reason enum `jr` (`.cache/pristine-cli.js` @2259664), carried in
+ * the response schema `aSr` beside `accessToken: null`.
+ */
+export type OAuthRefreshDeclineReason =
+  'signed_out' | 'identity_changed' | 'transient' | 'refresh_failed'
+
+/** A token for cli.js, or none and (optionally) why. */
+export interface OAuthTokenAnswer {
+  accessToken: string | null
+  /** Only meaningful when `accessToken` is null. */
+  reason?: OAuthRefreshDeclineReason
+}
+
+/**
+ * Answers cli.js's `oauth_token_refresh` (docs/protocol-cc/08 §8.7). A bare
+ * string or null is the original contract and still accepted; an
+ * {@link OAuthTokenAnswer} can also say why there is no token.
+ */
+export type GetOAuthTokenCallback = (opts: {
+  signal: AbortSignal
+}) => Promise<string | null | OAuthTokenAnswer>
 
 /**
  * Generic user-dialog prompt initiated by cli.js
@@ -778,6 +800,15 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   voiceServerStop(): Promise<{ stopped: boolean }>
   getUsage(): Promise<Record<string, unknown>>
   getContextUsage(): Promise<Record<string, unknown>>
+  /**
+   * Set variables in cli.js's own `process.env` through the stdin frame
+   * `update_environment_variables` (docs/protocol-cc/06 §6.7), and wait for
+   * cli.js's `control_response`. cli.js applies only an allowlist
+   * (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`) and drops
+   * every other key. Resolves `false` rather than rejecting when the frame is
+   * refused, times out, or cannot be written; the failure is logged.
+   */
+  updateEnvironmentVariables(variables: Record<string, string>): Promise<boolean>
 
   // --- MCP servers --------------------------------------------------------
   mcpServerStatus(): Promise<unknown[]>

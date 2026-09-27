@@ -12,6 +12,7 @@
  */
 
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import { getSdkExecutableOpts } from './claude-session'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
@@ -103,6 +104,9 @@ class ServiceSession {
     this.spawning = true
 
     try {
+      // Multi-account: renew the active account's token first. When there is
+      // no usable one this rejects, like a spawn that fails (HostTokenUnavailableError).
+      await ensureHostTokenFresh()
       const ac = new AbortController()
       this.abortController = ac
 

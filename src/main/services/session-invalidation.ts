@@ -2,8 +2,8 @@
  * "The credential these engine processes hold is stale" — main-side.
  *
  * Two events invalidate every running engine process's cached credential: a
- * multi-account switch (`AccountManager.persistAndApply` re-points
- * `CLAUDE_SECURESTORAGE_CONFIG_DIR`) and a successful native OAuth login
+ * multi-account switch (`AccountManager.persistAndApply` re-points the active
+ * credential dir, whose token every spawn carries) and a successful native OAuth login
  * (`AuthManager.finalize`). Both used to be handled ONLY by asking the desktop
  * renderer to flip its own `sdkActive` flags — `account:respawn-sessions` /
  * `auth:state`, both `host-local` — which had two defects:
@@ -51,8 +51,8 @@ interface CancellableSessions {
 /**
  * Cancel every live CLAUDE session — the policy both triggers actually want.
  *
- * Scope is deliberately narrow. An account switch re-points
- * `CLAUDE_SECURESTORAGE_CONFIG_DIR` and a successful login replaces the Anthropic
+ * Scope is deliberately narrow. An account switch re-points the active
+ * credential dir and a successful login replaces the Anthropic
  * OAuth token; neither touches opencode's or pi's vendor credentials (ADR-036).
  * Killing a pi turn because the user switched Claude accounts destroys work for
  * no reason, so engine is checked per session.

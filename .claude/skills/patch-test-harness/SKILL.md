@@ -1,6 +1,6 @@
 ---
 name: patch-test-harness
-description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the five patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, skip-securestorage, automode-verdict.
+description: Write and run behavioral tests for cli.js patches. Use when creating, updating, or debugging patch test harnesses that verify cli.js patches are functioning correctly. Covers the four patches in PATCH_REGISTRY — subagent-streaming, voice-server, bash-output-streaming, automode-verdict.
 ---
 
 # Patch Test Harness
@@ -9,17 +9,16 @@ Write behavioral tests that verify cli.js patches work correctly by launching re
 
 ## The patch set
 
-The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Five patches today:
+The patches are listed in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) as `{ name, apply, marker }`; `patch/apply-all.mjs` runs them in that order. After a build, `vendor/claude-cli/version.json` `patches` lists the ones whose `/*PATCHED:…*/` marker is actually in the patched `cli.js` — the app reads that list to gate patch-dependent surfaces (ADR-078). Four patches today:
 
 | Patch                   | Test                                                               |
 | ----------------------- | ------------------------------------------------------------------ |
 | `subagent-streaming`    | `patch/subagent-streaming/test.mjs` — live                         |
 | `bash-output-streaming` | `patch/bash-output-streaming/test.mjs` — live                      |
 | `automode-verdict`      | `patch/automode-verdict/test.mjs` — live                           |
-| `skip-securestorage`    | `patch/skip-securestorage/test.mjs` — structural, offline          |
 | `voice-server`          | none; its apply script's own checks are the only guard (see below) |
 
-Nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078), and `subprocess-proxy-strip` was removed on 2026-09-27; the list is in `docs/protocol-cc/01-transport.md` §1.12. Their tests went with them.
+Nine patches were deleted at Claude Code 2.1.280 or replaced by native cli.js surfaces (ADR-078), and `subprocess-proxy-strip` and `skip-securestorage` were removed on 2026-09-27; the list is in `docs/protocol-cc/01-transport.md` §1.12. Their tests went with them.
 
 ## Test Infrastructure
 
@@ -284,11 +283,6 @@ const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs
 
 **Trigger:** one Bash command that prints a line every 0.2 s for 4 s, `effort: 'low'`.
 **Assert:** `bash_output` messages arrive, with `tool_use_id`, `output`, `total_lines`, `total_bytes`, and at least one carrying the expected `line-` text.
-
-### skip-securestorage
-
-**Trigger:** none — structural and offline. The credential backend leaves no signal on the message stream, and on a clean machine both backends read the same file.
-**Assert:** against `vendor/claude-cli/cli.js`: the marker occurs exactly once, the patched getter short-circuits to the plaintext backend when `SKIP_SECURESTORAGE` is set, and the rest of the getter still builds the fallback facade. On a Linux store-less bundle the correct state is the unpatched one (marker absent).
 
 ### voice-server
 

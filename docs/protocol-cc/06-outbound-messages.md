@@ -19,7 +19,7 @@ cli.js branches on seven top-level `type` values. Anything else is ignored.
 | `control_response`             | `T87` at `11921367`       | Host's reply to an inbound control_request from cli.js | None (one-way)                                       |
 | `control_cancel_request`       | (direct parse)            | Cancel a pending inbound control_request               | None                                                 |
 | `keep_alive`                   | `v87` at `11921898`       | No-op heartbeat                                        | None                                                 |
-| `update_environment_variables` | `yc1`                     | Mutate cli.js's `process.env`                          | None                                                 |
+| `update_environment_variables` | `yc1`                     | Mutate cli.js's `process.env` (allowlisted keys)       | `control_response` when it carries a `request_id`    |
 | `assistant`                    | `E.unknown()` (see `mj4`) | Inject assistant message into transcript               | None (buffered)                                      |
 | `system`                       | `E.unknown()` (see `pj4`) | Inject system message into transcript                  | None (buffered)                                      |
 
@@ -181,24 +181,36 @@ We currently don't send keep_alive. It's documented here for completeness.
 
 ## 6.7 `update_environment_variables` — mutate cli.js's process.env
 
+**Sent by our harness** to hand a live process a rotated OAuth token (multi-account). Anchors are `.cache/pristine-cli.js` (2.1.280) offsets: the branch in `processLine` @22072957, the allowlist `le` @22061980.
+
 ### Shape
 
 ```json
 {
   "type": "update_environment_variables",
-  "variables": { "FOO": "bar", "BAZ": "qux" }
+  "variables": { "CLAUDE_CODE_OAUTH_TOKEN": "<token>" },
+  "request_id": "<id>"
 }
 ```
 
+This is the frame Claude Desktop 2.9939.2 writes when it rotates a session's token. `request_id` is optional on the wire; we always send one.
+
 ### Behavior
 
-Iterates `Object.entries(variables)` and sets `process.env[K] = V` inside cli.js. Logs `[structuredIO] applied update_environment_variables: ...` at debug level.
+1. `acceptsInboundEnvUpdates()` must hold. It is `!0` for the stdio transport (@22080337); the remote-worker transport refuses when hosted. A refused frame is logged and dropped with NO response.
+2. `variables` must be an object of string values, else cli.js answers `control_response` `error` ("variables must be an object of string values") when a `request_id` was given.
+3. Only allowlisted keys are applied: `le = new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])`. Any other key is logged ("refused update_environment_variables for non-allowlisted keys") and skipped; the frame still succeeds.
+4. Applied keys are set on cli.js's `process.env`. A new `CLAUDE_CODE_OAUTH_TOKEN` also runs `Gk()` (@3096708), the same credential-cache reset the 401 handler runs after adopting a host token (08 §8.7).
+5. With a `request_id`, cli.js answers `{"type":"control_response","response":{"subtype":"success","request_id":"<id>"}}` — no `response` payload.
 
 ### Gotchas
 
-- **Does NOT propagate to already-spawned child processes.** PTYs, Bash tool invocations already running — those inherited the old env at spawn time. New spawns see the update.
-- **Useful for refreshing tokens** — e.g. rotating `CLAUDE_CODE_SESSION_ACCESS_TOKEN` at runtime without restarting cli.js.
-- **Not currently used by our harness.** Flagged as a capability if we ever expose a token-refresh path that doesn't go through OAuth control subtypes.
+- **Does NOT propagate to already-spawned child processes.** PTYs, Bash tool invocations already running inherited the old env at spawn time. cli.js keeps `CLAUDE_CODE_OAUTH_TOKEN` out of its children's env in any case (02 §2.14, "Host-owned OAuth token").
+- **Not a `control_request`.** It is its own top-level type, correlated by the same `request_id` space as control responses.
+
+### Our harness implementation
+
+`QueryHandle.updateEnvironmentVariables(variables)` → `ControlChannel.updateEnvironmentVariables`, which registers the `request_id`, writes the frame and settles on the matching `control_response` (30 s timeout). The handle method resolves `true`/`false` and never rejects; a failure is logged by key name only. The token keeper (`src/core/services/claude-host-token.ts`) calls it on every rotation of the active account's token, for each live process still on an older token (08 §8.7). The frame's values are masked in the wire log (01 §1.8).
 
 ---
 
@@ -270,5 +282,5 @@ writer.write({ type: 'control_request', request_id, request: {...} })
 writer.write({ type: 'control_response', response: { subtype: 'success', request_id, response: {} } })
 writer.write({ type: 'control_cancel_request', request_id })  // never used today
 writer.write({ type: 'keep_alive' })                           // never used today
-writer.write({ type: 'update_environment_variables', variables: {...} })  // never used today
+writer.write({ type: 'update_environment_variables', variables: {...}, request_id })  // token rotation (§6.7)
 ```

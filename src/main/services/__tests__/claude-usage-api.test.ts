@@ -17,6 +17,8 @@ import { join } from 'node:path'
 import {
   fetchClaudeUsage,
   claudeLimitWindows,
+  onClaudeTokenRotated,
+  refreshClaudeToken,
   weeklyScopedKind
 } from '../../../core/services/claude-usage-api'
 import type { AccountUsage } from '../../../shared/types'
@@ -129,8 +131,9 @@ describe('fetchClaudeUsage', () => {
   //
   // What was here before posted to `console.anthropic.com/v1/oauth/token` with
   // `client_id: 'cli'` and a form-encoded body. Both refresh attempts in 14 days
-  // of the owner's logs came back 400, so it had probably never worked; it is
-  // rarely reached because cli.js keeps the ACTIVE folder's token fresh. These
+  // of the owner's logs came back 400, so it had probably never worked. Under
+  // multi-account it is now the only refresh an account's token gets (the token
+  // keeper and the usage reads both call it). These
   // three values are read out of the pinned CLI binary (see `CLI_OAUTH`), and
   // nothing else in the app would notice them going wrong.
   it('posts the refresh the way the pinned cli.js does', async () => {
@@ -223,6 +226,20 @@ describe('fetchClaudeUsage', () => {
     fetchMock.mockResolvedValueOnce(status(400))
 
     expect(await read()).toMatchObject({ error: 'needs-sign-in', refreshFailed: true })
+  })
+
+  it('answers `unavailable` when the token endpoint itself returns a 5xx or 429', async () => {
+    // "Not now" rather than "no": the grant may well still be good, so the
+    // file's version must not be latched and no sign-in is asked for.
+    for (const code of [503, 429]) {
+      await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+      fetchMock.mockResolvedValueOnce(status(code))
+
+      const result = await read()
+
+      expect(result).toMatchObject({ error: 'unavailable' })
+      expect(result).not.toHaveProperty('refreshFailed')
+    }
   })
 
   it('does not claim a grant was spent when the token was simply valid', async () => {
@@ -356,6 +373,40 @@ describe('fetchClaudeUsage', () => {
 
     expect(first).not.toBe(second)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('never POSTs a refresh token this process has already spent', async () => {
+    // A caller that read the file BEFORE another exchange rotated it (a usage
+    // read waiting out a 401 while the token keeper refreshed) still holds the
+    // spent refresh token. It is handed the rotated credential instead.
+    const stale = JSON.parse(credentials(Date.now() - 1000)).claudeAiOauth
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock.mockResolvedValueOnce(
+      ok({ access_token: 'fake-access-2', refresh_token: 'fake-refresh-2', expires_in: 3600 })
+    )
+
+    const first = await refreshClaudeToken(stale, accountPath)
+    const second = await refreshClaudeToken(stale, accountPath)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(second).toEqual(first)
+    expect(second.accessToken).toBe('fake-access-2')
+  })
+
+  it('announces every rotation with the file it rotated', async () => {
+    await writeFile(accountPath, credentials(Date.now() - 1000), 'utf-8')
+    fetchMock
+      .mockResolvedValueOnce(
+        ok({ access_token: 'fake-access-2', refresh_token: 'fake-refresh-2', expires_in: 3600 })
+      )
+      .mockResolvedValueOnce(ok(usageBody()))
+    const seen: Array<[string, string]> = []
+    const unsubscribe = onClaudeTokenRotated((path, creds) => seen.push([path, creds.accessToken]))
+
+    await read()
+    unsubscribe()
+
+    expect(seen).toEqual([[accountPath, 'fake-access-2']])
   })
 
   it('falls back to a second credential source only when the file has none', async () => {

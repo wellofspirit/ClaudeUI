@@ -326,16 +326,22 @@ Long-lived (awaits user).
 
 ## 8.7 `oauth_token_refresh`
 
-cli.js needs a fresh OAuth token.
+cli.js asks the host for a fresh OAuth access token after a 401, when it holds no refresh token of its own. **Live for us in multi-account mode**, where every spawn runs on a host-owned token (`CLAUDE_CODE_OAUTH_TOKEN`, 02 §2.14 "Host-owned OAuth token").
 
-**Anchor:** emission at `~11934264`. Schema `Vc1`. Response schema `G87`.
+Anchors are `.cache/pristine-cli.js` (2.1.280) offsets. Request schema `Wo` @2384656, response schema `aSr` @2384846, reason enum `jr` @2259660, sender `requestOAuthTokenRefresh()` @22091034.
 
-**Gate:** env-gated. Fires only when BOTH:
+**Gate:** `Mnt()` @3069074 — BOTH:
 
-- `process.env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is truthy
-- `process.env.CLAUDE_CODE_ENTRYPOINT` is in the allow-set `IR6` (typically SDK entry points)
+- `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is truthy
+- `CLAUDE_CODE_ENTRYPOINT` is in `Avo` @3069008: `claude-desktop`, `local-agent`, `claude-vscode`
 
-Neither is set by our harness by default — this subtype is effectively dormant for us today.
+When it holds, the headless startup registers the refresh callback (`if(Mnt())Cst(()=>oe.requestOAuthTokenRefresh())` @22684417). `buildEnv()` sets the flag on every multi-account spawn that carries a host token, and `CLAUDE_CODE_ENTRYPOINT=claude-desktop` on every spawn, so the gate is open exactly for host-token spawns. Single-account spawns and endpoint-profile spawns never see the flag and never send this.
+
+### When it fires
+
+The 401 handler `NM()` @3100109 calls it only when the stored credential has no `refreshToken`, which is always the case for an env token (`PM()` @3094847 builds `{accessToken: CLAUDE_CODE_OAUTH_TOKEN, refreshToken: null, expiresAt: null, …}`). A returned token that differs from the one that failed is written to cli.js's own `process.env.CLAUDE_CODE_OAUTH_TOKEN` and the request is retried; `null`, or the SAME token back, counts as no refresh ("SDK getOAuthToken callback returned the same expired token; treating as no refresh"). cli.js never persists the token to a file.
+
+It fires more than once per failure: the orchestrator's live probe (official 2.1.280, Haiku, Windows) saw an invalid token at spawn draw **four** requests (parallel startup calls plus one retry) before the turn succeeded. The answer must be single-flight.
 
 ### Request fields
 
@@ -348,18 +354,31 @@ No payload.
 ### Response
 
 ```json
-{ "accessToken": "<jwt>" | null }
+{ "accessToken": "<token>" }
+{ "accessToken": null, "reason": "signed_out" | "identity_changed" | "transient" | "refresh_failed" }
 ```
 
-`null` means we don't have a fresh token. cli.js surfaces this as an auth error downstream.
+`reason` is optional and only read when `accessToken` is null; an unknown value degrades to undefined (`.catch(void 0)` in `aSr`). cli.js records a declined reason (`puo`) for its bridge's host-state mapping: `signed_out` → `host_signed_out`, `identity_changed` → `host_account_changed`, the other two map to nothing.
 
 ### Timing
 
-cli.js self-times out via `AbortSignal.timeout(30_000)`. If we don't respond in 30 s, the request aborts and cli.js gets an auth error.
+`AbortSignal.timeout(Te)` with `Te = 30000`. An unanswered request throws inside cli.js and the turn fails with "Failed to authenticate. API Error: 401 OAuth access token is invalid."
 
 ### Our harness implementation
 
-Dispatches to `options.getOAuthToken({signal})`. Returns `{accessToken: null}` if not configured — cli.js treats as auth failure.
+`query()` routes the request to `options.getOAuthToken({signal})`, which may return a string, null, or `{accessToken, reason?}` (`OAuthTokenAnswer`); with no callback it answers an error. For a host-token spawn `query()` installs the token keeper's answer by default (`src/core/services/claude-host-token.ts`, `answerRefresh`), single-flighted per process:
+
+| Situation                                                                                                 | Answer                                            |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| The process was spawned for an account that is no longer the active one                                   | `{accessToken: null, reason: "identity_changed"}` |
+| The account's credentials file is gone                                                                    | `{accessToken: null, reason: "signed_out"}`       |
+| The file holds a different unexpired token than the process holds (someone rotated it)                    | that token, no refresh                            |
+| The file's token is the process's, written by this app less than 60 s ago (a straggler)                   | that token, no refresh                            |
+| Otherwise: refresh through `refreshClaudeToken` (single-flight per file)                                  | the new token                                     |
+| The refresh was refused (a non-retryable status), or was refused before on this file version (ADR-071 §6) | `{accessToken: null, reason: "refresh_failed"}`   |
+| Network error, timeout, 408, 429 or 5xx                                                                   | `{accessToken: null, reason: "transient"}`        |
+
+The token handed over is recorded as the one the process holds. The response's `accessToken` is masked in the wire log (§1.8).
 
 ---
 

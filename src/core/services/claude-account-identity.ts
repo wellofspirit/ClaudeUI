@@ -2,7 +2,7 @@
  * Who does a Claude credential DIRECTORY belong to (S2e, ADR-071 §3 and §6).
  *
  * Multi-account (ADR-015) gives each account its own `.credentials.json` and
- * points cli.js at one of them. It does NOT give each account its own
+ * hands cli.js the active one's token. It does NOT give each account its own
  * `~/.claude.json`: that file is shared by every dir and by the terminal
  * `claude`, and cli.js rewrites its `oauthAccount` block only when it refetches
  * the profile (older than 24 h, or a missing field). So the block names

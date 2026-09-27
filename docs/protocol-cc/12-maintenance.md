@@ -83,7 +83,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run test:patch          # the patches' own suites, against the rebuilt bun-claude
    ```
 
-   The integration project is the one that catches real-world wire drift. `test:patch` runs four suites (`subagent-streaming`, `bash-output-streaming`, `automode-verdict` live; `skip-securestorage` structural); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
+   The integration project is the one that catches real-world wire drift. `test:patch` runs three suites (`subagent-streaming`, `bash-output-streaming`, `automode-verdict`, all live); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
 
 8. **Re-verify the context-window mirror**
 
@@ -129,6 +129,23 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
     bytes, loopback `/callback` on `127.0.0.1`); and what `ILn`/`ab` store under
     `claudeAiOauth` plus `bLn`'s `organization_type` → `subscriptionType` map.
     `src/core/auth/__tests__/claude-oauth.test.ts` pins every one of these.
+
+11. **Re-verify the host-token contract (multi-account)**
+
+    Multi-account spawns run on a token the app hands cli.js (02 §2.14, "Host-owned
+    OAuth token"), and nothing on the stream fails loudly if cli.js changes how it
+    reads one. Re-check in the new `cli.js`: the `oauth_token_refresh` gate (find
+    `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH)&&` — the entrypoint set beside it must
+    still hold `claude-desktop`); the response schema (`reason:` next to
+    `accessToken:o().nullable()`) and its reason enum (`["signed_out",`); the 401
+    handler that calls the host and adopts a DIFFERENT token (`SDK getOAuthToken
+callback returned the same expired token`); the env-token credential
+    (`accessToken:a.CLAUDE_CODE_OAUTH_TOKEN,refreshToken:null`) and the scopes,
+    subscription and tier variables it reads; the `update_environment_variables`
+    allowlist (`new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN"`) and its
+    `control_response` on a `request_id`; and the child-env scrub that keeps the
+    token out of Bash and MCP children. 08 §8.7 and 06 §6.7 carry the 2.1.280
+    offsets.
 
 ---
 

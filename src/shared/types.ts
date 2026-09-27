@@ -3613,7 +3613,7 @@ export interface AccountInfo {
 }
 
 export interface AccountsState {
-  /** Multi-account mode (file-based credentials via SKIP_SECURESTORAGE). */
+  /** Multi-account mode (app-owned per-account credential files, ADR-015). */
   enabled: boolean
   activeId: string | null
   accounts: AccountInfo[]

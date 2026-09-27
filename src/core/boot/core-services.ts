@@ -61,6 +61,7 @@ import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
+import { claudeHostTokenKeeper } from '../services/claude-host-token'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -149,6 +150,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // built in (metering S2d).
   loadPersistedPrices()
   void refreshPricesIfStale()
+
+  // The multi-account token keeper, BEFORE anything can spawn cli.js. With
+  // multi-account on, a spawn reads the active account's token through it and
+  // refuses when it is not published (sdk/host-token.ts); it follows the active
+  // dir itself (`onSecurestorageEnvChange`), so it is idle in single-account
+  // mode. It reads no identity and subscribes before the boot-time apply, which
+  // is what arms it for the first account.
+  claudeHostTokenKeeper.start()
 
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.

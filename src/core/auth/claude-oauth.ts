@@ -4,11 +4,12 @@
  *
  * Why it exists: multi-account sign-in used to be cli.js's own
  * `claude_authenticate` flow, and its login reached the account's
- * `.credentials.json` only because the `skip-securestorage` patch redirected
- * cli.js's credential store there. Without that patch a macOS login lands in
- * the Keychain and the app never sees it, so the app now runs the same OAuth
- * flow itself and writes the account file. Single-account mode still signs in
- * through cli.js (`auth-manager.ts` picks the backend).
+ * `.credentials.json` only because the (since retired) `skip-securestorage`
+ * patch redirected cli.js's credential store there. Without that patch a macOS
+ * login lands in the Keychain and the app never sees it, so the app now runs
+ * the same OAuth flow itself and writes the account file, whose token every
+ * spawn is then handed (`core/sdk/host-token.ts`). Single-account mode still
+ * signs in through cli.js (`auth-manager.ts` picks the backend).
  *
  * Everything here mirrors cli.js 2.1.280 (`.cache/pristine-cli.js`) — read the
  * anchors before changing a value:

@@ -1,4 +1,6 @@
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh, hostTokenDir } from '../sdk/host-token'
+import { claudeLoginSignal } from './claude-login-state'
 import type {
   QueryHandle,
   SDKMessage,
@@ -762,6 +764,18 @@ export class ClaudeSession extends BaseSession {
           })
         : null
 
+      // Multi-account: renew the active account's token if it is about to
+      // expire, or refuse the spawn (HostTokenUnavailableError, whose message
+      // reaches the chat as session:error in the catch below) when there is no
+      // usable one. Guarded rather than awaited unconditionally so single-account
+      // mode reaches sdkQuery() in the same tick as before. A cancel() that lands
+      // during the wait ends the run here: the finally tears down as for any
+      // run that never produced a handle.
+      if (hostTokenDir()) {
+        await ensureHostTokenFresh()
+        if (myAbort.signal.aborted) return
+      }
+
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -1005,33 +1019,24 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // response's `account`. NOT from the system/init `apiKeySource`: that
       // reports the *API-key* source, which is legitimately "none" for every
       // logged-in *subscription* (OAuth-token) user — using it as a login signal
-      // falsely flags subscribers as logged out. A present `account.email` is the
-      // reliable "logged in" signal; absent = show the banner.
+      // falsely flags subscribers as logged out.
       void q
         .initializationResult()
         .then((init) => {
-          const account = (init as Record<string, unknown>)?.account as
-            Record<string, unknown> | undefined
-          // `account.email` present = logged in (subscription or API key). A
-          // logged-out cli.js returns an account with no email (tokenSource
-          // "none"); an expired-but-cached login still has an email — that 401s
-          // on send and is handled by the reactive auth card, not this banner.
-          const loggedIn = !!(account && account.email)
+          // Single-account: `account.email` present = logged in (subscription or
+          // API key). A logged-out cli.js returns an account with no email
+          // (tokenSource "none"); an expired-but-cached login still has an email
+          // — that 401s on send and is handled by the reactive auth card, not
+          // this banner. Multi-account runs on a host token, whose `account` has
+          // no email: the active account's own credential answers instead
+          // (claude-login-state.ts). In neither mode does this read cli.js's
+          // credential store (ADR-014 Keychain-prompt avoidance).
+          const { loggedIn, account: oauthAccount } = claudeLoginSignal(
+            (init as Record<string, unknown>)?.account
+          )
           const authSource = loggedIn ? 'authenticated' : 'none'
 
-          // Update the ClaudeAuthProvider probe cache from the cli.js init signal.
-          // This is the ONLY source of auth detection — no credential-file reads
-          // (preserves ADR-014 Keychain-prompt avoidance).
-          const oauthAccount = account
-            ? {
-                email: (account.email as string | null) ?? null,
-                organization: (account.organization as string | null) ?? null,
-                subscriptionType: (account.subscriptionType as string | null) ?? null,
-                tokenSource: (account.tokenSource as string | null) ?? null,
-                apiKeySource: (account.apiKeySource as string | null) ?? null,
-                apiProvider: (account.apiProvider as string | null) ?? null
-              }
-            : null
+          // Update the ClaudeAuthProvider probe cache from the same signal.
           updateClaudeAuthSource(authSource, oauthAccount)
 
           this.send('session:auth-source', authSource)

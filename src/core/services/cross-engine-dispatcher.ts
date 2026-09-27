@@ -117,6 +117,7 @@ import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
   CanUseTool,
   CanUseToolContext,
@@ -1890,6 +1891,9 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
 async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<QueryHandle> {
   const engineCfg = loadEngineConfig('claude')
   await claudeSpawnPrep(opts.model, engineCfg)
+  // After the spawn prep: it is what sets an endpoint profile, which decides
+  // whether this spawn carries a host token at all.
+  await ensureHostTokenFresh()
   const bunClaude = locateBunClaude()
   return sdkQuery({
     prompt: opts.prompt as AsyncIterable<never>,
