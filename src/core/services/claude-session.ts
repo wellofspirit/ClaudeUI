@@ -23,7 +23,12 @@ import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
-import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
+import {
+  AGENT_ID_RE,
+  readAgentIdentity,
+  readAgentSidecar,
+  type AgentIdentity
+} from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
 import {
@@ -1642,7 +1647,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.taskIdMap.set(taskId, toolUseId)
 
     const taskType = msg.task_type || ''
-    const origin = this.originByTaskId.get(taskId)
+    const origin =
+      this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
     // First run: this call IS the agent's identity.
     if (origin === undefined) {
@@ -1682,6 +1688,45 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       runToolUseId: toolUseId,
       runIndex
     })
+  }
+
+  /**
+   * The origin of an agent this object has never seen start, from the agent's
+   * `.meta.json` sidecar — or undefined, meaning this call is its first run.
+   *
+   * Only a session that resumed a transcript can meet an agent spawned by an
+   * earlier process, and the transcript seed (ADR-073 §5) already names every
+   * agent the MAIN agent spawned. What it cannot name is a NESTED agent: that
+   * spawn lives in the spawning sub-agent's transcript. When SendMessage
+   * resumes one, its task_started carries the SendMessage call's id while the
+   * relay parents its snapshots to the origin it reads from this same sidecar
+   * (ADR-078). A sidecar id that differs from the call's is therefore a
+   * resume; one that matches is the spawn itself.
+   *
+   * Recorded in `originByTaskId`, so the file is read at most once per agent:
+   * a miss makes this call the origin in the caller, which records it too.
+   */
+  private sidecarOrigin(taskId: string, taskType: string, toolUseId: string): string | undefined {
+    if (!this.resumeSessionId || taskType === 'local_bash') return undefined
+    // The transcript cli.js is writing now — the one whose sidecars it reads.
+    const sidecar = readAgentSidecar(
+      this.transcriptPathFor(this.sessionId ?? this.resumeSessionId),
+      taskId
+    )
+    if (!sidecar) {
+      logger.debug(
+        'ClaudeSession',
+        `no sidecar for unknown agent ${taskId}; ${toolUseId} is its origin`
+      )
+      return undefined
+    }
+    if (sidecar.toolUseId === toolUseId) return undefined
+    logger.debug(
+      'ClaudeSession',
+      `agent ${taskId} (depth ${sidecar.spawnDepth ?? '?'}, parent ${sidecar.parentAgentId ?? 'main'}) resumed by ${toolUseId}; origin ${sidecar.toolUseId} from its sidecar`
+    )
+    this.originByTaskId.set(taskId, sidecar.toolUseId)
+    return sidecar.toolUseId
   }
 
   /**

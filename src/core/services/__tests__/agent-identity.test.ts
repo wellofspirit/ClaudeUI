@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { foldAgentIdentity, readAgentIdentity } from '../agent-identity'
+import { foldAgentIdentity, readAgentIdentity, readAgentSidecar } from '../agent-identity'
 
 const AGENT = 'acb38d350312a25c3'
 const ORIGIN = 'toolu_019e8GsqnZqS8mnY21TC4ohu' // the Agent call
@@ -201,5 +201,56 @@ describe('readAgentIdentity', () => {
   it('yields an empty identity for a missing transcript instead of throwing', async () => {
     const identity = await readAgentIdentity(path.join(os.tmpdir(), 'no-such-dir', 'x.jsonl'))
     expect(identity.origins.size).toBe(0)
+  })
+})
+
+describe('readAgentSidecar', () => {
+  const NESTED = 'a652b1a0fd42ed962'
+  const NESTED_ORIGIN = 'toolu_01YAPdmYQSwWsw7ev74R48VP'
+
+  /** A transcript whose `<id>/subagents/` holds the given sidecar text for NESTED. */
+  function withSidecar(text: string, agentId = NESTED): string {
+    const file = writeTranscript([])
+    const dir = path.join(file.replace(/\.jsonl$/, ''), 'subagents')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, `agent-${agentId}.meta.json`), text)
+    return file
+  }
+
+  it("reads a nested agent's origin from the shape cli.js 2.1.280 writes", () => {
+    const file = withSidecar(
+      JSON.stringify({
+        agentType: 'general-purpose',
+        description: 'Task B global-row audit',
+        toolUseId: NESTED_ORIGIN,
+        parentAgentId: 'ab9368ec953c764ac',
+        spawnDepth: 2,
+        requestShape: 'background',
+        requestNonInteractive: true
+      })
+    )
+    expect(readAgentSidecar(file, NESTED)).toEqual({
+      toolUseId: NESTED_ORIGIN,
+      parentAgentId: 'ab9368ec953c764ac',
+      spawnDepth: 2
+    })
+  })
+
+  it('reads a top-level agent, which has no parent', () => {
+    const file = withSidecar(JSON.stringify({ toolUseId: NESTED_ORIGIN, spawnDepth: 1 }))
+    expect(readAgentSidecar(file, NESTED)).toEqual({ toolUseId: NESTED_ORIGIN, spawnDepth: 1 })
+  })
+
+  it('yields null for a missing sidecar, torn JSON or no toolUseId', () => {
+    expect(readAgentSidecar(writeTranscript([]), NESTED)).toBeNull()
+    expect(readAgentSidecar(withSidecar('{"toolUseId":"toolu_to'), NESTED)).toBeNull()
+    expect(readAgentSidecar(withSidecar(JSON.stringify({ spawnDepth: 2 })), NESTED)).toBeNull()
+    expect(readAgentSidecar(withSidecar(JSON.stringify([NESTED_ORIGIN])), NESTED)).toBeNull()
+  })
+
+  it('refuses an agent id that would leave the subagents directory', () => {
+    const file = withSidecar(JSON.stringify({ toolUseId: NESTED_ORIGIN }))
+    // Lexically this resolves back onto the real sidecar — the id check is what refuses it.
+    expect(readAgentSidecar(file, `x/../../subagents/agent-${NESTED}`)).toBeNull()
   })
 })
