@@ -175,6 +175,111 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The header clock of a running task
+// ---------------------------------------------------------------------------
+//
+// Observed live (2026-09-27): a run_in_background agent ran ~53 s and its
+// header read "0s" throughout. cli.js sends no elapsed ticks for an agent —
+// `tool_progress` is Bash/PowerShell-under-CLAUDE_CODE_REMOTE, REPL, or a 30 s
+// heartbeat keyed `<id>-heartbeat-N` — so the card's only clock source never
+// arrived, and a usage-only `system/task_progress` merged onto the reducer's
+// default `elapsedTimeSeconds: 0`, which rendered as "0s". The clock now counts
+// from the run's start, stamped on `session:task-started`.
+describe('TaskCard — a running task’s clock', () => {
+  let app: TestApp
+  const T0 = new Date('2026-09-27T12:06:58.000Z').getTime()
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(T0)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const launched = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+  const backgroundView = { ...defaultTaskView, background: true }
+  const renderCard = (): ReturnType<typeof render> =>
+    render(<TaskCard block={makeTaskBlock()} result={launched} view={backgroundView} />)
+  const elapsedText = (): string | null =>
+    screen.queryByTestId('TaskCard.elapsed')?.textContent ?? null
+  const advance = (ms: number): void => {
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+  }
+  const started = (): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'agent-abc123',
+      taskType: 'local_agent',
+      runIndex: 1,
+      startedAt: T0
+    })
+
+  it('advances from the run’s start with no progress frame at all', () => {
+    started()
+    renderCard()
+    advance(22_000)
+    expect(elapsedText()).toBe('22s')
+    advance(13_000)
+    expect(elapsedText()).toBe('35s')
+  })
+
+  it('is not pinned at "0s" by a usage-only task_progress (the live wire)', () => {
+    started()
+    renderCard()
+    act(() => {
+      // system/task_progress carries usage and no clock.
+      seed.taskProgress(ROUTE, {
+        toolUseId: 'call_task_1',
+        usage: { totalTokens: 1200, toolUses: 1, durationMs: 4000 }
+      } as unknown as Parameters<typeof seed.taskProgress>[1])
+    })
+    advance(22_000)
+    expect(elapsedText()).toBe('22s')
+  })
+
+  it('shows the run’s own duration once it ends, and stops ticking', () => {
+    started()
+    renderCard()
+    advance(40_000)
+    act(() => {
+      seed.taskNotification(ROUTE, {
+        taskId: 'agent-abc123',
+        toolUseId: 'call_task_1',
+        status: 'completed',
+        outputFile: '',
+        summary: 'done',
+        usage: { totalTokens: 5000, toolUses: 2, durationMs: 53_500 }
+      })
+    })
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'completed')
+    expect(elapsedText()).toBe('53.5s')
+    advance(10_000)
+    expect(elapsedText()).toBe('53.5s')
+  })
+
+  it('shows no clock for a task with no start and no progress (other engines)', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'running')
+    expect(elapsedText()).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // "Open in panel" — the mobile task-takeover entry point (see MobileTaskView)
 // ---------------------------------------------------------------------------
 //

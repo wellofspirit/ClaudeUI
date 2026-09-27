@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
@@ -96,5 +96,56 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
 
     expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+})
+
+/**
+ * The panel's header had the TaskCard defect verbatim: its only clock was
+ * `tool_progress`, which cli.js does not send for an agent, and a usage-only
+ * `task_progress` left the reducer's default 0 — "0s" for the whole run.
+ */
+describe('TaskEntry — a running task’s clock', () => {
+  let app: TestApp
+  const T0 = new Date('2026-09-27T12:06:58.000Z').getTime()
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [taskMessage()] }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(T0)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('advances from the run’s start, past a usage-only task_progress', () => {
+    seed.taskStarted(ROUTE, {
+      toolUseId: TOOL_USE_ID,
+      taskId: 'agent-abc123',
+      taskType: 'local_agent',
+      runIndex: 1,
+      startedAt: T0
+    })
+    seed.taskProgress(ROUTE, {
+      toolUseId: TOOL_USE_ID,
+      usage: { totalTokens: 1200, toolUses: 1, durationMs: 4000 }
+    } as unknown as Parameters<typeof seed.taskProgress>[1])
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    act(() => {
+      vi.advanceTimersByTime(22_000)
+    })
+    expect(screen.getByTestId('TaskEntry.elapsed').textContent).toBe('22s')
   })
 })

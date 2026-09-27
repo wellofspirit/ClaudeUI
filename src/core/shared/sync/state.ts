@@ -52,7 +52,10 @@ export interface CanonicalSessionState {
   /** Pending items only, mirroring the wire field (ADR-053). */
   queue: QueuedItem[]
   taskNotifications: TaskNotification[]
-  activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
+  activeTasks: Record<
+    string,
+    { taskId: string; taskType: string; runIndex?: number; startedAt?: number }
+  >
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
   permissionMode: string

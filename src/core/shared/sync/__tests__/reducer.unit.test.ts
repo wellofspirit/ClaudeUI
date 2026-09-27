@@ -1706,6 +1706,21 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].subagentMessages['task-1'].map((m) => m.id)).toEqual(['s1'])
   })
 
+  it("a task start carries its run's clock; a re-reported start keeps it, a resume restarts it", () => {
+    const start = (runIndex: number, startedAt: number): [string, string, unknown] => [
+      'session:task-started',
+      'rid',
+      { toolUseId: 't1', taskId: 'a', taskType: 'local_agent', runIndex, startedAt }
+    ]
+    const clock = (events: Array<[string, string, unknown]>): number | undefined =>
+      fold([created(), ...events]).sessions['rid'].activeTasks['t1']?.startedAt
+    expect(clock([start(1, 1000)])).toBe(1000)
+    // The same run re-reported (a replayed task_started): its clock does not reset.
+    expect(clock([start(1, 1000), start(1, 9000)])).toBe(1000)
+    // A resume is a new run with its own start.
+    expect(clock([start(1, 1000), start(2, 9000)])).toBe(9000)
+  })
+
   it('a task notification drops the task from activeTasks', () => {
     const s = fold([
       created(),

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
@@ -75,6 +75,52 @@ export function formatElapsed(seconds: number): string {
   return `${m}m ${s}s`
 }
 
+/**
+ * What a task card's clock reads.
+ *
+ * - Running with a known start: live, counted from the run's start. cli.js
+ *   sends no elapsed ticks for an agent (`tool_progress` fires only for
+ *   Bash/PowerShell under CLAUDE_CODE_REMOTE, for REPL, and as a 30 s
+ *   heartbeat keyed `<id>-heartbeat-N`), so a card that waited for one never
+ *   moved — and a usage-only `task_progress` left the reducer's default 0 in
+ *   the row, which read "0s" for the whole run.
+ * - Finished: the run's own duration, when the terminal event or the result
+ *   reports one.
+ * - Otherwise the last reported elapsed (the cross-engine dispatch heartbeat),
+ *   and never a placeholder zero.
+ */
+export function taskElapsedLabel({
+  isRunning,
+  startedAt,
+  now,
+  durationMs,
+  progressSeconds
+}: {
+  isRunning: boolean
+  startedAt?: number
+  now: number
+  durationMs?: number | null
+  progressSeconds?: number
+}): string | undefined {
+  if (isRunning && startedAt !== undefined) {
+    return formatElapsed(Math.max(0, (now - startedAt) / 1000))
+  }
+  if (!isRunning && durationMs != null) return formatDuration(durationMs)
+  return progressSeconds ? formatElapsed(progressSeconds) : undefined
+}
+
+/** Wall-clock ms, re-read every second while `live` — a running task's clock. */
+export function useTicker(live: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!live) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [live])
+  return now
+}
+
 export function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
@@ -137,7 +183,8 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const model = view.model ?? null
 
   const progress = taskProgressMap[toolUseId]
-  const elapsed = progress?.elapsedTimeSeconds
+  const startedAt = isRunning ? activeTasks[toolUseId]?.startedAt : undefined
+  const now = useTicker(startedAt !== undefined)
   // How many times this agent has been started. The live record carries it
   // while it runs; the notification carries it afterwards, because activeTasks
   // drops the task at terminal (ADR-073).
@@ -156,6 +203,13 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
         durationMs: bgNotification.usage.durationMs
       }
     : parsedUsage
+  const elapsed = taskElapsedLabel({
+    isRunning,
+    startedAt,
+    now,
+    durationMs: usage?.durationMs,
+    progressSeconds: progress?.elapsedTimeSeconds
+  })
 
   const isPendingApproval = !!approval
   const borderColor = isPendingApproval
@@ -332,9 +386,12 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
         <span className="text-text-secondary text-[12px] truncate flex-1 text-left">
           {description}
         </span>
-        {elapsed != null && (
-          <span className="text-[11px] text-text-muted font-mono shrink-0">
-            {formatElapsed(elapsed)}
+        {elapsed !== undefined && (
+          <span
+            data-testid="TaskCard.elapsed"
+            className="text-[11px] text-text-muted font-mono shrink-0"
+          >
+            {elapsed}
           </span>
         )}
         {isStopped && <span className="text-[10px] text-warning shrink-0">stopped</span>}
@@ -464,7 +521,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
                   msgs={msgs}
                   isRunning={isRunning}
                   isBackground={isBackground}
-                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  elapsedLabel={elapsed}
                   size="sm"
                 />
               </div>
@@ -478,9 +535,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               <div className="px-3 py-2 flex items-center gap-2 text-[12px] text-text-muted">
                 <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
                 <span>{isBackground ? 'Running in background...' : 'Running...'}</span>
-                {elapsed != null && (
-                  <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                )}
+                {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
           </div>

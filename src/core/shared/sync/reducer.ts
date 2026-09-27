@@ -1160,22 +1160,33 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         taskId?: string
         taskType?: string
         runIndex?: number
+        startedAt?: number
       }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
       // toolUseId is the agent's ORIGIN call, normalized by ClaudeSession — so a
       // resumed agent re-arms the record it already had rather than opening a
       // second one under the SendMessage call's id (ADR-073).
-      return withSession(state, routingId, (s) => ({
-        activeTasks: {
-          ...s.activeTasks,
-          [toolUseId]: {
-            taskId: data.taskId ?? '',
-            taskType: data.taskType ?? '',
-            ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {})
+      return withSession(state, routingId, (s) => {
+        // A re-reported start of the run already armed keeps that run's clock;
+        // a new run (a resume) starts its own.
+        const prev = s.activeTasks[toolUseId]
+        const startedAt =
+          prev?.startedAt !== undefined && prev.runIndex === data.runIndex
+            ? prev.startedAt
+            : data.startedAt
+        return {
+          activeTasks: {
+            ...s.activeTasks,
+            [toolUseId]: {
+              taskId: data.taskId ?? '',
+              taskType: data.taskType ?? '',
+              ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {}),
+              ...(startedAt !== undefined ? { startedAt } : {})
+            }
           }
         }
-      }))
+      })
     }
 
     case 'session:task-progress': {

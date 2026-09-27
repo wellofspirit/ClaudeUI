@@ -6,7 +6,8 @@ import { SubagentOutputBody } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../chat/task-state'
-import { findTaskBlocks, formatElapsed } from './utils'
+import { findTaskBlocks } from './utils'
+import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
 
 function BashOutputPanel({
   output,
@@ -97,6 +98,11 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     })
   }, [])
 
+  // A live record is running by construction here (isHistorical is false), so
+  // its start alone decides whether the clock ticks.
+  const startedAt = activeTasks[toolUseId]?.startedAt
+  const now = useTicker(startedAt !== undefined)
+
   // All hooks above run unconditionally (rules-of-hooks); bail out only after
   // them when the task block isn't present in the message stream yet.
   if (!taskBlock) return null
@@ -107,7 +113,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
   const isBackground = !!input.run_in_background
   const progress = taskProgressMap[toolUseId]
-  const elapsed = progress?.elapsedTimeSeconds
   const hasResult = !!resultBlock
   const resultText =
     resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
@@ -130,6 +135,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     hasResult,
     notification: bgNotification,
     resultIsError: resultBlock?.isError ?? false
+  })
+  const elapsed = taskElapsedLabel({
+    isRunning,
+    startedAt,
+    now,
+    durationMs: bgNotification?.usage?.durationMs,
+    progressSeconds: progress?.elapsedTimeSeconds
   })
 
   const statusBadge = isError ? (
@@ -204,9 +216,12 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           {isBash ? String(input.command || description) : description}
         </span>
         {statusBadge}
-        {elapsed != null && (
-          <span className="text-[11px] text-text-muted font-mono shrink-0">
-            {formatElapsed(elapsed)}
+        {elapsed !== undefined && (
+          <span
+            data-testid="TaskEntry.elapsed"
+            className="text-[11px] text-text-muted font-mono shrink-0"
+          >
+            {elapsed}
           </span>
         )}
         {isRunning && !isStopping && (
@@ -258,7 +273,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                   msgs={msgs}
                   isRunning={isRunning}
                   isBackground={isBackground}
-                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  elapsedLabel={elapsed}
                   size="md"
                 />
               </div>
@@ -279,9 +294,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               <div className="flex items-center gap-2 text-[13px] text-text-muted">
                 <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
                 <span>{isBackground ? 'Running in background...' : 'Running...'}</span>
-                {elapsed != null && (
-                  <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                )}
+                {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
           </div>

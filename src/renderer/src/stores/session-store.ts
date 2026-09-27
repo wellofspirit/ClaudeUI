@@ -858,7 +858,10 @@ export interface PerSessionState {
    * only opencode/pi child sessions and historical transcripts (which never
    * emit task_started) fall back to the old heuristic.
    */
-  activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
+  activeTasks: Record<
+    string,
+    { taskId: string; taskType: string; runIndex?: number; startedAt?: number }
+  >
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>

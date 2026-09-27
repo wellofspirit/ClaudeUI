@@ -1655,7 +1655,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.originByTaskId.set(taskId, toolUseId)
       this.runCountByOrigin.set(toolUseId, 1)
       this.liveTasks.set(taskId, toolUseId)
-      this.send('session:task-started', { toolUseId, taskId, taskType, runIndex: 1 })
+      this.send('session:task-started', {
+        toolUseId,
+        taskId,
+        taskType,
+        runIndex: 1,
+        startedAt: Date.now()
+      })
       return
     }
 
@@ -1670,7 +1676,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         toolUseId: origin,
         taskId,
         taskType,
-        runIndex: this.runCountByOrigin.get(origin) ?? 1
+        runIndex: this.runCountByOrigin.get(origin) ?? 1,
+        startedAt: Date.now()
       })
       return
     }
@@ -1686,7 +1693,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskId,
       taskType,
       runToolUseId: toolUseId,
-      runIndex
+      runIndex,
+      startedAt: Date.now()
     })
   }
 

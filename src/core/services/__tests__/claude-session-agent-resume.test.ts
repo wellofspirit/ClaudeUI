@@ -309,6 +309,21 @@ describe('ClaudeSession — a resumed agent keeps its identity', () => {
     expect(notifications(sent)[0]).toMatchObject({ toolUseId: ORIGIN, runIndex: 1 })
   })
 
+  it("stamps each run's start, so a running card's clock can count from it", async () => {
+    const before = Date.now()
+    const sent = await runWire('routing-run-clock', [
+      taskStarted(ORIGIN),
+      taskNotification(ORIGIN),
+      taskStarted(RUN2)
+    ])
+    const stamps = startedEvents(sent).map((s) => s.startedAt)
+    expect(stamps).toHaveLength(2)
+    for (const at of stamps) {
+      expect(at).toBeGreaterThanOrEqual(before)
+      expect(at).toBeLessThanOrEqual(Date.now())
+    }
+  })
+
   it('does not count a re-reported start as a resume', async () => {
     // A replayed or duplicated task_started for a run we already know must
     // re-arm the card without claiming the agent was resumed.

@@ -1160,6 +1160,14 @@ export interface TaskStartedData {
   runToolUseId?: string
   /** 1-based run counter for this agent. `> 1` means it was resumed. */
   runIndex?: number
+  /**
+   * Epoch ms at which THIS run started, stamped by the emitter when it saw the
+   * start (the reducer is clock-free). A resume stamps its own run's start. It
+   * is what a running task's elapsed clock counts from: cli.js sends no
+   * elapsed ticks for an agent (`tool_progress` is Bash/REPL-only in stock
+   * use), so without it a running card had no clock at all.
+   */
+  startedAt?: number
 }
 
 /** The terminal states an engine reports for a task run. */
