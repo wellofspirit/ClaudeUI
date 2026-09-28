@@ -417,4 +417,4 @@ Subagent/teammate variants require both:
 
 Without the patch, subagent stream events are swallowed by upstream's internal aggregation.
 
-On a harness without `subagent-streaming` (Anthropic's unpatched binary, ADR-078) ClaudeUI still gets a foreground subagent's text and thinking as complete `assistant` messages with `parent_tool_use_id` set, because it always passes `--forward-subagent-text` (02); only the token deltas are missing.
+On a harness without `subagent-streaming` (Anthropic's unpatched binary, ADR-079) ClaudeUI still gets a foreground subagent's text and thinking as complete `assistant` messages with `parent_tool_use_id` set, because it always passes `--forward-subagent-text` (02); only the token deltas are missing.

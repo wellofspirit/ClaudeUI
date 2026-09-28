@@ -1,11 +1,15 @@
-# ADR-078 — Claude Code harness: capability gating on the patches a binary carries, and the reduced patch set
+# ADR-079 — Claude Code harness: capability gating on the patches a binary carries, and the reduced patch set
+
+**Renumbered 2026-09-28** from ADR-078, and before that from ADR-077: pre-release took each number
+first (worktree-relocated transcripts, then stream-frame ownership). Commit messages before that
+date use the old numbers.
 
 **Status:** Accepted (2026-09-25). Owner ruling: chat must work on any Claude Code harness;
 streaming (subagent token deltas, live Bash output) and voice light up only when the harness
 carries the patch; voice is disabled on an unpatched harness.
 **Amended 2026-09-27:** `subprocess-proxy-strip` removed (owner ruling: the in-app proxy reaches
 cli.js's children, as a shell-set proxy does on the unpatched binary); `skip-securestorage`
-removed by [ADR-079](adr-079_host-owned-claude-credentials.md) (multi-account credentials are
+removed by [ADR-080](adr-080_host-owned-claude-credentials.md) (multi-account credentials are
 host-owned); `automode-verdict` ([ADR-076](adr-076_claude-automode-verdict-on-the-wire.md), merged
 from pre-release) joined the registry. **Amended 2026-09-28:** `automode-verdict` removed again
 (owner ruling: auto-mode ALLOW verdicts are not worth a patch; denials are native and still render).
@@ -16,7 +20,7 @@ The set is now `subagent-streaming`, `voice-server`, `bash-output-streaming`.
 [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) / [ADR-073](adr-073_agent-roster-and-task-run-identity.md)
 (task lifecycle — both amended below), [ADR-053](adr-053_queue-item-identity-cc-parity.md) (queue
 identity — amended below), [ADR-015](adr-015_multi-account-file-credentials.md) /
-[ADR-079](adr-079_host-owned-claude-credentials.md) (`skip-securestorage`, kept here, removed there).
+[ADR-080](adr-080_host-owned-claude-credentials.md) (`skip-securestorage`, kept here, removed there).
 
 ## Context
 
@@ -116,7 +120,7 @@ split will use; the user-facing chooser and download channel are a later ADR.
 | `bash-output-streaming`  | Live Bash output; upstream has none on the wire, and a file tail is fragile.                                                                                                                                                                                                       |
 | `voice-server`           | Voice input; the only terms-of-service-safe route is through cli.js's own voice pipeline.                                                                                                                                                                                          |
 | `subprocess-proxy-strip` | **Removed 2026-09-27 (owner ruling).** Keeps a credential-bearing in-app proxy out of child processes. Its inherited-proxy regression is fixed: with no in-app proxy the marker is set and children keep the user's own proxy, as the unpatched binary does.                       |
-| `skip-securestorage`     | **Removed 2026-09-27 (ADR-079).** Per-account plaintext credential files (ADR-015) on macOS, where the Keychain is otherwise primary and deletes the file on first write. A host-owned token path exists upstream (`oauth_token_refresh`) and is a spike, not a decision, for now. |
+| `skip-securestorage`     | **Removed 2026-09-27 (ADR-080).** Per-account plaintext credential files (ADR-015) on macOS, where the Keychain is otherwise primary and deletes the file on first write. A host-owned token path exists upstream (`oauth_token_refresh`) and is a spike, not a decision, for now. |
 | `automode-verdict`       | **Joined 2026-09-27 (ADR-076); removed 2026-09-28 (owner ruling).** Emitted `system/permission_allowed` for an auto-mode classifier ALLOW; allow verdicts were judged not worth a patch. Denials are native.                                                                       |
 
 ### 6. What a user on an unpatched harness gets
@@ -125,7 +129,7 @@ Chat, tools, approvals, MCP, plugins, queueing and take-back, background tasks, 
 all working through native surfaces. Foreground subagents show complete messages instead of a
 token stream; Bash output appears when the command finishes; the mic is hidden and voice verbs
 refuse with a message naming the missing patch. Since 2026-09-27 also: multi-account works on it
-(ADR-079). Auto-mode ALLOW verdicts are absent on every binary since 2026-09-28; denials show.
+(ADR-080). Auto-mode ALLOW verdicts are absent on every binary since 2026-09-28; denials show.
 
 ## Consequences
 

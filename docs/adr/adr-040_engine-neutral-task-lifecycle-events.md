@@ -51,7 +51,7 @@ tool input, tool results, or turn state.
   reverse-lookup misses (map evicted, or `task_started` never arrived).
 - ~~"Send to background" is suppressed for tasks with an `activeTasks` record — they are already
   async; the button remains only for the residual synchronous-foreground path.~~ Superseded by
-  [ADR-078](adr-078_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the button
+  [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the button
   requires a record with `isBackgrounded === false`. cli.js's native `background_tasks` can only
   move a task it has registered as running in the foreground, so the old gate showed the button
   exactly when it could not work and hid it once it could.

@@ -42,7 +42,7 @@ Every patch README MUST include all of these sections. The order below is the ca
 
 - State the exact file: `vendor/claude-cli/cli.js`, the bundle extracted from Anthropic's binary and rebundled into `bun-claude` (ADR-006)
 - Version table: CLI version at time of discovery + the version it was last re-anchored for
-- Say what Anthropic's unpatched binary does without the patch; the app has to run on it too (ADR-078)
+- Say what Anthropic's unpatched binary does without the patch; the app has to run on it too (ADR-079)
 
 ```markdown
 ## Affected Component
@@ -109,7 +109,7 @@ For each patch (A, B, C, etc.):
 **Marker**: `/*PATCHED:<name>-<letter>*/`
 ```
 
-The patch's `marker` regex in `PATCH_REGISTRY` must match every marker its apply script writes and no other patch's (`src/main/__tests__/patch-registry.test.ts` checks this). After a build, `apply-all.mjs` writes the patches whose markers it finds into `vendor/claude-cli/version.json` `patches`, and the app gates patch-dependent features on that list (ADR-078). A new marker family therefore needs the registry entry updated in the same change, or the build will report the patch as absent.
+The patch's `marker` regex in `PATCH_REGISTRY` must match every marker its apply script writes and no other patch's (`src/main/__tests__/patch-registry.test.ts` checks this). After a build, `apply-all.mjs` writes the patches whose markers it finds into `vendor/claude-cli/version.json` `patches`, and the app gates patch-dependent features on that list (ADR-079). A new marker family therefore needs the registry entry updated in the same change, or the build will report the patch as absent.
 
 #### Anchor (the unique string that locates the injection site)
 

@@ -1,6 +1,6 @@
 # ADR-014: Native Anthropic OAuth via cli.js control requests, hosted on the service session
 
-**Status:** Accepted; amended by [ADR-079](adr-079_host-owned-claude-credentials.md) (2026-09-27):
+**Status:** Accepted; amended by [ADR-080](adr-080_host-owned-claude-credentials.md) (2026-09-27):
 multi-account sign-in runs in-app (`core/auth/claude-oauth.ts`); single-account sign-in still
 drives these control requests.
 **Date:** 2026-06-15

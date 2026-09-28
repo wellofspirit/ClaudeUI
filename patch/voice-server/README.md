@@ -192,7 +192,7 @@ Part B (sdk.mjs) was removed — `voiceServerStart()` / `voiceServerStop()` now 
 
 #### Anchor (unique, 1 match)
 
-The control-request fallback warning. Until 2.1.280 `queue-control`, `background-task` and `usage-relay` injected at this anchor too; all three were deleted (ADR-078), and this is now the only patch that uses it:
+The control-request fallback warning. Until 2.1.280 `queue-control`, `background-task` and `usage-relay` injected at this anchor too; all three were deleted (ADR-079), and this is now the only patch that uses it:
 
 ```
 else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
@@ -620,7 +620,7 @@ surfaced:
 
 ## Related Patches
 
-- None today. Until 2.1.280, `patch/queue-control/`, `patch/background-task/` and `patch/usage-relay/` injected `else if` branches at the **same** fallback anchor with a byte-identical regex (so they took the same 2.1.261 widening), and the anchor stayed unique whichever ran first. All three were deleted in favour of cli.js's native `cancel_async_message` / `command_lifecycle`, `background_tasks` and `get_usage` (ADR-078; `docs/protocol-cc/07-control-outbound.md` §7.3, `03-inbound-messages.md` §3.21).
+- None today. Until 2.1.280, `patch/queue-control/`, `patch/background-task/` and `patch/usage-relay/` injected `else if` branches at the **same** fallback anchor with a byte-identical regex (so they took the same 2.1.261 widening), and the anchor stayed unique whichever ran first. All three were deleted in favour of cli.js's native `cancel_async_message` / `command_lifecycle`, `background_tasks` and `get_usage` (ADR-079; `docs/protocol-cc/07-control-outbound.md` §7.3, `03-inbound-messages.md` §3.21).
 
 ## Files
 

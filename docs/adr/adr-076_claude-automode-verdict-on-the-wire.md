@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-09-21), implemented on `automode-claude-judge`. Amended 2026-09-23 after PR review: renumbered from 073 (the agent roster took it first). The allow gate is now cli.js's `classifierAllowed`, on the stdio wrapper that is ClaudeUI's live path (§2). A no-verdict classifier block is a denial, not a verdict (§7). Subagent decisions now bind (§6, superseded).
 **Amended 2026-09-28 (owner ruling):** the allow half is retired — the `automode-verdict` patch is
-deleted ([ADR-078](adr-078_claude-harness-capability-gating-and-patch-set.md) amendment), so no
+deleted ([ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md) amendment), so no
 `permission_allowed` frame exists and a Claude card shows the judge's verdict on a BLOCK only. The
 deny half is native and unchanged. Without the patch's `no_verdict` flag, a classifier denial is
 routed to `autoModeNoVerdict` from native signals only: the reasons "Classifier unavailable" and

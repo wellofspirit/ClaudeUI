@@ -570,7 +570,7 @@ structural shapes in "How to Find This Code" to relocate.
 
 - `patch/subagent-streaming/` — different code path, same theme: bypassing SDK-side buffering so
   the GUI can render while work is in flight.
-- `patch/background-task/` (deleted at 2.1.280, ADR-078) exposed the CLI's Ctrl+B
+- `patch/background-task/` (deleted at 2.1.280, ADR-079) exposed the CLI's Ctrl+B
   send-to-background feature, which drives the same `aI` TaskOutput polling this patch starts
   early. The app now reaches that feature through cli.js's native `background_tasks` control
   request (`docs/protocol-cc/07-control-outbound.md` §7.3).

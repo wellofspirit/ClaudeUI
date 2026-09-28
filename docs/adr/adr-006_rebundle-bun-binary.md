@@ -156,7 +156,7 @@ fundamental mismatch; this ADR addresses the root cause.
 ### 2026-09-25 — five patches, and the build says which
 
 The "13 behavioral patches" above became five
-([ADR-078](adr-078_claude-harness-capability-gating-and-patch-set.md)): four were
+([ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)): four were
 replaced by cli.js's own surfaces and five had become no-ops or dead code.
 `apply-all.mjs` now records the patches a build carries in
 `vendor/claude-cli/version.json` (`patches`), read from the patched bytes, and
