@@ -500,6 +500,26 @@ export function formatUnparseableJudgeReply(result: ClassifyResult): string {
 }
 
 /**
+ * The one log line for a judge verdict — shared by every engine's wiring, which
+ * supplies the logger and the subject (the judged tool or permission category).
+ * Carries the stage-1 grade when one parsed (ADR-083 §2): a stage-1 allow at
+ * `sev=12` and an escalation at `sev=70` look the same without it, and the grade
+ * is what tells a threshold question from a policy question when a verdict is
+ * disputed.
+ */
+export function formatVerdictLine(result: ClassifyResult, subject: string): string {
+  const facets = [
+    `stage=${result.stage}`,
+    ...(result.severity !== undefined ? [`sev=${result.severity}`] : []),
+    ...(result.category ? [`rule=${result.category}`] : [])
+  ]
+  return (
+    `auto-mode ${result.block ? 'BLOCK' : 'allow'} (${facets.join(', ')}) ${subject}` +
+    (result.reason ? ` — ${result.reason}` : '')
+  )
+}
+
+/**
  * Strip `<thinking>` blocks before verdict matching (cli.js `qUs`), so a verdict
  * *mentioned* inside the model's reasoning can't be mistaken for the verdict. An
  * UNCLOSED `<thinking>` means the response was truncated mid-reasoning: drop

@@ -28,6 +28,7 @@ import {
   UNPARSEABLE_REASON,
   UNPARSEABLE_RAW_TAIL_CHARS,
   formatUnparseableJudgeReply,
+  formatVerdictLine,
   type ClassifyInput,
   type JudgeRequest
 } from '../classifier'
@@ -1156,5 +1157,34 @@ describe('formatUnparseableJudgeReply', () => {
     expect(line).toContain('stage=fast')
     expect(line).toContain('24 chars')
     expect(line).toContain(': I cannot help with that.')
+  })
+})
+
+describe('formatVerdictLine', () => {
+  it('names the verdict, stage, grade and rule, then the subject and reason', () => {
+    expect(
+      formatVerdictLine(
+        {
+          block: true,
+          stage: 'thinking',
+          severity: 70,
+          category: 'git_destructive',
+          reason: '[Git Destructive] x'
+        },
+        'bash'
+      )
+    ).toBe(
+      'auto-mode BLOCK (stage=thinking, sev=70, rule=git_destructive) bash — [Git Destructive] x'
+    )
+  })
+
+  it('omits the facets a verdict does not carry', () => {
+    expect(formatVerdictLine({ block: false, stage: 'fast', severity: 4 }, 'bash')).toBe(
+      'auto-mode allow (stage=fast, sev=4) bash'
+    )
+    // A full-review shape never ran stage 1: no grade to report.
+    expect(formatVerdictLine({ block: false, stage: 'thinking' }, 'bash')).toBe(
+      'auto-mode allow (stage=thinking) bash'
+    )
   })
 })

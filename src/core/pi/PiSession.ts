@@ -92,6 +92,7 @@ import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 import {
   classify,
   formatUnparseableJudgeReply,
+  formatVerdictLine,
   isAutoModeFastPathAllowed,
   type ClassifyResult,
   type EnvironmentInfo,
@@ -2435,10 +2436,7 @@ export class PiSession extends BaseSession {
         return ASK_HUMAN
       }
 
-      const verdictLine =
-        `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
-        `${result.category ? `, rule=${result.category}` : ''}) ${toolName}` +
-        (result.reason ? ` — ${result.reason}` : '')
+      const verdictLine = formatVerdictLine(result, toolName)
       if (result.stage === 'error') {
         // stage=error means no verdict was obtained — a WARN with the
         // transport's own message, because a bare `stage=error` line is

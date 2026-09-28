@@ -63,6 +63,7 @@ import { matchesUserAskRule } from './wildcard'
 import {
   classify,
   formatUnparseableJudgeReply,
+  formatVerdictLine,
   isAutoModeFastPathAllowed,
   type ClassifyResult,
   type EnvironmentInfo,
@@ -2064,10 +2065,7 @@ export class OpencodeSession extends BaseSession {
         this.fallbackToHuman(approval)
         return
       }
-      const verdictLine =
-        `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
-        `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
-        (result.reason ? ` — ${result.reason}` : '')
+      const verdictLine = formatVerdictLine(result, category)
       if (result.stage === 'error') {
         // stage=error means no verdict was obtained — a WARN carrying the
         // transport's own message, since a bare `stage=error` line says
