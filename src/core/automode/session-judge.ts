@@ -67,6 +67,6 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
 export function judgeRouteUnavailableMessage(engine: JudgeEngine, reason: string): string {
   return (
     `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
-    `Change the judge model in Settings → Engines → ${engineMeta(engine).label} → Auto mode.`
+    `Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (${engineMeta(engine).label}).`
   )
 }

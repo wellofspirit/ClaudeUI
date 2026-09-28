@@ -1847,7 +1847,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       .map((c) => String(c[2]))
     expect(banners).toEqual([
       `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
-        'Change the judge model in Settings → Engines → opencode → Auto mode.'
+        'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
     ])
     // Resolved on both approvals, judged on neither, auto-replied on neither.
     expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(2)

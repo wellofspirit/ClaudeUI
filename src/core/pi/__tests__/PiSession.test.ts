@@ -3106,7 +3106,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     expect(sentPayloads(win, 'session:error')).toEqual([
       `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
-        'Change the judge model in Settings → Engines → pi → Auto mode.'
+        'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (pi).'
     ])
     expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(2)
     expect(judgeCalls).toHaveLength(0)

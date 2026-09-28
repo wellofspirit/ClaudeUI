@@ -2292,7 +2292,7 @@ export class PiSession extends BaseSession {
     this.send(
       'session:error',
       `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-        `Change it in Settings → Engines → pi → Auto mode.`
+        `Change it in Settings › Sessions & autonomy › Auto-mode judge (pi).`
     )
   }
 
