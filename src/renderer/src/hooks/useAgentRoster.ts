@@ -20,6 +20,7 @@ import type { ToolView } from '../../../shared/tool-kinds'
 import { useActiveSession } from '../stores/session-store'
 import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../components/chat/task-state'
+import { backgroundBashTaskId } from '../../../shared/claude-background-bash'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type TaskView = Extract<ToolView, { kind: 'task' }>
@@ -89,25 +90,46 @@ export function scanTranscriptCached(messages: ChatMessage[], engineId: EngineId
  * which tool_use ids already have a result. tool_use blocks live on assistant
  * messages; tool_result blocks live on synthetic user messages (the same split
  * `findTaskBlocks` documents).
+ *
+ * A background shell is one started with `run_in_background`, or, on Claude, a
+ * command cli.js moved to the background later ("Send to background", a
+ * timeout, a message that arrived while it ran). The move shows in the
+ * command's tool_result, so the scan stays independent of the live maps; the
+ * row appears once that result lands, about a second after the flip. Unlike the
+ * tool card, a reopened session keeps these rows: the roster lists what the
+ * session spawned, and `deriveTaskState` never shows a historical row as
+ * running.
  */
 function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEntry[] {
   const map = engineToolMap(engineId)
   const spawns: ToolUseBlock[] = []
   const results = new Map<string, boolean>() // toolUseId → isError
+  // Claude commands started in the foreground: the only tool_results worth
+  // matching, since the scan re-runs on every transcript change.
+  const foreground = new Set<string>()
+  const moved = new Set<string>()
 
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'tool_use' && msg.role === 'assistant') {
         const kind = map.kindOf(block.toolName)
-        const isShell = kind === 'command' && !!block.toolInput?.run_in_background
-        if (kind === 'task' || isShell) spawns.push(block)
+        if (kind === 'task' || (kind === 'command' && block.toolInput?.run_in_background)) {
+          spawns.push(block)
+        } else if (kind === 'command' && engineId === 'claude') {
+          foreground.add(block.toolUseId)
+          spawns.push(block)
+        }
       } else if (block.type === 'tool_result') {
         results.set(block.toolUseId, !!block.isError)
+        if (foreground.has(block.toolUseId) && backgroundBashTaskId(block.toolResult)) {
+          moved.add(block.toolUseId)
+        }
       }
     }
   }
 
-  return spawns.map((block) => {
+  const shown = spawns.filter((b) => !foreground.has(b.toolUseId) || moved.has(b.toolUseId))
+  return shown.map((block) => {
     const kind = map.kindOf(block.toolName)
     const isAgent = kind === 'task'
     const view = isAgent

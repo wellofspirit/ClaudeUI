@@ -113,6 +113,75 @@ describe('useAgentRoster', () => {
     expect(seen?.totalCount).toBe(0)
   })
 
+  // Seen live (2026-09-28): a Bash sent to the background with the card's button
+  // never reached the roster, and the panel read "0 total" while it ran.
+  describe('a command cli.js moved to the background', () => {
+    const movedResult = (id: string, toolUseId: string): ChatMessage =>
+      ({
+        id,
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            toolUseId,
+            toolResult:
+              'Command was manually backgrounded by user with ID: b7x2k9. Output is being written to: /tmp/claude/proj/session/tasks/b7x2k9.output.',
+            isError: false
+          }
+        ],
+        timestamp: Date.now()
+      }) as ChatMessage
+    const transcript = (): ChatMessage[] => [
+      assistantWithTool('m1', 'tu-fg', 'Bash', { command: 'bun run build' }),
+      movedResult('m2', 'tu-fg')
+    ]
+
+    it('is a background shell, running until its task ends', async () => {
+      setSession({
+        messages: transcript(),
+        activeTasks: { 'tu-fg': { taskId: 'b7x2k9', taskType: 'local_bash', isBackgrounded: true } }
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.name)).toEqual(['bun'])
+      expect(seen?.shells[0].description).toBe('bun run build')
+      expect(seen?.shells[0].isRunning).toBe(true)
+      expect(seen?.runningCount).toBe(1)
+
+      await act(async () => {
+        setSession({
+          activeTasks: {},
+          taskNotifications: [
+            {
+              taskId: 'b7x2k9',
+              toolUseId: 'tu-fg',
+              status: 'completed',
+              outputFile: '',
+              summary: ''
+            }
+          ]
+        })
+      })
+      expect(seen?.shells[0].isRunning).toBe(false)
+      expect(seen?.shells[0].isError).toBe(false)
+    })
+
+    it('is not a shell while its result is an ordinary one', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-fg', 'Bash', { command: 'ls' }),
+          toolResult('m2', 'tu-fg')
+        ]
+      })
+      await renderProbe()
+      expect(seen?.totalCount).toBe(0)
+    })
+
+    it("is Claude's wording only", () => {
+      expect(scanTranscriptCached(transcript(), 'claude')).toHaveLength(1)
+      expect(scanTranscriptCached(transcript(), 'opencode')).toHaveLength(0)
+    })
+  })
+
   it('takes running state from the lifecycle record when there is one', async () => {
     setSession({
       messages: [
