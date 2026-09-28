@@ -7,7 +7,6 @@ import {
   capsFor,
   isOpenAIReasoningModel,
   judgeCacheKey,
-  lowestReasoningEffort,
   reasoningFields,
   wireForKind
 } from '../caps'
@@ -46,27 +45,6 @@ describe('isOpenAIReasoningModel', () => {
   })
 })
 
-describe('lowestReasoningEffort', () => {
-  it.each([
-    ['gpt-5.1', 'none'],
-    ['gpt-5.1-codex-mini', 'none'],
-    ['gpt-5.2', 'none'],
-    ['gpt-5.10', 'none'],
-    ['gpt-6', 'none'],
-    ['gpt-7-mini', 'none'],
-    ['openai/gpt-5.1', 'none'],
-    ['gpt-5', 'minimal'],
-    ['gpt-5-mini', 'minimal'],
-    ['gpt-5-nano', 'minimal'],
-    ['gpt-5.0', 'minimal'],
-    ['o3', 'low'],
-    ['o4-mini', 'low'],
-    ['o1', 'low']
-  ])('%s → %s', (id, want) => {
-    expect(lowestReasoningEffort(id)).toBe(want)
-  })
-})
-
 describe('wireForKind', () => {
   it('maps the two Responses routes to responses and the rest to chat', () => {
     expect(wireForKind('chatgpt')).toBe('responses')
@@ -93,13 +71,21 @@ describe('capsFor', () => {
         text: { verbosity: 'low' }
       },
       reasoning: {
-        fast: { reasoning: { effort: 'none' } },
+        fast: { reasoning: { effort: 'low' } },
         thinking: { reasoning: { effort: 'low' } }
       }
     })
-    // The original gpt-5 family has no `none`.
-    expect(capsFor('chatgpt', 'gpt-5').reasoning.fast).toEqual({ reasoning: { effort: 'minimal' } })
   })
+
+  it.each(['gpt-5', 'gpt-5.1-codex-mini', 'gpt-5.2', 'gpt-6', 'gpt-6-luna', 'o4-mini'])(
+    'stage 1 of reasoning model %s reasons at low, not the lowest effort it accepts (ADR-083 §2)',
+    (model) => {
+      // At `none` a stage-1 severity grade scattered (real block cases graded
+      // 0-20, i.e. cleared without stage 2), so stage 1 matches stage 2 here.
+      expect(capsFor('chatgpt', model).reasoning.fast).toEqual({ reasoning: { effort: 'low' } })
+      expect(capsFor('openai', model).reasoning.fast).toEqual({ reasoning_effort: 'low' })
+    }
+  )
 
   it('openai reasoning model: developer role, no stop, no temperature, reasoning_effort', () => {
     expect(capsFor('openai', 'gpt-5-mini')).toEqual({
@@ -111,8 +97,9 @@ describe('capsFor', () => {
       cacheMarkerOnSystem: false,
       affinityHeader: null,
       extraBody: { store: false, stream_options: { include_usage: true } },
+      reasoningHeadroom: 2048,
       reasoning: {
-        fast: { reasoning_effort: 'minimal' },
+        fast: { reasoning_effort: 'low' },
         thinking: { reasoning_effort: 'low' }
       }
     })
@@ -192,10 +179,15 @@ describe('capsFor', () => {
 
 describe('reasoningFields', () => {
   it('picks the stage, defaulting to thinking', () => {
-    const caps = capsFor('openai', 'gpt-5.1')
-    expect(reasoningFields(caps, 'fast')).toEqual({ reasoning_effort: 'none' })
-    expect(reasoningFields(caps, 'thinking')).toEqual({ reasoning_effort: 'low' })
-    expect(reasoningFields(caps, undefined)).toEqual({ reasoning_effort: 'low' })
+    // The two stages send the same effort on every route today, so the pick
+    // is observable only on caps whose stages differ.
+    const caps = {
+      ...capsFor('openai', 'gpt-5.1'),
+      reasoning: { fast: { reasoning_effort: 'x-fast' }, thinking: { reasoning_effort: 'x-think' } }
+    }
+    expect(reasoningFields(caps, 'fast')).toEqual({ reasoning_effort: 'x-fast' })
+    expect(reasoningFields(caps, 'thinking')).toEqual({ reasoning_effort: 'x-think' })
+    expect(reasoningFields(caps, undefined)).toEqual({ reasoning_effort: 'x-think' })
   })
 })
 

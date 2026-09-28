@@ -13,7 +13,16 @@
  *     would fail on every wording tweak while catching nothing.
  */
 import { describe, it, expect } from 'vitest'
-import { HARD_RULES, SOFT_RULES, ALLOW_RULES, deriveCategorySet } from '../rules/corpus'
+import {
+  HARD_RULES,
+  SOFT_RULES,
+  ALLOW_RULES,
+  USER_ALLOW_RULE,
+  USER_SOFT_RULE,
+  deriveCategorySet,
+  ruleNameForCategory,
+  userSoftRule
+} from '../rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from '../rules/policy'
 import { normalizeCategory } from '../classifier'
 
@@ -50,7 +59,7 @@ describe('rule corpus — structural invariants', () => {
   })
 
   it('every slug is unique across hard, soft and allow', () => {
-    const slugs = [...ALL_RULES, ...ALLOW_RULES].map((r) => r.slug)
+    const slugs = [...ALL_RULES, ...ALLOW_RULES, USER_SOFT_RULE, USER_ALLOW_RULE].map((r) => r.slug)
     expect(new Set(slugs).size).toBe(slugs.length)
   })
 
@@ -69,6 +78,20 @@ describe('rule corpus — structural invariants', () => {
     }
   })
 
+  it('the user-specified rules obey the same invariants as the corpus', () => {
+    // They are rendered next to the corpus rules and the model copies their
+    // names into <category> the same way, so the same properties must hold.
+    const soft = userSoftRule(['deploy scripts'])
+    expect(soft.tier).toBe('soft')
+    expect(soft.adversarial).toBeUndefined()
+    expect(soft.text).toContain('[named+specifics — must name:')
+    expect(soft.text).not.toContain('[adversarial — must name:')
+    for (const r of [USER_SOFT_RULE, USER_ALLOW_RULE]) {
+      expect(normalizeCategory(r.slug)).toBe(r.slug)
+      expect(normalizeCategory(r.name)).toBe(r.slug)
+    }
+  })
+
   it('every rule has a non-empty name and body', () => {
     for (const r of [...ALL_RULES, ...ALLOW_RULES]) {
       expect(r.name.trim().length).toBeGreaterThan(0)
@@ -78,10 +101,22 @@ describe('rule corpus — structural invariants', () => {
 })
 
 describe('deriveCategorySet', () => {
-  it('is exactly the hard + soft slugs', () => {
+  it('is exactly the hard + soft slugs, plus the user-specified soft rule', () => {
     const set = deriveCategorySet()
     for (const r of ALL_RULES) expect(set.has(r.slug)).toBe(true)
-    expect(set.size).toBe(ALL_RULES.length)
+    expect(set.has('user_specified_block')).toBe(true)
+    expect(set.size).toBe(ALL_RULES.length + 1)
+  })
+
+  it('always accepts user_specified_block, with or without a block list rendered', () => {
+    // The set is built once per process, not per prompt: a stage-2 verdict
+    // citing the user's rule must keep its category, and the name shown on the
+    // approval card must resolve.
+    expect(deriveCategorySet().has(normalizeCategory('User-Specified Block'))).toBe(true)
+    expect(ruleNameForCategory('user_specified_block')).toBe('User-Specified Block')
+    // The user's ALLOW exception is an exception: never a category.
+    expect(deriveCategorySet().has('user_specified_allow')).toBe(false)
+    expect(ruleNameForCategory('user_specified_allow')).toBeUndefined()
   })
 
   it('contains NO allow-exception slug (exceptions are never categories)', () => {
@@ -254,6 +289,115 @@ describe('buildPolicyPrompt — the Environment slots', () => {
   })
 })
 
+describe('buildPolicyPrompt — the user permission rules (ADR-083 §3)', () => {
+  const env = (over: Partial<EnvironmentInfo> = {}): string =>
+    buildPolicyPrompt({ cwd: '/repo', ...over })
+
+  it('says none are configured when there are no rules, absent or empty', () => {
+    // Silence would leave the model to guess whether the user has rules.
+    expect(env()).toContain('- User permission rules: none configured.')
+    expect(env({ permissionRules: {} })).toContain('- User permission rules: none configured.')
+    expect(env({ permissionRules: { allow: [], ask: [], deny: [] } })).toContain(
+      '- User permission rules: none configured.'
+    )
+  })
+
+  it('renders each non-empty list as its own line, rules in the order given', () => {
+    const p = env({
+      permissionRules: {
+        allow: ['Bash(gh pr create:*)', 'Bash(bun run test:*)'],
+        ask: ['Bash(git push:*)'],
+        deny: ['Edit(.env)', 'Bash(rm -rf:*)']
+      }
+    })
+    expect(p).not.toContain('User permission rules: none configured')
+    expect(p).toContain("- User permission rules — from the user's own settings, trusted;")
+    expect(p).toContain(
+      '  - Allow: `Bash(gh pr create:*)`, `Bash(bun run test:*)`. Standing consent'
+    )
+    expect(p).toContain('  - Ask: `Bash(git push:*)`. The user reviews these personally')
+    expect(p).toContain('  - Deny: `Edit(.env)`, `Bash(rm -rf:*)`. Each names a tool')
+    // Allow → ask → deny, whatever order the object was built in.
+    expect(p.indexOf('  - Allow:')).toBeLessThan(p.indexOf('  - Ask:'))
+    expect(p.indexOf('  - Ask:')).toBeLessThan(p.indexOf('  - Deny:'))
+  })
+
+  it('omits the line of an empty list', () => {
+    const p = env({ permissionRules: { deny: ['Bash(curl:*)'] } })
+    expect(p).toContain('  - Deny: `Bash(curl:*)`.')
+    expect(p).not.toContain('  - Allow:')
+    expect(p).not.toContain('  - Ask:')
+  })
+
+  it('sits inside Environment, right before the production-patterns line', () => {
+    for (const p of [env(), env({ permissionRules: { allow: ['Bash(ls:*)'] } })]) {
+      const at = p.indexOf('- User permission rules')
+      expect(at).toBeGreaterThan(p.indexOf('## Environment'))
+      expect(at).toBeLessThan(p.indexOf('- Production/protected patterns'))
+      expect(p.slice(at, p.indexOf('- Production/protected patterns'))).not.toContain(
+        '- Trusted package registries'
+      )
+    }
+  })
+
+  it('carries the consent clauses the allow line points at', () => {
+    const p = env()
+    expect(p).toContain('- PROPORTIONALITY:')
+    expect(p).toContain('- ROUTINE PARAMETERS:')
+    expect(p).toContain('- STANDING CONSENT: a user allow rule (see Environment)')
+  })
+})
+
+describe('buildPolicyPrompt — the user guidance lists (ADR-083 §4)', () => {
+  const env = (over: Partial<EnvironmentInfo> = {}): string =>
+    buildPolicyPrompt({ cwd: '/repo', ...over })
+
+  it('renders nothing for absent or empty lists — the corpus-only document', () => {
+    const plain = env()
+    expect(plain).not.toContain('### User-Specified')
+    expect(env({ judgeGuidance: {} })).toBe(plain)
+    expect(env({ judgeGuidance: { allow: [], block: [] } })).toBe(plain)
+    expect(plain).toContain(`## SOFT BLOCK — ${SOFT_RULES.length} rules`)
+  })
+
+  it('appends the User-Specified Block rule to SOFT, counted in its header', () => {
+    const p = env({ judgeGuidance: { block: ['database migrations', 'editing CI workflows'] } })
+    expect(p).toContain(`## SOFT BLOCK — ${SOFT_RULES.length + 1} rules`)
+    expect(p).toContain(
+      '### User-Specified Block\n' +
+        'The user wants to approve these kinds of action themselves — block an action one of them plainly describes:\n' +
+        '- database migrations\n' +
+        '- editing CI workflows\n' +
+        '[named+specifics — must name: the action itself, as that entry describes it.]'
+    )
+    // Last in SOFT: after every corpus soft rule, before the ALLOW section.
+    const at = p.indexOf('### User-Specified Block')
+    for (const r of SOFT_RULES) expect(p.indexOf(`### ${r.name}`)).toBeLessThan(at)
+    expect(at).toBeLessThan(p.indexOf('## ALLOW exceptions'))
+    expect(p).not.toContain('### User-Specified Allow')
+  })
+
+  it('appends the User-Specified Allow exception to ALLOW, not counted as a soft rule', () => {
+    const p = env({ judgeGuidance: { allow: ['running the e2e suite', 'docker compose up'] } })
+    expect(p).toContain(`## SOFT BLOCK — ${SOFT_RULES.length} rules`)
+    expect(p).toContain(
+      '### User-Specified Allow\n' +
+        'The user has declared these kinds of action routine for their work — allow an action one of them plainly describes (it still never clears the HARD rule, an adversarial rule, or an explicit boundary in the transcript):\n' +
+        '- running the e2e suite\n' +
+        '- docker compose up\n\n## Classification process'
+    )
+    const at = p.indexOf('### User-Specified Allow')
+    expect(at).toBeGreaterThan(p.indexOf('## ALLOW exceptions'))
+    for (const r of ALLOW_RULES) expect(p.indexOf(`### ${r.name}`)).toBeLessThan(at)
+    expect(p).not.toContain('### User-Specified Block')
+  })
+
+  it('keeps entries in the order given (the caller dedupes, the renderer does not)', () => {
+    const p = env({ judgeGuidance: { block: ['b', 'a', 'b'] } })
+    expect(p).toContain('plainly describes:\n- b\n- a\n- b\n[named+specifics')
+  })
+})
+
 describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, ADR-081 §4)', () => {
   // The judge's system prompt is ~24 KB and is re-sent on every classification.
   // The HTTP judge transport caches it — an explicit `cache_control` breakpoint
@@ -277,7 +421,13 @@ describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, A
     additionalDirectories: ['/srv/shared', '/srv/other'],
     trustedDomains: ['files.acme.com', 'api.acme.com'],
     trustedRegistries: ['https://npm.acme.internal'],
-    protectedPatterns: ['acme-live-*']
+    protectedPatterns: ['acme-live-*'],
+    permissionRules: {
+      allow: ['Bash(gh pr create:*)', 'Bash(bun run test:*)'],
+      ask: ['Bash(git push:*)'],
+      deny: ['Edit(.env)']
+    },
+    judgeGuidance: { allow: ['running the e2e suite'], block: ['database migrations'] }
   }
 
   it('renders byte-identically when called repeatedly with the SAME env object', () => {
@@ -294,6 +444,12 @@ describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, A
 
   it('does not depend on the insertion order of the env object keys', () => {
     const reordered: EnvironmentInfo = {
+      judgeGuidance: { block: full.judgeGuidance?.block, allow: full.judgeGuidance?.allow },
+      permissionRules: {
+        deny: full.permissionRules?.deny,
+        ask: full.permissionRules?.ask,
+        allow: full.permissionRules?.allow
+      },
       protectedPatterns: full.protectedPatterns,
       trustedRegistries: full.trustedRegistries,
       trustedDomains: full.trustedDomains,
@@ -324,5 +480,11 @@ describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, A
     // being blind. A different cwd is a different policy and must not be
     // served from the previous one's cache entry.
     expect(buildPolicyPrompt({ ...full, cwd: '/other' })).not.toBe(buildPolicyPrompt(full))
+    expect(
+      buildPolicyPrompt({ ...full, permissionRules: { ...full.permissionRules, ask: [] } })
+    ).not.toBe(buildPolicyPrompt(full))
+    expect(
+      buildPolicyPrompt({ ...full, judgeGuidance: { ...full.judgeGuidance, block: [] } })
+    ).not.toBe(buildPolicyPrompt(full))
   })
 })

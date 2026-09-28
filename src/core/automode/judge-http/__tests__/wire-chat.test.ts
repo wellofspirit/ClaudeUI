@@ -37,14 +37,16 @@ describe('buildChatBody', () => {
       stream: true,
       store: false,
       stream_options: { include_usage: true },
-      reasoning_effort: 'minimal',
-      max_completion_tokens: 64,
+      reasoning_effort: 'low',
+      // 64 + the reasoning headroom: `max_completion_tokens` counts reasoning,
+      // and stage 1 reasons at `low` (ADR-083 §2).
+      max_completion_tokens: 64 + 2048,
       prompt_cache_key: judgeCacheKey(SYSTEM)
     })
     // Stage 2 changes only the stage-dependent fields.
     expect(buildChatBody(routeFor('openai', 'gpt-5-mini'), STAGE2)).toMatchObject({
       reasoning_effort: 'low',
-      max_completion_tokens: 8192
+      max_completion_tokens: 8192 + 2048
     })
   })
 
@@ -130,10 +132,19 @@ describe('buildChatBody', () => {
     expect(buildChatBody(openrouter, STAGE1).max_tokens).toBe(64)
     const openai = routeFor('openai', 'gpt-5-mini', { maxOutputTokens: 1000 })
     expect(buildChatBody(openai, STAGE2).max_completion_tokens).toBe(1000)
+    // The reasoning headroom is clamped by the same ceiling.
+    expect(buildChatBody(openai, STAGE1).max_completion_tokens).toBe(1000)
     // A ceiling never adds a cap the request didn't ask for.
     expect(buildChatBody(openrouter, { system: SYSTEM, user: USER })).not.toHaveProperty(
       'max_tokens'
     )
+  })
+
+  it('only a reasoning model on a cap-counts-reasoning route gets headroom (ADR-083 §2)', () => {
+    // A non-reasoning OpenAI model's cap is all text, so its budget stands.
+    expect(buildChatBody(routeFor('openai', 'gpt-4.1-mini'), STAGE1).max_completion_tokens).toBe(64)
+    // OpenRouter switches reasoning off, so there is nothing to make room for.
+    expect(buildChatBody(routeFor('openrouter', 'z-ai/glm-4.6'), STAGE1).max_tokens).toBe(64)
   })
 
   it('does not alias the request stop array', () => {

@@ -35,21 +35,24 @@ export function isOpenAIReasoningModel(id: string): boolean {
 }
 
 /**
- * The cheapest reasoning effort a model accepts: `none` from gpt-5.1 on (and
- * every later major), `minimal` on the original gpt-5 family, `low` for
- * anything else (the o-series). Only meaningful for a reasoning model.
+ * The reasoning effort BOTH stages send on an OpenAI reasoning model (ADR-083
+ * §2, amending ADR-081 §4). Stage 1 used to send the cheapest effort the model
+ * accepts (`none` on gpt-5.1+), but a severity grade at `none` scattered on
+ * GPT-6 Luna — real block cases graded 0-20, i.e. cleared at stage 1. `low` is
+ * accepted by every OpenAI reasoning model, and at about 2 s p50 stage 1 stays
+ * well under stage 2's cost.
  */
-export function lowestReasoningEffort(id: string): 'none' | 'minimal' | 'low' {
-  const bare = bareOpenAIId(id)
-  const m = bare.match(/^gpt-(\d+)(?:\.(\d+))?/)
-  if (m) {
-    const major = Number(m[1])
-    const minor = m[2] === undefined ? 0 : Number(m[2])
-    if (major >= 6) return 'none'
-    if (major === 5) return minor >= 1 ? 'none' : 'minimal'
-  }
-  return 'low'
-}
+const JUDGE_REASONING_EFFORT = 'low'
+
+/**
+ * Server-side cap headroom for a reasoning model on a route whose cap counts
+ * reasoning tokens ({@link JudgeCaps.reasoningHeadroom}). At effort `none`
+ * stage 1's 64-token cap was all text; at `low` the reasoning comes out of the
+ * same budget, and a truncated reply is unparseable — which escalates every
+ * call to stage 2 and silently doubles the latency. cli.js adds 2048 for the
+ * same reason when a model cannot run its stage 1 without thinking.
+ */
+const REASONING_HEADROOM_TOKENS = 2048
 
 /**
  * Derive a route's caps. `flags.reasoning` is the engine catalog's reasoning
@@ -79,15 +82,17 @@ export function capsFor(
           include: ['reasoning.encrypted_content'],
           text: { verbosity: 'low' }
         },
+        // Every model the Codex backend serves is a reasoning model, so there
+        // is no non-reasoning branch to keep here.
         reasoning: {
-          fast: { reasoning: { effort: lowestReasoningEffort(model) } },
-          thinking: { reasoning: { effort: 'low' } }
+          fast: { reasoning: { effort: JUDGE_REASONING_EFFORT } },
+          thinking: { reasoning: { effort: JUDGE_REASONING_EFFORT } }
         }
       }
 
     case 'openai': {
       // Caps are per ROUTE, not per stage: OpenAI accepts a temperature on a
-      // reasoning model only at effort `none`, which stage 2 never uses, so a
+      // reasoning model only at effort `none`, which neither stage uses, so a
       // reasoning model gets none at all.
       const reasoning = isOpenAIReasoningModel(model)
       return {
@@ -99,10 +104,11 @@ export function capsFor(
         cacheMarkerOnSystem: false,
         affinityHeader: null,
         extraBody: { store: false, stream_options: { include_usage: true } },
+        ...(reasoning ? { reasoningHeadroom: REASONING_HEADROOM_TOKENS } : {}),
         reasoning: reasoning
           ? {
-              fast: { reasoning_effort: lowestReasoningEffort(model) },
-              thinking: { reasoning_effort: 'low' }
+              fast: { reasoning_effort: JUDGE_REASONING_EFFORT },
+              thinking: { reasoning_effort: JUDGE_REASONING_EFFORT }
             }
           : { fast: {}, thinking: {} }
       }
@@ -168,15 +174,17 @@ export function reasoningFields(
 
 /**
  * The output cap a body sends, before the caps decide whether it is sent at
- * all: the request's `maxTokens`, clamped to the route's catalog ceiling when
- * both are known. No `maxTokens`, no cap — the ceiling alone never adds one.
+ * all: the request's `maxTokens` plus the caps' reasoning headroom, clamped to
+ * the route's catalog ceiling when both are known. No `maxTokens`, no cap —
+ * the ceiling alone never adds one.
  */
 export function outputCapValue(
-  route: Pick<ResolvedJudgeRoute, 'maxOutputTokens'>,
+  route: Pick<ResolvedJudgeRoute, 'maxOutputTokens' | 'caps'>,
   req: Pick<JudgeRequest, 'maxTokens'>
 ): number | undefined {
-  if (req.maxTokens === undefined || route.maxOutputTokens === undefined) return req.maxTokens
-  return Math.min(req.maxTokens, route.maxOutputTokens)
+  if (req.maxTokens === undefined) return undefined
+  const wanted = req.maxTokens + (route.caps.reasoningHeadroom ?? 0)
+  return route.maxOutputTokens === undefined ? wanted : Math.min(wanted, route.maxOutputTokens)
 }
 
 /**

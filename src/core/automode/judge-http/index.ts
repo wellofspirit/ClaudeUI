@@ -9,7 +9,6 @@ export {
   capsFor,
   isOpenAIReasoningModel,
   judgeCacheKey,
-  lowestReasoningEffort,
   reasoningFields,
   wireForKind
 } from './caps'

@@ -429,14 +429,16 @@ describe('makeHttpJudgeTransport through classify()', () => {
   }
 
   it('a clean stage-1 allow returns the verdict', async () => {
-    const f = fakeFetch(sse(CHAT_OK))
+    // Stage 1 in `both` mode is a severity grade (ADR-083 §2); the stop
+    // sequence eats the closing tag.
+    const f = fakeFetch(sse([chatDelta('<severity>3'), chatFinish('stop'), CHAT_USAGE, CHAT_DONE]))
     const r = await classify(
       input,
       makeHttpJudgeTransport({ resolve: ok(routeFor('custom-chat', 'm')), fetchImpl: f.asFetch })
     )
-    expect(r).toMatchObject({ block: false, stage: 'fast' })
+    expect(r).toMatchObject({ block: false, stage: 'fast', severity: 3 })
     // Stage 1's budget and stop sequence really went over the wire.
-    expect(f.body(0)).toMatchObject({ max_tokens: 64, stop: ['</block>'] })
+    expect(f.body(0)).toMatchObject({ max_tokens: 64, stop: ['</severity>'] })
   })
 
   it('a provider error is unavailable (→ the human), never a BLOCK verdict', async () => {

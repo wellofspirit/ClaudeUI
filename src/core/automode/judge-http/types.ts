@@ -41,6 +41,14 @@ export interface JudgeCaps {
   affinityHeader: string | null
   /** Constant body fields merged in after `stream` and before the reasoning fields. Byte-stable. */
   extraBody: Readonly<Record<string, unknown>>
+  /**
+   * Output tokens added to the SERVER-side cap for endpoints that count
+   * reasoning against it (OpenAI's `max_completion_tokens`), so a stage that
+   * reasons does not spend its whole budget thinking and return empty text.
+   * The client-side text cap stays at the request's own `maxTokens` — only the
+   * wire value grows. Absent = 0 (ADR-083 §2).
+   */
+  reasoningHeadroom?: number
   /** Per-stage reasoning fields (merged after extraBody); {} = send nothing. */
   reasoning: {
     fast: Readonly<Record<string, unknown>>

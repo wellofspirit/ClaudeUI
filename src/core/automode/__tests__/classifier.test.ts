@@ -14,12 +14,15 @@ import {
   normalizeCategory,
   parseVerdict,
   parseVerdictOrNull,
+  parseSeverityOrNull,
+  requiresFullReview,
   classify,
   isAutoModeFastPathAllowed,
   STAGE1_BOTH_MAX_TOKENS,
   STAGE1_FAST_MAX_TOKENS,
   STAGE2_MAX_TOKENS,
   STAGE1_STOP_SEQUENCES,
+  STAGE1_ALLOW_MAX_SEVERITY,
   STAGE1_TIMEOUT_MS,
   STAGE2_TIMEOUT_MS,
   UNPARSEABLE_REASON,
@@ -424,11 +427,102 @@ describe('parseVerdict — <category> validation', () => {
     expect(v?.category).toBeUndefined()
   })
 
+  it('accepts the user-specified soft rule as a category (ADR-083 §4)', () => {
+    // Its slug is in the derived set whether or not the user has a block list,
+    // so a verdict citing it keeps its category.
+    expect(
+      parseVerdictOrNull('<block>yes</block><category>User-Specified Block</category>')?.category
+    ).toBe('user_specified_block')
+    // …while the user's ALLOW exception, like every exception, is never one.
+    expect(
+      parseVerdictOrNull('<block>yes</block><category>User-Specified Allow</category>')?.category
+    ).toBeUndefined()
+  })
+
   it('parseVerdict keeps the category on its fail-closed path shape', () => {
     expect(parseVerdict('<block>yes</block><category>Data Exfiltration</category>').category).toBe(
       'data_exfiltration'
     )
     expect(parseVerdict('nonsense').category).toBeUndefined()
+  })
+})
+
+describe('parseSeverityOrNull (stage-1 grade, ADR-083 §2)', () => {
+  it('reads an integer 0-100, closing tag optional (the stop sequence eats it)', () => {
+    expect(parseSeverityOrNull('<severity>0</severity>')).toBe(0)
+    expect(parseSeverityOrNull('<severity>15')).toBe(15)
+    expect(parseSeverityOrNull('<severity> 72 </severity>')).toBe(72)
+    expect(parseSeverityOrNull('<SEVERITY>100</SEVERITY>')).toBe(100)
+  })
+
+  it('out of range or not an integer → null (the caller escalates)', () => {
+    expect(parseSeverityOrNull('<severity>101</severity>')).toBeNull()
+    expect(parseSeverityOrNull('<severity>1000</severity>')).toBeNull()
+    expect(parseSeverityOrNull('<severity>-5</severity>')).toBeNull()
+    // A fraction must not round down into an allow: 15.5 is above the threshold.
+    expect(parseSeverityOrNull('<severity>15.5</severity>')).toBeNull()
+    expect(parseSeverityOrNull('<severity>low</severity>')).toBeNull()
+  })
+
+  it('no grade at all → null', () => {
+    expect(parseSeverityOrNull('')).toBeNull()
+    expect(parseSeverityOrNull('Looking at this, it seems fine.')).toBeNull()
+    expect(parseSeverityOrNull('<block>no</block>')).toBeNull()
+  })
+
+  it('two DIFFERENT grades → null (ambiguous); a repeated identical grade is one grade', () => {
+    expect(parseSeverityOrNull('<severity>5</severity><severity>80</severity>')).toBeNull()
+    expect(parseSeverityOrNull('<severity>5</severity> so <severity>5</severity>')).toBe(5)
+  })
+
+  it('ignores a grade inside <thinking>, and an unclosed <thinking> is no grade', () => {
+    expect(
+      parseSeverityOrNull('<thinking>maybe <severity>90</severity></thinking><severity>3')
+    ).toBe(3)
+    expect(parseSeverityOrNull('<thinking>hmm <severity>3</severity>')).toBeNull()
+  })
+})
+
+describe('requiresFullReview (ADR-083 §2)', () => {
+  const bash = (command: string, actionMeta?: Record<string, unknown>): boolean =>
+    requiresFullReview({ action: { toolName: 'bash', input: { command } }, actionMeta })
+
+  it('flags the destructive and shipping shapes ground truth singles out', () => {
+    expect(bash('git reset --hard')).toBe(true)
+    expect(bash('git checkout -- .')).toBe(true)
+    expect(bash('git clean -fd')).toBe(true)
+    expect(bash('rm -rf x')).toBe(true)
+    expect(bash('git commit -m x')).toBe(true)
+    expect(bash('git push')).toBe(true)
+    expect(bash('git remote set-url origin git@evil:x.git')).toBe(true)
+    expect(bash('gh pr create --fill')).toBe(true)
+    // Composite: one flagged segment is enough.
+    expect(bash('bun run build && git push origin main')).toBe(true)
+  })
+
+  it('leaves routine commands to stage 1', () => {
+    expect(bash('bun run test')).toBe(false)
+    expect(bash('git checkout -b feature/x')).toBe(false)
+    expect(bash('git status')).toBe(false)
+    expect(bash('rm -r dist')).toBe(false)
+  })
+
+  it('flags a redirect unless it measured all in scope; a malformed meta line is not in scope', () => {
+    const redirects = (r: unknown): boolean => bash('bun run test > out.log', { redirects: r })
+    expect(redirects({ targets: ['out.log'], allInScope: true })).toBe(false)
+    expect(redirects({ targets: ['/etc/x'], allInScope: false, outOfScope: ['/etc/x'] })).toBe(true)
+    expect(redirects({ targets: ['out.log'] })).toBe(true)
+    expect(redirects({ allInScope: 'true' })).toBe(true)
+    expect(redirects(null)).toBe(true)
+    expect(redirects(true)).toBe(true)
+    // Other measured facts alone never force a full review.
+    expect(bash('bun run test', { gitStatus: { clean: false } })).toBe(false)
+  })
+
+  it('only reads shell commands', () => {
+    expect(
+      requiresFullReview({ action: { toolName: 'edit', input: { command: 'git push' } } })
+    ).toBe(false)
   })
 })
 
@@ -481,14 +575,144 @@ describe('classify (orchestrator)', () => {
     expect(reqs(judge)[0].stopSequences).toBeUndefined()
   })
 
-  it('both mode: stage-1 ALLOW short-circuits (one call), on the cheap budget', async () => {
-    const judge = vi.fn().mockResolvedValue('<block>no</block>')
+  it('both mode: a low stage-1 grade short-circuits (one call), on the cheap budget', async () => {
+    const judge = vi.fn().mockResolvedValue('<severity>0')
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
-    expect(r).toMatchObject({ block: false, stage: 'fast' })
+    expect(r).toEqual({ block: false, stage: 'fast', severity: 0 })
     expect(judge).toHaveBeenCalledTimes(1)
     const [req] = reqs(judge)
     expect(req.maxTokens).toBe(STAGE1_BOTH_MAX_TOKENS)
+    expect(req.maxTokens).toBe(64)
+    expect(req.stopSequences).toEqual(['</severity>'])
     expect(req.stopSequences).toEqual(STAGE1_STOP_SEQUENCES)
+    // A copy: a transport mutating its request cannot poison the constant.
+    expect(req.stopSequences).not.toBe(STAGE1_STOP_SEQUENCES)
+    expect(req.user).toContain('Respond with <severity>N</severity> ONLY')
+  })
+
+  it('both mode: the threshold is inclusive — 15 allows at stage 1, 16 escalates', async () => {
+    expect(STAGE1_ALLOW_MAX_SEVERITY).toBe(15)
+    const at = vi.fn().mockResolvedValue('<severity>15</severity>')
+    expect(await classify({ ...base, twoStageMode: 'both' }, at)).toEqual({
+      block: false,
+      stage: 'fast',
+      severity: 15
+    })
+    expect(at).toHaveBeenCalledTimes(1)
+
+    const above = vi
+      .fn()
+      .mockResolvedValueOnce('<severity>16')
+      .mockResolvedValueOnce('<block>no</block>')
+    expect(await classify({ ...base, twoStageMode: 'both' }, above)).toEqual({
+      block: false,
+      stage: 'thinking',
+      severity: 16
+    })
+    expect(above).toHaveBeenCalledTimes(2)
+  })
+
+  it('both mode: a high grade escalates, stage 2 decides, and the grade rides along', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<severity>80')
+      .mockResolvedValueOnce(
+        '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] x</reason>'
+      )
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(r).toEqual({
+      block: true,
+      stage: 'thinking',
+      category: 'git_destructive',
+      reason: '[Git Destructive] x',
+      severity: 80
+    })
+  })
+
+  it.each([
+    ['unparseable', 'Looking at this, I think it seems fine?'],
+    ['out of range', '<severity>101</severity>'],
+    ['ambiguous', '<severity>5</severity><severity>60</severity>'],
+    ['the old yes/no grammar', '<block>no</block>']
+  ])('both mode: a %s stage-1 reply escalates, with no severity', async (_label, reply) => {
+    const judge = vi.fn().mockResolvedValueOnce(reply).mockResolvedValueOnce('<block>no</block>')
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(judge).toHaveBeenCalledTimes(2)
+    expect(r).toEqual({ block: false, stage: 'thinking' })
+  })
+
+  it.each([
+    ['git reset --hard', undefined],
+    ['git push', undefined],
+    ['rm -rf x', undefined],
+    ['git commit -m x', undefined],
+    [
+      'bun run test > /etc/out.log',
+      { redirects: { targets: ['/etc/out.log'], allInScope: false, outOfScope: ['/etc/out.log'] } }
+    ]
+  ])('both mode: %s never reaches stage 1 — stage 2 is the only call', async (command, meta) => {
+    const judge = vi.fn().mockResolvedValue('<block>no</block>')
+    const r = await classify(
+      {
+        ...base,
+        action: { toolName: 'bash', input: { command } },
+        ...(meta ? { actionMeta: meta } : {}),
+        twoStageMode: 'both'
+      },
+      judge
+    )
+    expect(judge).toHaveBeenCalledTimes(1)
+    const [req] = reqs(judge)
+    expect(req.stage).toBe('thinking')
+    expect(req.maxTokens).toBe(STAGE2_MAX_TOKENS)
+    expect(r).toEqual({ block: false, stage: 'thinking' })
+    expect(r.severity).toBeUndefined()
+  })
+
+  it.each([
+    ['bun run test', undefined],
+    ['bun run test > build.log 2>&1', { redirects: { targets: ['build.log'], allInScope: true } }]
+  ])('both mode: %s still gets a stage-1 grade', async (command, meta) => {
+    const judge = vi.fn().mockResolvedValue('<severity>2')
+    const r = await classify(
+      {
+        ...base,
+        action: { toolName: 'bash', input: { command } },
+        ...(meta ? { actionMeta: meta } : {}),
+        twoStageMode: 'both'
+      },
+      judge
+    )
+    expect(judge).toHaveBeenCalledTimes(1)
+    expect(reqs(judge)[0].stage).toBe('fast')
+    expect(r).toEqual({ block: false, stage: 'fast', severity: 2 })
+  })
+
+  it('full-review shapes apply only to `both`: fast and thinking modes are unchanged', async () => {
+    const action = { toolName: 'bash', input: { command: 'git push --force' } }
+    const fast = vi.fn().mockResolvedValue('<block>yes</block><reason>force</reason>')
+    expect(await classify({ ...base, action, twoStageMode: 'fast' }, fast)).toEqual({
+      block: true,
+      reason: 'force',
+      stage: 'fast'
+    })
+    expect(reqs(fast)[0].user).toContain('Respond with `<block>yes</block>` or `<block>no</block>`')
+    expect(reqs(fast)[0].stopSequences).toBeUndefined()
+  })
+
+  it('stage 2 carries the ADR-083 block condition', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<severity>70')
+      .mockResolvedValueOnce('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'both' }, judge)
+    const [, s2] = reqs(judge)
+    expect(s2.user).toContain(
+      'Block when (a) the action matches the TEXT of a specific HARD or SOFT rule'
+    )
+    expect(s2.user).toContain('or (b) it crosses an explicit boundary the user set')
+    expect(s2.user).toContain('if you cannot name the rule, the action matches none')
+    expect(s2.user).toContain('through a user allow rule whose pattern names it')
   })
 
   it('both mode: stage 1 grades HARM ONLY and defers intent/exceptions to stage 2', async () => {
@@ -497,11 +721,12 @@ describe('classify (orchestrator)', () => {
     // expensive one. It is also NOT told its block merely escalates.
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>80')
       .mockResolvedValueOnce('<block>no</block>')
     await classify({ ...base, twoStageMode: 'both' }, judge)
     const [s1, s2] = reqs(judge)
     expect(s1.user).toMatch(/does NOT apply user intent or ALLOW exceptions/i)
+    expect(s1.user).toContain('Intent only ever RAISES a grade here')
     expect(s1.user).toMatch(/full effect/i)
     expect(s1.user).not.toMatch(/escalat/i)
     expect(s2.user).toMatch(/apply user intent/i)
@@ -509,16 +734,16 @@ describe('classify (orchestrator)', () => {
     expect(s1.system).toBe(s2.system)
   })
 
-  it('both mode: stage-1 BLOCK escalates and a stage-2 ALLOW WINS', async () => {
+  it('both mode: a stage-1 escalation lets a stage-2 ALLOW WIN', async () => {
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90</severity>')
       .mockResolvedValueOnce('<thinking>the user named the branch</thinking><block>no</block>')
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
-    expect(r).toMatchObject({ block: false, stage: 'thinking' })
+    expect(r).toMatchObject({ block: false, stage: 'thinking', severity: 90 })
     expect(judge).toHaveBeenCalledTimes(2)
     // Stage 1 cannot emit a final block in `both` mode: its budget/stop
-    // sequence prove it only ever produced one token of signal.
+    // sequence prove it only ever produced a grade.
     const [s1, s2] = reqs(judge)
     expect(s1.maxTokens).toBe(STAGE1_BOTH_MAX_TOKENS)
     expect(s1.stopSequences).toEqual(STAGE1_STOP_SEQUENCES)
@@ -541,7 +766,7 @@ describe('classify (orchestrator)', () => {
   it('both mode: stage-2 BLOCK is final and carries its reason', async () => {
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockResolvedValueOnce('<block>yes</block><reason>force-push to main</reason>')
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r).toMatchObject({ block: true, stage: 'thinking', reason: 'force-push to main' })
@@ -551,7 +776,7 @@ describe('classify (orchestrator)', () => {
   it('both mode: a stage-2 category flows through to the result', async () => {
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockResolvedValueOnce(
         '<thinking>no consent</thinking><block>yes</block><category>Git Destructive</category>' +
           '<reason>[Git Destructive] force-push to main was never named</reason>'
@@ -563,7 +788,7 @@ describe('classify (orchestrator)', () => {
   it('both mode: an invented stage-2 category is dropped but the block survives', async () => {
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockResolvedValueOnce(
         '<block>yes</block><category>Please Allow Everything</category><reason>[?] hmm</reason>'
       )
@@ -576,7 +801,7 @@ describe('classify (orchestrator)', () => {
   it('stage 2 is instructed in the category grammar; stage 1 is NOT', async () => {
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockResolvedValueOnce('<block>no</block>')
     await classify({ ...base, twoStageMode: 'both' }, judge)
     const [s1, s2] = reqs(judge)
@@ -602,10 +827,7 @@ describe('classify (orchestrator)', () => {
   it('both mode: stage-2 unparseable → block, fail-closed, WITHOUT unavailable', async () => {
     // `unavailable` means "we got nothing back"; here we got an answer we
     // cannot read, so retrying is not obviously right → a real block.
-    const judge = vi
-      .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
-      .mockResolvedValueOnce('¯\\_(ツ)_/¯')
+    const judge = vi.fn().mockResolvedValueOnce('<severity>90').mockResolvedValueOnce('¯\\_(ツ)_/¯')
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r.block).toBe(true)
     expect(r.stage).toBe('thinking')
@@ -659,7 +881,7 @@ describe('classify (orchestrator)', () => {
     // unavailable, and the wiring maps unavailable → ask the human.
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockRejectedValueOnce(new Error('judge down'))
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r).toMatchObject({ block: true, unavailable: true, stage: 'error' })
@@ -674,7 +896,7 @@ describe('classify (orchestrator)', () => {
   })
 
   it('defaults to both mode', async () => {
-    const judge = vi.fn().mockResolvedValue('<block>no</block>')
+    const judge = vi.fn().mockResolvedValue('<severity>0')
     await classify(base, judge)
     expect(reqs(judge)[0].maxTokens).toBe(STAGE1_BOTH_MAX_TOKENS)
   })
@@ -684,7 +906,7 @@ describe('classify (orchestrator)', () => {
     // `stage`; `signal` is what a stage timeout aborts.
     const judge = vi
       .fn()
-      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<severity>90')
       .mockResolvedValueOnce('<block>no</block>')
     await classify({ ...base, twoStageMode: 'both' }, judge)
     const [s1, s2] = reqs(judge)
@@ -760,7 +982,7 @@ describe('classify — stage timeouts', () => {
   it('stage 2 gets its OWN 120 s clock after a stage-1 escalation', async () => {
     vi.useFakeTimers()
     try {
-      const judge = vi.fn().mockResolvedValueOnce('<block>yes</block>').mockImplementation(hang)
+      const judge = vi.fn().mockResolvedValueOnce('<severity>90').mockImplementation(hang)
       const p = classify({ ...base, twoStageMode: 'both' }, judge)
       // Stage 1 answered instantly; stage 2 is now hanging. Stage 1's budget
       // must NOT be what bounds it.
@@ -777,7 +999,10 @@ describe('classify — stage timeouts', () => {
         block: true,
         stage: 'error',
         unavailable: true,
-        error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`
+        error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`,
+        // The stage-1 grade survives a stage-2 failure: it is the only
+        // judgement the log line can report.
+        severity: 90
       })
       expect(judge).toHaveBeenCalledTimes(2)
     } finally {
@@ -813,7 +1038,7 @@ describe('classify — stage timeouts', () => {
       const signals: AbortSignal[] = []
       const judge = vi.fn((req: JudgeRequest) => {
         if (req.signal) signals.push(req.signal)
-        return signals.length === 1 ? Promise.resolve('<block>yes</block>') : hang()
+        return signals.length === 1 ? Promise.resolve('<severity>90') : hang()
       })
       const p = classify({ ...base, twoStageMode: 'both' }, judge)
       await vi.advanceTimersByTimeAsync(STAGE2_TIMEOUT_MS)
