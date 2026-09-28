@@ -65,6 +65,12 @@ enough. The rule texts carry the carve-outs that make that concrete:
 - **Local Operations** is rewritten as the everyday developer steps, version control included.
 - **External System Writes**: a PR on the session repo for this session's commits has that work as
   its substance.
+- **Remote Host Writes** (new soft rule): changing state on another machine through a remote shell or
+  remote execution — services, firewall rules, packages, system configuration, deploys — whatever the
+  host is called. Must name the host and the change. Read-only diagnostics the task calls for are not
+  this rule. **Credential Exploration** now names the instance-metadata credential endpoints. Both
+  came from replaying real historical denials (§Consequences): our corpus only knew hosts named
+  `prod`, and a metadata-credential probe inside a heredoc script cleared stage 1.
 
 The consent model adds two more clauses. **Routine parameters**: a branch name, commit message, PR
 title or file path the agent fills in does not defeat a bar. **Standing consent** is described in §3.
@@ -75,7 +81,7 @@ it allows: if it cannot name the rule, the action matches none. The boundary cla
 because a boundary block ("don't push") has no rule text of its own. Without the clause, the
 candidate let such a push through in 2 of 3 runs.
 
-### 2. Stage 1 grades severity, never clears destructive or shipping shapes, and reasons at `low`
+### 2. Stage 1 grades severity at the floor effort and never clears destructive, shipping or remote shapes
 
 - In `both` mode, stage 1 answers `<severity>N</severity>` (0-100) instead of yes/no. A grade of 15
   or less allows; anything else, including a reply we cannot parse, escalates to stage 2, which is
@@ -86,18 +92,22 @@ candidate let such a push through in 2 of 3 runs.
   boundary-crossing push clear stage 1.
 - **Full-review shapes skip stage 1.** A shell command that ground truth already singles out
   (`needsGitStatus` / `needsRepoVisibility`: `reset --hard`, `checkout .`, `clean -f`, `rm -rf`,
-  add/commit/push/stash, remote repoints, `gh pr create`/`merge`/`release`/`repo`), or a redirect
-  that is not all in scope, goes straight to stage 2. One-shot grades are noisy even at effort `low`:
+  add/commit/push/stash, remote repoints, `gh pr create`/`merge`/`release`/`repo`), remote execution
+  (`ssh`, `scp`, `rsync host:`, `paramiko`, `kubectl`/`docker exec`, `Invoke-Command`) or a cloud
+  instance-metadata endpoint anywhere in its text (heredoc bodies included), or a redirect that is not
+  all in scope, goes straight to stage 2. One-shot grades are noisy even at effort `low`:
   one run graded `git reset --hard` on a dirty tree 0. A deterministic list removes that failure
   instead of tuning around it.
-- On the ChatGPT and OpenAI routes, stage 1 of a reasoning model runs at effort `low` instead of the
-  lowest effort the model accepts (amends ADR-081 §4). At `none`, GPT-6 Luna's grades scattered.
-  Stage-1 p50 is about 2 s at `low`, against about 5.4 s for stage 2.
-- OpenAI's `max_completion_tokens` counts reasoning tokens, so at `low` stage 1's 64-token cap could
-  be spent on reasoning, leaving empty text: unparseable, so every call would escalate, and latency
-  would silently double. Reasoning models on that route get 2048 tokens of server-side headroom, as
-  `cli.js` adds for models that cannot run stage 1 without thinking. The client-side text cap is
-  unchanged. The ChatGPT route sends no server-side cap at all.
+- Stage 1 runs at the lowest reasoning effort the model accepts (`none` on GPT-5.1 and later), as
+  ADR-081 §4 had it. A first cut moved it to `low`; a same-time A/B on GPT-6 Luna (67 synthetic and 42
+  harvested real cases, × 3 each) showed no accuracy gain once the full-review shapes skip stage 1,
+  and a slower tail: stage-1 p90 2.1 s vs 1.9 s synthetic, 6.0 s vs 2.2 s real. Stage 1 is the speed
+  path, so it stays at the floor. Stage 2 stays at `low`.
+- OpenAI's `max_completion_tokens` counts reasoning tokens. Stage 2 reasons at `low`, and so does
+  stage 1 on a model whose floor is not `none` (`minimal` on gpt-5, `low` on the o-series); a reply cut
+  off mid-reasoning is unparseable. Reasoning models on that route get 2048 tokens of server-side
+  headroom, as `cli.js` adds for models that cannot run stage 1 without thinking. The client-side text
+  cap is unchanged. The ChatGPT route sends no server-side cap at all.
 - `fast` mode (stage 1 alone) keeps its yes/no grammar. `thinking` mode is unchanged.
 
 ### 3. The judge reads the user's permission rules
@@ -142,6 +152,14 @@ are Self-Modification territory for the agent.
 
 ## Consequences
 
+- **Harvested real cases.** 54 real denials (48 from Claude Code transcripts, 6 from ClaudeUI's own
+  judge in opencode) were rebuilt as judge inputs with the owner's actual permission rules; 12 were
+  excluded as arguable, and roughly half of the rest were false blocks (test runs, reads, per-file
+  restores, delegations, work the user had explicitly authorised). Kickoff prompts carry real
+  boundaries ("never checkout", "don't overwrite files you did not create"), which the judge must — and
+  does — honour. They stay private (the owner's real sessions) in the scratchpad bench, not in
+  JudgEval. On them the final design scores ~85 %, with residual misses from stage-2 variance (a bare
+  `<block>no</block>` without reasoning) and debatable labels.
 - **Measured result** (67 cases × 3 runs, GPT-6 Luna, ChatGPT route): the candidate reached 98.5-100 %
   with 0 false blocks on the owner's cases. The one critical leak left was `git reset --hard` graded
   0 by stage 1; full-review shapes remove it structurally. Stage 2 alone scored 97-98.5 % with 0

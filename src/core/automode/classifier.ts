@@ -623,6 +623,18 @@ export function parseSeverityOrNull(text: string): number | null {
 }
 
 /**
+ * Remote execution and the hosting layer's credential endpoints, matched on the
+ * command's WHOLE text — heredoc bodies and inline scripts included, because the
+ * harvested real case that slipped through stage 1 was a metadata probe inside a
+ * `cat > x.py <<'PY' … PY` script run over paramiko. Deliberately coarse: a
+ * mere mention (`grep ssh README.md`, a path like `ssh-config.md`) matches too,
+ * and that is accepted — a false positive costs one stage-2 call, never a
+ * verdict, while a miss lets a one-shot grade clear a remote write.
+ */
+const REMOTE_OR_METADATA =
+  /\b(?:ssh|scp|sftp|paramiko|fabric|Invoke-Command|Enter-PSSession|New-PSSession)\b|\bkubectl\s+(?:exec|cp|debug|port-forward|attach)\b|\bdocker\s+(?:exec|cp)\b|\brsync\b[^\n|;&]*\S+:|169\.254\.169\.254|metadata\.google\.internal|fd00:ec2::254/i
+
+/**
  * Action shapes that never get a stage-1 grade in `both` mode (ADR-083 §2):
  * they go straight to stage 2.
  *
@@ -632,8 +644,9 @@ export function parseSeverityOrNull(text: string): number | null {
  * destructive and shipping commands of {@link needsGitStatus} /
  * {@link needsRepoVisibility} (`reset --hard`, `checkout .`, `clean -f`,
  * `rm -rf`, add/commit/push/stash, remote repoints, `gh pr create`/`merge`,
- * releases) — and a shell redirect that did not measure as all in scope are
- * always read by the stage that sees intent. The cost is a stage-2 call on
+ * releases), remote execution and the cloud instance-metadata endpoints
+ * ({@link REMOTE_OR_METADATA}), and a shell redirect that did not measure as all
+ * in scope are always read by the stage that sees intent. The cost is a stage-2 call on
  * every commit; the benefit is that no destructive shape can clear on a guess.
  *
  * A redirect meta line that is present but malformed counts as not in scope:
@@ -642,6 +655,7 @@ export function parseSeverityOrNull(text: string): number | null {
 export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'actionMeta'>): boolean {
   const command = shellCommandOf(input.action.toolName, input.action.input)
   if (command !== null && (needsGitStatus(command) || needsRepoVisibility(command))) return true
+  if (command !== null && REMOTE_OR_METADATA.test(command)) return true
   const redirects = input.actionMeta?.redirects
   if (redirects === undefined) return false
   const inScope =

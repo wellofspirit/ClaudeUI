@@ -43,7 +43,7 @@ describe('buildResponsesBody', () => {
       store: false,
       include: ['reasoning.encrypted_content'],
       text: { verbosity: 'low' },
-      reasoning: { effort: 'low' },
+      reasoning: { effort: 'none' },
       prompt_cache_key: judgeCacheKey(SYSTEM)
     })
   })

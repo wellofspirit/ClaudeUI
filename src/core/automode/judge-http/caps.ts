@@ -35,22 +35,41 @@ export function isOpenAIReasoningModel(id: string): boolean {
 }
 
 /**
- * The reasoning effort BOTH stages send on an OpenAI reasoning model (ADR-083
- * §2, amending ADR-081 §4). Stage 1 used to send the cheapest effort the model
- * accepts (`none` on gpt-5.1+), but a severity grade at `none` scattered on
- * GPT-6 Luna — real block cases graded 0-20, i.e. cleared at stage 1. `low` is
- * accepted by every OpenAI reasoning model, and at about 2 s p50 stage 1 stays
- * well under stage 2's cost.
+ * The cheapest reasoning effort a model accepts — what STAGE 1 sends: `none`
+ * from gpt-5.1 on (and every later major), `minimal` on the original gpt-5
+ * family, `low` for anything else (the o-series). Only meaningful for a
+ * reasoning model.
+ *
+ * ADR-083 §2 measured `low` against this on GPT-6 Luna (same-time runs, 67
+ * synthetic + 42 harvested real cases × 3): no accuracy difference once the
+ * destructive and shipping shapes skip stage 1 (`requiresFullReview` in
+ * classifier.ts),
+ * and a slower tail (p90 2.1 s vs 1.9 s synthetic, 6.0 s vs 2.2 s real). Stage 1
+ * is the speed path, so it stays at the floor.
  */
-const JUDGE_REASONING_EFFORT = 'low'
+export function lowestReasoningEffort(id: string): 'none' | 'minimal' | 'low' {
+  const bare = bareOpenAIId(id)
+  const m = bare.match(/^gpt-(\d+)(?:\.(\d+))?/)
+  if (m) {
+    const major = Number(m[1])
+    const minor = m[2] === undefined ? 0 : Number(m[2])
+    if (major >= 6) return 'none'
+    if (major === 5) return minor >= 1 ? 'none' : 'minimal'
+  }
+  return 'low'
+}
+
+/** Stage 2's reasoning effort on an OpenAI reasoning model (ADR-081 §4). */
+const STAGE2_REASONING_EFFORT = 'low'
 
 /**
  * Server-side cap headroom for a reasoning model on a route whose cap counts
- * reasoning tokens ({@link JudgeCaps.reasoningHeadroom}). At effort `none`
- * stage 1's 64-token cap was all text; at `low` the reasoning comes out of the
- * same budget, and a truncated reply is unparseable — which escalates every
- * call to stage 2 and silently doubles the latency. cli.js adds 2048 for the
- * same reason when a model cannot run its stage 1 without thinking.
+ * reasoning tokens ({@link JudgeCaps.reasoningHeadroom}). Stage 2 reasons at
+ * `low` out of the same budget as its text, and so does stage 1 on a model
+ * whose floor is not `none` (`minimal` on gpt-5, `low` on the o-series): a
+ * reply truncated mid-reasoning is unparseable — which escalates every stage-1
+ * call and silently doubles the latency. cli.js adds 2048 for the same reason
+ * when a model cannot run its stage 1 without thinking.
  */
 const REASONING_HEADROOM_TOKENS = 2048
 
@@ -82,17 +101,15 @@ export function capsFor(
           include: ['reasoning.encrypted_content'],
           text: { verbosity: 'low' }
         },
-        // Every model the Codex backend serves is a reasoning model, so there
-        // is no non-reasoning branch to keep here.
         reasoning: {
-          fast: { reasoning: { effort: JUDGE_REASONING_EFFORT } },
-          thinking: { reasoning: { effort: JUDGE_REASONING_EFFORT } }
+          fast: { reasoning: { effort: lowestReasoningEffort(model) } },
+          thinking: { reasoning: { effort: STAGE2_REASONING_EFFORT } }
         }
       }
 
     case 'openai': {
       // Caps are per ROUTE, not per stage: OpenAI accepts a temperature on a
-      // reasoning model only at effort `none`, which neither stage uses, so a
+      // reasoning model only at effort `none`, which stage 2 never uses, so a
       // reasoning model gets none at all.
       const reasoning = isOpenAIReasoningModel(model)
       return {
@@ -107,8 +124,8 @@ export function capsFor(
         ...(reasoning ? { reasoningHeadroom: REASONING_HEADROOM_TOKENS } : {}),
         reasoning: reasoning
           ? {
-              fast: { reasoning_effort: JUDGE_REASONING_EFFORT },
-              thinking: { reasoning_effort: JUDGE_REASONING_EFFORT }
+              fast: { reasoning_effort: lowestReasoningEffort(model) },
+              thinking: { reasoning_effort: STAGE2_REASONING_EFFORT }
             }
           : { fast: {}, thinking: {} }
       }

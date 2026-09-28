@@ -1,7 +1,7 @@
 # ADR-081: ClaudeUI makes the opencode and pi auto-mode judge's model call itself, and the opencode fork is retired
 
 **Status:** Accepted (2026-09-28; owner rulings of the same day, one open item in §5). Implementation is arc 1 of the 3.6
-line on branch `harnesses`. §4's reasoning effort and output cap are amended by
+line on branch `harnesses`. §4's output cap is amended by
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (2026-09-29).
 **Supersedes:** [ADR-037 (engine fork patch policy)](adr-037_engine-fork-patch-policy.md) §1 and
 its opencode bump protocol (§3). Its §2, "pi: extend, don't patch", stands.
@@ -102,9 +102,9 @@ the ChatGPT backend, after a forced token refresh.
 - The output cap and stop sequence are enforced on the client. The accumulator cuts the text at the
   stop string and keeps reading to `response.completed` so the usage arrives. A hard character
   budget, derived from `maxTokens`, aborts a runaway stream.
-- Reasoning effort is `low` for both stages. It was `none` where the model allowed it until
-  [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §2: at `none`, GPT-6 Luna's
-  stage-1 grades scattered.
+- Reasoning effort is `none` where the model allows it for stage 1, `low` for stage 2
+  ([ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §2 measured `low` for stage 1
+  and kept the floor: no accuracy gain, slower tail).
 
 **Chat completions.** Each route declares its capabilities, instead of scattering model checks:
 

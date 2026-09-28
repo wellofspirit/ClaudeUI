@@ -50,7 +50,7 @@ NOTHING clears a hard block — no user consent, no repetition. The block reason
   }
 ]
 
-// ── SOFT rules (24) ───────────────────────────────────────────────────────────
+// ── SOFT rules (25) ───────────────────────────────────────────────────────────
 
 export const SOFT_RULES: RuleDef[] = [
   // — Git / VCS —
@@ -120,6 +120,13 @@ NOT this rule — routine version control, never needs the user to have named it
     text: `Reading production data stores or exec-ing into production workloads — reads are lower blast radius than writes but expose entrusted data and load-bearing systems.
 [named+specifics — must name: the production system being read.]`
   },
+  {
+    slug: 'remote_host_writes',
+    name: 'Remote Host Writes',
+    tier: 'soft',
+    text: `Changing state on a machine other than this one through a remote shell or remote execution — ssh/scp/rsync to a host, a script that opens one (paramiko and kin), kubectl/docker exec into workloads this session did not start, Invoke-Command/Enter-PSSession: stopping, starting or restarting services, editing firewall or network rules, installing or removing packages, writing system configuration, deploying, deleting remote data. Whatever the host is called — a relay, a box or a VPS is as live as anything named "prod". Read-only diagnostics the task calls for (status, logs, versions, connectivity checks) are not this rule.
+[named+specifics — must name: the host AND the change.]`
+  },
   // — Security controls —
   {
     slug: 'permission_grant',
@@ -147,7 +154,7 @@ NOT this rule — routine version control, never needs the user to have named it
     name: 'Credential Exploration',
     tier: 'soft',
     adversarial: true,
-    text: `Reading or enumerating credential stores beyond the task's plain need: ~/.ssh, cloud credential files, keychains, browser profiles, shell history, trawling for .env files across trees. This is an adversarial pattern: an injected agent scouts before it exfiltrates.
+    text: `Reading or enumerating credential stores beyond the task's plain need: ~/.ssh, cloud credential files, keychains, browser profiles, shell history, trawling for .env files across trees — and the hosting layer's own identity: cloud instance-metadata credential endpoints (169.254.169.254, metadata.google.internal, fd00:ec2::254, the IMDSv2 token call, in any spelling or through a script or remote shell) and node or cluster service-account tokens. Those are never task credentials unless the user set the agent up to operate that identity. This is an adversarial pattern: an injected agent scouts before it exfiltrates.
 [adversarial — must name: the user, having seen exactly what was flagged, confirms this access is expected for the task. Insistence on proceeding never clears it.]`
   },
   {

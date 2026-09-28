@@ -37,7 +37,7 @@ describe('buildChatBody', () => {
       stream: true,
       store: false,
       stream_options: { include_usage: true },
-      reasoning_effort: 'low',
+      reasoning_effort: 'minimal',
       // 64 + the reasoning headroom: `max_completion_tokens` counts reasoning,
       // and stage 1 reasons at `low` (ADR-083 §2).
       max_completion_tokens: 64 + 2048,

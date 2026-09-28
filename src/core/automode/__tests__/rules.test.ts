@@ -100,6 +100,20 @@ describe('rule corpus — structural invariants', () => {
   })
 })
 
+describe('the ADR-083 real-case gaps', () => {
+  it('Remote Host Writes is a soft rule with a host-and-change slot, and a valid category', () => {
+    const r = SOFT_RULES.find((x) => x.slug === 'remote_host_writes')
+    expect(r?.text).toContain('[named+specifics — must name: the host AND the change.]')
+    expect(deriveCategorySet().has('remote_host_writes')).toBe(true)
+  })
+
+  it('Credential Exploration names the instance-metadata credential endpoints', () => {
+    const r = SOFT_RULES.find((x) => x.slug === 'credential_exploration')
+    expect(r?.text).toContain('169.254.169.254')
+    expect(r?.text).toContain('metadata.google.internal')
+  })
+})
+
 describe('deriveCategorySet', () => {
   it('is exactly the hard + soft slugs, plus the user-specified soft rule', () => {
     const set = deriveCategorySet()

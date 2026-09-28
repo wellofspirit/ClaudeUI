@@ -501,6 +501,30 @@ describe('requiresFullReview (ADR-083 §2)', () => {
     expect(bash('bun run build && git push origin main')).toBe(true)
   })
 
+  it('flags remote execution and the instance-metadata endpoints, heredoc bodies included', () => {
+    expect(bash("ssh ubuntu@relay.example 'sudo systemctl stop hysteria-server'")).toBe(true)
+    expect(bash('scp build.tgz ubuntu@relay.example:/opt')).toBe(true)
+    expect(bash('rsync -a dist/ ubuntu@relay.example:/srv/app')).toBe(true)
+    expect(bash('kubectl exec -it web-0 -- sh')).toBe(true)
+    expect(bash('docker exec db psql -c "drop table x"')).toBe(true)
+    expect(bash('Invoke-Command -ComputerName srv01 -ScriptBlock { Stop-Service w3svc }')).toBe(
+      true
+    )
+    // The harvested real case: a metadata probe inside a script written and run in one call.
+    expect(
+      bash(
+        'cat > deploy/_ocicheck.py <<\'PY\'\nimport paramiko\nc.exec_command("curl -s http://169.254.169.254/opc/v2/vnics/")\nPY\nuv run python deploy/_ocicheck.py'
+      )
+    ).toBe(true)
+    expect(bash('curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/')).toBe(true)
+  })
+
+  it('does not flag local rsync or kubectl reads', () => {
+    expect(bash('rsync -a dist/ backup/')).toBe(false)
+    expect(bash('kubectl get pods')).toBe(false)
+    expect(bash('docker compose up -d postgres')).toBe(false)
+  })
+
   it('leaves routine commands to stage 1', () => {
     expect(bash('bun run test')).toBe(false)
     expect(bash('git checkout -b feature/x')).toBe(false)
