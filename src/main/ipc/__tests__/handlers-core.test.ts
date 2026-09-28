@@ -80,6 +80,16 @@ const { scanCodexLineage } = vi.hoisted(() => ({
 }))
 vi.mock('../../../core/codex/history', () => ({ scanCodexLineage }))
 
+// The judge picker's support query (ADR-081 §3). The resolver's describe path is
+// the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests
+// pin is the wire-argument check in front of it.
+const { describeJudgeModels } = vi.hoisted(() => ({
+  describeJudgeModels: vi.fn(async (_engine: string, values: string[]) =>
+    Object.fromEntries(values.map((v) => [v, { ok: true }]))
+  )
+}))
+vi.mock('../../../core/automode/judge-route', () => ({ describeJudgeModels }))
+
 // Import AFTER mocks.
 import {
   mcpStatus,
@@ -95,7 +105,8 @@ import {
   setAccount,
   deleteSession,
   deleteProject,
-  clearConversation
+  clearConversation,
+  judgeModelSupport
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 
@@ -973,5 +984,25 @@ describe('handlers-core', () => {
         off()
       }
     })
+  })
+})
+
+describe('judgeModelSupport — the automode:judge-model-support body', () => {
+  beforeEach(() => {
+    describeJudgeModels.mockClear()
+  })
+
+  it('hands a valid engine and value list to the resolver', async () => {
+    await expect(judgeModelSupport('pi', ['openai-codex/gpt-5.4'])).resolves.toEqual({
+      'openai-codex/gpt-5.4': { ok: true }
+    })
+    expect(describeJudgeModels).toHaveBeenCalledWith('pi', ['openai-codex/gpt-5.4'])
+  })
+
+  it('refuses an engine without a ClaudeUI judge, and a malformed value list', async () => {
+    await expect(judgeModelSupport('claude', ['x'])).rejects.toThrow(/unsupported engine/)
+    await expect(judgeModelSupport('opencode', 'openai/gpt-5')).rejects.toThrow(/array of strings/)
+    await expect(judgeModelSupport('opencode', ['ok', 7])).rejects.toThrow(/array of strings/)
+    expect(describeJudgeModels).not.toHaveBeenCalled()
   })
 })

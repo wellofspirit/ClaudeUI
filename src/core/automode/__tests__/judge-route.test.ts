@@ -13,7 +13,12 @@ import { apiKeyAccountKey } from '../../services/account-key-hash'
 import { chatgptProvider } from '../../shared-providers/SharedProviderRepository'
 import { buildChatBody } from '../judge-http/wire-chat'
 import type { JudgeRouteResult, ResolvedJudgeRoute } from '../judge-http/types'
-import { resolveJudgeRoute, type JudgeRouteDeps } from '../judge-route'
+import {
+  describeJudgeModels,
+  describeJudgeRoute,
+  resolveJudgeRoute,
+  type JudgeRouteDeps
+} from '../judge-route'
 
 const FAKE_KEY = 'sk-test-judge-route-00000000000000ab12'
 const OTHER_KEY = 'sk-test-judge-route-11111111111111cd34'
@@ -96,6 +101,8 @@ function fakeDeps(
   } = {}
 ): JudgeRouteDeps & {
   chatgptToken: ReturnType<typeof vi.fn>
+  chatgptSignedIn: ReturnType<typeof vi.fn>
+  listDefinitions: ReturnType<typeof vi.fn>
   loadApiKey: ReturnType<typeof vi.fn>
   opencodeCatalog: ReturnType<typeof vi.fn>
   piCatalog: ReturnType<typeof vi.fn>
@@ -103,9 +110,12 @@ function fakeDeps(
   const token = opts.token === undefined ? TOKEN : opts.token
   const fresh = opts.freshToken === undefined ? FRESH_TOKEN : opts.freshToken
   return {
-    listDefinitions: () => opts.definitions ?? [chatgptProvider()],
+    listDefinitions: vi.fn(() => opts.definitions ?? [chatgptProvider()]),
     loadApiKey: vi.fn(async (id: string) => opts.keys?.[id] ?? null),
     chatgptToken: vi.fn(async (force: boolean) => (force ? fresh : token)),
+    // The token-free twin of `chatgptToken(false)`: signed in iff it would
+    // have found a token.
+    chatgptSignedIn: vi.fn(async () => token !== null),
     chatgptIdentity: vi.fn(async (vaultAccountId: string) => ({
       accountKey: `chatgpt:ws-test:user-${vaultAccountId}`,
       accountLabel: 'ChatGPT test account'
@@ -559,5 +569,290 @@ describe('resolveJudgeRoute — providers ClaudeUI does not own', () => {
     expect(reason).toBe(
       '"github-copilot" is set up inside opencode, not in ClaudeUI, so ClaudeUI can\'t call it for the judge. Pick a judge model from a provider in Settings › Models & providers.'
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// describeJudgeRoute — the picker's token-free twin (ADR-081 §3)
+// ---------------------------------------------------------------------------
+
+/** One case per resolver branch: engine, picker value, and the world it runs in. */
+const PARITY_CASES: Array<{
+  name: string
+  engine: 'opencode' | 'pi'
+  value: string
+  deps: () => ReturnType<typeof fakeDeps>
+}> = [
+  { name: 'ChatGPT on opencode', engine: 'opencode', value: 'openai/gpt-5.4', deps: fakeDeps },
+  { name: 'ChatGPT on pi', engine: 'pi', value: 'openai-codex/gpt-5.4', deps: fakeDeps },
+  {
+    name: 'ChatGPT signed out',
+    engine: 'opencode',
+    value: 'openai/gpt-5.4',
+    deps: () => fakeDeps({ token: null })
+  },
+  { name: 'ChatGPT ids across engines', engine: 'pi', value: 'openai/gpt-5.4', deps: fakeDeps },
+  {
+    name: 'custom openai-completions',
+    engine: 'opencode',
+    value: 'acme/m',
+    deps: () =>
+      fakeDeps({
+        definitions: [customDef('acme', 'openai-completions')],
+        keys: { acme: FAKE_KEY }
+      })
+  },
+  {
+    name: 'custom openai-responses',
+    engine: 'pi',
+    value: 'acme/m',
+    deps: () =>
+      fakeDeps({ definitions: [customDef('acme', 'openai-responses')], keys: { acme: FAKE_KEY } })
+  },
+  {
+    name: 'custom anthropic-messages',
+    engine: 'opencode',
+    value: 'acme/claude-x',
+    deps: () =>
+      fakeDeps({
+        definitions: [customDef('acme', 'anthropic-messages')],
+        keys: { acme: FAKE_KEY }
+      })
+  },
+  {
+    name: 'OpenRouter second key',
+    engine: 'opencode',
+    value: 'openrouter-work/z-ai/glm-4.6',
+    deps: () =>
+      fakeDeps({
+        definitions: [
+          customDef('openrouter-work', 'openai-completions', {
+            derivedFrom: 'openrouter',
+            baseUrl: 'https://openrouter.ai/api/v1'
+          })
+        ],
+        keys: { 'openrouter-work': OTHER_KEY }
+      })
+  },
+  {
+    name: 'keyless custom endpoint',
+    engine: 'pi',
+    value: 'local/qwen',
+    deps: () => fakeDeps({ definitions: [customDef('local', 'openai-completions')] })
+  },
+  {
+    name: 'templated custom base URL',
+    engine: 'opencode',
+    value: 'acme/m',
+    deps: () =>
+      fakeDeps({
+        definitions: [customDef('acme', 'openai-completions', { baseUrl: '${ACME_URL}/v1' })]
+      })
+  },
+  {
+    name: 'catalog openai',
+    engine: 'pi',
+    value: 'openai/gpt-4.1-mini',
+    deps: () => fakeDeps({ definitions: [catalogDef('openai')], keys: { openai: FAKE_KEY } })
+  },
+  {
+    name: 'catalog openrouter',
+    engine: 'opencode',
+    value: 'openrouter/z-ai/glm-4.6',
+    deps: () =>
+      fakeDeps({ definitions: [catalogDef('openrouter')], keys: { openrouter: FAKE_KEY } })
+  },
+  {
+    name: 'catalog provider without a key',
+    engine: 'opencode',
+    value: 'openrouter/z-ai/glm-4.6',
+    deps: () => fakeDeps({ definitions: [catalogDef('openrouter')] })
+  },
+  {
+    name: 'other catalog provider, opencode compatible SDK',
+    engine: 'opencode',
+    value: 'acme/fast-1',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('acme')],
+        keys: { acme: FAKE_KEY },
+        opencode: {
+          acme: [
+            ocModel('fast-1', {
+              apiNpm: '@ai-sdk/openai-compatible',
+              apiUrl: 'https://api.acme.test/v1'
+            })
+          ]
+        }
+      })
+  },
+  {
+    name: 'other catalog provider, pi openai-completions',
+    engine: 'pi',
+    value: 'acme/fast-1',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('acme')],
+        keys: { acme: FAKE_KEY },
+        pi: [piModel('acme', 'fast-1')]
+      })
+  },
+  {
+    name: 'other catalog provider behind another SDK',
+    engine: 'opencode',
+    value: 'anthropic/claude-x',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('anthropic')],
+        keys: { anthropic: FAKE_KEY },
+        opencode: { anthropic: [ocModel('claude-x', { apiNpm: '@ai-sdk/anthropic' })] }
+      })
+  },
+  {
+    name: 'templated catalog URL',
+    engine: 'opencode',
+    value: 'acme/m',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('acme')],
+        keys: { acme: FAKE_KEY },
+        opencode: {
+          acme: [ocModel('m', { apiNpm: '@ai-sdk/openai-compatible', apiUrl: '${ACME}/v1' })]
+        }
+      })
+  },
+  {
+    name: "model not in the engine's catalog",
+    engine: 'pi',
+    value: 'acme/missing-model',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('acme')],
+        keys: { acme: FAKE_KEY },
+        pi: [piModel('acme', 'other-model')]
+      })
+  },
+  {
+    name: 'provider switched off',
+    engine: 'opencode',
+    value: 'openrouter/z-ai/glm-4.6',
+    deps: () =>
+      fakeDeps({
+        definitions: [catalogDef('openrouter', { name: 'OpenRouter', disabled: true })],
+        keys: { openrouter: FAKE_KEY }
+      })
+  },
+  {
+    name: 'engine-owned provider',
+    engine: 'opencode',
+    value: 'github-copilot/gpt-4.1',
+    deps: fakeDeps
+  }
+]
+
+describe('describeJudgeRoute — the same decision as resolveJudgeRoute, without a credential', () => {
+  it.each(PARITY_CASES)('$name: same verdict and reason as the resolver', async (c) => {
+    const resolved = await resolveJudgeRoute(c.engine, c.value, c.deps())
+    const describeDeps = c.deps()
+    const described = await describeJudgeRoute(c.engine, c.value, describeDeps)
+    expect(described.ok).toBe(resolved.ok)
+    if (!resolved.ok && !described.ok) {
+      expect(described.code).toBe(resolved.code)
+      expect(described.reason).toBe(resolved.reason)
+    }
+    // Never a token, not even for ChatGPT, and nothing but the verdict comes back.
+    expect(describeDeps.chatgptToken).not.toHaveBeenCalled()
+    expect(Object.keys(described).sort()).toEqual(described.ok ? ['ok'] : ['code', 'ok', 'reason'])
+    const text = JSON.stringify(described)
+    for (const secret of SECRETS) expect(text).not.toContain(secret)
+  })
+
+  it('the parity table covers both verdicts', async () => {
+    const verdicts = await Promise.all(
+      PARITY_CASES.map((c) => describeJudgeRoute(c.engine, c.value, c.deps()))
+    )
+    expect(verdicts.filter((v) => v.ok).length).toBeGreaterThan(5)
+    expect(verdicts.filter((v) => !v.ok).length).toBeGreaterThan(5)
+  })
+
+  it('ChatGPT reads "signed in" from the token-free status', async () => {
+    const deps = fakeDeps()
+    deps.chatgptSignedIn.mockResolvedValue(false)
+    const described = await describeJudgeRoute('opencode', 'openai/gpt-5.4', deps)
+    expect(described).toMatchObject({ ok: false, code: 'chatgpt-unavailable' })
+    expect(deps.chatgptSignedIn).toHaveBeenCalledTimes(1)
+    expect(deps.chatgptToken).not.toHaveBeenCalled()
+  })
+
+  it('a key route checks the key for presence and still refuses without one', async () => {
+    const deps = fakeDeps({ definitions: [catalogDef('openrouter')] })
+    expect(await describeJudgeRoute('pi', 'openrouter/x', deps)).toMatchObject({
+      ok: false,
+      code: 'no-credential'
+    })
+    expect(deps.loadApiKey).toHaveBeenCalledWith('openrouter')
+  })
+})
+
+describe('describeJudgeModels — the picker batch', () => {
+  it("answers every value, with the resolver's reason for a refusal", async () => {
+    const deps = fakeDeps({
+      definitions: [chatgptProvider(), catalogDef('openrouter')],
+      keys: { openrouter: FAKE_KEY }
+    })
+    const out = await describeJudgeModels(
+      'opencode',
+      ['openai/gpt-5.4', 'openrouter/z-ai/glm-4.6', 'github-copilot/gpt-4.1'],
+      deps
+    )
+    expect(out['openai/gpt-5.4']).toEqual({ ok: true })
+    expect(out['openrouter/z-ai/glm-4.6']).toEqual({ ok: true })
+    expect(out['github-copilot/gpt-4.1']).toEqual({
+      ok: false,
+      reason: expect.stringContaining('set up inside opencode, not in ClaudeUI')
+    })
+    const text = JSON.stringify(out)
+    for (const secret of SECRETS) expect(text).not.toContain(secret)
+    expect(deps.chatgptToken).not.toHaveBeenCalled()
+  })
+
+  it('reads the provider list, the ChatGPT status, each key and each catalog once per batch', async () => {
+    const deps = fakeDeps({
+      definitions: [chatgptProvider(), catalogDef('acme')],
+      keys: { acme: FAKE_KEY },
+      opencode: {
+        acme: ['a', 'b', 'c'].map((id) =>
+          ocModel(id, { apiNpm: '@ai-sdk/openai-compatible', apiUrl: 'https://acme.test/v1' })
+        )
+      }
+    })
+    const out = await describeJudgeModels(
+      'opencode',
+      ['acme/a', 'acme/b', 'acme/c', 'openai/x', 'openai/y', 'acme/a'],
+      deps
+    )
+    expect(Object.keys(out).sort()).toEqual(['acme/a', 'acme/b', 'acme/c', 'openai/x', 'openai/y'])
+    expect(Object.values(out).every((v) => v.ok)).toBe(true)
+    expect(deps.listDefinitions).toHaveBeenCalledTimes(1)
+    expect(deps.loadApiKey).toHaveBeenCalledTimes(1)
+    expect(deps.opencodeCatalog).toHaveBeenCalledTimes(1)
+    expect(deps.chatgptSignedIn).toHaveBeenCalledTimes(1)
+  })
+
+  it('a value whose check fails is unsupported with the failure, and the rest still answer', async () => {
+    const deps = fakeDeps({
+      definitions: [catalogDef('acme'), catalogDef('openrouter')],
+      keys: { acme: FAKE_KEY, openrouter: FAKE_KEY }
+    })
+    deps.opencodeCatalog.mockImplementation(async (providerId: string) => {
+      if (providerId === 'acme') throw new Error('opencode server hiccup')
+      return []
+    })
+    const out = await describeJudgeModels('opencode', ['acme/m', 'openrouter/z-ai/glm-4.6'], deps)
+    expect(out['acme/m']).toEqual({
+      ok: false,
+      reason: expect.stringContaining('opencode server hiccup')
+    })
+    expect(out['openrouter/z-ai/glm-4.6']).toEqual({ ok: true })
   })
 })

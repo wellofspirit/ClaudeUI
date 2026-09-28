@@ -47,8 +47,11 @@ const {
   mockOnExit,
   mockEphemeralInstances,
   ephemeralStartError,
-  judgeInstances,
+  judgeCalls,
   judgeScript,
+  mockResolveJudgeRoute,
+  mockRecordJudgeUsage,
+  mockPickJudgeFetch,
   MockPiRpcClient,
   mockLoadEngineConfig,
   mockLocatePiBinary,
@@ -106,83 +109,30 @@ const {
   // configured BEFORE `new PiRpcClient(...)` runs, since askSideQuestion
   // calls `client.start()` synchronously in the same tick it constructs it.
   const ephemeralStartError: { value: Error | null } = { value: null }
-  // Auto-mode judge (phase 4): a THIRD flavor of PiRpcClient — the warm
-  // `--system-prompt` judge process pi-judge.ts owns. Distinguished from the
-  // /btw ephemeral (which also passes --no-session) by that flag, kept in its
-  // own array so askSideQuestion's `lastEphemeralClient()` is unaffected, and
-  // scripted through `judgeScript`: `replies` are consumed one per judge call
-  // (one call in twoStageMode 'fast', two in 'both'), `rejectPrompt` simulates
-  // an unusable judge, and `hold` parks a call so a test can act while the
-  // judge is "thinking" (G10).
-  const judgeInstances: Array<{
-    request: ReturnType<typeof vi.fn>
-    dispose: ReturnType<typeof vi.fn>
-    opts: { cwd: string; args: string[] }
-    /** Every `prompt` message this judge process received, in order. */
-    prompts: string[]
-  }> = []
-  const judgeScript: { replies: string[]; rejectPrompt: boolean; hold: Promise<void> | null } = {
+  // Auto-mode judge: ClaudeUI's own HTTP call to the judge model (ADR-081), no
+  // pi process. The real transport runs; only its module boundaries are
+  // doubled — the route resolver, the fetch (`pickJudgeFetch`, answered by
+  // test/helpers/fake-judge's fake provider) and the ledger write. The fake
+  // model is scripted through `judgeScript`: `replies` are consumed one per
+  // judge call (one call in twoStageMode 'fast', two in 'both'), `fail` makes
+  // the provider answer HTTP 503, and `hold` parks a call so a test can act
+  // while the judge is "thinking" (G10). `judgeCalls` records what the judge
+  // was shown, one entry per call.
+  const judgeCalls: Array<{ system: string; user: string; body: Record<string, unknown> }> = []
+  const judgeScript: { replies: string[]; fail: boolean; hold: Promise<void> | null } = {
     replies: [],
-    rejectPrompt: false,
+    fail: false,
     hold: null
   }
+  const mockResolveJudgeRoute = vi.fn()
+  const mockRecordJudgeUsage = vi.fn()
+  const mockPickJudgeFetch = vi.fn()
   // Regular `function` (not an arrow fn) — PiSession does `new PiRpcClient(...)`,
   // and arrow functions have no [[Construct]] slot.
   const MockPiRpcClient = vi.fn().mockImplementation(function (
     _bin: string,
     opts: { cwd: string; args: string[]; env?: NodeJS.ProcessEnv }
   ) {
-    if (opts?.args?.includes('--system-prompt')) {
-      const eventHandlers: Array<(ev: { type: string }) => void> = []
-      const prompts: string[] = []
-      const inst = {
-        start: vi.fn().mockResolvedValue(undefined),
-        request: vi.fn().mockImplementation(async (cmd: { type: string; message?: string }) => {
-          switch (cmd.type) {
-            case 'prompt':
-              prompts.push(cmd.message ?? '')
-              // Settle asynchronously — pi-judge registers the listener BEFORE
-              // sending the prompt, so this can never race ahead of it.
-              queueMicrotask(() => {
-                for (const h of [...eventHandlers]) h({ type: 'agent_settled' })
-              })
-              return { type: 'response', command: 'prompt', success: !judgeScript.rejectPrompt }
-            case 'get_last_assistant_text': {
-              if (judgeScript.hold) await judgeScript.hold
-              const text = judgeScript.replies.shift()
-              return {
-                type: 'response',
-                command: cmd.type,
-                success: true,
-                data: text === undefined ? {} : { text }
-              }
-            }
-            case 'new_session':
-              return {
-                type: 'response',
-                command: 'new_session',
-                success: true,
-                data: { cancelled: false }
-              }
-            default:
-              return { type: 'response', command: cmd.type, success: true }
-          }
-        }),
-        dispose: vi.fn(),
-        onEvent: vi.fn().mockImplementation((cb: (ev: { type: string }) => void) => {
-          eventHandlers.push(cb)
-          return () => {
-            const i = eventHandlers.indexOf(cb)
-            if (i >= 0) eventHandlers.splice(i, 1)
-          }
-        }),
-        onExit: vi.fn().mockReturnValue(() => {}),
-        opts,
-        prompts
-      }
-      judgeInstances.push(inst)
-      return inst
-    }
     if (opts?.args?.includes('--no-session')) {
       const startErr = ephemeralStartError.value
       ephemeralStartError.value = null
@@ -287,11 +237,14 @@ const {
     mockOnExit,
     mockEphemeralInstances,
     ephemeralStartError,
-    judgeInstances,
+    judgeCalls,
     judgeScript,
+    mockResolveJudgeRoute,
+    mockRecordJudgeUsage,
+    mockPickJudgeFetch,
     MockPiRpcClient,
     // Auto mode reads engines/pi.json — mocked so the gating tests never
-    // depend on (or spawn a judge because of) the dev machine's own config.
+    // depend on (or call a judge because of) the dev machine's own config.
     // Default DISABLED: every pre-phase-4 test asserts the historical
     // allow-everything `full`/`auto` base; the auto-mode block opts in.
     mockLoadEngineConfig: vi.fn().mockReturnValue({ autoMode: { enabled: false } }),
@@ -347,6 +300,9 @@ const {
 })
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
+vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: mockResolveJudgeRoute }))
+vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
+vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 vi.mock('../pi-locate', () => ({
   locatePiBinary: mockLocatePiBinary,
   piBinaryAvailable: () => true
@@ -421,6 +377,12 @@ vi.mock('../../services/ui-config', () => ({
 }))
 
 import { PiSession } from '../PiSession'
+import {
+  FAKE_JUDGE_ACCOUNT,
+  FAKE_JUDGE_SAMPLE,
+  fakeJudgeFetch,
+  fakeJudgeRoute
+} from '../../../test/helpers/fake-judge'
 
 /** Default request() responder — get_state/get_session_stats/set_model/prompt/abort all succeed benignly. */
 function defaultRequestImpl(cmd: { type: string }): Promise<unknown> {
@@ -514,10 +476,22 @@ beforeEach(() => {
   mockOnExit.mockClear().mockReturnValue(() => {})
   mockEphemeralInstances.length = 0
   ephemeralStartError.value = null
-  judgeInstances.length = 0
+  judgeCalls.length = 0
   judgeScript.replies = []
-  judgeScript.rejectPrompt = false
+  judgeScript.fail = false
   judgeScript.hold = null
+  mockResolveJudgeRoute
+    .mockReset()
+    .mockImplementation(async () => ({ ok: true, route: fakeJudgeRoute() }))
+  mockRecordJudgeUsage.mockReset()
+  mockPickJudgeFetch.mockReset().mockImplementation(async () =>
+    fakeJudgeFetch(async (call) => {
+      judgeCalls.push(call)
+      if (judgeScript.hold) await judgeScript.hold
+      if (judgeScript.fail) return new Response('judge down', { status: 503 })
+      return judgeScript.replies.shift() ?? ''
+    })
+  )
   mockLoadEngineConfig.mockReset().mockReturnValue({ autoMode: { enabled: false } })
   mockDiscoverPiModels.mockReset().mockResolvedValue([])
   MockPiRpcClient.mockClear()
@@ -2555,7 +2529,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     expect(decision).toEqual({ behavior: 'allow' })
     expect(sentChannels(win)).not.toContain('session:approval-request')
-    expect(judgeInstances).toHaveLength(1)
+    expect(judgeCalls).toHaveLength(1)
     session.dispose()
   })
 
@@ -2633,7 +2607,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       const win = new MockWindow()
       const session = await autoSession('rid-review-fast', win)
       expect(await gate('call_r3', 'read', { path: '/cwd/a.txt' })).toEqual({ behavior: 'allow' })
-      expect(judgeInstances).toHaveLength(0)
+      expect(judgeCalls).toHaveLength(0)
       expect(reviews(win)).toEqual([])
       session.dispose()
     })
@@ -2651,7 +2625,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     pushToolCall(session, 'call_a3', 'bash', { command: 'rm -rf build' })
     await gate('call_a4', 'bash', { command: 'rm -rf build' })
 
-    const retryPrompt = judgeInstances[0].prompts.at(-1) ?? ''
+    const retryPrompt = judgeCalls.at(-1)?.user ?? ''
     expect(retryPrompt).toContain('{"outcome":"automode-blocked"}')
     session.dispose()
   })
@@ -2676,7 +2650,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     await session.setPermissionMode('auto')
     await gate('call_a6', 'bash', { command: 'npm publish' })
 
-    expect(judgeInstances[0].prompts.at(-1) ?? '').toContain('{"outcome":"rejected-by-user"}')
+    expect(judgeCalls.at(-1)?.user ?? '').toContain('{"outcome":"rejected-by-user"}')
     session.dispose()
   })
 
@@ -2697,7 +2671,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     await session.setPermissionMode('auto')
     await gate('call_a8', 'bash', { command: 'npm publish' })
 
-    const retryPrompt = judgeInstances[0].prompts.at(-1) ?? ''
+    const retryPrompt = judgeCalls.at(-1)?.user ?? ''
     expect(retryPrompt).toContain('{"outcome":"unanswered"}')
     expect(retryPrompt).not.toContain('{"outcome":"rejected-by-user"}')
     session.dispose()
@@ -2725,7 +2699,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     // The rule the USER singled out must never be auto-approved — auto mode is
     // not a permission downgrade. Provenance comes from PiPermissionEngine
     // itself (decideWithSource), not a host-side re-match.
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 
@@ -2747,7 +2721,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const session = await autoSession('rid-auto-g9-neg', win)
 
     expect(await gate('call_a8', 'bash', { command: 'npm test' })).toEqual({ behavior: 'allow' })
-    expect(judgeInstances).toHaveLength(1)
+    expect(judgeCalls).toHaveLength(1)
     session.dispose()
   })
 
@@ -2786,7 +2760,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       behavior: 'deny',
       reason: 'Auto mode blocked: rewrites pushed history'
     })
-    expect(judgeInstances).toHaveLength(1)
+    expect(judgeCalls).toHaveLength(1)
     // Not a downgrade to a human interruption either — the allow rule still
     // means "don't ask me", it just no longer means "skip the monitor".
     expect(sentChannels(win)).not.toContain('session:approval-request')
@@ -2803,7 +2777,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     void gate('call_al2', 'bash', { command: 'git push origin main' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 
@@ -2817,7 +2791,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       behavior: 'deny',
       reason: 'Denied by permission rule: Bash(git push --force:*)'
     })
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 
@@ -2835,20 +2809,19 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     expect(await gate('call_al4', 'bash', { command: 'git push origin main --force' })).toEqual({
       behavior: 'allow'
     })
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
   })
 
   /**
-   * Item 3c. `PiJudge` reads a null `resolveModel()` as "keep pi's own default",
-   * so a stale CONFIGURED judge model silently became a judge on some other
-   * model. It must fail CLOSED instead, and say so once.
+   * Item 3c. A stale CONFIGURED judge model must fail CLOSED — ask the human —
+   * and say so once, never falling back to some other model as the judge.
    *
-   * PRE-FIX: the judge process spawned and `set_model` was attempted with the
-   * stale value (or skipped, leaving pi's default judging).
+   * PRE-FIX: the old judge process spawned and `set_model` was attempted with
+   * the stale value (or skipped, leaving pi's default judging).
    */
-  it('a stale CONFIGURED judge model → one session:error + the human decides, with NO judge process', async () => {
+  it('a stale CONFIGURED judge model → one session:error + the human decides, with NO judge call', async () => {
     enableAutoMode({ judgeModel: 'openai-codex/gone' })
     mockDiscoverPiModels.mockResolvedValue([
       {
@@ -2865,7 +2838,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
 
     // Never judged — not by the stale model, not by the session's own.
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     const errors = (sentPayloads(win, 'session:error') as string[]).filter((e) =>
       String(e).includes('openai-codex/gone')
     )
@@ -2888,13 +2861,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const session = await autoSession('rid-auto-live-judge', win)
 
     expect(await gate('call_live1', 'bash', { command: 'npm test' })).toEqual({ behavior: 'allow' })
-    expect(judgeInstances).toHaveLength(1)
+    expect(judgeCalls).toHaveLength(1)
     session.dispose()
   })
 
   it('an unusable judge → the human decides (unavailable is never a silent allow)', async () => {
     enableAutoMode()
-    judgeScript.rejectPrompt = true
+    judgeScript.fail = true
     const win = new MockWindow()
     const session = await autoSession('rid-auto-unavailable', win)
 
@@ -3004,7 +2977,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const session = await autoSession('rid-auto-g10', win)
 
     const pending = gate('call_d1', 'bash', { command: 'npm test' })
-    await vi.waitFor(() => expect(judgeInstances[0]?.prompts.length).toBe(1))
+    await vi.waitFor(() => expect(judgeCalls).toHaveLength(1))
     // The user drops out of auto mode mid-flight — the (ALLOW) verdict is now
     // stale authority.
     await session.setPermissionMode('default')
@@ -3027,7 +3000,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     expect(await gate('call_e1', 'read', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
     expect(await gate('call_e2', 'ls', { path: 'src' })).toEqual({ behavior: 'allow' })
     expect(await gate('call_e3', 'edit', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
   })
@@ -3053,7 +3026,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       behavior: 'deny',
       reason: 'Denied by permission rule: Bash(rm:*)'
     })
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 
@@ -3065,26 +3038,28 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     expect(await gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({
       behavior: 'allow'
     })
-    expect(judgeInstances).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 
-  it('the judge process carries the rendered policy as --system-prompt and is torn down with the session', async () => {
+  // ── ADR-081: the judge is ClaudeUI's own HTTP call, not a pi process ──────
+
+  it('the judge call carries the rendered policy as its system prompt, and spawns no pi process', async () => {
     enableAutoMode()
-    judgeScript.replies = ['<block>no</block>']
+    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
     const win = new MockWindow()
-    const session = await autoSession('rid-auto-judge-proc', win)
+    const session = await autoSession('rid-auto-judge-http', win)
+    const spawnsBefore = MockPiRpcClient.mock.calls.length
     await gate('call_h1', 'bash', { command: 'npm test' })
+    await gate('call_h2', 'bash', { command: 'npm run build' })
 
-    const args = judgeInstances[0].opts.args
-    expect(args).toContain('--no-tools')
-    const system = args[args.indexOf('--system-prompt') + 1]
+    expect(judgeCalls).toHaveLength(2)
     // Rendered from OUR corpus, with the host's environment facts in it.
-    expect(system).toContain('security monitor')
-    expect(system).toContain('/cwd')
-
-    session.cancel()
-    expect(judgeInstances[0].dispose).toHaveBeenCalled()
+    expect(judgeCalls[0].system).toContain('security monitor')
+    expect(judgeCalls[0].system).toContain('/cwd')
+    expect(judgeCalls[0].body.model).toBe('judge-model')
+    // No second pi process judges anything any more.
+    expect(MockPiRpcClient.mock.calls.length).toBe(spawnsBefore)
     session.dispose()
   })
 
@@ -3095,28 +3070,69 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const session = await autoSession('rid-auto-judge-model', win)
     await gate('call_i1', 'bash', { command: 'npm test' })
 
-    expect(judgeInstances[0].request).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'set_model',
-        provider: 'openai-codex',
-        modelId: 'gpt-5.4-mini'
-      })
-    )
+    expect(mockResolveJudgeRoute).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.4-mini')
     session.dispose()
   })
 
-  it('the judge sees ONE warm process across approvals, reset with new_session between them', async () => {
+  it("the judge model defaults to the session's own model", async () => {
     enableAutoMode()
-    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+    judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
-    const session = await autoSession('rid-auto-warm', win)
+    const session = new PiSession('rid-auto-judge-default', win as never, '/cwd', {
+      model: 'acme/fast-1'
+    })
+    await session.setPermissionMode('auto')
+    await session.run('hi')
+    await gate('call_i2', 'bash', { command: 'npm test' })
 
-    await gate('call_j1', 'bash', { command: 'npm test' })
-    await gate('call_j2', 'bash', { command: 'npm run build' })
+    expect(mockResolveJudgeRoute).toHaveBeenCalledWith('pi', 'acme/fast-1')
+    session.dispose()
+  })
 
-    expect(judgeInstances).toHaveLength(1)
-    const types = judgeInstances[0].request.mock.calls.map((c) => (c[0] as { type: string }).type)
-    expect(types.filter((t) => t === 'new_session')).toHaveLength(1)
+  it('an unavailable route → the human decides, with exactly ONE banner across two approvals', async () => {
+    // ADR-081 §3: no fallback — nobody judges a model ClaudeUI can't call, and
+    // the session says why once rather than once per tool call.
+    const reason =
+      '"anthropic" is set up inside pi, not in ClaudeUI, so ClaudeUI can\'t call it for the judge.'
+    enableAutoMode()
+    mockResolveJudgeRoute.mockResolvedValue({ ok: false, code: 'no-shared-provider', reason })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-noroute', win)
+
+    void gate('call_n1', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+    void gate('call_n2', 'bash', { command: 'npm run build' })
+    await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(2))
+
+    expect(sentPayloads(win, 'session:error')).toEqual([
+      `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
+        'Change the judge model in Settings → Engines → pi → Auto mode.'
+    ])
+    expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(2)
+    expect(judgeCalls).toHaveLength(0)
+    session.dispose()
+  })
+
+  it("a judge call's usage → recordJudgeUsage with the session's ids and the route's account", async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-judge-usage', win)
+    await gate('call_u1', 'bash', { command: 'npm test' })
+
+    expect(mockRecordJudgeUsage).toHaveBeenCalledTimes(1)
+    expect(mockRecordJudgeUsage).toHaveBeenCalledWith(FAKE_JUDGE_SAMPLE, {
+      engineId: 'pi',
+      vendorId: FAKE_JUDGE_ACCOUNT.vendorId,
+      modelId: 'judge-model',
+      // `get_state`'s sessionId in defaultRequestImpl.
+      sessionId: 'pi-sess-1',
+      parentRoutingId: 'rid-auto-judge-usage',
+      accountId: FAKE_JUDGE_ACCOUNT.accountId,
+      accountKey: FAKE_JUDGE_ACCOUNT.accountKey,
+      accountLabel: FAKE_JUDGE_ACCOUNT.accountLabel,
+      billingType: FAKE_JUDGE_ACCOUNT.billingType
+    })
     session.dispose()
   })
 
@@ -3128,7 +3144,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     await gate('call_k1', 'bash', { command: 'git commit -m x' })
 
-    const prompt = judgeInstances[0].prompts[0]
+    const prompt = judgeCalls[0].user
     expect(prompt).toContain('Proposed next action:\nbash {"command":"git commit -m x"}')
     // `git commit` DOES request a gitStatus capture, but `/cwd` is not a
     // repository so the capture fails — and per ground-truth.ts's cardinal
@@ -3145,7 +3161,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const session = await autoSession('rid-auto-redirect', win)
 
     await gate('call_r1', 'bash', { command: 'npm test > build.log 2>&1' })
-    expect(judgeInstances[0].prompts[0]).toContain(
+    expect(judgeCalls[0].user).toContain(
       '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
         '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
     )
@@ -3153,7 +3169,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     // No redirect → no measurement → no meta line at all (`/cwd` is not a repo,
     // so the gitStatus capture contributes nothing either).
     await gate('call_r2', 'bash', { command: 'npm test' })
-    expect(judgeInstances[0].prompts[1]).not.toContain('redirects')
+    expect(judgeCalls[1].user).not.toContain('redirects')
     session.dispose()
   })
 
@@ -3165,7 +3181,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     await gate('call_r3', 'bash', { command: 'echo malicious >> ~/.bashrc' })
 
-    const prompt = judgeInstances[0].prompts[0]
+    const prompt = judgeCalls[0].user
     expect(prompt).toContain('"protectedHits":[".bashrc"]')
     expect(prompt).toContain('"allInScope":false')
     session.dispose()

@@ -989,6 +989,13 @@ export interface AutoModeConfig {
 }
 
 /**
+ * Whether ClaudeUI can make the auto-mode judge's model call for one picker
+ * value itself (ADR-081 §3: no fallback to the engine) — one entry of
+ * `ClaudeAPI.judgeModelSupport`. `reason` is user-facing copy.
+ */
+export type JudgeModelSupport = { ok: true } | { ok: false; reason: string }
+
+/**
  * The classifier trust lists, shared by every engine that runs ClaudeUI's own
  * judge — ONE file, `~/.claude/ui/automode.json` (ADR-065 § Shared trust lists).
  *
@@ -1568,6 +1575,15 @@ interface SessionAPI {
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
   getEngineModels(): Promise<EngineModelGroup[]>
+  /**
+   * For each judge-picker value, whether ClaudeUI can call that model for the
+   * engine's auto-mode judge (ADR-081 §3), and if not, why. Token-free: it
+   * checks credentials for presence and never fetches or refreshes one.
+   */
+  judgeModelSupport(
+    engineId: 'opencode' | 'pi',
+    values: string[]
+  ): Promise<Record<string, JudgeModelSupport>>
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>

@@ -88,7 +88,7 @@ import {
 } from './permission-engine'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
-// pi's own judge transport (docs/automode-rework-plan.md phase 4).
+// ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
 import {
   classify,
   formatUnparseableJudgeReply,
@@ -116,7 +116,7 @@ import {
   type RepoVisibility,
   type ToolOutcome
 } from '../automode/ground-truth'
-import { PiJudge } from './pi-judge'
+import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
@@ -349,12 +349,12 @@ export class PiSession extends BaseSession {
   /** Denial caps — 3 consecutive / 2 same-rule / 20 total blocks hand control
    *  back to the human. Shared with opencode (automode/denial-tracker.ts). */
   private autoDenials = new AutoModeDenialTracker()
-  /** The warm judge process (pi-judge.ts). Created on the first classified
-   *  approval, disposed with the session. */
-  private piJudge: PiJudge | null = null
   // One `session:error` per session for a CONFIGURED judge model that is gone —
   // the check runs on every gated approval (see judgeModelUnavailable).
   private staleJudgeModelReported = false
+  // The same one-banner rule for a judge model ClaudeUI has no route to call
+  // (ADR-081 §3) — the resolver runs on every judge call.
+  private judgeRouteUnavailableReported = false
   /** How prior tool calls ended, keyed by toolCallId — the classifier's
    *  `{"outcome":…}` annotations. The ONLY channel by which a refusal reaches
    *  the judge, since the transcript slimmer drops tool RESULTS. Bounded by
@@ -1574,14 +1574,6 @@ export class PiSession extends BaseSession {
       this.bridgeHost.dispose()
       this.bridgeHost = null
     }
-    // The warm auto-mode judge is a SECOND child process (pi-judge.ts) and must
-    // never outlive the session that spawned it. Idempotent — and nulling the
-    // field means a session that is cancelled and then re-run gets a fresh
-    // judge rather than a transport that permanently rejects.
-    if (this.piJudge) {
-      this.piJudge.dispose()
-      this.piJudge = null
-    }
     // Tear down any cross-engine dispatch targets owned by this session
     // (ADR-033 M4b — mirrors ClaudeSession.cancel()/OpencodeSession.cancel()'s
     // identical call; without this, a pi-sourced dispatch_agent's opencode/
@@ -1673,7 +1665,7 @@ export class PiSession extends BaseSession {
    *      feature needs is passed explicitly in the prompt, so nothing is lost.
    *      (Residual: a repo-local `.pi/SYSTEM.md`/`APPEND_SYSTEM.md` still
    *      applies — pi has no flag for it; only passing our own
-   *      `--system-prompt`, as pi-judge.ts does, would displace it.)
+   *      `--system-prompt` would displace it.)
    *      Best-effort `set_model` to this session's OWN model so
    *      the observer answers from a comparable vantage point; failure is
    *      swallowed (the ephemeral just runs with pi's own default instead).
@@ -1718,10 +1710,8 @@ export class PiSession extends BaseSession {
     // the model heeds the observe-only framing.
     //
     // The `--no-*` discovery flags close the repo-writable input paths (see the
-    // doc comment's "DISCOVERY DISABLED" note) — the same set pi-judge.ts's
-    // PI_JUDGE_BASE_ARGS carries, kept as its own literal here because the two
-    // spawns are separate features with separate tests pinning their args.
-    // All probed accepted together in `--mode rpc` against the vendored pi.
+    // doc comment's "DISCOVERY DISABLED" note). All probed accepted together in
+    // `--mode rpc` against the vendored pi.
     const client = new PiRpcClient(bin, {
       cwd: this.cwd,
       args: [
@@ -2168,11 +2158,12 @@ export class PiSession extends BaseSession {
 
   // ── Auto mode (`auto`/`full`) LLM gatekeeper ─────────────────────────────────
   // Phase 4 of docs/automode-rework-plan.md. The POLICY is engine-neutral
-  // (src/main/automode/) and shared verbatim with opencode; only the three
-  // seams below are pi's own: the permission intercept (gateToolCallInner's
-  // 'ask' branch), the judge transport (pi-judge.ts) and the ground-truth
-  // capture points. This block deliberately mirrors OpencodeSession's
-  // equivalents method-for-method so the two wirings stay comparable.
+  // (src/core/automode/) and shared verbatim with opencode, and so is the judge
+  // transport since ADR-081 (automode/session-judge.ts: ClaudeUI calls the judge
+  // model itself). Only two seams below are pi's own: the permission intercept
+  // (gateToolCallInner's 'ask' branch) and the ground-truth capture points.
+  // This block deliberately mirrors OpencodeSession's equivalents
+  // method-for-method so the two wirings stay comparable.
 
   /** `engines/pi.json#autoMode`, memoized for the session's lifetime (a
    *  mid-session config edit is not hot-reloaded — same as opencode). */
@@ -2308,11 +2299,10 @@ export class PiSession extends BaseSession {
   /**
    * True when `autoMode.judgeModel` names a model pi's catalog no longer has.
    *
-   * Fail-closed, and pi needs this MORE than opencode does: `PiJudge` treats a
-   * null `resolveModel()` as "leave pi on its own default", so a stale configured
-   * judge silently became a judge on some other model — a `catch → null` that
-   * read as robustness and behaved as a substitution. `?? this._model` is the
-   * same hazard one line up.
+   * Fail-closed: the caller drops to the human instead of judging with a
+   * substitute, and specifically instead of falling through to
+   * `?? this._model` — silently promoting the SESSION's model to security judge
+   * is not what "I picked a cheaper/stronger judge" asked for.
    *
    * `discoverPiModels()` rather than a cache-only peek because pi has no groups
    * cache until someone calls it; the underlying catalog fetch is already warm
@@ -2335,29 +2325,33 @@ export class PiSession extends BaseSession {
     return true
   }
 
-  /** The warm judge process's transport, created on first use (pi-judge.ts).
-   *  Judge model = `autoMode.judgeModel` or this session's own, resolved lazily
-   *  at each spawn so a live `setModel()` is picked up on the next respawn. */
+  /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
+  private reportJudgeRouteUnavailable(reason: string): void {
+    if (this.judgeRouteUnavailableReported) return
+    this.judgeRouteUnavailableReported = true
+    this.send('session:error', judgeRouteUnavailableMessage('pi', reason))
+  }
+
+  /**
+   * The judge transport: ClaudeUI's own HTTP call to the judge model (ADR-081)
+   * — no second pi process, so the judge prompt is exactly the policy, the
+   * stage budgets and stop sequence apply, and the call's usage lands on the
+   * ledger as a `judge` row under this session. Stateless: nothing to dispose.
+   *
+   * Judge model = `autoMode.judgeModel` or this session's own, resolved per
+   * call, so a live `setModel()` applies to the next judge call. A model no
+   * ClaudeUI route covers is not judged by anyone else: the call fails,
+   * `classify()` returns unavailable, the human decides, and the session says
+   * why once.
+   */
   private judgeTransport(): JudgeTransport {
-    this.piJudge ??= new PiJudge({
-      cwd: this.cwd,
-      resolveModel: () => {
-        const configured = this.autoModeConfig().judgeModel
-        try {
-          return engineMeta('pi').decodeModelValue(configured ?? this._model)
-        } catch (err) {
-          // A CONFIGURED judge model that will not decode must not degrade to
-          // `null` — PiJudge reads null as "keep pi's own default", which is the
-          // silent substitution this path forbids. Throwing reaches `classify()`
-          // as an unavailable transport, i.e. ask the human. Only the
-          // session's-own-model case may fall back.
-          if (!configured) return null
-          this.reportStaleJudgeModel(configured)
-          throw err instanceof Error ? err : new Error(String(err))
-        }
-      }
+    return makeSessionJudgeTransport({
+      engine: 'pi',
+      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      sessionId: () => this.piSessionId,
+      routingId: this.routingId,
+      onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
     })
-    return this.piJudge.transport
   }
 
   /**

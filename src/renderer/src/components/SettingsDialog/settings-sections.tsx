@@ -12,6 +12,7 @@ import type {
   VendorConfig,
   SandboxSettings,
   AutoModeConfig,
+  JudgeModelSupport,
   ModelInfo,
   OpencodeConfigSettings
 } from '../../../../shared/types'
@@ -402,6 +403,9 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
 
 /** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
 const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+/** The judge-model row's second sentence, the same for both engines (ADR-081 §3). */
+const JUDGE_MODEL_ROUTES_NOTE =
+  'ClaudeUI calls the judge itself, so only models from providers set up in ClaudeUI (OpenAI-compatible ones, or the ChatGPT subscription) can judge.'
 /** Label for the dispatch default-model picker's "no explicit choice" row. */
 const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
@@ -429,8 +433,13 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
  *
  * The judge-model picker is fed from `getEngineModels()` filtered to this
  * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
- * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
- * when resolving `autoMode.judgeModel`.
+ * exactly what both sessions hand the judge route resolver as
+ * `autoMode.judgeModel`. ClaudeUI makes the judge's model call itself
+ * (ADR-081), so the list is then narrowed to the models it can call
+ * (`judgeModelSupport`); a saved value it can't call, or a list with nothing
+ * left in it, gets a notice under the picker ({@link JudgeSupportNotice}).
+ * Until that answer arrives — or if asking fails — every model is listed: the
+ * session refuses an unroutable judge at call time either way, with a banner.
  *
  * What this editor does NOT own is the three trust lists: they are the same
  * values for every engine, so ADR-065 phase 4 moved them to one shared file with
@@ -445,7 +454,7 @@ function AutoModeSection({
   toggleDescription,
   judgeModelDescription
 }: {
-  engineId: EngineId
+  engineId: 'opencode' | 'pi'
   testid: string
   installed: boolean | null
   notInstalledMessage: string
@@ -455,17 +464,29 @@ function AutoModeSection({
 }): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
+  /** Per model value, whether ClaudeUI can call it as the judge; null = not known (yet). */
+  const [support, setSupport] = useState<Record<string, JudgeModelSupport> | null>(null)
 
   useEffect(() => {
     window.api
       .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
+    setSupport(null)
     window.api
       .getEngineModels()
       .then((groups) => {
-        const own = groups.filter((g) => g.engineId === engineId)
-        setModels(own.flatMap((g) => g.models))
+        const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
+        setModels(own)
+        // An empty list says nothing about routes (discovery found nothing), so
+        // there is nothing to ask about.
+        if (own.length === 0) return
+        return window.api
+          .judgeModelSupport(
+            engineId,
+            own.map((m) => m.value)
+          )
+          .then(setSupport)
       })
       .catch(() => {})
   }, [engineId])
@@ -493,7 +514,11 @@ function AutoModeSection({
   const judgeModel = auto.judgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
-  const judgeModelOptions = toModelDisplays(models)
+  // Only an explicit refusal hides a model; an unanswered value stays listed.
+  const judgeable = support ? models.filter((m) => support[m.value]?.ok !== false) : models
+  const judgeModelOptions = toModelDisplays(judgeable)
+  // Selected from the FULL list, so a saved model that can't judge still shows
+  // by name (its notice says why) rather than as an unknown value.
   const selectedJudgeModel = selectedModelDisplay(models, judgeModel, JUDGE_MODEL_DEFAULT_LABEL)
 
   const update = (patch: Partial<AutoModeConfig>): void => {
@@ -537,6 +562,12 @@ function AutoModeSection({
             </span>
           </SettingRow>
           <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
+          <JudgeSupportNotice
+            testid={`${testid}.judgeModel`}
+            value={judgeModel}
+            support={support}
+            noneLeft={support !== null && judgeable.length === 0}
+          />
           {/* `SettingsSelect` IS a `SettingRow` + `Segmented` (settings-controls),
               so using it keeps the row vocabulary and the `.twoStageMode` /
               `.twoStageMode.option` testids the call sites already assert. */}
@@ -555,6 +586,41 @@ function AutoModeSection({
 }
 
 /**
+ * Why the judge picker can't offer what the user might expect (ADR-081 §3),
+ * shown under it like `StaleModelNotice`: nothing in this engine's list can
+ * judge at all (`data-state="none"`), or the SAVED judge model is one ClaudeUI
+ * can't call (`data-state="unsupported"`, carrying the resolver's own reason —
+ * the same sentence the session's banner would show).
+ */
+function JudgeSupportNotice({
+  testid,
+  value,
+  support,
+  noneLeft
+}: {
+  testid: string
+  value: string
+  support: Record<string, JudgeModelSupport> | null
+  noneLeft: boolean
+}): React.JSX.Element | null {
+  const entry = value && support ? support[value] : undefined
+  const reason = entry && !entry.ok ? entry.reason : null
+  if (!noneLeft && reason === null) return null
+  return (
+    <div
+      data-testid={`${testid}.unsupported`}
+      data-state={noneLeft ? 'none' : 'unsupported'}
+      data-model={value}
+      className="px-3.5 pb-2 text-[12px] leading-4 text-warning"
+    >
+      {noneLeft
+        ? 'No model here can judge: ClaudeUI calls the judge itself, and none of these models comes from a provider set up in ClaudeUI. Add one in Settings › Models & providers.'
+        : reason}
+    </div>
+  )
+}
+
+/**
  * Configures the auto-mode LLM permission gatekeeper that runs in Full
  * autonomy on opencode. See ADR-023.
  */
@@ -567,7 +633,7 @@ function OpencodeAutoModeSection(): React.JSX.Element {
       installed={installed}
       notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
       toggleDescription="In Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, Full prompts you like Ask."
-      judgeModelDescription="Sees each tool call and decides whether to allow it; unset uses the session's own model."
+      judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
   )
 }
@@ -588,7 +654,7 @@ export function PiAutoModeSection(): React.JSX.Element {
       installed={installed}
       notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
       toggleDescription="In Auto and Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, both prompt you like Ask."
-      judgeModelDescription="Sees each tool call and decides whether to allow it, in its own short-lived pi process; unset uses the session's own model."
+      judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
   )
 }

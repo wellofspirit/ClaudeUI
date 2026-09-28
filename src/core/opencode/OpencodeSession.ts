@@ -60,8 +60,6 @@ import {
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { matchesUserAskRule } from './wildcard'
-import { makeJudgeTransportWithFallback } from './judge-transport'
-import type { JudgeEndpointProbe } from './judge-transport'
 import {
   classify,
   formatUnparseableJudgeReply,
@@ -70,6 +68,7 @@ import {
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
+import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import {
   AutoModeDenialTracker,
   autoModeReviewBlock,
@@ -124,15 +123,20 @@ const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
 
 /**
  * The ruleset every THROWAWAY opencode session is patched with before it is
- * prompted (the auto-mode judge, `/btw` side questions). Both are tool-LESS by
- * design — they must answer from text alone — and both are hazardous without
- * this patch, for two independent reasons:
+ * prompted (`/btw` side questions; agent-generate patches the same one). Both
+ * are tool-LESS by design — they must answer from text alone — and both are
+ * hazardous without this patch, for two independent reasons:
  *
  *  1. SECURITY. A fresh opencode session inherits the vendor's `{*: allow}`
  *     default (verified: agent.ts's `defaults` = `Permission.fromConfig({"*":
- *     "allow", …})`). The judge is fed a possibly attacker-influenced
- *     transcript and asked to reason about it; an unpatched judge session could
- *     be talked into really running bash/edit, with no human and no gate.
+ *     "allow", …})`), so an unpatched throwaway could really run bash/edit,
+ *     with no human and no gate. With deny-all patched, upstream hides every
+ *     tool from the request itself (`session/llm/request.ts` `resolveTools`,
+ *     lines 208-214 in `vendor/opencode-src` v1.18.32: a tool whose last
+ *     matching rule is a `*` deny is filtered out before the model sees the
+ *     tool list), so there is nothing to call — and nothing an instance-global
+ *     "always" approval could re-enable, because that list is not part of the
+ *     ruleset the filter reads.
  *  2. LIVENESS. `client.prompt` runs a SYNCHRONOUS server-side turn. An
  *     ask-class action on a session with no SSE consumer emits a
  *     `permission.asked` that our main consumer filters out (foreign
@@ -148,25 +152,14 @@ const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
 const DENY_ALL_TOOLS_RULESET: PermissionRule[] = [{ permission: '*', pattern: '*', action: 'deny' }]
 
 /**
- * The patch body for a throwaway session: deny-all AND sealed.
- *
- * The ruleset alone is not sufficient. opencode stores "always" approvals in
- * INSTANCE-GLOBAL state (not keyed by session) and `evaluate()` appends that
- * list AFTER the session ruleset, with last-match-wins — so any pattern the
- * user ever always-approved anywhere on this server outranks the deny-all
- * above (auto-mode rework plan §7 Q5, confirmed live). `permissionHermetic`
- * is the fork's fix (ADR-037 P2): a sealed session is evaluated against its
- * own ruleset only, and never contributes to the global list either.
- *
- * Sent unconditionally, with no fork detection: the stock PATCH payload
- * schema ignores unknown keys (measured against the unpatched 1.18.9 release
- * build — Effect Schema's default is to strip excess properties), so an
- * unpatched server drops the field and behaves exactly as it does today. A
- * capability probe here would buy nothing and add a failure mode.
+ * The patch body for a throwaway session: the deny-all ruleset above, nothing
+ * else. It hides every tool from the throwaway's request upstream (reason 1),
+ * so nothing can be called or "always"-approved, and it keeps the synchronous
+ * prompt hang-proof (reason 2). The auto-mode judge no longer runs through
+ * opencode at all (ADR-081: ClaudeUI makes that call itself).
  */
-const SEALED_THROWAWAY_PATCH = {
-  permission: DENY_ALL_TOOLS_RULESET,
-  permissionHermetic: true
+const DENY_ALL_THROWAWAY_PATCH = {
+  permission: DENY_ALL_TOOLS_RULESET
 } as const
 
 export class OpencodeSession extends BaseSession {
@@ -300,15 +293,13 @@ export class OpencodeSession extends BaseSession {
   private _sharedAutoMode: SharedAutoModeConfig | undefined
   // Consecutive / same-rule / total denial caps, shared with pi (denial-tracker.ts).
   private autoDenials = new AutoModeDenialTracker()
-  // Whether THIS session's opencode server exposes the patched tool-less
-  // `POST /judge/completion` (ADR-037 P1). Probed once, lazily, on the first
-  // judge call; the object identity is the cache, so every judge transport
-  // built for this session shares one probe.
-  private judgeEndpointProbe: JudgeEndpointProbe = {}
   // One `session:error` per session for a CONFIGURED judge model that no longer
   // exists — the check runs on every gated approval, and a banner per tool call
   // would bury the transcript.
   private staleJudgeModelReported = false
+  // The same one-banner rule for a judge model ClaudeUI has no route to call
+  // (ADR-081 §3) — the resolver runs on every judge call.
+  private judgeRouteUnavailableReported = false
   // The USER-authored half of the last ruleset we patched onto the session
   // (compiled allow/ask/deny). Kept so the auto-mode gatekeeper can re-match a
   // pending approval against the user's own `ask` rules, which outrank the
@@ -1966,67 +1957,6 @@ export class OpencodeSession extends BaseSession {
     return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
   }
 
-  /** A JudgeTransport backed by a fresh, stateless opencode judge session per call
-   *  (so the judge never accumulates prior Q&As; we trade cache for correctness).
-   *  Judge model defaults to the session's own model (ADR-023), override via config.
-   *
-   *  This is now the FALLBACK path — {@link makeJudgeFn} prefers the patched
-   *  server's tool-less `POST /judge/completion` (ADR-037 P1) and only lands
-   *  here on a server that does not expose it.
-   *
-   *  The judge session is patched TOOL-DENIED before it is prompted — see
-   *  DENY_ALL_TOOLS_RULESET for why (a security judge reasoning over
-   *  attacker-influenced transcript text must not be able to execute anything,
-   *  and a synchronous prompt on a consumer-less session must not be able to
-   *  block on an unanswerable approval). The judge needs no tools: it returns a
-   *  verdict from text alone.
-   *
-   *  A patch FAILURE propagates rather than being swallowed — the caller
-   *  (`handleAutoModeApproval`) catches it and falls back to asking the human,
-   *  which is the correct fail-closed outcome. Proceeding to prompt an
-   *  un-denied session would reinstate exactly the hazard above.
-   *
-   *  `maxTokens` / `stopSequences` on the request are ignored: opencode's prompt
-   *  API exposes neither (the ADR-023 deviation). They stay on the interface
-   *  because the classifier populates them for a future direct-API transport
-   *  (plan phase 5), and ignoring an advisory field is the documented contract. */
-  private makeSessionJudgeFn(): JudgeTransport | null {
-    const client = this.client
-    if (!client) return null
-    const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
-    return async ({ system, user }) => {
-      const js = await client.createSession({ title: 'auto-mode-judge' })
-      try {
-        await client.patchSession(js.id, SEALED_THROWAWAY_PATCH)
-        const resp = (await client.prompt(js.id, {
-          model: { providerID: parsed.providerID, modelID: parsed.modelID },
-          system,
-          parts: [{ type: 'text', text: user }]
-        })) as { parts?: Array<{ type?: string; text?: string }> }
-        return (resp?.parts ?? [])
-          .filter((p) => p?.type === 'text')
-          .map((p) => p?.text ?? '')
-          .join('')
-      } finally {
-        client.deleteSession(js.id).catch(() => {})
-      }
-    }
-  }
-
-  /**
-   * The judge transport actually used: the patched server's tool-less
-   * `POST /judge/completion` (ADR-037 P1) when this opencode has it, otherwise
-   * the tool-denied judge session above.
-   *
-   * The endpoint version is strictly better — no session, no tool registry, no
-   * permission evaluation (so plan §7 Q5's instance-global `approved` list has
-   * nothing to pierce), and it enforces `maxTokens`/`stopSequences` for real,
-   * closing the ADR-023 advisory-fields deviation on this path.
-   *
-   * Availability is probed once per session and cached in
-   * {@link judgeEndpointProbe}; see judge-transport.ts for why the probe reads
-   * `/doc` rather than POSTing the prompt speculatively.
-   */
   /**
    * True when `autoMode.judgeModel` names a model opencode no longer offers.
    *
@@ -2057,18 +1987,32 @@ export class OpencodeSession extends BaseSession {
     return true
   }
 
+  /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
+  private reportJudgeRouteUnavailable(reason: string): void {
+    if (this.judgeRouteUnavailableReported) return
+    this.judgeRouteUnavailableReported = true
+    this.send('session:error', judgeRouteUnavailableMessage('opencode', reason))
+  }
+
+  /**
+   * The judge transport: ClaudeUI's own HTTP call to the judge model (ADR-081),
+   * NOT an opencode session — so the judge prompt is exactly the policy, the
+   * stage budgets and stop sequence apply, and the call's usage lands on the
+   * ledger as a `judge` row under this session.
+   *
+   * Judge model = `autoMode.judgeModel`, else the session's own model (ADR-023),
+   * resolved per call. A model no ClaudeUI route covers is not judged by anyone
+   * else: the call fails, `classify()` returns unavailable, the human decides,
+   * and the session says why once.
+   */
   private makeJudgeFn(): JudgeTransport | null {
     if (this.judgeModelUnavailable()) return null
-    const fallback = this.makeSessionJudgeFn()
-    if (!fallback) return null
-    const conn = this.conn
-    if (!conn) return fallback
-    const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
-    return makeJudgeTransportWithFallback({
-      target: { baseUrl: conn.baseUrl, authHeader: conn.authHeader },
-      model: { providerID: parsed.providerID, modelID: parsed.modelID },
-      fallback,
-      probe: this.judgeEndpointProbe
+    return makeSessionJudgeTransport({
+      engine: 'opencode',
+      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      sessionId: () => this.openSessionId,
+      routingId: this.routingId,
+      onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
     })
   }
 
@@ -2232,8 +2176,8 @@ export class OpencodeSession extends BaseSession {
   /**
    * Ask a one-off question outside the main conversation history (the `/btw`
    * command). Uses a fresh throwaway opencode session so the question never
-   * pollutes the main session's history. Mirrors the `makeJudgeFn` pattern.
-   * Returns the joined assistant text, or null on any failure. Never throws.
+   * pollutes the main session's history. Returns the joined assistant text, or
+   * null on any failure. Never throws.
    *
    * `client.prompt` runs a SYNCHRONOUS server-side turn (POST /session/{id}/message
    * blocks until the turn fully completes). Claude's `/btw` is tool-less; ours
@@ -2242,13 +2186,14 @@ export class OpencodeSession extends BaseSession {
    * throwaway session, which our main SSE consumer filters out (foreign
    * sessionID) and never answers → the synchronous prompt would hang forever
    * (spinner stuck). So we patch a deny-all ruleset on the throwaway session
-   * BEFORE prompting: opencode's permission evaluator short-circuits a matching
-   * `deny` WITHOUT publishing `permission.asked` (verified vs 1.17.9 —
-   * permission/index.ts `ask()` returns DeniedError before the Event.Asked path;
-   * `{permission:'*', pattern:'*'}` matches every tool via Wildcard.match → regex
-   * `.*`). The model therefore just answers in text — tool-less, hang-proof. The
-   * system prompt is a belt-and-suspenders nudge. (We deliberately avoid the
-   * prompt body's `tools` field, which opencode marks as deprecated.)
+   * BEFORE prompting (DENY_ALL_THROWAWAY_PATCH): upstream then hides every tool
+   * from the request, and its permission evaluator short-circuits a matching
+   * `deny` WITHOUT publishing `permission.asked` (permission/index.ts `ask()`
+   * returns DeniedError before the Event.Asked path; `{permission:'*',
+   * pattern:'*'}` matches every tool via Wildcard.match → regex `.*`). The model
+   * therefore just answers in text — tool-less, hang-proof. The system prompt is
+   * a belt-and-suspenders nudge. (We deliberately avoid the prompt body's
+   * `tools` field, which opencode marks as deprecated.)
    */
   override async askSideQuestion(question: string): Promise<string | null> {
     try {
@@ -2258,11 +2203,10 @@ export class OpencodeSession extends BaseSession {
       const parsed = parseModelString(this._model)
       const js = await this.client.createSession({ title: 'side-question' })
       try {
-        // Deny every tool AND seal the session so an instance-global "always"
-        // approval cannot outrank that deny (see SEALED_THROWAWAY_PATCH).
+        // Deny (and so hide) every tool — see DENY_ALL_THROWAWAY_PATCH.
         // Best-effort; the system prompt still discourages tools if the patch
         // were to fail.
-        await this.client.patchSession(js.id, SEALED_THROWAWAY_PATCH)
+        await this.client.patchSession(js.id, DENY_ALL_THROWAWAY_PATCH)
         const resp = (await this.client.prompt(js.id, {
           model: { providerID: parsed.providerID, modelID: parsed.modelID },
           system: 'Answer the following question concisely and directly. Do not use tools.',

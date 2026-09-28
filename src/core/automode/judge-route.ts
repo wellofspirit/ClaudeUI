@@ -15,19 +15,24 @@
  * engine code. Runs per judge call, so a rotated key or a refreshed token
  * applies to the next call.
  *
+ * Two entry points share ONE decision path ({@link planRoute}):
+ * {@link resolveJudgeRoute} spends a credential on the route it plans, and
+ * {@link describeJudgeRoute} — the judge picker's "can ClaudeUI call this?" —
+ * only asks whether the credential is there.
+ *
  * CREDENTIAL BOUNDARY: keys and tokens go into `route.headers` and nowhere
  * else. Labels, reasons and the route's `account` are credential-free — the
- * account key of an API key is its digest (`apiKeyAccountKey`). Nothing here
- * logs. A dependency that throws (an unreadable vault) rejects the call, which
- * the transport's caller treats like any other judge failure: the human
- * decides.
+ * account key of an API key is its digest (`apiKeyAccountKey`). The describe
+ * path fetches no token at all and keeps no key. Nothing here logs. A
+ * dependency that throws (an unreadable vault) rejects the call, which the
+ * transport's caller treats like any other judge failure: the human decides.
  */
 
 import * as os from 'node:os'
 import { engineMeta } from '../../shared/engine-meta'
 import { nativeAccountKey, type AccountIdentity } from '../../shared/account-key'
 import { deliveredDefinition, type SharedProviderDefinition } from '../../shared/shared-provider'
-import type { OpencodeCatalogModel } from '../../shared/types'
+import type { JudgeModelSupport, OpencodeCatalogModel } from '../../shared/types'
 import { authVault, CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
 import { computeResidencyFromToken } from '../auth/vault/codex-oauth'
 import { credentialSync, type CodexInjectionToken } from '../auth/vault/CredentialSync'
@@ -60,6 +65,12 @@ export interface JudgeRouteDeps {
    * first whatever its expiry. Null when signed out or workspace-less.
    */
   chatgptToken(force: boolean): Promise<CodexInjectionToken | null>
+  /**
+   * Whether {@link chatgptToken} would find a token, answered WITHOUT one: the
+   * active account holds a credential with a workspace id. The describe path's
+   * ChatGPT check — it must never fetch or refresh a token.
+   */
+  chatgptSignedIn(): Promise<boolean>
   /** The ADR-071 §3 identity of one vault account. */
   chatgptIdentity(vaultAccountId: string): Promise<AccountIdentity>
   /** opencode's catalog entries for one provider. */
@@ -106,6 +117,12 @@ function defaultDeps(): JudgeRouteDeps {
     // refreshed first — through the same per-account single-flight as every
     // scheduled refresh.
     chatgptToken: (force) => credentialSync.injectionTokenFor(null, force ? Infinity : undefined),
+    // `injectionTokenFor(null)` is null exactly when the active account has no
+    // credential or no workspace id; `getStatus()` reports both, token-free.
+    chatgptSignedIn: async () => {
+      const status = await credentialSync.getStatus()
+      return status.connected && Boolean(status.accountId)
+    },
     chatgptIdentity: (vaultAccountId) => credentialSync.accountIdentity(vaultAccountId),
     opencodeCatalog: (providerId) => getOpencodeProviderModels(providerId),
     piCatalog: () => getPiModelCatalog(),
@@ -130,6 +147,148 @@ export async function resolveJudgeRoute(
   deps: Partial<JudgeRouteDeps> = {}
 ): Promise<JudgeRouteResult> {
   const d: JudgeRouteDeps = { ...defaultDeps(), ...deps }
+  const plan = await planRoute(engine, modelValue, d, d.loadApiKey)
+  if (!plan.ok) return plan
+  if (plan.kind === 'chatgpt') return chatgptRoute(plan.ctx)
+  return { ok: true, route: keyedRoute(plan.ctx, plan.kind, plan.url, plan.key, plan.facts) }
+}
+
+/** Whether ClaudeUI can call a judge model, and if not, the resolver's own reason. */
+export type JudgeRouteDescription =
+  { ok: true } | { ok: false; code: JudgeRouteUnavailableCode; reason: string }
+
+/**
+ * {@link resolveJudgeRoute}'s verdict on `modelValue` without spending a
+ * credential: the same plan, but a key is only checked for presence (and not
+ * kept), and ChatGPT counts as signed in from the token-free status. For the
+ * judge picker, which must not refresh a token per listed model.
+ *
+ * It can disagree with a later resolve only where the credential itself
+ * changes in between.
+ */
+export async function describeJudgeRoute(
+  engine: JudgeEngine,
+  modelValue: string,
+  deps: Partial<JudgeRouteDeps> = {}
+): Promise<JudgeRouteDescription> {
+  const d: JudgeRouteDeps = { ...defaultDeps(), ...deps }
+  return describeWith(engine, modelValue, d, keyPresence(d))
+}
+
+/**
+ * {@link describeJudgeRoute} for every value of a picker at once (the
+ * `automode:judge-model-support` IPC). Within one batch the provider list, the
+ * ChatGPT status, each key's PRESENCE and each catalog are read once. A value
+ * whose check itself fails (an unreadable catalog) is reported as unsupported
+ * with that failure: the picker can't offer a judge ClaudeUI could not vet.
+ */
+export async function describeJudgeModels(
+  engine: JudgeEngine,
+  values: readonly string[],
+  deps: Partial<JudgeRouteDeps> = {}
+): Promise<Record<string, JudgeModelSupport>> {
+  const base: JudgeRouteDeps = { ...defaultDeps(), ...deps }
+  let definitions: SharedProviderDefinition[] | undefined
+  const d: JudgeRouteDeps = {
+    ...base,
+    listDefinitions: () => (definitions ??= base.listDefinitions()),
+    chatgptSignedIn: once(() => base.chatgptSignedIn()),
+    opencodeCatalog: memoized((providerId) => base.opencodeCatalog(providerId)),
+    piCatalog: once(() => base.piCatalog())
+  }
+  const hasKey = memoized(keyPresence(base))
+  const out: Record<string, JudgeModelSupport> = {}
+  for (const value of new Set(values)) {
+    try {
+      const described = await describeWith(engine, value, d, hasKey)
+      out[value] = described.ok ? { ok: true } : { ok: false, reason: described.reason }
+    } catch (err) {
+      out[value] = {
+        ok: false,
+        reason: `ClaudeUI couldn't check whether it can call this model for the judge (${
+          err instanceof Error ? err.message : String(err)
+        }).`
+      }
+    }
+  }
+  return out
+}
+
+async function describeWith(
+  engine: JudgeEngine,
+  modelValue: string,
+  d: JudgeRouteDeps,
+  hasKey: KeyLookup<true>
+): Promise<JudgeRouteDescription> {
+  const plan = await planRoute(engine, modelValue, d, hasKey)
+  if (!plan.ok) return plan
+  if (plan.kind === 'chatgpt') {
+    return (await d.chatgptSignedIn()) ? { ok: true } : chatgptUnavailable()
+  }
+  return { ok: true }
+}
+
+/**
+ * A key lookup that answers only whether the key exists: the value is dropped
+ * on the spot, so the describe path holds no key material. Truthiness, as the
+ * resolver's own checks read a key.
+ */
+function keyPresence(d: JudgeRouteDeps): KeyLookup<true> {
+  return async (definitionId) => ((await d.loadApiKey(definitionId)) ? true : null)
+}
+
+function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let hit: Promise<T> | undefined
+  return () => (hit ??= fn())
+}
+
+function memoized<T>(fn: (key: string) => Promise<T>): (key: string) => Promise<T> {
+  const hits = new Map<string, Promise<T>>()
+  return (key) => {
+    let hit = hits.get(key)
+    if (!hit) {
+      hit = fn(key)
+      hits.set(key, hit)
+    }
+    return hit
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The plan: every branch decision, made once for both entry points
+// ---------------------------------------------------------------------------
+
+/**
+ * Looks a definition's API key up. The resolver's returns the key itself; the
+ * describe path's returns `true` for "there is one" and forgets the key.
+ */
+type KeyLookup<K> = (definitionId: string) => Promise<K | null>
+
+type Unavailable = { ok: false; code: JudgeRouteUnavailableCode; reason: string }
+
+/**
+ * What the resolver decided for a judge model before any route is built:
+ * refused, the ChatGPT subscription (whose token is fetched by whoever acts on
+ * the plan, or not at all), or a key route with the lookup's answer in hand.
+ */
+type RoutePlan<K> =
+  | Unavailable
+  | { ok: true; kind: 'chatgpt'; ctx: RouteContext }
+  | {
+      ok: true
+      kind: Exclude<JudgeRouteKind, 'chatgpt'>
+      ctx: RouteContext
+      url: string
+      key: K | null
+      facts: ModelFacts
+    }
+
+async function planRoute<K>(
+  engine: JudgeEngine,
+  modelValue: string,
+  d: JudgeRouteDeps,
+  loadKey: KeyLookup<K>
+): Promise<RoutePlan<K>> {
   const meta = engineMeta(engine)
   // The wire model id is the engine-native model id on every route: it is what
   // the engine itself sends (`harnessOverrides[engine].id ?? model.id` for a
@@ -162,9 +321,9 @@ export async function resolveJudgeRoute(
     )
   }
 
-  if (owner.id === CHATGPT_PROVIDER_ID) return chatgptRoute(ctx)
-  if (owner.kind === 'custom') return customRoute(ctx, owner)
-  if (owner.kind === 'catalog') return catalogRoute(ctx, owner)
+  if (owner.id === CHATGPT_PROVIDER_ID) return { ok: true, kind: 'chatgpt', ctx }
+  if (owner.kind === 'custom') return customPlan(ctx, owner, loadKey)
+  if (owner.kind === 'catalog') return catalogPlan(ctx, owner, loadKey)
   // A subscription other than ChatGPT: none exists, and none has a route.
   return unavailable(
     'unsupported-protocol',
@@ -193,7 +352,7 @@ function nativeIdFor(engine: JudgeEngine, definition: SharedProviderDefinition):
   return engine === 'opencode' ? opencodeProviderId(definition) : nativeProviderId(definition)
 }
 
-function unavailable(code: JudgeRouteUnavailableCode, reason: string): JudgeRouteResult {
+function unavailable(code: JudgeRouteUnavailableCode, reason: string): Unavailable {
   return { ok: false, code, reason }
 }
 
@@ -250,23 +409,27 @@ async function chatgptRoute(ctx: RouteContext): Promise<JudgeRouteResult> {
   }
 
   const token = await deps.chatgptToken(false)
-  if (!token) {
-    return unavailable(
-      'chatgpt-unavailable',
-      `ChatGPT isn't signed in in ClaudeUI (or its account has no workspace), so ClaudeUI can't call it for the judge. Sign in to ChatGPT in ${PROVIDERS_PAGE}, ${PICK_ANOTHER}.`
-    )
-  }
+  if (!token) return chatgptUnavailable()
   return { ok: true, route: await build(token) }
+}
+
+/** No token (signed out, or no workspace id) — the same refusal on both entry points. */
+function chatgptUnavailable(): Unavailable {
+  return unavailable(
+    'chatgpt-unavailable',
+    `ChatGPT isn't signed in in ClaudeUI (or its account has no workspace), so ClaudeUI can't call it for the judge. Sign in to ChatGPT in ${PROVIDERS_PAGE}, ${PICK_ANOTHER}.`
+  )
 }
 
 // ---------------------------------------------------------------------------
 // Custom endpoints (incl. a catalog provider's second key)
 // ---------------------------------------------------------------------------
 
-async function customRoute(
+async function customPlan<K>(
   ctx: RouteContext,
-  definition: SharedProviderDefinition
-): Promise<JudgeRouteResult> {
+  definition: SharedProviderDefinition,
+  loadKey: KeyLookup<K>
+): Promise<RoutePlan<K>> {
   const { protocol } = definition
   if (protocol !== 'openai-completions' && protocol !== 'openai-responses') {
     const api = protocol === 'anthropic-messages' ? 'the Anthropic Messages API' : 'an API'
@@ -291,22 +454,22 @@ async function customRoute(
   const declared = definition.models.find(
     (candidate) => (candidate.harnessOverrides?.[ctx.engine]?.id ?? candidate.id) === ctx.model
   )
-  const key = await ctx.deps.loadApiKey(definition.id)
-  return {
-    ok: true,
-    route: keyedRoute(ctx, kind, url, key, modelFacts(declared?.reasoning, declared?.maxTokens))
-  }
+  // No key is not a refusal here: the endpoint may be keyless.
+  const key = await loadKey(definition.id)
+  const facts = modelFacts(declared?.reasoning, declared?.maxTokens)
+  return { ok: true, kind, ctx, url, key, facts }
 }
 
 // ---------------------------------------------------------------------------
 // Catalog providers (a vault key for a provider the engines already know)
 // ---------------------------------------------------------------------------
 
-async function catalogRoute(
+async function catalogPlan<K>(
   ctx: RouteContext,
-  definition: SharedProviderDefinition
-): Promise<JudgeRouteResult> {
-  const key = await ctx.deps.loadApiKey(definition.id)
+  definition: SharedProviderDefinition,
+  loadKey: KeyLookup<K>
+): Promise<RoutePlan<K>> {
+  const key = await loadKey(definition.id)
   if (!key) {
     return unavailable(
       'no-credential',
@@ -319,7 +482,7 @@ async function catalogRoute(
     // The URL is a constant here: the catalog only adds optional facts (the
     // reasoning bit, the ceiling), so a catalog that fails routes without them.
     const entry = await catalogEntry(ctx).catch(() => null)
-    return { ok: true, route: keyedRoute(ctx, kind, url, key, entry?.facts ?? {}) }
+    return { ok: true, kind, ctx, url, key, facts: entry?.facts ?? {} }
   }
 
   // Every other catalog provider needs the catalog for its URL: a catalog
@@ -346,7 +509,7 @@ async function catalogRoute(
       `${ctx.engineLabel}'s catalog gives no usable endpoint for "${ctx.provider}", so ClaudeUI can't call it for the judge. Pick another judge model.`
     )
   }
-  return { ok: true, route: keyedRoute(ctx, 'custom-chat', url, key, entry.facts) }
+  return { ok: true, kind: 'custom-chat', ctx, url, key, facts: entry.facts }
 }
 
 interface CatalogEntry {
