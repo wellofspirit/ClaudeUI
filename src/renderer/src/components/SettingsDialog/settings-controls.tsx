@@ -648,13 +648,29 @@ export function SliderField({
   )
 }
 
+/**
+ * The optional entry rules a list can hold its editor to. Both are for lists
+ * whose backend REFUSES a bad value (the judge guidance lists, ADR-083 §4):
+ * without them the chip would appear, the save would be rejected, and the entry
+ * would silently vanish on the next load. Checked on add only — an entry
+ * already in the list came from disk and is the backend's business.
+ */
+export interface ListEntryRules {
+  /** The problem with `entry` as short user-facing copy, or `null` when it is fine. */
+  validate?: (entry: string) => string | null
+  /** The most entries the list may hold; adding past it is refused. */
+  maxItems?: number
+}
+
 /** Chips with remove, one add field. Domains, paths, globs, packages. */
 export function ListEditor({
   items,
   placeholder,
   onUpdate,
   disabled = false,
-  testid
+  testid,
+  validate,
+  maxItems
 }: {
   items: string[]
   placeholder: string
@@ -662,15 +678,27 @@ export function ListEditor({
   /** A dependent list whose parent is off: chips stay visible, nothing edits. */
   disabled?: boolean
   testid?: string
-}): React.JSX.Element {
+} & ListEntryRules): React.JSX.Element {
   const [inputVal, setInputVal] = useState('')
+  // Why the last add was refused. Cleared as soon as the input changes, so it
+  // always describes the text in front of the user.
+  const [error, setError] = useState<string | null>(null)
 
   const handleAdd = (): void => {
     const trimmed = inputVal.trim()
-    if (trimmed && !items.includes(trimmed)) {
-      onUpdate([...items, trimmed])
-      setInputVal('')
+    if (!trimmed || items.includes(trimmed)) return
+    if (maxItems !== undefined && items.length >= maxItems) {
+      setError(`At most ${maxItems} entries — remove one first.`)
+      return
     }
+    const problem = validate?.(trimmed) ?? null
+    if (problem) {
+      setError(problem)
+      return
+    }
+    setError(null)
+    onUpdate([...items, trimmed])
+    setInputVal('')
   }
 
   return (
@@ -705,14 +733,22 @@ export function ListEditor({
           data-testid={testid ? `${testid}.input` : undefined}
           type="text"
           value={inputVal}
-          onChange={(e) => setInputVal(e.target.value)}
+          onChange={(e) => {
+            setInputVal(e.target.value)
+            setError(null)
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleAdd()
           }}
           placeholder={placeholder}
           spellCheck={false}
           disabled={disabled}
-          className="flex-1 min-w-0 h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
+          aria-invalid={error ? true : undefined}
+          className={`flex-1 min-w-0 h-7 bg-bg-input border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none transition-colors ${
+            error
+              ? 'border-danger/60 focus:border-danger/70'
+              : 'border-border focus:border-accent/50'
+          }`}
         />
         <Button
           testid={testid ? `${testid}.add` : undefined}
@@ -722,6 +758,15 @@ export function ListEditor({
           Add
         </Button>
       </span>
+      {error && (
+        <span
+          data-testid={testid ? `${testid}.error` : undefined}
+          role="alert"
+          className="block mt-1 text-[12px] leading-4 text-danger"
+        >
+          {error}
+        </span>
+      )}
     </span>
   )
 }
@@ -1365,7 +1410,9 @@ export function SandboxListSetting({
   dimmed,
   disabled,
   indent,
-  testid
+  testid,
+  validate,
+  maxItems
 }: {
   label: string
   labelColor: string
@@ -1382,7 +1429,7 @@ export function SandboxListSetting({
   disabled?: boolean
   indent?: boolean
   testid?: string
-}): React.JSX.Element {
+} & ListEntryRules): React.JSX.Element {
   const editor = (
     <ListEditor
       items={items}
@@ -1390,6 +1437,8 @@ export function SandboxListSetting({
       onUpdate={onUpdate}
       disabled={disabled}
       testid={testid}
+      validate={validate}
+      maxItems={maxItems}
     />
   )
 

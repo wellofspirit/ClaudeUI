@@ -114,6 +114,12 @@ import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
 import { assertSafeIdSegment } from '../services/path-containment'
 import { setProviderModelAllowlist } from '../services/provider-model-allowlist'
+import {
+  JUDGE_GUIDANCE_MAX_ENTRIES,
+  JUDGE_GUIDANCE_MAX_ENTRY_CHARS,
+  codePointLength,
+  hasPromptBreakingChar
+} from '../../shared/judge-guidance'
 import type {
   EngineConfig,
   VendorConfig,
@@ -279,35 +285,53 @@ async function testProxyConnection(
 }
 
 // ---------------------------------------------------------------------------
-// Shared trust lists (ADR-065 phase 4)
+// Shared trust lists (ADR-065 phase 4) + judge guidance (ADR-083 §4)
 // ---------------------------------------------------------------------------
 
-/** The only three keys `config:save-shared-automode` may carry. */
+/** The trust lists `config:save-shared-automode` may carry. */
 const SHARED_TRUST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
 
+/** The judge guidance lists — same file, a stricter entry rule (see below). */
+const JUDGE_GUIDANCE_KEYS = ['judgeAllow', 'judgeBlock'] as const
+
 /**
- * Validate the shared trust-list payload AT THE PERIMETER, for the same reason
+ * Validate the shared auto-mode payload AT THE PERIMETER, for the same reason
  * `engineId` is validated here: this is a remotely reachable `config` write, and
  * what it writes is fed verbatim into the judge's prompt on the next session.
  * Garbage in that file is not a crash — it is a silently mis-specified
  * classifier environment, which is exactly the failure nobody notices.
  *
- * The shape is narrow on purpose: three OPTIONAL string arrays, each entry a
+ * The shape is narrow on purpose: five OPTIONAL string arrays, each entry a
  * non-empty trimmed string, and no other keys. An empty list is expressed by
  * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
  * caller and normalised away by the service, so an older client cannot create a
  * second encoding of "nothing is trusted".
+ *
+ * The two guidance lists (`judgeAllow` / `judgeBlock`) are held to more. They
+ * are not host names or patterns but free text written straight into the
+ * judge's SYSTEM PROMPT — each entry becomes one `- ` bullet line under a
+ * User-Specified rule — and this channel is reachable from any remote client
+ * holding the `config` capability. So an entry may carry no line break or other
+ * control character (an embedded newline could forge a `### Rule` heading or a
+ * fake Environment line and rewrite the policy), and each list is capped at
+ * {@link JUDGE_GUIDANCE_MAX_ENTRIES} entries of at most
+ * {@link JUDGE_GUIDANCE_MAX_ENTRY_CHARS} characters, so no caller can bloat
+ * every judged call's prompt. The limits and the character rule live in
+ * `shared/judge-guidance.ts`, the one definition the environment builder (which
+ * applies them again on read, for a hand-edited file that never came through
+ * here) and the settings UI (which refuses such an entry before saving) share.
  */
 function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAutoModeConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Invalid shared auto-mode config: expected an object')
   }
-  const allowed = new Set<string>(SHARED_TRUST_KEYS)
+  const allowed = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
   }
   const record = value as Record<string, unknown>
-  for (const key of SHARED_TRUST_KEYS) {
+  const guidance = new Set<string>(JUDGE_GUIDANCE_KEYS)
+  for (const key of allowed) {
     const list = record[key]
     if (list === undefined) continue
     if (!Array.isArray(list)) {
@@ -317,6 +341,25 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
       if (typeof entry !== 'string' || entry.trim() !== entry || entry === '') {
         throw new Error(
           `Invalid shared auto-mode config: "${key}" entries must be non-empty trimmed strings`
+        )
+      }
+    }
+    if (!guidance.has(key)) continue
+    if (list.length > JUDGE_GUIDANCE_MAX_ENTRIES) {
+      throw new Error(
+        `Invalid shared auto-mode config: "${key}" holds at most ${JUDGE_GUIDANCE_MAX_ENTRIES} entries`
+      )
+    }
+    for (const entry of list as string[]) {
+      if (hasPromptBreakingChar(entry)) {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must not contain line breaks or control characters`
+        )
+      }
+      // Code points, not UTF-16 units: the cap is "characters" to the user.
+      if (codePointLength(entry) > JUDGE_GUIDANCE_MAX_ENTRY_CHARS) {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must be at most ${JUDGE_GUIDANCE_MAX_ENTRY_CHARS} characters`
         )
       }
     }

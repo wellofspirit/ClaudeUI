@@ -16,9 +16,10 @@
  * what is guarded of it is only its ABSENCE from the rows below.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import {
+  ListEditor,
   NumberField,
   RadioRow,
   SettingRow,
@@ -412,5 +413,62 @@ describe('NumberField', () => {
     render(<NumberField value={undefined} onChange={vi.fn()} placeholder="unlimited" />)
     expect(screen.getByTestId('NumberField')).toHaveValue('')
     expect(screen.getByPlaceholderText('unlimited')).toBeInTheDocument()
+  })
+})
+
+// ── ListEditor entry rules ──────────────────────────────────────────────────
+
+describe('ListEditor — optional entry rules', () => {
+  afterEach(() => cleanup())
+
+  function type(value: string): void {
+    fireEvent.change(screen.getByTestId('L.input'), { target: { value } })
+  }
+  const add = (): void => {
+    fireEvent.click(screen.getByTestId('L.add'))
+  }
+
+  it('without rules, adds a trimmed entry and shows no error part', () => {
+    const onUpdate = vi.fn()
+    render(<ListEditor items={[]} placeholder="p" onUpdate={onUpdate} testid="L" />)
+    type('  a.dev  ')
+    add()
+    expect(onUpdate).toHaveBeenCalledWith(['a.dev'])
+    expect(screen.queryByTestId('L.error')).toBeNull()
+  })
+
+  it('refuses an entry `validate` rejects, shows why, and keeps the text', () => {
+    const onUpdate = vi.fn()
+    render(
+      <ListEditor
+        items={[]}
+        placeholder="p"
+        onUpdate={onUpdate}
+        testid="L"
+        validate={(e) => (e.length > 3 ? 'Too long.' : null)}
+      />
+    )
+    type('abcd')
+    add()
+    expect(onUpdate).not.toHaveBeenCalled()
+    expect(screen.getByTestId('L.error')).toHaveTextContent('Too long.')
+    expect(screen.getByTestId('L.input')).toHaveValue('abcd')
+
+    // Editing the text clears the stale message; a valid entry then adds.
+    type('abc')
+    expect(screen.queryByTestId('L.error')).toBeNull()
+    add()
+    expect(onUpdate).toHaveBeenCalledWith(['abc'])
+  })
+
+  it('refuses to add past `maxItems`', () => {
+    const onUpdate = vi.fn()
+    render(
+      <ListEditor items={['a', 'b']} placeholder="p" onUpdate={onUpdate} testid="L" maxItems={2} />
+    )
+    type('c')
+    add()
+    expect(onUpdate).not.toHaveBeenCalled()
+    expect(screen.getByTestId('L.error')).toHaveTextContent('At most 2 entries')
   })
 })

@@ -1012,6 +1012,13 @@ export type JudgeModelSupport = { ok: true } | { ok: false; reason: string }
  * for it (see `EnvironmentInfo`). An empty list is therefore stored as an ABSENT
  * key — the sessions read them behind `?.length`, so `[]` is not a distinct
  * state and storing it would invent a second encoding of one meaning.
+ *
+ * The same file also carries the two judge guidance lists (ADR-083 §4,
+ * `judgeAllow` / `judgeBlock`), under the same storage rules. Every entry of
+ * all five lists is written verbatim into the judge's system prompt, and a
+ * guidance entry becomes its own bullet line — which is why the IPC perimeter
+ * refuses line breaks and other control characters in guidance entries, and
+ * the environment builder drops any such entry a hand edit let through.
  */
 export interface SharedAutoModeConfig {
   /** External domains/services the agent may send data to or fetch from. */
@@ -1021,6 +1028,25 @@ export interface SharedAutoModeConfig {
   /** Production/protected target patterns. When set, they REPLACE the default
    *  'prod'/'production' name heuristic the policy would otherwise apply. */
   protectedPatterns?: string[]
+  /**
+   * The user's judge guidance (ADR-083 §4), in plain language: kinds of action
+   * that are routine for this user ("creating and switching git branches").
+   * Rendered as the User-Specified Allow exception — mandatory when it applies,
+   * but never over the HARD rule, an adversarial rule or an explicit boundary.
+   * This is cli.js's `autoMode.allow` for the opencode and pi judge. Unlike the
+   * trust lists this is not about the environment but about the judge's
+   * behaviour; it lives here because it is equally shared by every engine that
+   * runs ClaudeUI's judge. Empty = absent, as for the lists above.
+   */
+  judgeAllow?: string[]
+  /**
+   * Kinds of action the user wants to approve personally ("running database
+   * migrations"). Rendered as the User-Specified Block soft rule: the judge
+   * blocks a matching action unless the user asked for it in the chat, and a
+   * post-block "go ahead" clears it like any soft block. cli.js's
+   * `autoMode.soft_deny`. Empty = absent.
+   */
+  judgeBlock?: string[]
 }
 
 export interface VendorConfig {

@@ -69,6 +69,7 @@ import {
   type JudgeTransport
 } from '../automode/classifier'
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { buildClassifierEnvironment } from '../automode/environment'
 import {
   AutoModeDenialTracker,
   autoModeReviewBlock,
@@ -1893,30 +1894,23 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** Host-supplied ground truth for the classifier's Environment section
-   *  (plan phase 2 + 3). Trust slots come from the engine-SHARED
-   *  `~/.claude/ui/automode.json` and default to EMPTY — the policy renders
-   *  "nothing is trusted" for an empty slot, so omitting a list is the
-   *  restrictive choice, not the permissive one.
-   *
-   *  `repoVisibility` is only filled with a DEFINITE answer: leaving it unset
-   *  renders the policy's "unknown — assume PRIVATE for confidentiality, assume
-   *  PUBLIC for secret exposure" guidance, which is strictly more useful than
-   *  the bare word "unknown". */
+   *  (plan phase 2 + 3, ADR-083 §3/§4). What the judge is told is
+   *  {@link buildClassifierEnvironment}'s job, shared with pi; this method only
+   *  gathers the inputs. The trust and guidance lists come from the
+   *  engine-SHARED `~/.claude/ui/automode.json` (read once per session); the
+   *  user's permission rules are read FRESH on every approval, like the rules
+   *  the engine enforces, so a settings.json edit mid-session reaches the judge
+   *  on the next action. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
-    const trust = this.sharedAutoModeConfig()
-    const additionalDirectories = [...new Set(this.mergedUserPermissions().additionalDirectories)]
     const remotes = await this.sessionGitRemotes()
-    const visibility = this.sessionRepoVisibility
-    return {
+    return buildClassifierEnvironment({
       cwd: this.cwd,
       platform: process.platform,
-      ...(remotes.length ? { remotes } : {}),
-      ...(visibility && visibility !== 'unknown' ? { repoVisibility: visibility } : {}),
-      ...(additionalDirectories.length ? { additionalDirectories } : {}),
-      ...(trust.trustedDomains?.length ? { trustedDomains: trust.trustedDomains } : {}),
-      ...(trust.trustedRegistries?.length ? { trustedRegistries: trust.trustedRegistries } : {}),
-      ...(trust.protectedPatterns?.length ? { protectedPatterns: trust.protectedPatterns } : {})
-    }
+      remotes,
+      repoVisibility: this.sessionRepoVisibility,
+      permissions: this.mergedUserPermissions(),
+      shared: this.sharedAutoModeConfig()
+    })
   }
 
   /** Per-ACTION measured ground truth → the classifier's `{"meta":{…}}` line

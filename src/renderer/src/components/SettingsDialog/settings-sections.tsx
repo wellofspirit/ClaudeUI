@@ -2445,10 +2445,11 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4).
-    // Its own section rather than three rows inside each engine's auto-mode
-    // pane: they are stored in one shared file and derived into whichever
-    // engine's judge runs, so an engine-scoped home would misdescribe them.
+    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4), plus
+    // the judge guidance lists that share their file (ADR-083 §4). Its own
+    // section rather than rows inside each engine's auto-mode pane: they are
+    // stored in one shared file and derived into whichever engine's judge
+    // runs, so an engine-scoped home would misdescribe them.
     id: 'trust-lists',
     label: 'Trust & protection',
     icon: (
@@ -2472,7 +2473,7 @@ export const SECTIONS: Section[] = [
         key: 'trustLists',
         label: 'Trust & protection',
         keywords:
-          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist',
+          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist judge guidance routine allow block ask first',
         render: () => <TrustListsSection />
       }
     ]

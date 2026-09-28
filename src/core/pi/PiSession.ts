@@ -117,6 +117,7 @@ import {
   type ToolOutcome
 } from '../automode/ground-truth'
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
@@ -2224,10 +2225,14 @@ export class PiSession extends BaseSession {
     return this.sessionRepoVisibility
   }
 
-  /** Host-supplied ground truth for the classifier's Environment section. Trust
-   *  slots come from the engine-SHARED `~/.claude/ui/automode.json` and default
-   *  to EMPTY — the policy renders "nothing is trusted" for an empty slot, so
-   *  omitting a list is the restrictive choice.
+  /** Host-supplied ground truth for the classifier's Environment section
+   *  (ADR-083 §3/§4). What the judge is told is
+   *  {@link buildClassifierEnvironment}'s job, shared with opencode; this
+   *  method only gathers the inputs. The trust and guidance lists come from the
+   *  engine-SHARED `~/.claude/ui/automode.json` (read once per session); the
+   *  user's permission rules are the SAME `currentRules()` the permission
+   *  engine decides with, so the judge and the engine never disagree about what
+   *  the rules say — including across a `cachedRules` invalidation.
    *
    *  pi has no `additionalDirectories` enforcement of its own
    *  (permission-engine.ts documents the deliberate deferral), but the user's
@@ -2235,21 +2240,15 @@ export class PiSession extends BaseSession {
    *  user grant?", so it is reported to the judge exactly as opencode reports
    *  it. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
-    const trust = this.sharedAutoModeConfig()
-    const rules = this.currentRules()
-    const additionalDirectories = [...new Set(rules.additionalDirectories)]
     const remotes = await this.sessionGitRemotes()
-    const visibility = this.sessionRepoVisibility
-    return {
+    return buildClassifierEnvironment({
       cwd: this.cwd,
       platform: process.platform,
-      ...(remotes.length ? { remotes } : {}),
-      ...(visibility && visibility !== 'unknown' ? { repoVisibility: visibility } : {}),
-      ...(additionalDirectories.length ? { additionalDirectories } : {}),
-      ...(trust.trustedDomains?.length ? { trustedDomains: trust.trustedDomains } : {}),
-      ...(trust.trustedRegistries?.length ? { trustedRegistries: trust.trustedRegistries } : {}),
-      ...(trust.protectedPatterns?.length ? { protectedPatterns: trust.protectedPatterns } : {})
-    }
+      remotes,
+      repoVisibility: this.sessionRepoVisibility,
+      permissions: this.currentRules(),
+      shared: this.sharedAutoModeConfig()
+    })
   }
 
   /** Per-ACTION measured ground truth → the classifier's `{"meta":{…}}` line
