@@ -1,7 +1,8 @@
 # ADR-081: ClaudeUI makes the opencode and pi auto-mode judge's model call itself, and the opencode fork is retired
 
 **Status:** Accepted (2026-09-28; owner rulings of the same day, one open item in §5). Implementation is arc 1 of the 3.6
-line on branch `harnesses`.
+line on branch `harnesses`. §4's reasoning effort and output cap are amended by
+[ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (2026-09-29).
 **Supersedes:** [ADR-037 (engine fork patch policy)](adr-037_engine-fork-patch-policy.md) §1 and
 its opencode bump protocol (§3). Its §2, "pi: extend, don't patch", stands.
 **Amends:** [ADR-023](adr-023_opencode-automode-classifier.md) (the judge no longer runs through
@@ -101,13 +102,16 @@ the ChatGPT backend, after a forced token refresh.
 - The output cap and stop sequence are enforced on the client. The accumulator cuts the text at the
   stop string and keeps reading to `response.completed` so the usage arrives. A hard character
   budget, derived from `maxTokens`, aborts a runaway stream.
-- Reasoning effort is `none` where the model allows it, otherwise `low`.
+- Reasoning effort is `low` for both stages. It was `none` where the model allowed it until
+  [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §2: at `none`, GPT-6 Luna's
+  stage-1 grades scattered.
 
 **Chat completions.** Each route declares its capabilities, instead of scattering model checks:
 
 - OpenAI:
   - A reasoning model is one matching `^o\d`, or `gpt-N` with N ≥ 5 and no `-chat` suffix.
-  - Cap field `max_completion_tokens`.
+  - Cap field `max_completion_tokens`. It counts reasoning tokens, so a reasoning model gets 2048
+    tokens of headroom on top of the stage's budget (ADR-083 §2). The client-side text cap is unchanged.
   - `stop` only for non-reasoning models.
   - `temperature: 0` only for non-reasoning models, or gpt-5.1 and later with `reasoning_effort:"none"`.
   - The system message goes in the `developer` role for reasoning models.
