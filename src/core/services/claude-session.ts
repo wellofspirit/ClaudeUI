@@ -24,9 +24,14 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
-import { ClaudeItemStreamLifecycle } from './claude-item-stream'
+import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
-import { AGENT_ID_RE, readAgentIdentity, type AgentIdentity } from './agent-identity'
+import {
+  AGENT_ID_RE,
+  readAgentIdentity,
+  readAgentSidecar,
+  type AgentIdentity
+} from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
@@ -49,6 +54,7 @@ import { createCollabServer } from './collab-tool'
 import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../host'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
 import {
   resolveThinkingMode,
@@ -241,6 +247,16 @@ export class ClaudeSession extends BaseSession {
       }
       this.upsertMessage(message)
       this.send('session:message', message)
+    },
+    // Only the root transcript is kept main-side; a sub-agent's messages live in
+    // canonical state alone, which the channel's reducer fold covers.
+    retractToolUses: (messageId, toolUseIds, ownerToolUseId) => {
+      if (!ownerToolUseId) this.retractToolUsesFromHistory(messageId, toolUseIds)
+      this.send('session:tool-uses-retracted', {
+        messageId,
+        toolUseIds,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      })
     }
   })
   private abortController: AbortController | null = null
@@ -288,6 +304,8 @@ export class ClaudeSession extends BaseSession {
    * them stopped.
    */
   private liveTasks = new Map<string, { owner: string; taskType: string }>()
+  /** Agent ids whose stream events were dropped unplaced — logged once each. */
+  private unplacedAgentIds = new Set<string>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -1174,7 +1192,19 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // while the first was in flight doesn't get its own run() turn-start (the
     // channel push already happened), so this is where its turn actually
     // starts once cli.js begins working on it.
-    if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
+    //
+    // Only the MAIN agent's frames: a background agent keeps streaming while the
+    // session is idle (an idle self-resume, or a child still working after the
+    // turn ended), and its frames would otherwise flip the idle session to
+    // "running" — Stop button, typing indicator, turn clock, a prompt queued
+    // behind no turn — until some later result reset it. "An agent is working"
+    // is the task roster's to say, not the main turn's.
+    if (
+      (type === 'assistant' || type === 'stream_event') &&
+      !this.isProcessing &&
+      !msg.parent_tool_use_id &&
+      !msg.agent_id
+    ) {
       this.isProcessing = true
       this.turnStartedAtMs = Date.now()
       this.sendStatus()
@@ -1376,9 +1406,35 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleStreamEvent(msg: StreamEventMessage): void {
-    const routingId = this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined)
     const event = msg.event
-    if (event) this.itemStreams.handleEvent(event, routingId)
+    if (!event) return
+    const owner = this.streamEventOwner(msg)
+    if (owner === null) return
+    this.itemStreams.handleEvent(event, owner)
+  }
+
+  /**
+   * The item lane a stream event belongs to: a sub-agent's card, `undefined`
+   * for the main agent, or `null` for a sub-agent frame nothing can place
+   * (see {@link streamEventParent}). An agent_id-only frame goes through the
+   * same origin the agent's snapshots resolve to — `originByTaskId` first,
+   * then `taskIdMap` (which the spawn's tool_result also feeds).
+   */
+  private streamEventOwner(msg: StreamEventMessage): string | undefined | null {
+    const toolUseId = streamEventParent(
+      msg,
+      (agentId) => this.originByTaskId.get(agentId) ?? this.taskIdMap.get(agentId)
+    )
+    if (toolUseId !== null) return this.resolveTaskOwner(toolUseId)
+    const agentId = msg.agent_id ?? ''
+    if (!this.unplacedAgentIds.has(agentId)) {
+      this.unplacedAgentIds.add(agentId)
+      logger.debug(
+        'ClaudeSession',
+        `dropping stream events of unknown agent ${agentId} (no parent_tool_use_id)`
+      )
+    }
+    return null
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {
@@ -1633,7 +1689,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // be sent to the background, so this gates the card's button.
     const background =
       typeof msg.is_backgrounded === 'boolean' ? { isBackgrounded: msg.is_backgrounded } : {}
-    const origin = this.originByTaskId.get(taskId)
+    const origin =
+      this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
     // First run: this call IS the agent's identity.
     if (origin === undefined) {
@@ -1645,7 +1702,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         taskId,
         taskType,
         runIndex: 1,
-        ...background
+        ...background,
+        startedAt: Date.now()
       })
       return
     }
@@ -1662,7 +1720,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         taskId,
         taskType,
         runIndex: this.runCountByOrigin.get(origin) ?? 1,
-        ...background
+        ...background,
+        startedAt: Date.now()
       })
       return
     }
@@ -1679,7 +1738,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskType,
       runToolUseId: toolUseId,
       runIndex,
-      ...background
+      ...background,
+      startedAt: Date.now()
     })
   }
 
@@ -1700,8 +1760,50 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskId,
       taskType: live.taskType,
       runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
-      isBackgrounded: true
+      isBackgrounded: true,
+      // Read only when the record was dropped: a re-arm of the same run keeps
+      // that run's clock in the reducer.
+      startedAt: Date.now()
     })
+  }
+
+  /**
+   * The origin of an agent this object has never seen start, from the agent's
+   * `.meta.json` sidecar — or undefined, meaning this call is its first run.
+   *
+   * Only a session that resumed a transcript can meet an agent spawned by an
+   * earlier process, and the transcript seed (ADR-073 §5) already names every
+   * agent the MAIN agent spawned. What it cannot name is a NESTED agent: that
+   * spawn lives in the spawning sub-agent's transcript. When SendMessage
+   * resumes one, its task_started carries the SendMessage call's id while the
+   * relay parents its snapshots to the origin it reads from this same sidecar
+   * (ADR-078). A sidecar id that differs from the call's is therefore a
+   * resume; one that matches is the spawn itself.
+   *
+   * Recorded in `originByTaskId`, so the file is read at most once per agent:
+   * a miss makes this call the origin in the caller, which records it too.
+   */
+  private sidecarOrigin(taskId: string, taskType: string, toolUseId: string): string | undefined {
+    if (!this.resumeSessionId || taskType === 'local_bash') return undefined
+    // The transcript cli.js is writing now — the one whose sidecars it reads.
+    const sidecar = readAgentSidecar(
+      this.transcriptPathFor(this.sessionId ?? this.resumeSessionId),
+      taskId
+    )
+    if (!sidecar) {
+      logger.debug(
+        'ClaudeSession',
+        `no sidecar for unknown agent ${taskId}; ${toolUseId} is its origin`
+      )
+      return undefined
+    }
+    if (sidecar.toolUseId === toolUseId) return undefined
+    logger.debug(
+      'ClaudeSession',
+      `agent ${taskId} (depth ${sidecar.spawnDepth ?? '?'}, parent ${sidecar.parentAgentId ?? 'main'}) resumed by ${toolUseId}; origin ${sidecar.toolUseId} from its sidecar`
+    )
+    this.originByTaskId.set(taskId, sidecar.toolUseId)
+    return sidecar.toolUseId
   }
 
   /**
@@ -3309,6 +3411,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     for (const [origin, runs] of identity.runCounts) {
       if (!this.runCountByOrigin.has(origin)) this.runCountByOrigin.set(origin, runs)
     }
+  }
+
+  /** Drop retracted tool calls from a history message; a message left empty goes too. */
+  private retractToolUsesFromHistory(messageId: string, toolUseIds: string[]): void {
+    const idx = this.messageHistory.findIndex((m) => m.id === messageId)
+    if (idx < 0) return
+    const content = withoutToolUses(this.messageHistory[idx].content, toolUseIds)
+    if (content.length === 0) this.messageHistory.splice(idx, 1)
+    else this.messageHistory[idx] = { ...this.messageHistory[idx], content }
   }
 
   /** Upsert a message into the in-memory history (same dedup as the renderer). */

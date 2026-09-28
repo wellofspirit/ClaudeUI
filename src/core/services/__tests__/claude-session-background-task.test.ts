@@ -293,14 +293,16 @@ describe('ClaudeSession — task_started relays is_backgrounded', () => {
         taskId: BASH_TASK,
         taskType: 'local_bash',
         runIndex: 1,
-        isBackgrounded: false
+        isBackgrounded: false,
+        startedAt: expect.any(Number)
       },
       {
         toolUseId: 'toolu_bg_bash',
         taskId: 'b2',
         taskType: 'local_bash',
         runIndex: 1,
-        isBackgrounded: true
+        isBackgrounded: true,
+        startedAt: expect.any(Number)
       }
     ])
   })
@@ -327,7 +329,8 @@ describe('ClaudeSession — the task_updated flip', () => {
       taskId: BASH_TASK,
       taskType: 'local_bash',
       runIndex: 1,
-      isBackgrounded: true
+      isBackgrounded: true,
+      startedAt: expect.any(Number)
     })
   })
 
@@ -369,7 +372,8 @@ describe('ClaudeSession — the task_updated flip', () => {
       taskId: AGENT_TASK,
       taskType: 'local_agent',
       runIndex: 2,
-      isBackgrounded: true
+      isBackgrounded: true,
+      startedAt: expect.any(Number)
     })
   })
 })

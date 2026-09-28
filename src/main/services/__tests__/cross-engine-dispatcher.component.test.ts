@@ -2533,6 +2533,189 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     expect(core.getSnapshot().seq - before).toBe(reliableItemEvents)
   })
 
+  /**
+   * An idle self-resume of a background agent INSIDE the target (Patch E):
+   * its stream events carry `agent_id` and no `parent_tool_use_id`, while its
+   * snapshots arrive under the agent's ORIGIN Agent call. Before the fix they
+   * opened on the target's ROOT lane — the agent's `message_start` finished
+   * the root message in flight, whose later deltas then streamed into the
+   * agent's message.
+   */
+  it("routes an agent_id-only frame to its agent's origin lane, and drops one no task_started placed", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-agent-id' } as SDKMessage)
+    const frame = (agentId: string | undefined, event: Record<string, unknown>): SDKMessage =>
+      ({
+        type: 'stream_event',
+        ...(agentId ? { agent_id: agentId } : {}),
+        event
+      }) as unknown as SDKMessage
+    const textStart = { type: 'content_block_start', index: 0, content_block: { type: 'text' } }
+    const text = (t: string): Record<string, unknown> => ({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: t }
+    })
+
+    // The agent's first run: the origin, then a SendMessage run of it.
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-origin'
+    } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-run-2'
+    } as SDKMessage)
+    target.push(frame(undefined, { type: 'message_start', message: { id: 'root-message' } }))
+    target.push(frame(undefined, textStart))
+    target.push(frame(undefined, text('root ')))
+    target.push(frame('agent-x', { type: 'message_start', message: { id: 'agent-message' } }))
+    target.push(frame('agent-x', textStart))
+    target.push(frame('agent-x', text('agent')))
+    target.push(frame('agent-unknown', { type: 'message_start', message: { id: 'lost-message' } }))
+    target.push(frame('agent-unknown', textStart))
+    target.push(frame('agent-unknown', text('lost')))
+    target.push(frame(undefined, text('continues')))
+    // The relay parents the agent's snapshot to the origin: same lane as its partials.
+    target.push({
+      type: 'assistant',
+      parent_tool_use_id: 'native-origin',
+      message: {
+        id: 'agent-message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'agent' }]
+      }
+    } as unknown as SDKMessage)
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const chunksByMessage = new Map<string, string>()
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      if (channel !== 'session:item-delta') continue
+      const { target: t, chunk } = payload as { target: { messageId: string }; chunk: string }
+      chunksByMessage.set(t.messageId, (chunksByMessage.get(t.messageId) ?? '') + chunk)
+    }
+    expect(Object.fromEntries(chunksByMessage)).toEqual({
+      'root-message': 'root continues',
+      'agent-message': 'agent'
+    })
+    // The unplaceable agent reaches nothing, the root included.
+    expect(JSON.stringify(ctx.emit.mock.calls)).not.toContain('lost-message')
+    // The snapshot found the partials' state instead of arriving as a stray message.
+    expect(
+      ctx.emit.mock.calls.filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: { id: string } }).message.id === 'agent-message'
+      )
+    ).toEqual([])
+  })
+
+  /**
+   * A SendMessage-resumed run INSIDE the target (ADR-073 §1): cli.js re-emits
+   * `task_started` for the same task_id under the SendMessage call's id, the
+   * run's stream events carry that id as `parent_tool_use_id`, and its
+   * completed snapshots carry the ORIGIN's. Before the fix the two used
+   * different lane keys: the snapshot missed the partials' state and fell back
+   * to a plain `session:subagent-message`, and the partial lane sealed alone.
+   */
+  it("places a SendMessage-resumed run's partials and snapshot on one lane, the origin's", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-run-2' } as SDKMessage)
+    const frame = (parent: string, event: Record<string, unknown>): SDKMessage =>
+      ({ type: 'stream_event', parent_tool_use_id: parent, event }) as unknown as SDKMessage
+    const started = (toolUseId: string): SDKMessage =>
+      ({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'agent-r',
+        tool_use_id: toolUseId
+      }) as SDKMessage
+
+    target.push(started('native-origin'))
+    target.push(started('native-sendmessage'))
+    target.push(
+      frame('native-sendmessage', { type: 'message_start', message: { id: 'run2-message' } })
+    )
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'resumed ' }
+      })
+    )
+    // The relay parents the run's snapshot to the ORIGIN, mid-stream.
+    target.push({
+      type: 'assistant',
+      parent_tool_use_id: 'native-origin',
+      message: {
+        id: 'run2-message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'resumed ' }]
+      }
+    } as unknown as SDKMessage)
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'work' }
+      })
+    )
+    target.push(frame('native-sendmessage', { type: 'content_block_stop', index: 0 }))
+    target.push(frame('native-sendmessage', { type: 'message_stop' }))
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    // One item stream for the run's message, fed every delta.
+    const opens = ctx.emit.mock.calls.filter(
+      ([channel, payload]) =>
+        channel === 'session:item-open' &&
+        (payload as { target: { messageId: string } }).target.messageId === 'run2-message'
+    )
+    expect(opens).toHaveLength(1)
+    const chunks = ctx.emit.mock.calls
+      .filter(([channel]) => channel === 'session:item-delta')
+      .map(([, payload]) => payload as { target: { messageId: string }; chunk: string })
+      .filter((d) => d.target.messageId === 'run2-message')
+      .map((d) => d.chunk)
+    expect(chunks.join('')).toBe('resumed work')
+    // The snapshot found the partials' state instead of arriving as a stray message.
+    expect(
+      ctx.emit.mock.calls.filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: { id: string } }).message.id === 'run2-message'
+      )
+    ).toEqual([])
+  })
+
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({

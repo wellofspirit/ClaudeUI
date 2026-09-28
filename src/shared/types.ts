@@ -1161,6 +1161,14 @@ export interface TaskStartedData {
    * run. Absent when the engine or task type has no such notion.
    */
   isBackgrounded?: boolean
+  /**
+   * Epoch ms at which THIS run started, stamped by the emitter when it saw the
+   * start (the reducer is clock-free). A resume stamps its own run's start. It
+   * is what a running task's elapsed clock counts from: cli.js sends no
+   * elapsed ticks for an agent (`tool_progress` is Bash/REPL-only in stock
+   * use), so without it a running card had no clock at all.
+   */
+  startedAt?: number
 }
 
 /**
@@ -1170,7 +1178,7 @@ export interface TaskStartedData {
  */
 export type ActiveTask = Pick<
   TaskStartedData,
-  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded'
+  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
 >
 
 /** The terminal states an engine reports for a task run. */

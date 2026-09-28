@@ -21,6 +21,7 @@
  * the maps, and this module is the one reader of it.
  */
 import * as fs from 'fs'
+import * as path from 'path'
 import * as readline from 'readline'
 import { extractToolResultContent } from './tool-result-content'
 
@@ -198,6 +199,61 @@ export function readAgentIdentity(transcriptPath: string): Promise<AgentIdentity
       resolve({ origins, runAliases, runCounts })
     })
   })
+}
+
+/** What an agent's `.meta.json` sidecar says about its spawn (the fields read here). */
+export interface AgentSidecar {
+  /** The tool_use id of the call that spawned the agent: its origin. */
+  toolUseId: string
+  /** The spawning agent's id, for an agent spawned inside another agent. */
+  parentAgentId?: string
+  /** 1 for an agent the main agent spawned, N+1 for one spawned at depth N. */
+  spawnDepth?: number
+}
+
+/** A task id is interpolated into a file name below; anything else is refused. */
+const SIDECAR_AGENT_ID_RE = /^[A-Za-z0-9_-]+$/
+
+/**
+ * Read the sidecar cli.js keeps beside an agent's transcript:
+ * `<transcript without .jsonl>/subagents/agent-<agentId>.meta.json`.
+ *
+ * It records the tool_use id that spawned the agent, and cli.js reads it back
+ * on every resume to parent the resumed run's snapshots (see
+ * `patch/subagent-streaming/README.md`, Patch E). It is the only record of a
+ * NESTED agent's origin the parent transcript cannot give: that spawn lives in
+ * the spawning sub-agent's transcript, so {@link readAgentIdentity} never sees
+ * it (ADR-078, the second open gap).
+ *
+ * Synchronous: the file is a few hundred bytes and callers read it at most
+ * once per agent they cannot otherwise place. Only the flat `subagents/`
+ * directory is read; an agent cli.js files under a subdirectory of it
+ * (`agentTranscriptSubdirs`) is not found. Missing, unreadable or invalid →
+ * null, never a throw.
+ */
+export function readAgentSidecar(transcriptPath: string, agentId: string): AgentSidecar | null {
+  if (!SIDECAR_AGENT_ID_RE.test(agentId)) return null
+  const file = path.join(
+    transcriptPath.replace(/\.jsonl$/, ''),
+    'subagents',
+    `agent-${agentId}.meta.json`
+  )
+  let raw: unknown
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
+  } catch {
+    return null
+  }
+  if (!isRecord(raw)) return null
+  const toolUseId = stringField(raw, 'toolUseId')
+  if (!toolUseId) return null
+  const parentAgentId = stringField(raw, 'parentAgentId')
+  const spawnDepth = typeof raw.spawnDepth === 'number' ? raw.spawnDepth : undefined
+  return {
+    toolUseId,
+    ...(parentAgentId ? { parentAgentId } : {}),
+    ...(spawnDepth !== undefined ? { spawnDepth } : {})
+  }
 }
 
 function collectToolResults(line: unknown, into: TranscriptToolResult[]): void {

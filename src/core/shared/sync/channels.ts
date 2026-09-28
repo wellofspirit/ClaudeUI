@@ -167,6 +167,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Removes messages by id and clears in-flight streaming buffers.'
   },
+  'session:tool-uses-retracted': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Removes tool calls cut off mid-stream (never run, never answered) and their keyed blocks from one message.'
+  },
   'session:tool-result': {
     cls: 'replicated',
     ring: true,

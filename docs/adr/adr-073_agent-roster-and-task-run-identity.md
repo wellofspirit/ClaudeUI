@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -166,6 +166,14 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   and the reducer **merges** rather than replaces, so a usage tick cannot blank the clock. A resumed
   run's `tool_progress` is reported against the SendMessage call, so its `tool_name` is withheld and
   the origin's is kept.
+  _Correction (2026-09-27, `a3c5d1c7`):_ in stock local use `tool_progress` carries **no clock for an
+  agent**. Its producers in 2.1.280 are Bash/PowerShell progress (only under `CLAUDE_CODE_REMOTE`),
+  REPL, API-retry frames (`elapsed_time_seconds: 0`), and a 30 s main-agent heartbeat keyed
+  `<id>-heartbeat-N`, which matches no card. A usage-only `task_progress` then left the reducer's
+  default `0`, and a running Task card read "0s" for its whole run. `session:task-started` now
+  carries the run's `startedAt`, stamped by the emitter; a re-reported start keeps it and a resume
+  starts a new one. The card and the Tasks panel count live from it and show the run's duration once
+  it ends.
 - The legacy user-message `<task-notification>` XML path, kept for pre-2.1.241 binaries, resolves
   through the origin exactly as the system-message path does.
 - `deriveTaskState` settles a **foreground** task on a terminal notification too (ADR-040 calls it

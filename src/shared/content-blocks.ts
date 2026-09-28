@@ -77,3 +77,25 @@ export function mergeContentBlocks(
 
   return [...preserved, ...newBlocks]
 }
+
+/**
+ * Removes the given tool calls from a message's content together with every
+ * block keyed to them — the call's result, a judge's review, a pre-ask denial.
+ * Shared by the main-process transcript and the SyncCore reducer so a
+ * retraction reads the same everywhere (see `session:tool-uses-retracted`).
+ */
+export function withoutToolUses(
+  blocks: ContentBlock[],
+  toolUseIds: readonly string[]
+): ContentBlock[] {
+  return blocks.filter(
+    (b) =>
+      !(
+        (b.type === 'tool_use' ||
+          b.type === 'tool_result' ||
+          b.type === 'tool_review' ||
+          b.type === 'permission_denial') &&
+        toolUseIds.includes(b.toolUseId)
+      )
+  )
+}

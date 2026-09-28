@@ -3,13 +3,6 @@ import type { ContentBlock } from '../../../../shared/types'
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
-export function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`
-  const m = Math.floor(seconds / 60)
-  const s = Math.round(seconds % 60)
-  return `${m}m ${s}s`
-}
-
 /**
  * Scan a message list for the tool_use block and its matching tool_result.
  *
