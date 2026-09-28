@@ -35,7 +35,7 @@ export class ModelUnavailableError extends Error {
   constructor(engineId: EngineId, requested: string) {
     super(
       `Model "${requested}" is no longer available for ${engineId}. ` +
-        `Pick an available model, or change the configured default in Settings → Engines → ${engineId}.`
+        `Pick an available model, or change the configured default in Settings › Models & providers › Default models (${engineId}).`
     )
     this.name = 'ModelUnavailableError'
     this.engineId = engineId

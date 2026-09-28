@@ -2400,7 +2400,7 @@ export class CrossEngineDispatcher {
     if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into opencode. Ask the user to set ' +
-          'Engines › opencode › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › opencode (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/opencode.json), or pass `model` explicitly.'
       )
     }
@@ -3461,7 +3461,7 @@ export class CrossEngineDispatcher {
     if (!model) {
       return errorResult(
         'No model is configured for cross-engine dispatch into Claude. Ask the user to set ' +
-          'Engines › Claude › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › Claude (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/claude.json), or pass `model` explicitly.'
       )
     }
@@ -4266,7 +4266,7 @@ export class CrossEngineDispatcher {
     if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into pi. Ask the user to set ' +
-          'Engines › pi › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › pi (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/pi.json), or pass `model` explicitly.'
       )
     }
@@ -5408,7 +5408,7 @@ export class CrossEngineDispatcher {
       if (model === undefined) {
         throw new Error(
           'Codex reported no usable model for a dispatch target. Ask the user to set ' +
-            'Engines › codex › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+            'Settings › Cross-engine dispatch › Dispatch into › Codex (the `dispatch.defaultModel` field in ' +
             '~/.claude/ui/engines/codex.json), or pass `model` explicitly.'
         )
       }

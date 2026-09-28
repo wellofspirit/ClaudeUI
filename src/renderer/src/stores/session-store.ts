@@ -382,7 +382,7 @@ export function staleDefaultModelMessage(engineId: EngineId, model: string): str
     )
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
-    `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
+    `Pick a model in the picker, or change the default in Settings › Models & providers › Default models (${engineMeta(engineId).label}).`
   )
 }
 
