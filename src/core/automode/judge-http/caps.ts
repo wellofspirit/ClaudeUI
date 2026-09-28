@@ -7,7 +7,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { JudgeCaps, JudgeRouteKind, JudgeWire } from './types'
+import type { JudgeRequest } from '../classifier'
+import type { JudgeCaps, JudgeRouteKind, JudgeWire, ResolvedJudgeRoute } from './types'
 
 /** Which wire a route kind speaks. */
 export function wireForKind(kind: JudgeRouteKind): JudgeWire {
@@ -162,6 +163,19 @@ export function reasoningFields(
   stage: 'fast' | 'thinking' | undefined
 ): Readonly<Record<string, unknown>> {
   return caps.reasoning[stage ?? 'thinking']
+}
+
+/**
+ * The output cap a body sends, before the caps decide whether it is sent at
+ * all: the request's `maxTokens`, clamped to the route's catalog ceiling when
+ * both are known. No `maxTokens`, no cap — the ceiling alone never adds one.
+ */
+export function outputCapValue(
+  route: Pick<ResolvedJudgeRoute, 'maxOutputTokens'>,
+  req: Pick<JudgeRequest, 'maxTokens'>
+): number | undefined {
+  if (req.maxTokens === undefined || route.maxOutputTokens === undefined) return req.maxTokens
+  return Math.min(req.maxTokens, route.maxOutputTokens)
 }
 
 /**

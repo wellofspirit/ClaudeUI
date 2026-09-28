@@ -9,7 +9,7 @@
  */
 
 import type { JudgeRequest } from '../classifier'
-import { judgeCacheKey, reasoningFields } from './caps'
+import { judgeCacheKey, outputCapValue, reasoningFields } from './caps'
 import type { SseFrame } from './sse'
 import {
   JudgeTextAccumulator,
@@ -35,7 +35,8 @@ import {
  *   (OpenAI reasoning models), otherwise `system`. With `cacheMarkerOnSystem`
  *   it becomes one text part carrying `cache_control` (Anthropic via
  *   OpenRouter caches only what is marked).
- * - The cap is sent under the caps' field name only when the request has one.
+ * - The cap is sent under the caps' field name only when the request has one,
+ *   clamped to the route's catalog ceiling (`outputCapValue`).
  * - `stop` only when the route accepts it and the request has any; otherwise
  *   the reader still enforces it client-side.
  */
@@ -57,11 +58,12 @@ export function buildChatBody(
     ...caps.extraBody,
     ...reasoningFields(caps, req.stage)
   }
+  const cap = outputCapValue(route, req)
   if (
-    req.maxTokens !== undefined &&
+    cap !== undefined &&
     (caps.outputCap === 'max_tokens' || caps.outputCap === 'max_completion_tokens')
   ) {
-    body[caps.outputCap] = req.maxTokens
+    body[caps.outputCap] = cap
   }
   if (caps.supportsStop && req.stopSequences?.length) body.stop = [...req.stopSequences]
   if (caps.temperature !== null) body.temperature = caps.temperature

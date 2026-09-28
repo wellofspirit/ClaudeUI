@@ -62,6 +62,21 @@ export interface JudgeUsageSample {
   costUsd: number | null
 }
 
+/**
+ * Who pays for a route's calls — what a judge usage row is attributed to
+ * (ADR-081 §5). Credential-free by construction: `accountKey` is ADR-071 §3's
+ * key (a digest for an API key), `accountLabel` its display half.
+ */
+export interface JudgeRouteAccount {
+  /** The engine-native provider id the judge model names (`openrouter`, `openai-codex`, …). */
+  vendorId: string
+  /** The vault account id (ChatGPT), else null. */
+  accountId: string | null
+  accountKey: string
+  accountLabel: string | null
+  billingType: 'subscription' | 'apiKey'
+}
+
 /** Everything needed to make ONE call. Holds credential material — never log or serialize it. */
 export interface ResolvedJudgeRoute {
   kind: JudgeRouteKind
@@ -75,6 +90,13 @@ export interface ResolvedJudgeRoute {
   caps: JudgeCaps
   /** Human-readable, credential-free, for logs and errors, e.g. "openrouter · z-ai/glm-4.6". */
   label: string
+  account: JudgeRouteAccount
+  /**
+   * The catalog's output ceiling for the model, when it states one. A request's
+   * `maxTokens` above it is clamped to it: a provider may reject a cap larger
+   * than the model's own.
+   */
+  maxOutputTokens?: number
   /** ChatGPT only: force a token refresh and return a fresh route, or null when that failed. */
   reauthorize?: () => Promise<ResolvedJudgeRoute | null>
 }

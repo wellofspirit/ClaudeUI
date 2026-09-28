@@ -8,7 +8,7 @@
  */
 
 import type { JudgeRequest } from '../classifier'
-import { judgeCacheKey, reasoningFields } from './caps'
+import { judgeCacheKey, outputCapValue, reasoningFields } from './caps'
 import type { SseFrame } from './sse'
 import {
   JudgeTextAccumulator,
@@ -31,7 +31,7 @@ import {
  * <max_output_tokens>, <temperature>, <prompt_cache_key>}`.
  *
  * `instructions` is the system prompt verbatim. `max_output_tokens` only when
- * the caps name it (never on ChatGPT). The Responses API has no `stop`, so it is
+ * the caps name it (never on ChatGPT), clamped to the route's catalog ceiling. The Responses API has no `stop`, so it is
  * never sent here, whatever the caps say.
  */
 export function buildResponsesBody(
@@ -47,9 +47,8 @@ export function buildResponsesBody(
     ...caps.extraBody,
     ...reasoningFields(caps, req.stage)
   }
-  if (req.maxTokens !== undefined && caps.outputCap === 'max_output_tokens') {
-    body.max_output_tokens = req.maxTokens
-  }
+  const cap = outputCapValue(route, req)
+  if (cap !== undefined && caps.outputCap === 'max_output_tokens') body.max_output_tokens = cap
   if (caps.temperature !== null) body.temperature = caps.temperature
   if (caps.promptCacheKey) body.prompt_cache_key = judgeCacheKey(req.system)
   return body

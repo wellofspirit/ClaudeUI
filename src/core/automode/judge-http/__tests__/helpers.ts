@@ -8,6 +8,15 @@ import type { JudgeRouteKind, ResolvedJudgeRoute } from '../types'
 
 export const FAKE_KEY = 'sk-test-0000000000000000000000'
 
+/** A credential-free account every fixture route is billed to. */
+export const FAKE_ACCOUNT: ResolvedJudgeRoute['account'] = {
+  vendorId: 'test-vendor',
+  accountId: null,
+  accountKey: 'test-vendor:key:0000000000000000',
+  accountLabel: 'test-vendor key …0000',
+  billingType: 'apiKey'
+}
+
 export function routeFor(
   kind: JudgeRouteKind,
   model: string,
@@ -16,6 +25,7 @@ export function routeFor(
     headers?: Record<string, string>
     url?: string
     reauthorize?: ResolvedJudgeRoute['reauthorize']
+    maxOutputTokens?: number
   } = {}
 ): ResolvedJudgeRoute {
   const wire = wireForKind(kind)
@@ -31,6 +41,8 @@ export function routeFor(
     headers: opts.headers ?? { Authorization: `Bearer ${FAKE_KEY}` },
     caps: capsFor(kind, model, { reasoning: opts.reasoning }),
     label: `${kind} · ${model}`,
+    account: FAKE_ACCOUNT,
+    ...(opts.maxOutputTokens !== undefined ? { maxOutputTokens: opts.maxOutputTokens } : {}),
     ...(opts.reauthorize ? { reauthorize: opts.reauthorize } : {})
   }
 }

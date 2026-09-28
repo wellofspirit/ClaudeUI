@@ -71,6 +71,17 @@ describe('buildResponsesBody', () => {
     })
   })
 
+  it("custom-responses clamps max_output_tokens to the route's catalog ceiling", () => {
+    const route = routeFor('custom-responses', 'gpt-5-mini', { maxOutputTokens: 32 })
+    expect(buildResponsesBody(route, STAGE1).max_output_tokens).toBe(32)
+    expect(buildResponsesBody(route, { system: SYSTEM, user: USER })).not.toHaveProperty(
+      'max_output_tokens'
+    )
+    // ChatGPT never sends one, ceiling or not.
+    const chatgpt = routeFor('chatgpt', 'gpt-5.1-codex-mini', { maxOutputTokens: 32 })
+    expect(buildResponsesBody(chatgpt, STAGE1)).not.toHaveProperty('max_output_tokens')
+  })
+
   it('serializes byte-identically across two calls that differ only in the user turn', () => {
     const route = routeFor('chatgpt', 'gpt-5.1-codex-mini')
     const a = JSON.stringify(buildResponsesBody(route, { ...STAGE1, user: 'FIRST-USER-TURN' }))

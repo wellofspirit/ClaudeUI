@@ -123,6 +123,19 @@ describe('buildChatBody', () => {
     expect(body).not.toHaveProperty('stop')
   })
 
+  it("clamps the cap to the route's catalog ceiling, under either field name", () => {
+    const openrouter = routeFor('openrouter', 'z-ai/glm-4.6', { maxOutputTokens: 4096 })
+    expect(buildChatBody(openrouter, STAGE2).max_tokens).toBe(4096)
+    // Under the ceiling, the request's own budget stands.
+    expect(buildChatBody(openrouter, STAGE1).max_tokens).toBe(64)
+    const openai = routeFor('openai', 'gpt-5-mini', { maxOutputTokens: 1000 })
+    expect(buildChatBody(openai, STAGE2).max_completion_tokens).toBe(1000)
+    // A ceiling never adds a cap the request didn't ask for.
+    expect(buildChatBody(openrouter, { system: SYSTEM, user: USER })).not.toHaveProperty(
+      'max_tokens'
+    )
+  })
+
   it('does not alias the request stop array', () => {
     const req = { ...STAGE1, stopSequences: ['</block>'] }
     const body = buildChatBody(routeFor('custom-chat', 'm'), req)
