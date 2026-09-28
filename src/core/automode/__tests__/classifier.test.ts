@@ -678,6 +678,33 @@ describe('classify (orchestrator)', () => {
     await classify(base, judge)
     expect(reqs(judge)[0].maxTokens).toBe(STAGE1_BOTH_MAX_TOKENS)
   })
+
+  it('tells the transport which stage is asking, and hands each call its own signal', async () => {
+    // The HTTP transport (ADR-081) picks per-stage reasoning settings from
+    // `stage`; `signal` is what a stage timeout aborts.
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'both' }, judge)
+    const [s1, s2] = reqs(judge)
+    expect(s1.stage).toBe('fast')
+    expect(s2.stage).toBe('thinking')
+    expect(s1.signal).toBeInstanceOf(AbortSignal)
+    expect(s2.signal).toBeInstanceOf(AbortSignal)
+    expect(s1.signal).not.toBe(s2.signal)
+    // A call that answered in time is never aborted.
+    expect(s1.signal?.aborted).toBe(false)
+    expect(s2.signal?.aborted).toBe(false)
+
+    const fast = vi.fn().mockResolvedValue('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'fast' }, fast)
+    expect(reqs(fast)[0].stage).toBe('fast')
+
+    const thinking = vi.fn().mockResolvedValue('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'thinking' }, thinking)
+    expect(reqs(thinking)[0].stage).toBe('thinking')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -753,6 +780,76 @@ describe('classify — stage timeouts', () => {
         error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`
       })
       expect(judge).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a stage timeout ABORTS the request signal — and only once the budget is spent', async () => {
+    vi.useFakeTimers()
+    try {
+      const signals: AbortSignal[] = []
+      const judge = vi.fn((req: JudgeRequest) => {
+        if (req.signal) signals.push(req.signal)
+        return hang()
+      })
+      const p = classify({ ...base, twoStageMode: 'fast' }, judge)
+      await vi.advanceTimersByTimeAsync(STAGE1_TIMEOUT_MS - 1)
+      expect(signals).toHaveLength(1)
+      expect(signals[0].aborted).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signals[0].aborted).toBe(true)
+      // The timeout message still wins over whatever the aborted transport says.
+      expect((await p).error).toBe(`auto-mode judge timed out after ${STAGE1_TIMEOUT_MS} ms`)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an escalated stage 2 that times out aborts ITS signal, not the stage-1 one', async () => {
+    vi.useFakeTimers()
+    try {
+      const signals: AbortSignal[] = []
+      const judge = vi.fn((req: JudgeRequest) => {
+        if (req.signal) signals.push(req.signal)
+        return signals.length === 1 ? Promise.resolve('<block>yes</block>') : hang()
+      })
+      const p = classify({ ...base, twoStageMode: 'both' }, judge)
+      await vi.advanceTimersByTimeAsync(STAGE2_TIMEOUT_MS)
+      expect(await p).toMatchObject({
+        unavailable: true,
+        error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`
+      })
+      expect(signals).toHaveLength(2)
+      expect(signals[0].aborted).toBe(false)
+      expect(signals[1].aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a transport that rejects on abort cannot replace the timeout error', async () => {
+    // The shape the HTTP transport has: aborting its signal makes it reject
+    // straight away with its own message.
+    vi.useFakeTimers()
+    try {
+      const judge = vi.fn(
+        (req: JudgeRequest) =>
+          new Promise<string>((_resolve, reject) => {
+            req.signal?.addEventListener('abort', () =>
+              reject(new Error('auto-mode judge aborted'))
+            )
+          })
+      )
+      const p = classify({ ...base, twoStageMode: 'thinking' }, judge)
+      await vi.advanceTimersByTimeAsync(STAGE2_TIMEOUT_MS)
+      expect(await p).toEqual({
+        block: true,
+        stage: 'error',
+        unavailable: true,
+        error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`
+      })
     } finally {
       vi.useRealTimers()
     }

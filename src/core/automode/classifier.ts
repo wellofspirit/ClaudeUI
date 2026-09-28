@@ -129,16 +129,29 @@ export interface ClassifyResult {
 }
 
 /**
- * One judge call. `maxTokens` / `stopSequences` are **advisory**: the classifier
- * always populates them so a transport that can honour them (a direct-API one)
- * gets cli.js's cost profile, but a transport that cannot (opencode's session
- * prompt API exposes neither — ADR-023) simply ignores them.
+ * One judge call. The classifier always populates `maxTokens` / `stopSequences`
+ * (cli.js's cost profile). The HTTP transport (ADR-081) honours both — in the
+ * request where the provider accepts them, client-side where it does not — and
+ * only a transport that cannot honour them ignores them.
  */
 export interface JudgeRequest {
   system: string
   user: string
   maxTokens?: number
   stopSequences?: string[]
+  /**
+   * Aborted when the stage blows its {@link STAGE1_TIMEOUT_MS} /
+   * {@link STAGE2_TIMEOUT_MS} budget, so a timed-out request stops instead of
+   * running on unobserved. A transport that cannot cancel ignores it — the
+   * timeout still fails the stage either way.
+   */
+  signal?: AbortSignal
+  /**
+   * Which stage is asking: `fast` for stage 1 (both the `both`-mode filter and
+   * the `fast`-mode decider), `thinking` for stage 2. The HTTP transport picks
+   * its per-stage reasoning settings from it; a transport with none ignores it.
+   */
+  stage?: 'fast' | 'thinking'
 }
 
 /** Inject the model call: a judge request → raw completion text. */
@@ -335,6 +348,9 @@ export const STAGE2_TIMEOUT_MS = 120_000
 /**
  * Reject with a timeout error if `promise` has not settled within `ms`.
  *
+ * `onTimeout` runs when the budget fires — `classify()` aborts the request's
+ * signal there, so the timed-out call is cancelled rather than left running.
+ *
  * Deliberately plain (`setTimeout` + `Promise.race`-by-hand, no injected clock):
  * a fake-timer test drives it exactly as the real thing runs, and an injected
  * clock would be a second thing to keep in sync for no test power.
@@ -347,9 +363,19 @@ export const STAGE2_TIMEOUT_MS = 120_000
  * unhandled rejection because a judge died 3 minutes late is not an acceptable
  * failure mode for a security gate.
  */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+  onTimeout?: () => void
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms)
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms} ms`))
+      // After the reject: whatever the cancelled transport throws next lands on
+      // the already-settled path below and cannot replace the timeout message.
+      onTimeout?.()
+    }, ms)
     promise.then(
       (value) => {
         clearTimeout(timer)
@@ -552,16 +578,30 @@ export async function classify(
    * The message rides out on {@link ClassifyResult.error} rather than being
    * logged here: this module is pure and must not import a logger (its tests
    * import it without mocking one).
+   *
+   * Each call gets its own abort signal, fired by the stage timeout: a judge
+   * request nobody is waiting for any more should stop spending tokens.
    */
   const call = async (
-    req: Omit<JudgeRequest, 'system' | 'user'> & { instruction: string; timeoutMs: number }
+    req: Omit<JudgeRequest, 'system' | 'user' | 'signal' | 'stage'> & {
+      stage: 'fast' | 'thinking'
+      instruction: string
+      timeoutMs: number
+    }
   ): Promise<{ ok: true; raw: string } | { ok: false; error: string }> => {
     const { instruction, timeoutMs, ...rest } = req
+    const controller = new AbortController()
     try {
       const raw = await withTimeout(
-        judge({ system, user: buildUserPrompt(input, instruction), ...rest }),
+        judge({
+          system,
+          user: buildUserPrompt(input, instruction),
+          ...rest,
+          signal: controller.signal
+        }),
         timeoutMs,
-        'auto-mode judge'
+        'auto-mode judge',
+        () => controller.abort()
       )
       return { ok: true, raw }
     } catch (err) {
@@ -571,6 +611,7 @@ export async function classify(
 
   const runStage2 = async (): Promise<ClassifyResult> => {
     const out = await call({
+      stage: 'thinking',
       instruction: STAGE2_INSTRUCTION,
       maxTokens: STAGE2_MAX_TOKENS,
       timeoutMs: STAGE2_TIMEOUT_MS
@@ -597,6 +638,7 @@ export async function classify(
     // Sole decider: no stop sequence (cli.js omits it in `fast` so the reason
     // survives), a larger budget, and an unparseable reply blocks.
     const out = await call({
+      stage: 'fast',
       instruction: STAGE1_FAST_INSTRUCTION,
       maxTokens: STAGE1_FAST_MAX_TOKENS,
       timeoutMs: STAGE1_TIMEOUT_MS
@@ -617,6 +659,7 @@ export async function classify(
 
   // `both` — stage 1 is a veto-free filter: allow, or escalate.
   const out1 = await call({
+    stage: 'fast',
     instruction: STAGE1_BOTH_INSTRUCTION,
     maxTokens: STAGE1_BOTH_MAX_TOKENS,
     timeoutMs: STAGE1_TIMEOUT_MS,
