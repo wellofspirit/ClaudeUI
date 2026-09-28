@@ -254,14 +254,15 @@ describe('buildPolicyPrompt — the Environment slots', () => {
   })
 })
 
-describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, ADR-037 P3)', () => {
+describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, ADR-081 §4)', () => {
   // The judge's system prompt is ~24 KB and is re-sent on every classification.
-  // The patched opencode judge route caches it — an explicit `cache_control`
-  // breakpoint where the provider takes one, automatic prefix caching where it
-  // does not. BOTH require the rendered document to be byte-identical between
-  // calls for the same environment: one drifting character (a timestamp, a
-  // counter, a re-ordered Set) invalidates the prefix and silently restores
-  // full price on every call, with no error anywhere to notice it by.
+  // The HTTP judge transport caches it — an explicit `cache_control` breakpoint
+  // where the provider takes one, automatic prefix caching keyed by a hash of
+  // the prompt where it does not. BOTH require the rendered document to be
+  // byte-identical between calls for the same environment: one drifting
+  // character (a timestamp, a counter, a re-ordered Set) invalidates the prefix
+  // and silently restores full price on every call, with no error anywhere to
+  // notice it by.
   //
   // Determinism is asserted, never a golden hash: a hash pin would fail on
   // every legitimate policy edit while catching nothing this does not.

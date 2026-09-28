@@ -10,7 +10,7 @@
  * - OPENCODE_DISABLE_SHARE=1, the kill switch share-next.ts reads at module
  *   load. Config-level `share` is user-overridable; this is not.
  * - OPENCODE_SERVER_PASSWORD is still set (Basic auth on the local server).
- * - OPENCODE_CONFIG_CONTENT carries autoupdate:false (ADR-037).
+ * - OPENCODE_CONFIG_CONTENT carries autoupdate:false (ADR-081 §7).
  * - The parent environment is inherited, not replaced.
  */
 

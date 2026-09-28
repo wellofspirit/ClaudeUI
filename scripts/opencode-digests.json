@@ -1,0 +1,25 @@
+{
+  "version": "1.18.32",
+  "packages": {
+    "opencode-windows-x64": {
+      "integrity": "sha512-9uy0owugtP9nkuylzN9+O9zWUIxt4X+KYwsREVk4G27PCfxccj+xIT7yxO9hCVtrF+DVgiJ59xDpiANE9UZrrQ==",
+      "binarySha256": "cf664aa1da32b788f9b2699b84a9bb9be30b7e025693b90f9b85829d5fe4e252"
+    },
+    "opencode-darwin-arm64": {
+      "integrity": "sha512-sDsHk/A6FNqeN5NuAiII6AAhi4pJIFcIY0S2yjG9gToIIVaqrQRaHQ6g0kpoVqTiMci8tvaND6tWD4eDT3ahFw==",
+      "binarySha256": "a3c45d4e1d6620b436851f1ef6b25c71befcf06a382e279a1eb1c2196424395e"
+    },
+    "opencode-darwin-x64": {
+      "integrity": "sha512-ZO/4GTJV/q2jlZ8apN1OfgTdD4m9bkdgLsEWYYDK6O8eTljIFgwhRMrJw1ozucU/D6lLQsA3CX/sS56UtlsTjQ==",
+      "binarySha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "opencode-linux-x64": {
+      "integrity": "sha512-CIatvoyi8V5a56xyw6ZUnsKxB9wqYIZqfNeqUNWhBBY4aENAm907LP0xXAwL6tR0cYbqNl2+Dvx8mOqXIxbDeQ==",
+      "binarySha256": "513f500a1a5ea1dc7d865547ac87b32a8936334e8d5abd5b3ff585c45a170080"
+    },
+    "opencode-linux-arm64": {
+      "integrity": "sha512-SDMw716oYxxJ9CWDO5roCpziw98ANwPZSz6L8evUOHkFCq6OU31xZGQwv/T1ROJnoPNJKWODmm1vzS6s6uEgUA==",
+      "binarySha256": "7c6e67883fcb230b7d4cb1bfea821756ed8b320c1fb44e9c36c8e7fc8725826b"
+    }
+  }
+}

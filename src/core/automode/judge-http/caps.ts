@@ -110,7 +110,8 @@ export function capsFor(
 
     case 'openrouter': {
       // A reasoning model left to reason spends the whole budget thinking and
-      // returns empty text (observed on the fork path) — switch it off.
+      // returns empty text (observed on the retired opencode-fork judge path) —
+      // switch it off.
       const off = flags.reasoning ? { reasoning: { enabled: false } } : {}
       return {
         outputCap: 'max_tokens',

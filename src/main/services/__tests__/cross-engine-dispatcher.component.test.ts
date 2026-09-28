@@ -163,7 +163,7 @@ function storedAssistant(
   }
 }
 
-/** A stored USER message — the one the fork's `createUserMessage` writes BEFORE
+/** A stored USER message — the one opencode's `createUserMessage` writes BEFORE
  *  the turn is marked busy, i.e. the tail of history in the pre-busy window the
  *  reconcile's completion-evidence check exists to reject. */
 function storedUser(
@@ -703,7 +703,7 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBe(true)
     expect(result.text).toContain('server exploded')
-    // The fork starts the turn BEFORE responding, so a rejection (or a dropped
+    // opencode starts the turn BEFORE responding, so a rejection (or a dropped
     // socket on an accepted request) can still leave one running — the old
     // code's missing abort is exactly how a dispatched agent kept editing files
     // after its caller had given up.

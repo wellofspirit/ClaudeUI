@@ -820,8 +820,8 @@ interface OpencodeTargetEntry {
    * first turn), and the gate the streaming tap applies before emitting
    * anything.
    *
-   * WHY (verified against the fork): aborting a turn does not stop its parts
-   * from being republished. `processor.ts`'s abort path waits 250 ms for
+   * WHY (verified against opencode's source): aborting a turn does not stop
+   * its parts from being republished. `processor.ts`'s abort path waits 250 ms for
    * in-flight tool calls, then rewrites each one as `status: 'error'` /
    * `interrupted: true` — which publishes `message.part.updated` events for the
    * OLD turn's message. A quick continuation turn is already `busy` by then, so
@@ -2632,8 +2632,8 @@ export class CrossEngineDispatcher {
         // anyway), this is the invariant on `settled` holding uniformly.
         entry.settled = null
         this.dismissPendingForTarget(entry.sessionId)
-        // ZOMBIE GUARD: the refusal may still have left a turn running — the
-        // fork's `promptAsync` handler forks the prompt with
+        // ZOMBIE GUARD: the refusal may still have left a turn running —
+        // opencode's `promptAsync` handler forks the prompt with
         // `startImmediately: true` and only THEN returns, and a transport-level
         // failure (a dropped socket on an accepted request) is indistinguishable
         // from a rejected one out here. An abort against a session that never
@@ -3050,8 +3050,8 @@ export class CrossEngineDispatcher {
           /*
            * COMPLETION-EVIDENCE CHECK. "Absent from the status map" alone does
            * NOT mean the turn finished — it also covers a turn that has not
-           * STARTED yet. Verified against the fork: `prompt_async` returns 204
-           * at FORK time, and the forked `prompt()` first runs
+           * STARTED yet. Verified against opencode's source: `prompt_async`
+           * returns 204 at FORK time, and the forked `prompt()` first runs
            * `createUserMessage` (a storage write) and only then enters
            * `runLoop`, whose first act is `status.set(sessionID, {type:'busy'})`.
            * A reconcile landing in that window sees an absent session for a

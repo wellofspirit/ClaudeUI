@@ -181,11 +181,12 @@ export function buildOpencodeConfigContent(
     // permissions on any reject, which carry no message. Ephemeral env-var
     // config only — never written to a user file (ADR-031).
     experimental: { continue_loop_on_deny: true },
-    // The binary we spawn is the VENDORED FORK (ADR-037): a self-update would
-    // replace it with an upstream build and silently drop every patch we carry.
-    // Version is owned by `package.json#opencodeCliVersion` + ensure-opencode,
-    // never by the running process. Ephemeral like the block above — a user
-    // config file is never rewritten to say this (ADR-031).
+    // The binary we spawn is the pinned, digest-checked upstream release that
+    // ensure-opencode vendors (ADR-081 §7): a ClaudeUI-spawned server must not
+    // replace it under a running session. Version is owned by
+    // `package.json#opencodeCliVersion` + `scripts/opencode-digests.json`, never
+    // by the running process. Ephemeral like the block above — a user config
+    // file is never rewritten to say this (ADR-031).
     autoupdate: false,
     // ADR-033 M2: the caller-identity plugin, loaded ONLY when vendored (dev
     // and packaged builds both resolve it via locatePluginFile()). Absent in

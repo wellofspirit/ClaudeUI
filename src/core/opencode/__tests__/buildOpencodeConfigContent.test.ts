@@ -9,8 +9,8 @@
  * - bridgedMcp arg merges Claude MCP servers alongside claudeui; claudeui is always first.
  * - experimental.continue_loop_on_deny keeps permission rejections non-fatal
  *   (Claude parity — Slice C).
- * - autoupdate is forced false so the vendored fork can't replace itself with
- *   an upstream build (ADR-037).
+ * - autoupdate is forced false so a spawned server can't replace the pinned,
+ *   digest-checked vendored binary under a running session (ADR-081 §7).
  *
  * Model/provider/agent fields are now written to opencode's own config file by
  * opencode-config.ts; they are no longer part of OPENCODE_CONFIG_CONTENT.
@@ -79,9 +79,9 @@ describe('buildOpencodeConfigContent', () => {
     expect(out.experimental).toEqual({ continue_loop_on_deny: true })
   })
 
-  // ── ADR-037: the spawned binary is the vendored FORK ──────────────────────
+  // ── ADR-081 §7: the spawned binary is the pinned, digest-checked release ──
 
-  it('forces autoupdate: false — a self-update would drop every patch we carry', () => {
+  it('forces autoupdate: false — a self-update would replace the pinned binary', () => {
     const out = parse()
     expect(out.autoupdate).toBe(false)
   })
