@@ -16,7 +16,8 @@
  *    also reported as a sub-total on the account and on each model row, so a
  *    surface can mark it without adding it. The old dashboard left it out of
  *    the totals and showed it in a section of its own; that is the thing this
- *    replaces.
+ *    replaces. Auto-mode judge calls (`origin 'judge'`, ADR-081 §5) are treated
+ *    the same way, as a second sub-total beside it.
  *  - AN UNPRICED TURN IS NEVER A ZERO (ADR-030). It raises a count, not a sum,
  *    and every grouping carries the counts beside its dollars.
  *  - DAYS ARE LOCAL. Buckets are stored in UTC so that any reader can group
@@ -48,7 +49,8 @@ import type {
   DashboardProvider,
   DashboardRange,
   DashboardScope,
-  UsageDashboardData
+  UsageDashboardData,
+  UsageOrigin
 } from '../../shared/types'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { providerIdForBucket, providerLabel } from '../../shared/provider-label'
@@ -210,9 +212,16 @@ function addBucket(totals: CostTotals, bucket: UsageBucketRow): void {
   totals.tokens.cacheRead += bucket.cacheReadTokens
 }
 
-/** The dispatched sub-total of a grouping, created on the first dispatch bucket. */
-function addDispatched(current: CostTotals | null, bucket: UsageBucketRow): CostTotals | null {
-  if (bucket.origin !== 'dispatch') return current
+/**
+ * One origin's sub-total of a grouping, created on the first bucket of that
+ * origin — the `dispatch` and `judge` parts a surface marks without adding.
+ */
+function addOriginPart(
+  current: CostTotals | null,
+  bucket: UsageBucketRow,
+  origin: UsageOrigin
+): CostTotals | null {
+  if (bucket.origin !== origin) return current
   const totals = current ?? emptyTotals()
   addBucket(totals, bucket)
   return totals
@@ -333,6 +342,7 @@ interface ModelAgg {
   modelId: string
   totals: CostTotals
   dispatched: CostTotals | null
+  judge: CostTotals | null
 }
 
 interface AccountAgg {
@@ -340,6 +350,7 @@ interface AccountAgg {
   providerId: string
   totals: CostTotals
   dispatched: CostTotals | null
+  judge: CostTotals | null
   models: Map<string, ModelAgg>
   /** Display cost per billing type, insertion-ordered — see {@link representativeBillingType}. */
   billing: Map<BillingType, number>
@@ -360,6 +371,7 @@ interface MachineAccountAgg {
   accountKey: string
   totals: CostTotals
   dispatched: CostTotals | null
+  judge: CostTotals | null
 }
 
 /** What one machine spent over the range, and the (provider, account) slices of it. */
@@ -605,6 +617,7 @@ export async function buildUsageDashboard(opts: {
         providerId,
         totals: emptyTotals(),
         dispatched: null,
+        judge: null,
         models: new Map(),
         billing: new Map(),
         machines: new Set(),
@@ -613,7 +626,8 @@ export async function buildUsageDashboard(opts: {
       provider.accounts.set(bucket.accountKey, account)
     }
     addBucket(account.totals, bucket)
-    account.dispatched = addDispatched(account.dispatched, bucket)
+    account.dispatched = addOriginPart(account.dispatched, bucket, 'dispatch')
+    account.judge = addOriginPart(account.judge, bucket, 'judge')
     account.billing.set(
       bucket.billingType,
       (account.billing.get(bucket.billingType) ?? 0) + display
@@ -631,12 +645,14 @@ export async function buildUsageDashboard(opts: {
         vendorId: bucket.vendorId,
         modelId: bucket.modelId,
         totals: emptyTotals(),
-        dispatched: null
+        dispatched: null,
+        judge: null
       }
       account.models.set(modelKey, model)
     }
     addBucket(model.totals, bucket)
-    model.dispatched = addDispatched(model.dispatched, bucket)
+    model.dispatched = addOriginPart(model.dispatched, bucket, 'dispatch')
+    model.judge = addOriginPart(model.judge, bucket, 'judge')
 
     if (scope === 'all') addToMachine(machines, deviceId, bucket, providerId)
 
@@ -691,11 +707,18 @@ function addToMachine(
   const key = `${providerId}${KEY_SEP}${bucket.accountKey}`
   let slice = machine.accounts.get(key)
   if (!slice) {
-    slice = { providerId, accountKey: bucket.accountKey, totals: emptyTotals(), dispatched: null }
+    slice = {
+      providerId,
+      accountKey: bucket.accountKey,
+      totals: emptyTotals(),
+      dispatched: null,
+      judge: null
+    }
     machine.accounts.set(key, slice)
   }
   addBucket(slice.totals, bucket)
-  slice.dispatched = addDispatched(slice.dispatched, bucket)
+  slice.dispatched = addOriginPart(slice.dispatched, bucket, 'dispatch')
+  slice.judge = addOriginPart(slice.judge, bucket, 'judge')
 }
 
 /**
@@ -726,7 +749,8 @@ function toMachines(
         providerId: slice.providerId,
         accountKey: slice.accountKey,
         totals: slice.totals,
-        dispatched: slice.dispatched
+        dispatched: slice.dispatched,
+        judge: slice.judge
       })
     )
     return {
@@ -794,7 +818,8 @@ function toProviders(
           vendorId: model.vendorId,
           modelId: model.modelId,
           totals: model.totals,
-          dispatched: model.dispatched
+          dispatched: model.dispatched,
+          judge: model.judge
         }))
         .sort(byDisplayCostThen((model) => model.modelId))
       // The name, in the order the sources deserve: one this machine READ, then
@@ -821,6 +846,7 @@ function toProviders(
         totals: account.totals,
         models,
         dispatched: account.dispatched,
+        judge: account.judge,
         // Under `local` these two are absent rather than trivially true, so the
         // payload a reader that knows nothing of the hub receives is the one it
         // received before this slice.

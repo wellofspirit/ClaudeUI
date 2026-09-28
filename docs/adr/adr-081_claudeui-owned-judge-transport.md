@@ -131,8 +131,8 @@ stage aborts its request instead of leaving it running.
 ### 5. Usage
 
 Every judge HTTP response that reports usage writes one `usage_event` through `recordUsageEvent`,
-inside the transport. The row is written even when `classify()` has already timed out, because the
-provider billed it either way.
+inside the transport. The row records whatever usage the provider reported before the call completed
+or was aborted.
 
 | Field                        | Value                                                                                                       |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------- |

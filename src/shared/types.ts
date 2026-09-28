@@ -315,8 +315,10 @@ export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
  * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
  * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
  * counts in dashboard totals but not in the dispatching session's headline.
+ * 'judge' is an auto-mode judge call ClaudeUI made itself for the session named
+ * by `parentRoutingId` (ADR-081 §5).
  */
-export type UsageOrigin = 'session' | 'child' | 'dispatch'
+export type UsageOrigin = 'session' | 'child' | 'dispatch' | 'judge'
 
 /**
  * Resolved tri-state auth status for a single (engine, vendor) pair.
@@ -3347,6 +3349,8 @@ export interface DashboardModel {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**
@@ -3367,6 +3371,8 @@ export interface DashboardAccount {
   models: DashboardModel[]
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
   /**
    * The machines this account's spend came from, this one as its own device id
    * (S5c). Emitted under the `all` scope only — under `local` there is one
@@ -3455,6 +3461,8 @@ export interface DashboardMachineAccount {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals}, or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**

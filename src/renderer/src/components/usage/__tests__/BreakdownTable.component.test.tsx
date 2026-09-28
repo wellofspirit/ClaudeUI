@@ -41,6 +41,7 @@ function makeModel(
       tokens: { input: 1_000, output: 100, cacheWrite: 0, cacheRead: 0 }
     }),
     dispatched: null,
+    judge: null,
     ...extra
   }
 }
@@ -305,6 +306,103 @@ describe('BreakdownTable — the honest columns', () => {
     expect(marker.getAttribute('title')).toContain('$0.00')
   })
 
+  it('marks the judge part of a row apart from the dispatched part, without adding either', () => {
+    // The fixture's acct-a dispatched $1.50 on Sonnet; give its Opus row a
+    // $0.40 judge part as well, so one row carries both markers.
+    const data = fixture()
+    const acctA = data.providers[0].accounts[0]
+    const judge = makeTotals({ displayCostUsd: 0.4, apiCostUsd: 0.4, requestCount: 5 })
+    acctA.models[0] = { ...acctA.models[0], judge }
+    acctA.judge = judge
+    render(<BreakdownTable data={data} groupBy="provider" providerColors={COLORS} />)
+
+    const judged = screen
+      .getAllByTestId('BreakdownTable.row')
+      .filter((r) => within(r).queryByTestId('BreakdownTable.row.judge') !== null)
+    expect(judged.map((r) => r.getAttribute('data-key'))).toEqual([
+      'provider/anthropic',
+      'provider/anthropic/anthropic:org-1:acct-a'
+    ])
+    const marker = within(judged[0]).getByTestId('BreakdownTable.row.judge')
+    expect(marker).toHaveTextContent('$0.40 judge')
+    expect(marker).not.toHaveTextContent('dispatched')
+    expect(marker.getAttribute('title')).toContain('auto-mode judge calls')
+    expect(marker.getAttribute('title')).toContain('5 calls')
+    // Both markers on the same row, and the row's own cost still $15.00.
+    expect(within(judged[0]).getByTestId('BreakdownTable.row.dispatched')).toHaveTextContent(
+      '$1.50 dispatched'
+    )
+    expect(judged[0].querySelectorAll('td')[4]).toHaveTextContent('$15.00')
+    // The OpenAI provider judged nothing and carries no marker.
+    const openai = screen
+      .getAllByTestId('BreakdownTable.row')
+      .find((r) => r.getAttribute('data-key') === 'provider/openai')
+    expect(within(openai!).queryByTestId('BreakdownTable.row.judge')).toBeNull()
+  })
+
+  it('counts judge calls rather than dollars when the judge spend was not priced', () => {
+    const free = makeModel('pi', 'glm-5-free', 0, {
+      totals: makeTotals({ displayCostUsd: 0, requestCount: 3, unknownApiCostCount: 3 }),
+      judge: makeTotals({ displayCostUsd: 0, requestCount: 1, unknownApiCostCount: 1 })
+    })
+    const data = makeDashboard({
+      totals: makeTotals({ displayCostUsd: 0, unknownApiCostCount: 3, requestCount: 3 }),
+      providers: [
+        makeProvider({
+          providerId: 'deadp',
+          label: 'deadp',
+          totals: makeTotals({ displayCostUsd: 0, unknownApiCostCount: 3 }),
+          accounts: [
+            makeAccount({
+              accountKey: 'deadp:key:abc',
+              label: 'deadp key',
+              providerId: 'deadp',
+              billingType: 'free',
+              totals: makeTotals({ displayCostUsd: 0, unknownApiCostCount: 3 }),
+              models: [free]
+            })
+          ]
+        })
+      ]
+    })
+    render(<BreakdownTable data={data} groupBy="engine" providerColors={COLORS} />)
+
+    const marker = screen.getAllByTestId('BreakdownTable.row.judge')[0]
+    expect(marker).toHaveTextContent('1 judge call')
+    expect(marker).not.toHaveTextContent('$0.00')
+    expect(marker.getAttribute('title')).toContain('$0.00')
+  })
+
+  it("marks a machine's judge part under the machine grouping", () => {
+    const data = makeDashboard({
+      scope: 'all',
+      totals: makeTotals({ displayCostUsd: 10 }),
+      machines: [
+        makeMachine({
+          deviceId: 'dev-self',
+          deviceName: 'desk',
+          totals: makeTotals({ displayCostUsd: 10 }),
+          accounts: [
+            {
+              providerId: 'anthropic',
+              accountKey: 'anthropic:org-1:acct-1',
+              totals: makeTotals({ displayCostUsd: 10, apiCostUsd: 10 }),
+              dispatched: null,
+              judge: makeTotals({ displayCostUsd: 0.25, apiCostUsd: 0.25, requestCount: 2 })
+            }
+          ]
+        })
+      ]
+    })
+    render(<BreakdownTable data={data} groupBy="machine" providerColors={COLORS} />)
+
+    const root = screen
+      .getAllByTestId('BreakdownTable.row')
+      .find((r) => r.getAttribute('data-level') === '0')!
+    expect(within(root).getByTestId('BreakdownTable.row.judge')).toHaveTextContent('$0.25 judge')
+    expect(within(root).queryByTestId('BreakdownTable.row.dispatched')).toBeNull()
+  })
+
   it('writes an unbilled total the same way it writes an unbilled row', () => {
     const data = fixture()
     data.totals.billedCostUsd = 0
@@ -364,7 +462,8 @@ describe('BreakdownTable — group by machine', () => {
               providerId: 'anthropic',
               accountKey: 'anthropic:o:a',
               totals: makeTotals({ displayCostUsd: 60, apiCostUsd: 60 }),
-              dispatched: null
+              dispatched: null,
+              judge: null
             }
           ]
         }),
@@ -380,7 +479,8 @@ describe('BreakdownTable — group by machine', () => {
               providerId: 'anthropic',
               accountKey: 'anthropic:o:a',
               totals: makeTotals({ displayCostUsd: 40, apiCostUsd: 40 }),
-              dispatched: null
+              dispatched: null,
+              judge: null
             }
           ]
         })

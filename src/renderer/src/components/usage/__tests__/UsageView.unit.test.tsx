@@ -650,7 +650,8 @@ describe('UsageView — the scope', () => {
                     vendorId: 'anthropic',
                     modelId: 'claude-opus-5',
                     totals: makeTotals({ displayCostUsd: 42, apiCostUsd: 42 }),
-                    dispatched: null
+                    dispatched: null,
+                    judge: null
                   }
                 ]
               })

@@ -286,6 +286,45 @@ describe('buildUsageDashboard — the provider tree', () => {
     expect(accountB.models[0].dispatched).toBeNull()
   })
 
+  it('judge spend is inside totals AND reported as its own sub-total (ADR-081 §5)', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    // A ChatGPT-subscription judge call on the account B already spent on.
+    db.upsertUsageBuckets([
+      bucket({
+        hourUtc: DAY_D + DAY + 5 * HOUR,
+        accountKey: ACCOUNT_B,
+        engineId: 'opencode',
+        vendorId: 'openai',
+        modelId: 'gpt-5',
+        origin: 'judge',
+        apiCostUsd: 0.1
+      })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    const accounts = data.providers.flatMap((p) => p.accounts)
+    const accountB = accounts.find((a) => a.accountKey === ACCOUNT_B)!
+
+    // INSIDE: the seeded 4.25 plus the judge's 0.10, at every level.
+    expect(data.totals.displayCostUsd).toBeCloseTo(4.35, 6)
+    expect(accountB.totals.displayCostUsd).toBeCloseTo(2.1, 6)
+
+    // AND REPORTED, on the account and on the one model row it ran under — and
+    // never as dispatched work, which is a different origin.
+    expect(accountB.judge!.displayCostUsd).toBeCloseTo(0.1, 6)
+    expect(accountB.judge!.requestCount).toBe(1)
+    expect(accountB.dispatched).toBeNull()
+    const judgeModel = accountB.models.find((m) => m.engineId === 'opencode')!
+    expect(judgeModel.judge!.displayCostUsd).toBeCloseTo(0.1, 6)
+    expect(accountB.models.find((m) => m.engineId === 'codex')!.judge).toBeNull()
+
+    // The dispatched sub-total is untouched by it, and nothing else judged.
+    const accountA = accounts.find((a) => a.accountKey === ACCOUNT_A)!
+    expect(accountA.dispatched!.displayCostUsd).toBeCloseTo(0.25, 6)
+    expect(accountA.judge).toBeNull()
+  })
+
   it('coveredUsd counts only the subscription buckets', async () => {
     const { db, dashboard } = await fresh()
     seedTree(db)
@@ -716,6 +755,28 @@ describe('buildUsageDashboard — the combined scope', () => {
     expect([...data.machines[0].accounts.map((a) => a.accountKey)].sort()).toEqual(
       [ACCOUNT_A, ACCOUNT_B, ACCOUNT_KEY_ROW, 'unknown'].sort()
     )
+  })
+
+  it("carries a peer's judge spend as the judge part of that machine's slice", async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 }),
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, origin: 'judge', apiCostUsd: 0.5 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const peerSlice = data.machines
+      .find((m) => m.deviceId === PEER_DEVICE)!
+      .accounts.find((a) => a.accountKey === ACCOUNT_A)!
+
+    expect(peerSlice.totals.displayCostUsd).toBeCloseTo(3.5, 6)
+    expect(peerSlice.judge!.displayCostUsd).toBeCloseTo(0.5, 6)
+    // This machine's own slice for the same account judged nothing.
+    const selfSlice = data.machines[0].accounts.find((a) => a.accountKey === ACCOUNT_A)!
+    expect(selfSlice.judge).toBeNull()
+    expect(selfSlice.dispatched!.displayCostUsd).toBeCloseTo(0.25, 6)
   })
 
   it('still lists a machine whose hours are cached after the hub forgot it', async () => {
