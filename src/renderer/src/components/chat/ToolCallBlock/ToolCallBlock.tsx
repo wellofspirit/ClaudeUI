@@ -22,10 +22,9 @@ import type {
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
-import { backgroundBashTaskId } from '../../../../../shared/claude-background-bash'
 import { engineToolMap } from '../tool-registry/engine-tool-maps'
 import { ToolCard } from '../tool-registry/ToolCard'
-import { latestNotification } from '../task-state'
+import { bashMovedToBackground, latestNotification } from '../task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -75,19 +74,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
   const notification = isBash ? (latestNotification(taskNotifications, toolUseId) ?? null) : null
-  // A foreground command cli.js moved to the background ("Send to background",
-  // a timeout, a message that arrived while it ran) is a background command from
-  // then on; its tool_result only says where the output goes. The record's flip
-  // says so while the task runs; the terminal event drops the record, and from
-  // then the tool_result's wording plus that event do. A transcript has neither
-  // (history maps no shell's notification to its call), so a reopened session
-  // keeps showing the tool_result.
-  const movedToBackground =
-    !isHistorical &&
-    (activeTask?.isBackgrounded === true ||
-      (notification !== null &&
-        result !== undefined &&
-        backgroundBashTaskId(result.toolResult) !== undefined))
+  const movedToBackground = bashMovedToBackground({
+    isHistorical,
+    activeTask,
+    notification,
+    resultText: result?.toolResult
+  })
   const isBackgroundBash = isBash && (!!block.toolInput?.run_in_background || movedToBackground)
   const bgNotification = isBackgroundBash ? notification : null
 

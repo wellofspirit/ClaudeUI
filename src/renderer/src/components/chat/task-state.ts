@@ -9,6 +9,7 @@
  * one function now; the views decide how to render the answer, not what it is.
  */
 import type { TaskNotification } from '../../../../shared/types'
+import { backgroundBashTaskId } from '../../../../shared/claude-background-bash'
 
 /**
  * The **last** notification for a tool_use id — never the first.
@@ -110,4 +111,34 @@ export function deriveTaskState({
     isStopped: !isRunning && notification?.status === 'stopped',
     isLoaded: !isRunning && ((isHistorical && !hasResult && !notification) || unfinished)
   }
+}
+
+/**
+ * Whether cli.js moved a foreground Bash to the background: "Send to
+ * background", a timeout, or a message that arrived while it ran. From then on
+ * it is a background command, and its tool_result only says where the output
+ * goes.
+ *
+ * While the task runs, the record's flip says so (`isBackgrounded`). The
+ * terminal event drops the record; from then on, the tool_result's wording
+ * plus that event say so. A transcript has neither, because history maps no
+ * shell's notification to its call, so a reopened session keeps showing the
+ * tool_result rather than a command that would never end.
+ */
+export function bashMovedToBackground({
+  isHistorical,
+  activeTask,
+  notification,
+  resultText
+}: {
+  isHistorical: boolean
+  activeTask?: { isBackgrounded?: boolean }
+  notification?: TaskNotification | null
+  resultText?: string
+}): boolean {
+  if (isHistorical) return false
+  if (activeTask?.isBackgrounded === true) return true
+  return (
+    !!notification && resultText !== undefined && backgroundBashTaskId(resultText) !== undefined
+  )
 }

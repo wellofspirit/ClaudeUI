@@ -107,6 +107,79 @@ describe('TaskDetailPanel FC', () => {
     ])
   })
 
+  // Seen live (2026-09-28): a Bash sent to the background with the card's button
+  // opened as a plain task, whose finished entry showed "Command was manually
+  // backgrounded by user…" instead of the command's output.
+  describe('a Bash cli.js moved to the background', () => {
+    const TASK_ID = 'b7x2k9'
+    const openMoved = (patch: Record<string, unknown>): void => {
+      useSessionStore.getState().openTaskPanel(ROUTE, 'tu-fg')
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            openedTaskToolUseIds: ['tu-fg'],
+            messages: [
+              {
+                id: 'm1',
+                role: 'assistant',
+                content: [
+                  {
+                    type: 'tool_use',
+                    toolUseId: 'tu-fg',
+                    toolName: 'Bash',
+                    toolInput: { command: 'bun run build' }
+                  }
+                ],
+                timestamp: 0
+              },
+              {
+                id: 'm2',
+                role: 'user',
+                content: [
+                  {
+                    type: 'tool_result',
+                    toolUseId: 'tu-fg',
+                    toolResult: `Command was manually backgrounded by user with ID: ${TASK_ID}. Output is being written to: /tmp/claude/proj/session/tasks/${TASK_ID}.output.`,
+                    isError: false
+                  }
+                ],
+                timestamp: 1
+              }
+            ],
+            ...patch
+          }
+        }
+      }))
+    }
+    const ended = {
+      taskNotifications: [
+        { taskId: TASK_ID, toolUseId: 'tu-fg', status: 'completed', outputFile: '', summary: '' }
+      ]
+    }
+
+    it('opens as a background shell while it runs', async () => {
+      openMoved({
+        activeTasks: { 'tu-fg': { taskId: TASK_ID, taskType: 'local_bash', isBackgrounded: true } }
+      })
+      await renderFC()
+      expect(viewProps?.entries).toEqual([{ toolUseId: 'tu-fg', kind: 'bash-background' }])
+    })
+
+    it('stays a background shell after its task ends', async () => {
+      openMoved(ended)
+      await renderFC()
+      expect(viewProps?.entries).toEqual([{ toolUseId: 'tu-fg', kind: 'bash-background' }])
+    })
+
+    it('opens as a task in a reopened session, which has no task events', async () => {
+      openMoved({ ...ended, isHistorical: true })
+      await renderFC()
+      expect(viewProps?.entries).toEqual([{ toolUseId: 'tu-fg', kind: 'task' }])
+    })
+  })
+
   it('onClose calls closeTaskPanel, setting rightPanel to none', async () => {
     useSessionStore.getState().openTaskPanel(ROUTE, 'tu-1')
 
