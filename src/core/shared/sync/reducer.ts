@@ -1160,13 +1160,15 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         taskId?: string
         taskType?: string
         runIndex?: number
+        isBackgrounded?: boolean
         startedAt?: number
       }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
       // toolUseId is the agent's ORIGIN call, normalized by ClaudeSession — so a
       // resumed agent re-arms the record it already had rather than opening a
-      // second one under the SendMessage call's id (ADR-073).
+      // second one under the SendMessage call's id (ADR-073). The same re-arm
+      // carries a "Send to background" flip: same run, isBackgrounded now true.
       return withSession(state, routingId, (s) => {
         // A re-reported start of the run already armed keeps that run's clock;
         // a new run (a resume) starts its own.
@@ -1182,6 +1184,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               taskId: data.taskId ?? '',
               taskType: data.taskType ?? '',
               ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {}),
+              ...(data.isBackgrounded !== undefined ? { isBackgrounded: data.isBackgrounded } : {}),
               ...(startedAt !== undefined ? { startedAt } : {})
             }
           }

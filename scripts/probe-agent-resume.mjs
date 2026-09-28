@@ -126,10 +126,16 @@ try {
       }
     }
 
+    // Native queue lifecycle (docs/protocol-cc/03-inbound-messages.md §3.21);
+    // it replaced the queue-control patch's system/queued_command_consumed,
+    // deleted at 2.1.280. This probe's own frames carry no uuid and get none,
+    // so a frame here names a command cli.js enqueued itself.
+    if (msg.type === 'command_lifecycle') {
+      record('command_lifecycle', `[${phase}] ${msg.state} ${msg.command_uuid}`, msg)
+      continue
+    }
+
     if (msg.type === 'system' && typeof msg.subtype === 'string') {
-      if (msg.subtype === 'queued_command_consumed') {
-        record('system/queued_cmd_consumed', `[${phase}]`, msg)
-      }
       if (msg.subtype.startsWith('task_')) {
         const bits = [
           `task_id=${msg.task_id ?? '-'}`,

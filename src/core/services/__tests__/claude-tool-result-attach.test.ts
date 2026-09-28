@@ -64,7 +64,7 @@ vi.mock('../voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.
 vi.mock('../voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
 vi.mock('../usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../../../main/services/account-manager', () => ({

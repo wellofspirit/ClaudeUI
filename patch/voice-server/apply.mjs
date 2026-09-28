@@ -279,10 +279,12 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   // Step 5: Find the success response function
   //
-  // Search globally — the pattern `,X(MSG,{})}catch` is unique to this
-  // dispatch chain, and a windowed search around the anchor breaks once prior
-  // patches (background-task / usage-relay / etc.) shift the anchor and push
-  // the original site out of the lookback window.
+  // Search globally for every `X(MSG,{})` reply site and require them all to
+  // name one helper in the anchor's chunk (five sites at 2.1.280, where the
+  // single `,X(MSG,{})}catch` site of older versions is gone — README "2.1.280
+  // reply-helper anchor"). A windowed search around the anchor broke when other
+  // patches injected at the same anchor (background-task, usage-relay; both
+  // deleted at 2.1.280) and pushed the site out of the lookback window.
   //
   // 2.1.261: `let Xe=function(f,M){wt.enqueue(A5(f.request_id,M))}` — success;
   //          `let Be=function(f,M){wt.enqueue(_B(f.request_id,M))}` — error

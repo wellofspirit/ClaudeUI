@@ -6,6 +6,8 @@ import { readSessionHistory as loadSessionHistory, historyFor } from '../service
 import * as path from 'path'
 import * as os from 'os'
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
+import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
@@ -24,6 +26,7 @@ import {
   loadBackgroundOutput
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { voiceRefusal } from '../services/voice-gate'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import {
   loadSettings,
@@ -167,12 +170,15 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // A control request, then abort: no turn to use a plugin's tools.
+      reloadPlugins: false
     }
   })
 
@@ -208,12 +214,15 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
 
   try {
+    await ensureHostTokenFresh()
     const q = sdkQuery({
       prompt: diff,
       options: {
         ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
+        // One tool-less turn: plugin MCP servers would connect for nothing.
+        reloadPlugins: false,
         systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
         model: 'claude-haiku-4-5-20251001',
         maxTurns: 1,
@@ -260,12 +269,15 @@ async function fetchModels(): Promise<ModelInfo[]> {
   }
 
   const abort = new AbortController()
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // Init-only: killed right after the initialize response.
+      reloadPlugins: false
     }
   })
 
@@ -287,17 +299,10 @@ async function fetchModels(): Promise<ModelInfo[]> {
       reportHostLoginStatus(init?.account)
       // Also update the ClaudeAuthProvider probe cache so probe() and session.account
       // are accurate from the first model-fetch, before any chat session opens.
-      const acc = init?.account as Record<string, unknown> | undefined
-      if (acc) {
-        const loggedIn = !!acc.email
-        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', {
-          email: (acc.email as string | null) ?? null,
-          organization: (acc.organization as string | null) ?? null,
-          subscriptionType: (acc.subscriptionType as string | null) ?? null,
-          tokenSource: (acc.tokenSource as string | null) ?? null,
-          apiKeySource: (acc.apiKeySource as string | null) ?? null,
-          apiProvider: (acc.apiProvider as string | null) ?? null
-        })
+      // The same signal the banner reads (claude-login-state.ts).
+      if (init?.account) {
+        const { loggedIn, account } = claudeLoginSignal(init.account)
+        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
       }
     } catch {
       /* non-fatal — per-session init will still report status */
@@ -707,7 +712,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
-  // Voice input handlers (Claude-only: capabilities.voice)
+  // Voice input handlers (Claude-only, and only on a binary carrying the
+  // voice-server patch: capabilities.voice)
   handleIpc({
     channel: 'voice:start-server',
     capability: 'host',
@@ -716,7 +722,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      const refusal = voiceRefusal(session)
+      if (refusal) throw new Error(refusal)
       await session.voiceStartServer?.()
     })
   })
@@ -742,7 +749,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      const refusal = voiceRefusal(session)
+      if (refusal) throw new Error(refusal)
       await session.voiceStartRecording?.(language)
     })
   })

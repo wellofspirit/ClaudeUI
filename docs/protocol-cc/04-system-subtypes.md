@@ -29,7 +29,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `task_progress`           | Always                                           | vT queue                         |
 | `compact_boundary`        | On conversation compaction                       | Main generator                   |
 | `api_retry`               | On API error + auto-retry                        | Main generator                   |
-| `queued_command_consumed` | Patch `queue-control`                            | Main generator (patched)         |
+| `queued_command_consumed` | Retired with patch `queue-control` (§4.10)       | —                                |
 | `hook_started`            | `--include-hook-events`                          | Hook subscriber                  |
 | `hook_progress`           | `--include-hook-events`                          | Hook subscriber                  |
 | `hook_response`           | `--include-hook-events`                          | Hook subscriber                  |
@@ -45,7 +45,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `commands_changed`        | Mid-session slash-command list change            | stream-json module (§4.23)       |
 | `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
 | `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
-| `permission_allowed`      | Patch `automode-verdict`                         | Control channel (§4.25)          |
+| `permission_allowed`      | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
 | `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
 
@@ -68,7 +68,9 @@ mid-session model switch leaves it stale.
 **Gate:** Always.
 
 **Ordering:** First `system` message _of a session start_, but **not** the first message with a
-`session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
+`session_id` — a uuid-carrying prompt's `command_lifecycle` `queued` and `started`
+(03 §3.21) precede it on every turn and carry one; so did the retired `queued_command_consumed`
+(§4.10). A bootstrap latch on "the first `session_id`" must not gate reading init.
 Consumer uses this to resolve temp routingId → real session UUID.
 
 ### Shape
@@ -227,7 +229,7 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
 
 - `completed` — normal completion
 - `failed` — error exit
-- `stopped` — user-initiated stop (upstream `killed` is mapped to `stopped` in 2.1.114; the `taskstop-notification` patch is a no-op on recent versions)
+- `stopped` — user-initiated stop (upstream maps `killed` to `stopped` since 2.1.114; observed on the official 2.1.280 binary, which is why the `taskstop-notification` patch was deleted)
 
 ---
 
@@ -247,6 +249,10 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "tool_use_id": "...",
   "description": "...",
   "task_type": "local_bash"|"local_agent"|"in_process_teammate"|"local_workflow",
+  "is_backgrounded": false,                 // see below; absent for types without the notion
+  "subagent_type": "general-purpose",       // local_agent only
+  "spawn_depth": 1,                          // local_agent only
+  "owned_by_subagent": true,                 // local_bash started inside a subagent only
   "workflow_name": "...",                  // optional
   "prompt": "...",                          // optional
   "skip_transcript": false,
@@ -254,6 +260,34 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "uuid": "..."
 }
 ```
+
+### `is_backgrounded` — foreground or background (2.1.280)
+
+The registry record's `isBackgrounded` at registration, read as
+`is_backgrounded:"isBackgrounded"in g?g.isBackgrounded:void 0` (`.cache/pristine-cli.js`
+@10112444), so it is absent for task types whose record has no such field.
+
+- `false`: the task runs in the FOREGROUND and blocks its tool call — a Bash command without
+  `run_in_background`, or an agent the model launched synchronously. Only such a task can be
+  moved with `background_tasks` (07 §7.3).
+- `true`: it started in the background (`run_in_background: true`, an async agent launch, or a
+  Bash started inside a subagent).
+
+**Registration timing.** An agent registers within milliseconds of its tool_use. A foreground
+Bash registers only once it has run for 2 s: the Bash progress loop calls the registrar (`Ovn`,
+which builds the record with `isBackgrounded:!1`) on the first progress tick at or past
+`j6t=2000` ms (@10959996; call site @10987988). Observed 4.5–4.6 s after the assistant's
+tool_use frame on the official 2.1.280 binary (two probes). A command that finishes sooner never registers, so it emits no
+`task_started` and no `task_notification`. Until the `task_started` arrives, `background_tasks`
+answers `{backgrounded:false}` for that tool_use id. A foreground Bash that does register gets
+a `task_notification` (`status:"completed"`, `output_file:""`) when it finishes, like a
+background one.
+
+When a foreground task is backgrounded, `is_backgrounded` changes through `task_updated`
+(§4.6); `task_started` is not re-emitted. ClaudeUI relays the start as `session:task-started`
+with `isBackgrounded`, and re-sends that event for the same run with `isBackgrounded: true`
+when the `task_updated` flip arrives. `TaskCard` and `ToolCard` offer "Send to background" only
+for a record with `isBackgrounded === false`.
 
 ### `task_type` values (2.1.241)
 
@@ -346,6 +380,21 @@ Patch diff of a task's state changes.
 }
 ```
 
+At 2.1.280 the patch builder (`MMr`, `.cache/pristine-cli.js` @10110830) compares the old and
+new registry record and emits only these keys: `status`, `description`, `end_time`,
+`total_paused_ms`, `error`, and `is_backgrounded`. `is_backgrounded: true` is how a
+foreground task reports that it moved to the background; it is sent before cli.js answers the
+`background_tasks` request that caused it. Observed for Bash and for an agent:
+
+```
+system/background_tasks_changed  tasks=[{task_id:"bvup3m1hz", task_type:"local_bash", …}]
+system/task_updated              task_id="bvup3m1hz"  patch={is_backgrounded:true}
+control_response                 {backgrounded:true}
+user (tool_result, ~1 s later)   "Command was manually backgrounded by user with ID: bvup3m1hz. Output is being written to: …"
+…
+system/task_notification         task_id="bvup3m1hz"  status="completed"   (when the command ends)
+```
+
 ---
 
 ## 4.7 `task_progress`
@@ -427,94 +476,29 @@ API error triggered automatic retry inside the streaming layer.
 
 ---
 
-## 4.10 `queued_command_consumed` (PATCHED)
+## 4.10 `queued_command_consumed` (RETIRED 2026-09-25)
 
-A queued command was taken off cli.js's queue and is now running.
+Emitted only by the `queue-control` patch, deleted at 2.1.280. It announced, by the queued text,
+that cli.js had taken a queued command: the patch hooked both the mid-turn fold (a `queued_command`
+attachment) and the between-turns drain, and yielded `{subtype:"queued_command_consumed", prompt,
+source_uuid}` from both. Its native replacement is `command_lifecycle` `started` (03 §3.21), keyed
+by the client `uuid` the user frame carried instead of by text, and emitted by the official binary.
 
-**Two emit sites**, because cli.js has two ways of taking an item off the queue —
-`patch/queue-control` hooks both (Parts A2 and A3), and they emit the same shape:
+Two lessons from it still apply to the replacement:
 
-| Site                                                         | When                                                                                 | Patch part |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------- |
-| Outbound normalizer, `case"attachment"`                      | A turn is RUNNING: the command is absorbed mid-turn as a `queued_command` attachment | A2         |
-| Headless `drainCommandQueue` loop, at the user-message stamp | cli.js is BETWEEN TURNS: the command is dequeued and run as the next turn's PROMPT   | A3         |
-
-The drain path builds **no attachment at all** (its turn-start attachment builder
-is called with an empty queued-command list), so before A3 existed a message
-picked up between turns produced no notification — the UI's queue card only
-cleared on the turn-end flush, after the whole answer. That state is reachable
-whenever the host still considers the session busy while cli.js is idle — most
-visibly while a background subagent streams.
-
-Because the drain is also how an ordinary never-queued prompt reaches its turn,
-A3 fires for those too. Consumers must correlate against their own queue and
-treat an uncorrelated notification as a no-op (ClaudeUI: `consumeByText` only
-matches items still in state `queued`).
-
-**Gate:** Requires `queue-control` patch.
-
-```jsonc
-{
-  "type": "system",
-  "subtype": "queued_command_consumed",
-  // string OR ContentBlockParam[] — see the warning below
-  "prompt": "the queued user text",
-  "source_uuid": "...",
-  "session_id": "...",
-  "uuid": "..."
-}
-```
-
-**`prompt` is NOT always a string.** A2 yields `prompt: <attachment>.prompt` verbatim
-and A3 yields `prompt: <command>.value` — the same value, since cli.js builds the
-attachment from the command (`{prompt: <command>.value, source_uuid: <command>.uuid}`).
-Either way it is whatever was pushed into the queue — the pushed message's
-`message.content`. That is a plain string for a text-only prompt and a
-**content-block array** (`[{type:'image',…}, {type:'text',text}]`) whenever the prompt
-carried an image or a PDF. cli.js branches on this at every read site rather than
-normalizing at the emit site:
-
-```js
-ZPe(e) = typeof e === "string" ? e
-       : Array.isArray(e) ? e.filter(t => t.type === "text" && typeof t.text === "string")
-                             .map(t => t.text).join("
-")
-       : ""
-```
-
-The `dequeue_message` matcher uses the same rule under a different name
-(`VV_(v) = typeof v === "string" ? v : Lu(v,"
-")`, `Lu` keeping `text` blocks), which
-is why taking an image-carrying queued message BACK always worked while noticing it had
-been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
-`src/core/sdk/queued-command-text.ts`.
-
-**Ordering:** From the attachment site (A2), followed by a `user` message with
-`isReplay: true` when `replayUserMessages=true`. From the drain site (A3), it is
-emitted before the turn it starts — i.e. before that turn's first `assistant` /
-`stream_event`. UI uses this to dismiss the "queued" card and show the text as a
-normal user message.
-
-**It carries `session_id`, and it lands before `system/init`.** Verified on 2.1.268, deterministic
-across repeated probes, on the first turn of a fresh session:
-
-```
-#1 control_response                                    (the initialize reply)
-#2 type=system subtype=queued_command_consumed  session_id=YES
-#3 type=system subtype=init                     session_id=YES  model=claude-opus-5[1m]
-#4 type=assistant …
-```
-
-Because A3 is the path an ordinary never-queued prompt takes to its turn, this is the normal
-ordering, not an edge case.
-
-**Consumer hazard.** A bootstrap latch keyed on "the first message carrying a `session_id`" will be
-tripped by this notification and never see `system/init`. ClaudeUI's `captureSessionBootstrap` had
-exactly that shape: the init capture was nested inside `if (msg.session_id && !this.sessionId)`, so
-`resolvedModelId`, `slash_commands`, `skills`, `mcp_servers` and the init permission-mode
-reconciliation were all silently dropped — most visibly, a `default` session sized its context
-window at 200K instead of the resolved model's 1M and rendered a 614K-token transcript as 307%.
-Latch the session id and read `system/init` **independently**.
+- **Normalize a queued prompt before reading its text.** `prompt` was the pushed message's
+  `message.content` verbatim — a string, or a block array whenever the prompt carried an image or a
+  PDF. Comparing the array with the queued text never matched, so an image-carrying steer was
+  only noticed at the turn-end flush and its bubble landed below its own answer. The same `prompt`
+  field is what a persisted `queued_command` attachment carries (03 §3.21, "Transcript"); cli.js's
+  rule (`rD` @2680178 on 2.1.280) is mirrored in `src/core/sdk/queued-command-text.ts`.
+- **The frame that carries the first `session_id` is not `system/init`.** The notification landed
+  before init on every turn, and a `captureSessionBootstrap` that nested its init capture inside
+  `if (msg.session_id && !this.sessionId)` silently dropped `resolvedModelId`, `slash_commands`,
+  `skills`, `mcp_servers` and the init permission-mode reconciliation — a `default` session sized
+  its context window at 200K instead of 1M and rendered a 614K-token transcript as 307%.
+  `command_lifecycle` `queued`/`started` land in the same place today. Latch the session id and
+  read `system/init` **independently**.
 
 ---
 
@@ -743,7 +727,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`task_*`** — correlate by `task_id` in the client. `task_started` → `task_progress` (many) → `task_notification`. An active (non-terminal) task of an auto-continuing type means the conversation is NOT waiting for the user even after a `result` — see §3.7 "`result` vs background tasks".
 - **`compact_boundary`** — preserve `compact_metadata` for session replay.
 - **`api_retry`** — show in UI if visible. `retry_delay_ms` tells the user how long they're waiting.
-- **`queued_command_consumed`** — dismiss the corresponding queued-card UI element.
+- **`queued_command_consumed`** — retired with its patch (§4.10); a queued card is dismissed on the native top-level `command_lifecycle` `started` (03 §3.21).
 - **`hook_*`** — expose in a debug panel; not typically user-facing.
 - **`bridge_state`** — update remote-control status UI.
 - **`session_state_changed`** — only handle when your workflow enables the env var; otherwise ignore.
@@ -755,7 +739,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`thinking_tokens`** — optional spinner/pill progress; not authoritative token counts.
 - **`commands_changed`** — REPLACE the cached slash-command list with the payload (a re-fetch returns the stale init list).
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
-- **`permission_denied`** / **`permission_allowed`** — render the decision on the tool call instead of only showing an `is_error` tool_result. ClaudeUI does: a `classifier` decision becomes a `tool_review` block (the same one pi and opencode produce), anything else becomes a `permission_denial` block. See `core/services/claude-permission-decision.ts`.
+- **`permission_denied`** — render the decision on the tool call instead of only showing an `is_error` tool_result. ClaudeUI does: a `classifier` decision becomes a `tool_review` block (the same one pi and opencode produce), except a recognisable no-verdict fallback (below), which becomes a `permission_denial` block like anything else. See `core/services/claude-permission-decision.ts`.
 - **`mirror_error`** — log; surfaces transcript-mirror data loss.
 - **`dev_intent`** — advisory only; safe to ignore. ClaudeUI does not handle it (unknown subtypes fall through `handleSystemMessage`'s if-chain). See §4.28.
 
@@ -907,26 +891,25 @@ Emitted when an MCP server confirms that a URL-mode elicitation is complete.
 
 ---
 
-## 4.25 `permission_denied` / `permission_allowed`
+## 4.25 `permission_denied`
 
 `permission_denied` is emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
 
-`permission_allowed` is the symmetric frame for an **auto-mode classifier allow** and is **not upstream** — it is added by the `automode-verdict` patch. Stock cli.js emits nothing when the classifier clears an action, which left Claude the only engine ClaudeUI runs that showed a judge's verdict on a block but not on an allow. Same fields minus `message` (an allow has no rejection text), and only emitted when the decision carries cli.js's own `decisionReason.classifierAllowed === true`. The auto-mode permission check stamps that flag only on a `classifier` allow where the classifier ran and reached a verdict (`noVerdict !== true`, `classifierRan !== false`). A rule/mode/fast-path allow, a no-verdict allow and the "no classifier-relevant input" allow never carry it and are deliberately silent, as is a classifier block delivered as an allow under a tool's `onBlock: "flag"` policy.
+No frame reports an **auto-mode classifier allow**: the emit site is gated on `behavior === "deny"`, so Claude shows a judge's verdict on a block and nothing on an allow. Internally cli.js stamps `decisionReason.classifierAllowed === true` on a `classifier` allow where the classifier ran and reached a verdict (`noVerdict !== true`, `classifierRan !== false`), but that flag never reaches the wire. ClaudeUI's `automode-verdict` patch emitted the allow half as `system/permission_allowed` until 2026-09-28, when the owner ruled allow verdicts not worth a patch; nothing on the stock wire carries that subtype.
 
-**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area). On 2.1.280 the emitter is the `emitPermissionDenied(n,e,s,r){…this.outbound.enqueue({…})}` method; see `patch/automode-verdict/README.md` for how to find it.
+**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area). On 2.1.280 the emitter is the `emitPermissionDenied(n,e,s,r){…this.outbound.enqueue({…})}` method on the control-channel class (see "Two emitters" below).
 
 ```jsonc
 {
   "type": "system",
-  "subtype": "permission_denied", // or "permission_allowed" (patched)
+  "subtype": "permission_denied",
   "tool_name": "Bash",
   "tool_use_id": "toolu_...",
   "agent_id": "...", // optional; subagent ID when decided inside a subagent
   "decision_reason_type": "rule", // optional; 'classifier'|'asyncAgent'|'mode'|'rule'|…
   "decision_reason_code": "...", // optional, 2.1.280+; machine code, see below
   "decision_reason": "...", // optional human-readable reason
-  "message": "...", // the rejection message returned to the model — DENIED ONLY
-  "no_verdict": true, // PATCHED; present only when the classifier reached no verdict
+  "message": "...", // the rejection message returned to the model
   "session_id": "...",
   "uuid": "..."
 }
@@ -948,7 +931,7 @@ Upstream added a machine-readable code beside `decision_reason`. It is set for a
 
 For `subcommandResults` it is taken from the subcommands, with `outside_reads_blocked` taking precedence.
 
-### `no_verdict` (patched) and the non-verdict classifier outcomes
+### The non-verdict classifier outcomes
 
 `decision_reason_type: "classifier"` does **not** always mean the classifier judged the action. cli.js (2.1.268 and 2.1.280) builds all of the following with `type: "classifier"`:
 
@@ -962,7 +945,7 @@ For `subcommandResults` it is taken from the subcommands, with `outside_reads_bl
 | allow    | `true`      | `"Delivered with a warning: the classifier request was refused by the safety safeguard"` / `"Delivered with a note: the classifier could not review it"` |
 | allow    | not set     | `"Tool declares no classifier-relevant input"` (the classifier never ran; its `classifierRan: false` is stripped before the decision leaves)             |
 
-Stock frames carry no `noVerdict`, so a host cannot tell "the judge blocked this" from "the judge was never reached". The `automode-verdict` patch adds `no_verdict: true` to **both** subtypes when `decisionReason.noVerdict === true` and omits the key otherwise. It never appears on `permission_allowed` in practice: the patch emits that frame only when `classifierAllowed` is set, so **neither allow row above is ever emitted**, with or without a flag. That leaves one row a consumer must recognise by its exact `decision_reason` string: the `"Classifier unavailable"` **deny**.
+The frame carries none of `noVerdict` / `classifierRan`, and `decision_reason` for a `classifier` decision is `decisionReason.reason` verbatim, so a host cannot tell "the judge blocked this" from "the judge was never reached" from the flags alone. The allow rows are never on the wire (no allow frame exists). Three deny rows are recognisable natively: `"Classifier unavailable"` and the no-verdict streak `"Auto mode unavailable — stopped after repeated responses with no safety verdict"` by exact reason, and the transcript overflow by `decision_reason_code: "classifier_transcript_too_long"` (2.1.280+, which cli.js sends on a `classifier` deny only for that fallback). ClaudeUI routes those three to a `permission_denial` with source `autoModeNoVerdict`; the rest (a safeguard refusal, an empty classifier-only action) have free-form reasons and render as a verdict carrying that reason.
 
 ### Two emitters — only one is on the wire (probed 2.1.268, 2026-09-21)
 
@@ -975,14 +958,14 @@ Verify by instrumenting both with `process.stderr.write(...)` before assuming.
 
 ### `decision_reason` is not symmetric between allow and deny
 
-- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it), `"Allowed by classifier"` (stage 2 did), or `"Not flagged by the server-side auto mode classifier"`. Useful — they say which stage decided — but they are not model prose.
+- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it), `"Allowed by classifier"` (stage 2 did), or `"Not flagged by the server-side auto mode classifier"`. They say which stage decided but are not model prose, and no frame carries them.
 - **Deny** reasons ARE model text, following the stage-2 grammar (§14 §2): `[Exact Rule Name]` optionally followed by one sentence. Observed live: `"[Create Unsafe Agents]"` with no sentence at all. A consumer must handle bracket-only, bracket-plus-sentence, and no-bracket (`fast` mode never asks for one). The content-free fallbacks are `"Blocked by classifier"` (category mode with no rule) and `"No reason provided"` (the model gave no `<reason>`).
 
 `cli.js`'s own rejection `message` restates the reason inline: _"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Create Unsafe Agents]. …"_ — so it is also the `tool_result` body, and a consumer that renders both will say the same thing twice.
 
-### Neither frame is persisted
+### The frame is not persisted
 
-Both subtypes are excluded from the "worth keeping" predicate that gates the accumulated message list, the `--output-format json` last-message pick, and the transcript mirror. They are live-only: a reopened session shows no verdicts, on any engine (ClaudeUI's own `tool_review` blocks are live-only too, so this is parity rather than a gap).
+`permission_denied` is excluded from the "worth keeping" predicate that gates the accumulated message list, the `--output-format json` last-message pick, and the transcript mirror. It is live-only: a reopened session shows no verdicts, on any engine (ClaudeUI's own `tool_review` blocks are live-only too, so this is parity rather than a gap).
 
 ---
 

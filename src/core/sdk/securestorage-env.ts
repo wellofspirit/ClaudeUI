@@ -1,18 +1,20 @@
 /**
- * Scoped credential-storage env state for cli.js spawns (ADR-015).
+ * The ACTIVE multi-account credential dir (ADR-015), as module state.
  *
- * Mirrors endpoint-env.ts: keep `SKIP_SECURESTORAGE` /
- * `CLAUDE_SECURESTORAGE_CONFIG_DIR` out of the Electron main process env and
- * overlay them only onto cli.js spawns via buildEnv().
+ * `dir` is the active account's directory, `~/.claude/ui/accounts/<id>/`, whose
+ * `.credentials.json` the app owns; null = single-account mode, where cli.js
+ * uses the user's own Claude Code login. `AccountManager.applyActive()` sets it,
+ * and everything that must follow the active account reads it: `buildEnv()`
+ * hands cli.js that file's access token (`host-token.ts`), the token keeper
+ * keeps it fresh, and the usage code reads and attributes against it.
  *
- * When set, the `skip-securestorage` patch forces cli.js to read/write the
- * plaintext `.credentials.json` in `dir` (bypassing the macOS Keychain), which
- * is how multi-account keeps a separate credential file per account. `dir` is
- * the active account's directory; null = single-account (Keychain) mode.
+ * The name predates that: spawns used to be pointed at `dir` through
+ * `SKIP_SECURESTORAGE` / `CLAUDE_SECURESTORAGE_CONFIG_DIR` and the (retired)
+ * `skip-securestorage` patch, so cli.js read and refreshed the file itself.
  */
 
 export interface SecurestorageEnv {
-  /** Per-account credentials dir → CLAUDE_SECURESTORAGE_CONFIG_DIR. */
+  /** The active account's credentials dir. */
   dir: string
 }
 

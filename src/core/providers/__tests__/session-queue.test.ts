@@ -55,6 +55,22 @@ describe('SessionQueue', () => {
     expect(queue.consumeById('never-queued')).toBeUndefined()
   })
 
+  it('recallById recalls only a still-queued item — a consumed one stays consumed', () => {
+    const { queue } = makeQueue()
+    const consumed = queue.add('ran')
+    const pending = queue.add('dropped')
+    queue.consumeById(consumed.itemId)
+
+    // cli.js can report `cancelled` for a message it had already started (the
+    // consuming turn was aborted): the steer bubble must not turn into a recall.
+    expect(queue.recallById(consumed.itemId)).toBeUndefined()
+    expect(consumed.state).toBe('consumed')
+
+    expect(queue.recallById(pending.itemId)?.state).toBe('recalled')
+    expect(queue.recallById(pending.itemId)).toBeUndefined()
+    expect(queue.recallById('never-queued')).toBeUndefined()
+  })
+
   it('emit broadcasts the FULL list once, then prunes terminal items', () => {
     const { queue, broadcasts } = makeQueue()
     queue.add('consumed one')

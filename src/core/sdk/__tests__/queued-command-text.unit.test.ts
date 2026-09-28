@@ -4,16 +4,14 @@
  * cli.js's canonical queued-command text (F8).
  *
  * Every case here mirrors a branch that exists in the bundle, so the helper can
- * be checked against the protocol rather than against itself:
+ * be checked against the protocol rather than against itself (2.1.280 `rD`,
+ * `.cache/pristine-cli.js` @2680178; `ZPe` in earlier builds):
  *
- *   ZPe(e) = typeof e==="string" ? e
- *          : Array.isArray(e) ? e.filter(t => t.type==="text" && typeof t.text==="string")
- *                                .map(t => t.text).join("\n")
- *          : ""
- *
- * and the identical shape behind `dequeue_message`'s matcher:
- *   VV_(e) = typeof e==="string" ? e : Lu(e,"\n")
- *   Lu(e,t) = e.filter(r => r.type==="text").map(r => r.text).join(t)
+ *   rD(e) = typeof e==="string" ? e
+ *         : Array.isArray(e) ? e.filter(t => typeof t==="object" && t!==null &&
+ *                                  t.type==="text" && typeof t.text==="string")
+ *                               .map(t => t.text).join("\n")
+ *         : ""
  */
 import { describe, it, expect } from 'vitest'
 import { queuedCommandText } from '../queued-command-text'
@@ -44,15 +42,15 @@ describe('queuedCommandText', () => {
     ).toBe('first\nsecond')
   })
 
-  it('is empty for an attachments-only prompt — and that is a real queue item', () => {
-    // `enqueuePrompt('', [image])` stores `text: ''`, so '' has to be the answer
-    // here or the two sides could never correlate.
+  it('is empty for an attachments-only prompt — and that is a real queued message', () => {
+    // `enqueuePrompt('', [image])` stores `text: ''`; the transcript loader keeps
+    // such a steer for its attachments rather than dropping it as blank.
     expect(queuedCommandText([{ type: 'document', source: {} }])).toBe('')
   })
 
   it('degrades to empty for anything else, rather than stringifying it', () => {
-    // A JSON-ish stringification would silently produce a value that matches
-    // nothing while LOOKING like text in a log.
+    // A JSON-ish stringification would silently render a value that LOOKS like
+    // text the user typed.
     expect(queuedCommandText(undefined)).toBe('')
     expect(queuedCommandText(null)).toBe('')
     expect(queuedCommandText({ type: 'text', text: 'not an array' })).toBe('')

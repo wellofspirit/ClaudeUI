@@ -1,6 +1,10 @@
 # ADR-015: Multiple-account support via file-based credentials (SKIP_SECURESTORAGE)
 
-**Status:** Accepted
+**Status:** Accepted; **superseded in part** by [ADR-080](adr-080_host-owned-claude-credentials.md)
+(2026-09-27): §1 (the `skip-securestorage` patch), §2's `SKIP_SECURESTORAGE` /
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` spawn env and §3's sign-in through cli.js are replaced by in-app
+sign-in and host-owned tokens. The account model (one dir per account, shared `~/.claude`, switch =
+respawn) stands.
 **Date:** 2026-06-15
 
 ## Context

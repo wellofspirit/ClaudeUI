@@ -152,8 +152,7 @@ vi.mock('../../../core/services/git-service', () => ({
 }))
 
 vi.mock('../../../core/sdk/proxy', () => ({
-  setProxyEnv: vi.fn(),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn()
 }))
 
 vi.mock('../../../core/sdk/endpoint-env', () => ({
@@ -348,7 +347,6 @@ const sessionStub: any = {
   readBackgroundRange: vi.fn(() => ''),
   stopTask: vi.fn(async () => ({ success: true })),
   backgroundTask: vi.fn(async () => ({ success: true })),
-  dequeueMessage: vi.fn(async () => ({ removed: 1 })),
   queuedItems: [],
   enqueuePrompt: vi.fn(),
   recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),
@@ -453,6 +451,18 @@ describe('registerRemoteHandlers', () => {
     expect(groups).toEqual(
       expect.arrayContaining([native, expect.objectContaining({ engineId: 'claude', models: [] })])
     )
+  })
+
+  // The model probe, title and commit message never run a turn that could use
+  // a plugin's tools, so their processes skip the post-initialize reload.
+  it.each([
+    ['session:get-models', []],
+    ['session:generate-title', ['a conversation']],
+    ['session:generate-commit-message', ['diff --git a/x b/x']]
+  ])('%s spawns its process without a plugin reload', async (channel, args) => {
+    await dispatcher.handle(makeRequest(channel, ...args), remoteConn)
+    expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
   })
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {

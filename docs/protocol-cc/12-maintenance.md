@@ -22,7 +22,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run ensure-cli
    ```
 
-   If any of the 14 patches fail with "cannot locate anchor", those patches need updating.
+   If any patch in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) fails with "cannot locate anchor", that patch needs updating. The `patches:` line `apply-all.mjs` prints lists the patches the new build carries; one missing from it applied nothing.
 
 2. **Check patches that failed**
 
@@ -80,9 +80,10 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run test:component
    bun run test:e2e
    bun run test:integration    # exercises real cli.js contracts
+   bun run test:patch          # the patches' own suites, against the rebuilt bun-claude
    ```
 
-   The integration project is the one that catches real-world wire drift.
+   The integration project is the one that catches real-world wire drift. `test:patch` runs two suites (`subagent-streaming`, `bash-output-streaming`, both live); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
 
 8. **Re-verify the context-window mirror**
 
@@ -115,6 +116,36 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
     around the `grant_type` hit too: the body's fields, its `Content-Type` and
     the default scope list are all part of the request, and cli.js's own refresh
     posts JSON (the form-encoded one nearby is the unrelated gateway refresh).
+
+    The same `CLI_OAUTH` block also carries the **login** the in-app multi-account
+    sign-in performs (`src/core/auth/claude-oauth.ts`). Re-check, in the same
+    production config object: `CLAUDE_AI_AUTHORIZE_URL`, `MANUAL_REDIRECT_URL`,
+    `CLAUDEAI_SUCCESS_URL`, `ROLES_URL` and `BASE_API_URL` (→ `/api/oauth/profile`);
+    the login scope list `kCr()` = `U([...c, ...gqe()])` just above it (and whether
+    `PLUGINS_SCOPE_REGISTERED` still adds `user:plugins`); the authorize params and
+    their append order in `_Ln` (find it by `searchParams.append("code","true")`);
+    the exchange body in `M_r` (by `grant_type:"authorization_code"`); PKCE/state in
+    the class with `startOAuthFlow(` (verifier + state = base64url of 32 random
+    bytes, loopback `/callback` on `127.0.0.1`); and what `ILn`/`ab` store under
+    `claudeAiOauth` plus `bLn`'s `organization_type` → `subscriptionType` map.
+    `src/core/auth/__tests__/claude-oauth.test.ts` pins every one of these.
+
+11. **Re-verify the host-token contract (multi-account)**
+
+    Multi-account spawns run on a token the app hands cli.js (02 §2.14, "Host-owned
+    OAuth token"), and nothing on the stream fails loudly if cli.js changes how it
+    reads one. Re-check in the new `cli.js`: the `oauth_token_refresh` gate (find
+    `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH)&&` — the entrypoint set beside it must
+    still hold `claude-desktop`); the response schema (`reason:` next to
+    `accessToken:o().nullable()`) and its reason enum (`["signed_out",`); the 401
+    handler that calls the host and adopts a DIFFERENT token (`SDK getOAuthToken
+callback returned the same expired token`); the env-token credential
+    (`accessToken:a.CLAUDE_CODE_OAUTH_TOKEN,refreshToken:null`) and the scopes,
+    subscription and tier variables it reads; the `update_environment_variables`
+    allowlist (`new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN"`) and its
+    `control_response` on a `request_id`; and the child-env scrub that keeps the
+    token out of Bash and MCP children. 08 §8.7 and 06 §6.7 carry the 2.1.280
+    offsets.
 
 ---
 

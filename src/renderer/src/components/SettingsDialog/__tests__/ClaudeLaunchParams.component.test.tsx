@@ -46,8 +46,7 @@ const PROXY_OFF: ProxySettings = {
   hostname: '',
   port: 8080,
   username: '',
-  password: '',
-  proxySubprocesses: false
+  password: ''
 }
 
 function renderClaudePage(engineConfig: EngineConfig = {}): {
@@ -173,7 +172,14 @@ describe('the proxy group', () => {
     }
     expect(screen.getByTestId('ClaudeProxy.hostname.input')).toBeDisabled()
     expect(screen.getByTestId('ClaudeProxy.port.input')).toBeDisabled()
-    expect(screen.getByTestId('ClaudeProxy.subprocesses')).toBeDisabled()
+  })
+
+  it('says the proxy reaches the commands Claude runs, with no separate switch for them', () => {
+    renderClaudePage()
+    expect(screen.getByTestId('ClaudeProxy.note')).toHaveTextContent(
+      'The proxy also applies to the commands and tools Claude runs.'
+    )
+    expect(screen.queryByTestId('ClaudeProxy.subprocesses')).toBeNull()
   })
 
   it('picking SOCKS5 writes type and nothing else', () => {

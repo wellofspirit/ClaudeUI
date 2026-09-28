@@ -8,10 +8,11 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
-import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
+import { getProxyEnv } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
 import { getSecurestorageEnv } from './securestorage-env'
+import { readHostTokenSpawn, type HostTokenCredential } from './host-token'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
@@ -174,6 +175,16 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.includeHookEvents) args.push('--include-hook-events')
   if (options.includePartialMessages) args.push('--include-partial-messages')
   if (options.sessionMirror) args.push('--session-mirror')
+  // Always on, so a foreground subagent's text and thinking reach us on ANY
+  // Claude Code binary: without it an unpatched binary forwards only the
+  // subagent's tool_use/tool_result blocks. Upstream's precondition is a
+  // non-interactive session (stdout not a TTY — ours is a pipe) plus
+  // `--output-format stream-json`, the same one `--input-format stream-json`
+  // above already needs. On our patched binary, subagent-streaming Patch A
+  // removed the very `continue` this flag skips, so nothing arrives twice; the
+  // flag only adds what no patch forwards (a nested subagent's and a forked
+  // skill's messages). docs/protocol-cc/02-cli-flags.md §2.1.
+  args.push('--forward-subagent-text')
 
   // --- Additional dirs & plugins ------------------------------------------
   for (const dir of options.additionalDirectories ?? []) args.push('--add-dir', dir)
@@ -283,7 +294,23 @@ let cachedNodeModules: string | null | undefined
  */
 export const APP_ENTRYPOINT = 'claude-desktop'
 
+/** A spawn's env, and the host token it carries (multi-account; null otherwise). */
+export interface SpawnEnv {
+  env: NodeJS.ProcessEnv
+  /** The account dir the token belongs to and the token itself — what `query()` registers. */
+  hostToken: { dir: string; token: string } | null
+}
+
 export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return buildSpawnEnv(base).env
+}
+
+/**
+ * The env for one cli.js spawn. Throws `HostTokenUnavailableError` when
+ * multi-account is on and the active account has no stored token (fail
+ * closed; see `host-token.ts`).
+ */
+export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
   const env = { ...base }
   if (env.DEBUG_CLAUDE_AGENT_SDK) env.DEBUG = '1'
   // We do NOT force CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC here. It is not a
@@ -315,25 +342,20 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   // so an explicit opt-out in the environment still wins.
   env.CLAUDE_CODE_ENABLE_TODO_TOOLS ??= 'true'
 
-  // Scoped proxy: overlay proxy env vars only onto this spawn, not the main
-  // Electron process. If `proxyAllSubprocesses` is off (default), the
-  // subprocess-proxy-strip patch in cli.js removes these from Bash/MCP/LSP
-  // child env so only cli.js's own API traffic is proxied.
+  // Scoped proxy: overlay the in-app proxy only onto this spawn, not the main
+  // Electron process. cli.js passes its env to every child it spawns (Bash,
+  // MCP stdio servers, LSP, hooks), so the in-app proxy reaches them too, as a
+  // shell-set proxy does with the unpatched binary.
   const proxy = getProxyEnv()
   if (proxy) {
     env.HTTP_PROXY = proxy.HTTP_PROXY
     env.HTTPS_PROXY = proxy.HTTPS_PROXY
     env.ALL_PROXY = proxy.ALL_PROXY
-    if (getProxyAllSubprocesses()) env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
-    else delete env.CLAUDEUI_PROXY_SUBPROCESSES
-  } else {
-    // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
-    // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
-    // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
-    // corporate/env proxy with no connectivity (M-CL4). Only clear our own
-    // marker so the default subprocess-proxy-strip behavior applies.
-    delete env.CLAUDEUI_PROXY_SUBPROCESSES
   }
+  // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
+  // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
+  // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
+  // corporate/env proxy with no connectivity (M-CL4).
 
   // Scoped Anthropic endpoint: overlay base URL + auth token only onto this
   // spawn so user-supplied gateway credentials never leak into PTYs, simple-git
@@ -348,6 +370,8 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   // env relies on them and the stock CLI supports them (M-CL4). These inherited
   // values are the user's own shell env — the Codex/vault path never writes
   // ANTHROPIC_* to process.env, so this cannot leak vault tokens into Claude.
+  // The exception is a multi-account host-token spawn, below: it runs on the
+  // account's own OAuth token, which never goes to an inherited gateway.
 
   // Scoped model override: each field is set only when non-empty so partial
   // overrides leave cli.js's defaults intact for the unset families.
@@ -371,26 +395,27 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   }
 
-  // Multi-account credential storage (ADR-015). Precedence: the active
-  // account's dir from module state (setSecurestorageEnv, wired by
-  // AccountManager.applyActive) is AUTHORITATIVE and wins over anything in the
-  // spawn env. Treating an inherited `SKIP_SECURESTORAGE` (from the parent
-  // shell's process.env) as an explicit per-spawn override skipped this overlay,
-  // so every account silently shared one inherited credential dir instead of its
-  // own. Only when multi-account is OFF (no module state) do we honor a
-  // SKIP_SECURESTORAGE already present in the env, else clear so single-account
-  // Keychain mode is restored.
-  const ss = getSecurestorageEnv()
-  if (ss) {
-    env.SKIP_SECURESTORAGE = '1'
-    env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ss.dir
-  } else if (env.SKIP_SECURESTORAGE) {
-    // Single-account mode, but SKIP_SECURESTORAGE is present in the spawn env
-    // (an explicit per-spawn override, or one inherited from the shell) — with no
-    // active-account dir to enforce, leave it as provided.
-  } else {
+  // Multi-account (ADR-015): the app owns the active account's credential and
+  // hands cli.js its access token, exactly as Claude Desktop does
+  // (docs/protocol-cc/02-cli-flags.md §2.14, "Host-owned OAuth token"). The
+  // active dir from module state (setSecurestorageEnv, wired by
+  // AccountManager.applyActive) is AUTHORITATIVE: an inherited
+  // CLAUDE_CODE_OAUTH_TOKEN, or the retired SKIP_SECURESTORAGE /
+  // CLAUDE_SECURESTORAGE_CONFIG_DIR pair, from the parent shell would otherwise
+  // pick the credential instead. A custom endpoint profile (above) brings its
+  // own credential and wins, so it gets no host token. Single-account mode
+  // passes the inherited env through untouched: cli.js uses and refreshes the
+  // user's own Claude Code login, as a terminal `claude` would.
+  let hostToken: SpawnEnv['hostToken'] = null
+  if (getSecurestorageEnv()) {
     delete env.SKIP_SECURESTORAGE
     delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    delete env.CLAUDE_CODE_OAUTH_TOKEN
+    const spawn = readHostTokenSpawn()
+    if (spawn) {
+      applyHostTokenEnv(env, spawn.credential)
+      hostToken = { dir: spawn.dir, token: spawn.credential.accessToken }
+    }
   }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve
@@ -401,5 +426,33 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     const existing = env.NODE_PATH ? env.NODE_PATH + sep : ''
     env.NODE_PATH = existing + cachedNodeModules
   }
-  return env
+  return { env, hostToken }
+}
+
+/**
+ * Claude Desktop 2.9939.2's spawn env for a host-owned OAuth token, verbatim.
+ *
+ * `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` together with the `claude-desktop`
+ * entrypoint set above is cli.js's gate for asking US for a fresh token on a
+ * 401 (`Mnt()`, `.cache/pristine-cli.js` @3069074); without it cli.js has no
+ * refresh token of its own and the turn fails. The API-key variables are
+ * removed as Desktop removes them: an inherited key, bearer or header set would
+ * compete with the account's token for the same requests. An inherited
+ * `ANTHROPIC_BASE_URL` goes too: Desktop pins the base URL to its own API host,
+ * and a gateway named in the user's shell must not be handed the account's
+ * OAuth token (cli.js's default is the Anthropic API). cli.js keeps the
+ * token, the subscription and tier variables and the refresh flag out of every
+ * child it spawns (Bash, MCP, hooks); `CLAUDE_CODE_OAUTH_SCOPES` does reach
+ * them, and is only a scope list.
+ */
+function applyHostTokenEnv(env: NodeJS.ProcessEnv, credential: HostTokenCredential): void {
+  env.CLAUDE_CODE_OAUTH_TOKEN = credential.accessToken
+  env.CLAUDE_CODE_OAUTH_SCOPES = credential.scopes.join(' ')
+  env.CLAUDE_CODE_SUBSCRIPTION_TYPE = credential.subscriptionType ?? ''
+  env.CLAUDE_CODE_RATE_LIMIT_TIER = credential.rateLimitTier ?? ''
+  env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH = '1'
+  delete env.ANTHROPIC_API_KEY
+  delete env.ANTHROPIC_AUTH_TOKEN
+  delete env.ANTHROPIC_CUSTOM_HEADERS
+  delete env.ANTHROPIC_BASE_URL
 }

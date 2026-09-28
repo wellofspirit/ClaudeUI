@@ -22,6 +22,7 @@ import type {
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { backgroundBashTaskId } from '../../../../../shared/claude-background-bash'
 import { engineToolMap } from '../tool-registry/engine-tool-maps'
 import { ToolCard } from '../tool-registry/ToolCard'
 import { latestNotification } from '../task-state'
@@ -63,16 +64,32 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const toolOutputMaxChars = useSessionStore((s) => s.settings.toolOutputMaxChars)
 
   const toolUseId = block.toolUseId || ''
-  const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
+  const isBash = block.toolName === 'Bash'
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
+  // The live task record (session:task-started), when cli.js has registered this
+  // call as a task — a foreground Bash does so a few seconds after it starts.
+  const activeTask = useActiveSession((s) => (isHistorical ? undefined : s.activeTasks[toolUseId]))
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const watchBackgroundOutput = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
-  const bgNotification = isBackgroundBash
-    ? (latestNotification(taskNotifications, toolUseId) ?? null)
-    : null
+  const notification = isBash ? (latestNotification(taskNotifications, toolUseId) ?? null) : null
+  // A foreground command cli.js moved to the background ("Send to background",
+  // a timeout, a message that arrived while it ran) is a background command from
+  // then on; its tool_result only says where the output goes. The record's flip
+  // says so while the task runs; the terminal event drops the record, and from
+  // then the tool_result's wording plus that event do. A transcript has neither
+  // (history maps no shell's notification to its call), so a reopened session
+  // keeps showing the tool_result.
+  const movedToBackground =
+    !isHistorical &&
+    (activeTask?.isBackgrounded === true ||
+      (notification !== null &&
+        result !== undefined &&
+        backgroundBashTaskId(result.toolResult) !== undefined))
+  const isBackgroundBash = isBash && (!!block.toolInput?.run_in_background || movedToBackground)
+  const bgNotification = isBackgroundBash ? notification : null
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
@@ -121,9 +138,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({
     if (!activeSessionId) return
     setIsBackgrounding(true)
     const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    // Success needs no local state: the task's record flips to the background,
+    // which hides the button on every client. A failure also arrives as a
+    // session warning.
+    setIsBackgrounding(false)
     if (!bgResult.success) {
       window.api.logError('ToolCallBlock', `Failed to background task: ${bgResult.error}`)
-      setIsBackgrounding(false)
     }
   }
 
@@ -170,6 +190,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       bgOutput={bgOutput}
       bgNotification={bgNotification}
       isStopping={isStopping}
+      activeTask={activeTask}
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
       backgroundTasksEnabled={backgroundTasksEnabled}

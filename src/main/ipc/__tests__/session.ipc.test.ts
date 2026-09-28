@@ -76,7 +76,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     readBackgroundRange: vi.fn(() => ''),
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
-    dequeueMessage: vi.fn(async () => ({ removed: 0 })),
     queuedItems: [],
     enqueuePrompt: vi.fn(),
     recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
@@ -316,6 +315,7 @@ import { hostConnection } from '../../../core/ipc/command-registry'
 import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { query } from '../../../core/sdk'
 
 // Fill in the stub's capabilities now that the top-level import is available
 // (it can't be referenced inside the vi.hoisted() factory above).
@@ -774,6 +774,28 @@ describe('session.ipc', () => {
       expect(res.ok).toBe(false)
       expect(res.error).toBe('No active session')
     })
+
+    it('refuses both start verbs on a Claude binary without the voice-server patch', async () => {
+      // ClaudeSession.capabilities.voice is false exactly then.
+      const caps = sessionStub.capabilities
+      sessionStub.capabilities = { ...caps, voice: false }
+      sessionStub.voiceStartServer.mockClear()
+      sessionStub.voiceStartRecording.mockClear()
+      try {
+        for (const [channel, ...args] of [
+          ['voice:start-server', 'rid-1'],
+          ['voice:start-recording', 'rid-1', 'en']
+        ]) {
+          const res = await harness.call<any>(channel, ...args)
+          expect(res.ok, channel).toBe(false)
+          expect(res.error, channel).toMatch(/voice-server patch/)
+        }
+        expect(sessionStub.voiceStartServer).not.toHaveBeenCalled()
+        expect(sessionStub.voiceStartRecording).not.toHaveBeenCalled()
+      } finally {
+        sessionStub.capabilities = caps
+      }
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -786,8 +808,30 @@ describe('session.ipc', () => {
     })
 
     it('session:get-models is registered', async () => {
-      const res = await harness.call<any[]>('session:get-models')
-      expect(Array.isArray(res)).toBe(true)
+      // Past the 2-minute model cache, so this call spawns its probe.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60 * 60_000)
+      try {
+        const res = await harness.call<any[]>('session:get-models')
+        expect(Array.isArray(res)).toBe(true)
+      } finally {
+        now.mockRestore()
+      }
+      // Init-only probe: no reload_plugins in a process killed after initialize.
+      expect(vi.mocked(query)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: '',
+          options: expect.objectContaining({ reloadPlugins: false })
+        })
+      )
+    })
+
+    it.each([
+      ['session:generate-title', 'a conversation'],
+      ['session:generate-commit-message', 'diff --git a/x b/x']
+    ])('%s spawns its one-shot without a plugin reload', async (channel, arg) => {
+      await harness.call(channel, arg)
+      expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
     })
 
     it('session:set-permission-mode routes to session.setPermissionMode', async () => {
@@ -856,8 +900,8 @@ describe('session.ipc', () => {
         enqueuePrompt: vi.fn(),
         recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
-        // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
-        // mcpToggleServer, setEffort, etc.
+        // getPlanContent, getSessionLogPath, mcpServerStatus, mcpToggleServer,
+        // setEffort, etc.
       }
       sessionManagerSpies.get.mockReturnValue(minimalStub)
 

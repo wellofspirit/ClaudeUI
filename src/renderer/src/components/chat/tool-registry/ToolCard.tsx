@@ -22,6 +22,7 @@
 
 import { useState, useEffect } from 'react'
 import type {
+  ActiveTask,
   ContentBlock,
   PendingApproval,
   PermissionMode,
@@ -89,6 +90,13 @@ export interface ToolCardProps {
   bgOutput?: BgOutputSlice
   bgNotification: TaskNotification | null
   isStopping: boolean
+  /**
+   * The call's live task record (`activeTasks`), once cli.js has registered it
+   * as a task. "Send to background" needs `isBackgrounded === false`: before
+   * registration, or once in the background, `background_tasks` has nothing
+   * to move.
+   */
+  activeTask?: ActiveTask
   isBackgrounding: boolean
   hasActiveSession: boolean
   /** Show the "Send to background" affordance. Gated on capabilities.backgroundTasks. */
@@ -129,6 +137,7 @@ export function ToolCard({
   bgOutput,
   bgNotification,
   isStopping,
+  activeTask,
   isBackgrounding,
   hasActiveSession,
   backgroundTasksEnabled,
@@ -183,6 +192,8 @@ export function ToolCard({
   const isSuccess = visualState === 'success'
   const isLoaded = visualState === 'loaded'
   const isForegroundBashRunning = visualState === 'running' && !isBackgroundBash
+  const isForegroundTask = activeTask?.isBackgrounded === false
+  const canBackground = isForegroundBashRunning && isForegroundTask && backgroundTasksEnabled
 
   const statusIcon = isPendingApproval ? (
     <svg
@@ -312,7 +323,7 @@ export function ToolCard({
           </span>
         )}
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
-        {isForegroundBashRunning && !isBackgrounding && backgroundTasksEnabled && (
+        {canBackground && !isBackgrounding && (
           <button
             data-testid="ToolCard.sendToBackground"
             onClick={(e) => {
@@ -324,7 +335,7 @@ export function ToolCard({
             Send to background
           </button>
         )}
-        {isBackgrounding && (
+        {isBackgrounding && isForegroundTask && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
             sending to background…
           </span>

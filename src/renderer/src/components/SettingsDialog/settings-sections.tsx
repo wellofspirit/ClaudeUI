@@ -177,8 +177,7 @@ const DEFAULT_PROXY: ProxySettings = {
   hostname: '',
   port: 8080,
   username: '',
-  password: '',
-  proxySubprocesses: false
+  password: ''
 }
 
 // ── Proxy test connection row ────────────────────────────────────────
@@ -3027,33 +3026,13 @@ export const SECTIONS: Section[] = [
         }
       },
       {
-        key: 'proxySubprocesses',
-        label: 'Proxy shell commands',
-        keywords: 'proxy bash subprocess shell git curl npm everything all',
-        render: (_s, _u, e, ue) => {
-          const px = e.proxy ?? DEFAULT_PROXY
-          return (
-            <SettingsToggle
-              testid="ClaudeProxy.subprocesses"
-              label="Also proxy shell commands"
-              description="Sets HTTP_PROXY and HTTPS_PROXY for commands the agent runs; off keeps them direct."
-              checked={px.proxySubprocesses === true}
-              onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
-              indent
-              dimmed={!px.enabled}
-              disabled={!px.enabled}
-            />
-          )
-        }
-      },
-      {
         key: 'proxyFooter',
         label: 'Proxy info',
-        keywords: 'proxy info env environment variable',
+        keywords: 'proxy info env environment variable bash subprocess shell commands tools',
         render: () => (
           <SettingRow
             testid="ClaudeProxy.note"
-            description="Applies to the Claude API connection; shell commands only when the toggle above is on."
+            description="The proxy also applies to the commands and tools Claude runs."
           />
         )
       }

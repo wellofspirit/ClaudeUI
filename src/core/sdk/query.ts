@@ -6,7 +6,9 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import type {
   CanUseTool,
   CanUseToolResult,
+  GetOAuthTokenCallback,
   HookCallback,
+  OAuthTokenAnswer,
   PermissionMode,
   QueryHandle,
   QueryInput,
@@ -15,7 +17,8 @@ import type {
   McpServerConfig
 } from './types'
 import { locateBunClaude } from './locate'
-import { buildArgs, buildEnv, splitMcpServers } from './args'
+import { buildArgs, buildSpawnEnv, splitMcpServers } from './args'
+import { getHostTokenSource, type HostTokenSession } from './host-token'
 import { NdjsonReader, NdjsonWriter } from './protocol'
 import { ControlChannel } from './control'
 import { McpHost } from './mcp-host'
@@ -74,20 +77,40 @@ export class MessageQueue {
 }
 
 export function query(input: QueryInput): QueryHandle {
-  const options: QueryOptions = input.options ?? {}
+  const callerOptions: QueryOptions = input.options ?? {}
   // Default executable is the rebundled Bun binary; `pathToClaudeCodeExecutable`
   // lets tests/alt-runtimes override. When `standaloneExecutable` (default for
   // the Bun binary pipeline) is true, the executable is self-contained and we
   // don't inject its path as an argv entry.
-  const bunClaude = options.pathToClaudeCodeExecutable ?? locateBunClaude()
-  const standalone = options.standaloneExecutable ?? true
-  const executable = options.executable ?? bunClaude
-  const executableArgs = options.executableArgs ?? []
+  const bunClaude = callerOptions.pathToClaudeCodeExecutable ?? locateBunClaude()
+  const standalone = callerOptions.standaloneExecutable ?? true
+  const executable = callerOptions.executable ?? bunClaude
+  const executableArgs = callerOptions.executableArgs ?? []
 
-  const args = [...executableArgs, ...(standalone ? [] : [bunClaude]), ...buildArgs(options)]
+  const args = [...executableArgs, ...(standalone ? [] : [bunClaude]), ...buildArgs(callerOptions)]
   // Env overlay for the CLI child ONLY — keeps any temporary env changes from
-  // poisoning Electron's GPU/renderer children.
-  const env = buildEnv({ ...process.env, ...(options.env ?? {}) })
+  // poisoning Electron's GPU/renderer children. Throws before anything is
+  // spawned when multi-account is on and the active account has no token.
+  const { env, hostToken } = buildSpawnEnv({ ...process.env, ...(callerOptions.env ?? {}) })
+
+  // A host-token spawn (multi-account): this process runs on the active
+  // account's token, which the app keeps fresh. Its record — the dir it was
+  // spawned for, the token it holds — is registered with the token keeper for
+  // the life of the process, so a rotation reaches it and its
+  // `oauth_token_refresh` requests are answered by default.
+  const hostTokenSource = hostToken ? getHostTokenSource() : null
+  let hostTokenSession: HostTokenSession | null = null
+  let detachHostToken = (): void => {}
+  const hostTokenRefresh: GetOAuthTokenCallback | undefined = hostTokenSource
+    ? () =>
+        hostTokenSession
+          ? hostTokenSource.answerRefresh(hostTokenSession)
+          : Promise.resolve({ accessToken: null, reason: 'transient' })
+    : undefined
+  const options: QueryOptions =
+    hostTokenRefresh && !callerOptions.getOAuthToken
+      ? { ...callerOptions, getOAuthToken: hostTokenRefresh }
+      : callerOptions
 
   const { sdkServers } = splitMcpServers(options.mcpServers)
   const mcpHost = new McpHost(sdkServers)
@@ -115,11 +138,13 @@ export function query(input: QueryInput): QueryHandle {
 
   const wireLog = new WireLog({ capacity: options.wireLogCapacity ?? 1000 })
   // Tap the writer so every outbound line is captured before it crosses
-  // the pipe. Cheap — one record per control_request / user message.
+  // the pipe. Cheap — one record per control_request / user message. The two
+  // frames that carry an OAuth token are recorded with the token masked: the
+  // wire log is a diagnostics dump, not a credential store.
   const rawWriter = new NdjsonWriter(child.stdin)
   const origWrite = rawWriter.write.bind(rawWriter)
   rawWriter.write = (obj): boolean => {
-    wireLog.record('out', obj)
+    wireLog.record('out', redactForWireLog(obj))
     return origWrite(obj)
   }
   const writer = rawWriter
@@ -283,10 +308,12 @@ export function query(input: QueryInput): QueryHandle {
   }
   // Initialize can stall indefinitely on pathological cli.js states; bound
   // it with a generous timeout so consumers don't hang forever on spawn.
+  let initialized = false
   const initPromise: Promise<Record<string, unknown>> = control
     .request(initPayload, { timeoutMs: 60_000 })
     .then((r) => {
       stamp('initialize response')
+      initialized = true
       return (r ?? {}) as Record<string, unknown>
     })
     .catch((err: Error) => {
@@ -303,6 +330,41 @@ export function query(input: QueryInput): QueryHandle {
   // the inevitable EPIPE / "write after end" that occurs when the streaming
   // input iterator races child teardown. Those aren't user-facing failures.
   let childClosed = false
+
+  // Plugin MCP servers. cli.js's headless startup never connects the MCP
+  // servers of plugins enabled in settings: on the official 2.1.280 binary they
+  // were still absent from `mcp_status` after 12 s. `reload_plugins` connects
+  // them (`pending`, then `connected` about 2 s later); cli.js answers in tens
+  // of milliseconds and connects in the background (docs/protocol-cc/
+  // 07-control-outbound.md, `reload_plugins`).
+  //
+  // Sent once, after the initialize response, so it cannot race cli.js's own
+  // setup. Nothing waits for it: the first prompt was written at spawn, so the
+  // reload lands early in the first turn, where a tool-list change costs at
+  // most one prompt-cache rewrite.
+  //
+  // Unconditional: for a local spawn the handler's marketplace install pass is
+  // never admitted (managed cloud workers only) and a cached plugin loads from
+  // disk, so the only fetch is an ENABLED plugin missing from the cache, which
+  // a gate on `enabledPlugins` would not prevent anyway. With `strictMcpConfig`
+  // the caller wants only the `--mcp-config` servers, so no plugin servers are
+  // added. `reloadPlugins: false` is the caller saying the process never runs a
+  // turn that could use them (a model probe, the service session), so
+  // connecting them would be wasted work.
+  if (!options.strictMcpConfig && options.reloadPlugins !== false) {
+    void initPromise.then(() => {
+      if (!initialized || childClosed) return
+      control.request({ subtype: 'reload_plugins' }).then(
+        () => stamp('reload_plugins response'),
+        (err: Error) => {
+          if (childClosed) return // the session ended first; nothing failed
+          const text = `[sdk] reload_plugins after initialize failed: ${err?.message ?? err}`
+          console.warn(text)
+          options.stderr?.(Buffer.from(`${text}\n`))
+        }
+      )
+    })
+  }
 
   // Forward initial prompt(s) — do NOT await initPromise. cli.js queues
   // incoming messages and processes them in order after initialize completes,
@@ -376,6 +438,7 @@ export function query(input: QueryInput): QueryHandle {
       closeFallback = null
     }
     options.abortController?.signal.removeEventListener('abort', onAbort)
+    detachHostToken()
     control.rejectAll('cli.js exited')
     writer.end()
     const code = exitInfo?.code ?? null
@@ -389,6 +452,7 @@ export function query(input: QueryInput): QueryHandle {
 
   child.on('exit', (code, signal) => {
     childClosed = true
+    detachHostToken()
     exitInfo = { code, signal }
     // Do NOT finalize here — let stdout drain first. Arm a fallback so a
     // never-arriving 'close' can't hang the consumer forever.
@@ -411,11 +475,68 @@ export function query(input: QueryInput): QueryHandle {
     }
     finalized = true
     options.abortController?.signal.removeEventListener('abort', onAbort)
+    detachHostToken()
     control.rejectAll(err.message)
     queue.finish(err)
   })
 
-  return makeHandle(queue, control, child, options, initPromise, wireLog, killChild)
+  const handle = makeHandle(queue, control, child, options, initPromise, wireLog, killChild)
+
+  // Registered last, once the handle that pushes a token exists. Unregistered
+  // on the child's exit, close or spawn error (detachHostToken above), so a
+  // rotation never writes to a dead pipe for long.
+  if (hostToken && hostTokenSource && !childClosed) {
+    const session: HostTokenSession = {
+      dir: hostToken.dir,
+      token: hostToken.token,
+      push: (token) => handle.updateEnvironmentVariables({ CLAUDE_CODE_OAUTH_TOKEN: token })
+    }
+    hostTokenSession = session
+    const detach = hostTokenSource.attach(session)
+    detachHostToken = (): void => {
+      detachHostToken = (): void => {}
+      detach()
+    }
+  }
+
+  return handle
+}
+
+/**
+ * A copy of an outbound frame that is safe to keep in the wire log: the values
+ * of `update_environment_variables` and the `accessToken` of an
+ * `oauth_token_refresh` answer are masked. Everything else is returned as is.
+ */
+function redactForWireLog(obj: Record<string, unknown>): Record<string, unknown> {
+  if (obj.type === 'update_environment_variables' && obj.variables) {
+    const masked = Object.fromEntries(
+      Object.keys(obj.variables as Record<string, unknown>).map((key) => [key, '[redacted]'])
+    )
+    return { ...obj, variables: masked }
+  }
+  if (obj.type === 'control_response') {
+    const response = obj.response as { response?: { accessToken?: unknown } } | undefined
+    if (typeof response?.response?.accessToken === 'string') {
+      return {
+        ...obj,
+        response: {
+          ...response,
+          response: { ...response.response, accessToken: '[redacted]' }
+        }
+      }
+    }
+  }
+  return obj
+}
+
+/**
+ * The callback's answer as cli.js's response schema `aSr` wants it:
+ * `{accessToken}`, or `{accessToken: null, reason}` when a reason was given.
+ */
+function oauthTokenResponse(answer: string | null | OAuthTokenAnswer): OAuthTokenAnswer {
+  if (answer === null || typeof answer === 'string') return { accessToken: answer || null }
+  if (answer.accessToken) return { accessToken: answer.accessToken }
+  return answer.reason ? { accessToken: null, reason: answer.reason } : { accessToken: null }
 }
 
 interface InboundCtx {
@@ -530,8 +651,8 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
         ctx.control.respondError(request_id, 'getOAuthToken callback is not provided.')
         return
       }
-      const token = await ctx.options.getOAuthToken({ signal: ac.signal })
-      ctx.control.respondSuccess(request_id, { accessToken: token ?? null })
+      const answer = await ctx.options.getOAuthToken({ signal: ac.signal })
+      ctx.control.respondSuccess(request_id, oauthTokenResponse(answer ?? null))
       return
     }
 
@@ -693,10 +814,13 @@ export function makeHandle(
         user_message_id,
         dry_run: opts?.dryRun
       }),
+    // Native take-back of a queued user message by the `uuid` its frame
+    // carried. `{cancelled:false}` is a SUCCESS answer (cli.js does not hold
+    // that uuid), so anything short of an explicit `true` reads as not taken.
     cancelAsyncMessage: (message_uuid: string) =>
       control
-        .request({ subtype: 'cancel_async_message', message_uuid })
-        .then((r) => (r ?? {}) as { cancelled: boolean }),
+        .request<{ cancelled?: boolean } | null>({ subtype: 'cancel_async_message', message_uuid })
+        .then((r) => ({ cancelled: r?.cancelled === true })),
     seedReadState: (path: string, mtime: number) =>
       control.request({ subtype: 'seed_read_state', path, mtime }),
     enableRemoteControl: (enabled: boolean, opts?: { name?: string }) =>
@@ -717,12 +841,14 @@ export function makeHandle(
     launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
       control.request({ subtype: 'ultrareview_launch', args, confirm: opts?.confirm }),
     stopTask: (task_id: string) => control.request({ subtype: 'stop_task', task_id }),
+    // Native `background_tasks` (the control-request Ctrl+B). With a
+    // tool_use_id the SUCCESS payload is `{backgrounded}`: false when no
+    // foreground task with that id is registered — not yet (a foreground Bash
+    // registers seconds after its tool_use), already backgrounded, or finished.
     backgroundTask: (tool_use_id: string) =>
-      control.request({ subtype: 'background_task', tool_use_id }),
-    dequeueMessage: (value: string) =>
       control
-        .request<{ removed?: number } | null>({ subtype: 'dequeue_message', value })
-        .then((r) => ({ removed: r?.removed ?? 0 })),
+        .request<{ backgrounded?: boolean } | null>({ subtype: 'background_tasks', tool_use_id })
+        .then((r) => ({ backgrounded: r?.backgrounded === true })),
     voiceServerStart: () =>
       control
         .request<{ port?: number } | null>({ subtype: 'voice_server_start' })
@@ -731,14 +857,29 @@ export function makeHandle(
       control
         .request<{ stopped?: boolean } | null>({ subtype: 'voice_server_stop' })
         .then((r) => ({ stopped: r?.stopped ?? true })),
+    // Native since 2.1.177. `skip_behaviors` skips cli.js's scan of every
+    // transcript touched in the last seven days (~600 ms → ~1 ms); the scan
+    // only fills the response's `behaviors`, which parseUsageResponse never
+    // reads — the usage meter needs the rate limits alone.
     getUsage: () =>
       control
-        .request<Record<string, unknown> | null>({ subtype: 'get_usage' })
+        .request<Record<string, unknown> | null>({ subtype: 'get_usage', skip_behaviors: true })
         .then((r) => r ?? {}),
     getContextUsage: () =>
       control
         .request<Record<string, unknown> | null>({ subtype: 'get_context_usage' })
         .then((r) => r ?? {}),
+    updateEnvironmentVariables: (variables: Record<string, string>) =>
+      control.updateEnvironmentVariables(variables).then(
+        () => true,
+        (err: Error) => {
+          // Keys only: the values are credentials.
+          const text = `[sdk] update_environment_variables (${Object.keys(variables).join(', ')}) failed: ${err?.message ?? err}`
+          console.warn(text)
+          options.stderr?.(Buffer.from(`${text}\n`))
+          return false
+        }
+      ),
 
     // --- MCP servers ------------------------------------------------------
     mcpServerStatus: () =>

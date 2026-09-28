@@ -180,7 +180,7 @@ Always exactly once, by us, immediately after spawn and before (or concurrent wi
 
 - **`output_style`** — active style. Affects formatting / verbosity.
 - **`available_output_styles`** — enumerated styles. Can be changed via `apply_flag_settings` control subtype.
-- **`account`** — authenticated principal. `apiProvider` discriminates API vendor.
+- **`account`** — authenticated principal. `apiProvider` discriminates API vendor. Under an env token (`CLAUDE_CODE_OAUTH_TOKEN`, every multi-account spawn) it is `{tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "firstParty"}` with no email or organization (live probe, official 2.1.280), so the app reads login state from the account's own credential in that mode (02 §2.14).
 - **`pid`** — internal. Used for tmux socket deconfliction when multiple cli.js instances share a machine.
 - **`fast_mode_state`** — Opus fast-mode status. Emitted only when the account is eligible (`A7()`) AND fast-mode is enabled (`mP()`). Absent on most accounts.
 

@@ -2,7 +2,7 @@
  * Who does a Claude credential DIRECTORY belong to (S2e, ADR-071 §3 and §6).
  *
  * Multi-account (ADR-015) gives each account its own `.credentials.json` and
- * points cli.js at one of them. It does NOT give each account its own
+ * hands cli.js the active one's token. It does NOT give each account its own
  * `~/.claude.json`: that file is shared by every dir and by the terminal
  * `claude`, and cli.js rewrites its `oauthAccount` block only when it refetches
  * the profile (older than 24 h, or a missing field). So the block names
@@ -26,7 +26,7 @@
 
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import type { BillingType } from '../../shared/types'
-import { authorizedOAuthGet, type ClaudeUsageFailure } from './claude-usage-api'
+import { authorizedOAuthGet, CLI_OAUTH, type ClaudeUsageFailure } from './claude-usage-api'
 import { getMeta, repairClaudeAccountKey, setMeta } from './db'
 import { logger } from './logger'
 import {
@@ -37,7 +37,7 @@ import {
   type AccountLogRecord
 } from './usage-windows'
 
-const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
+const PROFILE_URL = CLI_OAUTH.profileUrl
 /** cli.js's own timeout for this call — twice the usage read's. */
 const PROFILE_TIMEOUT_MS = 10_000
 

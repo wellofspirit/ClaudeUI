@@ -1,5 +1,6 @@
 import { query as sdkQuery } from '../sdk'
-import { queuedCommandText } from '../sdk/queued-command-text'
+import { ensureHostTokenFresh, hostTokenDir } from '../sdk/host-token'
+import { claudeLoginSignal } from './claude-login-state'
 import type {
   QueryHandle,
   SDKMessage,
@@ -10,6 +11,7 @@ import type {
   ToolProgressMessage,
   RateLimitEventMessage,
   BashOutputMessage,
+  CommandLifecycleMessage,
   ControlResponseMessage
 } from '../sdk'
 import { v4 as uuid } from 'uuid'
@@ -19,6 +21,7 @@ import * as path from 'path'
 import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
@@ -31,11 +34,7 @@ import {
 } from './agent-identity'
 import { parseTaskNotificationXml } from './task-notification-xml'
 import { classifyApiError } from './api-error'
-import {
-  isClassifierDecision,
-  permissionDecisionBlock,
-  readPermissionDecisionFrame
-} from './claude-permission-decision'
+import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -65,6 +64,10 @@ import {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
 import { locateBunClaude } from '../sdk'
+// Straight from the module, not the '../sdk' barrel: several suites replace the
+// barrel with a factory that lists only `query`, and `capabilities` is read on
+// every status emission.
+import { harnessHasPatch } from '../sdk/harness'
 
 export { getCliVersion } from '../sdk'
 
@@ -182,8 +185,6 @@ class MessageChannel<T> {
 }
 
 const TASK_ID_RE = /task_id:\s*(\S+)/
-const BG_CMD_ID_RE = /Command running in background with ID:\s*([\w-]+)/
-const OUTPUT_FILE_RE = /Output is being written to:\s*(.+)/
 
 const TAIL_SIZE = 64 * 1024
 
@@ -202,9 +203,12 @@ export class ClaudeSession extends BaseSession {
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
     // but the HONEST per-session value also requires the opencode binary to
     // actually be vendored — otherwise there is no possible dispatch target.
+    // Voice likewise: the voice server is our cli.js patch, so an unpatched
+    // Claude Code binary (CLAUDEUI_CLAUDE_CLI) has nothing to talk to.
     return {
       ...base,
-      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude')
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude'),
+      voice: base.voice && harnessHasPatch('voice-server')
     }
   }
 
@@ -294,11 +298,12 @@ export class ClaudeSession extends BaseSession {
   private identitySeed: Promise<AgentIdentity> | null = null
   /**
    * Tasks the CURRENT process has started and not yet ended: task id → the
-   * tool_use id its card is keyed by. They run inside cli.js, so when the
-   * process goes they go with it — and nothing else will ever say so until a
-   * `--resume` reaps them. `settleOrphanedTasks` reports them stopped.
+   * tool_use id its card is keyed by, and the task's type. They run inside
+   * cli.js, so when the process goes they go with it — and nothing else will
+   * ever say so until a `--resume` reaps them. `settleOrphanedTasks` reports
+   * them stopped.
    */
-  private liveTasks = new Map<string, string>()
+  private liveTasks = new Map<string, { owner: string; taskType: string }>()
   /** Agent ids whose stream events were dropped unplaced — logged once each. */
   private unplacedAgentIds = new Set<string>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
@@ -570,9 +575,19 @@ export class ClaudeSession extends BaseSession {
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
   }
 
+  /**
+   * `wireUuid` becomes the user frame's `uuid` — the id cli.js names the
+   * message by in its `command_lifecycle` frames and in `cancel_async_message`,
+   * and the transcript uuid it persists the message under. A queued item passes
+   * its `itemId` so both sides key the same message the same way; every other
+   * send gets a fresh one. It must be unique per message: cli.js skips an
+   * inbound frame whose uuid it has already received or persisted as a
+   * duplicate.
+   */
   async run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    wireUuid?: string
   ): Promise<void> {
     this.clearInactivityTimer()
     // A fresh run reactivates a session a prior cancel() retired — re-enable the
@@ -630,7 +645,10 @@ export class ClaudeSession extends BaseSession {
         type: 'user' as const,
         session_id: this.sessionId || '',
         message: { role: 'user' as const, content },
-        parent_tool_use_id: null
+        parent_tool_use_id: null,
+        // Without a uuid cli.js emits no command_lifecycle frames for the
+        // message and cancel_async_message cannot name it (03 §3.21).
+        uuid: wireUuid ?? uuid()
       }
     }
 
@@ -677,6 +695,11 @@ export class ClaudeSession extends BaseSession {
       this.resolveActiveQuery = resolve
       this.rejectActiveQuery = reject
     })
+    // Handled here, not only by ensureActiveQuery(): a run that fails before
+    // sdkQuery() returns (no cli.js, or a multi-account spawn refused for want
+    // of a token) rejects this in the finally below with nobody awaiting it,
+    // which Node reports as an unhandled rejection. Awaiters still see it.
+    this.activeQueryPromise.catch(() => {})
 
     // Collect stderr chunks so we can include them in error messages. Bounded
     // to the last STDERR_MAX_CHUNKS entries (see the push site) so a chatty
@@ -696,10 +719,10 @@ export class ClaudeSession extends BaseSession {
         }
       }
       // Load MCP servers from config files and pass explicitly via mcpServers.
-      // This supplements the SDK's own settingSources config loading. While the
-      // mcp-status patch ensures plugin MCP servers are properly awaited before
-      // mcp_status responds, passing config-file servers via mcpServers ensures
-      // they're always available even if settingSources parsing differs.
+      // This supplements the SDK's own settingSources config loading. Plugin MCP
+      // servers are connected by the `reload_plugins` query() sends after
+      // initialize; passing config-file servers via mcpServers ensures they're
+      // always available even if settingSources parsing differs.
       // The SDK deduplicates by name, so there are no duplicate connections.
       this._mcpAllServers = {}
       this._mcpDisabledServers.clear()
@@ -759,6 +782,18 @@ export class ClaudeSession extends BaseSession {
               this.addDispatchedCost(engineId, modelId, costUsd)
           })
         : null
+
+      // Multi-account: renew the active account's token if it is about to
+      // expire, or refuse the spawn (HostTokenUnavailableError, whose message
+      // reaches the chat as session:error in the catch below) when there is no
+      // usable one. Guarded rather than awaited unconditionally so single-account
+      // mode reaches sdkQuery() in the same tick as before. A cancel() that lands
+      // during the wait ends the run here: the finally tears down as for any
+      // run that never produced a handle.
+      if (hostTokenDir()) {
+        await ensureHostTokenFresh()
+        if (myAbort.signal.aborted) return
+      }
 
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
@@ -1003,33 +1038,24 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // response's `account`. NOT from the system/init `apiKeySource`: that
       // reports the *API-key* source, which is legitimately "none" for every
       // logged-in *subscription* (OAuth-token) user — using it as a login signal
-      // falsely flags subscribers as logged out. A present `account.email` is the
-      // reliable "logged in" signal; absent = show the banner.
+      // falsely flags subscribers as logged out.
       void q
         .initializationResult()
         .then((init) => {
-          const account = (init as Record<string, unknown>)?.account as
-            Record<string, unknown> | undefined
-          // `account.email` present = logged in (subscription or API key). A
-          // logged-out cli.js returns an account with no email (tokenSource
-          // "none"); an expired-but-cached login still has an email — that 401s
-          // on send and is handled by the reactive auth card, not this banner.
-          const loggedIn = !!(account && account.email)
+          // Single-account: `account.email` present = logged in (subscription or
+          // API key). A logged-out cli.js returns an account with no email
+          // (tokenSource "none"); an expired-but-cached login still has an email
+          // — that 401s on send and is handled by the reactive auth card, not
+          // this banner. Multi-account runs on a host token, whose `account` has
+          // no email: the active account's own credential answers instead
+          // (claude-login-state.ts). In neither mode does this read cli.js's
+          // credential store (ADR-014 Keychain-prompt avoidance).
+          const { loggedIn, account: oauthAccount } = claudeLoginSignal(
+            (init as Record<string, unknown>)?.account
+          )
           const authSource = loggedIn ? 'authenticated' : 'none'
 
-          // Update the ClaudeAuthProvider probe cache from the cli.js init signal.
-          // This is the ONLY source of auth detection — no credential-file reads
-          // (preserves ADR-014 Keychain-prompt avoidance).
-          const oauthAccount = account
-            ? {
-                email: (account.email as string | null) ?? null,
-                organization: (account.organization as string | null) ?? null,
-                subscriptionType: (account.subscriptionType as string | null) ?? null,
-                tokenSource: (account.tokenSource as string | null) ?? null,
-                apiKeySource: (account.apiKeySource as string | null) ?? null,
-                apiProvider: (account.apiProvider as string | null) ?? null
-              }
-            : null
+          // Update the ClaudeAuthProvider probe cache from the same signal.
           updateClaudeAuthSource(authSource, oauthAccount)
 
           this.send('session:auth-source', authSource)
@@ -1212,14 +1238,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         // forward-compat safety net if query.ts ever routes these up.
         this.handleControlResponse(msg)
         return
-      case 'request_usage':
-        this.logRequestUsage(msg)
-        return
       case 'rate_limit_event':
         this.handleRateLimitEvent(msg)
         return
       case 'bash_output':
         this.handleBashOutput(msg)
+        return
+      case 'command_lifecycle':
+        this.handleCommandLifecycle(msg)
         return
       case 'result':
         this.handleResultMessage(msg, stderrChunks)
@@ -1238,10 +1264,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *
    * The session_id latch and the system/init capture are INDEPENDENT. They used
    * to be nested — init metadata was only read from the first message that also
-   * established the session id — and `system/queued_command_consumed` (which
-   * carries a `session_id` and, because the drain path is how every prompt
-   * reaches its turn, always lands BEFORE `system/init`) tripped that latch
-   * first, so the init branch never ran at all.
+   * established the session id — and a frame that carries a `session_id` and
+   * lands BEFORE `system/init` on every turn tripped that latch first, so the
+   * init branch never ran at all. The retired `queue-control` patch's
+   * `queued_command_consumed` was that frame; today `command_lifecycle`
+   * `queued`/`started` are, since every user frame carries a uuid.
    */
   private captureSessionBootstrap(msg: SDKMessage, type: string): void {
     const isInit = type === 'system' && (msg as SystemMessage).subtype === 'init'
@@ -1451,33 +1478,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleTaskUpdated(msg)
       return
     }
-    if (msg.subtype === 'queued_command_consumed') {
-      // cli.js has taken this text off its queue (docs/protocol-cc/
-      // 04-system-subtypes.md §4.10). Either it absorbed the item into the
-      // running turn as an attachment, or — when cli.js was between turns —
-      // it dequeued the item and is starting a fresh turn with it as the
-      // prompt; `queue-control` Parts A2 and A3 emit the same message for both,
-      // so this handler does not have to tell them apart. Text correlation is
-      // all the wire gives us — ADR-053 pins first-match, duplicates being
-      // interchangeable — and a prompt that was never queued here (every
-      // ordinary send travels the drain too) is a no-op in `consumeByText`.
-      //
-      // `msg.prompt` is the queued attachment's prompt VERBATIM, so it is an
-      // ARRAY of content blocks whenever the queued message carried images or a
-      // PDF. Passing that straight to `consumeByText` could never match (the
-      // comparison is `item.text === text`), so an attachment-carrying steer was
-      // only ever detected as consumed by the turn-end flush — and its bubble
-      // appeared after the whole turn, below the answer it had prompted.
-      // `queuedCommandText` is cli.js's own normalization, which the recall half
-      // of this protocol (`dequeue_message`) has always applied.
-      this.onPromptDelivered(queuedCommandText(msg.prompt))
-      return
-    }
     if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {
       this.handleModelFallback(msg)
       return
     }
-    if (msg.subtype === 'permission_denied' || msg.subtype === 'permission_allowed') {
+    if (msg.subtype === 'permission_denied') {
       this.handlePermissionDecision(msg)
       return
     }
@@ -1504,6 +1509,60 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     // Unknown / init — init is already consumed in captureSessionBootstrap.
     // Fall through silently.
+  }
+
+  /**
+   * The fate of a message we sent, keyed by the `uuid` its user frame carried
+   * (docs/protocol-cc/03-inbound-messages.md §3.21). Only a queued item's uuid
+   * is known to the queue — it is the item's `itemId` — so the frames for an
+   * ordinary send, and for commands cli.js enqueues itself, fall through the
+   * lookups as no-ops.
+   *
+   * - `started` is the consumption point: cli.js folded the message into the
+   *   running turn at a tool boundary (the frame follows that boundary's
+   *   tool_result), or drained it as a fresh turn's prompt. The reducer appends
+   *   the steer bubble when the consumed item is broadcast, so consuming HERE
+   *   is what puts the bubble where the model actually read the message.
+   * - `cancelled` / `discarded` / `refused` mean the message will not run.
+   *   Only a still-queued item changes: `cancelled` also arrives after
+   *   `started` when the consuming turn is aborted, and a consumed item stays
+   *   consumed. Our own `cancel_async_message` emits `cancelled` too, before its
+   *   response — `recallById` makes that a single transition either way.
+   * - `discarded` (the session ended with it queued) and `refused` (cli.js
+   *   declined it) happen without the user asking, so they say so.
+   * - `queued` and `completed` change nothing here.
+   */
+  private handleCommandLifecycle(msg: CommandLifecycleMessage): void {
+    const itemId = msg.command_uuid
+    if (typeof itemId !== 'string') return
+    switch (msg.state) {
+      case 'started':
+        if (this.queue.consumeById(itemId)) this.queue.emit()
+        return
+      case 'cancelled':
+        if (this.queue.recallById(itemId)) this.queue.emit()
+        return
+      case 'discarded':
+      case 'refused': {
+        const item = this.queue.recallById(itemId)
+        if (!item) return
+        this.queue.emit()
+        const preview = item.text.length > 60 ? `${item.text.slice(0, 57)}...` : item.text
+        const why =
+          msg.state === 'refused'
+            ? 'Claude Code refused it'
+            : 'the session ended before it could run'
+        this.send(
+          'session:warning',
+          preview
+            ? `Queued message "${preview}" was not delivered: ${why}.`
+            : `A queued message was not delivered: ${why}.`
+        )
+        return
+      }
+      default:
+        return
+    }
   }
 
   /**
@@ -1548,20 +1607,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   /**
-   * A tool call decided BEFORE any prompt was raised — cli.js's
-   * `permission_denied` (stock) and `permission_allowed` (the `automode-verdict`
-   * patch). Both are documented in docs/protocol-cc/04-system-subtypes.md §4.25.
+   * A tool call refused BEFORE any prompt was raised — cli.js's
+   * `permission_denied` (docs/protocol-cc/04-system-subtypes.md §4.25).
    *
    * Claude is the one engine whose auto-mode judge we do not run ourselves: the
-   * two-stage classifier lives inside cli.js, so these frames are the ONLY way
-   * its verdict reaches a card. Without them an auto-mode block showed up as a
-   * bare `is_error` tool_result with no reason and no reviewer — where pi,
-   * opencode and Codex all render a verdict — and an auto-mode allow showed
-   * nothing at all.
+   * two-stage classifier lives inside cli.js, so this frame is the ONLY way its
+   * verdict reaches a card. Without it an auto-mode block showed up as a bare
+   * `is_error` tool_result with no reason and no reviewer — where pi, opencode
+   * and Codex all render a verdict. cli.js emits no frame for an allow.
    *
-   * Which block a frame becomes — a verdict, a denial, or nothing — is decided
-   * entirely by `permissionDecisionBlock` in `claude-permission-decision.ts`,
-   * which owns the wire contract; this method only narrows, logs and sends.
+   * Which block a frame becomes — a verdict or a denial — is decided entirely by
+   * `permissionDecisionBlock` in `claude-permission-decision.ts`, which owns the
+   * wire contract; this method only narrows, logs and sends.
    *
    * Frames from INSIDE a subagent carry `agent_id` and go out on the same two
    * channels: the reducer binds by `tool_use_id`, searching the subagent
@@ -1587,30 +1644,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       )
     }
 
-    const denied = msg.subtype === 'permission_denied'
-    const block = permissionDecisionBlock(frame, denied ? 'denied' : 'allowed')
-    if (!block) {
-      // `permission_allowed` only ever carries a classifier verdict — the patch
-      // emits nothing for a rule/mode allow, because an allow nobody judged is
-      // just the tool running. A non-classifier one is a wire contract change.
-      if (!isClassifierDecision(frame)) {
-        logger.warn(
-          'ClaudeSession',
-          `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
-        )
-      } else {
-        logger.debug(
-          'ClaudeSession',
-          `permission_allowed for ${frame.toolUseId} with no verdict — nothing to render`
-        )
-      }
-      return
-    }
-
+    const block = permissionDecisionBlock(frame)
     if (block.type === 'tool_review') {
       logger.info(
         'ClaudeSession',
-        `auto-mode ${denied ? 'BLOCK' : 'allow'}${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
+        `auto-mode BLOCK${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
       )
       this.send('session:tool-review', { toolUseId: frame.toolUseId, review: block })
       return
@@ -1647,6 +1685,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.taskIdMap.set(taskId, toolUseId)
 
     const taskType = msg.task_type || ''
+    // Foreground or background, when cli.js says: only a foreground task can
+    // be sent to the background, so this gates the card's button.
+    const background =
+      typeof msg.is_backgrounded === 'boolean' ? { isBackgrounded: msg.is_backgrounded } : {}
     const origin =
       this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
@@ -1654,18 +1696,19 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (origin === undefined) {
       this.originByTaskId.set(taskId, toolUseId)
       this.runCountByOrigin.set(toolUseId, 1)
-      this.liveTasks.set(taskId, toolUseId)
+      this.liveTasks.set(taskId, { owner: toolUseId, taskType })
       this.send('session:task-started', {
         toolUseId,
         taskId,
         taskType,
         runIndex: 1,
+        ...background,
         startedAt: Date.now()
       })
       return
     }
 
-    this.liveTasks.set(taskId, origin)
+    this.liveTasks.set(taskId, { owner: origin, taskType })
 
     // A start we have already counted — the same call re-reported. Re-arm the
     // card (the record may have been dropped by a notification) without
@@ -1677,6 +1720,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         taskId,
         taskType,
         runIndex: this.runCountByOrigin.get(origin) ?? 1,
+        ...background,
         startedAt: Date.now()
       })
       return
@@ -1694,6 +1738,31 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskType,
       runToolUseId: toolUseId,
       runIndex,
+      ...background,
+      startedAt: Date.now()
+    })
+  }
+
+  /**
+   * A running task moved to the background: "Send to background" on any
+   * client, or any other path cli.js takes to background it. cli.js reports
+   * the flip as a `task_updated` patch (`is_backgrounded: true`) and sends it
+   * before it answers `background_tasks` (docs/protocol-cc/04-system-subtypes.md
+   * §4.6). Re-arm the task's record as backgrounded so every client's card
+   * leaves the foreground state. It is the same run, so the run counter is
+   * unchanged (ADR-073).
+   */
+  private reportBackgrounded(taskId: string): void {
+    const live = this.liveTasks.get(taskId)
+    if (!live) return
+    this.send('session:task-started', {
+      toolUseId: live.owner,
+      taskId,
+      taskType: live.taskType,
+      runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
+      isBackgrounded: true,
+      // Read only when the record was dropped: a re-arm of the same run keeps
+      // that run's clock in the reducer.
       startedAt: Date.now()
     })
   }
@@ -1796,7 +1865,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleTaskUpdated(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const patch = msg.patch
-    if (!taskId || !patch || typeof patch.status !== 'string') return
+    if (!taskId || !patch) return
+    if (patch.is_backgrounded === true) this.reportBackgrounded(taskId)
+    if (typeof patch.status !== 'string') return
 
     const status = patch.status
     // Only act on terminal states. Intermediate transitions (e.g. running →
@@ -1846,7 +1917,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.endTask(taskId)
     }
 
-    // Extract usage from the patched system message (task-notification-usage patch)
+    // cli.js's task_notification carries the run's usage natively (04 §4.4).
     const rawUsage = msg.usage
     const usage = rawUsage
       ? {
@@ -1880,11 +1951,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   private handleRateLimitEvent(msg: RateLimitEventMessage): void {
     // Real-time rate limit data from inference response headers — no extra
-    // API call needed. The rate-limit-relay patch injects these after every
-    // streaming API call.
-    if (msg.header_utilization) {
-      usageFetcher.updateFromHeaderUtilization(msg.header_utilization)
-    }
+    // API call needed. cli.js sends one whenever a window's rounded percentage
+    // or reset time moves (docs/protocol-cc/03-inbound-messages.md §3.11).
+    const windows = msg.rate_limit_info?.unifiedWindows
+    if (windows) usageFetcher.updateFromRateLimitWindows(windows)
   }
 
   private handleBashOutput(msg: BashOutputMessage): void {
@@ -2026,30 +2096,31 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * lands, and a push that races the turn's `result` is taken by cli.js as the
    * NEXT turn's fresh prompt.
    *
-   * A SAFETY NET, not the mechanism. `queue-control` Part A3 (2026-09-13) made
-   * the between-turns drain emit `queued_command_consumed` too, so the drain
-   * normally consumes the item — with the right text, at the right moment —
-   * before this ever sees it. What is left for this flush is the ordering
-   * residue: a push whose drain notification has not reached us by the time
-   * `result` does, and any item cli.js loses track of.
+   * A SAFETY NET, not the mechanism. `command_lifecycle` `started` consumes an
+   * item at the moment cli.js takes it ({@link handleCommandLifecycle}): at the
+   * tool boundary where a running turn folds it in, or when the between-turns
+   * drain makes it the next turn's prompt. The drain runs AFTER this `result`,
+   * so an item still queued here — the turn ended with no further tool
+   * boundary to fold it at, or the push raced the turn's end — has its
+   * `started` in flight behind this frame (verified on 2.1.280: the drained
+   * message's `queued`/`started` follow the previous `result`).
    *
-   * Marking everything still pending 'consumed' here is truthful in BOTH states
-   * a `result` can find:
-   *  a) cli.js still holds the item in its queueArray — its between-turns drain
-   *     runs it next turn, and the late `queued_command_consumed` no-ops against
-   *     our already-consumed item (`consumeByText` matches `state === 'queued'`
-   *     only, and `emit()` has already pruned it);
-   *  b) the push landed after `result` and is already running as a fresh prompt,
-   *     its A3 notification still in flight behind this `result`.
-   * Either way the text WILL run, which is exactly what 'consumed' asserts. One
-   * broadcast covers the whole list, and renderer synthesis stays exactly-once
-   * because the chat message id is derived from the item id (`steer-${itemId}`).
+   * Marking it 'consumed' now is truthful — cli.js runs it next turn — and puts
+   * the steer bubble exactly where its `started` would: after this turn's
+   * answer, ahead of the turn it starts. The late `started` then no-ops
+   * (`consumeById` matches `state === 'queued'` only, and `emit()` has pruned
+   * the item). Consuming here rather than waiting also takes the item off the
+   * card the moment the turn ends, and covers an item whose frame never
+   * arrives. One broadcast covers the whole list, and renderer synthesis stays
+   * exactly-once because the chat message id is derived from the item id
+   * (`steer-${itemId}`).
    *
    * KNOWN MICRO-RACE (accepted; documented, not fixed): a `recallQueued` in
-   * flight at this exact instant can dequeue an item from cli.js AFTER we marked
-   * it consumed — the item then never runs but is shown as a chat message. The
-   * window is one IPC round trip at turn end, and the card empties on this flush
-   * so the take-back affordance disappears immediately.
+   * flight at this exact instant can `cancel_async_message` an item AFTER we
+   * marked it consumed — the item then never runs but is shown as a chat
+   * message (its `cancelled` frame finds nothing to recall). The window is one
+   * IPC round trip at turn end, and the card empties on this flush so the
+   * take-back affordance disappears immediately.
    */
   private flushQueueAtTurnEnd(): void {
     const pending = this.queue.pending()
@@ -2205,28 +2276,33 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     return { type: 'enabled', display: 'summarized' }
   }
 
-  async dequeueMessage(value: string): Promise<{ removed: number }> {
-    if (!this.activeQuery) return { removed: 0 }
-    return await this.activeQuery.dequeueMessage(value)
-  }
-
   /**
    * cli.js's own queue already has native sub-turn timing AND a real per-item
-   * dequeue, so a claude item is pushed the moment it is queued — core holds
-   * nothing (ADR-053).
+   * take-back, so a claude item is pushed the moment it is queued — core holds
+   * nothing (ADR-053). The frame carries the item's id as its `uuid`, which is
+   * how `command_lifecycle` and `cancel_async_message` name it.
    */
   protected override onPromptQueued(item: QueuedItem): void {
-    void this.run(item.text, item.attachments)
+    void this.run(item.text, item.attachments, item.itemId)
   }
 
   /**
-   * Ask cli.js to drop this exact text from its queue. `removed: 0` means the
-   * item is already being consumed, so it stays put and its
-   * `queued_command_consumed` will arrive — never a silent clear (ADR-053).
+   * Ask cli.js to drop this exact message from its queue, by id.
+   * `cancelled: false` means cli.js no longer holds it — folded into the turn
+   * or drained — so it stays put and its `started` will arrive, never a silent
+   * clear (ADR-053). A failed request is not a take-back either: the message
+   * is still in cli.js's queue as far as anyone knows.
    */
   protected override async tryRecallQueuedItem(item: QueuedItem): Promise<boolean> {
-    const { removed } = await this.dequeueMessage(item.text)
-    return removed > 0
+    // Consumed while an earlier item of the same recall was in flight.
+    if (item.state !== 'queued' || !this.activeQuery) return false
+    try {
+      const { cancelled } = await this.activeQuery.cancelAsyncMessage(item.itemId)
+      return cancelled
+    } catch (err) {
+      logger.warn('ClaudeSession', 'cancel_async_message failed; item left queued', err)
+      return false
+    }
   }
 
   async askSideQuestion(question: string): Promise<string | null> {
@@ -2566,34 +2642,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
   discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
     return scanSkills(cwd)
-  }
-
-  /**
-   * Log per-request usage data from the request-usage patch to a JSONL file.
-   * Each line captures the token breakdown for a single API call, enabling
-   * analysis of cache effectiveness and rate-limit cost drivers.
-   */
-  private logRequestUsage(msg: Record<string, unknown>): void {
-    try {
-      const logDir = path.join(os.homedir(), '.claude', 'ui', 'usage')
-      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true })
-      const logPath = path.join(logDir, 'request-usage.jsonl')
-
-      const usage = msg.usage as Record<string, unknown> | undefined
-      if (!usage) return
-
-      const entry = {
-        timestamp: new Date().toISOString(),
-        sessionId: this.sessionId,
-        model: (msg.model as string) || this.model || 'unknown',
-        usage,
-        cwd: this.cwd
-      }
-
-      fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', { mode: 0o600 })
-    } catch (err) {
-      logger.warn('ClaudeSession', `Failed to log request_usage: ${err}`)
-    }
   }
 
   /**
@@ -2937,17 +2985,43 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
   }
 
+  /**
+   * "Send to background" for the task a card shows. cli.js's `background_tasks`
+   * finds the task by the tool_use id that started its CURRENT run: the card's
+   * own id, except for a resumed agent, whose run was started by the
+   * SendMessage call (ADR-073). A foreground Bash has no mapping until
+   * `task_started` registers it, and then the card's id is the one to send.
+   *
+   * The card's flip to the background state rides the wire (`task_updated`,
+   * see reportBackgrounded), so success sends nothing here. A failure is also
+   * posted as a session warning: whoever clicked may be on another client, and
+   * would otherwise only see the button come back.
+   */
   async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
-    // Pass toolUseId directly — the CLI handler searches tasks by toolUseId property.
-    // We don't use taskIdMap here because foreground tasks may not have a mapping yet
-    // (detectTaskMapping runs on tool results, which haven't arrived for running tasks).
+    const result = await this.requestBackground(toolUseId)
+    if (!result.success) {
+      logger.warn('ClaudeSession', `backgroundTask(${toolUseId}) failed: ${result.error}`)
+      this.send('session:warning', `Could not send the task to the background: ${result.error}`)
+    }
+    return result
+  }
+
+  private async requestBackground(
+    toolUseId: string
+  ): Promise<{ success: boolean; error?: string }> {
     if (!this.activeQuery) {
       return { success: false, error: 'No active session' }
     }
-
+    const taskId = this.taskIdForOwner(toolUseId)
+    const runToolUseId = (taskId && this.taskIdMap.get(taskId)) || toolUseId
     try {
-      await this.activeQuery.backgroundTask(toolUseId)
-      return { success: true }
+      const { backgrounded } = await this.activeQuery.backgroundTask(runToolUseId)
+      // `false` is cli.js finding no foreground task with that id: not
+      // registered yet (a Bash command registers seconds after it starts),
+      // already in the background, or finished.
+      return backgrounded
+        ? { success: true }
+        : { success: false, error: 'Task is not registered yet — try again in a moment' }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { success: false, error: msg }
@@ -3129,8 +3203,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private detectTaskMapping(toolUseId: string, resultText: string): void {
     const agentMatch = resultText.match(AGENT_ID_RE)
     const taskIdMatch = resultText.match(TASK_ID_RE)
-    const bgCmdMatch = resultText.match(BG_CMD_ID_RE)
-    const agentId = agentMatch?.[1] || taskIdMatch?.[1] || bgCmdMatch?.[1] || ''
+    // Every backgrounded Bash, however it got there: run_in_background, "Send
+    // to background", a timeout, a message that arrived while it ran.
+    const agentId = agentMatch?.[1] || taskIdMatch?.[1] || backgroundBashTaskId(resultText) || ''
 
     if (agentId) {
       this.taskIdMap.set(agentId, toolUseId)
@@ -3143,10 +3218,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     // Record output file path for background commands (permanent — survives completion).
-    // This works for both Task tools (with agentId) and background Bash (may lack agentId).
-    const outputMatch = resultText.match(OUTPUT_FILE_RE)
-    if (outputMatch) {
-      const filePath = outputMatch[1].trim()
+    // Only a backgrounded Bash's tool_result names its file this way.
+    const filePath = backgroundBashOutputFile(resultText)
+    if (filePath) {
       this.backgroundFilePaths.set(toolUseId, filePath)
       // Create dormant poller entry (no interval until the renderer calls
       // watchBackground). Agent task output files are JSONL transcripts
@@ -3302,7 +3376,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * the two into one entry.
    */
   private settleOrphanedTasks(): void {
-    for (const [taskId, owner] of this.liveTasks) {
+    for (const [taskId, { owner }] of this.liveTasks) {
       this.taskIdMap.delete(taskId)
       this.send('session:task-notification', {
         taskId,

@@ -4,7 +4,7 @@
  * Which sessions a credential change is allowed to stop (F5 / R3).
  *
  * The scope is the whole point. Both triggers are Claude-credential events: an
- * account switch re-points `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and a successful
+ * account switch re-points the active credential dir, and a successful
  * login replaces the Anthropic OAuth token. Neither touches opencode's or pi's
  * vendor credentials (ADR-036), so cancelling those sessions destroys a running
  * turn for no reason.

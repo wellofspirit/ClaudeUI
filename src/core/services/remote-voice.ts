@@ -41,6 +41,7 @@
 import { sendToStreamConnection } from './sync-host'
 import { logger } from './logger'
 import { VoiceStreamClient } from './voice-stream-client'
+import { VOICE_UNSUPPORTED, voiceRefusal } from './voice-gate'
 import type { SessionManager } from './session-manager'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { StreamEventFrame } from '../shared/sync/stream'
@@ -157,8 +158,9 @@ export class RemoteVoiceRegistry {
    *
    * Claude-engine only, matching the desktop's gate exactly (`capabilities.voice`
    * — the voice server is a cli.js patch, so there is nothing to talk to on
-   * opencode or pi). Throws on refusal: unlike the audio frames, the control verb
-   * is a request the caller is entitled to an answer to.
+   * opencode or pi, or on a Claude Code binary without the patch). Throws on
+   * refusal: unlike the audio frames, the control verb is a request the caller
+   * is entitled to an answer to.
    */
   async start(
     manager: SessionManager,
@@ -171,9 +173,9 @@ export class RemoteVoiceRegistry {
     }
     const session = manager.get(routingId)
     if (!session) throw new Error('No active session')
-    if (!session.capabilities.voice || !session.voiceStartServer) {
-      throw new Error('Provider does not support voice')
-    }
+    const refusal = voiceRefusal(session)
+    if (refusal) throw new Error(refusal)
+    if (!session.voiceStartServer) throw new Error(VOICE_UNSUPPORTED)
 
     // Registered before anything awaits, so a `voice:stop` that lands at any point
     // from here on cancels this start. Overwriting also cancels an older start

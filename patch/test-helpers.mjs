@@ -10,7 +10,7 @@
  *
  * Protocol mirrors src/main/sdk/: newline-delimited JSON on stdio, with a
  * control channel for request/response pairs (stopTask, mcpServerStatus,
- * dequeueMessage, toggleMcpServer, …).
+ * toggleMcpServer, …).
  *
  * Usage:
  *   import { createQuery, collectMessages, TestRunner, dumpMessages,
@@ -34,7 +34,9 @@ export const PROJECT_ROOT = resolve(__dirname, '..')
  * are tested in the exact form they ship.
  */
 const BIN_NAME = process.platform === 'win32' ? 'bun-claude.exe' : 'bun-claude'
-export const BUN_CLAUDE_PATH = resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
+export const BUN_CLAUDE_PATH = process.env.CLAUDEUI_TEST_BIN
+  ? resolve(process.env.CLAUDEUI_TEST_BIN)
+  : resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
 
 /** @deprecated Kept for legacy imports — prefer BUN_CLAUDE_PATH. */
 export const CLI_JS_PATH = BUN_CLAUDE_PATH
@@ -103,6 +105,9 @@ function buildArgs(options) {
       typeof options.settings === 'string' ? options.settings : JSON.stringify(options.settings)
     )
   }
+  // Verbatim argv tail for flags this builder does not model, e.g.
+  // `extraArgs: ['--forward-subagent-text']` (which the app always passes).
+  if (Array.isArray(options.extraArgs)) args.push(...options.extraArgs)
   return args
 }
 
@@ -112,7 +117,7 @@ function buildArgs(options) {
 
 /**
  * Spawn bun-claude and return an async-iterable query handle with control
- * methods (close/stopTask/mcpServerStatus/dequeueMessage/toggleMcpServer).
+ * methods (close/stopTask/mcpServerStatus/toggleMcpServer).
  *
  * The handle iterates stream-json data messages. Control responses are
  * intercepted and routed to the pending request map instead of being yielded.
@@ -126,7 +131,10 @@ function spawnQuery({ prompt, options, ac }) {
 
   const child = spawn(BUN_CLAUDE_PATH, buildArgs(options), {
     cwd: options.cwd ?? PROJECT_ROOT,
-    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: {
+      ...process.env,
+      CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDEUI_TEST_ENTRYPOINT || 'sdk-ts'
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -363,10 +371,6 @@ function spawnQuery({ prompt, options, ac }) {
     async stopTask(task_id) {
       return controlRequest('stop_task', { task_id })
     },
-    async dequeueMessage(value) {
-      const r = await controlRequest('dequeue_message', { value })
-      return { removed: r?.removed ?? 0 }
-    },
     async mcpServerStatus() {
       const r = await controlRequest('mcp_status', {})
       if (Array.isArray(r)) return r
@@ -406,7 +410,7 @@ const DEFAULT_OPTIONS = {
   settingSources: [],
   thinking: { type: 'enabled', budgetTokens: 10_000 },
   effort: 'low',
-  model: 'claude-sonnet-4-6'
+  model: process.env.CLAUDEUI_TEST_MODEL || 'claude-sonnet-4-6'
 }
 
 /**

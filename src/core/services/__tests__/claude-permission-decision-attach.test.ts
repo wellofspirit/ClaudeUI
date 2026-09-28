@@ -5,9 +5,8 @@
  *
  * Claude is the one engine whose auto-mode judge we do not run: the two-stage
  * classifier lives inside cli.js (docs/protocol-cc/14-auto-mode-classifier.md),
- * so `system/permission_denied` — and, behind the `automode-verdict` patch,
- * `system/permission_allowed` — are the ONLY way its verdict reaches the UI.
- * ClaudeUI dropped both, which is why an auto-mode block on Claude showed as a
+ * so `system/permission_denied` is the ONLY way its verdict reaches the UI.
+ * ClaudeUI dropped it, which is why an auto-mode block on Claude showed as a
  * bare red tool_result while pi, opencode and Codex all rendered a verdict.
  *
  * The wire order replayed here is the one PROBED against 2.1.268 on 2026-09-21:
@@ -254,33 +253,6 @@ describe('a cli.js permission decision reaches the card it is about', () => {
   })
 
   /**
-   * The patched half. Stock cli.js gates its emit on `behavior === "deny"`, so
-   * an allowed call carries no frame at all — `patch/automode-verdict` adds
-   * this one. Without it Claude shows a verdict only when it blocks, where the
-   * other three engines show one either way.
-   */
-  it('turns a patched classifier ALLOW into an approved verdict', async () => {
-    const { blocks } = await decide(
-      'routing-allow',
-      deniedFrame({
-        subtype: 'permission_allowed',
-        uuid: 'frame-2',
-        decision_reason_type: 'classifier',
-        decision_reason: 'Reads only inside the workspace.'
-      }),
-      false
-    )
-    const reviews = blocks.filter((b) => b.type === 'tool_review')
-    expect(reviews).toHaveLength(1)
-    expect(reviews[0]).toMatchObject({
-      reviewer: 'auto-mode',
-      decision: 'approved',
-      reviewId: 'frame-2',
-      rationale: 'Reads only inside the workspace.'
-    })
-  })
-
-  /**
    * The ordering `attachToToolUse` documents: the decision is APPENDED to the
    * message holding the call, so within that message the `tool_use` comes
    * first and the decision after it.
@@ -370,12 +342,11 @@ describe('a cli.js permission decision reaches the card it is about', () => {
           }
         },
         deniedFrame({
-          subtype: 'permission_allowed',
           tool_use_id: 'toolu_sub',
           uuid: 'frame-sub',
           agent_id: 'agent-7',
           decision_reason_type: 'classifier',
-          decision_reason: 'Reads a public page.'
+          decision_reason: '[Data Exfiltration] Sends data to an external host.'
         }),
         {
           type: 'user',
@@ -386,8 +357,8 @@ describe('a cli.js permission decision reaches the card it is about', () => {
               {
                 type: 'tool_result',
                 tool_use_id: 'toolu_sub',
-                is_error: false,
-                content: 'HTTP/2 200'
+                is_error: true,
+                content: 'Permission to use Bash has been denied.'
               }
             ]
           }
@@ -410,8 +381,9 @@ describe('a cli.js permission decision reaches the card it is about', () => {
         toolUseId: 'toolu_sub',
         reviewId: 'frame-sub',
         reviewer: 'auto-mode',
-        decision: 'approved',
-        rationale: 'Reads a public page.'
+        decision: 'denied',
+        rule: 'Data Exfiltration',
+        rationale: 'Sends data to an external host.'
       }
     ])
     // …and nothing leaked onto the top-level transcript.
@@ -426,8 +398,8 @@ describe('a cli.js permission decision reaches the card it is about', () => {
   })
 
   /**
-   * "Classifier unavailable" is a `classifier` DENY with no `no_verdict` flag:
-   * the call was refused, but no judge weighed it. It must land as a denial
+   * "Classifier unavailable" is a `classifier` DENY that no judge weighed: the
+   * call was refused, but nothing reached a verdict. It must land as a denial
    * saying so — a verdict card would claim a judgment that never happened.
    */
   it('turns an unavailable-classifier block into a no-verdict denial, not a verdict', async () => {
@@ -448,39 +420,6 @@ describe('a cli.js permission decision reaches the card it is about', () => {
     ])
   })
 
-  it('turns a patch-flagged no_verdict block into a no-verdict denial', async () => {
-    const { blocks } = await decide(
-      'routing-noverdict-deny',
-      deniedFrame({
-        decision_reason_type: 'classifier',
-        decision_reason: 'Auto mode classifier transcript exceeded context window',
-        no_verdict: true
-      })
-    )
-    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
-    expect(blocks.filter((b) => b.type === 'permission_denial')).toMatchObject([
-      { source: 'autoModeNoVerdict' }
-    ])
-  })
-
-  /** Defensive: the patch never emits one, but an allow nobody judged renders nothing. */
-  it('renders nothing for a no-verdict classifier allow', async () => {
-    const { blocks, channels } = await decide(
-      'routing-noverdict-allow',
-      deniedFrame({
-        subtype: 'permission_allowed',
-        decision_reason_type: 'classifier',
-        decision_reason: 'Delivered with a note: the classifier could not review it',
-        no_verdict: true
-      }),
-      false
-    )
-    expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
-    expect(blocks.filter((b) => b.type === 'permission_denial')).toEqual([])
-    expect(channels).not.toContain('session:tool-review')
-    expect(channels).not.toContain('session:permission-denial')
-  })
-
   it('keeps a classifier block but drops its content-free rationale', async () => {
     const { blocks } = await decide(
       'routing-contentfree-deny',
@@ -498,17 +437,24 @@ describe('a cli.js permission decision reaches the card it is about', () => {
   })
 
   /**
-   * A `permission_allowed` that is NOT the classifier's would mean the patch's
-   * filter changed upstream. Ignore it rather than inventing a verdict nobody
-   * reached — an allow nothing judged is just the tool running.
+   * `permission_allowed` came from the retired `automode-verdict` patch, and a
+   * binary built before the retirement still emits it. It falls through
+   * `handleSystemMessage` like any unknown subtype: an allowed call renders no
+   * verdict.
    */
-  it('ignores a permission_allowed carrying a non-classifier reason', async () => {
-    const { blocks } = await decide(
-      'routing-odd-allow',
-      deniedFrame({ subtype: 'permission_allowed', decision_reason_type: 'rule' }),
+  it('ignores a permission_allowed frame', async () => {
+    const { blocks, channels } = await decide(
+      'routing-allow',
+      deniedFrame({
+        subtype: 'permission_allowed',
+        decision_reason_type: 'classifier',
+        decision_reason: 'Reads only inside the workspace.'
+      }),
       false
     )
     expect(blocks.filter((b) => b.type === 'tool_review')).toEqual([])
     expect(blocks.filter((b) => b.type === 'permission_denial')).toEqual([])
+    expect(channels).not.toContain('session:tool-review')
+    expect(channels).not.toContain('session:permission-denial')
   })
 })

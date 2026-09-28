@@ -97,11 +97,10 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
  * judges that answer the same question: ClaudeUI's own classifier on opencode
  * and pi, and cli.js's native one on Claude, whose verdict reaches us as
- * `system/permission_denied` (blocks) and, behind the `automode-verdict` patch,
- * `system/permission_allowed` (allows). A pre-ask denial that was NOT a judge's
- * call — a deny rule, a hook, the static safety checker — is a
- * {@link PermissionDenialBlock} instead, because it carries no verdict that
- * could have gone the other way.
+ * `system/permission_denied` — blocks only, since cli.js emits no frame for an
+ * allow. A pre-ask denial that was NOT a judge's call — a deny rule, a hook,
+ * the static safety checker — is a {@link PermissionDenialBlock} instead,
+ * because it carries no verdict that could have gone the other way.
  *
  * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
  * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
@@ -132,10 +131,10 @@ export type ToolReviewBlock = {
  *
  * One member is NOT cli.js's: `autoModeNoVerdict` is derived by the producer
  * (`core/services/claude-permission-decision.ts`) from a `classifier` denial
- * where the classifier reached no verdict — it was unavailable, the transcript
- * overflowed its context, a safeguard refused it. The action was refused, but
- * nobody judged it, so it is a denial rather than a review. It is never
- * accepted from the wire.
+ * where the classifier reached no verdict and the frame says so natively: it was
+ * unavailable, it gave no verdict repeatedly, or the transcript overflowed its
+ * context. The action was refused, but nobody judged it, so it is a denial
+ * rather than a review. It is never accepted from the wire.
  */
 export type PermissionDenialSource =
   | 'autoModeNoVerdict'
@@ -487,12 +486,6 @@ export interface ProxySettings {
   port: number
   username: string
   password: string
-  /**
-   * When true, cli.js's subprocesses (Bash tool, MCP, LSP, shell-snapshot) also
-   * route through the proxy. When false (default), only cli.js's own Anthropic
-   * API calls are proxied — git/curl/npm/etc. spawned by Claude stay direct.
-   */
-  proxySubprocesses?: boolean
 }
 
 /**
@@ -1161,6 +1154,14 @@ export interface TaskStartedData {
   /** 1-based run counter for this agent. `> 1` means it was resumed. */
   runIndex?: number
   /**
+   * cli.js's `is_backgrounded` (Claude only): `false` for a task running in the
+   * foreground — the only kind "Send to background" can move — and `true` once
+   * it runs in the background, from the start or after a `background_tasks`
+   * flip, which ClaudeSession reports by re-sending this event for the same
+   * run. Absent when the engine or task type has no such notion.
+   */
+  isBackgrounded?: boolean
+  /**
    * Epoch ms at which THIS run started, stamped by the emitter when it saw the
    * start (the reducer is clock-free). A resume stamps its own run's start. It
    * is what a running task's elapsed clock counts from: cli.js sends no
@@ -1169,6 +1170,16 @@ export interface TaskStartedData {
    */
   startedAt?: number
 }
+
+/**
+ * One `activeTasks` entry: a task that has started and not yet ended (ADR-040),
+ * keyed by its origin tool_use id. The fields of the {@link TaskStartedData}
+ * that armed it.
+ */
+export type ActiveTask = Pick<
+  TaskStartedData,
+  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
+>
 
 /** The terminal states an engine reports for a task run. */
 export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
@@ -3609,7 +3620,7 @@ export interface AccountInfo {
 }
 
 export interface AccountsState {
-  /** Multi-account mode (file-based credentials via SKIP_SECURESTORAGE). */
+  /** Multi-account mode (app-owned per-account credential files, ADR-015). */
   enabled: boolean
   activeId: string | null
   accounts: AccountInfo[]

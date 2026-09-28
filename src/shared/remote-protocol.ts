@@ -1002,6 +1002,7 @@ import type {
   TodoItem,
   SentFile,
   QueuedItem,
+  ActiveTask,
   TaskNotification,
   TaskProgress,
   StatusLineData,
@@ -1035,7 +1036,7 @@ export interface PerSessionSnapshot {
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task
    *  reads an async-launched Task as already complete. */
-  activeTasks?: Record<string, { taskId: string; taskType: string }>
+  activeTasks?: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
   permissionMode: string

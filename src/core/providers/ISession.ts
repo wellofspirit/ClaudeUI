@@ -106,12 +106,6 @@ export interface ISession {
   stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
-  /** Per-item dequeue against the ENGINE's own queue. Claude-only; no capability
-   *  flag gates it — the absence of the method is the gate (opencode/pi hold
-   *  their items core-side instead, so they need nothing here). Used by
-   *  ClaudeSession's `tryRecallQueuedItem`, never called directly by IPC. */
-  dequeueMessage?(value: string): Promise<{ removed: number }>
-
   /** Voice input (gated by capabilities.voice). */
   voiceStartServer?(): Promise<{ port: number }>
   voiceStopServer?(): Promise<void>

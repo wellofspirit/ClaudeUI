@@ -454,8 +454,11 @@ export function InputBox(): React.JSX.Element {
   const setReasoningVariant = useSessionStore((s) => s.setReasoningVariant)
   const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
 
-  // Voice input
+  // Voice input: the user's setting AND the session's capability. The session
+  // value is false on engines without voice and on a Claude Code binary that
+  // lacks the voice-server patch, so both the mic and its Tab shortcut go dark.
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
+  const voiceAvailable = voiceEnabled && capabilities.voice
   const voiceLanguage = useSessionStore((s) => s.settings.voiceLanguage)
   const voiceState = useActiveSession((s) => s.voiceState) as VoiceStateType
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
@@ -864,7 +867,7 @@ export function InputBox(): React.JSX.Element {
       // still lags at idle, each repeat would start again and re-point the
       // native capture at a callback that drops the audio.
       if (e.repeat) return
-      if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
+      if (voiceAvailable && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
         handleVoiceStart()
     }
   }
@@ -1316,7 +1319,7 @@ export function InputBox(): React.JSX.Element {
       }
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
-      voiceEnabled={voiceEnabled && capabilities.voice}
+      voiceEnabled={voiceAvailable}
       voiceState={voiceState}
       statusLine={statusLine}
       onSend={handleSend}

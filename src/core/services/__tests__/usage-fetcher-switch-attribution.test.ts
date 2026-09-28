@@ -133,6 +133,8 @@ const { reconcileClaude } = vi.hoisted(() => ({ reconcileClaude: vi.fn(async () 
 vi.mock('../usage-reconciler', () => ({ usageReconciler: { reconcileClaude } }))
 
 import { UsageFetcher } from '../usage-fetcher'
+import { claudeRefreshGuard } from '../claude-refresh-guard'
+import { resetClaudeRefreshMemo } from '../claude-usage-api'
 import { resetWindowSampleDedup } from '../window-samples'
 import { setSecurestorageEnv } from '../../sdk/securestorage-env'
 import {
@@ -276,6 +278,10 @@ function reset(): void {
   getAccount.mockReturnValue(null)
   keychain.value = ''
   resetWindowSampleDedup()
+  // The refresh guard and the spent-grant memo are process-wide (shared with
+  // the token keeper), and every test here reuses the same paths and versions.
+  claudeRefreshGuard.reset()
+  resetClaudeRefreshMemo()
   routeByUrl()
 }
 
@@ -637,8 +643,8 @@ describe('UsageFetcher — retrying an unread identity', () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000)
     expect(tokenPosts()).toHaveLength(1)
 
-    // cli.js rewrites the credential (a turn on the account) — a new version,
-    // so a refresh is worth one more attempt.
+    // Something rewrites the credential (a sign-in, or another rotation) — a
+    // new version, so a refresh is worth one more attempt.
     rotateCredentialFile(DIR_B)
     await vi.advanceTimersByTimeAsync(5 * 60_000)
     expect(tokenPosts()).toHaveLength(2)

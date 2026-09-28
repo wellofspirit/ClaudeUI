@@ -25,7 +25,6 @@ const { sessionManagerSpies } = vi.hoisted(() => {
     readBackgroundRange: vi.fn(() => ''),
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
-    dequeueMessage: vi.fn(async () => ({ removed: 0 })),
     askSideQuestion: vi.fn(async () => null),
     setPermissionMode: vi.fn(async () => {}),
     setModel: vi.fn(async () => {}),
@@ -234,8 +233,7 @@ vi.mock('../../../core/services/mockup-settings', () => ({
   invalidateMockupSecuritySettings: vi.fn()
 }))
 vi.mock('../../../core/sdk/proxy', () => ({
-  setProxyEnv: vi.fn(async () => {}),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn(async () => {})
 }))
 vi.mock('../../../core/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../core/sdk/model-env', () => ({ setModelEnv: vi.fn() }))

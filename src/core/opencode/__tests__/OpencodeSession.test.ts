@@ -3114,23 +3114,6 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// dequeueMessage — no-op for opencode (Phase 8c)
-//
-// dequeueMessage is an OPTIONAL member of ISession (Item 3 — no capability flag
-// gates it; the absence of the method is the gate). The IPC handler guards via
-// optional-call: `session?.dequeueMessage?.(value) ?? { removed: 0 }`.
-// OpencodeSession does not implement dequeueMessage — this test verifies the
-// IPC-level guard is sufficient and that no error propagates to a caller
-// expecting the {removed:N} shape. (The renderer's dequeue affordance simply
-// no-ops gracefully — by design.)
-// ---------------------------------------------------------------------------
-
-// The dequeue guard lives in the IPC layer (session.ipc.ts + remote-handlers.ts),
-// not in OpencodeSession itself, so there's nothing to test on OpencodeSession
-// directly. The existing session.ipc.test and remote-handlers.ipc.test cover it.
-// We add a capability assertion as the test anchor.
-
-// ---------------------------------------------------------------------------
 // discoverSkills — ISession.discoverSkills (Item 3)
 // ---------------------------------------------------------------------------
 

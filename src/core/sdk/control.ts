@@ -76,6 +76,50 @@ export class ControlChannel {
         `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`
       )
     }
+    const subtype = (request as { subtype?: string }).subtype ?? '<unknown>'
+    return this.send<T>(
+      request_id,
+      { type: 'control_request', request_id, request },
+      `control_request ${subtype}`,
+      opts
+    )
+  }
+
+  /**
+   * Write an `update_environment_variables` frame and await cli.js's
+   * `control_response` for it (docs/protocol-cc/06 §6.7).
+   *
+   * Not a `control_request`: the frame is its own top-level type, and cli.js
+   * answers it with a `control_response` only when it carries a `request_id`
+   * (`processLine`, `.cache/pristine-cli.js` @22073210). The id is what lets
+   * the host tell an applied update from one that never landed. The values are
+   * never logged: the one variable this carries today is an OAuth token.
+   */
+  updateEnvironmentVariables(
+    variables: Record<string, string>,
+    opts: RequestOptions = {}
+  ): Promise<void> {
+    const request_id = this.newId()
+    if (process.env.DEBUG_SDK) {
+      console.error(
+        `[sdk] → update_environment_variables ${request_id} (${Object.keys(variables).join(', ')})`
+      )
+    }
+    return this.send<unknown>(
+      request_id,
+      { type: 'update_environment_variables', variables, request_id },
+      'update_environment_variables',
+      opts
+    ).then(() => undefined)
+  }
+
+  /** Register `request_id` as pending, write `frame`, and settle on its response. */
+  private send<T>(
+    request_id: string,
+    frame: JsonLine,
+    label: string,
+    opts: RequestOptions
+  ): Promise<T> {
     const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null
@@ -109,10 +153,7 @@ export class ControlChannel {
           const pending = this.pending.get(request_id)
           if (!pending) return
           this.pending.delete(request_id)
-          const subtype = (request as { subtype?: string }).subtype ?? '<unknown>'
-          pending.reject(
-            new Error(`control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`)
-          )
+          pending.reject(new Error(`${label} (${request_id}) timed out after ${timeoutMs}ms`))
         }, timeoutMs)
       }
       // If the write doesn't land (child gone / stdin ended), reject NOW rather
@@ -120,15 +161,12 @@ export class ControlChannel {
       // waited the full timeout — and `timeoutMs: 0` subtypes (oauth /
       // mcp_authenticate) waited forever, sticking auth flows in 'authorizing'
       // when the child died between handle-capture and the call (M-CL2).
-      const wrote = this.writer.write({ type: 'control_request', request_id, request })
+      const wrote = this.writer.write(frame)
       if (!wrote) {
         const pending = this.pending.get(request_id)
         if (pending) {
           this.pending.delete(request_id)
-          const subtype = (request as { subtype?: string }).subtype ?? '<unknown>'
-          pending.reject(
-            new Error(`control_request ${subtype} (${request_id}) failed: stream not writable`)
-          )
+          pending.reject(new Error(`${label} (${request_id}) failed: stream not writable`))
         }
       }
     })

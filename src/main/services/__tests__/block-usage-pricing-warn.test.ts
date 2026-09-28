@@ -27,7 +27,7 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() }
 }))
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 
 import { getPricing, calculateCostFromTokens } from '../../../core/services/block-usage'

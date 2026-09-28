@@ -71,6 +71,7 @@ import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
 import { prepareAndCreateSession } from './create-session'
@@ -216,12 +217,15 @@ async function withGit<T>(
  *  effects — those are desktop-only; see handlers-core.ts rationale). */
 async function claudeSupportedModels(): Promise<ModelInfo[]> {
   const abort = new AbortController()
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // Init-only: killed right after the initialize response.
+      reloadPlugins: false
     }
   })
   try {
@@ -239,12 +243,15 @@ const COMMIT_MSG_SYSTEM_PROMPT =
 
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // A control request, then abort: no turn to use a plugin's tools.
+      reloadPlugins: false
     }
   })
   try {
@@ -272,12 +279,15 @@ async function generateTitle(conversationText: string): Promise<string | null> {
 async function generateCommitMessage(diff: string): Promise<string | null> {
   const abort = new AbortController()
   try {
+    await ensureHostTokenFresh()
     const q = sdkQuery({
       prompt: diff,
       options: {
         ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
+        // One tool-less turn: plugin MCP servers would connect for nothing.
+        reloadPlugins: false,
         systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
         model: 'claude-haiku-4-5-20251001',
         maxTurns: 1,

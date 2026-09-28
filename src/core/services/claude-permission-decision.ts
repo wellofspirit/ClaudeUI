@@ -3,18 +3,14 @@
  *
  * Claude's Auto mode is cli.js-native: the two-stage classifier documented in
  * `docs/protocol-cc/14-auto-mode-classifier.md` runs INSIDE the CLI, so unlike
- * opencode and pi we do not call the judge — we read its verdict off the wire.
- * Two frames carry it (`docs/protocol-cc/04-system-subtypes.md` §4.25):
- *
- *  - `system/permission_denied` — stock cli.js, emitted for EVERY pre-ask
- *    denial, not just the classifier's. `decision_reason_type` says which:
- *    `classifier` is a judge's verdict, everything else is a rule / mode / hook
- *    / safety-check refusal.
- *  - `system/permission_allowed` — the `automode-verdict` patch. Stock cli.js
- *    emits nothing when the classifier ALLOWS (the emit site is gated on
- *    `behavior === "deny"`), which is the whole reason the patch exists: an
- *    allowed call would otherwise show no verdict at all, where pi and opencode
- *    both show one.
+ * opencode and pi we do not call the judge — we read its verdict off the wire. One
+ * frame carries it (`docs/protocol-cc/04-system-subtypes.md` §4.25):
+ * `system/permission_denied`, emitted for EVERY pre-ask denial, not just the
+ * classifier's. `decision_reason_type` says which: `classifier` is a judge's
+ * verdict, everything else is a rule / mode / hook / safety-check refusal.
+ * cli.js emits nothing when the classifier ALLOWS a call (the emit site is
+ * gated on `behavior === "deny"`), so a Claude card shows the judge's verdict
+ * on a block only.
  *
  * The split into two block types is the point of this module. A classifier
  * verdict could have gone the other way and names the rule it weighed, so it is
@@ -26,10 +22,13 @@
  * A `classifier` frame is not always a verdict, though. cli.js also tags its
  * no-verdict fallbacks `classifier` — the transcript overflowed the judge's
  * context, a safeguard refused the classifier request, the classifier was
- * unreachable — and blocks the call anyway. Those become a
- * `PermissionDenialBlock` with the synthetic source `autoModeNoVerdict`: the
- * action was refused, but nobody weighed it, so a "review" would claim a
- * judgment that never happened.
+ * unreachable — and blocks the call anyway. Its `noVerdict` flag stays inside
+ * cli.js, but three of those fallbacks are recognisable on the wire (see
+ * {@link isNoVerdictDenial}); they become a `PermissionDenialBlock` with the
+ * synthetic source `autoModeNoVerdict`: the action was refused, but nobody
+ * weighed it, so a "review" would claim a judgment that never happened. The
+ * rest (a safeguard refusal, an empty classifier-only action) carry free-form
+ * reasons and arrive as a denied review with cli.js's own text.
  *
  * Everything here is PURE — frame in, block out — so the wire contract is
  * testable without a session. {@link permissionDecisionBlock} owns ALL the
@@ -54,12 +53,8 @@ export interface PermissionDecisionFrame {
   decisionReasonType?: string
   /** `decision_reason` verbatim — UNTRUSTED, not yet collapsed or capped. */
   decisionReason?: string
-  /**
-   * The `automode-verdict` patch's `no_verdict: true` — cli.js decided under
-   * the `classifier` banner without the classifier reaching a verdict. Present
-   * only when the wire carried exactly `true`.
-   */
-  noVerdict?: true
+  /** `decision_reason_code` — cli.js's machine code for a few reasons (`qoe`). */
+  decisionReasonCode?: string
 }
 
 /** The {@link PermissionDenialSource}s cli.js itself can send. */
@@ -140,30 +135,7 @@ export function splitRulePrefix(reason: string | undefined): {
 }
 
 /**
- * cli.js's content-free allow reasons. Unlike a DENIAL's reason — which is the
- * judge's own `<reason>` text — an allow's is a fixed constant naming the stage
- * that cleared it (stage 1, stage 2, the server-side classifier), or stage 2's
- * fallback when the model gave no `<reason>` at all.
- *
- * They are dropped rather than rendered, for two reasons. The card's own
- * sentence is already "Auto mode allowed this action", so the strip read as the
- * same claim twice (verifier finding, 2026-09-21). And pi and opencode surface
- * no reason on a routine allow either — stage 1 is run behind a `</block>` stop
- * sequence that is never asked for one — so keeping these would make Claude's
- * card the odd one out, which is the exact thing this work exists to fix.
- *
- * Matched by exact string on purpose: an allow that says anything ELSE is
- * carrying real information and must survive.
- */
-const CONTENT_FREE_ALLOW_REASONS = new Set([
-  'Allowed by classifier',
-  'Allowed by fast classifier',
-  'Not flagged by the server-side auto mode classifier',
-  'No reason provided'
-])
-
-/**
- * The same for a denial: stage 2's fallbacks when it names no rule
+ * Stage 2's content-free denial reasons: its fallbacks when it names no rule
  * (`"Blocked by classifier"`, category mode) or the model gave no `<reason>`
  * (`"No reason provided"`). Only the RATIONALE is dropped — the decision stands,
  * and a `[Rule Name]` in front is still split out into the badge. Exact match,
@@ -173,33 +145,41 @@ const CONTENT_FREE_DENY_REASONS = new Set(['Blocked by classifier', 'No reason p
 
 /**
  * cli.js's "the classifier could not be reached" reason (`Gwe`). It arrives on a
- * `classifier` DENY with no `noVerdict` flag; cli.js itself tells it apart by
- * this exact string (its own `automode-unavailable` classification), so we do
- * too.
+ * `classifier` DENY that no judge weighed; cli.js itself tells it apart by this
+ * exact string (its own `automode-unavailable` classification), so we do too.
  */
 const CLASSIFIER_UNAVAILABLE_REASON = 'Classifier unavailable'
 
 /**
- * A classifier verdict as the block that renders on the card it judged.
+ * cli.js's reason when the server-side classifier gave no usable verdict for
+ * several responses in a row and it stopped the turn (`ptn`, 2.1.280).
+ */
+const NO_VERDICT_STREAK_REASON =
+  'Auto mode unavailable — stopped after repeated responses with no safety verdict'
+
+/**
+ * The `decision_reason_code` cli.js sends on a `classifier` denial ONLY when the
+ * transcript overflowed the classifier's context and it reached no verdict
+ * (`qoe`: `noVerdict === true && reason === fVe`, 2.1.280).
+ */
+const TRANSCRIPT_TOO_LONG_CODE = 'classifier_transcript_too_long'
+
+/**
+ * A classifier block as the verdict that renders on the card it judged.
  *
  * `reviewId` is the FRAME's uuid rather than a fresh one: cli.js mints exactly
  * one frame per decision, so using it makes a replayed catch-up idempotent for
  * free — the reducer's dedupe key is `reviewId`.
  */
-export function classifierReviewBlock(
-  frame: PermissionDecisionFrame,
-  decision: 'approved' | 'denied'
-): ToolReviewBlock {
+export function classifierReviewBlock(frame: PermissionDecisionFrame): ToolReviewBlock {
   const { rule, rationale: said } = splitRulePrefix(frame.decisionReason)
-  const contentFree =
-    decision === 'approved' ? CONTENT_FREE_ALLOW_REASONS : CONTENT_FREE_DENY_REASONS
-  const rationale = said !== undefined && contentFree.has(said) ? undefined : said
+  const rationale = said !== undefined && CONTENT_FREE_DENY_REASONS.has(said) ? undefined : said
   return {
     type: 'tool_review',
     toolUseId: frame.toolUseId,
     reviewId: frame.frameUuid,
     reviewer: 'auto-mode',
-    decision,
+    decision: 'denied',
     ...(rule ? { rule } : {}),
     ...(rationale ? { rationale } : {})
   }
@@ -225,46 +205,41 @@ function denialBlock(
 }
 
 /**
- * True when a `classifier` DENY is a fallback rather than a verdict: the patch
- * flagged it `no_verdict`, or it is cli.js's "Classifier unavailable", which
- * carries no flag.
+ * True when a `classifier` DENY is a fallback rather than a verdict. The frame
+ * carries no flag, so these are the native signals: the transcript-overflow
+ * reason code, and the two fixed reasons "Classifier unavailable" and the
+ * no-verdict streak. All exact matches.
  */
 function isNoVerdictDenial(frame: PermissionDecisionFrame): boolean {
-  return frame.noVerdict === true || frame.decisionReason?.trim() === CLASSIFIER_UNAVAILABLE_REASON
+  if (frame.decisionReasonCode === TRANSCRIPT_TOO_LONG_CODE) return true
+  const reason = frame.decisionReason?.trim()
+  return reason === CLASSIFIER_UNAVAILABLE_REASON || reason === NO_VERDICT_STREAK_REASON
 }
 
 /**
- * The single routing decision: which block, if any, a decision frame renders
+ * The single routing decision: which block a `permission_denied` frame renders
  * as on its card.
  *
- *  - classifier + allowed → an approved review. `null` for a no-verdict allow:
- *    the patch never emits one (it gates on cli.js's own `classifierAllowed`),
- *    so this is defensive — an allow nobody judged is just the tool running.
- *  - classifier + denied → a denied review, UNLESS the classifier reached no
- *    verdict; then a `permission_denial` with source `autoModeNoVerdict`,
- *    because the refusal is real but no judgment was made.
- *  - non-classifier + allowed → `null`. The patch emits allows for classifier
- *    verdicts only, so this means the wire contract moved; the caller logs it.
- *  - non-classifier + denied → a `permission_denial` naming its source.
+ *  - classifier → a denied review, UNLESS it is a recognisable no-verdict
+ *    fallback ({@link isNoVerdictDenial}); then a `permission_denial` with
+ *    source `autoModeNoVerdict`, because the refusal is real but no judgment
+ *    was made.
+ *  - anything else → a `permission_denial` naming its source.
  */
 export function permissionDecisionBlock(
-  frame: PermissionDecisionFrame,
-  outcome: 'allowed' | 'denied'
-): ToolReviewBlock | PermissionDenialBlock | null {
+  frame: PermissionDecisionFrame
+): ToolReviewBlock | PermissionDenialBlock {
   if (isClassifierDecision(frame)) {
-    if (outcome === 'allowed') {
-      return frame.noVerdict ? null : classifierReviewBlock(frame, 'approved')
-    }
     return isNoVerdictDenial(frame)
       ? denialBlock(frame, 'autoModeNoVerdict')
-      : classifierReviewBlock(frame, 'denied')
+      : classifierReviewBlock(frame)
   }
-  return outcome === 'denied' ? permissionDenialBlock(frame) : null
+  return permissionDenialBlock(frame)
 }
 
 /**
- * Narrow a raw `system/permission_denied` / `permission_allowed` message to the
- * fields we use, or `null` when it cannot be bound to a card.
+ * Narrow a raw `system/permission_denied` message to the fields we use, or
+ * `null` when it cannot be bound to a card.
  *
  * `tool_use_id` is required, not defaulted: a denial with no call to attach to
  * has nowhere to render, and inventing an id would park a block against a card
@@ -286,6 +261,8 @@ export function readPermissionDecisionFrame(
       ? { decisionReasonType: msg.decision_reason_type }
       : {}),
     ...(typeof msg.decision_reason === 'string' ? { decisionReason: msg.decision_reason } : {}),
-    ...(msg.no_verdict === true ? { noVerdict: true as const } : {})
+    ...(typeof msg.decision_reason_code === 'string'
+      ? { decisionReasonCode: msg.decision_reason_code }
+      : {})
   }
 }

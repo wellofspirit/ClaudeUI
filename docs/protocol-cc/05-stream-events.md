@@ -373,7 +373,7 @@ ClaudeUI uses a hybrid: stream_events drive the typewriter effect; assistant sna
 
 ## 5.11 Subagent and teammate variants
 
-Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
+Via patches (see `patch/subagent-streaming/`; `team-streaming`, which produced the teammate variant, is retired and its directory removed — 01 §1.12):
 
 ### Subagent (patches C, E, G)
 
@@ -394,7 +394,7 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
 
 **Idle self-resume: `agent_id` without `parent_tool_use_id`.** A background agent may stop while its own background children still run; when a child reports while the session is idle, cli.js resumes the agent itself with `_buildIdleToolUseContext()` — a main-loop context with **no `toolUseId`**. Patch E's `parent_tool_use_id:CTX.toolUseId` is then `undefined` and `JSON.stringify` drops the key, so the frame looks like the main agent's except for `agent_id`. That run's completed `assistant`/`user` frames (the native relay) are NOT affected: the relay stamps the `toolUseId` the agent's sidecar recorded at spawn, i.e. the ORIGIN Agent call's id (ADR-073), and cli.js's own task-notifications for such a run lack `<tool-use-id>`. A consumer must therefore place such a stream_event by `agent_id` on the same owner the snapshots use — `ClaudeSession.handleStreamEvent` maps it through `originByTaskId` → `resolveTaskOwner` — and must never treat a frame that carries `agent_id` as the main agent's (an unknown `agent_id` is dropped). Evidence and char offsets: `patch/subagent-streaming/README.md`, Patch E § "v2.1.280 — `agent_id`".
 
-### Teammate (patch team-streaming-B)
+### Teammate (patch team-streaming-B — retired)
 
 `teammate_id` instead of `parent_tool_use_id`:
 
@@ -416,3 +416,5 @@ Subagent/teammate variants require both:
 - The corresponding ClaudeUI patch applied
 
 Without the patch, subagent stream events are swallowed by upstream's internal aggregation.
+
+On a harness without `subagent-streaming` (Anthropic's unpatched binary, ADR-079) ClaudeUI still gets a foreground subagent's text and thinking as complete `assistant` messages with `parent_tool_use_id` set, because it always passes `--forward-subagent-text` (02); only the token deltas are missing.

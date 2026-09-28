@@ -366,30 +366,68 @@ Dry run always responds with the diff. Real run responds with error if `canRewin
 
 ### `cancel_async_message`
 
-Remove a queued message before it's consumed.
+Take a queued user message back, by the `uuid` its `user` frame carried. Native; ClaudeUI's
+take-back since 2026-09-25, replacing the `queue-control` patch's text-matched `dequeue_message`
+(below), which the official binary rejects.
 
-**Anchor:** `~12845570`. Schema `Oc1`. Response schema `v3Y`.
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** request schema `_o` @2322818 ("Drops a pending
+async user message from the command queue by uuid. No-op if already dequeued for execution"),
+response schema `Qv` right after it; headless handler @22780459, which calls
+`Cu({targetUuid, sender:"host", messageQueue, …})` @22534471.
 
 **Request:**
 
 ```json
 {
   "subtype": "cancel_async_message",
-  "message_uuid": "<uuid>"
+  "message_uuid": "<the uuid the user frame carried>"
 }
 ```
 
 **Response (success):**
 
 ```json
-{ "cancelled": true } // false if already dequeued for execution
+{ "cancelled": true }
 ```
 
-**Side effects:** Removes from command queue via `tNH(item => item.uuid === uuid)`.
+`{ "cancelled": false }` is also a SUCCESS: cli.js does not hold that uuid. Three reasons, from
+`Cu`:
 
-**Timing:** instant.
+- it already left the queue — folded into a turn or drained as a turn's prompt;
+- it is being folded right now (`isFoldInFlight`): nothing is removed and its `started` follows;
+- cli.js has not received it (yet). For the host sender `Cu` then calls
+  `markCancelPending(uuid)`, which records the uuid in a bounded set; if a message with that uuid
+  later reaches the **between-turns** dispatch, the dispatch drops it and emits `cancelled`
+  instead of `started`. The mid-turn fold does not consult that set: in the probe a mid-turn
+  message sent under a uuid cancelled beforehand ran normally.
 
-**QueryHandle:** `q.cancelAsyncMessage(uuid)`.
+**Side effects:** on `true`, the message is removed from the command queue and a
+`command_lifecycle` `cancelled` frame (03 §3.21) is emitted for it — **before** the response:
+
+```
+official.cancel.jsonl (2.1.280, Haiku, 2026-09-24)
+L99   → control_request cancel_async_message {message_uuid: 3f13…}   (300 ms after the frame)
+L100  command_lifecycle {command_uuid: 3f13…, state: "cancelled"}
+L101  control_response {cancelled: true}
+L103  → control_request cancel_async_message {message_uuid: 3f13…}   (again)
+L104  control_response {cancelled: false}                           (no second frame)
+```
+
+The model provably never saw the cancelled message: asked at the end to quote every user message
+it had received, it listed the others and not that one. A cancel sent after the message was
+consumed (L372) answers `{cancelled: false}`.
+
+**Timing:** instant (≤1 ms in the probe).
+
+**QueryHandle:** `q.cancelAsyncMessage(uuid)` → `{ cancelled: boolean }`; only an explicit `true`
+reads as cancelled.
+
+**ClaudeUI:** `ClaudeSession.tryRecallQueuedItem` sends it with the item's `itemId` — the uuid the
+item's frame carried (06 §6.2). `true` → the item is recalled; `false`, or a failed request → it
+stays queued, reported as not recalled, and its `started` settles it. An item already consumed
+while an earlier item of the same recall was in flight is not asked about. The `cancelled` frame
+that precedes the response recalls the item first; `SessionQueue.recallById` makes the second
+transition a no-op.
 
 ---
 
@@ -581,93 +619,116 @@ Enable/disable remote-control bridging (peer-to-peer mirror).
 
 ---
 
-### `dequeue_message` (patched)
+### `dequeue_message` (RETIRED 2026-09-25)
 
-Remove a queued command by text match. Added by `patch/queue-control/`.
+Removed a queued command by TEXT match, answering `{removed: N}`. It existed only in the
+`queue-control` patch, deleted at 2.1.280; the official binary answers it with
+`Unsupported control request subtype: dequeue_message` (`official.cancel.jsonl` L93–L94), so
+take-back silently failed there. Replaced by `cancel_async_message` (above), which names the
+message by the `uuid` its frame carried. `QueryHandle.dequeueMessage` is gone. The app-level
+`session:dequeue-message` IPC channel survives as a deprecated shim over `session:recall-queued`
+for cached `/remote` bundles, so it now reaches cli.js as `cancel_async_message` too.
 
-**Anchor:** `~12857658`. **No Zod schema** (patch-injected).
+---
+
+### `background_tasks`
+
+Move running foreground tasks to the background. Native, with a Zod schema; the 2.1.280 schema
+describes it as "the control-request equivalent of pressing Ctrl+B in the terminal". It
+replaced the `background-task` patch, whose `background_task` (singular) subtype the official
+binary rejects as `Unsupported control request subtype`. The patch was also broken: after it
+backgrounded a task, cli.js never saw the task finish.
+
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** schema `xo` @2367750, success schema `bM`
+@2368682; headless handler `St` @22374077, registered in the routed handler table as
+`background_tasks:St`.
 
 **Request:**
 
 ```json
-{
-  "subtype": "dequeue_message",
-  "value": "the text content" // after m$4() attachment extraction
-}
+{ "subtype": "background_tasks", "tool_use_id": "toolu_xxx" }
 ```
+
+`tool_use_id` is optional. Without it, every foreground task is backgrounded (Ctrl+B) and the
+answer is `{}`. ClaudeUI always sends one.
 
 **Response (success):**
 
 ```json
-{ "removed": 2 } // count of matching queue entries removed
+{ "backgrounded": true }
 ```
+
+`backgrounded` is `gBe(toolUseId, registry)` (@10908614). It looks for the task whose
+`toolUseId` equals the request's and answers `false`, still as a **success**, when there is no
+such task or it cannot be backgrounded (the eligibility predicate `v$e`: a Bash needs a live
+shell command and must not already be in the background; an agent must be running, not in the
+background, and not a fork worker). In practice `false` means one of three things:
+
+- **not registered yet**: a foreground Bash registers only after it has run for 2 s (04 §4.5),
+  and a request before then answers `false` (observed at +0 s and +1.5 s after the assistant's tool_use frame; the `task_started` came at +4.5 s);
+- **already in the background**: a second request for the same id answers `false`;
+- **finished.**
+
+`tool_use_id` is matched against the task's CURRENT run. For a resumed agent that is the
+`SendMessage` call's id, not the origin Agent call's (04 §4.5, ADR-073), and
+`ClaudeSession.backgroundTask` maps a card's origin id to the current run's id before sending.
+
+**Errors:** `background_tasks: tool_use_id must be a string`; `Background tasks are disabled in
+this session.` (when `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` or the `backgroundTasksDisabled`
+setting is on).
+
+**Side effects:** the task's record gets `isBackgrounded: true`, which cli.js reports as
+`system/task_updated {patch:{is_backgrounded:true}}` before it answers (04 §4.6). The blocked
+tool call returns about a second later with a "Command was manually backgrounded by user with
+ID: …" tool_result (an agent's returns immediately), the turn continues, and the task ends with
+a normal `task_notification`.
+
+That tool_result is not the command's result. ClaudeUI's Bash card treats the call as a
+background command from the flip on (`ToolCallBlock.tsx`): the `activeTasks` record says so
+while the task runs, and once the terminal event has dropped the record, the tool_result's
+wording plus that event do, so the card completes (or fails) on the notification. The text is
+`Command was manually backgrounded by user with ID: <id>. Output is being written to: <path>.`,
+ending in the sentence's period; for `run_in_background`, guidance for the model follows on the
+same line. `src/shared/claude-background-bash.ts` reads the id and the path, which ends at
+`<id>.output`, in all four phrasings cli.js builds (`mEn`, `.cache/pristine-cli.js` @8213182:
+run_in_background, manual, a timeout, a message that arrived), so the card can tail the file.
 
 **Timing:** instant.
 
-**QueryHandle:** `q.dequeueMessage(value)`.
+**QueryHandle:** `q.backgroundTask(toolUseId)` → `{ backgrounded: boolean }`.
+`ClaudeSession.backgroundTask` turns `false` into
+`{ success: false, error: 'Task is not registered yet — try again in a moment' }` and posts a
+session warning.
 
 ---
 
-### `background_task` (patched)
+### `get_usage` (native as of v2.1.177)
 
-Convert a running foreground task to background. Added by `patch/background-task/`.
-
-**Anchor:** `~12857897`. **No Zod schema** (patch-injected).
-
-**Request:**
-
-```json
-{
-  "subtype": "background_task",
-  "tool_use_id": "toolu_xxx"
-}
-```
-
-**Response (success):**
-
-```json
-{
-  "task_id": "<id>",
-  "tool_use_id": "toolu_xxx"
-}
-```
-
-**Errors:**
-
-- `"No task found with toolUseId: <id>"`
-- `"Task <id> is not running"`
-- `"Task <id> is already backgrounded"`
-- `"Failed to background bash task <id>"`
-- `"Unsupported task type for backgrounding"`
-
-**Side effects:**
-
-- Local bash: `shellCommand.background(taskId)` — spills stdout to disk, flips `isBackgrounded:true`.
-- Local agent: flips `isBackgrounded:true`, resolves `VuH.get(taskId)` stop-signal.
-
-**Timing:** instant.
-
-**QueryHandle:** `q.backgroundTask(toolUseId)`.
-
----
-
-### `get_usage` (native as of v2.1.177; previously patched)
-
-Expose cli.js's `/usage` data. Originally added by `patch/usage-relay/` (a
+Expose cli.js's `/usage` data. Originally added by the `usage-relay` patch (a
 patch-injected `else if` branch returning the raw `/api/oauth/usage` body).
 
 **As of cli.js v2.1.177 this is a _native_ control** with its own Zod schema
 (subtype `get_usage`, described "Requests the structured /usage data… the
-response shape may change"). The native handler runs ahead of the patch's
-injected branch, so the patch is now effectively dead code — retire it on the
-next patch sweep. The response is **no longer the flat API body**; it is a
-structured envelope.
+response shape may change"). The native handler ran ahead of the patch's
+injected branch, so the patch was dead code; it was deleted at 2.1.280. The
+response is **no longer the flat API body**; it is a structured envelope.
 
 **Request:**
 
 ```json
-{ "subtype": "get_usage" }
+{ "subtype": "get_usage", "skip_behaviors": true }
 ```
+
+`skip_behaviors` (optional boolean; anything else is rejected with
+`get_usage: skip_behaviors must be a boolean`) skips the scan of local
+transcripts that fills `behaviors`, which is then `null`. The 2.1.280 schema
+describes it as "For callers that need only the plan rate limits, such as a
+usage meter; the scan reads every transcript touched in the last seven days",
+and the handler passes `includeBehaviors: !redacted && skip_behaviors !== true`
+(`.cache/pristine-cli.js` @2296291 schema, @22348815 handler). Measured at
+2.1.280: ~600 ms with the scan, ~1 ms without. `q.getUsage()` always sends
+it: its only consumer, `parseUsageResponse` (`claude-usage-api.ts`), never
+reads `behaviors`.
 
 **Response (success):** structured envelope (NOT the raw API body):
 
@@ -804,9 +865,15 @@ Start the internal voice-transcription TCP server. Added by `patch/voice-server/
 
 ### `mcp_status`
 
-List all MCP servers with status. **Patched** to await in-flight reconnects.
+List all MCP servers with status. Native and unpatched since the `mcp-status` patch was deleted
+at 2.1.280: the headless handler (`Ie` in the routed handler table, `.cache/pristine-cli.js`
+@22347465) answers `{mcpServers: JMt(mcpConnections())}`, a snapshot of the current
+connections. A server still connecting reads `pending`; nothing waits.
 
-**Anchor:** `~12845000`. Schema `_c1`. Response schema `J3Y`.
+The patch existed because the MCP servers of plugins enabled in settings never showed up (on
+the official 2.1.280 binary they were still absent after 12 s, warm or cold). `--mcp-config`
+servers are fine. The fix is now the `reload_plugins` that `query()` sends after initialize
+(below).
 
 **Request:**
 
@@ -831,7 +898,7 @@ List all MCP servers with status. **Patched** to await in-flight reconnects.
 }
 ```
 
-**Timing:** slow — awaits `D8()` refresh and patched `ZH` promise. Multi-second under heavy MCP contention.
+**Timing:** instant.
 
 **QueryHandle:** `q.mcpServerStatus()`.
 
@@ -839,7 +906,7 @@ List all MCP servers with status. **Patched** to await in-flight reconnects.
 
 ### `mcp_toggle`
 
-Enable/disable an MCP server. **Does** propagate to the model's tool list (patched via `patch/mcp-tool-refresh/`).
+Enable/disable an MCP server. **Does** propagate to the model's tool list: since 2.1.114 the turn loop calls `options.refreshTools()` before each API call (`if(so.options.refreshTools){let j=so.options.refreshTools();…` at 2.1.280), which retired the `mcp-tool-refresh` patch.
 
 **Anchor:** `~12848500`. Schema `Lc1`.
 
@@ -1068,17 +1135,77 @@ Reload plugins + commands + agents + MCP from disk.
 }
 ```
 
-**Timing:** slow (disk walk + MCP reconnect). Multi-second under load.
+**Timing:** fast on the wire. Observed 30 ms from request to response on the official 2.1.280
+binary (`probes/mcp-status/official.plugin-B-reload_plugins.jsonl` lines 6→9). The plugin MCP
+servers connect afterwards: `pending` in `mcpServers`, then `connected` about 2 s later.
 
 **QueryHandle:** `q.reloadPlugins()`.
 
 **Note:** This is the ONLY source of `plugins` (and the authoritative refresh source for `skills` which aren't in initialize response either).
+
+**`hold_on_cache_impact: true`** (optional): when the reload would add or remove MCP servers or
+change LSP tools, and so invalidate the prompt cache, cli.js answers `held: true` plus
+`cache_impact: {mcp_servers_added, mcp_servers_removed, lsp_tool_change}` and applies nothing.
+ClaudeUI does not send it.
+
+#### ClaudeUI sends it once after initialize
+
+`query()` sends `{subtype:"reload_plugins"}` once the initialize response arrives, unless
+`strictMcpConfig` is set or the caller passes `reloadPlugins: false`. It is fire-and-forget: the
+first prompt was already written at spawn, and a failure is only logged (`console.warn` plus the
+`stderr` callback). Without it, the MCP servers of settings-enabled plugins never connect in a
+headless session (§7.4 `mcp_status`).
+
+`reloadPlugins: false` is for a process that never runs a turn that could use a plugin's tools.
+Three callers pass it, each in `src/core/ipc/session.ipc.ts` and again in its remote twin
+`remote-handlers.ts`: the model-list probe (`fetchModels` / `claudeSupportedModels`), killed
+right after the initialize response; title generation (a `generate_session_title` control
+request, then abort); and the tool-less commit-message one-shot. `ServiceSession` passes it too:
+it serves `get_usage` and the OAuth control requests and never runs a turn. Chat sessions
+(`ClaudeSession`), automation runs and cross-engine dispatch targets keep the default. Before
+the option existed, the boot-time `fetchModels` probe sent the reload as well, and it failed with
+"cli.js exited" when the probe was torn down.
+
+The headless handler (`.cache/pristine-cli.js` @22790141,
+`else if(y.request.subtype==="reload_plugins")`) runs these steps. None of them reaches the
+network for a local ClaudeUI spawn, except to fetch an enabled plugin missing from the cache:
+
+1. **Marketplace install pass** (`_y` @22669351): returns `{ran:false, reason:"not_admitted"}`
+   unless `pluginForwardingAdmission.admitted`, before it reads its feature flag or installs
+   anything. Admission (`Bon` @22114644, computed @22683672) requires `--sdk-url` and
+   `CLAUDE_CODE_REMOTE_SESSION_ID` without `CLAUDE_CODE_ENVIRONMENT_KIND`, i.e. a managed cloud
+   worker. ClaudeUI sets none of them.
+2. **Plugin sync** (`t7n`): runs only when `z_n(e)` (@7533509), i.e.
+   `(CLAUDE_CODE_SYNC_PLUGINS || CLAUDE_CODE_SYNC_SESSION_REFS…) && !pluginsSyncVetoed`.
+   ClaudeUI sets neither variable.
+3. **Reload definitions** (`ZI`, refreshActivePlugins @18666782) → `lb` → the non-cache-only
+   loader `JFe({cacheOnly:false})`. It walks only the plugins enabled in settings and the
+   marketplaces they name. Per plugin (`i2t` @10756873): a plugin whose versioned cache dir
+   exists loads from disk, and so does a marketplace-relative plugin (copied from the local
+   marketplace clone). Only a plugin with no cache dir is downloaded. With no plugin enabled
+   there is nothing to walk.
+4. **MCP diff** (`ri(Zd(),"reload_plugins")`) connects the plugins' MCP servers: a stdio
+   server spawns a process, an http/sse server is contacted. That connection is the point of
+   the call. **Plugin list** (`Gi`) is cache-only unless `CLAUDE_CODE_SYNC_PLUGIN_INSTALL`.
+
+So the call is unconditional. With every enabled plugin installed, or none enabled, it fetches
+nothing, and a gate on `enabledPlugins` would not prevent the one fetch it can make.
+
+Caveat for other `query()` callers: the reload re-reads agent definitions from disk and plugins
+and installs them (`Hd(ue.agentDefinitions.allAgents)`). Whether agents passed in initialize
+survive that was not checked. ClaudeUI passes none.
 
 ---
 
 ## 7.5 Claude OAuth subtypes
 
 All three are long-lived (user-driven). Always pass `timeoutMs: 0` to disable the 30 s default.
+
+**Single-account only.** Multi-account sign-in (ADR-015) no longer drives these: the app runs
+the same claude.ai OAuth flow itself (`src/core/auth/claude-oauth.ts`, chosen per flow by
+`src/main/services/claude-login-backend.ts`) and writes the active account dir's
+`.credentials.json`. See [architecture/engines.md](../architecture/engines.md) → "In-app
+Claude sign-in".
 
 ### `claude_authenticate`
 
@@ -1245,8 +1372,7 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 | `askSideQuestion(q)`                        | `side_question`                       |
 | `launchUltrareview(args, {confirm})`        | `ultrareview_launch`                  |
 | `stopTask(id)`                              | `stop_task`                           |
-| `backgroundTask(toolUseId)`                 | `background_task`                     |
-| `dequeueMessage(value)`                     | `dequeue_message`                     |
+| `backgroundTask(toolUseId)`                 | `background_tasks`                    |
 | `voiceServerStart()`                        | `voice_server_start`                  |
 | `voiceServerStop()`                         | `voice_server_stop`                   |
 | `getUsage()`                                | `get_usage`                           |

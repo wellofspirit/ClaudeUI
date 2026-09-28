@@ -71,7 +71,7 @@ vi.mock('../../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
 }))
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({
@@ -221,6 +221,33 @@ describe("ClaudeSession — cancel()'s disconnected survives the dying run's fin
     expect(statuses.at(-1)).toBe('disconnected')
 
     void p1
+  })
+})
+
+describe('ClaudeSession — a run that never produces a query handle', () => {
+  it('leaves no unhandled rejection when sdkQuery() throws (GUARD — fails pre-fix)', async () => {
+    const { win } = makeWin()
+    // What a multi-account spawn refused for want of a token does: query() throws.
+    mockQuery.mockImplementationOnce(() => {
+      throw new Error('The active Claude account is not signed in. Sign in to it to continue.')
+    })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const session = new ClaudeSession('routing-no-handle', win, '/tmp/proj')
+      liveSessions.push(session)
+      await session.run('hi')
+      // Two macrotask turns: Node reports an unhandled rejection after the
+      // microtask queue drains.
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })
 
