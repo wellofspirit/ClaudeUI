@@ -34,6 +34,7 @@
 
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
+import { isDescendant, normalizePath, resolveTarget, toPosixish } from './shell-lexical'
 
 // ── Outcome annotations ───────────────────────────────────────────────────────
 
@@ -278,21 +279,9 @@ export function needsRepoVisibility(command: string): boolean {
   })
 }
 
-/**
- * Permission categories whose input carries a raw shell command string. Kept
- * here rather than in the engine wiring so pi (phase 4) inherits it.
- */
-const SHELL_CATEGORIES = new Set(['bash', 'shell'])
-
-/** The shell command a proposed action would run, or `null` if it is not one. */
-export function shellCommandOf(
-  toolName: string,
-  input: Record<string, unknown> | undefined
-): string | null {
-  if (!SHELL_CATEGORIES.has(toolName.toLowerCase())) return null
-  const command = input?.command
-  return typeof command === 'string' && command.trim().length > 0 ? command : null
-}
+// The pure implementation lives in shell-lexical.ts (read-only.ts shares it
+// without pulling in node:child_process); existing callers import it from here.
+export { shellCommandOf } from './shell-lexical'
 
 // ── Redirect analysis (pure) ──────────────────────────────────────────────────
 
@@ -428,75 +417,6 @@ function extractRedirectTargets(command: string): string[] {
     if (raw.length > 0) out.push(raw)
   }
   return out
-}
-
-/** `\` → `/`, collapsed slashes, and (win32 only) the Git-Bash `/d/x` spelling
- *  folded onto `d:/x`. Gated on platform because `/e/tc` is a real directory on
- *  Linux; `platform` is injectable so both branches are testable anywhere. */
-function toPosixish(raw: string, platform: NodeJS.Platform): string {
-  let s = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
-  if (platform === 'win32') {
-    const msys = /^\/([A-Za-z])(\/|$)/.exec(s)
-    if (msys) s = `${msys[1]}:${s.slice(2) || '/'}`
-  }
-  return s
-}
-
-function isAbsolutePosixish(s: string, platform: NodeJS.Platform): boolean {
-  if (s.startsWith('/')) return true
-  return platform === 'win32' && /^[A-Za-z]:\//.test(s)
-}
-
-interface NormalizedPath {
-  /** Canonical comparison form, e.g. `d:/repo/build.log` or `/repo/build.log`. */
-  full: string
-  /** Path components, drive prefix excluded — what the protected-name check reads. */
-  components: string[]
-}
-
-/**
- * Resolve+normalize without `node:path`, so a test's verdict does not depend on
- * the OS running it (the whole point of the injectable `platform`). `.` and `..`
- * are collapsed textually — there are no symlinks to consult, and a `..` that
- * climbs past the root simply stops there.
- */
-function normalizePath(raw: string, platform: NodeJS.Platform): NormalizedPath {
-  const s = toPosixish(raw, platform)
-  let drive = ''
-  let rest = s
-  if (platform === 'win32') {
-    const m = /^([A-Za-z]:)(\/|$)/.exec(s)
-    if (m) {
-      drive = m[1].toLowerCase()
-      rest = s.slice(m[1].length)
-    }
-  }
-  const absolute = rest.startsWith('/')
-  const components: string[] = []
-  for (const part of rest.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') {
-      components.pop()
-      continue
-    }
-    components.push(part)
-  }
-  return { full: drive + (absolute || drive ? '/' : '') + components.join('/'), components }
-}
-
-/** Resolve a possibly-relative target against `cwd`, both in posix-ish form. */
-function resolveTarget(cwd: string, target: string, platform: NodeJS.Platform): NormalizedPath {
-  const t = toPosixish(target, platform)
-  if (isAbsolutePosixish(t, platform)) return normalizePath(t, platform)
-  return normalizePath(`${toPosixish(cwd, platform).replace(/\/+$/, '')}/${t}`, platform)
-}
-
-/** True iff `target` is a PROPER descendant of `root` (root-equal is not inside,
- *  mirroring {@link isPathInside} in services/path-containment.ts). */
-function isDescendant(root: string, target: string, platform: NodeJS.Platform): boolean {
-  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
-  const r = fold(root).replace(/\/+$/, '')
-  return fold(target).startsWith(`${r}/`)
 }
 
 function protectedComponentsOf(components: readonly string[]): string[] {
