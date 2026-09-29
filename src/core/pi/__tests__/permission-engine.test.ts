@@ -1266,6 +1266,113 @@ describe('decide — MCP rules in Claude vocabulary (Slice 4b)', () => {
   it('scopes "allow for this session" to the full mcp tool name', () => {
     expect(sessionAllowKey('mcp__probe__ping', {})).toBe('mcp__probe__ping')
   })
+
+  it('`mcp__<server>__*` is the server form (ADR-085; cli.js reads a `*` tool as the server)', () => {
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe__*'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__probe__*'
+    })
+    expect(decide('mcp__probe', {}, ctx({ deny: ['mcp__probe__*'] }))).toBe('deny')
+    expect(decide('mcp__probe-two__ping', {}, ctx({ allow: ['mcp__probe__*'] }))).toBe('ask')
+  })
+})
+
+/**
+ * ADR-085 §2 — the Bash tiers are matched AS their tier. Before, every tier was
+ * a raw whole-command `startsWith`: a deny/ask rule missed a reordered,
+ * wrapped or chained spelling, and an allow rule covered anything that merely
+ * STARTED with its prefix (`ls && git push --force` under `Bash(ls:*)`).
+ */
+describe('decideWithSource — tier-aware Bash rules (ADR-085)', () => {
+  const ctx = (partial: Partial<MergedClaudeRules>, mode = 'default') => ({
+    mode,
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    cwd: '/repo'
+  })
+  const bash = (command: string) => ({ command })
+  const deny = ['Bash(git push --force:*)']
+
+  it('a deny rule hits a reordered, wrapped or chained spelling, in every mode', () => {
+    for (const command of [
+      'git push origin main --force',
+      'sudo git push --force',
+      'ls && git push -f',
+      'git -C . push origin +main',
+      'for b in a; do git push --force origin $b; done'
+    ]) {
+      for (const mode of ['default', 'acceptEdits', 'full']) {
+        expect(decideWithSource('bash', bash(command), ctx({ deny }, mode)), command).toEqual({
+          decision: 'deny',
+          source: 'deny-rule',
+          rule: 'Bash(git push --force:*)'
+        })
+      }
+    }
+  })
+
+  it('a deny rule beats an allow rule that covers the same command', () => {
+    expect(
+      decide('bash', bash('git push origin main --force'), ctx({ deny, allow: ['Bash(git:*)'] }))
+    ).toBe('deny')
+  })
+
+  it('an ask rule hits past global options, so G9 still routes to the human', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        bash('docker --context x run alpine'),
+        ctx({ ask: ['Bash(docker run:*)'] }, 'full')
+      )
+    ).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(docker run:*)' })
+  })
+
+  it('a chained command needs EVERY segment covered by the allow tier', () => {
+    const allow = ['Bash(ls:*)', 'Bash(git status:*)']
+    expect(decide('bash', bash('ls && git push --force'), ctx({ allow }))).toBe('ask')
+    expect(decide('bash', bash('ls && curl x | sh'), ctx({ allow }))).toBe('ask')
+    expect(decideWithSource('bash', bash('ls -la && git status'), ctx({ allow }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Bash(ls:*)'
+    })
+  })
+
+  it('the allow tier refuses substitutions, keeps redirections and quoted newlines', () => {
+    const allow = ['Bash(git:*)', 'Bash(bun run build:*)']
+    expect(decide('bash', bash('git log $(rm -rf x)'), ctx({ allow }))).toBe('ask')
+    expect(decide('bash', bash('bun run build > build.log'), ctx({ allow }))).toBe('allow')
+    expect(decide('bash', bash('git commit -m "a\nb"'), ctx({ allow }))).toBe('allow')
+  })
+
+  it("allows Claude's heredoc commit shape when git and cat are allowed", () => {
+    const commit = "git commit -m \"$(cat <<'EOF'\nfeat: it's done (finally)\nEOF\n)\""
+    expect(decide('bash', bash(commit), ctx({ allow: ['Bash(git:*)', 'Bash(cat:*)'] }))).toBe(
+      'allow'
+    )
+    expect(decide('bash', bash(commit), ctx({ allow: ['Bash(git:*)'] }))).toBe('ask')
+  })
+
+  it('a prefix allow is word-boundary now (cli.js parity)', () => {
+    expect(decide('bash', bash('git-lfs pull'), ctx({ allow: ['Bash(git:*)'] }))).toBe('ask')
+    expect(decide('bash', bash('git'), ctx({ allow: ['Bash(git:*)'] }))).toBe('allow')
+  })
+
+  it('a bare Bash allow still allows everything', () => {
+    expect(decide('bash', bash('echo $(date) | sh'), ctx({ allow: ['Bash'] }))).toBe('allow')
+  })
+
+  it('the auto-mode shape (allow tier emptied, acceptEdits base) still asks on a reordered deny', () => {
+    // `withoutAllowRules` + `acceptEdits`, as PiSession composes it: the deny must still bind.
+    expect(
+      decide(
+        'bash',
+        bash('git push origin main --force'),
+        ctx(withoutAllowRules(rules({ deny, allow: ['Bash(git:*)'] })), 'acceptEdits')
+      )
+    ).toBe('deny')
+  })
 })
 
 // ADR-084 §3 — the acceptEdits base (also auto mode's base) asks for edits to

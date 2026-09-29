@@ -20,6 +20,7 @@ import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { parseClaudeRule } from '../opencode/permission-compiler'
 import { isAgentControlTarget } from '../automode/agent-control-paths'
+import { allowCovers, denyAskHit, type DenyAskHit } from '../permissions/shell-rules'
 import { logger } from '../services/logger'
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny'
@@ -221,13 +222,8 @@ export function normalizeWhitespace(s: string): string {
   return s.trim().replace(/\s+/g, ' ')
 }
 
-function bashSpecifierMatches(specifier: string, input: Record<string, unknown>): boolean {
-  const command = normalizeWhitespace(String(input.command ?? ''))
-  const prefixMatch = specifier.match(/^(.+):\*$/)
-  if (prefixMatch) {
-    return command.startsWith(normalizeWhitespace(prefixMatch[1]))
-  }
-  return command === normalizeWhitespace(specifier)
+function commandOf(input: Record<string, unknown>): string {
+  return String(input.command ?? '')
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +428,9 @@ const MCP_RULE_PREFIX = 'mcp__'
 /**
  * Claude's MCP rule vocabulary, the one tier of the ladder whose rules are not
  * `Tool(specifier)` at all: `mcp__<server>` names every tool on one server and
- * `mcp__<server>__<tool>` names one tool, and neither takes a specifier. The
+ * `mcp__<server>__<tool>` names one tool, and neither takes a specifier.
+ * `mcp__<server>__*` is the server form too (cli.js reads a `*` tool name as
+ * "every tool on the server"), so a trailing `__*` is dropped first. The
  * rule string IS the tool name the engine is asked about, so these are matched
  * against the NAME rather than through {@link CLAUDE_TOOL_TO_KIND} (which lists
  * only the seven tools with a pi analogue, and so made every `mcp__…` rule a
@@ -449,13 +447,16 @@ function mcpRuleMatches(parsed: { tool: string; specifier?: string }, toolName: 
   // syntax cannot express, and inventing a meaning for it here would either
   // over- or under-grant. It matches nothing, exactly as it did before.
   if (parsed.specifier !== undefined) return false
-  return toolName === parsed.tool || toolName.startsWith(`${parsed.tool}__`)
+  const rule = parsed.tool.endsWith('__*') ? parsed.tool.slice(0, -3) : parsed.tool
+  return toolName === rule || toolName.startsWith(`${rule}__`)
 }
 
 /**
  * Does a single Claude rule string match this pi tool_call? Bare tool rules
- * (no specifier) match unconditionally for the mapped kind. Bash specifiers
- * are evaluated (prefix `cmd:*` / exact, whitespace-normalized). Path-bearing
+ * (no specifier) match unconditionally for the mapped kind. The COMMAND kind
+ * never comes through here: `decideWithSource` matches every Bash tier as a
+ * whole with ADR-085's matcher (`../permissions/shell-rules`), so there is one
+ * Bash path per tier. Path-bearing
  * specifiers (Edit/Write/Read/Grep/Glob/LS) are evaluated as path globs
  * against the tool call's path argument — cwd-relative for an ordinary glob
  * (`resolveMatchPath`), absolute for an absolute/home/Windows-absolute
@@ -482,10 +483,6 @@ function ruleMatchesTool(
   if (!mappedKind || mappedKind !== kind) return false
 
   if (parsed.specifier === undefined) return true
-
-  if (mappedKind === 'command') {
-    return bashSpecifierMatches(parsed.specifier, input)
-  }
 
   if (PATH_BEARING_KINDS.has(mappedKind)) {
     const rawPath = extractToolPath(input)
@@ -921,6 +918,15 @@ export function decide(
  * and hands the caller the matched rule string, which
  * `PiSession.gateToolCallInner` already needed for its deny reason (it used to
  * re-scan with `firstMatchingRule`) and which auto mode needs for G9.
+ *
+ * Bash is matched per tier as a whole (ADR-085): the deny and ask tiers with
+ * the over-approximating matcher (`denyAskHit` — deny first; a command it
+ * cannot analyse is an ask, never an allow), the ALLOW tier by coverage —
+ * every segment of the command covered by some allow rule (`ls && git status`
+ * needs `ls` and `git` covered; `ls && curl x | sh` is covered by nothing),
+ * with the first segment's rule reported. Every caller inherits this:
+ * PiSession's gate, `CodexSession.gate()` (exec approvals, file changes, MCP
+ * elicitations, hosted tools) and the dispatcher's pi and Codex targets.
  */
 export function decideWithSource(
   toolName: string,
@@ -930,21 +936,34 @@ export function decideWithSource(
   const kind = piToolKind(toolName)
   const match = (rules: readonly string[]): string | undefined =>
     rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd))
+  // Only Bash rules can match the command kind; both of its rule tiers in one call.
+  const shell =
+    kind === 'command'
+      ? denyAskHit(commandOf(input), { deny: ctx.rules.deny, ask: ctx.rules.ask })
+      : undefined
 
-  const denyRule = match(ctx.rules.deny)
+  const denyRule = kind === 'command' ? tierRule(shell, 'deny') : match(ctx.rules.deny)
   if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
   if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) {
     return { decision: 'allow', source: 'hosted-auto-allow' }
   }
-  const askRule = match(ctx.rules.ask)
+  const askRule = kind === 'command' ? tierRule(shell, 'ask') : match(ctx.rules.ask)
   if (askRule !== undefined) return { decision: 'ask', source: 'ask-rule', rule: askRule }
   if (ctx.sessionAllows.has(sessionAllowKey(toolName, input))) {
     return { decision: 'allow', source: 'session-allow' }
   }
-  const allowRule = match(ctx.rules.allow)
+  // The allow tier covers a command segment by segment — possibly one rule per segment.
+  const allowRule =
+    kind === 'command'
+      ? allowCovers(commandOf(input), ctx.rules.allow, 'lenient')?.segments[0]?.rule
+      : match(ctx.rules.allow)
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
   return { decision: modeBaseDecision(ctx.mode, kind, input, ctx.cwd), source: 'mode-base' }
+}
+
+function tierRule(hit: DenyAskHit | undefined, tier: 'deny' | 'ask'): string | undefined {
+  return hit?.tier === tier ? hit.rule : undefined
 }
 
 /**
