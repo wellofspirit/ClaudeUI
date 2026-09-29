@@ -21,6 +21,8 @@ import { loadClaudePermissions } from '../services/claude-settings'
 import { parseClaudeRule } from '../opencode/permission-compiler'
 import { isAgentControlTarget } from '../automode/agent-control-paths'
 import { allowCovers, denyAskHit, type DenyAskHit } from '../permissions/shell-rules'
+import { readOnlyVerdict } from '../automode/read-only'
+import { hostRealpath } from '../automode/read-only-gate'
 import { logger } from '../services/logger'
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny'
@@ -75,8 +77,15 @@ export interface PermissionEngineContext {
    * the path against it).
    * Any caller that omits it falls back to matching the RAW input path
    * (best-effort — see `resolveMatchPath`'s doc comment).
+   *
+   * In plan mode it also enables the second read-only oracle
+   * ({@link isPlanReadOnlyCommand}); without it only pi's plan-safe list decides.
    */
   cwd?: string
+  /** Path semantics for plan mode's second read-only oracle. Tests inject; sessions default to the host (`process.platform`). */
+  platform?: NodeJS.Platform
+  /** realpath for plan mode's second read-only oracle. Tests inject; sessions default to the host (`hostRealpath`). */
+  realpath?: PlanReadOnlyScope['realpath']
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +557,7 @@ function editsAgentControlPath(input: Record<string, unknown>, cwd: string | und
  *    acceptEdits ruleset, so both engines draw the line in the same place.
  *  - bypassPermissions/full/auto -> allow everything (except the plan-kind carve-out above)
  *  - plan (M5a — real autonomy mode now, see planModeBaseDecision) -> read-only:
- *    reads/search allow, exit_plan asks, bash gated by isPlanSafeBashCommand,
+ *    reads/search allow, exit_plan asks, bash gated by isPlanReadOnlyCommand,
  *    everything else (fileEdit/fileWrite/task/unknown/…) denies outright
  *  - any other/unrecognised mode string -> treat as default (fail toward asking, not allowing)
  */
@@ -556,7 +565,8 @@ function modeBaseDecision(
   mode: string,
   kind: ToolKind,
   input: Record<string, unknown>,
-  cwd: string | undefined
+  cwd: string | undefined,
+  planScope?: PlanReadOnlyScope
 ): 'allow' | 'ask' | 'deny' {
   if (kind === 'plan' && mode !== 'plan') return 'deny'
   switch (mode) {
@@ -570,7 +580,7 @@ function modeBaseDecision(
       }
       return kind === 'fileRead' || kind === 'search' ? 'allow' : 'ask'
     case 'plan':
-      return planModeBaseDecision(kind, input)
+      return planModeBaseDecision(kind, input, planScope)
     case 'default':
     default:
       return kind === 'fileRead' || kind === 'search' ? 'allow' : 'ask'
@@ -582,11 +592,15 @@ function modeBaseDecision(
 // (pi-bridge-source.ts's exit_plan/cui-plan-enter/cui-plan-exit — the model
 // literally never sees edit/write while planning) and this gate (defense in
 // depth, and the ONLY place bash gets a command-level allowlist instead of a
-// blanket ask/deny). Precedence is unchanged: an explicit user deny/ask RULE
-// (checked earlier in decide(), see its doc comment) still overrides
-// everything below, and the hosted three (render_mermaid/create_mockup/
-// show_mockup) auto-allow before mode base is ever consulted — they don't
-// mutate the repo, so they stay available in plan mode.
+// blanket ask/deny). Precedence: an explicit user deny RULE (checked first in
+// decide(), see its doc comment) still overrides everything below; for a
+// MUTATING call (edit/write, a bash command isPlanReadOnlyCommand cannot vouch
+// for) the plan base then outranks the ask tier, session allows and the allow
+// tier (ADR-085 ruling 7, planModeOutranksRules); for everything else the
+// user's ask/allow rules still override the base. The hosted three
+// (render_mermaid/create_mockup/show_mockup) auto-allow before mode base is
+// ever consulted — they don't mutate the repo, so they stay available in plan
+// mode.
 // ---------------------------------------------------------------------------
 
 /**
@@ -825,24 +839,124 @@ export function isPlanSafeBashCommand(command: string): boolean {
   })
 }
 
+/** What the second oracle needs (ADR-084 `ReadOnlyScope` minus what the engine already holds). */
+export interface PlanReadOnlyScope {
+  cwd: string
+  additionalDirectories: readonly string[]
+  /**
+   * The user's DENY tier only. Read-only-ness must not depend on the user's allow or ask rules:
+   * a Bash deny hit is answered by the deny rung before the oracle runs (the checker refusing it
+   * again only re-denies), and a Bash ASK hit must not turn a checker-only read-only command into
+   * a refusal instead of a question — the ask rung decides that. The deny tier stays so the
+   * checker's `Read(...)` deny rules on reader paths keep refusing.
+   */
+  rules: { deny: readonly string[] }
+  /** Default `process.platform`. */
+  platform?: NodeJS.Platform
+  /** Default `hostRealpath` (`read-only-gate.ts`); tests inject. */
+  realpath?: (absPath: string) => string | undefined | null
+}
+
+/**
+ * ADR-085 S3b — plan mode's read-only oracle: pi's plan-safe list
+ * ({@link isPlanSafeBashCommand}) OR ADR-084's static read-only checker
+ * (`readOnlyVerdict(...).ok` — sync, no armed-git capture). A command is
+ * plan-read-only when EITHER says so. Without a scope (no cwd) only the list
+ * decides. Used everywhere the plan line is drawn: the plan rung and the plan
+ * base on pi / Codex / the dispatcher's pi and Codex targets, and opencode's
+ * host pre-check and dispatch targets (`planModeRefusesAsk`).
+ *
+ * Why a union: both are read-only checkers, and each knows commands the other
+ * does not. pi's list is bash-only, so on opencode under Windows — which runs
+ * pwsh by default — `Get-ChildItem` / `Get-Content` / `Select-String`
+ * research would be refused outright; the ADR-084 checker knows those cmdlets,
+ * and is quote-aware (`grep "a && b" f`, which the list's quote-blind splitter
+ * over-denies).
+ *
+ * Stated honestly:
+ *  (a) the union is only as strict as the LOOSER oracle. For a program pi's
+ *      list passes (`cat`, `head`, `grep`, `find`, `ls`, …) the checker's
+ *      secret-path and out-of-scope refusals do NOT apply: `cat .env` and
+ *      `cat ../outside` pass, as pi's plan mode already let them before this
+ *      slice (pre-existing, recorded). Plan mode is about mutation, not
+ *      secrecy — the `read` tool reads the same files;
+ *  (b) the checker's `needsGitCheck` (an armed git config: aliases, pager,
+ *      fsmonitor) is not run here — pi's list allows `git status` without it
+ *      today;
+ *  (c) commands neither knows stay refused: `cd src && ls` (`cd` is unknown to
+ *      both — and deliberately not taught to the ADR-084 checker, which auto
+ *      mode's judge skip also uses), `sed -n …`, `bun run test`.
+ *
+ * The checker gets the user's deny tier only (`ask: []`, `allow: []` — see
+ * {@link PlanReadOnlyScope}'s `rules`): a user ask rule on a command only the
+ * checker knows (`Bash(Get-Content:*)`) must reach the ask rung and ask, not
+ * make plan mode refuse the command. Its `Read(...)` deny rules still refuse a
+ * denied reader path — which matters only for programs pi's list does not
+ * pass (the union residual, (a)).
+ */
+export function isPlanReadOnlyCommand(
+  action: { toolName: string; input: Record<string, unknown> },
+  scope?: PlanReadOnlyScope
+): boolean {
+  if (isPlanSafeBashCommand(commandOf(action.input))) return true
+  if (scope === undefined) return false
+  return readOnlyVerdict(action, {
+    cwd: scope.cwd,
+    additionalDirectories: [...scope.additionalDirectories],
+    platform: scope.platform ?? process.platform,
+    rules: { deny: [...scope.rules.deny], ask: [], allow: [] },
+    realpath: scope.realpath ?? hostRealpath
+  }).ok
+}
+
 /**
  * Plan mode's own base (M5a) — read-only autonomy: reads/search always
  * allow; the 'plan' kind (exit_plan itself) always asks — that's the
  * approval that renders ExitPlanModeCard; bash is allow/deny by
- * isPlanSafeBashCommand; every other kind (fileEdit/fileWrite/task/mcp/
+ * {@link isPlanReadOnlyCommand} (pi's plan-safe list, or with a scope also
+ * ADR-084's read-only checker — ADR-085 S3b; the rung and the base use the
+ * same oracle so they cannot disagree); every other kind (fileEdit/fileWrite/task/mcp/
  * unknown/…) denies outright — plan mode has no interactive 'ask' tier of
- * its own beyond exit_plan (an explicit user ask/deny RULE still overrides
- * this, checked earlier in decide()).
+ * its own beyond exit_plan. An explicit user deny RULE still overrides this
+ * (checked first in decide()); for the mutating kinds — fileEdit/fileWrite
+ * and a bash command that is not plan-read-only — NOTHING else does (ADR-085
+ * ruling 7: {@link planModeOutranksRules} answers them right after the deny
+ * rung). For the remaining kinds (task/mcp/unknown/…) a user ask/allow rule
+ * still overrides the base deny.
  */
 function planModeBaseDecision(
   kind: ToolKind,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  scope?: PlanReadOnlyScope
 ): 'allow' | 'ask' | 'deny' {
   if (kind === 'fileRead' || kind === 'search') return 'allow'
   if (kind === 'plan') return 'ask'
   if (kind === 'command')
-    return isPlanSafeBashCommand(String(input.command ?? '')) ? 'allow' : 'deny'
+    return isPlanReadOnlyCommand({ toolName: 'bash', input }, scope) ? 'allow' : 'deny'
   return 'deny'
+}
+
+/**
+ * ADR-085 ruling 7 — the plan-mode base OUTRANKS the ask tier, session allows and the allow
+ * tier for a mutating call: a file edit/write, or a shell command {@link isPlanReadOnlyCommand}
+ * cannot vouch for. Reads, search, plan-read-only bash, the hosted tools and every other kind
+ * keep today's ladder.
+ *
+ * Plan mode is the read-only autonomy tier; a user allow rule (`Edit`, `Bash(git:*)`) or an
+ * "allow for this session" click says "don't interrupt me for this", not "this is read-only", so
+ * neither may turn a plan-mode edit or `git commit` back into an allow. Read-only-ness of a
+ * command is decided by the same oracle plan mode's base already uses (deny-when-unsure) — and
+ * opencode's host pre-check (`opencode/host-precheck.ts` `planModeRefusesAsk`) shares it, so
+ * every engine draws the line in one place.
+ */
+export function planModeOutranksRules(
+  kind: ToolKind,
+  input: Record<string, unknown>,
+  scope?: PlanReadOnlyScope
+): boolean {
+  if (kind === 'fileEdit' || kind === 'fileWrite') return true
+  if (kind === 'command') return !isPlanReadOnlyCommand({ toolName: 'bash', input }, scope)
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -855,10 +969,17 @@ function planModeBaseDecision(
  * every pre-auto-mode caller wants.
  *
  * Precedence — severity wins, deny(3) > hosted-auto-allow > ask(2) >
- * allow(1): any matching deny rule -> 'deny'; else a hosted LLM tool
+ * allow(1): any matching deny rule -> 'deny'; else, in plan mode, a mutating
+ * call (edit/write, a bash command that is not plan-read-only —
+ * {@link planModeOutranksRules}, ADR-085 ruling 7) -> 'deny' with
+ * `source: 'mode-base'`; else a hosted LLM tool
  * (PI_AUTO_ALLOW_HOSTED_TOOLS, M4a) -> 'allow'; else any matching ask rule ->
  * 'ask'; else sessionAllows or a matching allow rule -> 'allow'; else the
- * mode base. This mirrors Claude's own deny > ask > allow precedence
+ * mode base. The plan rung means that in plan mode an explicit user ASK rule
+ * no longer surfaces a card for an edit/write/unsafe command, and a session
+ * allow no longer allows one — the call is refused with the plan reason
+ * (opencode refuses those host-side before any ask rule too: engine parity).
+ * This mirrors Claude's own deny > ask > allow precedence
  * (ADR-022 gives opencode the identical property) and keeps a deny/ask rule
  * meaningful even in `full` mode — an "allow everything" autonomy mode is
  * still not a bypass of an explicit user rule. The hosted-tool short-circuit
@@ -945,6 +1066,26 @@ export function decideWithSource(
 
   const denyRule = kind === 'command' ? tierRule(shell, 'deny') : match(ctx.rules.deny)
   if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
+  // ADR-085 ruling 7 — plan mode wins over every rung below for a mutating call: a user ask rule
+  // no longer surfaces a card for it, and neither a session allow nor an allow rule allows it.
+  // The deny rung stays above (a user deny gives the more specific reason). `mode-base` so the
+  // callers (PiSession's gate, CodexSession.gate(), the dispatcher's pi/Codex targets) attach
+  // PLAN_MODE_DENY_REASON unchanged. Auto mode never reaches this: PiSession passes `acceptEdits`
+  // and CodexSession `default` in its place.
+  // The second read-only oracle needs the session's scope (ADR-085 S3b); without a cwd only
+  // pi's plan-safe list decides.
+  const planScope: PlanReadOnlyScope | undefined =
+    ctx.mode === 'plan' && ctx.cwd
+      ? {
+          cwd: ctx.cwd,
+          additionalDirectories: ctx.rules.additionalDirectories ?? [],
+          rules: { deny: ctx.rules.deny },
+          platform: ctx.platform,
+          realpath: ctx.realpath
+        }
+      : undefined
+  if (ctx.mode === 'plan' && planModeOutranksRules(kind, input, planScope))
+    return { decision: 'deny', source: 'mode-base' }
   if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) {
     return { decision: 'allow', source: 'hosted-auto-allow' }
   }
@@ -960,7 +1101,10 @@ export function decideWithSource(
       : match(ctx.rules.allow)
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
-  return { decision: modeBaseDecision(ctx.mode, kind, input, ctx.cwd), source: 'mode-base' }
+  return {
+    decision: modeBaseDecision(ctx.mode, kind, input, ctx.cwd, planScope),
+    source: 'mode-base'
+  }
 }
 
 function tierRule(hit: DenyAskHit | undefined, tier: 'deny' | 'ask'): string | undefined {

@@ -980,6 +980,39 @@ describe('Codex first session', () => {
     ])
   })
 
+  // ADR-085 S3b — owner ruling 7: an escalated command or a file change in plan
+  // mode is declined even when a user allow rule covers it. (A command
+  // execpolicy itself allows never escalates — the `rules-sync.ts` residual.)
+  describe('ADR-085 S3b — plan mode wins over allow rules', () => {
+    it('declines an escalated `mkdir x` under a Bash(mkdir:*) allow, no card, with the plan reason', async () => {
+      rules.allow = ['Bash(mkdir:*)']
+      const { session, approval, cards } = fixture({ permissionMode: 'plan' })
+      await session.run('hello')
+      const mkdir = approval({ command: 'mkdir x' })
+      expect(mkdir.card).toBeUndefined()
+      expect(await mkdir.result).toEqual({ decision: 'decline' })
+      expect(cards()).toHaveLength(0)
+      expect(events).toHaveBeenCalledWith('session:error', [
+        'temporary',
+        expect.stringContaining('Plan mode is read-only')
+      ])
+    })
+
+    it('declines a file change under an Edit allow, no card', async () => {
+      rules.allow = ['Edit']
+      const { session, fileChange, cards } = fixture({ permissionMode: 'plan' })
+      await session.run('hello')
+      const patch = fileChange(['/isolated/a.txt'], 'update')
+      expect(patch.card).toBeUndefined()
+      expect(await patch.result).toEqual({ decision: 'decline' })
+      expect(cards()).toHaveLength(0)
+      expect(events).toHaveBeenCalledWith('session:error', [
+        'temporary',
+        expect.stringContaining('Plan mode is read-only')
+      ])
+    })
+  })
+
   it('asks the human in default mode with a standard card and honours every decision', async () => {
     const first = fixture()
     await first.session.run('hello')

@@ -19,6 +19,15 @@
  *   included (`exec_policy.rs` maps `Decision::Allow` to
  *   `ExecApprovalRequirement::Skip`). That is the user's own rule, but it is a
  *   wider grant than the same rule buys on the Claude engine.
+ * - In plan mode too — the ClaudeUI plan gate never sees an execpolicy-allowed
+ *   command (ADR-085 ruling 7 residual). A surviving `Bash(mkdir:*)` allow runs
+ *   `mkdir x` in a plan turn without an escalation, and unsandboxed despite the
+ *   plan turn's `read-only` sandbox (`Skip { bypass_sandbox }` when every
+ *   segment is allowed, `exec_policy.rs`). The file is user-global and
+ *   mode-less (one per CODEX_HOME, loaded when a thread starts —
+ *   `session/mod.rs` `ExecPolicyManager::load`), so it cannot be made
+ *   plan-aware per session; what DOES escalate (every carved-out command, every
+ *   file change) meets `CodexSession.gate()`, where plan mode wins.
  * - So, whenever the user has any Bash deny or ask rule, two kinds of allow
  *   rule are NOT emitted (carved out, ADR-085, `../permissions/shell-rules.ts`):
  *   one for a program some deny/ask rule names (`Bash(git:*)` with

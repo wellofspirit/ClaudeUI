@@ -129,7 +129,8 @@ so the same allow/ask/deny rules + additional directories govern both engines.
   translation (Bash `cmd:*` prefix → glob `cmd*`; WebFetch `domain:x`→`x*`; file globs pass through);
   `additionalDirectories`→`external_directory` ALLOW rules (`join(dir,'*')`, platform-correct).
 - **Composition**: `applyPermissionMode` patches `[...base(mode), ...compiledUserRules]` — user rules
-  appended AFTER the base (override it), emitted **allow → ask → deny** so deny wins last-match-wins,
+  appended AFTER the base (override it; in plan mode without the user's `edit`/`bash`/`task` allow rules,
+  which ClaudeUI applies host-side to plan-safe commands only — ADR-085 ruling 7), emitted **allow → ask → deny** so deny wins last-match-wins,
   replicating Claude's deny>ask>allow precedence. All three scopes (user/project/local) merged.
 
 **Pending follow-on (decided, not yet built):**

@@ -1,6 +1,7 @@
 import type { PendingApproval } from '../../shared/types'
 import { isShellToolName } from '../automode/shell-lexical'
-import { denyAskHit } from '../permissions/shell-rules'
+import { allowCovers, denyAskHit } from '../permissions/shell-rules'
+import { isPlanReadOnlyCommand, type PlanReadOnlyScope } from '../pi/permission-engine'
 import type { OpencodePermissionRule } from './permission-compiler'
 import type { OpencodeSessionAllows } from './session-allows'
 import { matchesUserAskRule } from './wildcard'
@@ -19,24 +20,43 @@ import { matchesUserAskRule } from './wildcard'
  * (`permissions/shell-rules.ts` `denyAskHit`) closes both, for own-session and
  * child (task subagent) asks alike, and the host session-allow set is only
  * consulted after it.
+ *
+ * ADR-085 S3b (owner ruling 7, "plan mode wins") makes this the ONE ladder
+ * `OpencodeSession.routePermissionAsk` walks, pi parity with
+ * `decideWithSource` (`pi/permission-engine.ts`): plan mode's refusal of a
+ * mutating ask is a rung of it, right after the user's deny rules, and the
+ * user's Bash allow rules are applied here in plan mode (the session sends no
+ * `edit`/`bash` allow to the server then — `withoutMutatingAllowRules`).
  */
 export type HostPrecheckVerdict =
   /** §1 deny hit → refuse with the rule. */
   | { kind: 'deny'; rule: string }
+  /** Plan mode refuses a mutating ask (edit, task `general`, a shell command that is not plan-read-only) — ADR-085 ruling 7. */
+  | { kind: 'plan-refuse' }
   /** §1 ask hit (`rule`) or a user ask rule by glob (no `rule`) → the human, never the judge. */
   | { kind: 'user-ask'; rule?: string }
   /** Covered by the host session-allow set → `once`. */
   | { kind: 'session-allow' }
+  /** Plan mode only: a user allow rule covers a plan-read-only shell command (allows are not sent to the server in plan mode). */
+  | { kind: 'allow-rule'; rule: string }
   /** Nothing host-side says anything → today's path (judge in auto mode, else the card). */
   | { kind: 'continue' }
 
 export interface HostPrecheckContext {
-  /** The user's merged Claude rules (deny + ask tiers only are read). */
-  rules: { deny: readonly string[]; ask: readonly string[] }
+  /** The session's permission mode (`'plan'` is the only value the ladder reads). */
+  mode: string
+  /** The user's merged Claude rules; `allow` is read only in plan mode. */
+  rules: { deny: readonly string[]; ask: readonly string[]; allow?: readonly string[] }
   /** The compiled user-origin opencode rules (G9's provenance set — `userOriginRules()`). */
   userRules: readonly OpencodePermissionRule[]
   sessionAllows: OpencodeSessionAllows
   platform?: NodeJS.Platform
+  /** The session cwd — enables plan mode's second read-only oracle (`isPlanReadOnlyCommand`); without it only pi's plan-safe list decides. */
+  cwd?: string
+  /** The user's additional directories (the second oracle's extra scope roots). */
+  additionalDirectories?: readonly string[]
+  /** realpath for the second oracle. Tests inject; default the host (`hostRealpath`). */
+  realpath?: PlanReadOnlyScope['realpath']
   /** Told about an internal failure (the verdict is then `user-ask`), so the caller can log it at warn. */
   onError?: (err: unknown) => void
 }
@@ -55,33 +75,98 @@ function shellCommandText(approval: PendingApproval): string | undefined {
 }
 
 /**
- * Decide one permission ask host-side, in order: the robust §1 deny/ask match
- * (shell asks with a command), the user's ask rules by glob (G9, any category
- * — the union with §1 is deliberate), the session-allow set, else `continue`.
+ * Plan mode's refusal (ADR-085 ruling 7), shared by the session's ladder and
+ * the dispatcher's opencode targets (`cross-engine-dispatcher.ts`
+ * `opencodeTargetRefusal`): is this ask one plan mode refuses? Three shapes —
+ * any `edit` (opencode's one category for edit/write/apply_patch); a `task`
+ * ask for the mutating `general` subagent (read-only ones like `explore` stay
+ * allowed); a shell ask whose command `isPlanReadOnlyCommand` cannot vouch for,
+ * or that carries no command text at all (nothing to vouch for → refuse, fail
+ * toward deny). The read-only oracle is the one pi's plan mode uses (its
+ * plan-safe list, or with a `scope` also ADR-084's read-only checker), so
+ * every engine draws the plan line in the same place.
+ *
+ * The caller checks the mode; this answers for plan mode only. `command` is
+ * the ask's command text (`metadata.command`, else its patterns joined), or
+ * `undefined` when there is none. The checker reads the ask's own `input`
+ * (its `workdir` included) when that is where `command` came from, else
+ * `{ command }` (the patterns fallback).
+ */
+export function planModeRefusesAsk(
+  approval: { toolName: string; patterns?: readonly string[]; input?: unknown },
+  command: string | undefined,
+  scope?: PlanReadOnlyScope
+): boolean {
+  if (approval.toolName === 'edit') return true
+  if (approval.toolName === 'task') return (approval.patterns ?? []).includes('general')
+  if (!isShellToolName(approval.toolName)) return false
+  if (command === undefined) return true
+  const own = approval.input as Record<string, unknown> | null | undefined
+  const input = own && own.command === command ? own : { command }
+  return !isPlanReadOnlyCommand({ toolName: approval.toolName, input }, scope)
+}
+
+/** The second read-only oracle's scope, when the context has a cwd (ADR-085 S3b). */
+function planScope(ctx: HostPrecheckContext): PlanReadOnlyScope | undefined {
+  if (!ctx.cwd) return undefined
+  return {
+    cwd: ctx.cwd,
+    additionalDirectories: ctx.additionalDirectories ?? [],
+    // The deny tier only — read-only-ness must not depend on ask/allow rules (`PlanReadOnlyScope`).
+    rules: { deny: ctx.rules.deny },
+    platform: ctx.platform,
+    realpath: ctx.realpath
+  }
+}
+
+/**
+ * Decide one permission ask host-side, in order:
+ *
+ *  1. the robust §1 deny match (shell asks with a command) → `deny`;
+ *  2. plan mode only: a mutating ask ({@link planModeRefusesAsk}) →
+ *     `plan-refuse`, REGARDLESS of the user's ask rules, session allows and
+ *     allow rules (ruling 7; pi's ladder has the same rung after its deny
+ *     rung). The deny stays first: a user deny gives the more specific reason;
+ *  3. the §1 ask hit, then the user's ask rules by glob (G9, any category —
+ *     the union with §1 is deliberate) → `user-ask`;
+ *  4. the session-allow set → `session-allow`;
+ *  5. plan mode only: a shell command every segment of which a user `Bash`
+ *     allow rule covers (`allowCovers` lenient, the non-auto allow tier) →
+ *     `allow-rule`. Reached only by a plan-read-only command (rung 2 refused
+ *     the rest). ONLY in plan mode: in every other mode the allow rules are
+ *     server-side (default/acceptEdits — an allowed call never asks) or
+ *     deliberately stripped so the judge sees the call (auto; S5 adds the
+ *     auto-mode skip with its own predicate) — this rung must never fire
+ *     under auto;
+ *  6. else `continue`.
  *
  * Not for `AskUserQuestion` (the caller never passes questions). Never throws:
- * an internal failure answers `user-ask` — fail toward the human — and is
- * handed to `ctx.onError` for the caller's warn line.
+ * an internal failure answers `user-ask` — fail toward the human, never toward
+ * `allow-rule` — and is handed to `ctx.onError` for the caller's warn line.
  */
 export function hostPrecheck(
   approval: PendingApproval,
   ctx: HostPrecheckContext
 ): HostPrecheckVerdict {
   try {
-    if (isShellToolName(approval.toolName)) {
-      const command = shellCommandText(approval)
-      if (command !== undefined) {
-        // `UNANALYSABLE_COMMAND` comes back as an ask: the human decides.
-        const hit = denyAskHit(command, ctx.rules)
-        if (hit?.tier === 'deny') return { kind: 'deny', rule: hit.rule }
-        if (hit?.tier === 'ask') return { kind: 'user-ask', rule: hit.rule }
-      }
+    const command = isShellToolName(approval.toolName) ? shellCommandText(approval) : undefined
+    // `UNANALYSABLE_COMMAND` comes back as an ask: the human decides.
+    const hit = command !== undefined ? denyAskHit(command, ctx.rules) : undefined
+    if (hit?.tier === 'deny') return { kind: 'deny', rule: hit.rule }
+    const plan = ctx.mode === 'plan'
+    if (plan && planModeRefusesAsk(approval, command, planScope(ctx))) {
+      return { kind: 'plan-refuse' }
     }
+    if (hit?.tier === 'ask') return { kind: 'user-ask', rule: hit.rule }
     if (matchesUserAskRule(ctx.userRules, approval.toolName, approval.patterns, ctx.platform)) {
       return { kind: 'user-ask' }
     }
     if (ctx.sessionAllows.covers(approval.toolName, approval.patterns, ctx.platform)) {
       return { kind: 'session-allow' }
+    }
+    if (plan && command !== undefined) {
+      const rule = allowCovers(command, ctx.rules.allow ?? [], 'lenient')?.segments[0]?.rule
+      if (rule !== undefined) return { kind: 'allow-rule', rule }
     }
     return { kind: 'continue' }
   } catch (err) {

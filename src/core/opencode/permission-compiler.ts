@@ -387,6 +387,49 @@ export function withoutAllowRules(
   return rules.filter((r) => r.action !== 'allow')
 }
 
+/**
+ * ADR-085 ruling 7 — the compiled rules without the ALLOW rules for `edit`, `bash` and `task`:
+ * what plan mode patches. Plan mode refuses edits/writes and non-read-only commands regardless of
+ * the user's allow rules.
+ *
+ * Why. The session appends the user half AFTER the plan base, and opencode evaluates
+ * last-match-wins over `ruleset, approved`
+ * (`vendor/opencode-src/packages/opencode/src/permission/index.ts` `evaluate`), so a user `Edit`
+ * or `Bash(git:*)` allow turned the plan base's `edit`/`bash` asks back into server-side allows:
+ * the call never asked, the host's plan refusal never saw it, and `git commit` ran. Dropping them
+ * keeps both asks reaching the host. A bash allow cannot simply be kept for the read-only
+ * commands — a glob over the command text cannot tell `git status` from `git commit` — so it is
+ * applied HOST-side instead, where read-only-ness is judged per command
+ * (`host-precheck.ts`: `plan-refuse` for a command `isPlanReadOnlyCommand` cannot vouch for,
+ * `allow-rule` for a plan-safe one the user's allow rules cover).
+ *
+ * `task` allows go too, whatever their pattern. In plan mode the `{*: allow}` baseline already
+ * allows every subagent except `general` (the base's one `task:general` ask), so a user `task`
+ * allow can have exactly one server-side effect there: re-allowing the mutating `general`
+ * subagent, whose ask the host refuses — and whose child session would then edit unasked (a
+ * child inherits only the parent's denies). A `Task(explore)` allow is redundant with the
+ * baseline; the user's task ask/deny rules compile after the allows and are kept.
+ *
+ * Why only these three categories: the ruling names edits/writes and commands, and `task:general`
+ * is plan mode's third refusal. `read`/`glob`/`grep`/`list`/`external_directory` allows only
+ * widen reads; `webfetch`, `websearch` and MCP allows keep today's behaviour — a recorded
+ * residual. Every ask and deny passes through unchanged, including the broad Bash deny/ask
+ * globs.
+ *
+ * Auto mode is unaffected: it patches {@link withoutAllowRules}, which strips every allow.
+ */
+export function withoutMutatingAllowRules(
+  rules: readonly OpencodePermissionRule[]
+): OpencodePermissionRule[] {
+  return rules.filter(
+    (r) =>
+      !(
+        r.action === 'allow' &&
+        (r.permission === 'edit' || r.permission === 'bash' || r.permission === 'task')
+      )
+  )
+}
+
 // ── Reverse direction: opencode approval → Claude "always allow" suggestion ────
 
 /** Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category). */

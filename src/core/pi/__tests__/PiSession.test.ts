@@ -4073,6 +4073,78 @@ describe('PiSession — plan mode (M5a)', () => {
   })
 })
 
+// ADR-085 S3b — owner ruling 7: plan mode refuses edits and non-read-only
+// commands regardless of the user's allow rules; allows still apply to plan-safe commands.
+describe('ADR-085 S3b — PiSession plan mode wins over allow rules', () => {
+  const PLAN_REASON = 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+  beforeEach(() => {
+    // Synthetic allow rules in the project scope, as the rule tests above mock them.
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: ['Edit', 'Bash(git:*)'],
+            deny: [],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+  })
+
+  it('an Edit allow does not allow an edit in plan mode — denied with the plan reason, no card', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-s3b-edit', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    expect(await gate('call_s3b_1', 'edit', { path: 'x.ts' })).toEqual({
+      behavior: 'deny',
+      reason: PLAN_REASON
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('Bash(git:*): `git status` allows, `git commit -m x` denies with the plan reason', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-s3b-git', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    expect(await gate('call_s3b_2', 'bash', { command: 'git status' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(await gate('call_s3b_3', 'bash', { command: 'git commit -m x' })).toEqual({
+      behavior: 'deny',
+      reason: PLAN_REASON
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('`Get-Content README.md` is plan-read-only (ADR-084 checker, via the session cwd) — allowed, no card', async () => {
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-s3b-gc', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    expect(await gate('call_s3b_4', 'bash', { command: 'Get-Content README.md' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(await gate('call_s3b_5', 'bash', { command: 'Set-Content x y' })).toEqual({
+      behavior: 'deny',
+      reason: PLAN_REASON
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+})
+
 describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
   it('delegates to createMermaidServer().tools[render_mermaid].handler and passes {content} through verbatim', async () => {
     const win = new MockWindow()

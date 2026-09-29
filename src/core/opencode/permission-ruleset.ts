@@ -110,6 +110,14 @@ export function buildRuleset(mode: string): PermissionRule[] {
       // `deny` whose pattern is `*`); the plan agent's prompt and the host
       // refusal hold the line.
       //
+      // ADR-085 ruling 7 — the `edit`/`task:general`/`bash` asks below are
+      // what the host refuses or answers (host-precheck.ts: edits, the
+      // `general` subagent and non-plan-safe commands are refused, a plan-safe
+      // command a user allow rule covers is answered `once`). In plan mode the
+      // session never appends a user `edit`/`bash`/`task` ALLOW after this base
+      // (`withoutMutatingAllowRules`), so those three asks always reach the
+      // host.
+      //
       // …PLUS the same `bash`/`webfetch` gates `default` carries. opencode's
       // OWN plan agent leaves those on the `{*:allow}` baseline (it relies on
       // the planning SYSTEM PROMPT to keep the model read-only), which made

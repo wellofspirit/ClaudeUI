@@ -3186,8 +3186,10 @@ export class CodexSession extends BaseSession {
    *
    * The verdict comes from the SAME shared engine every other tool goes
    * through. For the hosted THREE it can only answer `allow` (the hosted
-   * auto-allow rung of `decideWithSource` sits above every rung but deny, and
-   * no Claude rule string maps to the `diagram`/`mockup` kinds), but the call
+   * auto-allow rung of `decideWithSource` sits above every rung but the deny
+   * rule and the plan-mode rung (ADR-085 ruling 7 — the hosted three are never
+   * mutating kinds, so it cannot change their verdict), and no Claude rule
+   * string maps to the `diagram`/`mockup` kinds), but the call
    * is made anyway so a future ladder change reaches Codex too — and anything
    * but `allow` refuses with the reason as the tool's own output, which is the
    * only channel that tells the model why. `dispatch_agent` is the one hosted

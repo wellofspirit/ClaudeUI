@@ -1300,6 +1300,60 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs.some((r) => r.permission === 'task')).toBe(false)
     session.dispose()
   })
+
+  // ADR-085 S3b — owner ruling 7: plan mode patches no user `edit`/`bash` allow
+  // (last-match-wins would turn the plan base's asks back into allows).
+  describe('ADR-085 S3b — plan mode patches no edit/bash/task allow rules', () => {
+    beforeEach(() => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) =>
+        scope === 'user'
+          ? {
+              allow: ['Edit', 'Bash(git:*)', 'Read(docs/**)', 'Task'],
+              deny: [],
+              ask: [],
+              additionalDirectories: [],
+              defaultMode: undefined
+            }
+          : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+      )
+    })
+
+    it('plan: no edit/bash/task allow in the PATCH, the read allow is kept, the plan base asks intact', async () => {
+      const rs = await rulesetFor('plan')
+      expect(
+        rs.some(
+          (r) =>
+            r.action === 'allow' &&
+            (r.permission === 'edit' || r.permission === 'bash' || r.permission === 'task')
+        )
+      ).toBe(false)
+      expect(rs).toContainEqual({ permission: 'read', pattern: 'docs/**', action: 'allow' })
+      expect(rs).toContainEqual({ permission: 'edit', pattern: '*', action: 'ask' })
+      expect(rs).toContainEqual({ permission: 'task', pattern: 'general', action: 'ask' })
+      expect(rs).toContainEqual({ permission: 'bash', pattern: '*', action: 'ask' })
+      expect(rs).toContainEqual({ permission: 'webfetch', pattern: '*', action: 'ask' })
+      // So under last-match-wins an edit and `git commit` still ask the host.
+      expect(rs.filter((r) => r.permission === 'edit').at(-1)?.action).toBe('ask')
+      expect(rs.filter((r) => r.permission === 'bash').at(-1)?.action).toBe('ask')
+      // …and a `general` subagent still asks the host (the base's one task rule is last for task).
+      expect(rs.filter((r) => r.permission === 'task').at(-1)).toEqual({
+        permission: 'task',
+        pattern: 'general',
+        action: 'ask'
+      })
+    })
+
+    it('plan → default re-patches the user’s edit/bash/task allows again', async () => {
+      const session = makeSession(undefined, 'plan')
+      await session.run('hi')
+      await session.setPermissionMode('default')
+      const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
+      expect(rs).toContainEqual({ permission: 'bash', pattern: 'git*', action: 'allow' })
+      expect(rs).toContainEqual({ permission: 'edit', pattern: '*', action: 'allow' })
+      expect(rs).toContainEqual({ permission: 'task', pattern: '*', action: 'allow' })
+      session.dispose()
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -7034,6 +7088,166 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
         const rules = (body as { permission: Array<{ action: string }> }).permission
         expect(rules.some((r) => r.action === 'deny')).toBe(false)
       }
+      session.dispose()
+    })
+  })
+
+  // ── ADR-085 S3b — owner ruling 7, "plan mode wins" ─────────────────────────
+
+  describe('ADR-085 S3b — plan mode refuses non-read-only commands regardless of allow rules', () => {
+    const GIT_ALLOW = 'Bash(git:*)'
+
+    it('plan + `git commit -m x` under Bash(git:*) → reject with the plan reason + a `mode` denial, no card', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashPart('c_pc', 'git commit -m x'))
+      push(bashAsk('per_pc', 'git commit -m x', { callID: 'c_pc' }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_pc', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
+      expect(sent(win, 'session:permission-denial')[0]).toEqual({
+        toolUseId: 'c_pc',
+        denial: expect.objectContaining({ source: 'mode', reason: PLAN_MODE_DENY_REASON })
+      })
+      expect(repliesFor('per_pc')).toHaveLength(1)
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan + `git status` under Bash(git:*) → `once` host-side, no card, no denial', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const info = vi.spyOn(logger, 'info')
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashPart('c_ps', 'git status'))
+      push(bashAsk('per_ps', 'git status', { callID: 'c_ps' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_ps', 'once'))
+      await settle()
+      expect(repliesFor('per_ps')).toEqual([['per_ps', 'once']])
+      expect(cards(win)).toHaveLength(0)
+      expect(sent(win, 'session:permission-denial')).toHaveLength(0)
+      // The info line names the rule, never the command.
+      const line = info.mock.calls.map((c) => String(c[1])).find((m) => m.includes('allow rule'))
+      expect(line).toBe(`plan mode: allow rule covers a read-only bash (rule ${GIT_ALLOW})`)
+      info.mockRestore()
+      session.dispose()
+    })
+
+    it('plan + `git status` with NO allow rule → the card (today’s path)', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashAsk('per_pn', 'git status'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(cards(win)[0].requestId).toBe('per_pn')
+      await settle()
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      session.dispose()
+    })
+
+    it('plan + `rm -rf x` with no allow rule → reject with the plan reason, no card (was a card)', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashAsk('per_pr', 'rm -rf x'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_pr', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      await settle()
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan + a host session allow covering `git commit *` → still refused', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(bashAsk('per_sa1', 'git commit -m a', { always: ['git commit *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      session.resolveApproval('per_sa1', 'allowForSession')
+      expect(repliesFor('per_sa1')).toEqual([['per_sa1', 'once']])
+
+      await session.setPermissionMode('plan')
+      push(bashAsk('per_sa2', 'git commit -m b', { always: ['git commit *'] }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_sa2', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      expect(repliesFor('per_sa2')).toHaveLength(1)
+      expect(cards(win)).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('plan + a deny rule on `git commit` → the rule reason (deny first), `rule` source', async () => {
+      withRules({ allow: [GIT_ALLOW], deny: ['Bash(git commit:*)'] })
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashPart('c_pd', 'git commit -m x'))
+      push(bashAsk('per_pd', 'git commit -m x', { callID: 'c_pd' }))
+      const reason = 'Denied by permission rule: Bash(git commit:*)'
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_pd', 'reject', reason)
+      )
+      await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
+      expect(sent(win, 'session:permission-denial')[0]).toEqual({
+        toolUseId: 'c_pd',
+        denial: expect.objectContaining({ source: 'rule', reason })
+      })
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('default + `git commit` under the allow → no host `once` (allows are server-side there); an ask that arrives gets the card', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(bashAsk('per_dc', 'git commit -m x'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      await settle()
+      expect(repliesFor('per_dc')).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan + `Get-Content README.md` (ADR-084 checker via the session cwd): no allow → the card; a Bash(Get-Content:*) allow → `once`', async () => {
+      withRules({})
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(bashAsk('per_gc1', 'Get-Content README.md'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(cards(win)[0].requestId).toBe('per_gc1')
+      await settle()
+      expect(repliesFor('per_gc1')).toHaveLength(0)
+
+      withRules({ allow: ['Bash(Get-Content:*)'] })
+      push(bashAsk('per_gc2', 'Get-Content README.md'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_gc2', 'once'))
+      expect(cards(win)).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('a CHILD bash ask under plan that is not plan-safe is refused', async () => {
+      const CHILD = 'ses_child_s3b'
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push({
+        id: 'ev_task_s3b',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_task_s3b',
+            messageID: 'msg_task_s3b',
+            type: 'tool',
+            tool: 'task',
+            callID: 'call_task_s3b',
+            state: { status: 'running', input: {}, metadata: { sessionId: CHILD } }
+          }
+        }
+      } as OpencodeEvent)
+      push(bashAsk('per_cb', 'git commit -m x', { sessionID: CHILD, callID: 'c_cb' }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_cb', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      expect(cards(win)).toHaveLength(0)
       session.dispose()
     })
   })

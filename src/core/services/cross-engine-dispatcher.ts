@@ -49,6 +49,7 @@ import type { PermissionRule } from '../opencode/permission-ruleset'
 // Already in this module's graph through `pi/permission-engine.ts`, which
 // imports it (no new edge, no cycle).
 import { compileClaudeRulesToOpencode } from '../opencode/permission-compiler'
+import { planModeRefusesAsk } from '../opencode/host-precheck'
 import { denyAskHit } from '../permissions/shell-rules'
 import { isShellToolName } from '../automode/shell-lexical'
 import { parseModelString } from '../opencode/model-discovery'
@@ -3363,14 +3364,18 @@ export class CrossEngineDispatcher {
   /**
    * The host check at an opencode target's ask (ADR-085 §3), before any card:
    * the reject text when the host refuses it, else `undefined` (forward as
-   * before).
-   * 1. Plan mode: the plan ruleset ASKS for `edit` and `task:general` (a
+   * before). The same order as the session's pre-check (`host-precheck.ts`):
+   * 1. A shell (`bash`) ask a user DENY rule hits (the §1 matcher, over the
+   *    statement's `metadata.command`, else its patterns) — refused with the
+   *    rule (the more specific reason, so it comes first).
+   * 2. Plan mode (ruling 7): `planModeRefusesAsk` — any `edit`,
+   *    `task:general`, a bash command `isPlanReadOnlyCommand` cannot vouch for
+   *    or one with no command text. The plan ruleset ASKS for all three (a
    *    server-side deny would outlive the mode — `buildRuleset('plan')`), so
    *    the refusal is made here, with the same text pi and Codex use.
-   * 2. A `bash` ask a user DENY rule hits (the §1 matcher, over the
-   *    statement's `metadata.command`, else its patterns) — refused with the
-   *    rule; an ask-rule hit or none is forwarded: the human decides either
-   *    way, as a target has no judge.
+   * Anything else — an ask-rule hit, a plan-safe command — is forwarded: the
+   * human decides, as a target has no judge. Targets get no allow rules
+   * (`userDenyAsk` compiles deny/ask only), so there is no allow-rule rung.
    * No command text is logged (ADR-084 logging rule).
    */
   private opencodeTargetRefusal(
@@ -3379,21 +3384,37 @@ export class CrossEngineDispatcher {
     metadata: Record<string, unknown>,
     patterns: string[] | undefined
   ): string | undefined {
+    const shellCommand =
+      typeof metadata.command === 'string' && metadata.command.length > 0
+        ? metadata.command
+        : (patterns ?? []).join('\n')
+    const command = isShellToolName(permission) && shellCommand ? shellCommand : undefined
+    // Loaded once, and only when a rung needs it.
+    let loaded: MergedClaudeRules | undefined
+    const rules = (): MergedClaudeRules => (loaded ??= this.userDenyAsk(entry.cwd))
+    if (command !== undefined) {
+      const hit = denyAskHit(command, rules())
+      if (hit?.tier === 'deny') {
+        logger.info(
+          'CrossEngineDispatcher',
+          `opencode target: permission rule deny bash — ${hit.rule}`
+        )
+        return `Denied by permission rule: ${hit.rule}`
+      }
+    }
     if (
       entry.ctx.autonomyMode === 'plan' &&
-      (permission === 'edit' || (permission === 'task' && (patterns ?? []).includes('general')))
+      planModeRefusesAsk({ toolName: permission, patterns, input: metadata }, command, {
+        cwd: entry.cwd,
+        // Targets get no additional directories (ADR-033, as `userDenyAsk` says).
+        additionalDirectories: [],
+        rules: { deny: rules().deny }
+      })
     ) {
       logger.info('CrossEngineDispatcher', `opencode target: plan mode refused ${permission}`)
       return PLAN_MODE_DENY_REASON
     }
-    if (permission !== 'bash') return undefined
-    const command =
-      typeof metadata.command === 'string' ? metadata.command : (patterns ?? []).join('\n')
-    if (!command) return undefined
-    const hit = denyAskHit(command, this.userDenyAsk(entry.cwd))
-    if (hit?.tier !== 'deny') return undefined
-    logger.info('CrossEngineDispatcher', `opencode target: permission rule deny bash — ${hit.rule}`)
-    return `Denied by permission rule: ${hit.rule}`
+    return undefined
   }
 
   /**
@@ -6008,9 +6029,11 @@ export class CrossEngineDispatcher {
    * subagent bucket, so an inner id is what makes the card render (floating).
    *
    * A user deny rule refuses (with the rule) and a user ask rule asks, in
-   * EVERY mode — both rungs precede the mode base. Past them, per mode:
+   * EVERY mode — both rungs precede the mode base — except that in plan mode a
+   * write or a command that is not plan-read-only is refused before the ask
+   * rule (ADR-085 ruling 7, `planModeOutranksRules`). Past them, per mode:
    *  - plan: `planModeBaseDecision` DENIES every write and every command that
-   *    is not plan-safe. Nothing is forwarded and nothing waits — which is the
+   *    is not plan-read-only (`isPlanReadOnlyCommand`). Nothing is forwarded and nothing waits — which is the
    *    whole point for a target with no human: a read-only dispatch cannot
    *    park forever on a question.
    *  - default / acceptEdits: reads and searches allow; the rest asks, and the

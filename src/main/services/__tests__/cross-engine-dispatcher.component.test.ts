@@ -9205,6 +9205,57 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await pending
     })
 
+    // ADR-085 S3b — owner ruling 7: a plan target refuses a bash command that
+    // is not plan-safe; a plan-safe one is forwarded; a user deny answers first.
+    describe('ADR-085 S3b — plan target bash asks', () => {
+      it('`rm -rf x` → reject with the plan reason; `git status` → forwarded as a card; a deny-rule hit → the rule reason', async () => {
+        const { dispatcher, client, stream } = makeHarness({ loadUserRules: () => RULES })
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_plan_bash', autonomyMode: 'plan' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+
+        stream.push('permission.asked', {
+          id: 'perm-rm',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['rm -rf x'],
+          metadata: { command: 'rm -rf x' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-status',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['git status'],
+          metadata: { command: 'git status' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-force',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['git push origin main --force'],
+          metadata: { command: 'git push origin main --force' }
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-rm',
+          'reject',
+          PLAN_MODE_DENY_REASON
+        )
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-force',
+          'reject',
+          `Denied by permission rule: ${FORCE_DENY}`
+        )
+        expect(client.replyPermission).not.toHaveBeenCalledWith('perm-status', expect.anything())
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-status` })
+        ])
+        completeTurn(stream)
+        await pending
+      })
+    })
+
     it('(d) outside plan an edit ask is forwarded', async () => {
       const { dispatcher, client, stream } = makeHarness()
       holdTurn(client)

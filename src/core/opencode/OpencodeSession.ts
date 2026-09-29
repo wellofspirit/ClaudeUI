@@ -59,7 +59,8 @@ import { loadClaudePermissions } from '../services/claude-settings'
 import {
   compileClaudeRulesToOpencode,
   persistAllowSuggestions,
-  withoutAllowRules
+  withoutAllowRules,
+  withoutMutatingAllowRules
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
@@ -1859,8 +1860,20 @@ export class OpencodeSession extends BaseSession {
     // reach the classifier instead of bypassing it (cli.js §3 step 2 parity —
     // see `withoutAllowRules` for the full reasoning and the live evasion that
     // motivated it). Ask + deny + the base + DISPATCH_AGENT_ASK_RULE are
-    // unchanged; every other mode keeps the full compiled set.
-    const effectiveUserRules = autoMode ? withoutAllowRules(userRules) : userRules
+    // unchanged.
+    // PLAN MODE (ADR-085 ruling 7): the user's `edit`, `bash` and `task` ALLOW
+    // rules are patched out too — appended after the plan base they would turn
+    // its `edit`/`bash`/`task:general` asks back into server-side allows
+    // (last-match-wins), so an edit, `git commit` or a `general` subagent never
+    // asked and the host's plan refusal never saw it. The bash allows are
+    // applied host-side instead, for plan-safe commands only (host-precheck.ts
+    // `allow-rule`); see `withoutMutatingAllowRules`. Every other mode keeps
+    // the full compiled set.
+    const effectiveUserRules = autoMode
+      ? withoutAllowRules(userRules)
+      : mode === 'plan'
+        ? withoutMutatingAllowRules(userRules)
+        : userRules
     const ruleset = [...base, ...effectiveUserRules, DISPATCH_AGENT_ASK_RULE]
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
@@ -2312,25 +2325,21 @@ export class OpencodeSession extends BaseSession {
    * Only then may this chat's session-allow set answer it; otherwise today's
    * split: auto mode → the judge path, else the card.
    *
-   * First of all, plan mode's refusal (ADR-085 §3): the plan ruleset ASKS for
-   * `edit` and `task:general` rather than denying them server-side (a PATCHed
-   * deny outlives the mode and binds every task child — permission-ruleset.ts
-   * `buildRuleset('plan')`), so the refusal is made here, for own and child
-   * asks alike. The mode is read at ask time: a mid-turn switch is visible
-   * here at once, while the server keeps the ruleset its runLoop snapshotted.
+   * Plan mode's refusal (ADR-085 §3, ruling 7) is a rung of the pre-check,
+   * right after the deny rules: any `edit`, `task:general`, and a shell
+   * command `isPlanReadOnlyCommand` cannot vouch for — regardless of the
+   * user's ask rules, session allows and allow rules. The plan ruleset ASKS
+   * for `edit`/`task:general`/`bash` rather than denying them server-side (a
+   * PATCHed deny outlives the mode and binds every task child —
+   * permission-ruleset.ts `buildRuleset('plan')`), so the refusal is made
+   * here, for own and child asks alike. The mode is read at ask time: a
+   * mid-turn switch is visible here at once, while the server keeps the
+   * ruleset its runLoop snapshotted. A plan-safe command a user allow rule
+   * covers is answered `once` host-side (`allow-rule`), because plan mode
+   * sends no `edit`/`bash` allow to the server (`withoutMutatingAllowRules`).
    */
   private routePermissionAsk(approval: PendingApproval): void {
     const category = approval.toolName
-    if (this.planModeRefuses(approval)) {
-      this.autoReply(approval.requestId, 'reject', PLAN_MODE_DENY_REASON)
-      // No command text on an info line (ADR-084 logging rule).
-      logger.info(
-        'OpencodeSession',
-        `plan mode refused ${category}${approval.subagent ? ' (subagent)' : ''}`
-      )
-      if (approval.toolUseId) this.sendDenial(approval.toolUseId, 'mode', PLAN_MODE_DENY_REASON)
-      return
-    }
     const autoMode = this.isAutoMode(this.permissionMode)
     const verdict = hostPrecheck(approval, this.precheckContext())
     if (approval.subagent) {
@@ -2342,6 +2351,15 @@ export class OpencodeSession extends BaseSession {
     switch (verdict.kind) {
       case 'deny':
         this.denyByRule(approval, verdict.rule)
+        return
+      case 'plan-refuse':
+        this.autoReply(approval.requestId, 'reject', PLAN_MODE_DENY_REASON)
+        // No command text on an info line (ADR-084 logging rule).
+        logger.info(
+          'OpencodeSession',
+          `plan mode refused ${category}${approval.subagent ? ' (subagent)' : ''}`
+        )
+        if (approval.toolUseId) this.sendDenial(approval.toolUseId, 'mode', PLAN_MODE_DENY_REASON)
         return
       case 'user-ask': {
         const pending = this.pendingApprovals.get(approval.requestId)
@@ -2365,6 +2383,15 @@ export class OpencodeSession extends BaseSession {
         logger.debug('OpencodeSession', `session allow ${category}`)
         this.autoReply(approval.requestId, 'once')
         return
+      case 'allow-rule':
+        // Plan mode only (ruling 7): a plan-safe command the user's allow
+        // rules cover. The rule text is the user's own; no command text.
+        logger.info(
+          'OpencodeSession',
+          `plan mode: allow rule covers a read-only ${category} (rule ${verdict.rule})`
+        )
+        this.autoReply(approval.requestId, 'once')
+        return
       case 'continue':
         break
     }
@@ -2377,24 +2404,21 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** Plan mode's two server-side asks that are refusals (ADR-085 §3): any edit, and the mutating `general` subagent. */
-  private planModeRefuses(approval: PendingApproval): boolean {
-    if (this.permissionMode !== 'plan') return false
-    if (approval.toolName === 'edit') return true
-    return approval.toolName === 'task' && (approval.patterns ?? []).includes('general')
-  }
-
   /**
-   * What the pre-check reads: the user's deny/ask rules FRESH per call (as
+   * What the pre-check reads: the permission mode at ask time, the user's
+   * deny/ask (and, read in plan mode only, allow) rules FRESH per call (as
    * readOnlyBypass reads them — a settings edit mid-session binds the next
-   * ask; best-effort, so a load failure leaves only session-allow/continue,
-   * today's behaviour), G9's compiled user-origin rules, this chat's
-   * session-allow set.
+   * ask; best-effort, so a load failure leaves only plan-refuse/session-allow/
+   * continue), G9's compiled user-origin rules, this chat's session-allow set.
    */
   private precheckContext(): HostPrecheckContext {
     const permissions = this.mergedUserPermissions()
     return {
-      rules: { deny: permissions.deny, ask: permissions.ask },
+      mode: this.permissionMode,
+      rules: { deny: permissions.deny, ask: permissions.ask, allow: permissions.allow },
+      // Plan mode's second read-only oracle (ADR-085 S3b, `isPlanReadOnlyCommand`).
+      cwd: this.cwd,
+      additionalDirectories: permissions.additionalDirectories,
       userRules: this.userOriginRules(),
       sessionAllows: this.sessionAllows,
       onError: (err) =>

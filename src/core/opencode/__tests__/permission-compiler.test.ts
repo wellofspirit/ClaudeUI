@@ -13,6 +13,7 @@ import {
   suggestionDestinationToScope,
   persistAllowSuggestions,
   withoutAllowRules,
+  withoutMutatingAllowRules,
   opencodeMcpKey
 } from '../permission-compiler'
 import { broadBashGlobs } from '../broad-bash-globs'
@@ -477,6 +478,89 @@ describe('withoutAllowRules', () => {
     const original = compiled()
     const snapshot = structuredClone(original)
     withoutAllowRules(original)
+    expect(original).toEqual(snapshot)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// withoutMutatingAllowRules — what plan mode patches (ADR-085 S3b, ruling 7).
+// ---------------------------------------------------------------------------
+
+describe('ADR-085 S3b — withoutMutatingAllowRules', () => {
+  const compiled = (): ReturnType<typeof compileClaudeRulesToOpencode> =>
+    compileClaudeRulesToOpencode(
+      perms({
+        allow: [
+          'Edit',
+          'Write(src/**)',
+          'Bash(git:*)',
+          'Bash',
+          'Read(docs/**)',
+          'Grep',
+          'WebFetch(domain:example.com)',
+          'Task',
+          'Task(general)',
+          'mcp__lsphub__find_refs'
+        ],
+        ask: ['Bash(docker run:*)', 'Edit(*.env)'],
+        deny: ['Bash(git push --force:*)', 'Edit(secrets/**)'],
+        additionalDirectories: ['/extra']
+      })
+    )
+
+  const DROPPED = ['edit', 'bash', 'task']
+
+  it('drops exactly the edit, bash and task allow rules', () => {
+    const all = compiled()
+    // The fixture really does compile edit/bash/task allows (so the filter has something to drop).
+    expect(all).toContainEqual({ permission: 'edit', pattern: '*', action: 'allow' })
+    expect(all).toContainEqual({ permission: 'bash', pattern: 'git*', action: 'allow' })
+    expect(all).toContainEqual({ permission: 'task', pattern: '*', action: 'allow' })
+    expect(all).toContainEqual({ permission: 'task', pattern: 'general', action: 'allow' })
+    const filtered = withoutMutatingAllowRules(all)
+    expect(filtered.some((r) => r.action === 'allow' && DROPPED.includes(r.permission))).toBe(false)
+    expect(filtered).toEqual(
+      all.filter((r) => !(r.action === 'allow' && DROPPED.includes(r.permission)))
+    )
+  })
+
+  it('a Task and a Task(general) allow are both dropped (they could only re-allow `general`)', () => {
+    const filtered = withoutMutatingAllowRules(compiled())
+    expect(filtered).not.toContainEqual({ permission: 'task', pattern: '*', action: 'allow' })
+    expect(filtered).not.toContainEqual({ permission: 'task', pattern: 'general', action: 'allow' })
+  })
+
+  it('keeps read / grep / webfetch / MCP / external_directory allows', () => {
+    const filtered = withoutMutatingAllowRules(compiled())
+    for (const permission of ['read', 'grep', 'webfetch', 'lsphub_find_refs']) {
+      expect(
+        filtered.some((r) => r.permission === permission && r.action === 'allow'),
+        permission
+      ).toBe(true)
+    }
+    expect(
+      filtered.some((r) => r.permission === 'external_directory' && r.action === 'allow')
+    ).toBe(true)
+  })
+
+  it('keeps every ask and deny, including the broad bash globs', () => {
+    const all = compiled()
+    const filtered = withoutMutatingAllowRules(all)
+    expect(filtered.filter((r) => r.action !== 'allow')).toEqual(
+      all.filter((r) => r.action !== 'allow')
+    )
+    for (const glob of broadBashGlobs('git push --force:*')) {
+      expect(filtered).toContainEqual({ permission: 'bash', pattern: glob, action: 'deny' })
+    }
+    for (const glob of broadBashGlobs('docker run:*')) {
+      expect(filtered).toContainEqual({ permission: 'bash', pattern: glob, action: 'ask' })
+    }
+  })
+
+  it('does NOT mutate its input — the provenance set (G9) shares this array', () => {
+    const original = compiled()
+    const snapshot = structuredClone(original)
+    withoutMutatingAllowRules(original)
     expect(original).toEqual(snapshot)
   })
 })
