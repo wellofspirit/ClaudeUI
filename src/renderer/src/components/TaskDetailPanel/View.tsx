@@ -18,7 +18,8 @@ export interface TaskDetailPanelViewProps {
   roster: AgentRoster
   /** Which of them are open below, so the roster can show what is selected. */
   openedToolUseIds: string[]
-  onOpenAgent: (toolUseId: string) => void
+  /** A roster row opens that entry below, or closes it if it is already open. */
+  onToggleAgent: (toolUseId: string) => void
   onClose: () => void
   /**
    * 'panel' (default) is the desktop side panel — bordered, its own "Tasks"
@@ -53,7 +54,7 @@ export function TaskDetailPanelView({
   entries,
   roster,
   openedToolUseIds,
-  onOpenAgent,
+  onToggleAgent,
   onClose,
   variant = 'panel'
 }: TaskDetailPanelViewProps): React.JSX.Element {
@@ -146,25 +147,34 @@ export function TaskDetailPanelView({
         </div>
       )}
 
-      <div className="shrink-0 border-b border-border">
+      {/* The roster scrolls on its own. Alone it may fill the panel; with entries
+          open it is capped so a long session cannot push them out of view. */}
+      <div
+        data-testid="TaskDetailPanel.roster"
+        className={`overflow-y-auto ${
+          count === 0 ? 'flex-1 min-h-0' : 'shrink-0 max-h-[40%] border-b border-border'
+        }`}
+      >
         <AgentRosterList
           roster={roster}
           selectedIds={openedToolUseIds}
-          onOpen={onOpenAgent}
+          onOpen={onToggleAgent}
           emptyHint="No agents or background shells in this session yet."
         />
       </div>
 
-      <div ref={containerRef} className="flex-1 min-h-0 flex flex-col overflow-y-auto">
-        {entries.map((entry, i) => (
-          <div key={entry.toolUseId} className="contents">
-            {i > 0 && <HResizeHandle onMouseDown={handleResizeMouseDown(i - 1)} />}
-            <div style={{ flex: `${ratios[i] ?? 1} 0 0%` }} className="min-h-0 overflow-hidden">
-              <PanelEntry entry={entry} />
+      {count > 0 && (
+        <div ref={containerRef} className="flex-1 min-h-0 flex flex-col overflow-y-auto">
+          {entries.map((entry, i) => (
+            <div key={entry.toolUseId} className="contents">
+              {i > 0 && <HResizeHandle onMouseDown={handleResizeMouseDown(i - 1)} />}
+              <div style={{ flex: `${ratios[i] ?? 1} 0 0%` }} className="min-h-0 overflow-hidden">
+                <PanelEntry entry={entry} />
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

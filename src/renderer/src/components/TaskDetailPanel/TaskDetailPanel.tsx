@@ -20,7 +20,7 @@ export function TaskDetailPanel({
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
-  const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
+  const toggleTaskInPanel = useSessionStore((s) => s.toggleTaskInPanel)
   const roster = useAgentRoster()
 
   const entries = useMemo<TaskEntryDescriptor[]>(() => {
@@ -43,11 +43,11 @@ export function TaskDetailPanel({
     })
   }, [openedTaskToolUseIds, messages, isHistorical, activeTasks, taskNotifications])
 
-  const handleOpen = useCallback(
+  const handleToggle = useCallback(
     (toolUseId: string) => {
-      if (activeSessionId) openTaskPanel(activeSessionId, toolUseId)
+      if (activeSessionId) toggleTaskInPanel(activeSessionId, toolUseId)
     },
-    [activeSessionId, openTaskPanel]
+    [activeSessionId, toggleTaskInPanel]
   )
 
   // Open with NO entries is a valid state now: the top-bar pill opens the
@@ -62,7 +62,7 @@ export function TaskDetailPanel({
       entries={entries}
       roster={roster}
       openedToolUseIds={openedTaskToolUseIds}
-      onOpenAgent={handleOpen}
+      onToggleAgent={handleToggle}
       onClose={() => activeSessionId && closeTaskPanel(activeSessionId)}
     />
   )

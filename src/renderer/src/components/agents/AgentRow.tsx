@@ -5,6 +5,7 @@
  * Deliberately has no notion of "unread": running and not-running is the whole
  * state model (owner ruling, 2026-09-21).
  */
+import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { formatElapsed, formatTokens } from '../chat/TaskCard'
 import type { AgentRosterRow } from '../../hooks/useAgentRoster'
@@ -54,6 +55,16 @@ export function AgentRow({
 
   const isStopping = stoppingTaskIds.includes(row.toolUseId)
 
+  // Opening an entry caps the panel roster at 40%, which can leave the row
+  // just clicked below the fold. Keep it in view, but only when it BECOMES
+  // selected — a row that mounts selected is where the user already left it.
+  const rowRef = useRef<HTMLDivElement>(null)
+  const wasSelected = useRef(selected)
+  useEffect(() => {
+    if (selected && !wasSelected.current) rowRef.current?.scrollIntoView?.({ block: 'nearest' })
+    wasSelected.current = selected
+  }, [selected])
+
   const handleStop = async (e: React.MouseEvent): Promise<void> => {
     // The row itself opens the transcript; the button must not do both.
     e.stopPropagation()
@@ -79,6 +90,7 @@ export function AgentRow({
 
   return (
     <div
+      ref={rowRef}
       data-testid="AgentRow"
       data-tool-use-id={row.toolUseId}
       data-running={row.isRunning}

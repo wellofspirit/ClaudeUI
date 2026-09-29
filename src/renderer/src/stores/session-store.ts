@@ -1553,6 +1553,12 @@ export interface SessionState {
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
   /**
+   * What a roster row does: open that agent below the roster, or put it away if
+   * it is already open. Unlike `removeTaskFromPanel`, putting the last one away
+   * leaves the panel open on the roster, which is where the click came from.
+   */
+  toggleTaskInPanel: (routingId: string, toolUseId: string) => void
+  /**
    * Open or close the panel on the ROSTER, with no agent selected (ADR-073).
    * What the top-bar pill does: reaching the list must not depend on a card
    * still being on screen, which is what `openTaskPanel` requires.
@@ -2681,6 +2687,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         openedTaskToolUseIds: s.openedTaskToolUseIds.includes(toolUseId)
           ? s.openedTaskToolUseIds
+          : [...s.openedTaskToolUseIds, toolUseId],
+        rightPanel: 'task' as const
+      }))
+    })),
+
+  toggleTaskInPanel: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        openedTaskToolUseIds: s.openedTaskToolUseIds.includes(toolUseId)
+          ? s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
           : [...s.openedTaskToolUseIds, toolUseId],
         rightPanel: 'task' as const
       }))

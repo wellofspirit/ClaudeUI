@@ -4,7 +4,8 @@
  * Tested flows:
  *   1. renders null when task panel is not open
  *   2. renders the roster, with no entries, when nothing is opened yet
- *   3. onClose calls closeTaskPanel store action
+ *   3. a roster row toggles its entry open and closed
+ *   4. onClose calls closeTaskPanel store action
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -178,6 +179,24 @@ describe('TaskDetailPanel FC', () => {
       await renderFC()
       expect(viewProps?.entries).toEqual([{ toolUseId: 'tu-fg', kind: 'task' }])
     })
+  })
+
+  it('a roster row toggles its entry, and putting the last away keeps the roster open', async () => {
+    useSessionStore.getState().toggleAgentsPanel(ROUTE)
+    await renderFC()
+    const session = (): { openedTaskToolUseIds: string[]; rightPanel: string } =>
+      useSessionStore.getState().sessions[ROUTE]
+
+    act(() => viewProps!.onToggleAgent('tu-1'))
+    act(() => viewProps!.onToggleAgent('tu-2'))
+    expect(session().openedTaskToolUseIds).toEqual(['tu-1', 'tu-2'])
+
+    act(() => viewProps!.onToggleAgent('tu-1'))
+    expect(session().openedTaskToolUseIds).toEqual(['tu-2'])
+
+    act(() => viewProps!.onToggleAgent('tu-2'))
+    expect(session().openedTaskToolUseIds).toEqual([])
+    expect(session().rightPanel).toBe('task')
   })
 
   it('onClose calls closeTaskPanel, setting rightPanel to none', async () => {
