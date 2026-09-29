@@ -960,6 +960,13 @@ describe('user rules', () => {
     expectRefuse('pwd', { scope: winScope({ rules: { ask: ['Bash'] } }) }, 'rule:Bash Bash')
   })
 
+  it("the rules use ADR-085's matcher: any word order, past global options", () => {
+    const scope = winScope({ rules: { ask: ['Bash(git diff --stat:*)'] } })
+    expectRefuse('git diff HEAD --stat', { scope }, 'rule:Bash Bash(git diff --stat:*)')
+    expectRefuse('git --no-pager diff --stat', { scope }, 'rule:Bash Bash(git diff --stat:*)')
+    expectBypass('git diff HEAD', { scope })
+  })
+
   it('allow rules never matter', () => {
     expectRefuse('sed -n 1p x', { scope: winScope({ rules: { allow: ['Bash(sed:*)'] } }) })
   })
@@ -1005,7 +1012,12 @@ describe('purity', () => {
 
   it('read-only.ts imports only pure modules and reads no environment', () => {
     const src = read('read-only.ts')
-    expect(importsOf(src)).toEqual(['../opencode/wildcard', './shell-lexical'])
+    expect(importsOf(src)).toEqual([
+      '../opencode/wildcard',
+      '../permissions/shell-rules',
+      './shell-strict-lexer',
+      './shell-lexical'
+    ])
     expect(src).not.toMatch(/node:fs|node:child_process|from 'fs'|child_process|process\.env/)
   })
 
@@ -1016,6 +1028,13 @@ describe('purity', () => {
     const wildcard = read('../opencode/wildcard.ts')
     expect(importsOf(wildcard).every((i) => i.startsWith('type '))).toBe(true)
     expect(wildcard).not.toMatch(/process\.env|node:/)
+    // The strict lexer is a leaf; ADR-085's rule matcher imports only it (no cycle back here).
+    const strictLexer = read('shell-strict-lexer.ts')
+    expect(importsOf(strictLexer)).toEqual([])
+    expect(strictLexer).not.toMatch(/process\.env|node:/)
+    const shellRules = read('../permissions/shell-rules.ts')
+    expect(importsOf(shellRules)).toEqual(['../automode/shell-strict-lexer'])
+    expect(shellRules).not.toMatch(/process\.env|node:/)
   })
 })
 
