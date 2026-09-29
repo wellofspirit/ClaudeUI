@@ -2086,6 +2086,76 @@ function conceptsFor(rule: ParsedBashRule): Concept[] {
   ).flatMap((e) => e.concepts)
 }
 
+/** One synonym {@link Member} as the single token that spells it (`{letter: f}` → `-f`). */
+function memberToken(m: Member): string {
+  if ('letter' in m) return `-${m.letter}`
+  if ('long' in m) return `--${m.long}`
+  if ('param' in m) return `-${m.param}`
+  if ('exact' in m) return m.exact
+  return m.refPrefix
+}
+
+/** Every ordering of `items` (callers keep it tiny: a cluster word has at most three letters). */
+function permutations<T>(items: readonly T[]): T[][] {
+  if (items.length <= 1) return [[...items]]
+  return items.flatMap((head, i) =>
+    permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [head, ...rest])
+  )
+}
+
+/**
+ * ADR-085 §3 — the token spellings a rule word may take, for the opencode
+ * server-side globs (`opencode/broad-bash-globs.ts`). Each alternative is a
+ * token SEQUENCE; the first is the word itself. `[]` when `index` names no word.
+ *
+ * - A glob word: itself only (server-side it keeps today's verbatim form).
+ * - A short cluster of two or three letters (`-rf`): every permutation as one
+ *   token (`-rf`, `-fr`) and the split letters in every order
+ *   (`-r -f`, `-f -r`). Long forms of a cluster's letters (`--recursive`) are
+ *   NOT expanded — a documented residual the host matcher covers.
+ * - Any other word: the members of the first synonym concept one of whose
+ *   members matches it ({@link memberMatches}, the same lookup
+ *   {@link wordAtom} makes), one token each — `--force` on `git push` gives
+ *   `-f`, `--force-with-lease`, `--force-if-includes` and `+` (a
+ *   `+<refspec>` token). An `allOf` concept (`git branch -D`) contributes its
+ *   own members only, never the `--delete --force` pair.
+ *
+ * Pure, deduplicated, order-stable; never throws (`[[text]]` on any internal
+ * failure).
+ */
+export function bashRuleWordAlternatives(rule: ParsedBashRule, index: number): string[][] {
+  const word = rule.words[index]
+  if (!word) return []
+  const self = [[word.text]]
+  try {
+    if (word.glob) return self
+    const out: string[][] = [[word.text]]
+    const seen = new Set<string>([JSON.stringify([word.text])])
+    const add = (seq: string[]): void => {
+      const key = JSON.stringify(seq)
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(seq)
+    }
+    // A one-letter word (`-f`) is its own only permutation; it takes the
+    // synonym route below, as wordAtom maps its one letter to that concept.
+    if (isClusterWord(word.text) && word.text.length > 2) {
+      const letters = [...word.text.slice(1)]
+      const orders = permutations(letters)
+      for (const order of orders) add([`-${order.join('')}`])
+      for (const order of orders) add(order.map((l) => `-${l}`))
+      return out
+    }
+    const concept = conceptsFor(rule).find((c) =>
+      c.members.some((m) => memberMatches(m, word.text))
+    )
+    for (const m of concept?.members ?? []) add([memberToken(m)])
+    return out
+  } catch {
+    return self
+  }
+}
+
 /**
  * The literal ways a token can match a rule word:
  * - a positional (non-`-`) word, case-insensitively — PowerShell's names are,

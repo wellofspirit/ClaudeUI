@@ -69,9 +69,10 @@ export interface PermissionEngineContext {
    * edit.ts/write.ts). See `resolveMatchPath`.
    *
    * Optional: `PiSession.gateToolCallInner` passes `this.cwd`, and so does
-   * the cross-engine-dispatcher's `gatePiTargetToolCall` (its rules are
-   * always `EMPTY_RULES`, but the acceptEdits base's agent-control-path check
-   * — ADR-084 §3, `editsAgentControlPath` — resolves the path against it).
+   * the cross-engine-dispatcher's `gatePiTargetToolCall` (its rules are the
+   * user's deny/ask tiers only, ADR-085 §3, and the acceptEdits base's
+   * agent-control-path check — ADR-084 §3, `editsAgentControlPath` — resolves
+   * the path against it).
    * Any caller that omits it falls back to matching the RAW input path
    * (best-effort — see `resolveMatchPath`'s doc comment).
    */
@@ -1016,11 +1017,11 @@ export function withoutAllowRules(rules: MergedClaudeRules): MergedClaudeRules {
 // ---------------------------------------------------------------------------
 
 /**
- * Exported (ADR-033 M4c): a pi cross-engine dispatch TARGET's gate uses this
- * verbatim as its `decide()` rules — a dispatched target should not inherit
- * the user's interactive-session Claude permission rules (only the target's
- * fixed autonomy mode governs it). See cross-engine-dispatcher.ts's
- * `gatePiTargetToolCall`.
+ * An empty rule set. Exported (ADR-033 M4c) for the dispatcher's pi and Codex
+ * target gates, which used it as their rules until ADR-085 §3 gave every
+ * dispatch target the user's deny/ask rules (never the allow tier — see
+ * cross-engine-dispatcher.ts's `userDenyAsk`); kept for any caller that needs
+ * a rule-less ladder.
  *
  * Frozen — object AND every array property — since this is a SHARED singleton
  * every caller reads by reference: without freezing, one caller mutating

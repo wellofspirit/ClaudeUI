@@ -12,8 +12,11 @@ import {
   suggestionRuleToClaudeString,
   suggestionDestinationToScope,
   persistAllowSuggestions,
-  withoutAllowRules
+  withoutAllowRules,
+  opencodeMcpKey
 } from '../permission-compiler'
+import { broadBashGlobs } from '../broad-bash-globs'
+import { evaluateOpencodeRules } from '../wildcard'
 import type { ClaudePermissions, PermissionSuggestion } from '../../../shared/types'
 
 // The store the shared persister writes through — never the dev machine's real
@@ -140,9 +143,14 @@ describe('compileClaudeRulesToOpencode', () => {
     expect(out).toHaveLength(3)
   })
 
-  it('skips unmappable tools (e.g. MCP) rather than guessing', () => {
-    const out = compileClaudeRulesToOpencode(perms({ allow: ['mcp__server__tool', 'Bash'] }))
-    expect(out).toEqual([{ permission: 'bash', pattern: '*', action: 'allow' }])
+  it('skips unmappable tools rather than guessing; MCP rules compile to opencode keys (ADR-085 §3)', () => {
+    const out = compileClaudeRulesToOpencode(
+      perms({ allow: ['mcp__server__tool', 'SomeUnknownTool', 'Bash'] })
+    )
+    expect(out).toEqual([
+      { permission: 'server_tool', pattern: '*', action: 'allow' },
+      { permission: 'bash', pattern: '*', action: 'allow' }
+    ])
   })
 
   it('additionalDirectories → external_directory allow rules (platform-correct glob)', () => {
@@ -167,6 +175,134 @@ describe('compileClaudeRulesToOpencode', () => {
 
   it('empty permissions → empty ruleset', () => {
     expect(compileClaudeRulesToOpencode(perms({}))).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-085 §3 — broad Bash deny/ask globs + MCP keys.
+// ---------------------------------------------------------------------------
+
+describe('compileClaudeRulesToOpencode — broad Bash deny/ask globs (ADR-085 §3)', () => {
+  it.each(['linux', 'win32'] as const)(
+    'F1: a broader allow no longer answers a reordered form of a narrower deny (%s)',
+    (platform) => {
+      const rules = compileClaudeRulesToOpencode(
+        perms({ allow: ['Bash(git:*)'], deny: ['Bash(git push --force:*)'] })
+      )
+      // Before ADR-085 S3 this evaluated to 'allow' (`git*` matched, `git push --force*` did not).
+      expect(evaluateOpencodeRules('bash', 'git push origin main --force', rules, platform)).toBe(
+        'deny'
+      )
+      expect(evaluateOpencodeRules('bash', 'git status', rules, platform)).toBe('allow')
+    }
+  )
+
+  it.each(['linux', 'win32'] as const)(
+    'F1 for ask: a broader allow no longer answers a reordered form of a narrower ask (%s)',
+    (platform) => {
+      const rules = compileClaudeRulesToOpencode(
+        perms({ allow: ['Bash(docker:*)'], ask: ['Bash(docker run:*)'] })
+      )
+      expect(evaluateOpencodeRules('bash', 'docker --context x run alpine', rules, platform)).toBe(
+        'ask'
+      )
+      expect(evaluateOpencodeRules('bash', 'docker build -t runtime .', rules, platform)).toBe(
+        'allow'
+      )
+    }
+  )
+
+  it('a deny/ask rule compiles to its verbatim pattern first, then the broad globs, all in its tier', () => {
+    const out = compileClaudeRulesToOpencode(
+      perms({ ask: ['Bash(docker run:*)'], deny: ['Bash(git push --force:*)'] })
+    )
+    const ask = out.filter((r) => r.action === 'ask').map((r) => r.pattern)
+    const deny = out.filter((r) => r.action === 'deny').map((r) => r.pattern)
+    expect(ask).toEqual(['docker run*', ...broadBashGlobs('docker run:*')])
+    expect(deny).toEqual(['git push --force*', ...broadBashGlobs('git push --force:*')])
+    expect(new Set(deny).size).toBe(deny.length)
+    // Tier order holds: every ask before every deny.
+    const actions = out.map((r) => r.action)
+    expect(actions.lastIndexOf('ask')).toBeLessThan(actions.indexOf('deny'))
+  })
+
+  it('allow bash rules emit the verbatim pattern only (broadening an allow is an over-grant)', () => {
+    expect(compileClaudeRulesToOpencode(perms({ allow: ['Bash(git push --force:*)'] }))).toEqual([
+      { permission: 'bash', pattern: 'git push --force*', action: 'allow' }
+    ])
+  })
+
+  it('a bare Bash deny stays one `*` rule; a glob-word rule keeps its verbatim form only', () => {
+    expect(compileClaudeRulesToOpencode(perms({ deny: ['Bash'] }))).toEqual([
+      { permission: 'bash', pattern: '*', action: 'deny' }
+    ])
+    expect(compileClaudeRulesToOpencode(perms({ deny: ['Bash(rm -rf /*)'] }))).toEqual([
+      { permission: 'bash', pattern: 'rm -rf /*', action: 'deny' }
+    ])
+  })
+})
+
+describe('compileClaudeRulesToOpencode — MCP rules (ADR-085 §3)', () => {
+  const compile = (p: Partial<ClaudePermissions>, mcpServers?: string[]) =>
+    compileClaudeRulesToOpencode(perms(p), mcpServers ? { mcpServers } : undefined)
+
+  it('opencodeMcpKey mirrors opencode `sanitize(server)_sanitize(tool)` and `sanitize(server)_*`', () => {
+    expect(opencodeMcpKey('lsphub', 'find_refs')).toBe('lsphub_find_refs')
+    expect(opencodeMcpKey('a b', 'x.y')).toBe('a_b_x_y')
+    expect(opencodeMcpKey('my-server')).toBe('my-server_*')
+  })
+
+  it('tool level → the exact key in every tier (a specifier is ignored)', () => {
+    expect(
+      compile({
+        allow: ['mcp__lsphub__find_refs'],
+        ask: ['mcp__lsphub__rename(x)'],
+        deny: ['mcp__lsphub__delete_all']
+      })
+    ).toEqual([
+      { permission: 'lsphub_find_refs', pattern: '*', action: 'allow' },
+      { permission: 'lsphub_rename', pattern: '*', action: 'ask' },
+      { permission: 'lsphub_delete_all', pattern: '*', action: 'deny' }
+    ])
+  })
+
+  it('server level deny/ask → `s_*`, with or without `__*`, known server or not', () => {
+    expect(compile({ ask: ['mcp__jira'], deny: ['mcp__lsphub__*'] })).toEqual([
+      { permission: 'jira_*', pattern: '*', action: 'ask' },
+      { permission: 'lsphub_*', pattern: '*', action: 'deny' }
+    ])
+  })
+
+  it('server level allow → `s_*` only for a server in the live set', () => {
+    expect(compile({ allow: ['mcp__lsphub', 'mcp__other__*'] }, ['lsphub'])).toEqual([
+      { permission: 'lsphub_*', pattern: '*', action: 'allow' }
+    ])
+    // No live set (existing callers) → never emitted.
+    expect(compile({ allow: ['mcp__lsphub'] })).toEqual([])
+  })
+
+  it('a server-level allow whose glob hits a built-in key is skipped; its deny is emitted', () => {
+    // `external_*` would also match `external_directory`, `doom_*` `doom_loop`.
+    expect(compile({ allow: ['mcp__external'] }, ['external'])).toEqual([])
+    expect(compile({ allow: ['mcp__doom__*'] }, ['doom'])).toEqual([])
+    expect(compile({ deny: ['mcp__external'] }, ['external'])).toEqual([
+      { permission: 'external_*', pattern: '*', action: 'deny' }
+    ])
+  })
+
+  it('names are sanitised like opencode does (`mcp__a b__x`)', () => {
+    expect(compile({ deny: ['mcp__a b__x'] })).toEqual([
+      { permission: 'a_b_x', pattern: '*', action: 'deny' }
+    ])
+    expect(compile({ allow: ['mcp__a b'] }, ['a b'])).toEqual([
+      { permission: 'a_b_*', pattern: '*', action: 'allow' }
+    ])
+  })
+
+  it('a user MCP deny beats an earlier server-level allow (tier order)', () => {
+    const rules = compile({ allow: ['mcp__lsphub'], deny: ['mcp__lsphub__delete_all'] }, ['lsphub'])
+    expect(evaluateOpencodeRules('lsphub_delete_all', '*', rules, 'linux')).toBe('deny')
+    expect(evaluateOpencodeRules('lsphub_find_refs', '*', rules, 'linux')).toBe('allow')
   })
 })
 
@@ -312,6 +448,20 @@ describe('withoutAllowRules', () => {
     expect(filtered).toEqual(compiled().filter((r) => r.action !== 'allow'))
     expect(filtered).toContainEqual({ permission: 'bash', pattern: 'git push*', action: 'ask' })
     expect(filtered).toContainEqual({ permission: 'bash', pattern: 'rm*', action: 'deny' })
+  })
+
+  it('keeps the broad deny/ask globs (ADR-085 §3) — a reordered denied command stays denied', () => {
+    const filtered = withoutAllowRules(
+      compileClaudeRulesToOpencode(
+        perms({ allow: ['Bash(git:*)'], deny: ['Bash(git push --force:*)'] })
+      )
+    )
+    for (const glob of broadBashGlobs('git push --force:*')) {
+      expect(filtered).toContainEqual({ permission: 'bash', pattern: glob, action: 'deny' })
+    }
+    expect(evaluateOpencodeRules('bash', 'git push origin main --force', filtered, 'linux')).toBe(
+      'deny'
+    )
   })
 
   it('drops the external_directory allows compiled from additionalDirectories', () => {

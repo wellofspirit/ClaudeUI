@@ -72,6 +72,7 @@ const {
   mockListCommands,
   mockListSkills,
   mockRunCommand,
+  mockMcpStatus,
   MockOpencodeClient
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
@@ -96,6 +97,7 @@ const {
   const mockListCommands = vi.fn()
   const mockListSkills = vi.fn()
   const mockRunCommand = vi.fn()
+  const mockMcpStatus = vi.fn()
 
   // Constructor mock — we build the instance here so clearAllMocks doesn't
   // kill the implementation.
@@ -122,6 +124,7 @@ const {
     mockListCommands,
     mockListSkills,
     mockRunCommand,
+    mockMcpStatus,
     MockOpencodeClient
   }
 })
@@ -260,6 +263,7 @@ import { logger } from '../../services/logger'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
 import { evaluateOpencodeRules } from '../wildcard'
+import { PLAN_MODE_DENY_REASON } from '../../pi/permission-engine'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
 import type { QueuedItem } from '../../../shared/types'
@@ -314,6 +318,9 @@ function setupMocks(): void {
   mockListCommands.mockReset()
   mockListSkills.mockReset()
   mockRunCommand.mockReset()
+  mockMcpStatus.mockReset()
+  // Default: no MCP server beyond the bridged/hosted ones (ADR-085 §3).
+  mockMcpStatus.mockResolvedValue({})
   mockJudge.mockReset()
   mockResolveJudgeRoute.mockReset()
   mockResolveJudgeRoute.mockImplementation(async () => ({ ok: true, route: fakeJudgeRoute() }))
@@ -397,7 +404,8 @@ function setupMocks(): void {
       subscribeEvents: mockSubscribeEvents,
       listCommands: mockListCommands,
       listSkills: mockListSkills,
-      runCommand: mockRunCommand
+      runCommand: mockRunCommand,
+      mcpStatus: mockMcpStatus
     }
   })
 }
@@ -1214,13 +1222,14 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     })
   })
 
-  it('plan → deny edits + ONLY the general subagent (explore/research task still works); selects plan agent', async () => {
+  it('plan → edits + ONLY the general subagent ask (refused host-side); explore/research task still works; selects plan agent', async () => {
     const session = makeSession(undefined, 'plan')
     await session.run('hi')
     const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
-    // Mirrors opencode's built-in plan agent: edit denied, task denied for the
-    // `general` subagent ONLY (read-only subagents stay allowed via baseline)
-    // — PLUS the bash/webfetch gates `default` carries. opencode's own plan
+    // Mirrors opencode's built-in plan agent: no edits, no `general` subagent
+    // (read-only subagents stay allowed via baseline) — as ASKS the host
+    // refuses (ADR-085 §3: a PATCHed deny outlives the mode and binds every
+    // task child) — PLUS the bash/webfetch gates `default` carries. opencode's own plan
     // agent leaves those on the `{*:allow}` baseline, which made ClaudeUI's
     // plan mode strictly MORE permissive than its default mode for command
     // execution and network fetch. The neutral autonomy ladder (ADR-022)
@@ -1228,12 +1237,14 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs).toEqual([
       ALLOW_ALL,
       ...GUARDS,
-      { permission: 'edit', pattern: '*', action: 'deny' },
-      { permission: 'task', pattern: 'general', action: 'deny' },
+      { permission: 'edit', pattern: '*', action: 'ask' },
+      { permission: 'task', pattern: 'general', action: 'ask' },
       { permission: 'bash', pattern: '*', action: 'ask' },
       { permission: 'webfetch', pattern: '*', action: 'ask' },
       DISPATCH_ASK_RULE
     ])
+    // No server-side deny at all: a child would copy it, and it would outlive the mode.
+    expect(rs.some((r) => r.action === 'deny')).toBe(false)
     // Regression for the over-restriction: there must be NO blanket task deny.
     expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
     // Regression for the plan-mode fail-open: bash must never fall through to
@@ -6887,5 +6898,228 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
     expect(repliesFor('per_J11')).toEqual([['per_J11', 'once']])
     expect(sent(win, 'session:tool-review')).toHaveLength(0)
     session.dispose()
+  })
+
+  // ── ADR-085 S3 — plan-mode refusal host-side, MCP asks in auto mode ───────
+
+  describe('S3. plan mode refuses edits and the general subagent host-side', () => {
+    const editAsk = (id: string, sessionID = SES, callID = `c_${id}`): OpencodeEvent =>
+      ({
+        id: `ev_${id}`,
+        type: 'permission.asked',
+        properties: {
+          sessionID,
+          id,
+          permission: 'edit',
+          patterns: ['src/a.ts'],
+          always: ['*'],
+          metadata: { filepath: 'src/a.ts', diff: '' },
+          tool: { callID, messageID: `msg_${callID}` }
+        }
+      }) as OpencodeEvent
+    const editPart = (callID: string, sessionID = SES): OpencodeEvent =>
+      ({
+        id: `ev_part_${callID}`,
+        type: 'message.part.updated',
+        properties: {
+          sessionID,
+          part: {
+            id: `p_${callID}`,
+            messageID: `msg_${callID}`,
+            type: 'tool',
+            tool: 'edit',
+            callID,
+            state: { status: 'running', input: { filePath: 'src/a.ts' } }
+          }
+        }
+      }) as OpencodeEvent
+    const taskAsk = (id: string, subagent: string): OpencodeEvent =>
+      ({
+        id: `ev_${id}`,
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          permission: 'task',
+          patterns: [subagent],
+          always: ['*'],
+          metadata: { description: 'd', subagent_type: subagent },
+          tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+        }
+      }) as OpencodeEvent
+
+    it('plan + edit ask → reject with the plan-mode reason and a `mode` denial on the card', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(editPart('c_pe'))
+      push(editAsk('per_pe', SES, 'c_pe'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_pe', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
+      expect(sent(win, 'session:permission-denial')[0]).toEqual({
+        toolUseId: 'c_pe',
+        denial: expect.objectContaining({
+          type: 'permission_denial',
+          toolUseId: 'c_pe',
+          source: 'mode',
+          reason: PLAN_MODE_DENY_REASON
+        })
+      })
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan + task `general` → reject; plan + task `explore` → the card', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(taskAsk('per_tg', 'general'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_tg', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      push(taskAsk('per_tx', 'explore'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(cards(win)[0].requestId).toBe('per_tx')
+      expect(repliesFor('per_tx')).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('default + edit ask → the card, no refusal', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(editAsk('per_de'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      await settle()
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      session.dispose()
+    })
+
+    it('a child edit ask under plan is refused too', async () => {
+      const CHILD = 'ses_child_s3'
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push({
+        id: 'ev_task_s3',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_task_s3',
+            messageID: 'msg_task_s3',
+            type: 'tool',
+            tool: 'task',
+            callID: 'call_task_s3',
+            state: { status: 'running', input: {}, metadata: { sessionId: CHILD } }
+          }
+        }
+      } as OpencodeEvent)
+      push(editAsk('per_ce', CHILD))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_ce', 'reject', PLAN_MODE_DENY_REASON)
+      )
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('the mode is read at ask time: after plan → default an edit asks the human', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      await session.setPermissionMode('default')
+      push(editAsk('per_sw'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      await settle()
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      // …and nothing the plan patch left behind is a deny a child would copy.
+      for (const [, body] of mockPatchSession.mock.calls) {
+        const rules = (body as { permission: Array<{ action: string }> }).permission
+        expect(rules.some((r) => r.action === 'deny')).toBe(false)
+      }
+      session.dispose()
+    })
+  })
+
+  describe('S3. MCP servers in the auto-mode ruleset', () => {
+    const lastPatch = (): Array<{ permission: string; pattern: string; action: string }> =>
+      (
+        mockPatchSession.mock.calls.at(-1)?.[1] as {
+          permission: Array<{ permission: string; pattern: string; action: string }>
+        }
+      ).permission
+
+    it('auto: one ask per `GET /mcp` server (claudeui excluded); default: none', async () => {
+      enableAuto()
+      mockMcpStatus.mockResolvedValue({ lsphub: { status: 'connected' } })
+      const { session } = await start('full')
+      expect(lastPatch()).toContainEqual({ permission: 'lsphub_*', pattern: '*', action: 'ask' })
+      // `claudeui` gets no per-server ask: only the dispatch tool's own.
+      expect(
+        lastPatch()
+          .filter((r) => r.permission.startsWith('claudeui'))
+          .map((r) => r.permission)
+      ).toEqual(['claudeui_dispatch_agent'])
+      expect(mockMcpStatus).toHaveBeenCalled()
+
+      await session.setPermissionMode('default')
+      expect(lastPatch().some((r) => r.permission === 'lsphub_*')).toBe(false)
+      session.dispose()
+    })
+
+    it('a failing `GET /mcp` still patches (static set) and warns once per session', async () => {
+      enableAuto()
+      mockMcpStatus.mockRejectedValue(new Error('boom'))
+      const warn = vi.spyOn(logger, 'warn')
+      const { session } = await start('full')
+      await session.setPermissionMode('full')
+      expect(mockPatchSession).toHaveBeenCalledTimes(2)
+      const warns = warn.mock.calls.filter((c) => String(c[1]).includes('GET /mcp failed'))
+      expect(warns).toHaveLength(1)
+      warn.mockRestore()
+      session.dispose()
+    })
+
+    it('an MCP ask that lands before its tool part: the judge sees the part input', async () => {
+      enableAuto()
+      __setToolInputWaitMsForTests(2000)
+      mockMcpStatus.mockResolvedValue({ lsphub: { status: 'connected' } })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session } = await start('full')
+      // opencode's MCP ask: the key, `patterns: ["*"]`, `metadata: {}` (session/tools.ts:408).
+      push({
+        id: 'ev_mcp_ask',
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id: 'per_mcp',
+          permission: 'lsphub_find_refs',
+          patterns: ['*'],
+          always: ['*'],
+          metadata: {},
+          tool: { callID: 'c_mcp', messageID: 'msg_c_mcp' }
+        }
+      } as OpencodeEvent)
+      await settle()
+      expect(mockJudge).not.toHaveBeenCalled()
+      push({
+        id: 'ev_mcp_part',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_c_mcp',
+            messageID: 'msg_c_mcp',
+            type: 'tool',
+            tool: 'lsphub_find_refs',
+            callID: 'c_mcp',
+            state: { status: 'running', input: { symbol: 'needle_s3_symbol' } }
+          }
+        }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mcp', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      const [call] = mockJudge.mock.calls[0] as [FakeJudgeCall]
+      expect(call.user).toContain('needle_s3_symbol')
+      session.dispose()
+    })
   })
 })

@@ -122,11 +122,52 @@ describe.each(['acceptEdits', 'autoEdit'])('buildRuleset(%s) — agent-control e
 })
 
 describe('buildRuleset — other modes are unchanged by the agent-control asks', () => {
-  it('default still asks for every edit with a single rule; plan still denies every edit', () => {
+  it('default still asks for every edit with a single rule; plan asks too (refused host-side, ADR-085 §3)', () => {
     const dflt = buildRuleset('default').filter((r) => r.permission === 'edit')
     expect(dflt).toEqual([{ permission: 'edit', pattern: '*', action: 'ask' }])
     const plan = buildRuleset('plan').filter((r) => r.permission === 'edit')
-    expect(plan).toEqual([{ permission: 'edit', pattern: '*', action: 'deny' }])
+    expect(plan).toEqual([{ permission: 'edit', pattern: '*', action: 'ask' }])
+  })
+})
+
+describe('buildRuleset(plan) — no server-side deny (ADR-085 §3)', () => {
+  it('edit and task:general ask; nothing a task child could copy is a deny', () => {
+    const plan = buildRuleset('plan')
+    expect(plan).toContainEqual({ permission: 'edit', pattern: '*', action: 'ask' })
+    expect(plan).toContainEqual({ permission: 'task', pattern: 'general', action: 'ask' })
+    // A child copies every parent deny (`agent/subagent-permissions.ts`), and PATCH appends.
+    expect(plan.filter((r) => r.action === 'deny')).toEqual([])
+    // explore stays allowed via the baseline.
+    expect(evaluateOpencodeRules('task', 'explore', plan, 'linux')).toBe('allow')
+  })
+})
+
+describe('buildAutoModeRuleset — per-server MCP asks (ADR-085 §3)', () => {
+  it('asks for each known server except claudeui, sanitised, never *_*', () => {
+    const auto = buildAutoModeRuleset({ mcpServers: ['claudeui', 'lsphub', 'my server'] })
+    const mcp = auto.filter((r) => r.permission.endsWith('_*'))
+    expect(mcp).toEqual([
+      { permission: 'lsphub_*', pattern: '*', action: 'ask' },
+      { permission: 'my_server_*', pattern: '*', action: 'ask' }
+    ])
+    expect(auto.some((r) => r.permission === '*_*')).toBe(false)
+    expect(auto.some((r) => r.permission.startsWith('claudeui'))).toBe(false)
+    for (const platform of ['linux', 'win32'] as const) {
+      expect(evaluateOpencodeRules('lsphub_find_refs', '*', auto, platform)).toBe('ask')
+      expect(evaluateOpencodeRules('my_server_x', '*', auto, platform)).toBe('ask')
+      // Hosted tools stay allowed; built-in keys with `_` are untouched.
+      expect(evaluateOpencodeRules('claudeui_render_mermaid', '*', auto, platform)).toBe('allow')
+      expect(evaluateOpencodeRules('external_directory', '/x/*', auto, platform)).toBe('allow')
+    }
+  })
+
+  it('without servers it is unchanged; default and plan carry no MCP rule', () => {
+    expect(buildAutoModeRuleset({ mcpServers: [] })).toEqual(buildAutoModeRuleset())
+    for (const mode of ['default', 'plan', 'acceptEdits']) {
+      const rs = buildRuleset(mode)
+      expect(rs.some((r) => r.permission.endsWith('_*'))).toBe(false)
+      expect(evaluateOpencodeRules('lsphub_find_refs', '*', rs, 'linux')).toBe('allow')
+    }
   })
 })
 

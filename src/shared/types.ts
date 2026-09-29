@@ -187,7 +187,9 @@ export type PermissionDenialBlock = {
    * `permissionPromptTool` — those denials are fully described by their source.
    * The opencode host's own `rule` denial (ADR-085 S2) does carry one: the
    * rule that refused, `Denied by permission rule: <rule>`, since no other
-   * frame names it.
+   * frame names it. So does its `mode` denial (ADR-085 §3, plan mode's
+   * host-side refusal of an edit or a `general` subagent): the plan-mode text
+   * the model was given.
    */
   reason?: string
 }

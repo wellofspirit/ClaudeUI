@@ -161,8 +161,10 @@ describe('conformance: opencode plan mode is never more permissive than default 
     expect(evaluate('read', 'src/index.ts', plan)).toBe('allow')
     expect(evaluate('grep', 'TODO', plan)).toBe('allow')
     expect(evaluate('glob', '**/*.ts', plan)).toBe('allow')
-    // Only the MUTATING `general` subagent is denied — read-only ones still run.
-    expect(evaluate('task', 'general', plan)).toBe('deny')
+    // Only the MUTATING `general` subagent is held — an ask the host refuses
+    // (ADR-085 §3: a server-side deny outlives the mode and binds every task
+    // child) — read-only ones still run.
+    expect(evaluate('task', 'general', plan)).toBe('ask')
     expect(evaluate('task', 'explore', plan)).toBe('allow')
   })
 

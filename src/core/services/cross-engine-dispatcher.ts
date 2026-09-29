@@ -46,6 +46,11 @@ import { OpencodeClient } from '../opencode/OpencodeClient'
 // for any other existing importer.
 import { buildRuleset } from '../opencode/permission-ruleset'
 import type { PermissionRule } from '../opencode/permission-ruleset'
+// Already in this module's graph through `pi/permission-engine.ts`, which
+// imports it (no new edge, no cycle).
+import { compileClaudeRulesToOpencode } from '../opencode/permission-compiler'
+import { denyAskHit } from '../permissions/shell-rules'
+import { isShellToolName } from '../automode/shell-lexical'
 import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig, loadSettings } from './ui-config'
@@ -72,7 +77,6 @@ import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
 import { mapPiEvent, createPiMapperState, finishPiMessage } from '../pi/event-mapper'
 import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
-import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
 import type {
   PiGetStateData,
   PiGetLastAssistantTextData,
@@ -101,10 +105,10 @@ import type { CodexMappedEvent } from '../codex/event-mapper'
 import { unwrapShellCommand } from '../codex/command-text'
 import {
   decideWithSource,
-  EMPTY_RULES as EMPTY_CODEX_RULES,
+  mergedClaudeRulesFor,
   PLAN_MODE_DENY_REASON
 } from '../pi/permission-engine'
-import type { PermissionDecision } from '../pi/permission-engine'
+import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
 import type { Turn } from '../codex/protocol/v2/Turn'
@@ -334,6 +338,14 @@ export interface ClaudeQuerySpawnOpts {
   canUseTool: CanUseTool
   abortController: AbortController
   prompt: AsyncIterable<Record<string, unknown>>
+  /**
+   * `--settings <json>` for the target (ADR-085 §3): `{ permissions: { deny,
+   * ask } }` when the user has any deny/ask rule, absent otherwise. It is
+   * cli.js's `flagSettings` source, independent of `settingSources: []`
+   * (`docs/protocol-cc/02-cli-flags.md` §2.6; `sdk/args.ts` emits
+   * `options.settings` as `--settings`).
+   */
+  settings?: Record<string, unknown>
 }
 
 /**
@@ -448,6 +460,13 @@ export interface DispatcherDeps {
   loadEngineConfig: (engineId: string) => EngineConfig
   /** Defaults to the real sdkQuery + claudeSpawnPrep. */
   spawnClaudeQuery?: SpawnClaudeQueryFn
+  /**
+   * The user's merged Claude permission rules for a cwd (ADR-085 §3 — every
+   * target gets their deny/ask tiers, never their allow tier). Defaults to
+   * `mergedClaudeRulesFor`, which reads the user's settings files; tests inject
+   * a stub to stay hermetic.
+   */
+  loadUserRules?: (cwd: string) => MergedClaudeRules
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
   /** Defaults to a thread on the caller's host (ADR-033 slice H, ADR-069 §7). */
@@ -564,7 +583,7 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
  * escalation set — UNLIKE PiSession's own interactive sessionAllows, a
  * dispatched target's `gatePiTargetToolCall` treats 'allowForSession'
  * IDENTICALLY to a one-off 'allow' (see its resolve callback): each tool_call
- * runs `decide()` fresh, matching `awaitClaudeTargetApproval`, which ALSO
+ * runs `decideWithSource()` fresh, matching `awaitClaudeTargetApproval`, which ALSO
  * never persists any escalation state across a Claude target's tool calls.
  * One shared, frozen, empty Set — never mutated — so no per-target
  * allocation is needed.
@@ -864,6 +883,15 @@ interface OpencodeTargetEntry {
    *  same rebuilt message on every part update), `.size` read once at turn
    *  end for the notification/usage-record `toolUses` figure. */
   turnToolUseIds: Set<string>
+  /**
+   * This target's task children (child session id → the target's `task`
+   * callID), registered by `mapEvent` when a task part reports its child
+   * session (ADR-085 §3). Read ONLY by `opencodeTargetForSession` for
+   * `permission.asked`, so a target subagent's ask is forwarded instead of
+   * parking forever; a child's `session.idle`/`session.error` never settles
+   * the target's turn (those branches look up target ids only).
+   */
+  childSessions: Map<string, string>
 }
 
 /**
@@ -1017,7 +1045,7 @@ interface PiTargetEntry {
    * (possibly different) `ctx.autonomyMode` is IGNORED for gating purposes,
    * mirroring the Claude target's `permissionMode`, which is baked into the
    * spawned process at creation and can never change later either. Passed
-   * DIRECTLY (no translation) as `permission-engine.ts`'s `decide()` `mode`
+   * DIRECTLY (no translation) as `permission-engine.ts`'s `decideWithSource()` `mode`
    * param — `modeBaseDecision` already natively accepts this exact vocabulary
    * ('auto'/'bypassPermissions' → allow-all, 'acceptEdits' → partial,
    * 'plan'/'default'/anything else → conservative), so unlike
@@ -1877,7 +1905,11 @@ function buildClaudeDispatchMessage(
  * item 5).
  *  - 'auto' / 'bypassPermissions' → bypassPermissions + allowDangerouslySkipPermissions:
  *    no LLM judge is spun up for dispatched targets in v1 (ADR-033 §5) —
- *    "full" autonomy on the caller means allow-all on the target too.
+ *    "full" autonomy on the caller means allow-all on the target too, except
+ *    the user's deny/ask rules (ADR-085 §3, passed as `--settings`): cli.js
+ *    returns an ask for a bare or specifier ask rule BEFORE its
+ *    bypassPermissions mode-allow branch, and a deny before that (cli.js
+ *    2.1.280 `kNt`, verified 2026-09-30).
  *  - 'plan' → 'default': a strictly read-only dispatched agent can't do any
  *    useful work, so we fall back to the conservative ask-everything mode
  *    instead of inheriting plan's refusal-by-default.
@@ -1930,6 +1962,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       ...(opts.allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
       persistSession: false,
       settingSources: [],
+      ...(opts.settings ? { settings: opts.settings } : {}),
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
@@ -2039,6 +2072,7 @@ export class CrossEngineDispatcher {
   private readonly codexAbortSettleGraceMs: number
   private readonly sseReconnectDelayMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
+  private readonly loadUserRules: (cwd: string) => MergedClaudeRules
   private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly attachCodexTarget: AttachCodexTargetFn
   private readonly codexVaultAccounts: boolean
@@ -2091,6 +2125,7 @@ export class CrossEngineDispatcher {
     this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
     this.sseReconnectDelayMs = deps.sseReconnectDelayMs ?? SSE_RECONNECT_DELAY_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
+    this.loadUserRules = deps.loadUserRules ?? mergedClaudeRulesFor
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
     this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
     this.codexVaultAccounts = deps.codexVaultAccounts ?? false
@@ -2101,6 +2136,40 @@ export class CrossEngineDispatcher {
   /** For tests: current in-flight dispatch count. */
   get inFlightCount(): number {
     return this.activeDispatches
+  }
+
+  /**
+   * The user's deny and ask rules for `cwd`, with an EMPTY allow tier (ADR-085
+   * §3, owner ruling 3: deny/ask rules hold in every mode, dispatch targets
+   * included). Targets never get the user's allow rules or additional
+   * directories — a dispatched agent is governed by its autonomy mode, not by
+   * what the user pre-approved for their own chats (ADR-033). Read fresh per
+   * call, like the interactive sessions' gates.
+   */
+  private userDenyAsk(cwd: string): MergedClaudeRules {
+    const rules = this.loadUserRules(cwd)
+    return {
+      deny: [...rules.deny],
+      ask: [...rules.ask],
+      allow: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }
+  }
+
+  /**
+   * The opencode target an event's session belongs to: the target itself, or
+   * the target whose task child it is (`OpencodeTargetEntry.childSessions`).
+   * For `permission.asked` ONLY — a child's `session.idle`/`session.error` must
+   * never settle the target's turn, so those branches keep `this.targets.get`.
+   */
+  private opencodeTargetForSession(sessionID: string): OpencodeTargetEntry | undefined {
+    const own = this.targets.get(sessionID)
+    if (own) return own.kind === 'opencode' ? own : undefined
+    for (const entry of this.targets.values()) {
+      if (entry.kind === 'opencode' && entry.childSessions.has(sessionID)) return entry
+    }
+    return undefined
   }
 
   /**
@@ -2892,10 +2961,15 @@ export class CrossEngineDispatcher {
       const session = await rec.client.createSession({
         title: OPENCODE_DISPATCH_SESSION_TITLE
       })
-      // Inherit the dispatcher's autonomy mode, plus a structural recursion
-      // guard: the target can never call the dispatch tool back (ADR-033 §4).
+      // Inherit the dispatcher's autonomy mode, then the user's deny/ask rules
+      // compiled like an interactive session's (broad Bash globs, MCP keys —
+      // ADR-085 §3; never their allow rules, ADR-033), plus a structural
+      // recursion guard LAST: the target can never call the dispatch tool back
+      // (ADR-033 §4). The host check in `handleSseEvent` backs the compiled
+      // rules at the ask.
       const ruleset: PermissionRule[] = [
         ...buildRuleset(ctx.autonomyMode),
+        ...compileClaudeRulesToOpencode(this.userDenyAsk(ctx.cwd)),
         { permission: 'claudeui_dispatch_agent*', pattern: '*', action: 'deny' }
       ]
       await rec.client.patchSession(session.id, { permission: ruleset })
@@ -2918,7 +2992,8 @@ export class CrossEngineDispatcher {
         activeStreamItems: new Map(),
         cumulativeCostUsd: 0,
         unpricedTurns: 0,
-        turnToolUseIds: new Set()
+        turnToolUseIds: new Set(),
+        childSessions: new Map()
       }
       this.targets.set(session.id, entry)
       return entry
@@ -3221,13 +3296,26 @@ export class CrossEngineDispatcher {
       const sessionID = props.sessionID as string | undefined
       const id = props.id as string | undefined
       if (!sessionID || !id) return
-      const entry = this.targets.get(sessionID)
-      if (!entry || entry.kind !== 'opencode') return // foreign session — not an opencode dispatch target
+      // The target's own ask, or one of its task children's (ADR-085 §3) —
+      // forwarded the same way; without this a target subagent's ask parked
+      // forever.
+      const entry = this.opencodeTargetForSession(sessionID)
+      if (!entry) return // foreign session — not an opencode dispatch target or its child
 
       const requestId = XENG_REQUEST_PREFIX + id
       const permission = (props.permission as string | undefined) ?? 'tool'
       const metadata = (props.metadata as Record<string, unknown> | undefined) ?? {}
       const patterns = props.patterns as string[] | undefined
+      const refusal = this.opencodeTargetRefusal(entry, permission, metadata, patterns)
+      if (refusal !== undefined) {
+        entry.client.replyPermission(id, 'reject', refusal).catch((err) => {
+          logger.warn(
+            'CrossEngineDispatcher',
+            `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
+        return
+      }
       // The TARGET-side tool call this ask belongs to. The target's stream is
       // replayed on the dispatching client under the dispatch tool card, so
       // this id is the one the nested tool block there carries — binding it
@@ -3245,7 +3333,9 @@ export class CrossEngineDispatcher {
       this.pendingApprovals.set(requestId, {
         kind: 'opencode',
         permissionId: id,
-        targetSessionId: sessionID,
+        // The TARGET's id even for a child's ask, so disposal and the turn
+        // watchdog's "parked on a human" check see it.
+        targetSessionId: entry.sessionId,
         client: entry.client,
         emit: entry.ctx.emit
       })
@@ -3271,6 +3361,42 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * The host check at an opencode target's ask (ADR-085 §3), before any card:
+   * the reject text when the host refuses it, else `undefined` (forward as
+   * before).
+   * 1. Plan mode: the plan ruleset ASKS for `edit` and `task:general` (a
+   *    server-side deny would outlive the mode — `buildRuleset('plan')`), so
+   *    the refusal is made here, with the same text pi and Codex use.
+   * 2. A `bash` ask a user DENY rule hits (the §1 matcher, over the
+   *    statement's `metadata.command`, else its patterns) — refused with the
+   *    rule; an ask-rule hit or none is forwarded: the human decides either
+   *    way, as a target has no judge.
+   * No command text is logged (ADR-084 logging rule).
+   */
+  private opencodeTargetRefusal(
+    entry: OpencodeTargetEntry,
+    permission: string,
+    metadata: Record<string, unknown>,
+    patterns: string[] | undefined
+  ): string | undefined {
+    if (
+      entry.ctx.autonomyMode === 'plan' &&
+      (permission === 'edit' || (permission === 'task' && (patterns ?? []).includes('general')))
+    ) {
+      logger.info('CrossEngineDispatcher', `opencode target: plan mode refused ${permission}`)
+      return PLAN_MODE_DENY_REASON
+    }
+    if (permission !== 'bash') return undefined
+    const command =
+      typeof metadata.command === 'string' ? metadata.command : (patterns ?? []).join('\n')
+    if (!command) return undefined
+    const hit = denyAskHit(command, this.userDenyAsk(entry.cwd))
+    if (hit?.tier !== 'deny') return undefined
+    logger.info('CrossEngineDispatcher', `opencode target: permission rule deny bash — ${hit.rule}`)
+    return `Denied by permission rule: ${hit.rule}`
+  }
+
+  /**
    * Forward an opencode dispatch target's live turn output as engine-neutral
    * subagent events (ADR-033 M3). Reuses `mapEvent` (event-mapper.ts) by
    * treating the TARGET's session id as the "own" session — the exact same
@@ -3280,25 +3406,37 @@ export class CrossEngineDispatcher {
    *
    * Gated on `entry.busy` (a completed/aborted turn's trailing SSE chatter
    * must never emit), on `entry.ctx.toolUseId` (no id → no way to key the
-   * event on the renderer side — never fail the dispatch over it, just skip),
-   * and on `entry.priorMessageIds` (a PREVIOUS turn's message must never land
-   * on this turn's card — see that field's doc for the post-abort republish
-   * that makes this reachable).
+   * event on the renderer side — never fail the dispatch over it, just skip
+   * the emits; the event is still mapped, so a task child is registered for
+   * its asks either way — ADR-085 §3), and on `entry.priorMessageIds` (a
+   * PREVIOUS turn's message must never land on this turn's card — see that
+   * field's doc for the post-abort republish that makes this reachable).
    */
   private handleOpencodeTargetStream(ev: OpencodeEvent): void {
     const sessionID = ev.properties.sessionID as string | undefined
     if (!sessionID) return
     const entry = this.targets.get(sessionID)
     if (!entry || entry.kind !== 'opencode' || !entry.busy) return
-    const toolUseId = entry.ctx.toolUseId
-    if (!toolUseId) return
 
     // DUMMY startTimeMs/totalCostUsd — they are consumed ONLY by mapEvent's
     // cost_update / result branches, which this tap deliberately ignores:
     // completion is settled directly from `session.idle` (never routed through
     // mapEvent, precisely because these refs are fake) and metering is read
-    // from stored history at turn end.
-    const output = mapEvent(ev, sessionID, entry.accumulators, Date.now(), { value: 0 })
+    // from stored history at turn end. `childSessions` is where mapEvent
+    // registers the target's task children (a task part with
+    // `state.metadata.sessionId`) — read back by `opencodeTargetForSession`
+    // (ADR-085 §3). A child's own events never get here: this tap looks up
+    // target ids only.
+    const output = mapEvent(
+      ev,
+      sessionID,
+      entry.accumulators,
+      Date.now(),
+      { value: 0 },
+      entry.childSessions
+    )
+    const toolUseId = entry.ctx.toolUseId
+    if (!toolUseId) return
     switch (output.kind) {
       case 'stream':
         // A delta against a prior turn's message is that turn's, not ours.
@@ -3524,6 +3662,9 @@ export class CrossEngineDispatcher {
       entry = shell.entry
       try {
         const mode = mapAutonomyToClaudeTargetMode(ctx.autonomyMode)
+        // ADR-085 §3 — the user's deny/ask rules as the target's flag
+        // settings (never the allow tier); omitted when there are none.
+        const { deny, ask } = this.userDenyAsk(ctx.cwd)
         entry.query = await this.spawnClaudeQuery({
           cwd: ctx.cwd,
           model,
@@ -3531,7 +3672,8 @@ export class CrossEngineDispatcher {
           allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
           canUseTool: shell.canUseTool,
           abortController: entry.abortController,
-          prompt: entry.channel
+          prompt: entry.channel,
+          ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {})
         })
         entry.iterator = entry.query[Symbol.asyncIterator]()
       } catch (err) {
@@ -4000,6 +4142,13 @@ export class CrossEngineDispatcher {
    * Forward a Claude target's tool-approval request into the dispatching
    * session's chat (ADR-033 M2 item 7) — the Claude-target mirror of the SSE
    * loop's `permission.asked` handling for opencode targets.
+   *
+   * ADR-085 §3 — first, a shell command a user DENY rule hits by the §1
+   * matcher is refused with the rule, no card: cli.js got the same rules as
+   * `--settings` but matches them by its own text prefix, which a reordered
+   * form evades. Residual: under `bypassPermissions` (an auto/bypass target)
+   * only what cli.js itself asks reaches this gate, so there cli.js's own
+   * matcher decides the rest.
    */
   private awaitClaudeTargetApproval(
     entry: ClaudeTargetEntry,
@@ -4007,6 +4156,19 @@ export class CrossEngineDispatcher {
     input: Record<string, unknown>,
     opts: CanUseToolContext
   ): Promise<CanUseToolResult> {
+    if (isShellToolName(toolName) && typeof input.command === 'string') {
+      const hit = denyAskHit(input.command, this.userDenyAsk(entry.cwd))
+      if (hit?.tier === 'deny') {
+        logger.info(
+          'CrossEngineDispatcher',
+          `claude target: permission rule deny ${toolName} — ${hit.rule}`
+        )
+        return Promise.resolve({
+          behavior: 'deny',
+          message: `Denied by permission rule: ${hit.rule}`
+        })
+      }
+    }
     return new Promise<CanUseToolResult>((resolve) => {
       const requestId = XENG_REQUEST_PREFIX + uuidv4()
       const approval: PendingApproval = {
@@ -4841,22 +5003,21 @@ export class CrossEngineDispatcher {
    * Gate handler for a pi dispatch target's PiBridgeHost (the two-stage
    * approval gate, ADR-033 M4c) — mirrors `awaitClaudeTargetApproval`'s
    * ROLE (forward an 'ask' to the dispatching session, resolve a local
-   * Promise) with an extra stage IN FRONT of it: `permission-engine.decide()`
-   * runs FIRST against the target's fixed `autonomyMode` with EMPTY Claude
-   * rules + an empty sessionAllows set — a dispatched target does not
-   * inherit the user's interactive-session rules (see PiTargetEntry.autonomyMode's
-   * doc comment) — so ONLY an 'ask' decision ever reaches a human; 'allow'
-   * resolves immediately (no round-trip), and a full-autonomy dispatch target
-   * (mode 'auto'/'bypassPermissions') NEVER prompts, matching the Claude
-   * target's allow-all under bypassPermissions.
+   * Promise) with an extra stage IN FRONT of it: `permission-engine.decideWithSource()`
+   * runs FIRST against the target's fixed `autonomyMode` with the user's
+   * DENY and ASK rules only (ADR-085 §3 — never their allow rules or
+   * "allow for this session" clicks: a dispatched target does not inherit
+   * what the user pre-approved for their own chats, see
+   * PiTargetEntry.autonomyMode's doc comment) + an empty sessionAllows set —
+   * so ONLY an 'ask' decision ever reaches a human; 'allow' resolves
+   * immediately (no round-trip). The ask-rule rung precedes the mode base, so
+   * a full-autonomy dispatch target (mode 'auto'/'bypassPermissions') still
+   * asks on a user ask rule, and a user deny rule refuses with the rule —
+   * otherwise it allows, matching the Claude target under bypassPermissions.
    *
-   * NOTE: with EMPTY rules, `decide()` can structurally never return 'deny'
-   * (`modeBaseDecision`'s own return type is `'allow' | 'ask'` — rules-based
-   * deny is the ONLY source of a 'deny' verdict, and the rules are empty
-   * here). The 'deny' branch below is kept anyway for defensive completeness
-   * against `decide()`'s full return type (and in case a future change starts
-   * passing real rules) — see the M4c report for the full discussion of this
-   * tension against the kickoff spec's phrasing.
+   * A 'deny' is either a user deny rule (reported with the rule) or the mode
+   * base (plan mode's read-only refusals, `exit_plan` outside plan mode) —
+   * 'Denied by dispatch autonomy mode'.
    *
    * `toolUseId` on the forwarded approval is the pi tool call's OWN id
    * (`payload.toolCallId`), NOT the outer dispatching `ctx.toolUseId` —
@@ -4874,9 +5035,9 @@ export class CrossEngineDispatcher {
    * private `buildApprovalSuggestions` here or exporting/refactoring it out
    * of PiSession.ts, which the kickoff spec says not to revisit for M4c. The
    * approval still fully functions via Allow/Deny — only the persistent
-   * "always allow" convenience is missing, and it would write to the SAME
-   * shared Claude permission files a dispatch target's gate deliberately does
-   * NOT consult (rules are empty here), so its practical value would be
+   * "always allow" convenience is missing, and it would write an ALLOW rule to
+   * the shared Claude permission files, whose allow tier a dispatch target's
+   * gate deliberately does NOT consult, so its practical value would be
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
   private gatePiTargetToolCall(
@@ -4888,9 +5049,9 @@ export class CrossEngineDispatcher {
     if (entry.draining) {
       return Promise.resolve({ behavior: 'deny', reason: 'Dispatch stopped' })
     }
-    const decision = decide(payload.toolName, payload.input, {
+    const verdict = decideWithSource(payload.toolName, payload.input, {
       mode: entry.autonomyMode,
-      rules: EMPTY_PI_RULES,
+      rules: this.userDenyAsk(entry.cwd),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
@@ -4898,9 +5059,15 @@ export class CrossEngineDispatcher {
       cwd: entry.cwd
     })
 
-    if (decision === 'allow') return Promise.resolve({ behavior: 'allow' })
-    if (decision === 'deny') {
-      return Promise.resolve({ behavior: 'deny', reason: 'Denied by dispatch autonomy mode' })
+    if (verdict.decision === 'allow') return Promise.resolve({ behavior: 'allow' })
+    if (verdict.decision === 'deny') {
+      return Promise.resolve({
+        behavior: 'deny',
+        reason:
+          verdict.source === 'deny-rule'
+            ? `Denied by permission rule: ${verdict.rule}`
+            : 'Denied by dispatch autonomy mode'
+      })
     }
 
     // 'ask' — forward to the DISPATCHING session, mirrors awaitClaudeTargetApproval.
@@ -5831,33 +5998,35 @@ export class CrossEngineDispatcher {
    * deliberately narrowed copy of `CodexSession.requestApproval`'s gating half.
    *
    * The shared permission engine runs FIRST, against the target's FIXED
-   * `autonomyMode`, with EMPTY rules and an empty session-allow set: a
-   * dispatched target does not inherit the user's own interactive rules or
-   * their "allow for this session" clicks (same reasoning as the pi target's
-   * gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
+   * `autonomyMode`, with the user's DENY and ASK rules only (ADR-085 §3) and an
+   * empty session-allow set: a dispatched target does not inherit the user's
+   * allow rules or their "allow for this session" clicks (same reasoning as
+   * the pi target's gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
    * client, bound to the target ITEM's own id — `FloatingApproval
    * .useUnmatchedApprovals` matches a `PendingApproval.toolUseId` against
    * TOP-LEVEL message tool_use ids only, and a target's inner ids live in the
    * subagent bucket, so an inner id is what makes the card render (floating).
    *
-   * Per mode, with EMPTY rules:
+   * A user deny rule refuses (with the rule) and a user ask rule asks, in
+   * EVERY mode — both rungs precede the mode base. Past them, per mode:
    *  - plan: `planModeBaseDecision` DENIES every write and every command that
    *    is not plan-safe. Nothing is forwarded and nothing waits — which is the
    *    whole point for a target with no human: a read-only dispatch cannot
    *    park forever on a question.
    *  - default / acceptEdits: reads and searches allow; the rest asks, and the
    *    ask is forwarded to the caller.
-   *  - auto: allow-all HERE, because the decision was already made natively —
-   *    the thread runs `approvalsReviewer: 'auto_review'`, so the only requests
-   *    that reach this gate at all are the ones that subagent escalated. This
-   *    is the one place the target is laxer than `CodexSession.gate`, which
-   *    re-gates `auto` as `default` because an interactive session HAS a human
-   *    to escalate to. It is also why `auto` never maps to `never`/bypass: the
-   *    native reviewer, not nobody, is the decider.
+   *  - auto: the mode base allows HERE, because the decision was already made
+   *    natively — the thread runs `approvalsReviewer: 'auto_review'`, so the
+   *    only requests that reach this gate at all are the ones that subagent
+   *    escalated. This is the one place the target is laxer than
+   *    `CodexSession.gate`, which re-gates `auto` as `default` because an
+   *    interactive session HAS a human to escalate to. It is also why `auto`
+   *    never maps to `never`/bypass: the native reviewer, not nobody, is the
+   *    decider. A user ask rule still asks the caller's human.
    *
    * `suggestions` ("always allow" checkboxes) are deliberately omitted, same as
-   * the pi target: they would write to the shared permission files this gate
-   * deliberately does not read.
+   * the pi target: they would write allow rules to the shared permission
+   * files, whose allow tier this gate deliberately does not read.
    */
   private gateCodexTargetRequest(
     entry: CodexTargetEntry,
@@ -5993,7 +6162,7 @@ export class CrossEngineDispatcher {
     if (gated.length === 0) return { decision: 'ask' }
     const engineCtx = {
       mode: entry.autonomyMode,
-      rules: EMPTY_CODEX_RULES,
+      rules: this.userDenyAsk(entry.cwd),
       sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
       cwd: entry.cwd
     }
@@ -6006,8 +6175,8 @@ export class CrossEngineDispatcher {
       // unconditionally, which on this engine would silently apply a patch
       // ANYWHERE on disk, while Codex's own workspaceWrite sandbox draws the
       // line at the workspace. A mode-base allow outside cwd is downgraded to a
-      // human ask. (Only mode-base verdicts — but the rules are empty on a
-      // target, so mode-base is the only rung that can allow here at all.)
+      // human ask. (Only mode-base verdicts — a target's allow tier is empty,
+      // so mode-base is the only rung that can allow here at all.)
       if (
         step === 'allow' &&
         verdict.source === 'mode-base' &&
@@ -6019,9 +6188,11 @@ export class CrossEngineDispatcher {
         return {
           decision: 'deny',
           reason:
-            entry.autonomyMode === 'plan'
-              ? PLAN_MODE_DENY_REASON
-              : 'Denied by dispatch autonomy mode'
+            verdict.source === 'deny-rule'
+              ? `Denied by permission rule: ${verdict.rule}`
+              : entry.autonomyMode === 'plan'
+                ? PLAN_MODE_DENY_REASON
+                : 'Denied by dispatch autonomy mode'
         }
       if (step === 'ask') decision = 'ask'
     }

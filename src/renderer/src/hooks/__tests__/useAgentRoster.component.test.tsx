@@ -101,6 +101,41 @@ describe('useAgentRoster', () => {
     expect(seen?.totalCount).toBe(3)
   })
 
+  // ADR-085 §3: the opencode host refuses a plan-mode `general` spawn before it
+  // runs, and the refusal lands as a `permission_denial` on the task call.
+  it('a refused spawn (a permission_denial on the task call) is no row', async () => {
+    const refused: ChatMessage = {
+      id: 'm1',
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-refused',
+          toolName: 'Task',
+          toolInput: { subagent_type: 'general', description: 'edit things' }
+        },
+        {
+          type: 'permission_denial',
+          toolUseId: 'tu-refused',
+          denialId: 'd1',
+          source: 'mode',
+          reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+        }
+      ],
+      timestamp: Date.now()
+    } as ChatMessage
+    setSession({
+      messages: [
+        refused,
+        toolResult('m2', 'tu-refused', true),
+        assistantWithTool('m3', 'tu-ok', 'Task', { subagent_type: 'explore', description: 'look' })
+      ]
+    })
+    await renderProbe()
+    expect(seen?.agents.map((r) => r.toolUseId)).toEqual(['tu-ok'])
+    expect(seen?.totalCount).toBe(1)
+  })
+
   it('ignores ordinary tool calls', async () => {
     setSession({
       messages: [

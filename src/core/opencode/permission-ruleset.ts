@@ -7,10 +7,13 @@
  * OpencodeSession.ts itself needs to call into the dispatcher (ADR-033 M2 —
  * `cancel()` tears down dispatch targets it owns, mirroring ClaudeSession):
  * cross-engine-dispatcher.ts → OpencodeSession.ts → cross-engine-dispatcher.ts.
- * This module has no dependents that could complete such a cycle.
+ * This module has no dependents that could complete such a cycle (nor does
+ * `permission-compiler.ts`, which the dispatcher already reaches through
+ * `pi/permission-engine.ts`).
  */
 
 import { agentControlEditPatterns } from '../automode/agent-control-paths'
+import { opencodeMcpKey } from './permission-compiler'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
 
@@ -84,13 +87,28 @@ export function buildRuleset(mode: string): PermissionRule[] {
       ]
     case 'plan':
       // Read-only planning. Pairs with opencode's `plan` agent (set in
-      // applyPermissionMode). Mirrors that agent's own rules (verified in the
-      // opencode source — plan = merge(base, { edit:{'*':deny, …plan files…},
-      // task:{general:deny} })): deny edits, and deny ONLY the mutating
-      // `general` subagent. Read-only subagents (e.g. `explore`) stay allowed
-      // via the baseline, so plan-mode research/`task` still works. `deny`
-      // refuses without prompting → no approval round-trip, no hang.
-      // (We don't reproduce opencode's plan-file edit allow-list — minor.)
+      // applyPermissionMode), whose own rules are plan = merge(base, {
+      // edit:{'*':deny, …plan files…}, task:{general:deny} }): no edits, and
+      // not the mutating `general` subagent. Read-only subagents (e.g.
+      // `explore`) stay allowed via the baseline, so plan-mode research/`task`
+      // still works. (We don't reproduce opencode's plan-file edit allow-list
+      // — minor.)
+      //
+      // ADR-085 §3 — those two are `ask` here, NOT `deny`, and the REFUSAL is
+      // host-side: `OpencodeSession.routePermissionAsk` (own and child asks)
+      // and the dispatcher's `permission.asked` branch (plan dispatch targets)
+      // reject them with PLAN_MODE_DENY_REASON, reading the mode at ask time.
+      // A server-side deny went stale: PATCH APPENDS
+      // (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:194-198`,
+      // `Permission.merge(current, payload)`) and a task child copies EVERY
+      // deny of the parent session (`agent/subagent-permissions.ts:20-26`), so
+      // after a plan → default switch the `edit`/`task:general` denies kept
+      // binding the chat's subagents — they could never edit again. An ask
+      // leaves nothing behind that a later mode's rules do not outrank.
+      // Visible consequence: edit tools are no longer HIDDEN from the model in
+      // plan mode (`permission/index.ts` `disabled()` hides a tool only for a
+      // `deny` whose pattern is `*`); the plan agent's prompt and the host
+      // refusal hold the line.
       //
       // …PLUS the same `bash`/`webfetch` gates `default` carries. opencode's
       // OWN plan agent leaves those on the `{*:allow}` baseline (it relies on
@@ -109,8 +127,8 @@ export function buildRuleset(mode: string): PermissionRule[] {
       return [
         allowAll,
         ...guards,
-        rule('edit', 'deny'),
-        { permission: 'task', pattern: 'general', action: 'deny' },
+        rule('edit', 'ask'),
+        { permission: 'task', pattern: 'general', action: 'ask' },
         rule('bash', 'ask'),
         rule('webfetch', 'ask')
       ]
@@ -140,6 +158,12 @@ export function buildRuleset(mode: string): PermissionRule[] {
 }
 
 /**
+ * ClaudeUI's own hosted MCP server name on opencode (`opencode-hosted-tools.ts`,
+ * `OpencodeServerManager.ts` — its tools are `claudeui_<tool>`).
+ */
+export const CLAUDEUI_MCP_SERVER = 'claudeui'
+
+/**
  * The base ruleset auto mode patches (ADR-023; ADR-084 §3): the acceptEdits
  * base, except that EVERY edit asks. `OpencodeSession.handleAutoModeApproval`
  * then clears an edit host-side with the shared agent-control matcher
@@ -150,10 +174,29 @@ export function buildRuleset(mode: string): PermissionRule[] {
  * move destinations, none of which opencode's server-side patterns can do.
  * The agent-control asks are therefore dropped here: the blanket ask covers
  * them.
+ *
+ * ADR-085 §3 — plus one `ask` per MCP server in `opts.mcpServers`
+ * (`<sanitized server>_*`), so every MCP call reaches the host (the user's MCP
+ * rules, then the judge) instead of the `{*: allow}` baseline answering it
+ * server-side. Never `*_*`: built-in permission keys contain `_` too
+ * (`external_directory`, `doom_loop`). `claudeui` is excluded — its hosted
+ * tools (mermaid, mockups) stay allowed as pi's `PI_AUTO_ALLOW_HOSTED_TOOLS`
+ * do, and its dispatch tool keeps `DISPATCH_AGENT_ASK_RULE` (appended last by
+ * the session). These sit BEFORE the user's compiled rules, so a user MCP
+ * allow/ask/deny rule still wins. Non-auto modes keep the baseline for MCP.
  */
-export function buildAutoModeRuleset(): PermissionRule[] {
+export function buildAutoModeRuleset(
+  opts: { mcpServers?: readonly string[] } = {}
+): PermissionRule[] {
   return [
     ...buildRuleset('acceptEdits').filter((r) => r.permission !== 'edit'),
-    { permission: 'edit', pattern: '*', action: 'ask' }
+    { permission: 'edit', pattern: '*', action: 'ask' },
+    ...(opts.mcpServers ?? [])
+      .filter((server) => server !== CLAUDEUI_MCP_SERVER)
+      .map((server): PermissionRule => ({
+        permission: opencodeMcpKey(server),
+        pattern: '*',
+        action: 'ask'
+      }))
   ]
 }

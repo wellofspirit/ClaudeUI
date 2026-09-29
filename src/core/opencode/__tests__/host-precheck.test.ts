@@ -63,10 +63,12 @@ describe('hostPrecheck (ADR-085 S2)', () => {
   })
 
   describe('§1 ask', () => {
-    it('a global option the glob misses is an ask hit, with the rule', () => {
-      const command = 'docker --context x run alpine'
+    it('a spelling the glob misses is an ask hit, with the rule', () => {
+      // `docker --context x run alpine` is caught server-side since the broad
+      // globs (ADR-085 §3); a `.exe`-suffixed program is still only §1's.
+      const command = 'docker.exe --context x run alpine'
       const ctx = ctxWith()
-      // The glob (today's G9) does not see it…
+      // The glob (G9, including the broad globs) does not see it…
       expect(matchesUserAskRule(ctx.userRules, 'bash', [command], 'linux')).toBe(false)
       // …§1 does.
       expect(hostPrecheck(bash(command), ctx)).toEqual({

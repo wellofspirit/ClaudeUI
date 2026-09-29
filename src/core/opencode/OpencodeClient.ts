@@ -316,6 +316,19 @@ export class OpencodeClient {
     return this.post(`/question/${encodeURIComponent(requestId)}/reject`)
   }
 
+  // ── MCP ───────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /mcp — the configured MCP servers' status, keyed by server name
+   * (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/groups/mcp.ts:33-47`,
+   * `Record<serverName, MCP.Status>`). Status only: no route lists MCP tool
+   * keys, so this is how ClaudeUI learns the server names it did not inject
+   * itself (the user's own opencode-config servers) — ADR-085 §3.
+   */
+  mcpStatus(): Promise<Record<string, { status?: string }>> {
+    return this.get('/mcp')
+  }
+
   // ── Commands + Skills ─────────────────────────────────────────────────────
 
   /** GET /command — list all available commands (built-in, config, MCP, slash-skills). */

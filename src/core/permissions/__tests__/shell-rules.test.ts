@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   allowCovers,
+  bashRuleWordAlternatives,
   canLaunchOtherPrograms,
   denyAskHit,
   hasBashRule,
@@ -586,6 +587,51 @@ describe('parseBashRule', () => {
       'wip one'
     ])
     expect(parseBashRule(':*')).toBeUndefined()
+  })
+})
+
+describe('bashRuleWordAlternatives (ADR-085 §3 — the opencode broad globs)', () => {
+  const alts = (specifier: string, index: number): string[][] => {
+    const rule = parseBashRule(specifier)
+    if (!rule) throw new Error(`unparsable ${specifier}`)
+    return bashRuleWordAlternatives(rule, index)
+  }
+
+  it('`--force` on git push → itself first, then every force spelling', () => {
+    const out = alts('git push --force:*', 1)
+    expect(out[0]).toEqual(['--force'])
+    expect(out).toContainEqual(['-f'])
+    expect(out).toContainEqual(['--force-with-lease'])
+    expect(out).toContainEqual(['--force-if-includes'])
+    expect(out).toContainEqual(['+'])
+    expect(new Set(out.map((a) => a.join(' '))).size).toBe(out.length)
+  })
+
+  it('`-rf` on rm → the permutations as one token, and the split letters in every order', () => {
+    expect(alts('rm -rf:*', 0)).toEqual([['-rf'], ['-fr'], ['-r', '-f'], ['-f', '-r']])
+  })
+
+  it('a plain word → itself only', () => {
+    expect(alts('git push --force:*', 0)).toEqual([['push']])
+    expect(alts('docker run:*', 0)).toEqual([['run']])
+  })
+
+  it('a glob word → itself only', () => {
+    expect(alts('rm -rf /*', 1)).toEqual([['/*']])
+  })
+
+  it('an index out of range → []', () => {
+    expect(alts('rm -rf:*', 1)).toEqual([])
+    expect(alts('rm:*', 0)).toEqual([])
+    expect(alts('rm -rf:*', -1)).toEqual([])
+  })
+
+  it('an allOf concept contributes its own members only (`git branch -D`)', () => {
+    expect(alts('git branch -D:*', 1)).toEqual([['-D']])
+  })
+
+  it('a one-letter flag takes its synonym concept (`rm -f` → `--force`, `-force`, `/q`, `/f`)', () => {
+    expect(alts('rm -f:*', 0)).toEqual([['-f'], ['--force'], ['-force'], ['/q'], ['/f']])
   })
 })
 

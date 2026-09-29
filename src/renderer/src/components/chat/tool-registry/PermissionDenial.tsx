@@ -106,14 +106,20 @@ function BarredIcon({ size, className }: { size: number; className?: string }): 
   )
 }
 
+/**
+ * `testIdPrefix` names the hosting card type (ADR-027 two-tier ids —
+ * `ToolCard.denialChip`, `TaskCard.denialChip`); `ToolCard` by default.
+ */
 export function PermissionDenialChip({
-  denial
+  denial,
+  testIdPrefix = 'ToolCard'
 }: {
   denial: PermissionDenialBlock
+  testIdPrefix?: string
 }): React.JSX.Element {
   return (
     <span
-      data-testid="ToolCard.denialChip"
+      data-testid={`${testIdPrefix}.denialChip`}
       className="inline-flex items-center gap-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-danger/10 text-danger"
     >
       <BarredIcon size={10} />
@@ -122,14 +128,17 @@ export function PermissionDenialChip({
   )
 }
 
+/** `testIdPrefix`: as {@link PermissionDenialChip}'s. */
 export function PermissionDenialStrip({
-  denial
+  denial,
+  testIdPrefix = 'ToolCard'
 }: {
   denial: PermissionDenialBlock
+  testIdPrefix?: string
 }): React.JSX.Element {
   return (
     <div
-      data-testid="ToolCard.denial"
+      data-testid={`${testIdPrefix}.denial`}
       className="flex items-start gap-2 border-t border-border bg-bg-secondary px-3 py-2 text-[12px] leading-relaxed"
     >
       <BarredIcon size={14} className="mt-[2px] text-danger" />

@@ -301,6 +301,23 @@ describe('OpencodeClient', () => {
     })
   })
 
+  describe('mcpStatus (ADR-085 §3)', () => {
+    it('sends GET /mcp and returns the server-name → status map', async () => {
+      const status = { lsphub: { status: 'connected' }, claudeui: { status: 'connected' } }
+      const mock = mockFetch(200, status)
+      vi.stubGlobal('fetch', mock)
+
+      expect(await client.mcpStatus()).toEqual(status)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/mcp`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ Authorization: AUTH })
+        })
+      )
+    })
+  })
+
   describe('listSkills', () => {
     it('sends GET /skill with auth header', async () => {
       const skills = [

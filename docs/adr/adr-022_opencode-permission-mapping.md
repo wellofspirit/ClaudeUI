@@ -66,17 +66,19 @@ from a previous mode, since you can't un-patch them.)
 
 | Autonomy (Claude mode string) | agent   | session permission ruleset (last-match-wins)          |
 | ----------------------------- | ------- | ----------------------------------------------------- |
-| `plan`                        | `plan`  | `[{*:allow}, {edit:* deny}, {task:general deny}]`     |
+| `plan`                        | `plan`  | `[{*:allow}, {edit:* ask}, {task:general ask}]` ¹     |
 | `ask` (`default`)             | `build` | `[{*:allow}, {edit:ask}, {bash:ask}, {webfetch:ask}]` |
 | `autoEdit` (`acceptEdits`)    | `build` | `[{*:allow}, {bash:ask}, {webfetch:ask}]`             |
 | `full` (`auto`)               | `build` | `[{*:allow}]`                                         |
 
 - **`ask` is Claude-faithful**: reads/glob/grep/list/`task` auto-allowed; edit/bash/webfetch prompt.
   `task` is _not_ gated → no spurious subagent-spawn prompt, no hang.
-- **`plan`** mirrors opencode's own `plan` agent: deny edits, and deny **only the `general`
-  subagent** (`{task:general deny}`) — read-only subagents (e.g. `explore`) stay allowed via the
-  baseline, so **plan-mode `task`/research still works**. `deny` refuses without a permission
-  round-trip (no approval to surface → no hang). Pairing with the `plan` agent adds its planning
+- **`plan`** mirrors opencode's own `plan` agent: no edits, and **only the `general` subagent** is
+  refused (`{task:general …}`) — read-only subagents (e.g. `explore`) stay allowed via the
+  baseline, so **plan-mode `task`/research still works**. ¹ Since ADR-085 §3 both rules are `ask`
+  server-side and ClaudeUI refuses them host-side with the plan-mode reason (own and task-child
+  asks, and plan dispatch targets): a PATCHed `deny` is cumulative and copied into every task child,
+  so it outlived plan mode. The refusal needs no human (no approval to surface → no hang). Pairing with the `plan` agent adds its planning
   system prompt + plan_exit flow. We deliberately do **not** reproduce opencode's plan-file edit
   allow-list (`.opencode/plans/*.md`) — minor; plan output is surfaced via `plan_exit`.
 - **`autoEdit` asks for agent-control paths** ([ADR-084](adr-084_read-only-judge-bypass.md) §3):
@@ -122,7 +124,8 @@ so the same allow/ask/deny rules + additional directories govern both engines.
   strings + `additionalDirectories`, edited by the existing PermissionsDialog). No new store/UI.
 - **`permission-compiler.ts`** (pure, unit-tested) parses `Tool(specifier)` → opencode
   `{permission, pattern, action}`: tool→category map (Read/Glob/Grep→read/glob/grep, Edit/Write/
-  NotebookEdit→edit, Bash→bash, WebFetch→webfetch, Task→task; MCP/unmapped skipped); specifier
+  NotebookEdit→edit, Bash→bash, WebFetch→webfetch, Task→task; MCP rules → opencode MCP keys since
+  ADR-085 §3; other unmapped tools skipped); specifier
   translation (Bash `cmd:*` prefix → glob `cmd*`; WebFetch `domain:x`→`x*`; file globs pass through);
   `additionalDirectories`→`external_directory` ALLOW rules (`join(dir,'*')`, platform-correct).
 - **Composition**: `applyPermissionMode` patches `[...base(mode), ...compiledUserRules]` — user rules
