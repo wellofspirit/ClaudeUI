@@ -52,6 +52,8 @@ A pure module, `src/core/automode/read-only.ts`, exports
 
 - **Placement.** Both engine wirings call it right after the existing category fast path and before
   the judge is set up. It is not inside `classify()`. It runs even when no judge model resolves.
+  On opencode the ask can arrive before the tool part carries its input, so the gate waits up to
+  ~1 s for that input and otherwise sends the call to the judge.
 - **On `ok` it:**
   - allows the call;
   - logs one info line, `auto-mode allow (stage=static) bash — read-only`, with no command text

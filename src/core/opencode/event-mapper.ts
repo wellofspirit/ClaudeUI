@@ -383,11 +383,17 @@ function handleOwnEvent(
       // M-OC6: prefer the REAL tool-call input over the wire `metadata`. MCP
       // tools (claudeui_dispatch_agent + every bridged Claude MCP server) ask
       // with `metadata: {}`, leaving both the approval dialog and the ADR-023
-      // auto-mode judge with zero context about what's being run. The tool part
-      // carrying `state.input` is published (message.part.updated) before the
-      // tool calls ctx.ask (verified vs vendor session/tools.ts — ctx.metadata
-      // sets `input: args`), so it's already in the accumulator here. Fall back
-      // to `metadata` (populated for built-in tools) then {}.
+      // auto-mode judge with zero context about what's being run. The tool
+      // part's `state.input` is published by the processor's `tool-call`
+      // handler (vendor session/processor.ts) CONCURRENTLY with the tool's
+      // `execute`, so it is only guaranteed to be in the accumulator here for a
+      // tool that calls ctx.metadata before ctx.ask (session/tools.ts —
+      // ctx.metadata also sets `input: args`). A tool that asks straight from
+      // `execute` can beat it: the shell tool does (tool/shell.ts `execute` →
+      // `ask`), and the part is then often still `pending` with `input: {}` —
+      // readOnlyBypass (OpencodeSession) waits for it rather than trusting
+      // this snapshot. Fall back to `metadata` (populated for built-in tools)
+      // then {}.
       const metadata = props.metadata as Record<string, unknown> | undefined
       const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
       const input = toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})

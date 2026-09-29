@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid'
 import { opencodeServerManager } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
+import type { OpencodeEvent } from './protocol/types'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -171,6 +172,30 @@ const DENY_ALL_THROWAWAY_PATCH = {
   permission: DENY_ALL_TOOLS_RULESET
 } as const
 
+/**
+ * ADR-084 §1 — how long the read-only gate waits for a shell call's tool part
+ * to carry its input when the call's `permission.asked` got there first.
+ *
+ * The two race: the processor publishes the part's input from its `tool-call`
+ * handler (vendor/opencode-src/packages/opencode/src/session/processor.ts,
+ * `updateToolCall` → `state: {status: 'running', input}`) while the AI SDK is
+ * already running the tool's `execute`, and the shell tool's `execute` parses
+ * the command and asks straight away (src/tool/shell.ts `execute` → `ask`). So
+ * the ask regularly lands while the part is still `pending` with `input: {}`,
+ * the part following a moment later. Past the bound the call goes to the judge,
+ * exactly as with no part at all.
+ */
+export const TOOL_INPUT_WAIT_MS = 1000
+let toolInputWaitMs = TOOL_INPUT_WAIT_MS
+
+/** Tests shorten (or lengthen) the wait; no argument restores the default. */
+export function __setToolInputWaitMsForTests(ms?: number): void {
+  toolInputWaitMs = ms ?? TOOL_INPUT_WAIT_MS
+}
+
+/** How one wait for a tool part's input ended. `closed` = cancel()/dispose(). */
+type ToolInputWait = 'input' | 'timeout' | 'closed'
+
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
 
@@ -264,6 +289,11 @@ export class OpencodeSession extends BaseSession {
   private pendingQuestions = new Map<string, AskUserQuestion[]>()
   // Per-message part accumulator keyed by messageId
   private accumulators = new Map<string, MessageAccumulator>()
+  // ADR-084 §1 — readOnlyBypass calls waiting for a tool part's input, keyed by
+  // the part's callID. Settled from consumeEvents right after mapEvent applied a
+  // `message.part.updated` to `accumulators`, by their own timeout, or by
+  // cancel(); each settle removes itself, so an empty set never lingers.
+  private toolInputWaiters = new Map<string, Set<(outcome: ToolInputWait) => void>>()
   private activeStreamItems = new Map<
     string,
     { target: ItemStreamTarget; ownerSessionId: string; partId: string }
@@ -1119,6 +1149,7 @@ export class OpencodeSession extends BaseSession {
           this.childSessions
         )
         this.liveTotalCostUsd = totalCostRef.value
+        this.settleToolInputWaiters(ev)
 
         this.dispatchMapperOutput(output)
       }
@@ -1550,6 +1581,11 @@ export class OpencodeSession extends BaseSession {
     this.lastContextLength = 0
     this.sseAbort?.abort()
     this.sseAbort = null
+    // No SSE consumer is left to deliver a tool part, so nothing waiting on one
+    // may sit out its timer (ADR-084 §1): settle every wait as closed.
+    for (const waiters of [...this.toolInputWaiters.values()]) {
+      for (const settle of [...waiters]) settle('closed')
+    }
     this.childSessions.clear()
     // Tear down any cross-engine dispatch targets owned by this session
     // (ADR-033 M2 — mirrors ClaudeSession.cancel()'s identical call).
@@ -1975,12 +2011,38 @@ export class OpencodeSession extends BaseSession {
    * `metadata` fallback: opencode's shell ask carries only `{command}` there
    * (vendor/opencode-src/packages/opencode/src/tool/shell.ts `ask`), so a
    * `workdir` would be lost and every relative path checked against the wrong
-   * directory. No tool part → no bypass.
+   * directory. The shell tool asks from its own `execute`, concurrently with
+   * the processor publishing the part's input, so the ask can arrive first:
+   * when the part carries no input yet, wait up to TOOL_INPUT_WAIT_MS for it.
+   * Still no tool part → no bypass (the judge decides).
    */
   private async readOnlyBypass(approval: PendingApproval): Promise<boolean> {
     if (!isShellToolName(approval.toolName)) return false
     if (!this.isAutoMode(this.permissionMode)) return false
-    const input = findToolInput(this.accumulators, undefined, approval.toolUseId)
+    let input = findToolInput(this.accumulators, undefined, approval.toolUseId)
+    if (!input && approval.toolUseId) {
+      logger.debug('OpencodeSession', 'auto-mode read-only bypass: waiting for the tool part input')
+      const outcome = await this.waitForToolInput(approval.toolUseId)
+      // The session closed under the wait: the ask went with it, so nothing is
+      // replied and no judge is asked.
+      if (outcome === 'closed') {
+        logger.debug(
+          'OpencodeSession',
+          'auto-mode read-only bypass: session closed while waiting — not replying'
+        )
+        return true
+      }
+      // Answered server-side during the wait: settled, so handled — the same
+      // rule as the check after the gate below.
+      if (!this.pendingApprovals.has(approval.requestId)) {
+        logger.debug(
+          'OpencodeSession',
+          'auto-mode read-only bypass: ask resolved while it ran — not replying'
+        )
+        return true
+      }
+      input = findToolInput(this.accumulators, undefined, approval.toolUseId)
+    }
     if (!input) {
       logger.debug('OpencodeSession', 'auto-mode read-only bypass refused (input:unverified)')
       return false
@@ -2007,6 +2069,45 @@ export class OpencodeSession extends BaseSession {
     this.sendToolReview(approval.toolUseId, 'read-only')
     this.autoReply(approval.requestId, 'once')
     return true
+  }
+
+  /**
+   * Resolve once the tool part for `callId` carries a non-empty input
+   * (`input`), after TOOL_INPUT_WAIT_MS (`timeout`), or on cancel()
+   * (`closed`). The caller re-reads the input from the accumulators either way.
+   */
+  private waitForToolInput(callId: string): Promise<ToolInputWait> {
+    return new Promise((resolve) => {
+      let waiters = this.toolInputWaiters.get(callId)
+      if (!waiters) {
+        waiters = new Set()
+        this.toolInputWaiters.set(callId, waiters)
+      }
+      const settle = (outcome: ToolInputWait): void => {
+        clearTimeout(timer)
+        const current = this.toolInputWaiters.get(callId)
+        current?.delete(settle)
+        if (current?.size === 0) this.toolInputWaiters.delete(callId)
+        resolve(outcome)
+      }
+      const timer = setTimeout(() => settle('timeout'), toolInputWaitMs)
+      waiters.add(settle)
+    })
+  }
+
+  /**
+   * Wake the waits for a tool part whose input just arrived. Called right
+   * after mapEvent applied the event to the accumulators, and it reads the
+   * accumulators rather than the raw part, so a wake means `findToolInput`
+   * will find it.
+   */
+  private settleToolInputWaiters(ev: OpencodeEvent): void {
+    if (this.toolInputWaiters.size === 0 || ev.type !== 'message.part.updated') return
+    const part = ev.properties.part as { type?: unknown; callID?: unknown } | undefined
+    if (part?.type !== 'tool' || typeof part.callID !== 'string') return
+    const waiters = this.toolInputWaiters.get(part.callID)
+    if (!waiters || !findToolInput(this.accumulators, undefined, part.callID)) return
+    for (const settle of [...waiters]) settle('input')
   }
 
   /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */

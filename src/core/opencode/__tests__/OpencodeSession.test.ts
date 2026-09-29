@@ -247,7 +247,7 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 // Import the system under test AFTER mocking
 // ---------------------------------------------------------------------------
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeSession, __setToolInputWaitMsForTests } from '../OpencodeSession'
 import {
   FAKE_JUDGE_ACCOUNT,
   FAKE_JUDGE_SAMPLE,
@@ -263,6 +263,12 @@ import { evaluateOpencodeRules } from '../wildcard'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
 import type { QueuedItem } from '../../../shared/types'
+
+// ADR-084 §1: a shell ask whose tool part has no input yet waits up to
+// TOOL_INPUT_WAIT_MS (1 s) for it. Most tests here push a part-less ask on
+// purpose, so the wait is shortened file-wide; the race tests set their own.
+beforeEach(() => __setToolInputWaitMsForTests(20))
+afterEach(() => __setToolInputWaitMsForTests())
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -2823,6 +2829,206 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
     expect(mockJudge).toHaveBeenCalledTimes(1)
     session.dispose()
+  })
+
+  // ── ADR-084 §1: the ask can beat the tool part's input ────────────────────
+  // opencode's shell tool asks from its own `execute` while the processor
+  // publishes the part's input concurrently, so `permission.asked` often lands
+  // while the part is still `pending` with `input: {}`. The gate waits for the
+  // input (bounded), keyed by callID.
+
+  /** The part as the processor first publishes it: pending, no input yet. */
+  const pendingToolPart = (callID: string): OpencodeEvent =>
+    ({
+      id: `ev_pending_${callID}`,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { status: 'pending', input: {}, raw: '' }
+        }
+      }
+    }) as OpencodeEvent
+
+  /** A server-side resolution — also a cheap marker that the feed got this far. */
+  const repliedEvent = (requestID: string): OpencodeEvent =>
+    ({
+      id: `ev_replied_${requestID}`,
+      type: 'permission.replied',
+      properties: { sessionID: SES, requestID, reply: 'reject' }
+    }) as OpencodeEvent
+
+  const dismissed = (win: MockWindow, requestId: string): boolean =>
+    win.webContents.send.mock.calls.some(
+      (c) =>
+        c[0] === 'session:approval-dismiss' &&
+        (c[2] as { requestId?: string } | undefined)?.requestId === requestId
+    )
+
+  const waiterCount = (session: OpencodeSession): number =>
+    (session as unknown as { toolInputWaiters: Map<string, unknown> }).toolInputWaiters.size
+
+  const WAIT_LOG = 'auto-mode read-only bypass: waiting for the tool part input'
+
+  it('read-only bypass: the ask BEFORE the part’s input (the shell race) waits for it → once, NO judge', async () => {
+    enableAutoMode()
+    // Long enough that only the part's arrival can end the wait in this test.
+    __setToolInputWaitMsForTests(5000)
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_late',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(pendingToolPart('c_late'))
+    push(permissionEvent('per_late', 'c_late', 'git status'))
+    // A re-published pending part (still no input) must not end the wait.
+    push(pendingToolPart('c_late'))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+
+    push(toolPartWithInput('c_late', { command: 'git status', workdir: 'packages/app' }))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_late', 'once'))
+
+    expect(mockJudge).not.toHaveBeenCalled()
+    // The late part's input is the one checked — workdir included.
+    expect(mockCaptureGitConfigArmed).toHaveBeenCalledWith('/tmp/test-cwd/packages/app')
+    expect(reviewsSent(win).map((r) => (r.review as { rationale?: string }).rationale)).toEqual([
+      READ_ONLY_REVIEW_RATIONALE
+    ])
+    expect(waiterCount(session)).toBe(0)
+    session.dispose()
+  })
+
+  it('read-only bypass: a part that never gets its input → the JUDGE after the bound', async () => {
+    enableAutoMode()
+    __setToolInputWaitMsForTests(30)
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const debug = vi.spyOn(logger, 'debug')
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(pendingToolPart('c_never'))
+    push(permissionEvent('per_never', 'c_never', 'git status'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_never', 'once'))
+
+    expect(debug).toHaveBeenCalledWith('OpencodeSession', WAIT_LOG)
+    expect(debug).toHaveBeenCalledWith(
+      'OpencodeSession',
+      'auto-mode read-only bypass refused (input:unverified)'
+    )
+    expect(mockJudge).toHaveBeenCalledTimes(1)
+    expect(waiterCount(session)).toBe(0)
+    debug.mockRestore()
+    session.dispose()
+  })
+
+  it('read-only bypass: another call’s part arriving does NOT end the wait for ours', async () => {
+    enableAutoMode()
+    __setToolInputWaitMsForTests(5000)
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_other',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(permissionEvent('per_mine', 'c_mine', 'git status'))
+    push(toolPartWithInput('c_other', { command: 'rm -rf build' }))
+    push(repliedEvent('per_unrelated'))
+    await vi.waitFor(() => expect(dismissed(win, 'per_unrelated')).toBe(true))
+    // The other part was applied and nothing moved for ours.
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(mockCaptureGitConfigArmed).not.toHaveBeenCalled()
+    expect(waiterCount(session)).toBe(1)
+
+    push(toolPartWithInput('c_mine', { command: 'git status' }))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mine', 'once'))
+    expect(mockReplyPermission).toHaveBeenCalledTimes(1)
+    expect(mockJudge).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('read-only bypass: an ask resolved server-side during the wait gets NO reply and NO judge', async () => {
+    enableAutoMode()
+    // The wait ends by timing out; the ask is no longer pending by then.
+    __setToolInputWaitMsForTests(50)
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const debug = vi.spyOn(logger, 'debug')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_waitres',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(permissionEvent('per_wr', 'c_wr', 'git status'))
+    push(repliedEvent('per_wr'))
+    await vi.waitFor(() => expect(dismissed(win, 'per_wr')).toBe(true))
+    await vi.waitFor(() =>
+      expect(debug).toHaveBeenCalledWith(
+        'OpencodeSession',
+        'auto-mode read-only bypass: ask resolved while it ran — not replying'
+      )
+    )
+
+    expect(debug).toHaveBeenCalledWith('OpencodeSession', WAIT_LOG)
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(mockCaptureGitConfigArmed).not.toHaveBeenCalled()
+    expect(reviewsSent(win)).toEqual([])
+    debug.mockRestore()
+    session.dispose()
+  })
+
+  it('read-only bypass: dispose() during the wait settles it — no throw, NO reply, NO judge', async () => {
+    enableAutoMode()
+    // Only dispose() can end this wait within the test's time.
+    __setToolInputWaitMsForTests(5000)
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const debug = vi.spyOn(logger, 'debug')
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(permissionEvent('per_disp', 'c_disp', 'git status'))
+    await vi.waitFor(() => expect(debug).toHaveBeenCalledWith('OpencodeSession', WAIT_LOG))
+
+    expect(() => session.dispose()).not.toThrow()
+    await vi.waitFor(() =>
+      expect(debug).toHaveBeenCalledWith(
+        'OpencodeSession',
+        'auto-mode read-only bypass: session closed while waiting — not replying'
+      )
+    )
+    expect(waiterCount(session)).toBe(0)
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+    debug.mockRestore()
   })
 
   it('read-only bypass: an ARMED repo sends git diff to the judge, which is told the keys', async () => {
