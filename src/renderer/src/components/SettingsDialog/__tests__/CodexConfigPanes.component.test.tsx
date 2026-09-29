@@ -73,6 +73,7 @@ const readCodexConfig = vi.fn(async (): Promise<CodexConfigRead> => ({
     path: '/home/u/.codex/rules/claudeui.rules',
     rules: 3,
     skipped: 1,
+    carvedOut: 1,
     syncedAt: '2026-09-14T00:00:00.000Z',
     upToDate: true
   },
@@ -609,6 +610,7 @@ describe('Managed', () => {
     await renderPane(<CodexManagedSection />)
     expect(rowFor('rules').textContent).toContain('3 rules')
     expect(rowFor('rules').textContent).toContain('1 skipped')
+    expect(rowFor('rules').textContent).toContain('(1 held back by your deny/ask rules)')
     await act(async () => {
       fireEvent.click(screen.getByTestId('CodexConfigPane.recompileRules'))
     })

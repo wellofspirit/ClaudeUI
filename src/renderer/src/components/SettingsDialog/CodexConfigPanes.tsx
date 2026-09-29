@@ -1065,7 +1065,7 @@ export function CodexManagedSection(): React.JSX.Element {
         label="Compiled Bash rules"
         description={
           rules
-            ? `${rules.rules} rule${rules.rules === 1 ? '' : 's'} compiled from your Claude permission rules${rules.skipped > 0 ? `, ${rules.skipped} skipped` : ''}. ${
+            ? `${rules.rules} rule${rules.rules === 1 ? '' : 's'} compiled from your Claude permission rules${rules.skipped > 0 ? `, ${rules.skipped} skipped` : ''}${rules.carvedOut ? ` (${rules.carvedOut} held back by your deny/ask rules)` : ''}. ${
                 rules.syncedAt
                   ? `Last written ${new Date(rules.syncedAt).toLocaleString()}.`
                   : 'Not written yet.'
