@@ -19,6 +19,7 @@ import { hostedMcpKind } from '../../shared/tool-kinds'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { parseClaudeRule } from '../opencode/permission-compiler'
+import { isAgentControlTarget } from '../automode/agent-control-paths'
 import { logger } from '../services/logger'
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny'
@@ -66,12 +67,12 @@ export interface PermissionEngineContext {
    * `path.relative(instance.worktree, filepath)`, mirrored identically by
    * edit.ts/write.ts). See `resolveMatchPath`.
    *
-   * Optional: `PiSession.gateToolCallInner` passes `this.cwd`. The
-   * cross-engine-dispatcher's `gatePiTargetToolCall` omits it — harmless,
-   * since it always passes `EMPTY_RULES` (no allow/deny/ask entries), so
-   * `ruleMatchesTool` never reaches the path-matching branch for that
-   * caller. Any OTHER caller that omits it falls back to matching the RAW
-   * input path (best-effort — see `resolveMatchPath`'s doc comment).
+   * Optional: `PiSession.gateToolCallInner` passes `this.cwd`, and so does
+   * the cross-engine-dispatcher's `gatePiTargetToolCall` (its rules are
+   * always `EMPTY_RULES`, but the acceptEdits base's agent-control-path check
+   * — ADR-084 §3, `editsAgentControlPath` — resolves the path against it).
+   * Any caller that omits it falls back to matching the RAW input path
+   * (best-effort — see `resolveMatchPath`'s doc comment).
    */
   cwd?: string
 }
@@ -326,9 +327,8 @@ function extractToolPath(input: Record<string, unknown>): string | undefined {
  *
  * `cwd` absent falls back to matching the RAW path as-is (backslash-
  * normalized only), best-effort — documented, not silently pretended to be
- * correct. Every real caller threads `cwd` (`PiSession.gateToolCallInner`);
- * the only omitting caller (`gatePiTargetToolCall`) always passes
- * `EMPTY_RULES`, so it never reaches this function in practice.
+ * correct. Every real caller threads `cwd` (`PiSession.gateToolCallInner`,
+ * the dispatcher's `gatePiTargetToolCall`).
  *
  * Path FLAVOR (win32 vs posix semantics) follows `cwd`'s own syntax — NOT
  * the host platform running this process. A session's `cwd` is a string
@@ -513,6 +513,19 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
   return toolName
 }
 
+/**
+ * Does this edit/write target an agent-control path (ADR-084 §3)? Resolution
+ * against cwd (relative inside it, absolute outside it) is the shared
+ * `isAgentControlTarget`, which opencode's auto-mode edit gate uses too.
+ *
+ * No path at all → false: pi's edit/write schemas require one, so such a call
+ * writes nothing.
+ */
+function editsAgentControlPath(input: Record<string, unknown>, cwd: string | undefined): boolean {
+  const rawPath = extractToolPath(input)
+  return rawPath !== undefined && isAgentControlTarget(rawPath, cwd)
+}
+
 // ---------------------------------------------------------------------------
 // Mode base
 // ---------------------------------------------------------------------------
@@ -529,7 +542,12 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
  *    "Plan approved — proceeding." for a plan that never existed). Mirrors
  *    cli.js never offering ExitPlanMode outside plan mode.
  *  - default            -> fileRead/search allow, everything else ask
- *  - acceptEdits         -> also fileEdit/fileWrite allow, bash/unknown ask
+ *  - acceptEdits         -> also fileEdit/fileWrite allow, bash/unknown ask —
+ *    except an edit/write whose path is an agent-control path (`.git/`,
+ *    `.claude/`, CLAUDE.md, hooks, `.vscode/`, …; ADR-084 §3), which asks. In
+ *    auto mode (whose base is acceptEdits) that ask reaches the judge; in plain
+ *    acceptEdits the human. The same list is rendered into opencode's
+ *    acceptEdits ruleset, so both engines draw the line in the same place.
  *  - bypassPermissions/full/auto -> allow everything (except the plan-kind carve-out above)
  *  - plan (M5a — real autonomy mode now, see planModeBaseDecision) -> read-only:
  *    reads/search allow, exit_plan asks, bash gated by isPlanSafeBashCommand,
@@ -539,7 +557,8 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
 function modeBaseDecision(
   mode: string,
   kind: ToolKind,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  cwd: string | undefined
 ): 'allow' | 'ask' | 'deny' {
   if (kind === 'plan' && mode !== 'plan') return 'deny'
   switch (mode) {
@@ -548,9 +567,10 @@ function modeBaseDecision(
     case 'auto':
       return 'allow'
     case 'acceptEdits':
-      return kind === 'fileRead' || kind === 'search' || kind === 'fileEdit' || kind === 'fileWrite'
-        ? 'allow'
-        : 'ask'
+      if (kind === 'fileEdit' || kind === 'fileWrite') {
+        return editsAgentControlPath(input, cwd) ? 'ask' : 'allow'
+      }
+      return kind === 'fileRead' || kind === 'search' ? 'allow' : 'ask'
     case 'plan':
       return planModeBaseDecision(kind, input)
     case 'default':
@@ -924,7 +944,7 @@ export function decideWithSource(
   const allowRule = match(ctx.rules.allow)
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
-  return { decision: modeBaseDecision(ctx.mode, kind, input), source: 'mode-base' }
+  return { decision: modeBaseDecision(ctx.mode, kind, input, ctx.cwd), source: 'mode-base' }
 }
 
 /**

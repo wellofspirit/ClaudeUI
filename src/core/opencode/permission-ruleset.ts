@@ -10,6 +10,8 @@
  * This module has no dependents that could complete such a cycle.
  */
 
+import { agentControlEditPatterns } from '../automode/agent-control-paths'
+
 export type PermissionAction = 'allow' | 'ask' | 'deny'
 
 export interface PermissionRule {
@@ -60,8 +62,26 @@ export function buildRuleset(mode: string): PermissionRule[] {
   switch (mode) {
     case 'acceptEdits':
     case 'autoEdit':
-      // Auto-accept file edits; still gate command execution + network fetch.
-      return [allowAll, ...guards, rule('bash', 'ask'), rule('webfetch', 'ask')]
+      // Auto-accept file edits; still gate command execution + network fetch,
+      // and edits to agent-control paths (ADR-084 §3), which ask the human as
+      // cli.js's do. Those asks sit after `allowAll` so they win under
+      // last-match-wins; the user's compiled rules are appended after this
+      // base, so a user `Edit(.claude/**)` allow still wins. The rendered
+      // patterns follow opencode's `Wildcard.match`, so they are
+      // case-sensitive off Windows and cannot see 8.3 aliases, ADS suffixes or
+      // apply_patch move destinations; auto mode does not rely on them (see
+      // `buildAutoModeRuleset`).
+      return [
+        allowAll,
+        ...guards,
+        rule('bash', 'ask'),
+        rule('webfetch', 'ask'),
+        ...agentControlEditPatterns().map((pattern): PermissionRule => ({
+          permission: 'edit',
+          pattern,
+          action: 'ask'
+        }))
+      ]
     case 'plan':
       // Read-only planning. Pairs with opencode's `plan` agent (set in
       // applyPermissionMode). Mirrors that agent's own rules (verified in the
@@ -117,4 +137,23 @@ export function buildRuleset(mode: string): PermissionRule[] {
         rule('webfetch', 'ask')
       ]
   }
+}
+
+/**
+ * The base ruleset auto mode patches (ADR-023; ADR-084 §3): the acceptEdits
+ * base, except that EVERY edit asks. `OpencodeSession.handleAutoModeApproval`
+ * then clears an edit host-side with the shared agent-control matcher
+ * (`isAgentControlTarget`) — replying `once` with no judge call when every
+ * target it names is clear, and sending it to the judge otherwise. The host
+ * matcher folds case on every platform, sees 8.3 aliases, ADS suffixes and
+ * trailing dots, resolves `..` against the session cwd, and reads apply_patch
+ * move destinations, none of which opencode's server-side patterns can do.
+ * The agent-control asks are therefore dropped here: the blanket ask covers
+ * them.
+ */
+export function buildAutoModeRuleset(): PermissionRule[] {
+  return [
+    ...buildRuleset('acceptEdits').filter((r) => r.permission !== 'edit'),
+    { permission: 'edit', pattern: '*', action: 'ask' }
+  ]
 }

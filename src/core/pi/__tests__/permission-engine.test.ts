@@ -1267,3 +1267,68 @@ describe('decide — MCP rules in Claude vocabulary (Slice 4b)', () => {
     expect(sessionAllowKey('mcp__probe__ping', {})).toBe('mcp__probe__ping')
   })
 })
+
+// ADR-084 §3 — the acceptEdits base (also auto mode's base) asks for edits to
+// agent-control paths instead of auto-allowing them.
+describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', () => {
+  const ctx = (cwd: string | undefined = '/repo', mode = 'acceptEdits') => ({
+    mode,
+    rules: rules(),
+    sessionAllows: NO_SESSION_ALLOWS,
+    ...(cwd === undefined ? {} : { cwd })
+  })
+
+  it.each([
+    ['edit', '.git/config'],
+    ['write', '/repo/.git/hooks/pre-commit'],
+    ['edit', 'sub/.git/hooks/pre-commit'],
+    ['edit', '.claude/settings.json'],
+    ['write', '.vscode/tasks.json'],
+    ['edit', 'CLAUDE.md'],
+    ['write', '.pi/settings.json'],
+    ['edit', '.GIT/config']
+  ])('%s %s -> ask (mode-base)', (tool, p) => {
+    expect(decideWithSource(tool, { path: p }, ctx())).toEqual({
+      decision: 'ask',
+      source: 'mode-base'
+    })
+  })
+
+  it('reads the legacy file_path alias too', () => {
+    expect(decide('edit', { file_path: '.git/config' }, ctx())).toBe('ask')
+  })
+
+  it('an ordinary edit is still auto-allowed', () => {
+    expect(decide('edit', { path: 'src/a.ts' }, ctx())).toBe('allow')
+    expect(decide('write', { path: '/repo/src/.git-hooks-docs.md' }, ctx())).toBe('allow')
+  })
+
+  it('Windows cwd and separators', () => {
+    const win = ctx('D:\\repo')
+    expect(decide('edit', { path: 'D:\\repo\\.git\\config' }, win)).toBe('ask')
+    expect(decide('edit', { path: 'sub\\.claude\\settings.json' }, win)).toBe('ask')
+    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, win)).toBe('allow')
+  })
+
+  it('a session inside a worktree under .claude/ does not ask for every edit', () => {
+    const wt = ctx('/repo/.claude/worktrees/feat')
+    expect(decide('edit', { path: '/repo/.claude/worktrees/feat/src/a.ts' }, wt)).toBe('allow')
+    expect(decide('edit', { path: 'src/a.ts' }, wt)).toBe('allow')
+    // …but a path that climbs out to the repo's own .claude/ is matched absolutely.
+    expect(decide('edit', { path: '../../settings.json' }, wt)).toBe('ask')
+    expect(decide('edit', { path: '/repo/.claude/settings.json' }, wt)).toBe('ask')
+  })
+
+  it('a user ALLOW rule still wins outside auto mode; a user deny still denies', () => {
+    const allow = { ...ctx(), rules: rules({ allow: ['Edit(.claude/**)'] }) }
+    expect(decide('edit', { path: '.claude/settings.json' }, allow)).toBe('allow')
+    const deny = { ...ctx(), rules: rules({ deny: ['Edit(.git/**)'] }) }
+    expect(decide('edit', { path: '.git/config' }, deny)).toBe('deny')
+  })
+
+  it('other modes are unchanged: default asks every edit, full allows, plan denies', () => {
+    expect(decide('edit', { path: 'src/a.ts' }, ctx('/repo', 'default'))).toBe('ask')
+    expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'full'))).toBe('allow')
+    expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'plan'))).toBe('deny')
+  })
+})

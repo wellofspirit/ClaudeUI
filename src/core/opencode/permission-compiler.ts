@@ -194,14 +194,16 @@ export function compileClaudeRulesToOpencode(perms: ClaudePermissions): Opencode
  *
  * ## Why ALL allow rules, not just `bash`
  *
- * Auto mode's base is already `acceptEdits` (`buildRuleset('acceptEdits')` =
- * `{*:allow}` + guards, with only `bash`/`webfetch` asking). So reads, edits,
+ * Auto mode's base is already `acceptEdits` (`buildAutoModeRuleset()` =
+ * `{*:allow}` + guards, with `bash`/`webfetch` asking, and `edit` asking only
+ * so the host-side agent-control gate can clear it — ADR-084 §3). So reads,
  * globs, greps, tasks and `external_directory` (the compiled form of
  * `additionalDirectories`) are auto-allowed by the BASE regardless of what the
- * user's allow rules say — dropping them changes nothing. The only allow rules
- * that can have any effect here are precisely the ones that override a base
- * `ask`, i.e. exactly the "classifier-bypassing" set cli.js filters. Scoping the
- * filter to `bash` would therefore be a narrower rule with identical behavior
+ * user's allow rules say, and ordinary edits by that gate — dropping them
+ * changes nothing. The only allow rules that can have any effect here are
+ * precisely the ones that override a base `ask`, i.e. exactly the
+ * "classifier-bypassing" set cli.js filters. Scoping the filter to `bash`
+ * would therefore be a narrower rule with identical behavior
  * today and a silent hole the next time the base gates another category.
  *
  * ASK and DENY rules are kept: they only ever tighten, and the ask tier is what

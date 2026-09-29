@@ -102,7 +102,8 @@ import {
 // cross-engine-dispatcher.ts can depend on it without importing THIS module
 // (which would cycle back now that this file imports crossEngineDispatcher
 // above). Re-exported here for back-compat with any other existing importer.
-import { buildRuleset } from './permission-ruleset'
+import { buildAutoModeRuleset, buildRuleset } from './permission-ruleset'
+import { editClearsAgentControl } from './agent-control-gate'
 import type { PermissionRule } from './permission-ruleset'
 export { buildRuleset } from './permission-ruleset'
 export type { PermissionRule } from './permission-ruleset'
@@ -1736,12 +1737,15 @@ export class OpencodeSession extends BaseSession {
     // stale override from a previous mode. See buildRuleset / ADR-022.
     this.agent = mode === 'plan' ? 'plan' : null
     // In auto mode (full + classifier enabled) we use the acceptEdits base so the
-    // ruleset auto-allows reads + edits and only bash/webfetch raise
-    // `permission.asked` → the classifier judges just those (the acceptEdits-
-    // equivalence fast-path, parity with cli.js). Classifier-disabled `full`
-    // falls through to buildRuleset('full') = the gated `default` (ADR-023).
+    // ruleset auto-allows reads and only bash/webfetch raise `permission.asked`
+    // → the classifier judges just those (the acceptEdits-equivalence
+    // fast-path, parity with cli.js). Edits ask too, but only so the host-side
+    // agent-control gate in handleAutoModeApproval sees them: an ordinary edit
+    // is allowed there with no judge call (buildAutoModeRuleset, ADR-084 §3).
+    // Classifier-disabled `full` falls through to buildRuleset('full') = the
+    // gated `default` (ADR-023).
     const autoMode = this.isAutoMode(mode)
-    const baseMode = autoMode ? 'acceptEdits' : mode
+    const base = autoMode ? buildAutoModeRuleset() : buildRuleset(mode)
     // Compose: autonomy-mode base ruleset + the user's neutral permission rules
     // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
     // appended AFTER the base so they override it (last-match-wins). This makes
@@ -1764,7 +1768,7 @@ export class OpencodeSession extends BaseSession {
     // motivated it). Ask + deny + the base + DISPATCH_AGENT_ASK_RULE are
     // unchanged; every other mode keeps the full compiled set.
     const effectiveUserRules = autoMode ? withoutAllowRules(userRules) : userRules
-    const ruleset = [...buildRuleset(baseMode), ...effectiveUserRules, DISPATCH_AGENT_ASK_RULE]
+    const ruleset = [...base, ...effectiveUserRules, DISPATCH_AGENT_ASK_RULE]
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
     } catch (err) {
@@ -2028,6 +2032,19 @@ export class OpencodeSession extends BaseSession {
     }
     // Fast-path: read-only/safe tools never need the judge.
     if (isAutoModeFastPathAllowed(category)) {
+      this.autoReply(approval.requestId, 'once')
+      return
+    }
+    // ADR-084 §3 — the auto-mode ruleset asks for EVERY edit so this gate sees
+    // it: an edit whose targets (patterns, the edit/write path, apply_patch
+    // move destinations) are all clear of agent-control paths is the
+    // acceptEdits auto-allow, with no judge call and no denial-cap bookkeeping,
+    // exactly as when opencode allowed it server-side. Anything else — a
+    // control path, or targets that cannot all be told — goes to the judge.
+    if (
+      category === 'edit' &&
+      editClearsAgentControl(approval.patterns, approval.input, this.cwd)
+    ) {
       this.autoReply(approval.requestId, 'once')
       return
     }

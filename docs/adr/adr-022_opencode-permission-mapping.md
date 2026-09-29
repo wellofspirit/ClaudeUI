@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-22
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex phase 1 from shared-rule parity; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex now runs under the shared modes and Claude permission rules through ClaudeUI's own evaluator rather than a compiled native ruleset. Existing Claude/opencode/pi rules are unchanged.
+**Amended by:** [ADR-084](adr-084_read-only-judge-bypass.md) §3 — the `autoEdit` (`acceptEdits`) ruleset gains `edit` asks for agent-control paths, and auto mode asks for every edit and clears ordinary ones host-side.
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md) (neutral autonomy modes), [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend)
 
 ## Context
@@ -78,6 +79,11 @@ from a previous mode, since you can't un-patch them.)
   round-trip (no approval to surface → no hang). Pairing with the `plan` agent adds its planning
   system prompt + plan_exit flow. We deliberately do **not** reproduce opencode's plan-file edit
   allow-list (`.opencode/plans/*.md`) — minor; plan output is surfaced via `plan_exit`.
+- **`autoEdit` asks for agent-control paths** ([ADR-084](adr-084_read-only-judge-bypass.md) §3):
+  after `{bash:ask}, {webfetch:ask}` it appends `edit` asks for `.git/`, `.claude/`, `CLAUDE.md`,
+  hook directories, `.vscode/` and the other paths listed there, so those edits prompt instead of
+  auto-accepting. Auto mode does not use these rules: its ruleset asks for every edit and ClaudeUI
+  clears the ordinary ones host-side.
 - **Subagents are unaffected by the parent ruleset**: a `task` runs in a child session under its own
   (permissive) subagent agent, so it does not raise child-session `permission.asked` events (which the
   event mapper would otherwise drop — see Consequences).

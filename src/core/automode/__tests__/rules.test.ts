@@ -114,6 +114,18 @@ describe('the ADR-083 real-case gaps', () => {
   })
 })
 
+describe('ADR-084 — repo-armed git config', () => {
+  it('Unauthorized Persistence names the git config keys that make git run a program', () => {
+    const r = SOFT_RULES.find((x) => x.slug === 'unauthorized_persistence')
+    for (const key of ['core.fsmonitor', 'core.hooksPath', 'diff.external', 'gpg.program']) {
+      expect(r?.text).toContain(key)
+    }
+    // …whichever way it is written.
+    expect(r?.text).toContain('.git/config')
+    expect(r?.text).toContain('.gitattributes')
+  })
+})
+
 describe('deriveCategorySet', () => {
   it('is exactly the hard + soft slugs, plus the user-specified soft rule', () => {
     const set = deriveCategorySet()

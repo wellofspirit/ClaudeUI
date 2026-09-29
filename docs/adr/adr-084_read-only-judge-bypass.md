@@ -120,12 +120,40 @@ sees them (Self-Modification, Instruction Poisoning, and Unauthorized Persistenc
 the repo git config keys that execute programs). This matches `cli.js`, which treats these as
 sensitive for its acceptEdits fast path.
 
-- `.git/` (any depth);
-- `.claude/`, `CLAUDE.md`, `AGENTS.md`;
-- `.husky/` and other hook directories;
-- `.vscode/` and `.devcontainer/` (VS Code tasks can run on folder open);
-- `.mcp.json`;
-- the engines' own config files (`opencode.json`, pi settings).
+The list lives in one pure module, `src/core/automode/agent-control-paths.ts`, which both engines
+use:
+
+- directories, matched as any path component at any depth: `.git` (also as a file, which is what a
+  linked worktree has), `.claude`, `.husky`, `.githooks`, `.vscode`, `.devcontainer` (VS Code tasks
+  can run on folder open), `.opencode`, `.pi`, and `.agents` (pi's Agent Skills);
+- files, matched as the last component: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `AGENTS.override.md` (pi's replacement for AGENTS.md), `.mcp.json`, `opencode.json`,
+  `opencode.jsonc`, `.devcontainer.json`.
+
+The matcher does not trust the spelling:
+
+- case folds on every platform;
+- `\` and `/` are the same;
+- an ADS suffix (`CLAUDE.md:x`) and trailing dots or spaces are dropped;
+- any component shaped like an 8.3 short name (`GIT~1`) matches.
+
+A path is resolved against the session cwd. Inside cwd it is matched relative to cwd, so a session
+in `<repo>/.claude/worktrees/<name>` does not match `.claude` on every edit. Outside cwd it is matched
+absolute, so `../../settings.json` from that worktree still matches the parent repo's `.claude/`.
+
+- **pi** checks the path in its `acceptEdits` mode base, which is also auto mode's base. A matching
+  edit asks: the judge in auto mode, the human in plain `acceptEdits`. **Codex** shares pi's
+  evaluator, so a file change Codex escalates to a control path now asks in `acceptEdits` too.
+- **opencode, plain `acceptEdits`/`autoEdit`:** the list is rendered into `edit` ask patterns after
+  the base rules, and the human is asked. The rules are matched by opencode's own `Wildcard.match`.
+- **opencode, auto mode:** the ruleset asks for every edit. `handleAutoModeApproval` then runs a
+  host-side gate after G9 and the read fast path. The gate collects every target the ask names:
+  - its patterns;
+  - the edit/write path;
+  - apply_patch move destinations, which opencode leaves out of the patterns.
+
+  If the matcher clears all of them, it replies `once` with no judge call. A control path, or a
+  target it cannot determine, goes to the judge.
 
 ## Consequences
 
@@ -136,6 +164,12 @@ sensitive for its acceptEdits fast path.
 - **Accepted residuals:**
   - `Get-ChildItem -Recurse` follows an in-tree junction, but lists names only.
   - Committed secrets are reachable by blob SHA, since repo content is in scope by definition.
+  - In the non-auto modes, a human "allow for session" on one control-path edit allows every later
+    edit in that session (opencode's `always` on `edit *`, pi's bare `edit` session key). It is the
+    human's own choice. The judge always replies `once`.
+  - Paths are matched by text, so a symlink into `.git/` is not seen.
+  - Non-auto opencode off Windows matches the rendered patterns case-sensitively, because
+    `Wildcard.match` folds case on win32 only. Auto mode does not depend on those patterns.
   - opencode's bash path sources `~/.bashrc` with aliases enabled, which is the user's own doing.
 - The realpath and git-config captures must run where the command executes. That is the host today;
   for remote tasks it will be the remote host. The module stays filesystem-free so it can move with

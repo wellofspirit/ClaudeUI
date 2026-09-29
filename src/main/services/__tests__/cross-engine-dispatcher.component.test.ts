@@ -4954,6 +4954,33 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     await pending
   })
 
+  it("'acceptEdits' matches agent-control paths against the target's cwd — an edit inside a .claude/worktrees checkout is not one", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'acceptEdits',
+      cwd: '/repo/.claude/worktrees/feat'
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'edit',
+      input: { path: '/repo/.claude/worktrees/feat/src/a.ts' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
   it("'default' autonomy ASKS for a mutating tool — forwards an xeng:-prefixed approval keyed by the pi tool call's OWN id (not ctx.toolUseId)", async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({

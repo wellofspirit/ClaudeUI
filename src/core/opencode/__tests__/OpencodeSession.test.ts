@@ -251,6 +251,8 @@ import {
   type FakeJudgeCall
 } from '../../../test/helpers/fake-judge'
 import { closeDb, getUsageEventByMessageId } from '../../services/db'
+import { agentControlEditPatterns } from '../../automode/agent-control-paths'
+import { evaluateOpencodeRules } from '../wildcard'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
 import type { QueuedItem } from '../../../shared/types'
@@ -1122,6 +1124,12 @@ const GUARDS: Rule[] = [
   { permission: 'read', pattern: '*.env.*', action: 'ask' },
   { permission: 'read', pattern: '*.env.example', action: 'allow' }
 ]
+// ADR-084 §3: the edit-auto-accepting base asks for agent-control paths.
+const AGENT_CONTROL_EDIT_ASKS: Rule[] = agentControlEditPatterns().map((pattern) => ({
+  permission: 'edit',
+  pattern,
+  action: 'ask'
+}))
 // ADR-033 M2: gates the dispatch_agent tool in EVERY mode, appended LAST
 // (after buildRuleset + the user's compiled rules) so last-match-wins can't
 // accidentally auto-allow it via a blanket user rule.
@@ -1157,12 +1165,13 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs.some((r) => r.permission === 'task')).toBe(false)
   })
 
-  it('acceptEdits → edits auto; bash/webfetch still ask', async () => {
+  it('acceptEdits → edits auto except agent-control paths; bash/webfetch still ask', async () => {
     expect(await rulesetFor('acceptEdits')).toEqual([
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'bash', pattern: '*', action: 'ask' },
       { permission: 'webfetch', pattern: '*', action: 'ask' },
+      ...AGENT_CONTROL_EDIT_ASKS,
       DISPATCH_ASK_RULE
     ])
   })
@@ -1391,13 +1400,16 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     await session.run('go')
     const rs = (
       mockPatchSession.mock.calls.at(-1)?.[1] as {
-        permission: { permission: string; action: string }[]
+        permission: Rule[]
       }
     ).permission
     expect(rs.some((r) => r.permission === 'bash' && r.action === 'ask')).toBe(true)
     expect(rs.some((r) => r.permission === 'webfetch' && r.action === 'ask')).toBe(true)
-    // edits are auto-allowed (no edit:ask rule) — they never reach the classifier.
-    expect(rs.some((r) => r.permission === 'edit')).toBe(false)
+    // Every edit asks, but only so the host-side agent-control gate sees it:
+    // an ordinary edit is allowed there without the classifier (ADR-084 §3).
+    expect(rs.filter((r) => r.permission === 'edit')).toEqual([
+      { permission: 'edit', pattern: '*', action: 'ask' }
+    ])
     session.dispose()
   })
 
@@ -2062,6 +2074,172 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       )
       expect(sent).toBe(true)
     })
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── ADR-084 §3: edits to agent-control paths go to the judge ─────────────
+  // The auto-mode ruleset asks for EVERY edit, and handleAutoModeApproval
+  // clears the ordinary ones host-side with the shared matcher (no judge).
+  // The edit asks are BASE rules, so G9 (user-authored asks only) lets them
+  // through to that gate rather than the human.
+
+  /** An `edit` ask carrying opencode's `metadata` (what the approval's input
+   *  falls back to when the accumulator holds no tool part, as here). */
+  function feedEditAsked(id: string, patterns: string[], metadata: Record<string, unknown>): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          permission: 'edit',
+          patterns,
+          metadata,
+          tool: { callID: 'c1' }
+        }
+      } as OpencodeEvent
+      await parkUntilAborted(signal)
+    })
+  }
+
+  /** Run an auto-mode session on `cwd` that receives one edit ask. */
+  async function autoEdit(
+    cwd: string,
+    id: string,
+    patterns: string[],
+    metadata: Record<string, unknown>
+  ): Promise<{ session: OpencodeSession; win: MockWindow }> {
+    feedEditAsked(id, patterns, metadata)
+    const win = new MockWindow()
+    const session = new OpencodeSession(`r_${id}`, win as unknown as HostWindowHandle, cwd, {
+      permissionMode: 'full'
+    })
+    await session.run('go')
+    return { session, win }
+  }
+
+  const approvalSent = (win: MockWindow): boolean =>
+    win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-request')
+
+  it('auto mode: the patched ruleset asks for every edit (the host gate decides)', async () => {
+    enableAutoMode()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    const rs = lastPatchedRules() as Parameters<typeof evaluateOpencodeRules>[2]
+    expect(evaluateOpencodeRules('edit', 'src/a.ts', rs, 'linux')).toBe('ask')
+    expect(evaluateOpencodeRules('edit', '.GIT/config', rs, 'darwin')).toBe('ask')
+    // The rendered agent-control patterns are the non-auto acceptEdits rules.
+    expect(rs.filter((r) => r.permission === 'edit')).toEqual([
+      { permission: 'edit', pattern: '*', action: 'ask' }
+    ])
+    session.dispose()
+  })
+
+  it('auto mode: an ordinary edit is allowed with NO judge call and no human prompt', async () => {
+    enableAutoMode()
+    const { session, win } = await autoEdit('/tmp', 'per_plain_edit', ['src/a.ts'], {
+      filepath: '/tmp/src/a.ts',
+      diff: ''
+    })
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_plain_edit', 'once')
+    )
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(approvalSent(win)).toBe(false)
+    session.dispose()
+  })
+
+  it.each([
+    // case folds on every host, not only where opencode's Wildcard.match does
+    ['upper-case .GIT', ['.GIT/config'], { filepath: '/tmp/.GIT/config', diff: '' }],
+    // outside the worktree the ancestors are kept
+    [
+      'a .claude/ outside cwd',
+      ['../outside/.claude/settings.json'],
+      { filepath: '/outside/.claude/settings.json', diff: '' }
+    ],
+    // apply_patch: the move DESTINATION is not among the patterns
+    [
+      'an apply_patch moving into .git/hooks',
+      ['src/a.ts'],
+      {
+        filepath: 'src/a.ts',
+        diff: '',
+        files: [{ filePath: '/tmp/src/a.ts', movePath: '/tmp/.git/hooks/x', type: 'move' }]
+      }
+    ],
+    // an ask whose input says nothing about what it writes
+    ['an edit of unknown shape', ['src/a.ts'], {}]
+  ])('auto mode: %s goes to the JUDGE', async (_label, patterns, metadata) => {
+    enableAutoMode()
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const { session, win } = await autoEdit('/tmp', 'per_judged_edit', patterns, metadata)
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_judged_edit', 'once')
+    )
+    expect(mockJudge).toHaveBeenCalled()
+    expect(approvalSent(win)).toBe(false)
+    session.dispose()
+  })
+
+  it('auto mode in a .claude/worktrees checkout: src/a.ts auto-allows, ../../.claude/settings.json is judged', async () => {
+    enableAutoMode()
+    const cwd = '/repo/.claude/worktrees/x'
+    const plain = await autoEdit(cwd, 'per_wt_plain', ['src/a.ts'], {
+      filepath: `${cwd}/src/a.ts`,
+      diff: ''
+    })
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_wt_plain', 'once'))
+    expect(mockJudge).not.toHaveBeenCalled()
+    plain.session.dispose()
+
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const parent = await autoEdit(cwd, 'per_wt_parent', ['../../settings.json'], {
+      filepath: '/repo/.claude/settings.json',
+      diff: ''
+    })
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_wt_parent', 'once')
+    )
+    expect(mockJudge).toHaveBeenCalled()
+    parent.session.dispose()
+  })
+
+  it('auto mode: an edit ask for .git/config reaches the JUDGE, not the human', async () => {
+    enableAutoMode()
+    mockJudge.mockResolvedValue('<block>no</block>')
+    feedPermissionAsked('edit', 'per_git_config', 'c1', ['.git/config'])
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_git_config', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_git_config', 'once')
+    )
+    expect(mockJudge).toHaveBeenCalled()
+    expect(
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+    ).toBe(false)
+    session.dispose()
+  })
+
+  it('auto mode: a USER ask rule on the same path still sends it to the human (G9)', async () => {
+    enableAutoMode()
+    withUserAskRule(['Edit(.git/**)'])
+    feedPermissionAsked('edit', 'per_git_user_ask', 'c1', ['.git/config'])
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_git_user_ask', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockJudge).not.toHaveBeenCalled()
     expect(mockReplyPermission).not.toHaveBeenCalled()
     session.dispose()
   })

@@ -4881,7 +4881,11 @@ export class CrossEngineDispatcher {
     const decision = decide(payload.toolName, payload.input, {
       mode: entry.autonomyMode,
       rules: EMPTY_PI_RULES,
-      sessionAllows: EMPTY_PI_SESSION_ALLOWS
+      sessionAllows: EMPTY_PI_SESSION_ALLOWS,
+      // The acceptEdits base matches agent-control paths cwd-relative
+      // (ADR-084 §3); without it an absolute path inside a target running in a
+      // `.claude/worktrees/<name>` checkout would ask on every edit.
+      cwd: entry.cwd
     })
 
     if (decision === 'allow') return Promise.resolve({ behavior: 'allow' })

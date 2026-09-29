@@ -36,7 +36,8 @@ vi.mock('../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { buildRuleset } from '../../core/opencode/permission-ruleset'
+import { buildAutoModeRuleset, buildRuleset } from '../../core/opencode/permission-ruleset'
+import { editClearsAgentControl } from '../../core/opencode/agent-control-gate'
 import {
   compileClaudeRulesToOpencode,
   withoutAllowRules as withoutOpencodeAllowRules
@@ -429,10 +430,10 @@ describe('conformance: auto mode routes user-ALLOWED actions to the classifier o
     ask: ['Bash(npm publish:*)'],
     deny: ['Bash(rm:*)']
   })
-  /** What applyPermissionMode patches under auto mode: acceptEdits base + the
-   *  user's ask/deny half + the dispatch guard. */
+  /** What applyPermissionMode patches under auto mode: the auto-mode base +
+   *  the user's ask/deny half + the dispatch guard. */
   const autoRuleset = (): Rule[] => [
-    ...buildRuleset('acceptEdits'),
+    ...buildAutoModeRuleset(),
     ...withoutOpencodeAllowRules(compileClaudeRulesToOpencode(USER)),
     { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
   ]
@@ -484,4 +485,68 @@ describe('conformance: auto mode routes user-ALLOWED actions to the classifier o
       )
     ).toBe('allow')
   })
+})
+
+// ---------------------------------------------------------------------------
+// 6. AUTO MODE / acceptEdits: an edit to an agent-control path asks — on
+//    EITHER engine (ADR-084 §3). pi calls the shared matcher from its
+//    acceptEdits base. opencode in auto mode asks for every edit
+//    (buildAutoModeRuleset) and clears it host-side with the SAME matcher
+//    (agent-control-gate.ts); in plain acceptEdits it evaluates the list
+//    rendered into its ruleset. Spellings here are the canonical case the list
+//    uses, so the table holds on every host (opencode's server matcher folds
+//    case on win32 only; the host gate folds it everywhere).
+// ---------------------------------------------------------------------------
+
+describe('conformance: acceptEdits/auto asks for agent-control edits on both engines', () => {
+  const USER_EDIT_ALLOW = perms({ allow: ['Edit'] })
+  /** What applyPermissionMode patches under auto mode, then the host gate. */
+  const opencodeAuto = (subject: string): Action => {
+    const ruleset: Rule[] = [
+      ...buildAutoModeRuleset(),
+      ...withoutOpencodeAllowRules(compileClaudeRulesToOpencode(USER_EDIT_ALLOW)),
+      { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
+    ]
+    const server = evaluate('edit', subject, ruleset)
+    if (server !== 'ask') return server
+    return editClearsAgentControl([subject], { filePath: subject }, '/repo') ? 'allow' : 'ask'
+  }
+  const opencodeAcceptEdits = (subject: string): Action =>
+    evaluate('edit', subject, buildRuleset('acceptEdits'))
+  const pi = (p: string, auto: boolean): Action =>
+    decide(
+      'edit',
+      { path: p },
+      {
+        mode: 'acceptEdits',
+        rules: auto ? withoutAllowRules(piRules({ allow: ['Edit'] })) : piRules(),
+        sessionAllows: NO_SESSION_ALLOWS,
+        cwd: '/repo'
+      }
+    ) as Action
+
+  const CASES: Array<[subject: string, expected: Action]> = [
+    ['.git/config', 'ask'],
+    ['sub/.git/hooks/pre-commit', 'ask'],
+    ['.claude/settings.json', 'ask'],
+    ['.vscode/tasks.json', 'ask'],
+    ['CLAUDE.md', 'ask'],
+    ['AGENTS.md', 'ask'],
+    ['.mcp.json', 'ask'],
+    ['opencode.json', 'ask'],
+    ['.pi/settings.json', 'ask'],
+    ['src/a.ts', 'allow'],
+    ['src/.git-hooks-docs.md', 'allow'],
+    ['.github/workflows/ci.yml', 'allow']
+  ]
+
+  it.each(CASES)(
+    '%s → %s on opencode and pi alike, auto and plain acceptEdits',
+    (subject, expected) => {
+      expect(opencodeAuto(subject)).toBe(expected)
+      expect(pi(subject, true)).toBe(expected)
+      expect(opencodeAcceptEdits(subject)).toBe(expected)
+      expect(pi(subject, false)).toBe(expected)
+    }
+  )
 })

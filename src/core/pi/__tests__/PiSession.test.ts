@@ -3005,6 +3005,62 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  // ADR-084 §3 — the acceptEdits base asks for agent-control paths, and that
+  // ask is `mode-base`, not a user ask rule, so auto mode hands it to the judge.
+  it('an edit to .git/config reaches the JUDGE, not the human; an ordinary edit does not', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-agent-control', win)
+
+    expect(await gate('call_ac1', 'edit', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(0)
+
+    expect(await gate('call_ac2', 'write', { path: '.git/config' })).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('a judge BLOCK on an agent-control edit denies it', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>arms core.fsmonitor</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-agent-control-block', win)
+
+    expect(await gate('call_ac3', 'edit', { path: '/cwd/.git/config' })).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: arms core.fsmonitor'
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('a USER ask rule on an agent-control path still goes to the human (G9)', async () => {
+    enableAutoMode()
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'user'
+        ? {
+            allow: [],
+            deny: [],
+            ask: ['Edit(.git/**)'],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-agent-control-user-ask', win)
+
+    const pending = gate('call_ac4', 'edit', { path: '.git/config' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    expect(judgeCalls).toHaveLength(0)
+    const [approval] = sentPayloads(win, 'session:approval-request') as Array<{ requestId: string }>
+    session.resolveApproval(approval.requestId, 'deny')
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny' })
+    session.dispose()
+  })
+
   it('an explicit user DENY rule still beats the classifier in auto mode', async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>no</block>']
