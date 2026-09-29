@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -259,6 +259,29 @@ real reap.
 **Not addressed:** after a respawn, `SendMessage{to: <name>}` fails ("No agent named … is
 reachable") and only the raw agent id resumes. That is cli.js's name registry and nothing ClaudeUI
 can change.
+
+### 6. A long roster stays usable (amendment, 2026-09-29)
+
+In a long session the panel roster was unusable: it sat in a `shrink-0` box above the entry stack,
+so twenty-odd rows pushed the entries off the panel and the list itself could not scroll. The
+owner's rulings of 2026-09-29:
+
+- **Running is the default filter** (the buttons read Running | All). Finished rows are most of a
+  long session's list and bury the ones that still matter. Under Running, a finished row that is
+  open in the panel stays listed, because clicking it again is how it is put away. With nothing
+  running, the empty state offers "Show all N".
+- **Each section folds.** "Agents" and "Background shells" always carry a heading, even alone,
+  because the heading is the fold control; it keeps the row count when folded. The filter and the
+  folds stay local component state, for the reason the filter already was: they are a way of
+  looking, not a preference.
+- **The roster scrolls on its own** (`TaskDetailPanel.roster`). Alone it fills the panel; with
+  entries open it is capped at 40% of the panel so they stay in view. Its header is sticky, and a
+  row that becomes selected scrolls into view, since the cap can otherwise push the row just
+  clicked below the fold.
+- **A row click in the panel toggles** its entry (`toggleTaskInPanel`). Putting the last entry away
+  leaves the panel open on the roster, unlike an entry's own close button
+  (`removeTaskFromPanel`), which closes the panel with it. The composer overlay still only opens:
+  it is a door into the panel, not the panel.
 
 ## Consequences
 
