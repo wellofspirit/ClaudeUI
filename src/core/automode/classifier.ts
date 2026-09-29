@@ -79,7 +79,13 @@ export interface ClassifierAction {
   toolName: string
   /** The tool input / metadata for the proposed call. */
   input: Record<string, unknown>
+  /** Set when the call was proposed by a subagent (opencode task child, ADR-085 S4): the agent type and
+   *  the parent's `task` call that spawned it, so the judge reads the action against that intent. */
+  subagent?: { type: string; description?: string; prompt?: string }
 }
+
+/** How much of the spawning prompt the judge sees (head, then `…`). */
+export const MAX_SUBAGENT_PROMPT_CHARS = 600
 
 export interface ClassifyInput {
   /** The session transcript (slimmed internally). */
@@ -300,6 +306,32 @@ export function renderAction(action: ClassifierAction): string {
   return `${action.toolName} ${JSON.stringify(action.input ?? {})}`
 }
 
+/**
+ * The header line above the rendered action. A subagent's call (ADR-085 S4)
+ * says which subagent proposed it and the parent `task` that spawned it — the
+ * task fields JSON-rendered (absent ones omitted; the prompt clipped at
+ * {@link MAX_SUBAGENT_PROMPT_CHARS}, then `…`) — and asks the judge to read it
+ * as the assistant's own action against the same user intent: the judge sees
+ * only the PARENT transcript, whose `task` line is the child's mandate.
+ * Exactly one line; the system prompt is untouched (byte-stability, ADR-081 §4).
+ */
+function actionHeader(action: ClassifierAction): string {
+  const sub = action.subagent
+  if (!sub) return 'Proposed next action:'
+  const task: { description?: string; prompt?: string } = {}
+  if (sub.description !== undefined) task.description = sub.description
+  if (sub.prompt !== undefined) {
+    task.prompt =
+      sub.prompt.length > MAX_SUBAGENT_PROMPT_CHARS
+        ? `${sub.prompt.slice(0, MAX_SUBAGENT_PROMPT_CHARS)}…`
+        : sub.prompt
+  }
+  return (
+    `Proposed next action (by the ${JSON.stringify(sub.type)} subagent the assistant spawned with task ` +
+    `${JSON.stringify(task)}; judge it as the assistant's own action against the same user intent):`
+  )
+}
+
 // ── Prompt assembly ───────────────────────────────────────────────────────────
 
 /**
@@ -462,7 +494,7 @@ export function buildUserPrompt(input: ClassifyInput, instruction: string): stri
     '</transcript>',
     '',
     ...(hasMeta ? [JSON.stringify({ meta })] : []),
-    `Proposed next action:\n${renderAction(input.action)}`,
+    `${actionHeader(input.action)}\n${renderAction(input.action)}`,
     '',
     instruction
   ].join('\n')

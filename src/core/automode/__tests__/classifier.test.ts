@@ -10,6 +10,7 @@ import {
   MAX_ASSISTANT_PROSE_CHARS,
   renderAction,
   buildUserPrompt,
+  MAX_SUBAGENT_PROMPT_CHARS,
   buildPolicyPrompt,
   normalizeCategory,
   parseVerdict,
@@ -274,6 +275,80 @@ describe('renderAction + buildUserPrompt', () => {
     expect(p).toContain('User: hi')
     expect(p).toContain('Proposed next action:\nbash {"command":"ls"}')
     expect(p).toContain('INSTRUCT')
+  })
+
+  // ── ADR-085 S4: the action came from a subagent ───────────────────────────
+
+  describe('a subagent’s action (ADR-085 S4)', () => {
+    const base: ClassifyInput = {
+      messages: [msg('user', [{ type: 'text', text: 'look around' }])],
+      action: { toolName: 'bash', input: { command: 'hostname' } },
+      environment: { cwd: '/repo' }
+    }
+    const header = (p: string): string => {
+      const lines = p.split('\n')
+      const i = lines.findIndex((l) => l.startsWith('Proposed next action'))
+      return lines[i]
+    }
+
+    it('one header line naming the subagent and the spawning task, then the action as today', () => {
+      const p = buildUserPrompt(
+        {
+          ...base,
+          action: {
+            ...base.action,
+            subagent: { type: 'explore', description: 'find host', prompt: 'print the hostname' }
+          }
+        },
+        'I'
+      )
+      expect(p).toContain(
+        'Proposed next action (by the "explore" subagent the assistant spawned with task ' +
+          '{"description":"find host","prompt":"print the hostname"}; judge it as the ' +
+          "assistant's own action against the same user intent):\n" +
+          'bash {"command":"hostname"}'
+      )
+    })
+
+    it('clips the prompt at MAX_SUBAGENT_PROMPT_CHARS with …; a multi-line prompt stays on one line', () => {
+      const prompt = 'x'.repeat(MAX_SUBAGENT_PROMPT_CHARS - 1) + '\nyz' + 'q'.repeat(50)
+      const p = buildUserPrompt(
+        { ...base, action: { ...base.action, subagent: { type: 'general', prompt } } },
+        'I'
+      )
+      const line = header(p)
+      const task = JSON.parse(line.slice(line.indexOf('{'), line.lastIndexOf('}') + 1)) as {
+        prompt: string
+      }
+      expect(task.prompt).toBe(prompt.slice(0, MAX_SUBAGENT_PROMPT_CHARS) + '…')
+      expect(line).toContain('"prompt":"' + 'x'.repeat(MAX_SUBAGENT_PROMPT_CHARS - 1) + '\\n…"')
+      // The action line follows the header directly.
+      const lines = p.split('\n')
+      expect(lines[lines.indexOf(line) + 1]).toBe('bash {"command":"hostname"}')
+    })
+
+    it('absent task fields are omitted', () => {
+      const p = buildUserPrompt(
+        { ...base, action: { ...base.action, subagent: { type: 'unknown' } } },
+        'I'
+      )
+      expect(header(p)).toBe(
+        'Proposed next action (by the "unknown" subagent the assistant spawned with task {}; ' +
+          "judge it as the assistant's own action against the same user intent):"
+      )
+      const onlyDesc = buildUserPrompt(
+        { ...base, action: { ...base.action, subagent: { type: 'explore', description: 'd' } } },
+        'I'
+      )
+      expect(header(onlyDesc)).toContain('with task {"description":"d"};')
+    })
+
+    it('no subagent → the plain header; renderAction is unchanged either way', () => {
+      expect(header(buildUserPrompt(base, 'I'))).toBe('Proposed next action:')
+      expect(renderAction({ ...base.action, subagent: { type: 'explore', prompt: 'p' } })).toBe(
+        'bash {"command":"hostname"}'
+      )
+    })
   })
   // ── Phase 3: the {"meta":…} ground-truth line (ref §5) ────────────────────
 

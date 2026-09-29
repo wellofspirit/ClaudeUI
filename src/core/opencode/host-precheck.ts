@@ -4,7 +4,12 @@ import { allowCovers, denyAskHit } from '../permissions/shell-rules'
 import { isPlanReadOnlyCommand, type PlanReadOnlyScope } from '../pi/permission-engine'
 import type { OpencodePermissionRule } from './permission-compiler'
 import type { OpencodeSessionAllows } from './session-allows'
-import { matchesUserAskRule } from './wildcard'
+import {
+  evaluateOpencodeAsk,
+  lastMatchingRule,
+  matchesUserAskRule,
+  wildcardMatch
+} from './wildcard'
 
 /**
  * ADR-085 S2 — what the host says about an opencode permission ask before
@@ -27,6 +32,14 @@ import { matchesUserAskRule } from './wildcard'
  * mutating ask is a rung of it, right after the user's deny rules, and the
  * user's Bash allow rules are applied here in plan mode (the session sends no
  * `edit`/`bash` allow to the server then — `withoutMutatingAllowRules`).
+ *
+ * ADR-085 S4 (owner ruling 4) — a task CHILD's ask is answered with the
+ * PARENT's rules: the child's agent carries static `ask`s for every gated
+ * category (`subagent-permissions.ts`), so its bash/edit/webfetch/MCP calls
+ * reach this ladder, and once nothing above has spoken the parent's current
+ * patched ruleset decides — allow → `once` silently (`parent-allow`), deny →
+ * reject with the rule, ask → today's path (the card, or in auto mode the
+ * judge path).
  */
 export type HostPrecheckVerdict =
   /** §1 deny hit → refuse with the rule. */
@@ -39,6 +52,8 @@ export type HostPrecheckVerdict =
   | { kind: 'session-allow' }
   /** Plan mode only: a user allow rule covers a plan-read-only shell command (allows are not sent to the server in plan mode). */
   | { kind: 'allow-rule'; rule: string }
+  /** Child ask only: the parent's current ruleset allows every pattern → `once`, silently (ruling 4). */
+  | { kind: 'parent-allow' }
   /** Nothing host-side says anything → today's path (judge in auto mode, else the card). */
   | { kind: 'continue' }
 
@@ -59,6 +74,23 @@ export interface HostPrecheckContext {
   realpath?: PlanReadOnlyScope['realpath']
   /** Told about an internal failure (the verdict is then `user-ask`), so the caller can log it at warn. */
   onError?: (err: unknown) => void
+  /**
+   * The ruleset the session last PATCHed onto the parent opencode session
+   * (`OpencodeSession.lastPatchedRuleset`): base + effective user rules +
+   * backstop + dispatch rule. Read only for a CHILD ask (`approval.subagent`).
+   * Absent → the rung is skipped (today's path).
+   */
+  parentRuleset?: readonly OpencodePermissionRule[]
+  /**
+   * The categories (opencode permission globs) the spawn-time static asks
+   * cover — `CHILD_GATED_CATEGORIES` plus the injected MCP keys
+   * (`subagent-permissions.ts`). The parent rung answers ONLY a child ask
+   * whose permission matches one: any other child ask (`external_directory`,
+   * `doom_loop`, a `.env` read, a category the agent's own config asks for)
+   * is asked today, and the parent's `{*: allow}` catch-all must not answer
+   * it. Absent → the rung is skipped.
+   */
+  childGatedCategories?: readonly string[]
 }
 
 /**
@@ -120,6 +152,28 @@ function planScope(ctx: HostPrecheckContext): PlanReadOnlyScope | undefined {
 }
 
 /**
+ * Rung 6: the parent's ruleset over a child ask. `undefined` = it asks (fall
+ * through to `continue`).
+ */
+function parentVerdict(
+  approval: PendingApproval,
+  rules: readonly OpencodePermissionRule[],
+  platform: NodeJS.Platform | undefined
+): HostPrecheckVerdict | undefined {
+  const verdict = evaluateOpencodeAsk(rules, approval.toolName, approval.patterns, platform)
+  if (verdict === 'allow') return { kind: 'parent-allow' }
+  if (verdict !== 'deny') return undefined
+  const patterns = approval.patterns && approval.patterns.length > 0 ? approval.patterns : ['*']
+  for (const pattern of patterns) {
+    const rule = lastMatchingRule(approval.toolName, pattern, rules, platform)
+    if (rule?.action === 'deny')
+      return { kind: 'deny', rule: `${rule.permission}(${rule.pattern})` }
+  }
+  // Unreachable (a `deny` verdict has a deny rule behind it); fail toward the human.
+  return { kind: 'user-ask' }
+}
+
+/**
  * Decide one permission ask host-side, in order:
  *
  *  1. the robust §1 deny match (shell asks with a command) → `deny`;
@@ -138,7 +192,24 @@ function planScope(ctx: HostPrecheckContext): PlanReadOnlyScope | undefined {
  *     deliberately stripped so the judge sees the call (auto; S5 adds the
  *     auto-mode skip with its own predicate) — this rung must never fire
  *     under auto;
- *  6. else `continue`.
+ *  6. a task CHILD's ask (`approval.subagent`) with a `parentRuleset`, in a
+ *     category the static asks cover (`childGatedCategories` — never widen
+ *     what the child asked for on its own today): the parent's current
+ *     ruleset over the ask's patterns
+ *     (`evaluateOpencodeAsk`) — every pattern allowed → `parent-allow`; any
+ *     pattern denied → `deny` with the last matching deny rule's
+ *     `permission(pattern)` text (belt and braces: the user's non-Bash denies
+ *     are copied into the child session server-side already); else fall
+ *     through. Auto mode is covered by construction: the parent's auto
+ *     ruleset carries no user allow (`withoutAllowRules`) and its base asks
+ *     for bash/edit/webfetch/MCP, so a child's gated ask evaluates to `ask`
+ *     and reaches `handleAutoModeApproval` (fast path, agent-control gate,
+ *     read-only bypass, judge). Plan mode: rung 2 already refused the
+ *     mutating asks, a plan-read-only command under a user allow is
+ *     `allow-rule` (rung 5), anything else evaluates to `ask` (the plan base)
+ *     → the card. An OWN-session ask never takes this rung: the server has
+ *     already evaluated the same ruleset for it;
+ *  7. else `continue`.
  *
  * Not for `AskUserQuestion` (the caller never passes questions). Never throws:
  * an internal failure answers `user-ask` — fail toward the human, never toward
@@ -167,6 +238,14 @@ export function hostPrecheck(
     if (plan && command !== undefined) {
       const rule = allowCovers(command, ctx.rules.allow ?? [], 'lenient')?.segments[0]?.rule
       if (rule !== undefined) return { kind: 'allow-rule', rule }
+    }
+    if (
+      approval.subagent &&
+      ctx.parentRuleset &&
+      ctx.childGatedCategories?.some((glob) => wildcardMatch(approval.toolName, glob, ctx.platform))
+    ) {
+      const parent = parentVerdict(approval, ctx.parentRuleset, ctx.platform)
+      if (parent) return parent
     }
     return { kind: 'continue' }
   } catch (err) {

@@ -43,7 +43,7 @@ import {
   sessionAllowKey,
   type PermissionDecision,
   PI_TOOL_TO_CLAUDE_TOOL,
-  PLAN_MODE_DENY_REASON
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import type { CodexMethods } from './protocol/methods'
@@ -3719,7 +3719,7 @@ export class CodexSession extends BaseSession {
             verdict.source === 'deny-rule' && verdict.rule
               ? `Denied by permission rule: ${verdict.rule}`
               : this.permissionMode === 'plan'
-                ? PLAN_MODE_DENY_REASON
+                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
                 : 'Denied by permission rules'
         }
       if (step === 'ask') decision = 'ask'

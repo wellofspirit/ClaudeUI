@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { hostPrecheck, planModeRefusesAsk, type HostPrecheckContext } from '../host-precheck'
 import { OpencodeSessionAllows } from '../session-allows'
 import { compileClaudeRulesToOpencode } from '../permission-compiler'
+import type { OpencodePermissionRule } from '../permission-compiler'
+import { buildRuleset } from '../permission-ruleset'
 import { matchesUserAskRule } from '../wildcard'
 import type { PendingApproval } from '../../../shared/types'
 
@@ -426,5 +428,153 @@ describe('ADR-085 S3b — hostPrecheck plan mode reads the union oracle', () => 
         realpath: () => undefined
       })
     ).toBe(false)
+  })
+})
+
+describe('ADR-085 S4 — a child ask is answered with the parent ruleset (rung 6)', () => {
+  const GIT_ALLOW = 'Bash(git:*)'
+  /** The default-mode base + the compiled `Bash(git:*)` allow, as the session patches it. */
+  const parentDefault: OpencodePermissionRule[] = [
+    ...buildRuleset('default'),
+    ...compileClaudeRulesToOpencode({
+      allow: [GIT_ALLOW],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+  ]
+  const everything: OpencodePermissionRule[] = [{ permission: '*', pattern: '*', action: 'allow' }]
+  const marker = { sessionId: 'ses_child', parentToolUseId: 'call_task' }
+  const child = (a: PendingApproval): PendingApproval => ({ ...a, subagent: marker })
+  const childEdit: PendingApproval = child({
+    requestId: 'per_e',
+    toolUseId: 'c_e',
+    toolName: 'edit',
+    input: { filepath: 'src/a.ts' },
+    patterns: ['src/a.ts']
+  })
+  /** What the session passes: the gated built-ins + the bridged MCP key. */
+  const GATED = ['bash', 'edit', 'webfetch', 'lsphub_*']
+  const ctx = (
+    parentRuleset: OpencodePermissionRule[] | undefined,
+    mode = 'default',
+    /** `null` = the context carries no list. */
+    childGatedCategories: string[] | null = GATED
+  ) => ({
+    ...ctxWith({ allow: [GIT_ALLOW], mode }),
+    ...(parentRuleset ? { parentRuleset } : {}),
+    ...(childGatedCategories ? { childGatedCategories } : {})
+  })
+
+  describe('only the categories the static asks cover (R1)', () => {
+    const childAsk = (toolName: string, patterns: string[]): PendingApproval =>
+      child({ requestId: 'per_x', toolUseId: 'c_x', toolName, input: {}, patterns })
+
+    it('a child `external_directory` / `doom_loop` ask under `{*: allow}` → continue (asked today)', () => {
+      expect(hostPrecheck(childAsk('external_directory', ['/outside/*']), ctx(everything))).toEqual(
+        { kind: 'continue' }
+      )
+      expect(hostPrecheck(childAsk('doom_loop', ['*']), ctx(everything))).toEqual({
+        kind: 'continue'
+      })
+    })
+
+    it('a child MCP ask: parent-allow when its key is in the list; continue when it is not', () => {
+      const mcp = childAsk('lsphub_find_refs', ['*'])
+      expect(hostPrecheck(mcp, ctx(parentDefault))).toEqual({ kind: 'parent-allow' })
+      expect(
+        hostPrecheck(mcp, ctx(parentDefault, 'default', ['bash', 'edit', 'webfetch']))
+      ).toEqual({ kind: 'continue' })
+    })
+
+    it('no list → continue, even for bash', () => {
+      expect(hostPrecheck(child(bash('git status')), ctx(parentDefault, 'default', null))).toEqual({
+        kind: 'continue'
+      })
+    })
+  })
+
+  it('child `git status` under the parent’s Bash(git:*) allow → parent-allow', () => {
+    expect(hostPrecheck(child(bash('git status')), ctx(parentDefault))).toEqual({
+      kind: 'parent-allow'
+    })
+  })
+
+  it('child `hostname` (the parent base asks) → continue', () => {
+    expect(hostPrecheck(child(bash('hostname')), ctx(parentDefault))).toEqual({ kind: 'continue' })
+  })
+
+  it('child edit under a parent ruleset with `edit * allow` → parent-allow', () => {
+    const acceptEdits = [
+      ...parentDefault,
+      { permission: 'edit', pattern: '*', action: 'allow' as const }
+    ]
+    expect(hostPrecheck(childEdit, ctx(acceptEdits))).toEqual({ kind: 'parent-allow' })
+    expect(hostPrecheck(childEdit, ctx(parentDefault))).toEqual({ kind: 'continue' })
+  })
+
+  it('a parent-ruleset deny → deny with the rendered rule', () => {
+    const fetch: PendingApproval = child({
+      requestId: 'per_w',
+      toolUseId: 'c_w',
+      toolName: 'webfetch',
+      input: { url: 'https://example.invalid' },
+      patterns: ['https://example.invalid']
+    })
+    const denied = [
+      ...parentDefault,
+      { permission: 'webfetch', pattern: '*', action: 'deny' as const }
+    ]
+    expect(hostPrecheck(fetch, ctx(denied))).toEqual({ kind: 'deny', rule: 'webfetch(*)' })
+  })
+
+  it('NO subagent marker → never parent-allow, even when the ruleset allows', () => {
+    expect(hostPrecheck(bash('hostname'), ctx(everything))).toEqual({ kind: 'continue' })
+    expect(hostPrecheck(bash('git status'), ctx(parentDefault))).toEqual({ kind: 'continue' })
+  })
+
+  it('no parentRuleset → continue (today’s path)', () => {
+    expect(hostPrecheck(child(bash('git status')), ctx(undefined))).toEqual({ kind: 'continue' })
+  })
+
+  describe('the earlier rungs still come first', () => {
+    it('a §1 deny the child hits → deny with the user rule', () => {
+      expect(hostPrecheck(child(bash('sudo git push --force')), ctx(everything))).toEqual({
+        kind: 'deny',
+        rule: 'Bash(git push --force:*)'
+      })
+    })
+
+    it('plan: a child `git commit` under the allow → plan-refuse', () => {
+      expect(hostPrecheck(child(bash('git commit -m x')), ctx(everything, 'plan'))).toEqual({
+        kind: 'plan-refuse'
+      })
+    })
+
+    it('a user ask rule → user-ask', () => {
+      expect(hostPrecheck(child(bash('docker run alpine')), ctx(everything))).toEqual({
+        kind: 'user-ask',
+        rule: 'Bash(docker run:*)'
+      })
+    })
+
+    it('a session allow → session-allow', () => {
+      const allows = new OpencodeSessionAllows()
+      allows.add('bash', ['hostname *'])
+      expect(
+        hostPrecheck(child(bash('hostname')), {
+          ...ctxWith({ allows }),
+          parentRuleset: everything
+        })
+      ).toEqual({ kind: 'session-allow' })
+    })
+
+    it('plan: a child plan-safe command under the allow → allow-rule (rung 5), not parent-allow', () => {
+      expect(hostPrecheck(child(bash('git status')), ctx(everything, 'plan'))).toEqual({
+        kind: 'allow-rule',
+        rule: GIT_ALLOW
+      })
+    })
   })
 })

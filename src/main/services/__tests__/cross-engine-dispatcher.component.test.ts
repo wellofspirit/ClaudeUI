@@ -41,6 +41,16 @@ vi.mock('../../../core/codex/codex-locate', () => ({
   locateCodexBinary: vi.fn(() => null),
   locateCodexCodeModeHost: vi.fn(() => null)
 }))
+// The bridged Claude MCP servers for a cwd (ADR-085 S4: an opencode target
+// records their keys as child-gated categories). Hermetic — never the dev's
+// real Claude config: no bridged server unless a test says so.
+const { mockCollectClaudeMcp } = vi.hoisted(() => ({
+  mockCollectClaudeMcp: vi.fn((): Record<string, unknown> => ({}))
+}))
+vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
+  collectClaudeMcpForOpencode: mockCollectClaudeMcp
+}))
 
 import {
   CrossEngineDispatcher,
@@ -77,7 +87,7 @@ import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
 import { broadBashGlobs } from '../../../core/opencode/broad-bash-globs'
-import { PLAN_MODE_DENY_REASON } from '../../../core/pi/permission-engine'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 
 // ---------------------------------------------------------------------------
@@ -193,6 +203,7 @@ function makeFakeClient(stream = makeEventStream()): {
     deleteSession: ReturnType<typeof vi.fn<DispatchTargetClient['deleteSession']>>
     abortSession: ReturnType<typeof vi.fn<DispatchTargetClient['abortSession']>>
     replyPermission: ReturnType<typeof vi.fn<DispatchTargetClient['replyPermission']>>
+    agents: ReturnType<typeof vi.fn<DispatchTargetClient['agents']>>
     subscribeEvents: DispatchTargetClient['subscribeEvents']
   }
   stream: typeof stream
@@ -224,6 +235,8 @@ function makeFakeClient(stream = makeEventStream()): {
     deleteSession: vi.fn<DispatchTargetClient['deleteSession']>(async () => true),
     abortSession: vi.fn<DispatchTargetClient['abortSession']>(async () => true),
     replyPermission: vi.fn<DispatchTargetClient['replyPermission']>(async () => ({})),
+    // `GET /agent` (ADR-085 S4 backstop). Default: no agents → no backstop rule.
+    agents: vi.fn<DispatchTargetClient['agents']>(async () => []),
     subscribeEvents: (signal?: AbortSignal, onConnected?: () => void) =>
       stream.subscribe(signal, onConnected)
   }
@@ -6924,7 +6937,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
         JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
     )
     expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
-      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+      PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
     )
     target.completeTurn()
     await pending
@@ -9191,12 +9204,12 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       expect(client.replyPermission).toHaveBeenCalledWith(
         'perm-edit',
         'reject',
-        PLAN_MODE_DENY_REASON
+        PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
       )
       expect(client.replyPermission).toHaveBeenCalledWith(
         'perm-general',
         'reject',
-        PLAN_MODE_DENY_REASON
+        PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
       )
       expect(approvals(ctx)).toEqual([
         expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-explore` })
@@ -9240,7 +9253,7 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
         expect(client.replyPermission).toHaveBeenCalledWith(
           'perm-rm',
           'reject',
-          PLAN_MODE_DENY_REASON
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
         )
         expect(client.replyPermission).toHaveBeenCalledWith(
           'perm-force',
@@ -9273,6 +9286,218 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       expect(client.replyPermission).not.toHaveBeenCalled()
       completeTurn(stream)
       await pending
+    })
+
+    // ── ADR-085 S4 — subagents follow the target's rules ────────────────────
+    describe('ADR-085 S4 — the subagent backstop and target children', () => {
+      const RECURSION_DENY = {
+        permission: 'claudeui_dispatch_agent*',
+        pattern: '*',
+        action: 'deny'
+      }
+      const ALLOW_ALL = { permission: '*', pattern: '*', action: 'allow' as const }
+
+      it('an ungated subagent gets `task <name> ask` after the compiled deny/ask, before the recursion deny', async () => {
+        const { dispatcher, client } = makeHarness({ loadUserRules: () => RULES })
+        client.agents.mockResolvedValue([
+          { name: 'mybuilder', mode: 'subagent', permission: [ALLOW_ALL] },
+          {
+            name: 'explore',
+            mode: 'subagent',
+            permission: [
+              ALLOW_ALL,
+              { permission: 'bash', pattern: '*', action: 'ask' },
+              { permission: 'edit', pattern: '*', action: 'deny' },
+              { permission: 'webfetch', pattern: '*', action: 'ask' }
+            ]
+          },
+          { name: 'build', mode: 'primary', permission: [ALLOW_ALL] }
+        ])
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+        const rules = client.patchSession.mock.calls[0]![1].permission!
+        expect(rules.at(-1)).toEqual(RECURSION_DENY)
+        expect(rules.at(-2)).toEqual({ permission: 'task', pattern: 'mybuilder', action: 'ask' })
+        // After the compiled user deny/ask rules.
+        const lastUserRule = rules.findLastIndex(
+          (r) => r.permission === 'bash' && r.action === 'deny'
+        )
+        expect(lastUserRule).toBeGreaterThan(-1)
+        expect(lastUserRule).toBeLessThan(rules.length - 2)
+        expect(rules.filter((r) => r.permission === 'task')).toHaveLength(1)
+      })
+
+      it('a failing `GET /agent` → `task * ask` before the recursion deny', async () => {
+        const { dispatcher, client } = makeHarness()
+        client.agents.mockRejectedValue(new Error('boom'))
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+        const rules = client.patchSession.mock.calls[0]![1].permission!
+        expect(rules.at(-1)).toEqual(RECURSION_DENY)
+        expect(rules.at(-2)).toEqual({ permission: 'task', pattern: '*', action: 'ask' })
+      })
+
+      it("a target child's ask the target's ruleset allows → `once`, no card; one it asks for → forwarded", async () => {
+        const { dispatcher, client, stream } = makeHarness()
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4', autonomyMode: 'acceptEdits' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-edit',
+          sessionID: 'oc-child-s4',
+          permission: 'edit',
+          patterns: ['src/a.ts'],
+          metadata: { filepath: 'src/a.ts' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-child-bash',
+          sessionID: 'oc-child-s4',
+          permission: 'bash',
+          patterns: ['hostname'],
+          metadata: { command: 'hostname' }
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith('perm-child-edit', 'once')
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-child-bash` })
+        ])
+        expect(client.replyPermission).not.toHaveBeenCalledWith(
+          'perm-child-bash',
+          expect.anything()
+        )
+        completeTurn(stream)
+        await pending
+      })
+
+      describe('bridged MCP servers (parity with the target, never wider)', () => {
+        beforeEach(() => {
+          mockCollectClaudeMcp.mockReturnValue({
+            lsphub: { type: 'local', command: ['lsphub'], enabled: true }
+          })
+        })
+        afterEach(() => {
+          mockCollectClaudeMcp.mockReturnValue({})
+        })
+
+        async function childMcpAsk(
+          harness: ReturnType<typeof makeHarness>,
+          permission: string,
+          toolUseId: string
+        ): Promise<{ ctx: ReturnType<typeof makeCtx>; pending: Promise<DispatchResult> }> {
+          const { dispatcher, client, stream } = harness
+          holdTurn(client)
+          const ctx = makeCtx({ toolUseId })
+          const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+          await tick()
+          stream.push('message.part.updated', TASK_PART(`oc-child-${toolUseId}`))
+          await tick()
+          stream.push('permission.asked', {
+            id: `perm-${toolUseId}`,
+            sessionID: `oc-child-${toolUseId}`,
+            permission,
+            patterns: ['*'],
+            metadata: {}
+          })
+          await tick()
+          return { ctx, pending }
+        }
+
+        it("a target child's `lsphub_find_refs` ask → `once`, no card", async () => {
+          const harness = makeHarness()
+          const { ctx, pending } = await childMcpAsk(harness, 'lsphub_find_refs', 'mcp1')
+          expect(harness.client.replyPermission).toHaveBeenCalledWith('perm-mcp1', 'once')
+          expect(approvals(ctx)).toHaveLength(0)
+          completeTurn(harness.stream)
+          await pending
+        })
+
+        it('…a user `mcp__lsphub` deny → refused with the compiled key', async () => {
+          const harness = makeHarness({ loadUserRules: () => userRules({ deny: ['mcp__lsphub'] }) })
+          const { ctx, pending } = await childMcpAsk(harness, 'lsphub_find_refs', 'mcp2')
+          expect(harness.client.replyPermission).toHaveBeenCalledWith(
+            'perm-mcp2',
+            'reject',
+            'Denied by permission rule: lsphub_*(*)'
+          )
+          expect(approvals(ctx)).toHaveLength(0)
+          completeTurn(harness.stream)
+          await pending
+        })
+
+        it('a NON-bridged key `otherserver_tool` → forwarded as a card, no reply', async () => {
+          const harness = makeHarness()
+          const { ctx, pending } = await childMcpAsk(harness, 'otherserver_tool', 'mcp3')
+          expect(approvals(ctx)).toEqual([
+            expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-mcp3` })
+          ])
+          expect(harness.client.replyPermission).not.toHaveBeenCalled()
+          completeTurn(harness.stream)
+          await pending
+        })
+      })
+
+      it("a target child's `external_directory` ask is forwarded as a card, never answered by the target's `{*: allow}`", async () => {
+        const { dispatcher, client, stream } = makeHarness()
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4_ext', autonomyMode: 'acceptEdits' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4e'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-ext',
+          sessionID: 'oc-child-s4e',
+          permission: 'external_directory',
+          patterns: ['/outside/*'],
+          metadata: {}
+        })
+        await tick()
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-child-ext` })
+        ])
+        expect(client.replyPermission).not.toHaveBeenCalled()
+        completeTurn(stream)
+        await pending
+      })
+
+      it("a target child's ask the target's ruleset denies → refused with the rule; the target's OWN ask is forwarded", async () => {
+        const { dispatcher, client, stream } = makeHarness({
+          loadUserRules: () => userRules({ deny: ['WebFetch'] })
+        })
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4_deny' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4d'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-fetch',
+          sessionID: 'oc-child-s4d',
+          permission: 'webfetch',
+          patterns: ['https://example.invalid'],
+          metadata: { url: 'https://example.invalid' }
+        })
+        // An own-session ask is the server's business (it evaluated the same
+        // ruleset) — never answered by this rung.
+        stream.push('permission.asked', {
+          id: 'perm-own-edit',
+          sessionID: 'oc-sess-1',
+          permission: 'edit',
+          patterns: ['src/a.ts']
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-child-fetch',
+          'reject',
+          'Denied by permission rule: webfetch(*)'
+        )
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-own-edit` })
+        ])
+        completeTurn(stream)
+        await pending
+      })
     })
   })
 

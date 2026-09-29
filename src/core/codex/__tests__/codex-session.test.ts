@@ -15,6 +15,7 @@ import { applyEvent } from '../../shared/sync/reducer'
 import { emptyCanonicalState } from '../../shared/sync/state'
 import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 import { codexItemId } from '../event-mapper'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -2527,7 +2528,7 @@ describe('Codex cross-engine dispatch', () => {
       contentItems: [
         {
           type: 'inputText',
-          text: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+          text: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
         }
       ],
       success: false

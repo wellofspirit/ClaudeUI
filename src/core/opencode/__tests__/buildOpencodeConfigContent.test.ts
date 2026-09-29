@@ -19,6 +19,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildOpencodeConfigContent } from '../OpencodeServerManager'
 import type { OpencodeMcpEntry } from '../claude-mcp-bridge'
+import { buildSubagentPermissionConfig } from '../subagent-permissions'
 
 const PORT = 19000
 const TOKEN = 'test-token'
@@ -183,5 +184,47 @@ describe('buildOpencodeConfigContent', () => {
       headers: { X: 'y' },
       enabled: true
     })
+  })
+})
+
+// ── ADR-085 S4: per-subagent permission asks ──────────────────────────────────
+
+describe('buildOpencodeConfigContent — the `agent` block (ADR-085 S4)', () => {
+  const agentPermissions = buildSubagentPermissionConfig({
+    agents: [
+      { name: 'general', kind: 'builtin', mode: 'subagent', scope: null },
+      { name: 'explore', kind: 'builtin', mode: 'subagent', scope: null },
+      {
+        name: 'mybuilder',
+        kind: 'custom',
+        mode: 'subagent',
+        scope: 'project',
+        permission: { bash: 'allow' }
+      }
+    ],
+    mcpServers: ['lsphub']
+  })
+  const parseWith = (agents?: Parameters<typeof buildOpencodeConfigContent>[4]) =>
+    JSON.parse(buildOpencodeConfigContent(PORT, TOKEN, undefined, null, agents)) as Record<
+      string,
+      unknown
+    >
+
+  it('emits the per-agent string asks exactly, after `mcp` and before `experimental`', () => {
+    const out = parseWith(agentPermissions)
+    expect(out.agent).toEqual({
+      explore: { permission: { bash: 'ask', webfetch: 'ask' } },
+      general: { permission: { bash: 'ask', edit: 'ask', webfetch: 'ask', 'lsphub_*': 'ask' } },
+      mybuilder: { permission: { bash: 'ask', edit: 'ask', webfetch: 'ask', 'lsphub_*': 'ask' } }
+    })
+    expect(Object.keys(out)).toEqual(['mcp', 'agent', 'experimental', 'autoupdate'])
+    // Never a top-level permission key (it would turn explore's denies into asks).
+    expect(out).not.toHaveProperty('permission')
+  })
+
+  it('absent or empty → no `agent` key (output unchanged)', () => {
+    expect(parseWith()).not.toHaveProperty('agent')
+    expect(parseWith({})).not.toHaveProperty('agent')
+    expect(Object.keys(parseWith({}))).toEqual(['mcp', 'experimental', 'autoupdate'])
   })
 })

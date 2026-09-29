@@ -63,13 +63,28 @@ export function evaluateOpencodeRules(
   rules: readonly OpencodePermissionRule[],
   platform: NodeJS.Platform = process.platform
 ): OpencodeAction | undefined {
+  return lastMatchingRule(permission, pattern, rules, platform)?.action
+}
+
+/**
+ * The rule {@link evaluateOpencodeRules} decides by — the LAST rule whose
+ * `permission` and `pattern` both match — or `undefined` when none does. Used
+ * where the host has to name the rule it acted on (ADR-085 S4: a child ask
+ * the parent's ruleset denies is refused with that rule's text).
+ */
+export function lastMatchingRule(
+  permission: string,
+  pattern: string,
+  rules: readonly OpencodePermissionRule[],
+  platform: NodeJS.Platform = process.platform
+): OpencodePermissionRule | undefined {
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]
     if (
       wildcardMatch(permission, rule.permission, platform) &&
       wildcardMatch(pattern, rule.pattern, platform)
     ) {
-      return rule.action
+      return rule
     }
   }
   return undefined
@@ -97,4 +112,29 @@ export function matchesUserAskRule(
   if (rules.length === 0) return false
   const list = patterns && patterns.length > 0 ? patterns : ['*']
   return list.some((p) => evaluateOpencodeRules(permission, p, rules, platform) === 'ask')
+}
+
+/**
+ * opencode's per-ask verdict over a ruleset (`permission/index.ts` `ask()`):
+ * evaluate every pattern (absent/empty → `['*']`); any `deny` → `'deny'`; all
+ * `allow` → `'allow'`; else `'ask'`. A pattern no rule matches counts as
+ * `'ask'` (opencode's own fallthrough — and fail toward the human).
+ *
+ * ADR-085 S4: the host answers a task child's ask with this verdict over the
+ * PARENT session's current ruleset (`host-precheck.ts`, `parent-allow`).
+ */
+export function evaluateOpencodeAsk(
+  rules: readonly OpencodePermissionRule[],
+  permission: string,
+  patterns: readonly string[] | undefined,
+  platform: NodeJS.Platform = process.platform
+): OpencodeAction {
+  const list = patterns && patterns.length > 0 ? patterns : ['*']
+  let verdict: OpencodeAction = 'allow'
+  for (const pattern of list) {
+    const action = evaluateOpencodeRules(permission, pattern, rules, platform) ?? 'ask'
+    if (action === 'deny') return 'deny'
+    if (action !== 'allow') verdict = 'ask'
+  }
+  return verdict
 }

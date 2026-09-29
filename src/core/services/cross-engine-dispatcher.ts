@@ -39,17 +39,25 @@ import {
 import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
+import type { OpencodeAgentInfo } from '../opencode/OpencodeClient'
 // NOT imported from OpencodeSession.ts — that module now imports
 // crossEngineDispatcher (ADR-033 M2 — cancel() disposes owned targets), so
 // importing it here would form a require-cycle. permission-ruleset.ts holds
 // the same buildRuleset/PermissionRule, re-exported from OpencodeSession.ts
 // for any other existing importer.
-import { buildRuleset } from '../opencode/permission-ruleset'
+import { buildRuleset, CLAUDEUI_MCP_SERVER } from '../opencode/permission-ruleset'
 import type { PermissionRule } from '../opencode/permission-ruleset'
 // Already in this module's graph through `pi/permission-engine.ts`, which
 // imports it (no new edge, no cycle).
-import { compileClaudeRulesToOpencode } from '../opencode/permission-compiler'
+import { compileClaudeRulesToOpencode, opencodeMcpKey } from '../opencode/permission-compiler'
+import { collectClaudeMcpForOpencode } from '../opencode/claude-mcp-bridge'
 import { planModeRefusesAsk } from '../opencode/host-precheck'
+import {
+  CHILD_GATED_CATEGORIES,
+  subagentBackstopRules,
+  TASK_BACKSTOP_FAIL_CLOSED_RULE
+} from '../opencode/subagent-permissions'
+import { evaluateOpencodeAsk, lastMatchingRule, wildcardMatch } from '../opencode/wildcard'
 import { denyAskHit } from '../permissions/shell-rules'
 import { isShellToolName } from '../automode/shell-lexical'
 import { parseModelString } from '../opencode/model-discovery'
@@ -107,7 +115,7 @@ import { unwrapShellCommand } from '../codex/command-text'
 import {
   decideWithSource,
   mergedClaudeRulesFor,
-  PLAN_MODE_DENY_REASON
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
 import type { Model } from '../codex/protocol/v2/Model'
@@ -269,6 +277,24 @@ export interface DispatchRequest {
   sessionId?: string
 }
 
+/**
+ * The reject text for a target child's ask the target's ruleset denies: the
+ * last matching deny rule, as `permission(pattern)` (ADR-085 S4).
+ */
+function targetDenyReason(
+  rules: readonly PermissionRule[],
+  permission: string,
+  patterns: readonly string[] | undefined
+): string {
+  for (const pattern of patterns && patterns.length > 0 ? patterns : ['*']) {
+    const rule = lastMatchingRule(permission, pattern, rules)
+    if (rule?.action === 'deny') {
+      return `Denied by permission rule: ${rule.permission}(${rule.pattern})`
+    }
+  }
+  return 'Denied by permission rules'
+}
+
 export interface DispatchResult {
   text: string
   sessionId: string
@@ -321,6 +347,9 @@ export interface DispatchTargetClient {
     reply: 'once' | 'always' | 'reject',
     message?: string
   ): Promise<unknown>
+  /** `GET /agent` — the server's agents with their computed rulesets, read for
+   *  the target's subagent backstop (ADR-085 S4, `OpencodeClient.agents`). */
+  agents(): Promise<OpencodeAgentInfo[]>
   /** `onConnected` fires once the subscription is provably receiving — see
    *  `OpencodeClient.subscribeEvents` for why the reconnect reconcile has to
    *  hang off it rather than run before the subscribe. */
@@ -893,6 +922,19 @@ interface OpencodeTargetEntry {
    * the target's turn (those branches look up target ids only).
    */
   childSessions: Map<string, string>
+  /**
+   * The ruleset patched onto the target session at creation (ADR-085 S4): what
+   * a target CHILD's ask is answered with before it may reach a human — the
+   * target is that child's parent (owner ruling 4, `handleSseEvent`).
+   */
+  permission: PermissionRule[]
+  /**
+   * The categories the spawn put a static child ask on for this cwd (ADR-085
+   * S4): bash/edit/webfetch plus the bridged MCP servers' keys (the spawn's
+   * `collectClaudeMcpForOpencode` set, minus `claudeui`), read at target
+   * creation. Only a child ask in one of these is answered by `permission`.
+   */
+  childGated: string[]
 }
 
 /**
@@ -2968,9 +3010,16 @@ export class CrossEngineDispatcher {
       // recursion guard LAST: the target can never call the dispatch tool back
       // (ADR-033 §4). The host check in `handleSseEvent` backs the compiled
       // rules at the ask.
+      //
+      // ADR-085 S4 — the subagent backstop sits after the compiled deny/ask
+      // and before the recursion guard: a `task:<name>` ask for every
+      // subagent a gated category may still be allowed under (the static
+      // spawn-time asks missed it). Targets never carry the auto-mode MCP
+      // base, so MCP is not a gated category here.
       const ruleset: PermissionRule[] = [
         ...buildRuleset(ctx.autonomyMode),
         ...compileClaudeRulesToOpencode(this.userDenyAsk(ctx.cwd)),
+        ...(await this.opencodeTargetBackstop(rec.client)),
         { permission: 'claudeui_dispatch_agent*', pattern: '*', action: 'deny' }
       ]
       await rec.client.patchSession(session.id, { permission: ruleset })
@@ -2994,7 +3043,14 @@ export class CrossEngineDispatcher {
         cumulativeCostUsd: 0,
         unpricedTurns: 0,
         turnToolUseIds: new Set(),
-        childSessions: new Map()
+        childSessions: new Map(),
+        permission: ruleset,
+        childGated: [
+          ...CHILD_GATED_CATEGORIES,
+          ...Object.keys(collectClaudeMcpForOpencode(ctx.cwd))
+            .filter((server) => server !== CLAUDEUI_MCP_SERVER)
+            .map((server) => opencodeMcpKey(server))
+        ]
       }
       this.targets.set(session.id, entry)
       return entry
@@ -3002,6 +3058,26 @@ export class CrossEngineDispatcher {
       // Roll back the ref we took for this target.
       this.releaseConnection({ cwd: ctx.cwd, cwdKey })
       throw err
+    }
+  }
+
+  /**
+   * ADR-085 S4 — the target's subagent backstop (`subagentBackstopRules` over
+   * `GET /agent`, gated = bash/edit/webfetch). A failing `GET /agent` fails
+   * CLOSED — every task spawn of this target asks (`task * ask`) — with one
+   * warn.
+   */
+  private async opencodeTargetBackstop(client: DispatchTargetClient): Promise<PermissionRule[]> {
+    try {
+      const agents = await client.agents()
+      if (!Array.isArray(agents)) throw new Error('GET /agent did not return a list')
+      return subagentBackstopRules(agents, CHILD_GATED_CATEGORIES)
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `opencode target: GET /agent failed — every task spawn asks: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return [TASK_BACKSTOP_FAIL_CLOSED_RULE]
     }
   }
 
@@ -3317,6 +3393,47 @@ export class CrossEngineDispatcher {
         })
         return
       }
+      // ADR-085 S4 (owner ruling 4) — a target CHILD follows its parent, the
+      // target: its agent always asks for the gated categories (static asks
+      // injected at spawn), and the target's own ruleset answers — allow →
+      // `once`, deny → refused with the rule, ask → forwarded as below. The
+      // target's own asks were already evaluated server-side against it.
+      // Only for the categories the static asks cover (`entry.childGated`:
+      // bash/edit/webfetch and the bridged MCP keys): any other child ask
+      // (`external_directory`, `doom_loop`, a non-bridged MCP key, …) is
+      // forwarded as today, never answered by the target's `{*: allow}`
+      // catch-all. A bridged MCP key is parity, never wider: the target's own
+      // calls to that server are answered by the same `{*: allow}` server-side
+      // (targets carry no MCP base), and the user's MCP deny/ask rules
+      // compiled into the target ruleset (ADR-085 §3) still evaluate to
+      // deny/ask here.
+      if (
+        sessionID !== entry.sessionId &&
+        entry.childGated.some((glob) => wildcardMatch(permission, glob))
+      ) {
+        const verdict = evaluateOpencodeAsk(entry.permission, permission, patterns)
+        if (verdict === 'allow' || verdict === 'deny') {
+          const reason =
+            verdict === 'deny'
+              ? targetDenyReason(entry.permission, permission, patterns)
+              : undefined
+          logger.info(
+            'CrossEngineDispatcher',
+            `opencode target: child ask ${permission} ${verdict === 'allow' ? 'allowed' : 'denied'} by the target's rules`
+          )
+          const replied =
+            reason !== undefined
+              ? entry.client.replyPermission(id, 'reject', reason)
+              : entry.client.replyPermission(id, 'once')
+          replied.catch((err) => {
+            logger.warn(
+              'CrossEngineDispatcher',
+              `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          })
+          return
+        }
+      }
       // The TARGET-side tool call this ask belongs to. The target's stream is
       // replayed on the dispatching client under the dispatch tool card, so
       // this id is the one the nested tool block there carries — binding it
@@ -3372,7 +3489,9 @@ export class CrossEngineDispatcher {
    *    `task:general`, a bash command `isPlanReadOnlyCommand` cannot vouch for
    *    or one with no command text. The plan ruleset ASKS for all three (a
    *    server-side deny would outlive the mode — `buildRuleset('plan')`), so
-   *    the refusal is made here, with the same text pi and Codex use.
+   *    the refusal is made here, with the no-exit-tool plan text Codex uses
+   *    too (`PLAN_MODE_DENY_REASON_NO_EXIT_TOOL` — opencode has no
+   *    `exit_plan`; ADR-085 S4, S3b verifier F4).
    * Anything else — an ask-rule hit, a plan-safe command — is forwarded: the
    * human decides, as a target has no judge. Targets get no allow rules
    * (`userDenyAsk` compiles deny/ask only), so there is no allow-rule rung.
@@ -3412,7 +3531,7 @@ export class CrossEngineDispatcher {
       })
     ) {
       logger.info('CrossEngineDispatcher', `opencode target: plan mode refused ${permission}`)
-      return PLAN_MODE_DENY_REASON
+      return PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
     }
     return undefined
   }
@@ -6214,7 +6333,7 @@ export class CrossEngineDispatcher {
             verdict.source === 'deny-rule'
               ? `Denied by permission rule: ${verdict.rule}`
               : entry.autonomyMode === 'plan'
-                ? PLAN_MODE_DENY_REASON
+                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
                 : 'Denied by dispatch autonomy mode'
         }
       if (step === 'ask') decision = 'ask'

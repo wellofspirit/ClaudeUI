@@ -58,12 +58,19 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
 import {
   compileClaudeRulesToOpencode,
+  opencodeMcpKey,
   persistAllowSuggestions,
   withoutAllowRules,
   withoutMutatingAllowRules
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
+import {
+  CHILD_GATED_CATEGORIES,
+  subagentBackstopRules,
+  TASK_BACKSTOP_FAIL_CLOSED_RULE
+} from './subagent-permissions'
+import type { OpencodeAgentInfo } from './OpencodeClient'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -116,7 +123,7 @@ import {
 import { buildAutoModeRuleset, buildRuleset, CLAUDEUI_MCP_SERVER } from './permission-ruleset'
 import { editClearsAgentControl } from './agent-control-gate'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
-import { PLAN_MODE_DENY_REASON } from '../pi/permission-engine'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../pi/permission-engine'
 import type { PermissionRule } from './permission-ruleset'
 export { buildRuleset } from './permission-ruleset'
 export type { PermissionRule } from './permission-ruleset'
@@ -377,6 +384,26 @@ export class OpencodeSession extends BaseSession {
   private knownMcpServers: string[] | null = null
   // One warn per session for a failing `GET /mcp` (the static set is used).
   private mcpStatusWarned = false
+  // ADR-085 S4 — the server's agents with their COMPUTED rulesets (`GET
+  // /agent`), for the parent-side `task:<name>` backstop. Cached like
+  // `knownMcpServers` (the server's agent config is fixed at its spawn) and
+  // reset with it on a reconnect. `null` = not resolved yet (a failing GET is
+  // not cached: the next apply retries).
+  private subagentAgents: OpencodeAgentInfo[] | null = null
+  // One warn per session for a failing `GET /agent` (every task spawn asks then).
+  private agentsWarned = false
+  // ADR-085 S4 — the ruleset the last SUCCESSFUL patch put on the opencode
+  // session, keyed by that session's id: what a task child's ask is answered
+  // with (host-precheck.ts `parentRuleset`), and what `applyPermissionMode`
+  // compares against to skip an unchanged PATCH (S3b verifier F3 — see there).
+  // Reset on a reconnect and on cancel().
+  private lastPatchedRuleset: { sessionId: string; rules: PermissionRule[]; key: string } | null =
+    null
+  // ADR-085 S4 — the categories the spawn put a static child ask on (see
+  // childGatedCategories()). Memoized per connection — it reads the Claude MCP
+  // config, and the pre-check runs on every ask — and reset with
+  // `knownMcpServers` on a reconnect.
+  private childGated: string[] | null = null
   // ── Phase 3 ground truth (docs/automode-rework-plan.md §5) ────────────────
   // How prior tool calls ended, keyed by toolUseId. Fed to the classifier as
   // `{"outcome":…}` annotations — the ONLY channel by which a refusal reaches
@@ -930,8 +957,13 @@ export class OpencodeSession extends BaseSession {
         }
         this.conn = c
         this.client = new OpencodeClient(c.baseUrl, c.authHeader)
-        // A (re)spawned server may carry a different MCP config (ADR-085 §3).
+        // A (re)spawned server may carry a different MCP config (ADR-085 §3)
+        // and different agents (ADR-085 S4) — and the next apply must PATCH
+        // again rather than trust what the previous connection sent.
         this.knownMcpServers = null
+        this.subagentAgents = null
+        this.lastPatchedRuleset = null
+        this.childGated = null
         this.disconnected = false
         // Server death is otherwise INVISIBLE to a session with no SSE
         // consumer: ensureSSEConsumer() only starts at the first prompt, so an
@@ -1618,6 +1650,9 @@ export class OpencodeSession extends BaseSession {
       for (const settle of [...waiters]) settle('closed')
     }
     this.childSessions.clear()
+    // ADR-085 S4 — the next run() reconnects and re-PATCHes (F3's skip must
+    // not trust a ruleset from before the teardown).
+    this.lastPatchedRuleset = null
     // Tear down any cross-engine dispatch targets owned by this session
     // (ADR-033 M2 — mirrors ClaudeSession.cancel()'s identical call).
     crossEngineDispatcher.disposeFor(this.routingId)
@@ -1819,6 +1854,22 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /**
+   * Patch the session's permission ruleset for `mode`: the mode base, the
+   * user's compiled rules (mode-filtered), the subagent backstop (ADR-085 S4)
+   * and the dispatch-tool ask.
+   *
+   * ADR-085 S4 / S3b verifier F3 — an UNCHANGED ruleset is not re-sent. The
+   * PATCH APPENDS (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:194-198`,
+   * `Permission.merge(current, payload)`), and every `run()` applies the mode,
+   * so re-sending the same rules grew the stored ruleset without bound (116 →
+   * 2705 rules in ~21 turns) — and opencode's DeniedError renders every
+   * matching rule, the user's own included, into the tool result the model
+   * reads. A NEW opencode session id, a reconnect (`ensureConnected` resets the
+   * record), or a changed mode / settings / MCP set / agent set re-PATCHes;
+   * so does a retry after a failed PATCH (the record is only written on
+   * success).
+   */
   private async applyPermissionMode(mode: string): Promise<void> {
     if (!this.client || !this.openSessionId) return
     // Plan mode additionally switches to opencode's read-only `plan` agent
@@ -1874,9 +1925,27 @@ export class OpencodeSession extends BaseSession {
       : mode === 'plan'
         ? withoutMutatingAllowRules(userRules)
         : userRules
-    const ruleset = [...base, ...effectiveUserRules, DISPATCH_AGENT_ASK_RULE]
+    // ADR-085 S4 — the `task:<name>` asks for subagents a gated category may
+    // still be allowed under (see resolveSubagentBackstop). AFTER the user
+    // rules on purpose: a user `Task`/`Task(x)` allow must not un-gate an
+    // agent whose bash is ungated — the ask is about the agent, not the user's
+    // task preference (in plan mode `withoutMutatingAllowRules` strips task
+    // allows anyway).
+    const backstop = await this.resolveSubagentBackstop(autoMode, mcpServers)
+    const ruleset = [...base, ...effectiveUserRules, ...backstop, DISPATCH_AGENT_ASK_RULE]
+    const sessionId = this.openSessionId
+    const key = JSON.stringify(ruleset)
+    if (
+      this.lastPatchedRuleset &&
+      this.lastPatchedRuleset.sessionId === sessionId &&
+      this.lastPatchedRuleset.key === key
+    ) {
+      logger.debug('OpencodeSession', 'permission ruleset unchanged — no PATCH')
+      return
+    }
     try {
-      await this.client.patchSession(this.openSessionId, { permission: ruleset })
+      await this.client.patchSession(sessionId, { permission: ruleset })
+      this.lastPatchedRuleset = { sessionId, rules: ruleset, key }
     } catch (err) {
       // FAIL CLOSED. This patch is the ONLY thing standing between the user's
       // chosen autonomy mode (+ their deny rules) and the vendor's `{*: allow}`
@@ -1976,6 +2045,75 @@ export class OpencodeSession extends BaseSession {
       }
       return known
     }
+  }
+
+  /**
+   * ADR-085 S4 — the categories a task child's ask may be answered with the
+   * parent's rules for (host-precheck.ts `childGatedCategories`): exactly the
+   * ones the spawn put a static ask on — the gated built-ins plus the bridged
+   * MCP servers' keys (the spawn's `collectClaudeMcpForOpencode` set, minus
+   * `claudeui`). A `GET /mcp`-only server got no injected ask, so a child ask
+   * for it stays the card's / judge's, as does every other category.
+   */
+  private childGatedCategories(): string[] {
+    this.childGated ??= [
+      ...CHILD_GATED_CATEGORIES,
+      ...this.staticMcpServers()
+        .filter((server) => server !== CLAUDEUI_MCP_SERVER)
+        .map((server) => opencodeMcpKey(server))
+    ]
+    return this.childGated
+  }
+
+  /**
+   * ADR-085 S4 — the parent-side subagent backstop for this apply: one
+   * `{task, <name>, ask}` per subagent whose computed ruleset (`GET /agent`)
+   * may still ALLOW a gated category (`subagentBackstopRules`) — an agent the
+   * spawn-time scan could not give its static asks. Gated = bash/edit/webfetch,
+   * plus in auto mode (the one mode whose parent base gates MCP) the MCP key
+   * of every known server except `claudeui`. The agent list is cached per
+   * session (see `subagentAgents`); a failing `GET /agent` warns once per
+   * session and fails CLOSED for this apply (`task * ask` — every spawn asks),
+   * not cached, so the next apply retries.
+   */
+  private async resolveSubagentBackstop(
+    autoMode: boolean,
+    mcpServers: readonly string[]
+  ): Promise<PermissionRule[]> {
+    let agents = this.subagentAgents
+    if (!agents) {
+      try {
+        const listed = await this.client?.agents()
+        if (!Array.isArray(listed)) throw new Error('GET /agent did not return a list')
+        agents = listed
+        this.subagentAgents = listed
+      } catch (err) {
+        if (!this.agentsWarned) {
+          this.agentsWarned = true
+          logger.warn(
+            'OpencodeSession',
+            `GET /agent failed — every task spawn asks: ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+        return [TASK_BACKSTOP_FAIL_CLOSED_RULE]
+      }
+    }
+    const gated: string[] = [
+      ...CHILD_GATED_CATEGORIES,
+      ...(autoMode
+        ? mcpServers
+            .filter((server) => server !== CLAUDEUI_MCP_SERVER)
+            .map((server) => opencodeMcpKey(server))
+        : [])
+    ]
+    const rules = subagentBackstopRules(agents, gated)
+    if (rules.length > 0) {
+      logger.debug(
+        'OpencodeSession',
+        `subagent backstop: task ask for ${rules.map((r) => r.pattern).join(', ')}`
+      )
+    }
+    return rules
   }
 
   // ── Auto mode (full) LLM permission gatekeeper (ADR-023) ──────────────────
@@ -2337,6 +2475,15 @@ export class OpencodeSession extends BaseSession {
    * ruleset its runLoop snapshotted. A plan-safe command a user allow rule
    * covers is answered `once` host-side (`allow-rule`), because plan mode
    * sends no `edit`/`bash` allow to the server (`withoutMutatingAllowRules`).
+   *
+   * ADR-085 S4 (owner ruling 4) — a task CHILD's ask is answered with the
+   * PARENT's rules: its agent always asks for the gated categories (static
+   * asks injected at spawn, `subagent-permissions.ts`), and once the rungs
+   * above have not spoken, the ruleset last PATCHed onto this session decides
+   * (`parent-allow` → `once` silently; a deny → refused with the rule; an ask
+   * → today's split, so in auto mode the fast path, the agent-control gate,
+   * the read-only bypass and the judge — told which subagent proposed the
+   * call — all apply).
    */
   private routePermissionAsk(approval: PendingApproval): void {
     const category = approval.toolName
@@ -2353,13 +2500,15 @@ export class OpencodeSession extends BaseSession {
         this.denyByRule(approval, verdict.rule)
         return
       case 'plan-refuse':
-        this.autoReply(approval.requestId, 'reject', PLAN_MODE_DENY_REASON)
+        this.autoReply(approval.requestId, 'reject', PLAN_MODE_DENY_REASON_NO_EXIT_TOOL)
         // No command text on an info line (ADR-084 logging rule).
         logger.info(
           'OpencodeSession',
           `plan mode refused ${category}${approval.subagent ? ' (subagent)' : ''}`
         )
-        if (approval.toolUseId) this.sendDenial(approval.toolUseId, 'mode', PLAN_MODE_DENY_REASON)
+        if (approval.toolUseId) {
+          this.sendDenial(approval.toolUseId, 'mode', PLAN_MODE_DENY_REASON_NO_EXIT_TOOL)
+        }
         return
       case 'user-ask': {
         const pending = this.pendingApprovals.get(approval.requestId)
@@ -2392,6 +2541,18 @@ export class OpencodeSession extends BaseSession {
         )
         this.autoReply(approval.requestId, 'once')
         return
+      case 'parent-allow': {
+        // ADR-085 S4 (ruling 4): the parent's rules allow this child call.
+        // The subagent type when known; never the command, patterns or the
+        // task prompt (ADR-084 logging rule).
+        const type = approval.subagent ? this.subagentTask(approval.subagent)?.type : undefined
+        logger.info(
+          'OpencodeSession',
+          `child ask ${category} allowed by the parent's rules${type ? ` (subagent ${type})` : ''}`
+        )
+        this.autoReply(approval.requestId, 'once')
+        return
+      }
       case 'continue':
         break
     }
@@ -2409,7 +2570,9 @@ export class OpencodeSession extends BaseSession {
    * deny/ask (and, read in plan mode only, allow) rules FRESH per call (as
    * readOnlyBypass reads them — a settings edit mid-session binds the next
    * ask; best-effort, so a load failure leaves only plan-refuse/session-allow/
-   * continue), G9's compiled user-origin rules, this chat's session-allow set.
+   * continue), G9's compiled user-origin rules, this chat's session-allow set,
+   * and (for child asks, ADR-085 S4) the ruleset last patched onto this
+   * opencode session.
    */
   private precheckContext(): HostPrecheckContext {
     const permissions = this.mergedUserPermissions()
@@ -2421,11 +2584,45 @@ export class OpencodeSession extends BaseSession {
       additionalDirectories: permissions.additionalDirectories,
       userRules: this.userOriginRules(),
       sessionAllows: this.sessionAllows,
+      // ADR-085 S4 — what a CHILD ask is answered with: the ruleset on THIS
+      // opencode session, never one patched onto a previous session id.
+      parentRuleset:
+        this.lastPatchedRuleset?.sessionId === this.openSessionId
+          ? this.lastPatchedRuleset.rules
+          : undefined,
+      // …and only for the categories the spawn put a static ask on: the gated
+      // built-ins plus the bridged MCP servers' keys (the spawn's
+      // `collectClaudeMcpForOpencode` set — `GET /mcp`-only servers got no
+      // injected ask, so their child asks stay the card/judge's).
+      childGatedCategories: this.childGatedCategories(),
       onError: (err) =>
         logger.warn(
           'OpencodeSession',
           `host pre-check failed — asking the human: ${err instanceof Error ? err.message : String(err)}`
         )
+    }
+  }
+
+  /**
+   * ADR-085 S4 — the parent `task` call that spawned a child, read from its
+   * tool part at the time it is needed (the mapper's marker carries only
+   * `{sessionId, parentToolUseId}` — one resolution site, and the task part's
+   * input is certainly there by then): the subagent type (`'unknown'` when the
+   * part has none), plus the description and prompt when they are strings.
+   * `undefined` when the part carries no input at all.
+   */
+  private subagentTask(marker: {
+    parentToolUseId: string
+  }): { type: string; description?: string; prompt?: string } | undefined {
+    const input = findToolInput(this.accumulators, undefined, marker.parentToolUseId)
+    if (!input) return undefined
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+    const description = str(input.description)
+    const prompt = str(input.prompt)
+    return {
+      type: str(input.subagent_type) ?? 'unknown',
+      ...(description !== undefined ? { description } : {}),
+      ...(prompt !== undefined ? { prompt } : {})
     }
   }
 
@@ -2572,10 +2769,17 @@ export class OpencodeSession extends BaseSession {
       // this same call rather than one approval later.
       const actionMeta = await this.captureActionMeta(category, approval.input)
       const environment = await this.classifierEnvironment()
+      // ADR-085 S4 — a child's call is judged as the assistant's own, against
+      // the parent's task that spawned it.
+      const subagent = approval.subagent ? this.subagentTask(approval.subagent) : undefined
       const result = await classify(
         {
           messages: this.messageHistory,
-          action: { toolName: category, input: approval.input },
+          action: {
+            toolName: category,
+            input: approval.input,
+            ...(approval.subagent ? { subagent: subagent ?? { type: 'unknown' } } : {})
+          },
           environment,
           ...(actionMeta ? { actionMeta } : {}),
           ...(this.toolOutcomes.size ? { outcomes: Object.fromEntries(this.toolOutcomes) } : {}),

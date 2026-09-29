@@ -36,6 +36,7 @@ import {
   isPlanReadOnlyCommand,
   planModeOutranksRules,
   PLAN_MODE_DENY_REASON,
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL,
   PLAN_EXIT_OUTSIDE_PLAN_REASON
 } from '../permission-engine'
 
@@ -201,6 +202,18 @@ describe('PLAN_MODE_DENY_REASON', () => {
     expect(PLAN_MODE_DENY_REASON).toBe(
       'Plan mode is read-only — present a plan and call exit_plan to proceed'
     )
+  })
+})
+
+describe('PLAN_MODE_DENY_REASON_NO_EXIT_TOOL (ADR-085 S4, S3b verifier F4)', () => {
+  it('is the exact reason string for the engines without an exit_plan tool (opencode, Codex)', () => {
+    expect(PLAN_MODE_DENY_REASON_NO_EXIT_TOOL).toBe(
+      'Plan mode is read-only — present the plan and ask the user to leave plan mode to proceed'
+    )
+  })
+
+  it('never points the model at exit_plan, a tool only pi has', () => {
+    expect(PLAN_MODE_DENY_REASON_NO_EXIT_TOOL).not.toContain('exit_plan')
   })
 })
 

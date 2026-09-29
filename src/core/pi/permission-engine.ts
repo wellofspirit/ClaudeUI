@@ -613,6 +613,12 @@ function modeBaseDecision(
 export const PLAN_MODE_DENY_REASON =
   'Plan mode is read-only — present a plan and call exit_plan to proceed'
 
+/** The same refusal for the engines with NO exit_plan tool (opencode, Codex — ADR-085 S4, S3b verifier F4):
+ *  the user leaves plan mode from the mode picker. opencode's own `plan_exit` (its plan agent's tool) is
+ *  model-visible but its "switch to build agent" question does not change ClaudeUI's permission mode. */
+export const PLAN_MODE_DENY_REASON_NO_EXIT_TOOL =
+  'Plan mode is read-only — present the plan and ask the user to leave plan mode to proceed'
+
 /**
  * Denial reason for an exit_plan call OUTSIDE plan mode (M5a addendum) —
  * pi.registerTool() auto-activates the tool, so exit_plan is model-visible

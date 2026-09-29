@@ -86,9 +86,10 @@ from a previous mode, since you can't un-patch them.)
   hook directories, `.vscode/` and the other paths listed there, so those edits prompt instead of
   auto-accepting. Auto mode does not use these rules: its ruleset asks for every edit and ClaudeUI
   clears the ordinary ones host-side.
-- **Subagents are unaffected by the parent ruleset**: a `task` runs in a child session under its own
-  (permissive) subagent agent, so it does not raise child-session `permission.asked` events (which the
-  event mapper would otherwise drop — see Consequences).
+- **Subagents follow the parent ruleset** (ADR-085 S4): a `task` child's agent is given string `ask`s
+  for bash/edit/webfetch/MCP at spawn, so it raises child-session `permission.asked` events, which
+  ClaudeUI answers with the parent session's current ruleset (allow → `once`, deny → reject, ask →
+  the card or the auto-mode judge).
 
 **Defense-in-depth (renderer).** `TaskCard` now consumes a pending `approval` and renders the shared
 `<ApprovalButtons>` (mirroring the lifted plan/question cards). If a `task` ever legitimately asks

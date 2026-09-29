@@ -73,6 +73,7 @@ const {
   mockListSkills,
   mockRunCommand,
   mockMcpStatus,
+  mockAgents,
   MockOpencodeClient
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
@@ -98,6 +99,7 @@ const {
   const mockListSkills = vi.fn()
   const mockRunCommand = vi.fn()
   const mockMcpStatus = vi.fn()
+  const mockAgents = vi.fn()
 
   // Constructor mock — we build the instance here so clearAllMocks doesn't
   // kill the implementation.
@@ -125,6 +127,7 @@ const {
     mockListSkills,
     mockRunCommand,
     mockMcpStatus,
+    mockAgents,
     MockOpencodeClient
   }
 })
@@ -263,7 +266,7 @@ import { logger } from '../../services/logger'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
 import { evaluateOpencodeRules } from '../wildcard'
-import { PLAN_MODE_DENY_REASON } from '../../pi/permission-engine'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
 import type { QueuedItem } from '../../../shared/types'
@@ -321,6 +324,9 @@ function setupMocks(): void {
   mockMcpStatus.mockReset()
   // Default: no MCP server beyond the bridged/hosted ones (ADR-085 §3).
   mockMcpStatus.mockResolvedValue({})
+  mockAgents.mockReset()
+  // Default: `GET /agent` lists nothing → no subagent backstop rule (ADR-085 S4).
+  mockAgents.mockResolvedValue([])
   mockJudge.mockReset()
   mockResolveJudgeRoute.mockReset()
   mockResolveJudgeRoute.mockImplementation(async () => ({ ok: true, route: fakeJudgeRoute() }))
@@ -405,7 +411,8 @@ function setupMocks(): void {
       listCommands: mockListCommands,
       listSkills: mockListSkills,
       runCommand: mockRunCommand,
-      mcpStatus: mockMcpStatus
+      mcpStatus: mockMcpStatus,
+      agents: mockAgents
     }
   })
 }
@@ -7008,7 +7015,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       push(editPart('c_pe'))
       push(editAsk('per_pe', SES, 'c_pe'))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_pe', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_pe',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
       expect(sent(win, 'session:permission-denial')[0]).toEqual({
@@ -7017,7 +7028,7 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
           type: 'permission_denial',
           toolUseId: 'c_pe',
           source: 'mode',
-          reason: PLAN_MODE_DENY_REASON
+          reason: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
         })
       })
       expect(cards(win)).toHaveLength(0)
@@ -7029,7 +7040,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       const { session, win } = await start('plan')
       push(taskAsk('per_tg', 'general'))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_tg', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_tg',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       push(taskAsk('per_tx', 'explore'))
       await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
@@ -7069,7 +7084,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       } as OpencodeEvent)
       push(editAsk('per_ce', CHILD))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_ce', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_ce',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       expect(cards(win)).toHaveLength(0)
       session.dispose()
@@ -7104,12 +7123,19 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       push(bashPart('c_pc', 'git commit -m x'))
       push(bashAsk('per_pc', 'git commit -m x', { callID: 'c_pc' }))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_pc', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_pc',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
       expect(sent(win, 'session:permission-denial')[0]).toEqual({
         toolUseId: 'c_pc',
-        denial: expect.objectContaining({ source: 'mode', reason: PLAN_MODE_DENY_REASON })
+        denial: expect.objectContaining({
+          source: 'mode',
+          reason: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        })
       })
       expect(repliesFor('per_pc')).toHaveLength(1)
       expect(cards(win)).toHaveLength(0)
@@ -7151,7 +7177,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       const { session, win } = await start('plan')
       push(bashAsk('per_pr', 'rm -rf x'))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_pr', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_pr',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       await settle()
       expect(cards(win)).toHaveLength(0)
@@ -7169,7 +7199,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       await session.setPermissionMode('plan')
       push(bashAsk('per_sa2', 'git commit -m b', { always: ['git commit *'] }))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_sa2', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_sa2',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       expect(repliesFor('per_sa2')).toHaveLength(1)
       expect(cards(win)).toHaveLength(1)
@@ -7245,7 +7279,11 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       } as OpencodeEvent)
       push(bashAsk('per_cb', 'git commit -m x', { sessionID: CHILD, callID: 'c_cb' }))
       await vi.waitFor(() =>
-        expect(mockReplyPermission).toHaveBeenCalledWith('per_cb', 'reject', PLAN_MODE_DENY_REASON)
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_cb',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
       )
       expect(cards(win)).toHaveLength(0)
       session.dispose()
@@ -7283,7 +7321,8 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       mockMcpStatus.mockRejectedValue(new Error('boom'))
       const warn = vi.spyOn(logger, 'warn')
       const { session } = await start('full')
-      await session.setPermissionMode('full')
+      // ADR-085 S4 F3: an unchanged ruleset is not re-PATCHed, so the second apply must change the mode.
+      await session.setPermissionMode('default')
       expect(mockPatchSession).toHaveBeenCalledTimes(2)
       const warns = warn.mock.calls.filter((c) => String(c[1]).includes('GET /mcp failed'))
       expect(warns).toHaveLength(1)
@@ -7334,6 +7373,291 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       const [call] = mockJudge.mock.calls[0] as [FakeJudgeCall]
       expect(call.user).toContain('needle_s3_symbol')
       session.dispose()
+    })
+  })
+
+  // ── ADR-085 S4 — subagents follow the PARENT's rules and mode ─────────────
+
+  describe('ADR-085 S4 — a child ask is answered with the parent ruleset', () => {
+    const CHILD = 'ses_child_s4'
+    const TASK_CALL = 'call_task_s4'
+    const GIT_ALLOW = 'Bash(git:*)'
+    /** The parent's `task` part: registers the child and carries the task input the judge is told. */
+    const taskPart = {
+      id: 'ev_task_s4',
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: 'p_task_s4',
+          messageID: 'msg_task_s4',
+          type: 'tool',
+          tool: 'task',
+          callID: TASK_CALL,
+          state: {
+            status: 'running',
+            input: { subagent_type: 'explore', description: 'd', prompt: 'p' },
+            metadata: { sessionId: CHILD }
+          }
+        }
+      }
+    } as OpencodeEvent
+    const childEditAsk = (id: string): OpencodeEvent =>
+      ({
+        id: `ev_${id}`,
+        type: 'permission.asked',
+        properties: {
+          sessionID: CHILD,
+          id,
+          permission: 'edit',
+          patterns: ['src/a.ts'],
+          always: ['*'],
+          metadata: { filepath: 'src/a.ts', diff: '' },
+          tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+        }
+      }) as OpencodeEvent
+    type Rule = { permission: string; pattern: string; action: string }
+    const patches = (): Rule[][] =>
+      mockPatchSession.mock.calls.map((c) => (c[1] as { permission: Rule[] }).permission)
+    const DISPATCH_ASK: Rule = {
+      permission: 'claudeui_dispatch_agent',
+      pattern: '*',
+      action: 'ask'
+    }
+    const ALLOW_ALL: Rule = { permission: '*', pattern: '*', action: 'allow' }
+    const GATED: Rule[] = [
+      ALLOW_ALL,
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'edit', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' }
+    ]
+
+    it('default + Bash(git:*): child `git status` → `once`, no card, an info line without the command', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const info = vi.spyOn(logger, 'info')
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(taskPart)
+      push(bashAsk('per_c1', 'git status', { sessionID: CHILD, callID: 'c_c1' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_c1', 'once'))
+      await settle()
+      expect(repliesFor('per_c1')).toEqual([['per_c1', 'once']])
+      expect(cards(win)).toHaveLength(0)
+      const line = info.mock.calls
+        .map((c) => String(c[1]))
+        .find((m) => m.includes("allowed by the parent's rules"))
+      expect(line).toBe("child ask bash allowed by the parent's rules (subagent explore)")
+      info.mockRestore()
+      session.dispose()
+    })
+
+    it('default + Bash(git:*): child `hostname` → the card', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(taskPart)
+      push(bashAsk('per_c2', 'hostname', { sessionID: CHILD, callID: 'c_c2' }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(cards(win)[0].requestId).toBe('per_c2')
+      await settle()
+      expect(repliesFor('per_c2')).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan: child `hostname` → reject with the no-exit-tool reason + a `mode` denial, no card (S3b F1)', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(taskPart)
+      push(bashPart('c_c3', 'hostname', CHILD))
+      push(bashAsk('per_c3', 'hostname', { sessionID: CHILD, callID: 'c_c3' }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_c3',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
+      )
+      await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
+      expect(sent(win, 'session:permission-denial')[0]).toEqual({
+        toolUseId: 'c_c3',
+        denial: expect.objectContaining({
+          source: 'mode',
+          reason: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        })
+      })
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('plan + Bash(git:*): child `git status` → `once`', async () => {
+      withRules({ allow: [GIT_ALLOW] })
+      const push = makeFeed()
+      const { session, win } = await start('plan')
+      push(taskPart)
+      push(bashAsk('per_c4', 'git status', { sessionID: CHILD, callID: 'c_c4' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_c4', 'once'))
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('acceptEdits: a child edit ask for `src/a.ts` → `once`; default: the card', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('acceptEdits')
+      push(taskPart)
+      push(childEditAsk('per_c5'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_c5', 'once'))
+      expect(cards(win)).toHaveLength(0)
+
+      await session.setPermissionMode('default')
+      push(childEditAsk('per_c5b'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(repliesFor('per_c5b')).toHaveLength(0)
+      session.dispose()
+    })
+
+    it("a child `external_directory` ask is never answered by the parent's `{*: allow}` → the card", async () => {
+      const push = makeFeed()
+      const { session, win } = await start('acceptEdits')
+      push(taskPart)
+      push({
+        id: 'ev_c_ext',
+        type: 'permission.asked',
+        properties: {
+          sessionID: CHILD,
+          id: 'per_c_ext',
+          permission: 'external_directory',
+          patterns: ['/outside/*'],
+          always: ['/outside/*'],
+          metadata: {},
+          tool: { callID: 'c_c_ext', messageID: 'msg_c_c_ext' }
+        }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      await settle()
+      expect(repliesFor('per_c_ext')).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('auto: a child `hostname` ask reaches the judge, told the subagent type and its task', async () => {
+      enableAuto()
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session } = await start('full')
+      push(taskPart)
+      push(bashPart('c_c6', 'hostname', CHILD))
+      push(bashAsk('per_c6', 'hostname', { sessionID: CHILD, callID: 'c_c6' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_c6', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      const [call] = mockJudge.mock.calls[0] as [FakeJudgeCall]
+      expect(call.user).toContain(
+        'Proposed next action (by the "explore" subagent the assistant spawned with task ' +
+          '{"description":"d","prompt":"p"}; judge it as the assistant\'s own action against ' +
+          'the same user intent):\nbash {"command":"hostname"}'
+      )
+      session.dispose()
+    })
+
+    describe('the `GET /agent` backstop', () => {
+      it('a subagent whose bash is ungated gets `task <name> ask` after the user rules, before the dispatch ask', async () => {
+        withRules({ allow: [GIT_ALLOW], deny: ['Bash(rm -rf:*)'] })
+        mockAgents.mockResolvedValue([
+          { name: 'mybuilder', mode: 'subagent', permission: [ALLOW_ALL] },
+          {
+            name: 'explore',
+            mode: 'subagent',
+            permission: [...GATED, { permission: '*', pattern: '*', action: 'deny' }]
+          },
+          { name: 'build', mode: 'primary', permission: [ALLOW_ALL] }
+        ])
+        const { session } = await start('default')
+        const rules = patches().at(-1)!
+        const task = { permission: 'task', pattern: 'mybuilder', action: 'ask' }
+        expect(rules.at(-1)).toEqual(DISPATCH_ASK)
+        expect(rules.at(-2)).toEqual(task)
+        const lastUserRule = rules.map((r) => r.action).lastIndexOf('deny')
+        expect(lastUserRule).toBeGreaterThan(-1)
+        expect(lastUserRule).toBeLessThan(rules.length - 2)
+        expect(rules.filter((r) => r.permission === 'task').map((r) => r.pattern)).toEqual([
+          'mybuilder'
+        ])
+        session.dispose()
+      })
+
+      it('a failing `GET /agent` → `task * ask`, and ONE warn across two applies', async () => {
+        mockAgents.mockRejectedValue(new Error('boom'))
+        const warn = vi.spyOn(logger, 'warn')
+        const { session } = await start('default')
+        await session.setPermissionMode('acceptEdits')
+        expect(patches()).toHaveLength(2)
+        for (const rules of patches()) {
+          expect(rules.at(-2)).toEqual({ permission: 'task', pattern: '*', action: 'ask' })
+        }
+        expect(
+          warn.mock.calls.filter((c) => String(c[1]).includes('GET /agent failed'))
+        ).toHaveLength(1)
+        expect(mockAgents).toHaveBeenCalledTimes(2)
+        warn.mockRestore()
+        session.dispose()
+      })
+
+      it('auto with an MCP server general may still call → `task general ask`; default (same agents) → none', async () => {
+        enableAuto()
+        mockMcpStatus.mockResolvedValue({ lsphub: { status: 'connected' } })
+        mockAgents.mockResolvedValue([{ name: 'general', mode: 'subagent', permission: GATED }])
+        const { session } = await start('full')
+        const general = { permission: 'task', pattern: 'general', action: 'ask' }
+        expect(patches().at(-1)).toContainEqual(general)
+        await session.setPermissionMode('default')
+        expect(patches()).toHaveLength(2)
+        expect(patches().at(-1)).not.toContainEqual(general)
+        // The agent list is cached per session.
+        expect(mockAgents).toHaveBeenCalledTimes(1)
+        session.dispose()
+      })
+    })
+
+    describe('F3 — an unchanged ruleset is not re-PATCHed', () => {
+      it('two run()s in the same mode → ONE patch; a mode switch → a second', async () => {
+        const push = makeFeed()
+        const { session, win } = await start('default')
+        push({
+          id: 'ev_idle_f3',
+          type: 'session.idle',
+          properties: { sessionID: SES }
+        } as OpencodeEvent)
+        // The first turn ended, so the next run() establishes (and applies the mode) again.
+        await vi.waitFor(() => expect(sent(win, 'session:result')).toHaveLength(1))
+        await session.run('again')
+        expect(mockPromptAsync).toHaveBeenCalledTimes(2)
+        expect(mockPatchSession).toHaveBeenCalledTimes(1)
+
+        await session.setPermissionMode('plan')
+        expect(mockPatchSession).toHaveBeenCalledTimes(2)
+        session.dispose()
+      })
+
+      it('notifySettingsChanged: unchanged rules → no patch; a new allow → one more', async () => {
+        const { session } = await start('default')
+        expect(mockPatchSession).toHaveBeenCalledTimes(1)
+        await session.notifySettingsChanged()
+        expect(mockPatchSession).toHaveBeenCalledTimes(1)
+        withRules({ allow: [GIT_ALLOW] })
+        await session.notifySettingsChanged()
+        expect(mockPatchSession).toHaveBeenCalledTimes(2)
+        session.dispose()
+      })
+
+      it('a rejected patch is retried by the next apply', async () => {
+        const { session, win } = await start('default')
+        expect(mockPatchSession).toHaveBeenCalledTimes(1)
+        mockPatchSession.mockRejectedValueOnce(new Error('down'))
+        await session.setPermissionMode('plan')
+        expect(sent(win, 'session:error')).toHaveLength(1)
+        await session.setPermissionMode('plan')
+        expect(mockPatchSession).toHaveBeenCalledTimes(3)
+        session.dispose()
+      })
     })
   })
 })

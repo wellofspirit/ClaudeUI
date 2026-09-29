@@ -13,6 +13,7 @@ import type {
   RunCommandRequest,
   Skill
 } from './protocol/types'
+import type { OpencodePermissionRule } from './permission-compiler'
 
 /**
  * M-OC5: every request gets a timeout + AbortSignal so a dead/hung opencode
@@ -41,6 +42,22 @@ const PROMPT_TIMEOUT_MS = 15 * 60_000
 export interface OpencodeRequestOptions {
   timeoutMs?: number
   signal?: AbortSignal
+}
+
+/**
+ * One row of `GET /agent` — opencode's `Agent.Info`
+ * (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/groups/instance.ts:149-156`,
+ * `agent/agent.ts` `Info`). `permission` is the agent's COMPUTED ruleset: the
+ * vendor defaults, the user's top-level config, the agent's own config and the
+ * asks ClaudeUI injects at spawn (ADR-085 S4, `subagent-permissions.ts`) — in
+ * evaluation order, last match wins.
+ */
+export interface OpencodeAgentInfo {
+  name: string
+  mode: 'primary' | 'subagent' | 'all'
+  native?: boolean
+  hidden?: boolean
+  permission: OpencodePermissionRule[]
 }
 
 export class OpencodeClient {
@@ -327,6 +344,18 @@ export class OpencodeClient {
    */
   mcpStatus(): Promise<Record<string, { status?: string }>> {
     return this.get('/mcp')
+  }
+
+  // ── Agents ────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /agent — every agent this server knows with its computed permission
+   * ruleset ({@link OpencodeAgentInfo}). ADR-085 S4 reads it for the
+   * `task:<name>` backstop: a subagent whose gated categories may still be
+   * allowed gets a `task` ask on the parent (`subagent-permissions.ts`).
+   */
+  agents(): Promise<OpencodeAgentInfo[]> {
+    return this.get('/agent')
   }
 
   // ── Commands + Skills ─────────────────────────────────────────────────────
