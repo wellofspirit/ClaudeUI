@@ -1362,9 +1362,11 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
   })
 
+  // ADR-085 S2: never `always` — an opencode target's allowForSession is a
+  // one-off allow, like the pi/Codex targets'.
   it.each([
     ['allow', 'once'],
-    ['allowForSession', 'always']
+    ['allowForSession', 'once']
   ] as const)('resolveApproval(%s) → replyPermission(%s)', async (decision, reply) => {
     const { dispatcher, client, stream, sessionId } = await makeTarget()
     stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })

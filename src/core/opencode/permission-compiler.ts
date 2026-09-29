@@ -271,7 +271,8 @@ export function suggestionRuleToClaudeString(rule: {
 }
 
 /** Map a PermissionSuggestion `destination` → a ClaudePermissions scope, or null
- *  (e.g. `session`, which opencode persists natively via replyPermission('always')). */
+ *  (e.g. `session`, which the opencode host keeps in its session-allow set,
+ *  `session-allows.ts` — ADR-085 S2; nothing is written for it). */
 export function suggestionDestinationToScope(
   destination: string
 ): 'user' | 'project' | 'local' | null {
@@ -294,8 +295,8 @@ export function suggestionDestinationToScope(
  * `destination` maps to, then merge each group into that scope's allow list.
  *
  * Destinations with no on-disk scope (`session`, `cliArg`) are skipped — those
- * are the engines' own in-memory grants (opencode's `replyPermission('always')`,
- * Codex's `sessionAllows`), already applied by the caller.
+ * are the engines' own in-memory grants (opencode's host session-allow set,
+ * `session-allows.ts`; Codex's `sessionAllows`), already applied by the caller.
  *
  * Returns whether any scope was written, so a caller holding a cached rules
  * merge (PiSession) knows to invalidate it and honour the new rule on its very

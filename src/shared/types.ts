@@ -185,6 +185,9 @@ export type PermissionDenialBlock = {
    * for `hook`, `safetyCheck`, `asyncAgent`, `sandboxOverride`, `workingDir` and
    * `other`, and returns NOTHING for `rule`, `mode`, `subcommandResults` and
    * `permissionPromptTool` — those denials are fully described by their source.
+   * The opencode host's own `rule` denial (ADR-085 S2) does carry one: the
+   * rule that refused, `Denied by permission rule: <rule>`, since no other
+   * frame names it.
    */
   reason?: string
 }
@@ -430,6 +433,21 @@ export interface PendingApproval {
    * user-authored rules, which outrank the auto-mode classifier (ADR-023 G9).
    */
   patterns?: string[]
+  /**
+   * opencode only: the patterns opencode would remember on an `always` reply
+   * (`permission.asked`'s `always` — for a shell call the arity prefix + ` *`
+   * per statement, `["*"]` for edit / webfetch / MCP). ClaudeUI never sends
+   * `always` (ADR-085 S2); the host session-allow set is keyed by these
+   * instead (`core/opencode/session-allows.ts`).
+   */
+  always?: string[]
+  /**
+   * opencode only: set on a CHILD (task subagent) ask — the child's opencode
+   * session id and the parent `task` part's callID (the `childSessions` value).
+   * Absent on an own-session ask. ADR-085 S2 carries it (and logs it); S4
+   * evaluates child asks against the parent's rules on this marker.
+   */
+  subagent?: { sessionId: string; parentToolUseId: string }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string

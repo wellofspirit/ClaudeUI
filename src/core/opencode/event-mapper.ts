@@ -397,15 +397,19 @@ function handleOwnEvent(
       const metadata = props.metadata as Record<string, unknown> | undefined
       const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
       const input = toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
+      // ADR-085 S2: what an `always` reply would have remembered — the key of
+      // the HOST session-allow set, since ClaudeUI never sends `always`.
+      const always = props.always as string[] | undefined
 
       const approval: PendingApproval = {
         requestId: id,
         toolUseId: tool?.callID,
         toolName: permission,
         input,
-        // Carried through for the auto-mode ask-rule precedence check (G9) —
-        // the classifier must never auto-approve what a user rule says to ask.
+        // Carried through for the host pre-check (ADR-085 S2: the user's ask
+        // rules by glob, G9) and the session-allow set's coverage test.
         ...(patterns && patterns.length > 0 ? { patterns } : {}),
+        ...(always && always.length > 0 ? { always } : {}),
         ...(suggestion ? { suggestions: [suggestion] } : {})
       }
       return { kind: 'approval', approval }
@@ -752,23 +756,39 @@ function handleChildEvent(
       //      the parent's ruleset next spawn, but `deriveSubagentSessionPermission`
       //      (opencode 1.17.9) only copies parent *deny* rules to children — so the
       //      persisted allow would NOT stop the child re-asking. Including the
-      //      suggestion would be misleading. Child approvals are once / session / deny
-      //      only.
+      //      suggestion would be misleading. Child approvals are once / deny, or
+      //      covered by the HOST session-allow set (ADR-085 S2) — opencode's own
+      //      `always` is never sent any more.
       const id = props.id as string | undefined
       const permission = props.permission as string | undefined
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
       if (!id || !permission) return { kind: 'ignore' }
 
       const childPatterns = props.patterns as string[] | undefined
+      const childAlways = props.always as string[] | undefined
+      // M-OC6, as the own-session branch: prefer the child tool part's REAL
+      // input over the wire `metadata`. Child parts are accumulated in the SAME
+      // `accumulators` map as the parent's (the `message.part.updated` case
+      // above writes them there, marked `isChild`), and `findToolInput` scans
+      // every accumulator when the named message misses, so a child's part is
+      // found here like an own one.
+      const metadata = props.metadata as Record<string, unknown> | undefined
+      const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
+      const input = toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
       const approval: import('../../shared/types').PendingApproval = {
         requestId: id,
         // Child tool's own callID — see note 1 above.
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {},
-        // Carried for the auto-mode ask-rule precedence check (G9); a child ask
-        // reaches handleAutoModeApproval on the same path as an own-session one.
-        ...(childPatterns && childPatterns.length > 0 ? { patterns: childPatterns } : {})
+        input,
+        // Carried for the host pre-check (ADR-085 S2) — a child ask reaches it
+        // on the same path as an own-session one.
+        ...(childPatterns && childPatterns.length > 0 ? { patterns: childPatterns } : {}),
+        ...(childAlways && childAlways.length > 0 ? { always: childAlways } : {}),
+        // The child marker (ADR-085 S2): which child session asked, under which
+        // parent `task` call. S4 evaluates child asks against the parent's
+        // rules on it.
+        subagent: { sessionId: childSessionId, parentToolUseId: toolUseId }
         // No `suggestions` — see note 2 above.
       }
       return { kind: 'approval', approval }

@@ -540,6 +540,49 @@ describe('mapEvent — permission.asked', () => {
     if (out.kind === 'approval') expect(out.approval.input).toEqual({ command: 'ls' })
     else throw new Error('expected approval')
   })
+
+  // ADR-085 S2: `always` keys the host session-allow set (ClaudeUI never sends it).
+  it('carries the ask `always` patterns, and no child marker', () => {
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_always',
+        permission: 'bash',
+        patterns: ['git push origin feat'],
+        always: ['git push *'],
+        tool: { callID: 'call_always' },
+        metadata: { command: 'git push origin feat' }
+      }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.always).toEqual(['git push *'])
+    expect('subagent' in out.approval).toBe(false)
+  })
+
+  it('omits `always` when the ask carries none (or an empty list)', () => {
+    for (const always of [undefined, []]) {
+      const out = mapEvent(
+        makeEvent('permission.asked', {
+          sessionID: SESSION_ID,
+          id: 'perm_no_always',
+          permission: 'bash',
+          patterns: ['ls'],
+          ...(always ? { always } : {}),
+          tool: { callID: 'call_no_always' }
+        }),
+        SESSION_ID,
+        new Map(),
+        START_TIME,
+        { value: 0 }
+      )
+      if (out.kind !== 'approval') throw new Error('expected approval')
+      expect('always' in out.approval).toBe(false)
+    }
+  })
 })
 
 // M-OC2: permission.replied retracts the (possibly cascade-resolved) card.
@@ -1758,6 +1801,89 @@ describe('mapEvent — Phase 8e: child permission.asked → approval (hang fix)'
     })
     const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
     expect(out.kind).toBe('ignore')
+  })
+
+  // ADR-085 S2 — the child marker, `always`, and the tool part's real input.
+  it('child ask carries `always` and the subagent marker', () => {
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('permission.asked', {
+      sessionID: CHILD_ID,
+      id: 'perm_child_always',
+      permission: 'bash',
+      patterns: ['git push origin feat'],
+      always: ['git push *'],
+      tool: { callID: CHILD_CALL_ID },
+      metadata: { command: 'git push origin feat' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.always).toEqual(['git push *'])
+    expect(out.approval.subagent).toEqual({ sessionId: CHILD_ID, parentToolUseId: PARENT_CALL_ID })
+    // No tool part → the wire metadata.
+    expect(out.approval.input).toEqual({ command: 'git push origin feat' })
+  })
+
+  it('child ask prefers the child tool part input over metadata (M-OC6)', () => {
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    // The child's tool part lands first, in the SAME accumulators map.
+    mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: CHILD_ID,
+        part: {
+          id: 'cp_bash',
+          messageID: 'child_msg_bash',
+          type: 'tool',
+          tool: 'bash',
+          callID: CHILD_CALL_ID,
+          state: { status: 'running', input: { command: 'git push origin feat', workdir: 'sub' } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: CHILD_ID,
+        id: 'perm_child_part',
+        permission: 'bash',
+        patterns: ['git push origin feat'],
+        tool: { callID: CHILD_CALL_ID }, // no messageID — found by the scan
+        metadata: { command: 'git push origin feat' }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.input).toEqual({ command: 'git push origin feat', workdir: 'sub' })
+    expect(out.approval.subagent).toEqual({ sessionId: CHILD_ID, parentToolUseId: PARENT_CALL_ID })
+  })
+
+  it('child ask with empty metadata and no part → input {}', () => {
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: CHILD_ID,
+        id: 'perm_child_empty',
+        permission: 'somemcp_tool',
+        patterns: ['*'],
+        tool: { callID: CHILD_CALL_ID },
+        metadata: {}
+      }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.input).toEqual({})
   })
 
   it('own-session permission.asked still emits suggestions (unchanged)', () => {

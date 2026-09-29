@@ -1,8 +1,10 @@
 import type { OpencodeAction, OpencodePermissionRule } from './permission-compiler'
 
 /**
- * Host-side port of opencode's permission matcher, used by the auto-mode
- * ask-rule precedence guard (G9, `docs/automode-rework-plan.md` §4.5).
+ * Host-side port of opencode's permission matcher, used by the ask-rule
+ * precedence guard (G9, `docs/automode-rework-plan.md` §4.5 — since ADR-085 S2
+ * part of the host pre-check, `host-precheck.ts`, in every mode) and by the
+ * host session-allow set's coverage test (`session-allows.ts`).
  *
  * Why we need it: opencode evaluates the ruleset itself, logs the matched rule,
  * and then **discards** it (`permission/index.ts:73`) — the `permission.asked`

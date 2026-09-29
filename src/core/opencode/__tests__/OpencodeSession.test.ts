@@ -834,11 +834,13 @@ describe('OpencodeSession — resolveApproval()', () => {
     session.dispose()
   })
 
-  it('calls replyPermission with "always" for allowForSession', async () => {
+  it('calls replyPermission with "once" for allowForSession', async () => {
+    // ADR-085 S2: never `always` — opencode's `approved` list is instance-global
+    // and outranks the user's deny/ask rules; the session allow is host-side.
     const session = makeSession()
     await session.run('hi')
     session.resolveApproval('perm_1', 'allowForSession')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'always'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'once'))
     session.dispose()
   })
 
@@ -1290,8 +1292,9 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
 })
 
 // ---------------------------------------------------------------------------
-// Always-allow write-back (ADR-022): resolveApproval → reply 'always' + persist
-// the rule to the shared Claude permission store so it recompiles next spawn.
+// Always-allow write-back (ADR-022): resolveApproval → reply 'once' (ADR-085
+// S2: never `always`) + persist the rule to the shared Claude permission store
+// so it recompiles next spawn.
 // ---------------------------------------------------------------------------
 
 describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
@@ -1311,7 +1314,9 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
     session.dispose()
   })
 
-  it('allow WITH always-allow suggestions → replyPermission(always) + persists to shared store', async () => {
+  it('allow WITH always-allow suggestions → replyPermission(once) + persists to shared store', async () => {
+    // ADR-085 S2: never `always` — the persisted rule plus the host
+    // session-allow set replace opencode's instance-global memory.
     const session = await started()
     const suggestions = [
       {
@@ -1322,7 +1327,7 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
       }
     ]
     session.resolveApproval('per-2', 'allow', undefined, suggestions as never)
-    expect(mockReplyPermission).toHaveBeenCalledWith('per-2', 'always')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-2', 'once')
     expect(mockSaveClaudePermissions).toHaveBeenCalledWith(
       'local',
       expect.objectContaining({ allow: expect.arrayContaining(['Bash(echo hi)']) }),
@@ -1339,7 +1344,9 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
     session.dispose()
   })
 
-  it('session-scoped suggestions are NOT written to the store (opencode native always covers it)', async () => {
+  it('session-scoped suggestions are NOT written to the store (the host session-allow set covers it)', async () => {
+    // ADR-085 S2: never `always` — a session-scoped tick replies `once` and is
+    // remembered host-side (session-allows.ts), not by opencode.
     const session = await started()
     const suggestions = [
       {
@@ -1350,7 +1357,7 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
       }
     ]
     session.resolveApproval('per-4', 'allow', undefined, suggestions as never)
-    expect(mockReplyPermission).toHaveBeenCalledWith('per-4', 'always')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-4', 'once')
     expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -2402,7 +2409,12 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     // The human declines.
     session.resolveApproval('per_h1', 'deny')
 
-    // The agent retries the same command; this one reaches the judge.
+    // The agent retries the same command; this one reaches the judge. ADR-085
+    // S2: the host pre-check now matches the ask rule on the COMMAND
+    // (`metadata.command`), not only on the patterns, so the retry would go
+    // to the human again while the rule stands — the user drops it first
+    // (rules are read fresh per ask; the compiled G9 glob misses `retry`).
+    withUserAskRule([])
     push(permissionEvent('per_h2', 'c_push2', 'git push --force origin main', ['retry']))
     await vi.waitFor(() => expect(mockJudge).toHaveBeenCalled())
 
@@ -6387,6 +6399,493 @@ describe('OpencodeSession — disconnect status', () => {
     expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
     expect(statusStates(win).at(-1)).toBe('disconnected')
     expect(session.status.state).toBe('disconnected')
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-085 S2 — every ask that reaches the host is pre-checked against the
+// user's deny/ask rules (own and child, every mode); "allow for session" is
+// remembered host-side and answered `once` — opencode's instance-global
+// `always` is never sent.
+// ---------------------------------------------------------------------------
+
+describe('ADR-085 S2 — host pre-check + session allows', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_s2'
+
+  function withRules(r: { deny?: string[]; ask?: string[]; allow?: string[] }): void {
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: r.allow ?? [],
+      deny: r.deny ?? [],
+      ask: r.ask ?? [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+  }
+
+  function enableAuto(): void {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+  }
+
+  /**
+   * A controllable SSE feed every subscriber replays from the start — so two
+   * sessions can share one stream (each keeps only its own session's events),
+   * and a push that lands before a subscription is never lost.
+   */
+  function makeFeed(): (e: OpencodeEvent) => void {
+    const history: OpencodeEvent[] = []
+    const wakers = new Set<() => void>()
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      let i = 0
+      for (;;) {
+        while (i < history.length) yield history[i++]
+        if (signal?.aborted) return
+        await new Promise<void>((resolve) => {
+          wakers.add(resolve)
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }
+    })
+    return (e) => {
+      history.push(e)
+      const pending = [...wakers]
+      wakers.clear()
+      for (const wake of pending) wake()
+    }
+  }
+
+  /** A shell ask as opencode publishes it (`tool/shell.ts`: `metadata: {command}`). */
+  function bashAsk(
+    id: string,
+    command: string,
+    opts: { callID?: string; always?: string[]; sessionID?: string } = {}
+  ): OpencodeEvent {
+    const callID = opts.callID ?? `c_${id}`
+    return {
+      id: `ev_${id}`,
+      type: 'permission.asked',
+      properties: {
+        sessionID: opts.sessionID ?? SES,
+        id,
+        permission: 'bash',
+        patterns: [command],
+        ...(opts.always ? { always: opts.always } : {}),
+        metadata: { command },
+        tool: { callID, messageID: `msg_${callID}` }
+      }
+    } as OpencodeEvent
+  }
+
+  /** The shell call's tool part, carrying its input. */
+  function bashPart(callID: string, command: string, sessionID = SES): OpencodeEvent {
+    return {
+      id: `ev_part_${callID}`,
+      type: 'message.part.updated',
+      properties: {
+        sessionID,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { status: 'running', input: { command } }
+        }
+      }
+    } as OpencodeEvent
+  }
+
+  async function start(
+    mode: string,
+    routingId = 'r_s2',
+    sessionId = SES
+  ): Promise<{ session: OpencodeSession; win: MockWindow }> {
+    mockCreateSession.mockResolvedValueOnce({ id: sessionId })
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      routingId,
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: mode }
+    )
+    await session.run('go')
+    return { session, win }
+  }
+
+  const sent = (win: MockWindow, channel: string): unknown[] =>
+    win.webContents.send.mock.calls.filter((c) => c[0] === channel).map((c) => c[2])
+  const cards = (win: MockWindow): Array<Record<string, unknown>> =>
+    sent(win, 'session:approval-request') as Array<Record<string, unknown>>
+  const repliesFor = (id: string): unknown[][] =>
+    mockReplyPermission.mock.calls.filter((c) => c[0] === id)
+  /** Let the SSE consumer drain what was pushed. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 30))
+
+  const FORCE_DENY = 'Bash(git push --force:*)'
+  const DENIED = `Denied by permission rule: ${FORCE_DENY}`
+
+  describe('1. a deny rule refuses the ask before any card (default mode)', () => {
+    it('the ask lands before its tool part: reject now, the denial once the part arrives', async () => {
+      __setToolInputWaitMsForTests(2000)
+      withRules({ deny: [FORCE_DENY] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+
+      push(bashAsk('per_d1', 'git push origin main --force', { callID: 'c_d1' }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_d1', 'reject', DENIED)
+      )
+      expect(cards(win)).toHaveLength(0)
+      // Not bound yet: the reducer would drop a block with no tool_use.
+      expect(sent(win, 'session:permission-denial')).toHaveLength(0)
+
+      push(bashPart('c_d1', 'git push origin main --force'))
+      await vi.waitFor(() => expect(sent(win, 'session:permission-denial')).toHaveLength(1))
+      expect(sent(win, 'session:permission-denial')[0]).toEqual({
+        toolUseId: 'c_d1',
+        denial: expect.objectContaining({
+          type: 'permission_denial',
+          toolUseId: 'c_d1',
+          source: 'rule',
+          reason: DENIED
+        })
+      })
+      expect(repliesFor('per_d1')).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('the tool part is already there: the denial is sent at once', async () => {
+      withRules({ deny: [FORCE_DENY] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+
+      push(bashPart('c_d2', 'git push origin main --force'))
+      push(bashAsk('per_d2', 'git push origin main --force', { callID: 'c_d2' }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_d2', 'reject', DENIED)
+      )
+      expect(sent(win, 'session:permission-denial')).toEqual([
+        {
+          toolUseId: 'c_d2',
+          denial: expect.objectContaining({ source: 'rule', toolUseId: 'c_d2', reason: DENIED })
+        }
+      ])
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+  })
+
+  it('2. an ask rule the glob misses still raises the card (default mode), no reply', async () => {
+    withRules({ ask: ['Bash(docker run:*)'] })
+    const push = makeFeed()
+    const { session, win } = await start('default')
+    push(bashAsk('per_a2', 'docker --context x run alpine'))
+    await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+    expect(cards(win)[0].requestId).toBe('per_a2')
+    await settle()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  describe('3. auto mode', () => {
+    it('a deny hit is refused with ZERO judge calls', async () => {
+      enableAuto()
+      withRules({ deny: [FORCE_DENY] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      push(bashAsk('per_a3', 'git push origin main --force'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_a3', 'reject', DENIED)
+      )
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('a reordered ask hit goes to the human with ZERO judge calls', async () => {
+      enableAuto()
+      withRules({ ask: ['Bash(docker run:*)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const info = vi.spyOn(logger, 'info')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      push(bashAsk('per_a3b', 'docker --context x run alpine'))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      await settle()
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      // The info line names the rule, never the command.
+      const line = info.mock.calls.map((c) => String(c[1])).find((m) => m.includes('user ask rule'))
+      expect(line).toBe('auto-mode → human: user ask rule matches bash (rule Bash(docker run:*))')
+      info.mockRestore()
+      session.dispose()
+    })
+  })
+
+  describe('4. child (task subagent) asks', () => {
+    const CHILD_SES = 'ses_child_s2'
+    const TASK_CALL_ID = 'call_task_s2'
+    const taskPart = {
+      id: 'ev_task',
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: 'p_task_s2',
+          messageID: 'msg_task_s2',
+          type: 'tool',
+          tool: 'task',
+          callID: TASK_CALL_ID,
+          state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+        }
+      }
+    } as OpencodeEvent
+
+    it('a child ask a deny rule hits is refused', async () => {
+      withRules({ deny: [FORCE_DENY] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(taskPart)
+      push(
+        bashAsk('per_child_d', 'sudo git push --force', {
+          sessionID: CHILD_SES,
+          callID: 'c_child_d'
+        })
+      )
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_child_d', 'reject', DENIED)
+      )
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('the mapped child approval carries the marker, `always` and the tool part input', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(taskPart)
+      push({
+        id: 'ev_child_part',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: CHILD_SES,
+          part: {
+            id: 'p_child_ls',
+            messageID: 'msg_child_ls',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'c_child_ls',
+            state: { status: 'running', input: { command: 'ls -la', workdir: 'sub' } }
+          }
+        }
+      } as OpencodeEvent)
+      push({
+        id: 'ev_child_ask',
+        type: 'permission.asked',
+        properties: {
+          sessionID: CHILD_SES,
+          id: 'per_child_ls',
+          permission: 'bash',
+          patterns: ['ls -la'],
+          always: ['ls *'],
+          metadata: { command: 'ls -la' },
+          tool: { callID: 'c_child_ls' }
+        }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(cards(win)[0]).toMatchObject({
+        requestId: 'per_child_ls',
+        toolUseId: 'c_child_ls',
+        always: ['ls *'],
+        subagent: { sessionId: CHILD_SES, parentToolUseId: TASK_CALL_ID },
+        input: { command: 'ls -la', workdir: 'sub' }
+      })
+      session.dispose()
+    })
+  })
+
+  describe('5. allow for session replies `once` and answers the next matching ask', () => {
+    it('default mode: no second card', async () => {
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(bashAsk('per_s1', 'git push origin feat', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+
+      session.resolveApproval('per_s1', 'allowForSession')
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_s1', 'once')
+
+      push(bashAsk('per_s2', 'git push origin other', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s2', 'once'))
+      expect(cards(win)).toHaveLength(1)
+      expect(mockReplyPermission.mock.calls.some((c) => c[1] === 'always')).toBe(false)
+      session.dispose()
+    })
+
+    it('auto mode: the covered ask costs ZERO judge calls', async () => {
+      enableAuto()
+      // The first ask reaches the human through a narrow ask rule; the second
+      // is not an ask hit, so only the session allow can answer it.
+      withRules({ ask: ['Bash(git push origin feat:*)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      push(bashAsk('per_s3', 'git push origin feat', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+
+      session.resolveApproval('per_s3', 'allowForSession')
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_s3', 'once')
+
+      push(bashAsk('per_s4', 'git push origin other', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s4', 'once'))
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(cards(win)).toHaveLength(1)
+      session.dispose()
+    })
+  })
+
+  it('6. a persist tick replies `once`, writes the rule and remembers the session allow', async () => {
+    const push = makeFeed()
+    const { session, win } = await start('default')
+    push(bashAsk('per_p1', 'git push origin feat', { always: ['git push *'] }))
+    await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+
+    const suggestion = {
+      type: 'addRules',
+      behavior: 'allow',
+      destination: 'localSettings',
+      rules: [{ toolName: 'Bash', ruleContent: 'git push origin feat' }]
+    }
+    session.resolveApproval('per_p1', 'allow', undefined, [suggestion])
+    expect(mockReplyPermission).toHaveBeenCalledWith('per_p1', 'once')
+    expect(mockSaveClaudePermissions).toHaveBeenCalledWith(
+      'local',
+      expect.objectContaining({ allow: expect.arrayContaining(['Bash(git push origin feat)']) }),
+      expect.any(String)
+    )
+
+    push(bashAsk('per_p2', 'git push origin other', { always: ['git push *'] }))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_p2', 'once'))
+    expect(cards(win)).toHaveLength(1)
+    session.dispose()
+  })
+
+  describe('7. a session allow never beats a rule', () => {
+    it('deny rule → reject', async () => {
+      withRules({ deny: [FORCE_DENY] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(bashAsk('per_r1', 'git push origin feat', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      session.resolveApproval('per_r1', 'allowForSession')
+
+      push(bashAsk('per_r2', 'git push --force origin main', { always: ['git push *'] }))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_r2', 'reject', DENIED)
+      )
+      expect(repliesFor('per_r2')).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('ask rule → card', async () => {
+      withRules({ ask: [FORCE_DENY] })
+      const push = makeFeed()
+      const { session, win } = await start('default')
+      push(bashAsk('per_r3', 'git push origin feat', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      session.resolveApproval('per_r3', 'allowForSession')
+
+      push(bashAsk('per_r4', 'git push --force origin main', { always: ['git push *'] }))
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(2))
+      await settle()
+      expect(repliesFor('per_r4')).toHaveLength(0)
+      session.dispose()
+    })
+  })
+
+  it('8. allow for session sweeps the pending asks it now covers', async () => {
+    const push = makeFeed()
+    const { session, win } = await start('default')
+    push(bashAsk('per_A', 'git push origin a', { always: ['git push *'] }))
+    push(bashAsk('per_B', 'git push origin b', { always: ['git push *'] }))
+    await vi.waitFor(() => expect(cards(win)).toHaveLength(2))
+
+    session.resolveApproval('per_A', 'allowForSession')
+    expect(repliesFor('per_A')).toEqual([['per_A', 'once']])
+    expect(repliesFor('per_B')).toEqual([['per_B', 'once']])
+    session.dispose()
+  })
+
+  it('9. the sweep never answers an ask a user ask rule holds', async () => {
+    withRules({ ask: ['Bash(docker run:*)'] })
+    const push = makeFeed()
+    const { session, win } = await start('default')
+    // Both are `docker *` for opencode's arity, so the session allow covers C's
+    // pattern — only the ask rule's hold keeps it for the human.
+    push(bashAsk('per_A9', 'docker ps', { always: ['docker *'] }))
+    push(bashAsk('per_C9', 'docker --context x run alpine', { always: ['docker *'] }))
+    await vi.waitFor(() => expect(cards(win)).toHaveLength(2))
+
+    session.resolveApproval('per_A9', 'allowForSession')
+    expect(repliesFor('per_A9')).toEqual([['per_A9', 'once']])
+    expect(repliesFor('per_C9')).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('10. the session-allow set is per ClaudeUI session, and `always` is never sent', async () => {
+    const push = makeFeed()
+    const first = await start('default', 'r_s2_one', 'ses_s2_one')
+    const second = await start('default', 'r_s2_two', 'ses_s2_two')
+    push(
+      bashAsk('per_one', 'git push origin feat', {
+        sessionID: 'ses_s2_one',
+        always: ['git push *']
+      })
+    )
+    await vi.waitFor(() => expect(cards(first.win)).toHaveLength(1))
+    first.session.resolveApproval('per_one', 'allowForSession')
+    expect(repliesFor('per_one')).toEqual([['per_one', 'once']])
+
+    push(
+      bashAsk('per_two', 'git push origin feat', {
+        sessionID: 'ses_s2_two',
+        always: ['git push *']
+      })
+    )
+    await vi.waitFor(() => expect(cards(second.win)).toHaveLength(1))
+    await settle()
+    expect(repliesFor('per_two')).toHaveLength(0)
+    expect(mockReplyPermission.mock.calls.some((c) => c[1] === 'always')).toBe(false)
+    first.session.dispose()
+    second.session.dispose()
+  })
+
+  it('11. a verdict for an ask the sweep settled while the judge ran is not replied', async () => {
+    enableAuto()
+    // A reaches the human (narrow ask rule); J reaches the judge.
+    withRules({ ask: ['Bash(git push origin a:*)'] })
+    let releaseJudge: (reply: string) => void = () => {}
+    mockJudge.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseJudge = resolve
+        })
+    )
+    const push = makeFeed()
+    const { session, win } = await start('full')
+    push(bashAsk('per_A11', 'git push origin a', { always: ['git push *'] }))
+    push(bashAsk('per_J11', 'git push origin j', { always: ['git push *'] }))
+    await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+    await vi.waitFor(() => expect(mockJudge).toHaveBeenCalledTimes(1))
+
+    session.resolveApproval('per_A11', 'allowForSession')
+    expect(repliesFor('per_J11')).toEqual([['per_J11', 'once']])
+
+    releaseJudge('<block>yes</block><reason>nope</reason>')
+    await settle()
+    expect(repliesFor('per_J11')).toEqual([['per_J11', 'once']])
+    expect(sent(win, 'session:tool-review')).toHaveLength(0)
     session.dispose()
   })
 })

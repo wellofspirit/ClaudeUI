@@ -576,6 +576,11 @@ const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
  * has no per-session "always allow" escalation set, so 'allowForSession' is
  * handled identically to a one-off 'allow' and every request is decided fresh.
  * One shared, frozen, never-mutated Set.
+ *
+ * An opencode target is the same (ADR-085 S2): its 'allowForSession' replies
+ * `once` like a plain 'allow' (`resolveApproval`) — never opencode's `always`,
+ * whose instance-global memory would outrank the user's deny/ask rules — and
+ * the dispatcher keeps no host-side session-allow set for it either.
  */
 const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
@@ -2303,7 +2308,12 @@ export class CrossEngineDispatcher {
     }
 
     const allow = decision === 'allow' || decision === 'allowForSession'
-    const reply = !allow ? 'reject' : decision === 'allowForSession' ? 'always' : 'once'
+    // Never `always` (ADR-085 S2): opencode would store its patterns in an
+    // INSTANCE-global list evaluated after every session's ruleset, so one
+    // approval here would outrank the user's deny/ask rules for every chat in
+    // the target's folder. No session-allow set is kept for a target — see
+    // EMPTY_CODEX_SESSION_ALLOWS.
+    const reply = allow ? 'once' : 'reject'
     // Deny feedback is model-visible (CorrectedError, non-fatal) — parity with
     // OpencodeSession.resolveApproval.
     const message = !allow ? answers?.feedback || 'User denied' : undefined
