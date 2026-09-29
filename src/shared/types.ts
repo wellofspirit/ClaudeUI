@@ -1047,6 +1047,12 @@ export interface SharedAutoModeConfig {
    * `autoMode.soft_deny`. Empty = absent.
    */
   judgeBlock?: string[]
+  /**
+   * ADR-084 §1: plainly read-only shell commands in the workspace skip the
+   * judge. ON unless this is `false`; `true` is stored as an ABSENT key, so
+   * the default and "on" are one encoding, as for the lists above.
+   */
+  readOnlyBypass?: boolean
 }
 
 export interface VendorConfig {

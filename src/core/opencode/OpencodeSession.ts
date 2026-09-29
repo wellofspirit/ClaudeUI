@@ -43,6 +43,7 @@ import {
   buildChatMessage,
   extractToolResult,
   convertStoredMessage,
+  findToolInput,
   storedCompactionMessages
 } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
@@ -74,13 +75,18 @@ import { buildClassifierEnvironment } from '../automode/environment'
 import {
   AutoModeDenialTracker,
   autoModeReviewBlock,
-  formatAutoModeDenyReason
+  formatAutoModeDenyReason,
+  readOnlyReviewBlock
 } from '../automode/denial-tracker'
+import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
+import { isShellToolName } from '../automode/shell-lexical'
 import {
   analyzeRedirects,
+  captureGitConfigArmed,
   captureGitRemotes,
   captureGitStatus,
   captureRepoVisibility,
+  hasGitSegment,
   needsGitStatus,
   needsRepoVisibility,
   recordToolOutcome,
@@ -1948,7 +1954,59 @@ export class OpencodeSession extends BaseSession {
       additionalDirectories: this.mergedUserPermissions().additionalDirectories
     })
     if (redirects) meta.redirects = redirects
+    // ADR-084 §2 — repo-local git config that makes git run a program, in the
+    // directory the command runs in (opencode honours `workdir`). Only a
+    // non-empty list is emitted: `[]` (clean) and `null` (not measured) both
+    // say nothing, per this method's rule that absence is never "fine".
+    if (hasGitSegment(command)) {
+      const runIn = effectiveShellCwd(this.cwd, input, true)
+      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
+      if (armed && armed.length > 0) meta.gitConfigArmed = armed
+    }
     return Object.keys(meta).length > 0 ? meta : undefined
+  }
+
+  /**
+   * ADR-084 §1 — the static read-only path, run after the category fast path
+   * and before any judge is resolved. True when it allowed the call (replied,
+   * card annotated); false sends the call on to the judge exactly as before.
+   *
+   * The command is read from the TOOL PART's own input, never from the ask's
+   * `metadata` fallback: opencode's shell ask carries only `{command}` there
+   * (vendor/opencode-src/packages/opencode/src/tool/shell.ts `ask`), so a
+   * `workdir` would be lost and every relative path checked against the wrong
+   * directory. No tool part → no bypass.
+   */
+  private async readOnlyBypass(approval: PendingApproval): Promise<boolean> {
+    if (!isShellToolName(approval.toolName)) return false
+    if (!this.isAutoMode(this.permissionMode)) return false
+    const input = findToolInput(this.accumulators, undefined, approval.toolUseId)
+    if (!input) {
+      logger.debug('OpencodeSession', 'auto-mode read-only bypass refused (input:unverified)')
+      return false
+    }
+    const gate = await readOnlyGate({
+      action: { toolName: approval.toolName, input },
+      cwd: this.cwd,
+      permissions: this.mergedUserPermissions(),
+      autoModeActive: () => this.isAutoMode(this.permissionMode),
+      honoursWorkdir: true,
+      logSource: 'OpencodeSession'
+    })
+    // The capture awaited a subprocess; the ask may have been answered
+    // server-side meanwhile (`approval-resolved` drops it from the map). It is
+    // settled, so it is handled: no reply, and no judge call for it either.
+    if (!this.pendingApprovals.has(approval.requestId)) {
+      logger.debug(
+        'OpencodeSession',
+        'auto-mode read-only bypass: ask resolved while it ran — not replying'
+      )
+      return true
+    }
+    if (!gate.allow) return false
+    this.sendToolReview(approval.toolUseId, 'read-only')
+    this.autoReply(approval.requestId, 'once')
+    return true
   }
 
   /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
@@ -2048,6 +2106,11 @@ export class OpencodeSession extends BaseSession {
       this.autoReply(approval.requestId, 'once')
       return
     }
+    // ADR-084 §1 — a plainly read-only shell command in the workspace needs no
+    // judge: allowed here with a fixed review on the card, no recordAllow()
+    // (a static allow never resets the denial caps) and no usage row. Before
+    // the judge is resolved, so it holds even when no judge model does.
+    if (await this.readOnlyBypass(approval)) return
     const judge = this.makeJudgeFn()
     if (!judge) {
       this.fallbackToHuman(approval)
@@ -2140,12 +2203,23 @@ export class OpencodeSession extends BaseSession {
    * tool calls `ctx.ask` — the fact M-OC6 already relies on to read the real
    * input off the accumulator — and the judge call that produced this verdict
    * took a model round-trip on top of that.
+   *
+   * `'read-only'` is the static path's fixed review (ADR-084 §1). It has no
+   * round-trip to wait on, but needs none: that path only runs once it has
+   * found the tool part in the accumulator, so the card already exists.
    */
-  private sendToolReview(toolUseId: string | undefined, result: ClassifyResult): void {
+  private sendToolReview(
+    toolUseId: string | undefined,
+    result: ClassifyResult | 'read-only'
+  ): void {
     if (!toolUseId) return
+    const reviewId = uuid()
     this.send('session:tool-review', {
       toolUseId,
-      review: autoModeReviewBlock(toolUseId, uuid(), result)
+      review:
+        result === 'read-only'
+          ? readOnlyReviewBlock(toolUseId, reviewId)
+          : autoModeReviewBlock(toolUseId, reviewId, result)
     })
   }
 

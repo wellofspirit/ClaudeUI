@@ -54,7 +54,9 @@ A pure module, `src/core/automode/read-only.ts`, exports
   the judge is set up. It is not inside `classify()`. It runs even when no judge model resolves.
 - **On `ok` it:**
   - allows the call;
-  - logs one info line, `auto-mode allow (stage=static) bash — read-only: …`;
+  - logs one info line, `auto-mode allow (stage=static) bash — read-only`, with no command text
+    (`echo <token>` and `rg <literal>` are allowlisted, and the judge path never logs the command);
+    the command follows at debug;
   - puts a `tool_review` block with a fixed rationale on the card.
 - **On `ok` it does not:**
   - call `recordAllow()`, so a static allow never resets the denial cap;
@@ -98,18 +100,37 @@ A pure module, `src/core/automode/read-only.ts`, exports
     - `Bash(...)` deny and ask rules re-checked per segment, since pi's matcher is a prefix on the
       whole command.
 - **Opt-out.** `readOnlyBypass: false` in `automode.json`, one row under Trust & protection. It is on
-  by default.
+  by default. A present value other than `true` (a hand-edited `"false"` or `0`) reads as off.
 
 ### 2. No git bypass in an armed repo; the judge sees it too
 
-When the verdict has `needsGitCheck`, the caller runs `git config --list --show-scope --includes`
-(`shell:false`, about 25 ms) and keeps only the `local | worktree | command` scopes. The user's own
-global config, such as difftastic as `diff.external`, is theirs.
+When the verdict has `needsGitCheck`, the caller runs
+`git --no-pager config --list --show-scope --includes -z` (`shell:false`, about 25 ms) and keeps
+only the `local | worktree | command` scopes. The user's own global config, such as difftastic as
+`diff.external`, is theirs. `-z` records are `<scope>\0<key>\n<value>\0`, so a multi-line value
+cannot forge a record.
 
 - It refuses the bypass on any of: `diff.external`, `diff.*.command`, `diff.*.textconv`,
-  `filter.*.clean|smudge`, a non-boolean `core.fsmonitor`, `core.hooksPath`, `gpg.program`,
-  `gpg.*.program`, `log.showSignature`, `core.pager`, `pager.*`.
-- A failed capture also refuses.
+  `filter.*.clean|smudge|process`, a non-boolean `core.fsmonitor`, `core.hooksPath`,
+  `gpg.program`, `gpg.*.program`, `log.showSignature`, `core.pager`, `pager.*`,
+  `core.worktree`.
+  - `core.worktree` runs no program, but it points status/diff/ls-files/show at another directory
+    whose paths the checker never sees. A session whose cwd is a submodule's work tree (where git
+    sets it legitimately) loses the git bypass.
+  - `core.hooksPath` stays armed: `git status` (without `--no-optional-locks`) and `git diff`
+    (even with it) rewrite the index and fire `post-index-change` from that directory, verified on
+    git 2.55.
+  - `core.pager` / `pager.*` are armed conservatively: neither engine gives git a TTY, so no pager
+    runs today.
+- Then, only if that capture succeeded, `git ls-files -z --format=%(objectmode)` (git 2.38+, 7 bytes
+  per entry, so the capture cap is reached only past about 140k tracked files), falling back to
+  `git ls-files --stage -z` when git refuses `--format`. A gitlink (mode `160000`) in the index
+  means the repo cannot be verified: `git status` and `git diff` run `git status` inside every
+  populated submodule with that submodule's own config, which the superproject's capture does not
+  show. The check keys off the index, not `submodule.*` config, because the recursion follows any
+  populated gitlink.
+- A failed, truncated or malformed capture also refuses, and so does a cwd with no `local` entry
+  (not a repository).
 - The same capture feeds the judge a `{"meta":{"gitConfigArmed":[…keys]}}` line for git commands, so
   the judge no longer allows `git diff` in an armed repo blind.
 
@@ -171,6 +192,22 @@ absolute, so `../../settings.json` from that worktree still matches the parent r
   - Non-auto opencode off Windows matches the rendered patterns case-sensitively, because
     `Wildcard.match` folds case on win32 only. Auto mode does not depend on those patterns.
   - opencode's bash path sources `~/.bashrc` with aliases enabled, which is the user's own doing.
+  - `rg` reads every non-hidden, non-gitignored file under its paths by content, so a
+    secret-shaped file that is tracked, or untracked but not ignored, can surface. The judge would
+    see the same command.
+  - `Get-Command <name>` can trigger PowerShell module auto-loading, which runs installed module
+    code from the user's `PSModulePath` (never from the workspace).
+  - cmd.exe is not modelled. It is reachable only if the user configures `shell=cmd`, or when a
+    native command resolves to a `.cmd`/`.bat` shim on `PATH`. cmd.exe re-parses a shim's
+    arguments, so `|`, `&&`, `<`, `>`, `^` and `%` inside a quoted pattern become live. The shims
+    are programs the user installed; the agent cannot plant one without a write the judge sees, and
+    the judge does not model this either.
+  - pi's `bash` tool always runs Git Bash but gets the both-dialects rule, so Git-Bash `/d/...`
+    paths lose the bypass there.
+  - pi ships a `powershell` tool on Windows that ClaudeUI does not enable. It is never bypassed,
+    and the judge's shell meta and redirect analysis do not read it.
+  - Repos with submodules lose the git part of the bypass (§2).
+  - A corrupt, unparseable `automode.json` reads as "bypass on".
 - The realpath and git-config captures must run where the command executes. That is the host today;
   for remote tasks it will be the remote host. The module stays filesystem-free so it can move with
   the core.

@@ -302,7 +302,8 @@ const JUDGE_GUIDANCE_KEYS = ['judgeAllow', 'judgeBlock'] as const
  * classifier environment, which is exactly the failure nobody notices.
  *
  * The shape is narrow on purpose: five OPTIONAL string arrays, each entry a
- * non-empty trimmed string, and no other keys. An empty list is expressed by
+ * non-empty trimmed string, one optional boolean (`readOnlyBypass`, ADR-084's
+ * opt-out), and no other keys. An empty list is expressed by
  * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
  * caller and normalised away by the service, so an older client cannot create a
  * second encoding of "nothing is trusted".
@@ -325,13 +326,19 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Invalid shared auto-mode config: expected an object')
   }
-  const allowed = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
+  const lists = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+    if (!lists.has(key) && key !== 'readOnlyBypass') {
+      throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+    }
   }
   const record = value as Record<string, unknown>
+  // ADR-084 §1's opt-out: a boolean or nothing.
+  if (record.readOnlyBypass !== undefined && typeof record.readOnlyBypass !== 'boolean') {
+    throw new Error('Invalid shared auto-mode config: "readOnlyBypass" must be a boolean')
+  }
   const guidance = new Set<string>(JUDGE_GUIDANCE_KEYS)
-  for (const key of allowed) {
+  for (const key of lists) {
     const list = record[key]
     if (list === undefined) continue
     if (!Array.isArray(list)) {

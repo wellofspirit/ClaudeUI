@@ -195,6 +195,22 @@ describe('config:save-shared-automode', () => {
     })
   })
 
+  it('accepts readOnlyBypass as a boolean only (ADR-084 §1)', () => {
+    invoke('config:save-shared-automode', { readOnlyBypass: false })
+    invoke('config:save-shared-automode', {
+      trustedDomains: ['files.acme.com'],
+      readOnlyBypass: true
+    })
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+    for (const bad of ['false', 0, null, []]) {
+      expect(
+        () => invoke('config:save-shared-automode', { readOnlyBypass: bad }),
+        JSON.stringify(bad)
+      ).toThrow(/"readOnlyBypass" must be a boolean/)
+    }
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+  })
+
   it('refuses an unknown key rather than writing it into the judge environment', () => {
     expect(() =>
       invoke('config:save-shared-automode', { trustedDomains: [], enabled: false })

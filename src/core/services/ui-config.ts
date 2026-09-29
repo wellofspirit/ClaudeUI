@@ -307,9 +307,11 @@ export function loadSharedAutoModeConfig(): import('../../shared/types').SharedA
 }
 
 /**
- * Replaces the shared trust and guidance lists. An empty list is written as an
- * ABSENT key. The object is REBUILT from the known keys rather than spread, so
- * a key missing from {@link SHARED_AUTOMODE_LIST_KEYS} is dropped on save —
+ * Replaces the shared trust and guidance lists and the read-only bypass switch.
+ * An empty list is written as an ABSENT key, and so is `readOnlyBypass: true`
+ * (the default): only an explicit `false` is stored. The object is REBUILT from
+ * the known keys rather than spread, so a key missing from
+ * {@link SHARED_AUTOMODE_LIST_KEYS} (or not handled below) is dropped on save —
  * which is why the guidance lists have to be named there.
  */
 export function saveSharedAutoModeConfig(
@@ -323,6 +325,9 @@ export function saveSharedAutoModeConfig(
     const entries = normalizeTrustEntries(config[key])
     if (entries && entries.length > 0) next[key] = entries
   }
+  // Boolean only: anything else (a hand-edited "false" string) is not an
+  // opt-out and is dropped, leaving the bypass at its default.
+  if (config.readOnlyBypass === false) next.readOnlyBypass = false
   writeJson(SHARED_AUTOMODE_FILE, next)
 }
 

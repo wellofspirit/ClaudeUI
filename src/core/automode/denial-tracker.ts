@@ -159,3 +159,24 @@ export function autoModeReviewBlock(
     ...(rationale ? { rationale } : {})
   }
 }
+
+/** The card's rationale for a static read-only allow (ADR-084 §1). */
+export const READ_ONLY_REVIEW_RATIONALE =
+  'Read-only command in the workspace — allowed without a judge call'
+
+/**
+ * The review block for a call the static read-only path allowed (ADR-084 §1) —
+ * {@link autoModeReviewBlock}'s sibling, so the card still says auto mode
+ * decided it, and why no judge was asked. Fixed text: there is no model reply
+ * to cap and no corpus rule behind an allow.
+ */
+export function readOnlyReviewBlock(toolUseId: string, reviewId: string): ToolReviewBlock {
+  return {
+    type: 'tool_review',
+    toolUseId,
+    reviewId,
+    reviewer: 'auto-mode',
+    decision: 'approved',
+    rationale: READ_ONLY_REVIEW_RATIONALE
+  }
+}

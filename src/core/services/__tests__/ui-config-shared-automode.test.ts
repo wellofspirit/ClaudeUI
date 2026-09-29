@@ -280,6 +280,23 @@ describe('load/saveSharedAutoModeConfig', () => {
     expect('judgeBlock' in onDisk).toBe(false)
   })
 
+  it('stores readOnlyBypass only as an explicit false (ADR-084 §1)', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({ trustedDomains: ['files.acme.com'], readOnlyBypass: false })
+    expect(readJsonFile(sharedFile())).toEqual({
+      trustedDomains: ['files.acme.com'],
+      readOnlyBypass: false
+    })
+
+    // `true` is the default, so it is written ABSENT — one encoding of "on".
+    mod.saveSharedAutoModeConfig({ trustedDomains: ['files.acme.com'], readOnlyBypass: true })
+    expect(readJsonFile(sharedFile())).toEqual({ trustedDomains: ['files.acme.com'] })
+
+    // A non-boolean is not an opt-out.
+    mod.saveSharedAutoModeConfig({ readOnlyBypass: 'false' as unknown as boolean })
+    expect(readJsonFile(sharedFile())).toEqual({})
+  })
+
   it('round-trips through the file, not through memory', async () => {
     const first = await freshModule()
     first.saveSharedAutoModeConfig({ protectedPatterns: ['acme-live-*'] })

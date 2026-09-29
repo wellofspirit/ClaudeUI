@@ -21,6 +21,10 @@
  * live in the same shared file for the same reason — one judge policy, every
  * engine — and so ride the same rows and the same save path.
  *
+ * Above them sits one switch, the ADR-084 read-only bypass: plainly read-only
+ * shell commands in the workspace skip the judge. It is on by default and
+ * stored only as `readOnlyBypass: false`, so "on" has one encoding (absent).
+ *
  * An emptied list is saved as an ABSENT key, never `[]`: the sessions read the
  * lists behind `?.length`, so the two are indistinguishable downstream and a
  * second encoding of "nothing is trusted" would be a lie waiting to be believed.
@@ -36,7 +40,12 @@ import {
   JUDGE_GUIDANCE_MAX_ENTRIES,
   judgeGuidanceEntryError
 } from '../../../../shared/judge-guidance'
-import { SandboxListSetting, SettingRow, type ListEntryRules } from './settings-controls'
+import {
+  SandboxListSetting,
+  SettingRow,
+  SettingsToggle,
+  type ListEntryRules
+} from './settings-controls'
 
 /** The five list keys `SharedAutoModeConfig` holds. */
 type TrustListKey =
@@ -103,6 +112,12 @@ const TRUST_LISTS: ReadonlyArray<{
   }
 ]
 
+/** The ADR-084 §1 switch's copy. The description names the escape hatch: an
+ *  Ask rule still reaches the user, bypass or not. */
+const READ_ONLY_BYPASS_LABEL = 'Skip the judge for read-only commands'
+const READ_ONLY_BYPASS_DESCRIPTION =
+  'Plainly read-only commands in your workspace (git status, ls, reading source files) run without a judge call. Commands that touch secrets, other folders, the network or anything else still go to the judge; to review a read yourself, add an Ask rule.'
+
 /** Shown when a save is rejected; the section has already reloaded the file. */
 const SAVE_ERROR = "Couldn't save that change — showing what is saved."
 
@@ -151,10 +166,7 @@ export function TrustListsSection(): React.JSX.Element {
     )
   }
 
-  const updateList = (key: TrustListKey, items: string[]): void => {
-    const next: SharedAutoModeConfig = { ...cfg }
-    if (items.length > 0) next[key] = items
-    else delete next[key]
+  const save = (next: SharedAutoModeConfig): void => {
     setCfg(next)
     setSaveError(null)
     const seq = ++saveSeq.current
@@ -165,8 +177,29 @@ export function TrustListsSection(): React.JSX.Element {
     })
   }
 
+  const updateList = (key: TrustListKey, items: string[]): void => {
+    const next: SharedAutoModeConfig = { ...cfg }
+    if (items.length > 0) next[key] = items
+    else delete next[key]
+    save(next)
+  }
+
+  const setReadOnlyBypass = (on: boolean): void => {
+    const next: SharedAutoModeConfig = { ...cfg }
+    if (on) delete next.readOnlyBypass
+    else next.readOnlyBypass = false
+    save(next)
+  }
+
   return (
     <div data-testid="TrustListsSection" className="divide-y divide-border/55">
+      <SettingsToggle
+        testid="TrustListsSection.readOnlyBypass"
+        label={READ_ONLY_BYPASS_LABEL}
+        description={READ_ONLY_BYPASS_DESCRIPTION}
+        checked={cfg.readOnlyBypass !== false}
+        onChange={setReadOnlyBypass}
+      />
       {TRUST_LISTS.map((f) => (
         <SandboxListSetting
           key={f.key}

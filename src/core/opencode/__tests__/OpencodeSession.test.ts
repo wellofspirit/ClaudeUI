@@ -206,8 +206,13 @@ vi.mock('../model-discovery', () => ({
 const mockCaptureGitRemotes = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 const mockCaptureGitStatus = vi.hoisted(() => vi.fn().mockResolvedValue(null))
 const mockCaptureRepoVisibility = vi.hoisted(() => vi.fn().mockResolvedValue('unknown'))
+// ADR-084 §2: `null` (cannot verify) by default, so the read-only bypass never
+// clears a git command and no gitConfigArmed meta line appears unless a test
+// says the repo config was measured.
+const mockCaptureGitConfigArmed = vi.hoisted(() => vi.fn().mockResolvedValue(null))
 vi.mock('../../automode/ground-truth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../automode/ground-truth')>()),
+  captureGitConfigArmed: mockCaptureGitConfigArmed,
   captureGitRemotes: mockCaptureGitRemotes,
   captureGitStatus: mockCaptureGitStatus,
   captureRepoVisibility: mockCaptureRepoVisibility
@@ -251,6 +256,8 @@ import {
   type FakeJudgeCall
 } from '../../../test/helpers/fake-judge'
 import { closeDb, getUsageEventByMessageId } from '../../services/db'
+import { logger } from '../../services/logger'
+import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
 import { evaluateOpencodeRules } from '../wildcard'
 import type { OpencodeEvent } from '../protocol/types'
@@ -323,6 +330,8 @@ function setupMocks(): void {
   mockCaptureGitStatus.mockResolvedValue(null)
   mockCaptureRepoVisibility.mockReset()
   mockCaptureRepoVisibility.mockResolvedValue('unknown')
+  mockCaptureGitConfigArmed.mockReset()
+  mockCaptureGitConfigArmed.mockResolvedValue(null)
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -2602,6 +2611,340 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     expect(mockCaptureGitRemotes).toHaveBeenCalledTimes(1)
     expect(judgePrompt().system).toContain('origin → git@github.com:acme/app.git')
     expect(judgePrompt().system).not.toContain('evil')
+    session.dispose()
+  })
+
+  // ── ADR-084 §1/§2: the static read-only path ahead of the judge ───────────
+  // Order: G9 user ask rule → category fast path → read-only bypass → judge.
+  // The command is read from the TOOL PART (so `workdir` is known), never from
+  // the ask's `{command}`-only metadata.
+
+  /** A running tool part with an arbitrary input (workdir included). */
+  const toolPartWithInput = (callID: string, input: Record<string, unknown>): OpencodeEvent =>
+    ({
+      id: `ev_part_${callID}`,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { status: 'running', input }
+        }
+      }
+    }) as OpencodeEvent
+
+  const reviewsSent = (win: MockWindow): { toolUseId: string; review: unknown }[] =>
+    win.webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:tool-review')
+      .map((c) => c[2] as { toolUseId: string; review: unknown })
+
+  it('read-only bypass: git status with a clean repo config → once, NO judge, fixed review on the card', async () => {
+    enableAutoMode()
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_allow',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      {
+        permissionMode: 'full'
+      }
+    )
+    await session.run('go')
+
+    push(toolPartEvent('c_ro', 'git status'))
+    push(permissionEvent('per_ro', 'c_ro', 'git status'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_ro', 'once'))
+
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(mockRecordJudgeUsage).not.toHaveBeenCalled()
+    expect(mockCaptureGitConfigArmed).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(reviewsSent(win)).toEqual([
+      {
+        toolUseId: 'c_ro',
+        review: {
+          type: 'tool_review',
+          toolUseId: 'c_ro',
+          reviewId: expect.any(String),
+          reviewer: 'auto-mode',
+          decision: 'approved',
+          rationale: 'Read-only command in the workspace — allowed without a judge call'
+        }
+      }
+    ])
+    session.dispose()
+  })
+
+  it('read-only bypass: the git capture runs in the tool part’s workdir', async () => {
+    enableAutoMode()
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartWithInput('c_wd', { command: 'git status', workdir: 'packages/app' }))
+    push(permissionEvent('per_wd', 'c_wd', 'git status'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_wd', 'once'))
+
+    expect(mockCaptureGitConfigArmed).toHaveBeenCalledWith('/tmp/test-cwd/packages/app')
+    expect(mockJudge).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('read-only bypass: cat .npmrc is refused by the gate and reaches the JUDGE', async () => {
+    enableAutoMode()
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const debug = vi.spyOn(logger, 'debug')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_npmrc',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(toolPartEvent('c_npmrc', 'cat .npmrc'))
+    push(permissionEvent('per_npmrc', 'c_npmrc', 'cat .npmrc'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_npmrc', 'once'))
+
+    expect(mockJudge).toHaveBeenCalledTimes(1)
+    // The gate saw the call and refused it — not merely never reached.
+    expect(debug).toHaveBeenCalledWith(
+      'OpencodeSession',
+      'auto-mode read-only bypass refused (path:sensitive .npmrc)'
+    )
+    expect(
+      reviewsSent(win).map((r) => (r.review as { rationale?: string }).rationale)
+    ).not.toContain(READ_ONLY_REVIEW_RATIONALE)
+    debug.mockRestore()
+    session.dispose()
+  })
+
+  it('read-only bypass: holds when the judge model is unavailable (checked BEFORE the judge resolves)', async () => {
+    // makeJudgeFn() → null: the configured judge is not in the catalog.
+    enableAutoMode({ judgeModel: 'openai/gpt-5.6-luna' })
+    mockPeekOpencodeModels.mockReturnValue([
+      {
+        engineId: 'opencode',
+        vendorId: 'opencode',
+        vendorName: 'OpenCode Zen',
+        models: [{ value: 'opencode/mimo-v2.5-free', displayName: 'MiMo', description: '' }]
+      }
+    ])
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_nojudge',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(toolPartEvent('c_nojudge', 'ls'))
+    push(permissionEvent('per_nojudge', 'c_nojudge', 'ls'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_nojudge', 'once'))
+
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(
+      false
+    )
+    expect(reviewsSent(win).map((r) => (r.review as { rationale?: string }).rationale)).toEqual([
+      READ_ONLY_REVIEW_RATIONALE
+    ])
+    session.dispose()
+  })
+
+  it('read-only bypass: an ask resolved server-side while the capture ran gets NO reply and NO judge', async () => {
+    enableAutoMode()
+    mockJudge.mockResolvedValue('<block>no</block>')
+    let release: ((armed: string[]) => void) | undefined
+    mockCaptureGitConfigArmed.mockImplementation(
+      () =>
+        new Promise<string[]>((resolve) => {
+          release = resolve
+        })
+    )
+    const debug = vi.spyOn(logger, 'debug')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_race',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      { permissionMode: 'full' }
+    )
+    await session.run('go')
+
+    push(toolPartEvent('c_race', 'git status'))
+    push(permissionEvent('per_race', 'c_race', 'git status'))
+    await vi.waitFor(() => expect(release).toBeDefined())
+    // M-OC2: e.g. a sibling reject cascade-rejected it on the server.
+    push({
+      id: 'ev_replied_race',
+      type: 'permission.replied',
+      properties: { sessionID: SES, requestID: 'per_race', reply: 'reject' }
+    } as OpencodeEvent)
+    await vi.waitFor(() =>
+      expect(win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(
+        true
+      )
+    )
+    release!([])
+    await vi.waitFor(() =>
+      expect(debug).toHaveBeenCalledWith(
+        'OpencodeSession',
+        'auto-mode read-only bypass: ask resolved while it ran — not replying'
+      )
+    )
+
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(reviewsSent(win)).toEqual([])
+    debug.mockRestore()
+    session.dispose()
+  })
+
+  it('read-only bypass: an ask with no tool part (metadata only, workdir unknown) reaches the JUDGE', async () => {
+    enableAutoMode()
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    feedPermissionAskedWithCommand('per_nopart', 'git status')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_nopart', 'once'))
+
+    expect(mockJudge).toHaveBeenCalledTimes(1)
+    session.dispose()
+  })
+
+  it('read-only bypass: an ARMED repo sends git diff to the judge, which is told the keys', async () => {
+    enableAutoMode()
+    mockCaptureGitConfigArmed.mockResolvedValue(['diff.external'])
+    mockJudge.mockResolvedValue('<block>no</block>')
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartEvent('c_armed', 'git diff'))
+    push(permissionEvent('per_armed', 'c_armed', 'git diff'))
+    await vi.waitFor(() => expect(mockJudge).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain(
+      '{"meta":{"gitConfigArmed":["diff.external"]}}\nProposed next action:'
+    )
+    session.dispose()
+  })
+
+  it('read-only bypass: a git call the gate refuses reaches the judge with NO meta line for a clean or unmeasured config', async () => {
+    // `git fetch` is not read-only (the checker refuses it before any capture),
+    // so the call passes through the bypass — tool part found — to the judge,
+    // whose meta capture sees `[]` or `null` and must say nothing.
+    enableAutoMode()
+    mockJudge.mockResolvedValue('<block>no</block>')
+    for (const [i, armed] of [[], null].entries()) {
+      mockJudge.mockClear()
+      mockCaptureGitConfigArmed.mockClear()
+      mockCaptureGitConfigArmed.mockResolvedValue(armed)
+      const debug = vi.spyOn(logger, 'debug')
+      const push = makeEventFeed()
+      const session = makeSession(undefined, 'full')
+      await session.run('go')
+      push(toolPartEvent(`c_gc${i}`, 'git fetch'))
+      push(permissionEvent(`per_gc${i}`, `c_gc${i}`, 'git fetch'))
+      await vi.waitFor(() => expect(mockJudge).toHaveBeenCalled())
+      expect(debug).toHaveBeenCalledWith(
+        'OpencodeSession',
+        'auto-mode read-only bypass refused (cmd:git fetch)'
+      )
+      // Only the judge's meta capture ran.
+      expect(mockCaptureGitConfigArmed).toHaveBeenCalledTimes(1)
+      expect(judgePrompt().user).not.toContain('gitConfigArmed')
+      debug.mockRestore()
+      session.dispose()
+    }
+  })
+
+  it('read-only bypass: a USER ask rule still sends the call to the human (G9 first)', async () => {
+    enableAutoMode()
+    withUserAskRule(['Bash(git status:*)'])
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_g9',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      {
+        permissionMode: 'full'
+      }
+    )
+    await session.run('go')
+
+    push(toolPartEvent('c_g9', 'git status'))
+    push(permissionEvent('per_g9', 'c_g9', 'git status'))
+    await vi.waitFor(() =>
+      expect(win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(
+        true
+      )
+    )
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(mockCaptureGitConfigArmed).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('read-only bypass: a static allow does NOT reset the denial streak (no recordAllow)', async () => {
+    // fast mode: uncategorized blocks, so the 3-in-a-row cap is the one that
+    // fires. A static allow between blocks 2 and 3 must not break the streak.
+    enableAutoMode()
+    mockCaptureGitConfigArmed.mockResolvedValue([])
+    mockJudge.mockResolvedValue('<block>yes</block><reason>nope</reason>')
+    const push = makeEventFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession(
+      'r_ro_cap',
+      win as unknown as HostWindowHandle,
+      '/tmp/test-cwd',
+      {
+        permissionMode: 'full'
+      }
+    )
+    await session.run('go')
+
+    for (const id of ['1', '2']) {
+      push(permissionEvent(`per_blk${id}`, `c_blk${id}`, 'npm publish'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          `per_blk${id}`,
+          'reject',
+          'Auto mode blocked: nope'
+        )
+      )
+    }
+    push(toolPartEvent('c_ls', 'ls'))
+    push(permissionEvent('per_ls', 'c_ls', 'ls'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_ls', 'once'))
+    expect(mockJudge).toHaveBeenCalledTimes(2)
+
+    push(permissionEvent('per_blk3', 'c_blk3', 'npm publish'))
+    await vi.waitFor(() =>
+      expect(win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(
+        true
+      )
+    )
+    const approval = win.webContents.send.mock.calls.find(
+      (c) => c[0] === 'session:approval-request'
+    )![2] as { requestId: string; decisionReason?: string }
+    expect(approval.requestId).toBe('per_blk3')
+    expect(approval.decisionReason).toContain('3 actions in a row')
     session.dispose()
   })
 

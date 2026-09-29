@@ -19,6 +19,8 @@
  *      over 300 characters, past 50 entries) BEFORE saving, with an inline error
  *   9. A failed save is surfaced inline and the section reloads the file, so it
  *      never shows an entry that is not on disk
+ *  10. The read-only bypass switch (ADR-084 §1) sits above the lists, is ON when
+ *      the key is absent, and saves only an explicit `false`
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
@@ -140,6 +142,7 @@ describe('TrustListsSection — judge guidance rows (ADR-083 §4)', () => {
       .getAllByTestId(/^TrustListsSection\.[A-Za-z]+$/)
       .map((el) => el.getAttribute('data-testid'))
     expect(rows).toEqual([
+      'TrustListsSection.readOnlyBypass',
       'TrustListsSection.trustedDomains',
       'TrustListsSection.trustedRegistries',
       'TrustListsSection.protectedPatterns',
@@ -205,6 +208,57 @@ describe('TrustListsSection — judge guidance rows (ADR-083 §4)', () => {
     expect(JSON.parse(JSON.stringify(saved[0]))).not.toHaveProperty('judgeBlock')
     expect(saved[0]).toEqual({ trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'] })
     expect(items('judgeBlock')).toEqual([])
+  })
+})
+
+describe('TrustListsSection — read-only bypass switch (ADR-084 §1)', () => {
+  const toggle = (): HTMLElement => screen.getByTestId('TrustListsSection.readOnlyBypass')
+
+  it('is the first row, ON when the file has no key, with its copy', async () => {
+    await renderLoaded()
+
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+    expect(toggle().textContent).toContain('Skip the judge for read-only commands')
+    expect(toggle().textContent).toContain(
+      'Plainly read-only commands in your workspace (git status, ls, reading source files) run without a judge call.'
+    )
+    expect(toggle().textContent).toContain('to review a read yourself, add an Ask rule.')
+  })
+
+  it('turning it off saves readOnlyBypass: false alongside the lists', async () => {
+    await renderLoaded()
+
+    fireEvent.click(toggle())
+
+    expect(saved).toEqual([
+      { trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'], readOnlyBypass: false }
+    ])
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('turning it back on saves the key ABSENT, never true', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), readOnlyBypass: false }))
+    })
+    await renderLoaded()
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle())
+
+    expect('readOnlyBypass' in saved[0]).toBe(false)
+    expect(saved[0]).toEqual({ trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'] })
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('a list edit keeps the switch off', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), readOnlyBypass: false }))
+    })
+    await renderLoaded()
+
+    addItem('trustedDomains', 'files.acme.com')
+
+    expect(saved[0].readOnlyBypass).toBe(false)
   })
 })
 

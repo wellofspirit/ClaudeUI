@@ -860,7 +860,7 @@ function messageIdFromProps(props: Record<string, unknown>): string | undefined 
  * to the wire `metadata`. Checks the named message first, then scans all
  * accumulators (the permission event's `messageID` may be absent/mismatched).
  */
-function findToolInput(
+export function findToolInput(
   accumulators: Map<string, MessageAccumulator>,
   messageId: string | undefined,
   callId: string | undefined

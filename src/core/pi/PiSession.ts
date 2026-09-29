@@ -101,13 +101,17 @@ import {
 import {
   AutoModeDenialTracker,
   autoModeReviewBlock,
-  formatAutoModeDenyReason
+  formatAutoModeDenyReason,
+  readOnlyReviewBlock
 } from '../automode/denial-tracker'
+import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
 import {
   analyzeRedirects,
+  captureGitConfigArmed,
   captureGitRemotes,
   captureGitStatus,
   captureRepoVisibility,
+  hasGitSegment,
   needsGitStatus,
   needsRepoVisibility,
   recordToolOutcome,
@@ -2282,6 +2286,15 @@ export class PiSession extends BaseSession {
       additionalDirectories: this.currentRules().additionalDirectories
     })
     if (redirects) meta.redirects = redirects
+    // ADR-084 §2 — repo-local git config that makes git run a program. pi's
+    // bash always runs in the session cwd (it has no `workdir`). Only a
+    // non-empty list is emitted: `[]` (clean) and `null` (not measured) both
+    // say nothing, per this method's rule that absence is never "fine".
+    if (hasGitSegment(command)) {
+      const runIn = effectiveShellCwd(this.cwd, input, false)
+      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
+      if (armed && armed.length > 0) meta.gitConfigArmed = armed
+    }
     return Object.keys(meta).length > 0 ? meta : undefined
   }
 
@@ -2401,6 +2414,26 @@ export class PiSession extends BaseSession {
     // cannot be reached would be risk with no benefit.
     if (isAutoModeFastPathAllowed(toolName)) return decided({ behavior: 'allow' })
 
+    // ADR-084 §1 — a plainly read-only shell command in the workspace needs no
+    // judge: allowed with a fixed review on the card, no recordAllow() (a
+    // static allow never resets the denial caps) and no usage row. Before the
+    // judge-model check, so it holds even when no judge model resolves. pi's
+    // `bash` has no `workdir` — it runs in the session cwd — so the gate
+    // refuses an input that carries one. `currentRules()` is the ruleset the
+    // permission engine just decided with, deny rules included.
+    const readOnly = await readOnlyGate({
+      action: { toolName, input },
+      cwd: this.cwd,
+      permissions: this.currentRules(),
+      autoModeActive: () => this.isAutoMode(this.permissionMode),
+      honoursWorkdir: false,
+      logSource: 'PiSession'
+    })
+    if (readOnly.allow) {
+      this.sendToolReview(toolCallId, 'read-only')
+      return decided({ behavior: 'allow' })
+    }
+
     // A configured judge model that no longer exists fails CLOSED — never judged
     // by a stand-in (see judgeModelUnavailable). Checked after the fast path so a
     // stale judge does not start prompting for reads.
@@ -2493,12 +2526,17 @@ export class PiSession extends BaseSession {
    *
    * Only a real verdict reaches here — a fast-path allow returns before the
    * judge, an `unavailable` result and a denial cap both return ASK_HUMAN, and
-   * the human's approval card carries its own reason.
+   * the human's approval card carries its own reason — plus `'read-only'`, the
+   * static path's fixed review (ADR-084 §1).
    */
-  private sendToolReview(toolCallId: string, result: ClassifyResult): void {
+  private sendToolReview(toolCallId: string, result: ClassifyResult | 'read-only'): void {
+    const reviewId = uuid()
     this.send('session:tool-review', {
       toolUseId: toolCallId,
-      review: autoModeReviewBlock(toolCallId, uuid(), result)
+      review:
+        result === 'read-only'
+          ? readOnlyReviewBlock(toolCallId, reviewId)
+          : autoModeReviewBlock(toolCallId, reviewId, result)
     })
   }
 

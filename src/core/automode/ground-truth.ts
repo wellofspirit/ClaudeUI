@@ -699,3 +699,196 @@ export async function captureRepoVisibility(
   const v = res.stdout.trim().toLowerCase()
   return v === 'public' || v === 'private' || v === 'internal' ? v : 'unknown'
 }
+
+// ── Repo-armed git config (ADR-084 §2) ────────────────────────────────────────
+
+/**
+ * Does this command run git in any segment? The trigger for the
+ * {@link captureGitConfigArmed} meta line, read with the same naive segment
+ * parser as the other detectors (a stray quote can cost a meta line, never
+ * invent one).
+ */
+export function hasGitSegment(command: string): boolean {
+  return splitCommandSegments(command).some((s) => parseSegment(s)?.cmd === 'git')
+}
+
+/** Config scopes the REPO controls. `system` and `global` are the user's own
+ *  (difftastic as a global `diff.external` is theirs), so they never arm. */
+const REPO_SCOPES: ReadonlySet<string> = new Set(['local', 'worktree', 'command'])
+
+/**
+ * Keys that make an otherwise read-only git command run a program, matched on
+ * the lowercased key, plus one that moves where it reads. `filter.<driver>.process`
+ * is git's long-running filter protocol, which runs a program exactly where
+ * `clean`/`smudge` would.
+ */
+const ARMED_KEY_PATTERNS: readonly RegExp[] = [
+  /^diff\.external$/,
+  /^diff\..+\.(?:command|textconv)$/,
+  /^filter\..+\.(?:clean|smudge|process)$/,
+  /^core\.fsmonitor$/,
+  /^core\.hookspath$/,
+  /^gpg\.program$/,
+  /^gpg\..+\.program$/,
+  /^log\.showsignature$/,
+  /^core\.pager$/,
+  /^pager\..+$/,
+  // Not a program: it redirects status/diff/ls-files/show to another
+  // directory, whose paths the checker's scope rules never see (the command
+  // names none). Any value arms. A session whose cwd is a submodule's work
+  // tree (its git dir sets core.worktree legitimately) loses the git bypass —
+  // accepted.
+  /^core\.worktree$/
+]
+
+/** `core.fsmonitor` set to a boolean is git's built-in daemon, not a hook program. */
+const GIT_BOOLEAN = /^(?:true|false|yes|no|on|off|1|0)$/i
+
+/** A subsection the judge may be shown as written; anything else is masked. */
+const SAFE_SUBSECTION = /^[A-Za-z0-9_.-]{1,64}$/
+
+/**
+ * The key as reported. A subsection (`diff."<name>".textconv`) is text the
+ * repo's author chose, and the list reaches the judge's prompt, so one outside
+ * a plain identifier charset is masked as `*` — the fact is "a textconv is
+ * set", not what the attacker called it.
+ */
+function reportedKey(lowerKey: string): string {
+  const first = lowerKey.indexOf('.')
+  const last = lowerKey.lastIndexOf('.')
+  if (first === last) return lowerKey
+  const sub = lowerKey.slice(first + 1, last)
+  return SAFE_SUBSECTION.test(sub)
+    ? lowerKey
+    : `${lowerKey.slice(0, first)}.*${lowerKey.slice(last)}`
+}
+
+function isArmed(lowerKey: string, value: string | undefined): boolean {
+  if (!ARMED_KEY_PATTERNS.some((re) => re.test(lowerKey))) return false
+  // A bare `fsmonitor` key (no `=`) is boolean true.
+  if (lowerKey === 'core.fsmonitor') return value !== undefined && !GIT_BOOLEAN.test(value.trim())
+  return true
+}
+
+/**
+ * Which repo-controlled git config keys would make git run a program in `cwd`
+ * (ADR-084 §2). Runs `git --no-pager config --list --show-scope --includes -z`
+ * with `shell: false`, so include-sourced entries are seen under the scope of
+ * the file that included them; then, only when that came back with a list,
+ * `git ls-files` for gitlinks (see {@link indexHasGitlink}).
+ *
+ * `-z` rather than the line format the ADR names: records are
+ * `<scope>\0<key>\n<value>\0` (a bare key has no `\n`), so a multi-line value
+ * can neither forge nor split a record.
+ *
+ * Returns the sorted, de-duplicated ARMED keys — never their values, which can
+ * hold paths or tokens — `[]` for a clean repo, and `null` whenever the answer
+ * is not known:
+ * - the capture failed, threw or timed out (git missing, non-zero exit);
+ * - the output was cut at the capture cap, or a record is malformed — an armed
+ *   key could sit past the cut;
+ * - there is no `local` entry at all: `git config --list` succeeds outside a
+ *   repository, and every repository git creates has local entries, so this
+ *   is how "not a repo" reads here;
+ * - the index holds a gitlink (see {@link indexHasGitlink}).
+ *
+ * Callers treat `null` as "cannot verify": the static bypass refuses, and the
+ * judge's meta line is simply absent.
+ */
+export async function captureGitConfigArmed(
+  cwd: string,
+  exec: CaptureExec = defaultExec
+): Promise<string[] | null> {
+  let res: CaptureExecResult
+  try {
+    res = await exec(
+      'git',
+      ['--no-pager', 'config', '--list', '--show-scope', '--includes', '-z'],
+      { cwd, timeoutMs: GIT_CAPTURE_TIMEOUT_MS }
+    )
+  } catch {
+    return null
+  }
+  if (!res.ok || typeof res.stdout !== 'string') return null
+  const out = res.stdout
+  if (out.length >= MAX_CAPTURE_BYTES) return null
+  if (out.length > 0 && !out.endsWith('\0')) return null
+  const fields = out.length > 0 ? out.slice(0, -1).split('\0') : []
+  if (fields.length % 2 !== 0) return null
+
+  let sawLocal = false
+  const armed = new Set<string>()
+  for (let i = 0; i < fields.length; i += 2) {
+    const scope = fields[i]
+    const entry = fields[i + 1]
+    const nl = entry.indexOf('\n')
+    const key = (nl === -1 ? entry : entry.slice(0, nl)).toLowerCase()
+    const value = nl === -1 ? undefined : entry.slice(nl + 1)
+    if (scope === '' || key === '') return null
+    if (scope === 'local') sawLocal = true
+    if (!REPO_SCOPES.has(scope)) continue
+    if (isArmed(key, value)) armed.add(reportedKey(key))
+  }
+  if (!sawLocal) return null
+  if ((await indexHasGitlink(cwd, exec)) !== false) return null
+  return [...armed].sort()
+}
+
+/**
+ * The two ways to list index modes, tried in order. `--format=%(objectmode)`
+ * (git ≥ 2.38) prints 7 bytes per entry, so the capture cap is reached only
+ * past ~140k tracked files; `--stage` (every git) prints the object id and
+ * path too, ~50+ bytes per entry, and is the fallback when `--format` is
+ * refused. Each `-z` record must match its shape exactly.
+ */
+const LS_FILES_MODE_QUERIES: ReadonlyArray<{ args: string[]; record: RegExp }> = [
+  {
+    args: ['--no-pager', 'ls-files', '-z', '--format=%(objectmode)'],
+    record: /^([0-7]{6})$/
+  },
+  {
+    args: ['--no-pager', 'ls-files', '--stage', '-z'],
+    record: /^([0-7]{6}) [0-9a-f]{40,64} [0-3]\t./s
+  }
+]
+
+/** The index mode of a gitlink (a submodule commit). */
+const GITLINK_MODE = '160000'
+
+/**
+ * Does the index in `cwd` hold a gitlink? `null` when it cannot be told
+ * (both queries failed, timeout, output cut at the capture cap, a malformed
+ * record).
+ *
+ * Why it matters to {@link captureGitConfigArmed}: `git status` and `git diff`
+ * run `git status --porcelain=2` inside every populated submodule, with THAT
+ * repository's own config — its `core.fsmonitor`, its `core.hooksPath`, its
+ * `diff.external` — none of which the superproject's `git config --list` shows.
+ * So a repo with a gitlink cannot be verified. This keys off the index, not
+ * `submodule.*` config, because the recursion follows any populated gitlink
+ * whether or not `.gitmodules` or the config names it. Fail closed rather than
+ * recurse: repos with submodules lose only the git part of the bypass.
+ */
+async function indexHasGitlink(cwd: string, exec: CaptureExec): Promise<boolean | null> {
+  for (const query of LS_FILES_MODE_QUERIES) {
+    let res: CaptureExecResult
+    try {
+      res = await exec('git', query.args, { cwd, timeoutMs: GIT_CAPTURE_TIMEOUT_MS })
+    } catch {
+      return null
+    }
+    // A refused `--format` (older git) exits non-zero: try the next query.
+    if (!res.ok || typeof res.stdout !== 'string') continue
+    const out = res.stdout
+    if (out.length >= MAX_CAPTURE_BYTES) return null
+    if (out.length === 0) return false
+    if (!out.endsWith('\0')) return null
+    for (const record of out.slice(0, -1).split('\0')) {
+      const m = query.record.exec(record)
+      if (!m) return null
+      if (m[1] === GITLINK_MODE) return true
+    }
+    return false
+  }
+  return null
+}
