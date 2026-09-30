@@ -1,8 +1,10 @@
 import type { OpencodeAction, OpencodePermissionRule } from './permission-compiler'
 
 /**
- * Host-side port of opencode's permission matcher, used by the auto-mode
- * ask-rule precedence guard (G9, `docs/automode-rework-plan.md` §4.5).
+ * Host-side port of opencode's permission matcher, used by the ask-rule
+ * precedence guard (G9, `docs/automode-rework-plan.md` §4.5 — since ADR-085 S2
+ * part of the host pre-check, `host-precheck.ts`, in every mode) and by the
+ * host session-allow set's coverage test (`session-allows.ts`).
  *
  * Why we need it: opencode evaluates the ruleset itself, logs the matched rule,
  * and then **discards** it (`permission/index.ts:73`) — the `permission.asked`
@@ -61,13 +63,28 @@ export function evaluateOpencodeRules(
   rules: readonly OpencodePermissionRule[],
   platform: NodeJS.Platform = process.platform
 ): OpencodeAction | undefined {
+  return lastMatchingRule(permission, pattern, rules, platform)?.action
+}
+
+/**
+ * The rule {@link evaluateOpencodeRules} decides by — the LAST rule whose
+ * `permission` and `pattern` both match — or `undefined` when none does. Used
+ * where the host has to name the rule it acted on (ADR-085 S4: a child ask
+ * the parent's ruleset denies is refused with that rule's text).
+ */
+export function lastMatchingRule(
+  permission: string,
+  pattern: string,
+  rules: readonly OpencodePermissionRule[],
+  platform: NodeJS.Platform = process.platform
+): OpencodePermissionRule | undefined {
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]
     if (
       wildcardMatch(permission, rule.permission, platform) &&
       wildcardMatch(pattern, rule.pattern, platform)
     ) {
-      return rule.action
+      return rule
     }
   }
   return undefined
@@ -95,4 +112,53 @@ export function matchesUserAskRule(
   if (rules.length === 0) return false
   const list = patterns && patterns.length > 0 ? patterns : ['*']
   return list.some((p) => evaluateOpencodeRules(permission, p, rules, platform) === 'ask')
+}
+
+/**
+ * The user DENY rule an ask resolves to, or `undefined`: the first of the
+ * ask's patterns (absent/empty → `['*']`) whose last matching user-origin rule
+ * denies. The host's replay of the server-side deny that
+ * `permission-ruleset.ts` `opencodeWireRuleset` sends as an `ask` (ADR-085
+ * follow-up) — the compiler emits allow → ask → deny, so a matching deny is
+ * always the user tier's last match, and the rules the session appends after
+ * that tier (the subagent backstop, the dispatch ask) are other permissions.
+ */
+export function userDenyRule(
+  rules: readonly OpencodePermissionRule[],
+  permission: string,
+  patterns: readonly string[] | undefined,
+  platform: NodeJS.Platform = process.platform
+): OpencodePermissionRule | undefined {
+  if (rules.length === 0) return undefined
+  const list = patterns && patterns.length > 0 ? patterns : ['*']
+  for (const pattern of list) {
+    const rule = lastMatchingRule(permission, pattern, rules, platform)
+    if (rule?.action === 'deny') return rule
+  }
+  return undefined
+}
+
+/**
+ * opencode's per-ask verdict over a ruleset (`permission/index.ts` `ask()`):
+ * evaluate every pattern (absent/empty → `['*']`); any `deny` → `'deny'`; all
+ * `allow` → `'allow'`; else `'ask'`. A pattern no rule matches counts as
+ * `'ask'` (opencode's own fallthrough — and fail toward the human).
+ *
+ * ADR-085 S4: the host answers a task child's ask with this verdict over the
+ * PARENT session's current ruleset (`host-precheck.ts`, `parent-allow`).
+ */
+export function evaluateOpencodeAsk(
+  rules: readonly OpencodePermissionRule[],
+  permission: string,
+  patterns: readonly string[] | undefined,
+  platform: NodeJS.Platform = process.platform
+): OpencodeAction {
+  const list = patterns && patterns.length > 0 ? patterns : ['*']
+  let verdict: OpencodeAction = 'allow'
+  for (const pattern of list) {
+    const action = evaluateOpencodeRules(permission, pattern, rules, platform) ?? 'ask'
+    if (action === 'deny') return 'deny'
+    if (action !== 'allow') verdict = 'ask'
+  }
+  return verdict
 }

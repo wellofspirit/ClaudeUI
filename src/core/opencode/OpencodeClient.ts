@@ -13,6 +13,7 @@ import type {
   RunCommandRequest,
   Skill
 } from './protocol/types'
+import type { OpencodePermissionRule } from './permission-compiler'
 
 /**
  * M-OC5: every request gets a timeout + AbortSignal so a dead/hung opencode
@@ -41,6 +42,22 @@ const PROMPT_TIMEOUT_MS = 15 * 60_000
 export interface OpencodeRequestOptions {
   timeoutMs?: number
   signal?: AbortSignal
+}
+
+/**
+ * One row of `GET /agent` — opencode's `Agent.Info`
+ * (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/groups/instance.ts:149-156`,
+ * `agent/agent.ts` `Info`). `permission` is the agent's COMPUTED ruleset: the
+ * vendor defaults, the user's top-level config, the agent's own config and the
+ * asks ClaudeUI injects at spawn (ADR-085 S4, `subagent-permissions.ts`) — in
+ * evaluation order, last match wins.
+ */
+export interface OpencodeAgentInfo {
+  name: string
+  mode: 'primary' | 'subagent' | 'all'
+  native?: boolean
+  hidden?: boolean
+  permission: OpencodePermissionRule[]
 }
 
 export class OpencodeClient {
@@ -278,21 +295,10 @@ export class OpencodeClient {
   }
 
   /** PATCH /session/{id} — update per-session settings (permission ruleset, title, agent) */
-  /**
-   * PATCH /session/{id}.
-   *
-   * `permissionHermetic` is a ClaudeUI fork field (ADR-037 P2): it seals the
-   * session so opencode evaluates it against this ruleset ALONE, ignoring the
-   * instance-global "always" approvals that would otherwise outrank a deny-all.
-   * Safe to send unconditionally — the stock payload schema ignores unknown
-   * keys (verified against the unpatched 1.18.9 release build), so an
-   * unpatched server simply drops it. See patch/opencode-fork/README.md.
-   */
   patchSession(
     sessionId: string,
     patch: {
       permission?: Array<{ permission: string; pattern: string; action: string }>
-      permissionHermetic?: boolean
       title?: string
       agent?: string
     }
@@ -325,6 +331,31 @@ export class OpencodeClient {
   /** POST /question/{id}/reject — dismiss a question.asked event */
   rejectQuestion(requestId: string): Promise<unknown> {
     return this.post(`/question/${encodeURIComponent(requestId)}/reject`)
+  }
+
+  // ── MCP ───────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /mcp — the configured MCP servers' status, keyed by server name
+   * (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/groups/mcp.ts:33-47`,
+   * `Record<serverName, MCP.Status>`). Status only: no route lists MCP tool
+   * keys, so this is how ClaudeUI learns the server names it did not inject
+   * itself (the user's own opencode-config servers) — ADR-085 §3.
+   */
+  mcpStatus(): Promise<Record<string, { status?: string }>> {
+    return this.get('/mcp')
+  }
+
+  // ── Agents ────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /agent — every agent this server knows with its computed permission
+   * ruleset ({@link OpencodeAgentInfo}). ADR-085 S4 reads it for the
+   * `task:<name>` backstop: a subagent whose gated categories may still be
+   * allowed gets a `task` ask on the parent (`subagent-permissions.ts`).
+   */
+  agents(): Promise<OpencodeAgentInfo[]> {
+    return this.get('/agent')
   }
 
   // ── Commands + Skills ─────────────────────────────────────────────────────

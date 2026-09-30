@@ -18,7 +18,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
-import type { ContentBlock } from '../../../../../shared/types'
+import type { ContentBlock, PermissionDenialBlock } from '../../../../../shared/types'
 
 vi.mock('../MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
@@ -426,6 +426,18 @@ describe('TaskCard — "Open in panel" (mobile takeover entry point)', () => {
     expect(session.rightPanel).toBe('task')
     expect(session.openedTaskToolUseIds).toContain('call_task_1')
   })
+
+  it('the expanded card has its own "Open in panel" (ADR-027 id) that opens the panel the same way', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.expanded.openInPanel')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    fireEvent.click(screen.getByTestId('TaskCard.expanded.openInPanel'))
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.rightPanel).toBe('task')
+    expect(session.openedTaskToolUseIds).toContain('call_task_1')
+  })
 })
 
 describe('TaskCard — inline task approval', () => {
@@ -743,5 +755,70 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
 
     expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A refused spawn (ADR-085 §3 — the opencode host's plan-mode refusal of `task`)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — a permission denial of the task call', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const denial: PermissionDenialBlock = {
+    type: 'permission_denial',
+    toolUseId: 'call_task_1',
+    denialId: 'd1',
+    source: 'mode',
+    reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+  }
+  const refusedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Plan mode is read-only — present a plan and call exit_plan to proceed',
+    isError: true
+  }
+
+  it('shows the chip in the header, and the strip only once expanded', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={refusedResult}
+        view={defaultTaskView}
+        denial={denial}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.denialChip')).toHaveTextContent('Blocked · mode')
+    expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
+    // The result is the error: the card still reads failed.
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'failed')
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const strip = screen.getByTestId('TaskCard.denial')
+    expect(strip).toHaveTextContent('The permission mode refused this action')
+    expect(strip).toHaveTextContent(
+      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    )
+    // ToolCard's ids are not borrowed.
+    expect(screen.queryByTestId('ToolCard.denialChip')).not.toBeInTheDocument()
+  })
+
+  it('renders neither without a denial', () => {
+    render(<TaskCard block={makeTaskBlock()} result={refusedResult} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.denialChip')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
   })
 })

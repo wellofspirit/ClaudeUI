@@ -16,7 +16,8 @@
  * engine or model) the work actually ran under. That is strictly more than the
  * old section had: it is in range, it is attributed to an account, and it is
  * counted in every subtotal above it rather than sitting in its own table where
- * a reader could add it twice.
+ * a reader could add it twice. Auto-mode judge calls ClaudeUI made itself
+ * (ADR-081 §5) are the `judge` sub-total and get the same kind of marker.
  *
  * ADR-030 runs down the cost columns: a turn nothing could price is never added
  * as `$0.00`. The count of those turns is shown beside the figure they are
@@ -81,6 +82,7 @@ interface Leaf {
   modelId: string
   totals: CostTotals
   dispatched: CostTotals | null
+  judge: CostTotals | null
   /** Set only on a machine leaf — the row its `machine` rung is drawn from. */
   machine?: DashboardMachine
 }
@@ -98,7 +100,8 @@ function toLeaves(data: UsageDashboardData): Leaf[] {
           engineId: model.engineId,
           modelId: model.modelId,
           totals: model.totals,
-          dispatched: model.dispatched
+          dispatched: model.dispatched,
+          judge: model.judge
         })
       }
     }
@@ -134,6 +137,7 @@ function toMachineLeaves(data: UsageDashboardData): Leaf[] {
         modelId: '',
         totals: slice.totals,
         dispatched: slice.dispatched,
+        judge: slice.judge,
         machine
       })
     }
@@ -179,6 +183,14 @@ function addTotals(acc: CostTotals, t: CostTotals): void {
   acc.tokens.output += t.tokens.output
   acc.tokens.cacheWrite += t.tokens.cacheWrite
   acc.tokens.cacheRead += t.tokens.cacheRead
+}
+
+/** Add an origin's sub-total to a running one, which exists only once something did. */
+function addPart(acc: CostTotals | null, part: CostTotals | null): CostTotals | null {
+  if (!part) return acc
+  const sum = acc ?? emptyTotals()
+  addTotals(sum, part)
+  return sum
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +245,8 @@ interface Node {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, null when nothing was. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals}, null when nothing was. */
+  judge: CostTotals | null
   /** Set on a machine ROOT only — what the `remote` and `behind` tags read. */
   machine: DashboardMachine | null
   children: Node[]
@@ -258,12 +272,11 @@ function buildNodes(
   for (const [key, members] of groups) {
     const totals = emptyTotals()
     let dispatched: CostTotals | null = null
+    let judge: CostTotals | null = null
     for (const leaf of members) {
       addTotals(totals, leaf.totals)
-      if (leaf.dispatched) {
-        dispatched = dispatched ?? emptyTotals()
-        addTotals(dispatched, leaf.dispatched)
-      }
+      dispatched = addPart(dispatched, leaf.dispatched)
+      judge = addPart(judge, leaf.judge)
     }
     const path = `${parentPath}/${key}`
     nodes.push({
@@ -273,6 +286,7 @@ function buildNodes(
       color: depth === 0 ? colorOf(members[0]) : null,
       totals,
       dispatched,
+      judge,
       machine: depth === 0 ? (members[0].machine ?? null) : null,
       children:
         depth + 1 < levels.length ? buildNodes(members, levels, depth + 1, path, colorOf) : []
@@ -460,7 +474,8 @@ function Row({
             {node.label}
           </span>
           {node.machine && <MachineTags machine={node.machine} />}
-          {node.dispatched && <DispatchedMarker totals={node.dispatched} />}
+          {node.dispatched && <PartMarker part="dispatched" totals={node.dispatched} />}
+          {node.judge && <PartMarker part="judge" totals={node.judge} />}
         </span>
       </td>
       <TokensCell totals={node.totals} />
@@ -551,26 +566,54 @@ function TokensCell({ totals }: { totals: CostTotals }): React.JSX.Element {
   )
 }
 
+/** `1 turn`, `3 turns`. */
+function counted(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
 /**
- * The dispatched part of a row, ON the row rather than in a section of its own.
- * It is ALREADY inside every figure on this line (owner ruling, ADR-071 §8), so
- * the marker says where the work came from, never adds to the arithmetic.
+ * What each marked origin says on a row. `cost` is null when the sub-total is
+ * zero dollars, which is the normal case on a free or unpriced model: `↗ $0.00
+ * dispatched` reads as a broken figure rather than as the fact it carries, and
+ * the count is what is actually known there.
  */
-function DispatchedMarker({ totals }: { totals: CostTotals }): React.JSX.Element {
-  // A dispatched sub-total of zero is the normal case on a free or unpriced
-  // engine, and `↗ $0.00 dispatched` reads as a broken figure rather than as
-  // the fact it carries. The turn count is what is actually known there.
-  const measure =
-    totals.displayCostUsd > 0
-      ? formatCost(totals.displayCostUsd)
-      : `${totals.requestCount} ${totals.requestCount === 1 ? 'turn' : 'turns'}`
+const PART_MARKER = {
+  dispatched: {
+    testId: 'BreakdownTable.row.dispatched',
+    text: (cost: string | null, n: number) => `↗ ${cost ?? counted(n, 'turn', 'turns')} dispatched`,
+    title: (n: number) => `work dispatched to another engine (${counted(n, 'turn', 'turns')})`
+  },
+  judge: {
+    testId: 'BreakdownTable.row.judge',
+    text: (cost: string | null, n: number) =>
+      cost === null ? counted(n, 'judge call', 'judge calls') : `${cost} judge`,
+    title: (n: number) =>
+      `auto-mode judge calls ClaudeUI made for its sessions (${counted(n, 'call', 'calls')})`
+  }
+} as const
+
+/**
+ * The dispatched or judge part of a row, ON the row rather than in a section of
+ * its own. It is ALREADY inside every figure on this line (owner ruling,
+ * ADR-071 §8), so the marker says where the spend came from, never adds to the
+ * arithmetic.
+ */
+function PartMarker({
+  part,
+  totals
+}: {
+  part: keyof typeof PART_MARKER
+  totals: CostTotals
+}): React.JSX.Element {
+  const marker = PART_MARKER[part]
+  const cost = totals.displayCostUsd > 0 ? formatCost(totals.displayCostUsd) : null
   return (
     <span
-      data-testid="BreakdownTable.row.dispatched"
+      data-testid={marker.testId}
       className="text-[9px] px-1 py-px rounded border border-accent/50 text-accent whitespace-nowrap"
-      title={`${formatCost(totals.displayCostUsd)} of this row was work dispatched to another engine (${totals.requestCount} turns) — already included in the figures on this row, not an extra.`}
+      title={`${formatCost(totals.displayCostUsd)} of this row was ${marker.title(totals.requestCount)} — already included in the figures on this row, not an extra.`}
     >
-      ↗ {measure} dispatched
+      {marker.text(cost, totals.requestCount)}
     </span>
   )
 }

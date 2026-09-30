@@ -229,6 +229,28 @@ describe('MessageBubble', () => {
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/Search codebase/)).toBeInTheDocument()
     })
+
+    it('hands a permission_denial on the task call to its TaskCard (ADR-085 §3)', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Agent', { description: 'Search codebase' }, 'toolu_task_denied'),
+          {
+            type: 'permission_denial',
+            toolUseId: 'toolu_task_denied',
+            denialId: 'd-task',
+            source: 'mode',
+            reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+          },
+          makeToolUseBlock('Agent', { description: 'Other task' }, 'toolu_task_ok')
+        ]
+      })
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
+      const chips = screen.getAllByTestId('TaskCard.denialChip')
+      expect(chips).toHaveLength(1)
+      expect(chips[0]).toHaveTextContent('Blocked · mode')
+      expect(screen.getAllByTestId('TaskCard')).toHaveLength(2)
+    })
   })
 
   describe('approval → tool_use binding', () => {

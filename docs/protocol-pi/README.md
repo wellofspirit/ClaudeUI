@@ -59,10 +59,12 @@ See `vendor/pi-cli/docs/rpc.md` for full shapes. The integration surface:
 default (`gpt-5.4-mini`), and the next `prompt` on it returns an assistant message with
 `content: []` in ~0.7 s, so `get_last_assistant_text` answers `{}` with no `text` key.
 
-This bit the auto-mode judge (`src/core/pi/pi-judge.ts`), whose warm process resets between
+This bit the old auto-mode judge (`pi-judge.ts`, since removed), whose warm process reset between
 verdicts: every second verdict threw `no assistant text` and landed on the human — strictly
 alternating `auto-mode allow (stage=fast)` / `auto-mode BLOCK (stage=error)` in the log. **Any
-warm-process design must re-apply `set_model` after every `new_session`.**
+warm-process design must re-apply `set_model` after every `new_session`.** The judge no longer
+runs through pi at all: ClaudeUI makes its model call itself (ADR-081,
+`src/core/automode/judge-http/`).
 
 ## Events (verified sequence)
 

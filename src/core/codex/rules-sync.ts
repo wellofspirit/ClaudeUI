@@ -19,6 +19,29 @@
  *   included (`exec_policy.rs` maps `Decision::Allow` to
  *   `ExecApprovalRequirement::Skip`). That is the user's own rule, but it is a
  *   wider grant than the same rule buys on the Claude engine.
+ * - In plan mode too — the ClaudeUI plan gate never sees an execpolicy-allowed
+ *   command (ADR-085 ruling 7 residual). A surviving `Bash(mkdir:*)` allow runs
+ *   `mkdir x` in a plan turn without an escalation, and unsandboxed despite the
+ *   plan turn's `read-only` sandbox (`Skip { bypass_sandbox }` when every
+ *   segment is allowed, `exec_policy.rs`). The file is user-global and
+ *   mode-less (one per CODEX_HOME, loaded when a thread starts —
+ *   `session/mod.rs` `ExecPolicyManager::load`), so it cannot be made
+ *   plan-aware per session; what DOES escalate (every carved-out command, every
+ *   file change) meets `CodexSession.gate()`, where plan mode wins.
+ * - So, whenever the user has any Bash deny or ask rule, two kinds of allow
+ *   rule are NOT emitted (carved out, ADR-085, `../permissions/shell-rules.ts`):
+ *   one for a program some deny/ask rule names (`Bash(git:*)` with
+ *   `Bash(git push --force:*)`; `Bash(docker compose:*)` with
+ *   `Bash(docker run:*)` — `isCarvedOut`, program strength), and one whose
+ *   program can launch other programs (`Bash(npm:*)` reaches
+ *   `npm exec -- git push --force`; shells, wrappers, interpreters, `git`,
+ *   `find`, `sed`, … — `canLaunchOtherPrograms`). Emitted, either would let a
+ *   denied command skip past the deny, because a `forbidden` prefix rule only
+ *   matches its tokens in order and an `allow` never reaches ClaudeUI again.
+ *   Withheld, Codex asks for those commands and ClaudeUI's gate — with the full
+ *   deny/ask matcher — decides (under Auto, Codex's reviewer).
+ * - ASK rules are not compiled at all (owner ruling, ADR-085): under Auto a
+ *   `prompt` would be decided by Codex's reviewer, not the human.
  * - An EXACT deny (`Bash(git push)`) is emitted as a PREFIX, which over-matches
  *   — it also forbids longer commands starting with those tokens. Over-matching
  *   a deny only narrows, so it is accepted and stated in the file header. An
@@ -51,6 +74,7 @@ import { join } from 'node:path'
 import type { ClaudePermissions } from '../../shared/types'
 import type { CodexRulesStatus } from '../../shared/codex-types'
 import { parseClaudeRule } from '../opencode/permission-compiler'
+import { canLaunchOtherPrograms, hasBashRule, isCarvedOut } from '../permissions/shell-rules'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { logger } from '../services/logger'
 import { resolveCodexHome } from './codex-home'
@@ -130,16 +154,33 @@ function commentText(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim()
 }
 
+/** The reason prefix of every allow rule withheld by a carve-out (both kinds below). */
+const CARVED_OUT = 'carved out'
+
+/** The reason recorded for an allow rule withheld by {@link isCarvedOut}. */
+const CARVED_OUT_PREFIX = `${CARVED_OUT} by `
+
+/** The reason recorded for an allow rule withheld by {@link canLaunchOtherPrograms}. */
+const CARVED_OUT_LAUNCHER = `${CARVED_OUT}: can launch other programs`
+
+/** Does the user have any `Bash` deny or ask rule? (The matcher's own parser decides.) */
+function hasBashDenyAsk(denyAsk: { deny: readonly string[]; ask: readonly string[] }): boolean {
+  return hasBashRule([...denyAsk.deny, ...denyAsk.ask])
+}
+
 /**
  * Turn one tier of Claude rules into `prefix_rule`s, recording every rule that
  * cannot become one. `tier` decides both the emitted decision and whether an
- * EXACT specifier is usable (see the module header).
+ * EXACT specifier is usable (see the module header). `denyAsk` is consulted for
+ * the allow tier only: an allow rule for a program a deny/ask rule names, or
+ * for a program that can launch others, is skipped as carved out.
  */
 function compileTier(
   rules: readonly string[],
   tier: 'deny' | 'allow',
   out: CompiledPrefixRule[],
-  skipped: SkippedClaudeRule[]
+  skipped: SkippedClaudeRule[],
+  denyAsk: { deny: readonly string[]; ask: readonly string[] }
 ): void {
   const decision = tier === 'deny' ? 'forbidden' : 'allow'
   for (const raw of rules) {
@@ -168,6 +209,17 @@ function compileTier(
       skipped.push({ rule: raw, reason: 'does not tokenize as shell words' })
       continue
     }
+    if (tier === 'allow') {
+      const carvedBy = isCarvedOut(raw, denyAsk, { strength: 'program' })
+      if (carvedBy !== undefined) {
+        skipped.push({ rule: raw, reason: `${CARVED_OUT_PREFIX}${commentText(carvedBy)}` })
+        continue
+      }
+      if (hasBashDenyAsk(denyAsk) && canLaunchOtherPrograms(raw)) {
+        skipped.push({ rule: raw, reason: CARVED_OUT_LAUNCHER })
+        continue
+      }
+    }
     out.push({
       decision,
       tokens,
@@ -183,7 +235,10 @@ const HEADER_PREAMBLE = [
   '# `Bash(<prefix>:*)` becomes an argv prefix rule. An exact deny `Bash(<cmd>)` is also emitted',
   '# as a PREFIX, which over-matches — it forbids longer commands starting with those tokens too.',
   '# That only narrows, so it is accepted; an exact ALLOW is skipped instead, because widening it',
-  '# would grant more than the rule says. Anything else unexpressible is skipped and listed below.'
+  '# would grant more than the rule says. With any Bash deny/ask rule present, an allow rule for a',
+  '# program a deny/ask rule names, or for one that can launch other programs, is skipped as',
+  '# "carved out" (Codex then asks for those commands, and ClaudeUI decides). Ask rules are not',
+  '# compiled. Anything else unexpressible is skipped and listed below.'
 ]
 
 /**
@@ -198,8 +253,9 @@ const HEADER_PREAMBLE = [
 export function compileClaudeRulesToExecpolicy(perms: ClaudePermissions): CompiledExecpolicy {
   const rules: CompiledPrefixRule[] = []
   const skipped: SkippedClaudeRule[] = []
-  compileTier(perms.deny ?? [], 'deny', rules, skipped)
-  compileTier(perms.allow ?? [], 'allow', rules, skipped)
+  const denyAsk = { deny: perms.deny ?? [], ask: perms.ask ?? [] }
+  compileTier(perms.deny ?? [], 'deny', rules, skipped, denyAsk)
+  compileTier(perms.allow ?? [], 'allow', rules, skipped, denyAsk)
 
   const body = rules.map(
     (rule) =>
@@ -288,6 +344,7 @@ export function codexRulesStatus(
       path,
       rules,
       skipped: compiled.skipped.length,
+      carvedOut: compiled.skipped.filter((entry) => entry.reason.startsWith(CARVED_OUT)).length,
       syncedAt,
       upToDate: recordedHash(path) === compiled.hash
     }

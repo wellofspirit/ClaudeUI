@@ -115,19 +115,18 @@ export async function generateAgent(
     // (e.g. to read project context), opencode emits `permission.asked` for this
     // throwaway session. There is no SSE consumer answering it (this session is
     // foreign to any chat session's consumer), so the synchronous prompt would
-    // hang forever — "session launched, no response ever". opencode's permission
-    // evaluator
-    // short-circuits a matching `deny` WITHOUT publishing `permission.asked`
-    // ({permission:'*', pattern:'*'} matches every tool), making the turn
-    // tool-less and hang-proof. Mirrors OpencodeSession.askSideQuestion. NOT
-    // swallowed: if the deny ruleset can't be applied we must fail loudly rather
-    // than risk the hang it exists to prevent.
-    // `permissionHermetic` seals the session so an instance-global "always"
-    // approval cannot outrank the deny-all above (ADR-037 P2). Unknown to an
-    // unpatched opencode, which ignores it — see SEALED_THROWAWAY_PATCH.
+    // hang forever — "session launched, no response ever". With deny-all
+    // patched, upstream hides every tool from the request itself
+    // (`session/llm/request.ts` `resolveTools`, v1.18.32), so there is nothing
+    // to call or "always"-approve, and its permission evaluator short-circuits a
+    // matching `deny` WITHOUT publishing `permission.asked` ({permission:'*',
+    // pattern:'*'} matches every tool), making the turn tool-less and
+    // hang-proof. Mirrors OpencodeSession.askSideQuestion's
+    // DENY_ALL_THROWAWAY_PATCH. NOT swallowed: if the deny ruleset can't be
+    // applied we must fail loudly rather than risk the hang it exists to
+    // prevent.
     await client.patchSession(js.id, {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
-      permissionHermetic: true
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
     })
 
     const resp = await client.prompt(js.id, {

@@ -17,6 +17,7 @@ import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
   ClaudePermissions,
   EngineId,
+  JudgeModelSupport,
   ListPlacesResult,
   PermissionScope
 } from '../../shared/types'
@@ -42,6 +43,7 @@ import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/cla
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { getSessionMeta } from '../services/db'
+import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -910,6 +912,26 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
 // ---------------------------------------------------------------------------
 // Stateless
 // ---------------------------------------------------------------------------
+
+/**
+ * `automode:judge-model-support` — which judge-picker values ClaudeUI can call
+ * for the engine's auto-mode judge (ADR-081 §3), for the Settings picker.
+ * Token-free: `describeJudgeModels` checks credentials for presence only, so a
+ * remote caller learns a yes/no and the resolver's own copy, never a key.
+ * Arguments arrive from the renderer or the web client, so they are checked.
+ */
+export async function judgeModelSupport(
+  engineId: unknown,
+  values: unknown
+): Promise<Record<string, JudgeModelSupport>> {
+  if (engineId !== 'opencode' && engineId !== 'pi') {
+    throw new Error(`judge-model-support: unsupported engine ${JSON.stringify(engineId)}`)
+  }
+  if (!Array.isArray(values) || values.some((v) => typeof v !== 'string')) {
+    throw new Error('judge-model-support: values must be an array of strings')
+  }
+  return describeJudgeModels(engineId, values as string[])
+}
 
 export async function listDirEntries(dirPath: string): Promise<{
   entries: Array<{ name: string; isDirectory: boolean }>

@@ -568,6 +568,41 @@ describe('the pull', () => {
     expect(getRemoteUsageBucketsSince(0).map((b) => b.deviceId)).toEqual(['device-b'])
   })
 
+  it('keeps a judge bucket as judge and folds an origin it cannot name into session', async () => {
+    enable()
+    let page = 0
+    const hub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/v1/buckets')) {
+        calls.push({ url, init: init ?? {} })
+        page += 1
+        if (page > 1) return jsonResponse({ epoch: 1, rev: 3, buckets: [] })
+        const b = bucket('device-b', 1, TS)
+        return jsonResponse({
+          epoch: 1,
+          rev: 3,
+          // Same hour, account and model, and the origin is part of the key,
+          // so `judge` is a row of its own beside the session's. The unnamed
+          // origin is on another model so its fold cannot collide with either.
+          buckets: [
+            b,
+            { ...b, rev: 2, origin: 'judge' },
+            { ...b, rev: 3, modelId: 'claude-sonnet-5', origin: 'from-a-newer-build' }
+          ]
+        })
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch
+
+    await build(hub).syncNow()
+
+    expect(
+      getRemoteUsageBucketsSince(0)
+        .map((b) => `${b.modelId}:${b.origin}`)
+        .sort()
+    ).toEqual(['claude-opus-5:judge', 'claude-opus-5:session', 'claude-sonnet-5:session'])
+  })
+
   it('fills the machine list from GET /v1/devices, minus itself', async () => {
     enable()
     const client = build(happyHub())

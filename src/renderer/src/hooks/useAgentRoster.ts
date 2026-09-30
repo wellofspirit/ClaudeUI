@@ -108,6 +108,11 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   // matching, since the scan re-runs on every transcript change.
   const foreground = new Set<string>()
   const moved = new Set<string>()
+  // Calls refused before they ran (a `permission_denial` block): the opencode
+  // host's plan-mode refusal of a subagent spawn (ADR-085 §3), a Claude `Task`
+  // or background shell a deny rule refused. A refused spawn never became an
+  // agent (or a shell), so it is no row.
+  const refused = new Set<string>()
 
   for (const msg of messages) {
     for (const block of msg.content) {
@@ -119,6 +124,8 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
           foreground.add(block.toolUseId)
           spawns.push(block)
         }
+      } else if (block.type === 'permission_denial' && msg.role === 'assistant') {
+        refused.add(block.toolUseId)
       } else if (block.type === 'tool_result') {
         results.set(block.toolUseId, !!block.isError)
         if (foreground.has(block.toolUseId) && backgroundBashTaskId(block.toolResult)) {
@@ -128,7 +135,9 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
     }
   }
 
-  const shown = spawns.filter((b) => !foreground.has(b.toolUseId) || moved.has(b.toolUseId))
+  const shown = spawns.filter(
+    (b) => !refused.has(b.toolUseId) && (!foreground.has(b.toolUseId) || moved.has(b.toolUseId))
+  )
   return shown.map((block) => {
     const kind = map.kindOf(block.toolName)
     const isAgent = kind === 'task'

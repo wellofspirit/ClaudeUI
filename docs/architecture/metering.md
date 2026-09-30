@@ -40,8 +40,9 @@ them wins. A recording failure is logged and swallowed; metering never fails a t
 A row carries what the turn was (`engine_id`, `vendor_id`, `model_id`, the five token counts), what
 it was worth (`equiv_cost_usd` and `engine_cost_usd` as the raw inputs, `api_cost_usd` and
 `billed_cost_usd` as the two resolved figures), and who ran it (`account_key`, `account_label`,
-`billing_type`). `origin` is `session`, `child` for a native subagent or a Codex child thread, or
-`dispatch`, and `parent_routing_id` names the spawning or dispatching session for the last two.
+`billing_type`). `origin` is `session`, `child` for a native subagent or a Codex child thread,
+`dispatch`, or `judge` for an auto-mode judge call ClaudeUI made itself (ADR-081), and
+`parent_routing_id` names the spawning, dispatching or judged session for the last three.
 Migration v18 added those seven columns; `SessionManager.rekey()` renames `parent_routing_id` with
 the session it belongs to.
 
@@ -94,6 +95,20 @@ Dispatched turns are ledger rows. `cross-engine-dispatcher.ts` writes one per ta
 every dashboard total and can still be marked. The opencode reconciler skips the dispatcher's own
 throwaway sessions by their title (`OPENCODE_DISPATCH_SESSION_TITLE`), because their messages are
 already rows and a second copy under opencode's own message ids could never be deduplicated.
+
+Judge calls are ledger rows too. ClaudeUI makes the opencode and pi auto-mode judge's model call
+itself (ADR-081), so no engine meters it; the transport hands each call's usage to
+`recordJudgeUsage` in `src/core/automode/judge-usage.ts`, which writes one row through
+`recordUsageEvent` with `origin: 'judge'`, the judged session's engine, engine session id and routing
+id, and a fresh `judge:<uuid>` message id per call, because the hub is idempotent on it. Both wires
+report cached tokens inside the input count and reasoning inside the output count, so the row's
+`input` is the uncached part, `cache_read` the cached part, `output` the whole output, and no cache
+write. The account is the one that paid: the ChatGPT identity under `subscription`, or the API key's
+`<vendor>:key:<hex16>` under `apiKey`; `engine_cost_usd` is OpenRouter's reported `usage.cost` and
+null elsewhere, and it is a charge, not an equivalent. The row records whatever usage the provider
+reported before the call completed or was aborted, and a call that reported nothing writes nothing.
+A judge row counts in every dashboard total and in its account's window numerator, like any other
+origin.
 
 `usage-reconciler.ts` imports usage that happened outside this app. It runs at start-up and every ten
 minutes: Claude from the JSONL transcripts through block-usage's parse, opencode by enumerating
@@ -223,9 +238,10 @@ providers found, joined on the account key and never on `unknown`, with each acc
 as meters; the Claude block analytics live behind those rows in `ClaudeBlocksDrillIn`. `SpendChart`
 stacks display cost by provider per day or per hour, because `byProvider` is the only per-day split
 the query carries, and says so when the group-by disagrees. `BreakdownTable` is a tree whose levels
-the group-by reorders, with dispatched work as an inline marker on the row it ran under rather than a
-section of its own. `WindowValue` compares subscriptions, charts one account's windows in time order
-and scatters peak against dollars. `MachinesPanel` lists the machines, flags one more than 24 hours
+the group-by reorders, with dispatched work and judge calls as inline markers on the row they ran
+under rather than sections of their own; the query reports both as sub-totals (`dispatched`,
+`judge`) of the account, model and machine slice they are already inside. `WindowValue` compares
+subscriptions, charts one account's windows in time order and scatters peak against dollars. `MachinesPanel` lists the machines, flags one more than 24 hours
 behind against the reader's own clock, and is the only widget that says which machines the combined
 figures came from.
 
@@ -316,7 +332,10 @@ against both the Worker and the fake hub, then copy it back. `types.ts` holds th
 two rules that are not shapes, `codec.ts` the encoders, decoders and the privacy check, and
 `fixtures/` one golden JSON file per request and response, which a replay test asserts round-trips
 byte for byte. The folder is deliberately self-contained, and `billingType`, `origin` and `windowKind`
-are plain strings so that a hub can accept a value a newer client knows.
+are plain strings so that a hub can accept a value a newer client knows. On the way in, `asOrigin` in
+`client.ts` keeps the origins this build names, `judge` among them since 3.6, and stores any other
+as `session`; a client older than 3.6 therefore folds a peer's `judge` buckets into `session`
+(ADR-081 §5).
 
 This build speaks `SCHEMA_VERSION = 2`. Every request states its version, in the body on a write and
 in the `schemaVersion` query parameter on a read, and every route may answer `426 { hubSchemaVersion }`.

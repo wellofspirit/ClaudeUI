@@ -181,6 +181,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
     getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+    judgeModelSupport: (engineId, values) =>
+      ipcRenderer.invoke('automode:judge-model-support', engineId, values),
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     setOpencodeProviderDisabled: (providerId, disabled) =>
       ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),

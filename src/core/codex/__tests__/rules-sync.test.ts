@@ -37,7 +37,12 @@ const loggerMocks = vi.hoisted(() => ({
 }))
 vi.mock('../../services/logger', () => loggerMocks)
 
-import { compileClaudeRulesToExecpolicy, resolveCodexHome, syncCodexRulesFile } from '../rules-sync'
+import {
+  codexRulesStatus,
+  compileClaudeRulesToExecpolicy,
+  resolveCodexHome,
+  syncCodexRulesFile
+} from '../rules-sync'
 
 const perms = (partial: Partial<ClaudePermissions>): ClaudePermissions => ({
   allow: [],
@@ -174,6 +179,98 @@ describe('compileClaudeRulesToExecpolicy — mapping', () => {
     )
     expect(bodyLines(text)).toEqual([])
     expect(skipped).toEqual([])
+  })
+})
+
+/**
+ * ADR-085: an execpolicy `allow` skips Codex's review AND ClaudeUI's gate, and a
+ * `forbidden` prefix only matches its tokens in order — so `Bash(git:*)` emitted
+ * as `allow` let `git push origin main --force` run past `Bash(git push
+ * --force:*)`. An allow rule with a narrower deny/ask rule inside it is withheld.
+ */
+describe('compileClaudeRulesToExecpolicy — carve-out (ADR-085)', () => {
+  it('withholds an allow rule for a program some deny or ask rule names, naming the rule', () => {
+    const { text, skipped } = compileClaudeRulesToExecpolicy(
+      perms({
+        deny: ['Bash(git push --force:*)'],
+        ask: ['Bash(docker run:*)'],
+        allow: [
+          'Bash(git:*)',
+          'Bash(git push:*)',
+          'Bash(docker:*)',
+          'Bash(git status:*)',
+          'Bash(ls:*)'
+        ]
+      })
+    )
+    expect(bodyLines(text)).toEqual([
+      'prefix_rule(pattern=["git", "push", "--force"], decision="forbidden", justification="ClaudeUI deny rule Bash(git push --force:*)")',
+      'prefix_rule(pattern=["ls"], decision="allow", justification="ClaudeUI allow rule Bash(ls:*)")'
+    ])
+    // Program strength: `git status:*` goes too — an emitted allow never reaches the
+    // matcher again, and the matcher hits words in any order.
+    expect(skipped).toEqual([
+      { rule: 'Bash(git:*)', reason: 'carved out by Bash(git push --force:*)' },
+      { rule: 'Bash(git push:*)', reason: 'carved out by Bash(git push --force:*)' },
+      { rule: 'Bash(docker:*)', reason: 'carved out by Bash(docker run:*)' },
+      { rule: 'Bash(git status:*)', reason: 'carved out by Bash(git push --force:*)' }
+    ])
+    expect(text).toContain('#   Bash(git:*)  carved out by Bash(git push --force:*)')
+    expect(text).toContain('"carved out"')
+  })
+
+  it('withholds `docker compose:*` under an ask on `docker run:*` (`docker compose run` hits it)', () => {
+    const { text, skipped } = compileClaudeRulesToExecpolicy(
+      perms({ ask: ['Bash(docker run:*)'], allow: ['Bash(docker compose:*)'] })
+    )
+    expect(bodyLines(text)).toEqual([])
+    expect(skipped).toEqual([
+      { rule: 'Bash(docker compose:*)', reason: 'carved out by Bash(docker run:*)' }
+    ])
+  })
+
+  it('withholds an allow that can launch other programs whenever any Bash deny/ask exists', () => {
+    const { text, skipped } = compileClaudeRulesToExecpolicy(
+      perms({
+        deny: ['Bash(git push --force:*)'],
+        allow: ['Bash(npm:*)', 'Bash(bun:*)', 'Bash(python3:*)', 'Bash(sed:*)', 'Bash(cat:*)']
+      })
+    )
+    expect(bodyLines(text)).toEqual([
+      'prefix_rule(pattern=["git", "push", "--force"], decision="forbidden", justification="ClaudeUI deny rule Bash(git push --force:*)")',
+      'prefix_rule(pattern=["cat"], decision="allow", justification="ClaudeUI allow rule Bash(cat:*)")'
+    ])
+    expect(skipped.map((entry) => entry.reason)).toEqual([
+      'carved out: can launch other programs',
+      'carved out: can launch other programs',
+      // `python3:*` is a classifier-bypassing launcher shape: carved out by any deny/ask rule.
+      'carved out by Bash(git push --force:*)',
+      'carved out: can launch other programs'
+    ])
+    // With no Bash deny/ask rule at all there is nothing to protect: emitted as before.
+    const open = compileClaudeRulesToExecpolicy(perms({ allow: ['Bash(npm:*)'] }))
+    expect(bodyLines(open.text)).toHaveLength(1)
+    expect(open.skipped).toEqual([])
+  })
+
+  it('keeps the earlier, more specific skip reason for an allow that was never expressible', () => {
+    const { skipped } = compileClaudeRulesToExecpolicy(
+      perms({ deny: ['Bash(git push --force:*)'], allow: ['Bash(git)'] })
+    )
+    expect(skipped).toEqual([{ rule: 'Bash(git)', reason: 'exact allow cannot be a prefix' }])
+  })
+
+  it('reports the carve-out count in the settings-page status', () => {
+    const codexHome = tempCodexHome()
+    const status = codexRulesStatus({
+      codexHome,
+      perms: perms({
+        deny: ['Bash(rm -rf:*)'],
+        allow: ['Bash(rm:*)', 'Bash(git status)', 'Bash(ls:*)', 'Bash(npm:*)']
+      })
+    })
+    // Both carve-out kinds count; the exact allow's skip does not.
+    expect(status).toMatchObject({ rules: 2, skipped: 3, carvedOut: 2 })
   })
 })
 

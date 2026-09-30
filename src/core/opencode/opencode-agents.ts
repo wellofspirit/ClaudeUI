@@ -45,6 +45,12 @@ export interface OpencodeAgentDetail extends OpencodeAgentSummary {
   reasoningEffort?: string
   restrict: boolean
   permission?: Record<string, 'allow' | 'ask' | 'deny'>
+  /**
+   * The legacy `tools` frontmatter (`{bash: false}` …), surfaced read-only when
+   * it is an object of booleans. opencode turns it into permission rules — a
+   * `false` is a `deny` (ADR-085 S4, `subagent-permissions.ts`).
+   */
+  tools?: Record<string, boolean>
 }
 
 export interface OpencodeAgentInput {
@@ -74,6 +80,15 @@ const BUILTIN_AGENTS: Record<string, { mode: OpencodeAgentMode; hidden?: boolean
   title: { mode: 'subagent', hidden: true },
   summary: { mode: 'subagent', hidden: true },
   compaction: { mode: 'subagent', hidden: true }
+}
+
+/** The built-in catalog entry for `name` (mode, hidden), or `undefined` for a non-built-in name. */
+export function builtinAgent(
+  name: string
+): { mode: OpencodeAgentMode; hidden?: boolean } | undefined {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_AGENTS, name)
+    ? BUILTIN_AGENTS[name]
+    : undefined
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -234,6 +249,14 @@ function parsedToDetail(
 
   const prompt = body.trim() || undefined
 
+  const tools =
+    data.tools &&
+    typeof data.tools === 'object' &&
+    !Array.isArray(data.tools) &&
+    Object.values(data.tools as Record<string, unknown>).every((v) => typeof v === 'boolean')
+      ? (data.tools as Record<string, boolean>)
+      : undefined
+
   return {
     name,
     kind,
@@ -251,7 +274,8 @@ function parsedToDetail(
     steps,
     reasoningEffort,
     restrict,
-    permission: restrict ? permission : undefined
+    permission: restrict ? permission : undefined,
+    ...(tools ? { tools } : {})
   }
 }
 

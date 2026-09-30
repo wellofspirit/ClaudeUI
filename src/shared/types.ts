@@ -185,6 +185,11 @@ export type PermissionDenialBlock = {
    * for `hook`, `safetyCheck`, `asyncAgent`, `sandboxOverride`, `workingDir` and
    * `other`, and returns NOTHING for `rule`, `mode`, `subcommandResults` and
    * `permissionPromptTool` — those denials are fully described by their source.
+   * The opencode host's own `rule` denial (ADR-085 S2) does carry one: the
+   * rule that refused, `Denied by permission rule: <rule>`, since no other
+   * frame names it. So does its `mode` denial (ADR-085 §3, plan mode's
+   * host-side refusal of an edit or a `general` subagent): the plan-mode text
+   * the model was given.
    */
   reason?: string
 }
@@ -315,8 +320,10 @@ export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
  * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
  * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
  * counts in dashboard totals but not in the dispatching session's headline.
+ * 'judge' is an auto-mode judge call ClaudeUI made itself for the session named
+ * by `parentRoutingId` (ADR-081 §5).
  */
-export type UsageOrigin = 'session' | 'child' | 'dispatch'
+export type UsageOrigin = 'session' | 'child' | 'dispatch' | 'judge'
 
 /**
  * Resolved tri-state auth status for a single (engine, vendor) pair.
@@ -428,6 +435,21 @@ export interface PendingApproval {
    * user-authored rules, which outrank the auto-mode classifier (ADR-023 G9).
    */
   patterns?: string[]
+  /**
+   * opencode only: the patterns opencode would remember on an `always` reply
+   * (`permission.asked`'s `always` — for a shell call the arity prefix + ` *`
+   * per statement, `["*"]` for edit / webfetch / MCP). ClaudeUI never sends
+   * `always` (ADR-085 S2); the host session-allow set is keyed by these
+   * instead (`core/opencode/session-allows.ts`).
+   */
+  always?: string[]
+  /**
+   * opencode only: set on a CHILD (task subagent) ask — the child's opencode
+   * session id and the parent `task` part's callID (the `childSessions` value).
+   * Absent on an own-session ask. ADR-085 S2 carries it (and logs it); S4
+   * evaluates child asks against the parent's rules on this marker.
+   */
+  subagent?: { sessionId: string; parentToolUseId: string }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string
@@ -987,6 +1009,13 @@ export interface AutoModeConfig {
 }
 
 /**
+ * Whether ClaudeUI can make the auto-mode judge's model call for one picker
+ * value itself (ADR-081 §3: no fallback to the engine) — one entry of
+ * `ClaudeAPI.judgeModelSupport`. `reason` is user-facing copy.
+ */
+export type JudgeModelSupport = { ok: true } | { ok: false; reason: string }
+
+/**
  * The classifier trust lists, shared by every engine that runs ClaudeUI's own
  * judge — ONE file, `~/.claude/ui/automode.json` (ADR-065 § Shared trust lists).
  *
@@ -1003,6 +1032,13 @@ export interface AutoModeConfig {
  * for it (see `EnvironmentInfo`). An empty list is therefore stored as an ABSENT
  * key — the sessions read them behind `?.length`, so `[]` is not a distinct
  * state and storing it would invent a second encoding of one meaning.
+ *
+ * The same file also carries the two judge guidance lists (ADR-083 §4,
+ * `judgeAllow` / `judgeBlock`), under the same storage rules. Every entry of
+ * all five lists is written verbatim into the judge's system prompt, and a
+ * guidance entry becomes its own bullet line — which is why the IPC perimeter
+ * refuses line breaks and other control characters in guidance entries, and
+ * the environment builder drops any such entry a hand edit let through.
  */
 export interface SharedAutoModeConfig {
   /** External domains/services the agent may send data to or fetch from. */
@@ -1012,6 +1048,31 @@ export interface SharedAutoModeConfig {
   /** Production/protected target patterns. When set, they REPLACE the default
    *  'prod'/'production' name heuristic the policy would otherwise apply. */
   protectedPatterns?: string[]
+  /**
+   * The user's judge guidance (ADR-083 §4), in plain language: kinds of action
+   * that are routine for this user ("creating and switching git branches").
+   * Rendered as the User-Specified Allow exception — mandatory when it applies,
+   * but never over the HARD rule, an adversarial rule or an explicit boundary.
+   * This is cli.js's `autoMode.allow` for the opencode and pi judge. Unlike the
+   * trust lists this is not about the environment but about the judge's
+   * behaviour; it lives here because it is equally shared by every engine that
+   * runs ClaudeUI's judge. Empty = absent, as for the lists above.
+   */
+  judgeAllow?: string[]
+  /**
+   * Kinds of action the user wants to approve personally ("running database
+   * migrations"). Rendered as the User-Specified Block soft rule: the judge
+   * blocks a matching action unless the user asked for it in the chat, and a
+   * post-block "go ahead" clears it like any soft block. cli.js's
+   * `autoMode.soft_deny`. Empty = absent.
+   */
+  judgeBlock?: string[]
+  /**
+   * ADR-084 §1: plainly read-only shell commands in the workspace skip the
+   * judge. ON unless this is `false`; `true` is stored as an ABSENT key, so
+   * the default and "on" are one encoding, as for the lists above.
+   */
+  readOnlyBypass?: boolean
 }
 
 export interface VendorConfig {
@@ -1566,6 +1627,15 @@ interface SessionAPI {
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
   getEngineModels(): Promise<EngineModelGroup[]>
+  /**
+   * For each judge-picker value, whether ClaudeUI can call that model for the
+   * engine's auto-mode judge (ADR-081 §3), and if not, why. Token-free: it
+   * checks credentials for presence and never fetches or refreshes one.
+   */
+  judgeModelSupport(
+    engineId: 'opencode' | 'pi',
+    values: string[]
+  ): Promise<Record<string, JudgeModelSupport>>
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
@@ -3347,6 +3417,8 @@ export interface DashboardModel {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**
@@ -3367,6 +3439,8 @@ export interface DashboardAccount {
   models: DashboardModel[]
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
   /**
    * The machines this account's spend came from, this one as its own device id
    * (S5c). Emitted under the `all` scope only — under `local` there is one
@@ -3455,6 +3529,8 @@ export interface DashboardMachineAccount {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals}, or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**

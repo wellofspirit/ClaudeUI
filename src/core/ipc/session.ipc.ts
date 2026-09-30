@@ -134,7 +134,8 @@ import {
   deleteSession,
   deleteProject,
   codexDeletePlanFor,
-  clearConversation
+  clearConversation,
+  judgeModelSupport
 } from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
@@ -339,6 +340,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
+  'automode:judge-model-support',
   'session:get-opencode-providers',
   'session:set-opencode-provider-disabled',
   'session:remove-opencode-provider',
@@ -852,6 +854,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         ...(await discoverCodexModels().catch(() => []))
       ]
     }
+  })
+
+  // Which judge-picker values ClaudeUI can call for the auto-mode judge
+  // (ADR-081 §3). Read-only and token-free, so the same class as
+  // get-engine-models above.
+  handleIpc({
+    channel: 'automode:judge-model-support',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []

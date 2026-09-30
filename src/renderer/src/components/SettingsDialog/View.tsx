@@ -56,8 +56,20 @@ export interface SettingsDialogViewProps {
   onClose: () => void
 }
 
-/** How far below the pane's top edge a group header counts as "the current one". */
+/** The spy line's MINIMUM depth below the pane's top edge (see {@link SPY_LINE_FRACTION}). */
 export const SPY_OFFSET_PX = 84
+
+/**
+ * The spy line sits this fraction of the pane's height below its top edge, or
+ * {@link SPY_OFFSET_PX}, whichever is deeper. A fixed 84 px line made a group
+ * count only once its header reached the very top: on Sessions & autonomy the
+ * rail kept marking "Permissions" — whose last ~120-250 px were all that was
+ * left on screen — while the Auto-mode judge filled most of a ~600 px pane
+ * below it (its header 115-253 px down). At 45% a group is marked once its
+ * header is in the upper half of the pane, i.e. once it is plausibly what you
+ * are reading.
+ */
+export const SPY_LINE_FRACTION = 0.45
 
 /**
  * How long after a programmatic scroll the spy stays quiet. `scrollIntoView` is
@@ -80,22 +92,30 @@ function isMacKeyboard(): boolean {
 /**
  * Which group the rail should mark, given where the headers are.
  *
- * The last header at or above the spy line wins — EXCEPT at the bottom of the
- * pane, where the last group wins outright. A group near the end of a page can
- * never bring its header to the top edge (there is not enough content below it
- * to scroll), so without the `atBottom` case clicking the last sub-entry
- * scrolls correctly and is then immediately re-marked as the previous group.
+ * The last header at or above the spy line — `max(SPY_OFFSET_PX,
+ * SPY_LINE_FRACTION × pane height)` below the pane's top — wins, EXCEPT at the
+ * bottom of the pane, where the last group wins outright. A group near the end
+ * of a page can never bring its header to the top edge (there is not enough
+ * content below it to scroll), so without the `atBottom` case clicking the last
+ * sub-entry scrolls correctly and is then immediately re-marked as the previous
+ * group.
+ *
+ * `pane` and every header `top` must be in the SAME coordinate space — the
+ * caller passes `getBoundingClientRect()` values for all of them. Under the
+ * app's CSS `zoom` (uiFontScale) those are zoomed pixels while `scrollTop` is
+ * not (at 115% a 60 px scroll moves a header ~69 px), which is why nothing here
+ * mixes the two. It also means SPY_OFFSET_PX is effectively in zoomed pixels.
  *
  * Pure and exported so this can be tested with fake rects — jsdom has no layout.
  */
 export function pickActiveGroup(
-  paneTop: number,
+  pane: { top: number; height: number },
   headers: Array<{ id: string; top: number }>,
   atBottom: boolean
 ): string | null {
   if (headers.length === 0) return null
   if (atBottom) return headers[headers.length - 1].id
-  const line = paneTop + SPY_OFFSET_PX
+  const line = pane.top + Math.max(SPY_OFFSET_PX, SPY_LINE_FRACTION * pane.height)
   let current: string | null = null
   for (const header of headers) if (header.top <= line) current = header.id
   return current
@@ -372,7 +392,12 @@ export function SettingsDialogView({
         .filter((h): h is { id: string; el: HTMLElement } => h.el !== undefined)
         .map((h) => ({ id: h.id, top: h.el.getBoundingClientRect().top }))
       const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 2
-      const current = pickActiveGroup(pane.getBoundingClientRect().top, headers, atBottom)
+      const paneRect = pane.getBoundingClientRect()
+      const current = pickActiveGroup(
+        { top: paneRect.top, height: paneRect.height },
+        headers,
+        atBottom
+      )
       if (current && current !== activeGroup) onActiveGroupChange(current)
     }
     const onScroll = (): void => {

@@ -271,12 +271,13 @@ describe('generateAgent', () => {
 
     await generateAgent('Review agent')
 
+    // Exactly the deny-all ruleset: upstream hides every tool from a deny-all
+    // session's request, so the fork-only `permissionHermetic` seal is gone
+    // (ADR-081 §7) and must not be sent.
     expect(mockPatchSession).toHaveBeenCalledWith('session-abc-123', {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
-      // Sealed too: the deny-all alone loses to instance-global "always"
-      // approvals under last-match-wins (ADR-037 P2).
-      permissionHermetic: true
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
     })
+    expect(mockPatchSession.mock.calls[0][1]).not.toHaveProperty('permissionHermetic')
     // Ordering matters: a tool-call permission.asked between patch and prompt is
     // exactly the hang we prevent — the deny ruleset must land first.
     expect(mockPatchSession.mock.invocationCallOrder[0]).toBeLessThan(

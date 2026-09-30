@@ -111,7 +111,16 @@ function renderToolBlock(
     )
   }
   if (kind === 'task' && view.kind === 'task') {
-    return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />
+    return (
+      <TaskCard
+        key={key}
+        block={block}
+        result={result}
+        view={view}
+        approval={approval}
+        denial={decision?.type === 'permission_denial' ? decision : undefined}
+      />
+    )
   }
 
   // Passive kinds → ToolCallBlock host → ToolCard + kind body

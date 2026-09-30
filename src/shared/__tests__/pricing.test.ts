@@ -281,6 +281,60 @@ describe('equivalentCostUsd — openai pricing', () => {
     const cost = equivalentCostUsd('openai', 'gpt-5.5-fast', oneMTok({ inputTokens: 1_000_000 }))
     expect(cost).toBeCloseTo(5.0)
   })
+
+  // Ordering guards (ADR-081 §5): these ids used to fall through to an older
+  // family's entry by substring — gpt-4.1* to `gpt-4` ($30/$60), o3-pro to `o3`.
+  it('gpt-4.1-mini on openai is no longer priced as gpt-4 ($30/$60)', () => {
+    const input = equivalentCostUsd('openai', 'gpt-4.1-mini', oneMTok({ inputTokens: 1_000_000 }))
+    const output = equivalentCostUsd('openai', 'gpt-4.1-mini', oneMTok({ outputTokens: 1_000_000 }))
+    expect(input).toBeCloseTo(0.4)
+    expect(output).toBeCloseTo(1.6)
+    expect(input).not.toBeCloseTo(30)
+    expect(output).not.toBeCloseTo(60)
+  })
+
+  it.each([
+    // model, input, cached input, output — the models.dev snapshot's figures
+    ['gpt-4.1', 2, 0.5, 8],
+    ['gpt-4.1-mini', 0.4, 0.1, 1.6],
+    ['gpt-4.1-nano', 0.1, 0.025, 0.4],
+    ['o3-pro', 20, 20, 80]
+  ] as const)('%s: $%s in / $%s cached / $%s out', (model, input, cacheRead, output) => {
+    expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+      input
+    )
+    expect(equivalentCostUsd('openai', model, oneMTok({ cacheReadTokens: 1_000_000 }))).toBeCloseTo(
+      cacheRead
+    )
+    expect(equivalentCostUsd('openai', model, oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(
+      output
+    )
+  })
+
+  it('gpt-4.1 dated ids resolve to their own family, not gpt-4', () => {
+    const cost = equivalentCostUsd(
+      'openai',
+      'gpt-4.1-mini-2025-04-14',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(0.4)
+  })
+
+  it('o3-pro is not priced as o3', () => {
+    expect(equivalentCostUsd('openai', 'o3-pro', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+      20
+    )
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(2)
+  })
+
+  // o3 at the snapshot's rates, not the pre-cut $10/$40 the table used to carry.
+  it('o3: $2 in / $0.50 cached / $8 out', () => {
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(2)
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ cacheReadTokens: 1_000_000 }))).toBeCloseTo(
+      0.5
+    )
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(8)
+  })
 })
 
 // ---------------------------------------------------------------------------

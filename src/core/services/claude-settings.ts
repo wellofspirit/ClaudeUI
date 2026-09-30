@@ -91,6 +91,26 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
   return normalizePermissions(data.permissions, data.disableAutoMode)
 }
 
+/**
+ * The auto-mode flags ClaudeUI's own judge skip honours (ADR-085 §4):
+ * `autoMode.classifyAllShell === true` — exactly `true`, nothing truthy — in
+ * the USER settings file only. cli.js reads this flag from user, flag and
+ * policy settings and ignores project/local (`Lvr`,
+ * `docs/protocol-cc/14-auto-mode-classifier.md` §3.0): a repository must not
+ * be able to switch its own review off or on. ClaudeUI has no flag or policy
+ * layer, so the user file is the whole source. Read fresh per call (callers
+ * read it per gate call, like the permissions). Never throws.
+ */
+export function loadClaudeAutoModeFlags(): { classifyAllShell: boolean } {
+  const data = readJsonSafe(settingsFilePath('user'))
+  const autoMode = data?.autoMode
+  const classifyAllShell =
+    !!autoMode &&
+    typeof autoMode === 'object' &&
+    (autoMode as Record<string, unknown>).classifyAllShell === true
+  return { classifyAllShell }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace trust (~/.claude.json#projects[cwd].hasTrustDialogAccepted)
 // ---------------------------------------------------------------------------
