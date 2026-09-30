@@ -1,7 +1,7 @@
 # ADR-086 — Custom endpoints: per-model limits and capabilities in the form, filled by Detect from vLLM and SGLang
 
-**Status:** Accepted (2026-09-30), owner-ruled from mockup `3fdf1efe` (Option A). Building on branch
-`endpoint-model-details`; § As built to follow.
+**Status:** Implemented (2026-09-30, branch `endpoint-model-details`, S1 `37d091cb` + S2 `673fa304` —
+see § As built); accepted 2026-09-30, owner-ruled from mockup `3fdf1efe` (Option A).
 **Amends:** [ADR-074](adr-074_provider-surfaces-v3.md) §7 (the Manage sheet's "Endpoint (custom)"
 now edits each model's context window, max output, vision and reasoning) and §11 (opencode receives
 custom models' capabilities; this ADR is how a user sets them)
@@ -129,6 +129,36 @@ The result discriminates on `status` (`detected` | `failed`, with a failure reas
   field and ignored by both adapters, so engine files do not change unless a visible value changed.
 - `ProviderSheet`'s rule that opencode's model editor is hidden for custom definitions becomes true
   as written: their details are edited in the endpoint form.
+
+## As built
+
+- **Where it lives.** The probe is `src/core/shared-providers/endpoint-probe.ts`, reached through
+  `SharedProviderService.probeEndpoint` and `shared-provider:probe`. Every rule about filling, badges,
+  the diff and the warning is a pure function in `src/shared/endpoint-detect.ts` (`modelFromProbe`,
+  `fieldSource`, `mergeProbe`, `liveChanges`, `applyChanges`, `importModels`, `outputWarning`,
+  `suggestMaxOutput`), and `ProviderForm.tsx` only renders their outcome.
+- **Found in review, now part of the decision:**
+  - A max output the user typed never enters the diff (§5). The first build re-offered the
+    suggestion over it on every Detect.
+  - The stored key is sent only for an existing custom definition at the same origin (§6). The first
+    build accepted any provider id, a catalog one included. A failure then carries `keyWithheld`.
+  - The diff shows only changes that still hold (`liveChanges`), and Apply skips stale ones, so a
+    value typed after the diff is never overwritten. The real-app verifier found this: Apply had
+    written a stale suggestion over a hand edit.
+  - Changing the Base URL or the protocol clears the last result, and an answer arriving after such
+    a change is dropped, so one server's models are never imported into another endpoint.
+  - The Import offer is computed live (served ids minus listed ids), so removing a served model
+    offers it again.
+- **Smaller choices.** Userinfo in a Base URL is refused rather than stripped. Duplicate served ids
+  are dropped (the repository refuses them). A context under 4 tokens gets no suggestion (it would be
+  0). "Set {n}" on a model Detect never saw badges **manual**, having no baseline to record a
+  suggestion in. Chips use the existing `formatTokenCount` ("131.1K"). pi's default max output has
+  one source, `PI_DEFAULT_MAX_OUTPUT`, which the pi adapter reads.
+- **Verification.** Unit and component tests cover every rule, with guard tests shown to fail
+  against the pre-fix code, plus the probe against a real local HTTP server in each vLLM, SGLang and
+  failure shape. A separate verifier drove the real app with a throwaway profile against fake vLLM,
+  SGLang and generic servers: all nine claims, then a re-check of the fixes above, with no console
+  errors and the owner's real providers and engine configs untouched.
 
 ## Out of scope
 
