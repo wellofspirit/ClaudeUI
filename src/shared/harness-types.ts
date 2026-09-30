@@ -98,3 +98,61 @@ export interface HarnessManifest {
   /** Download coordinates and reviewed digests, keyed `<platform>-<arch>`. */
   platforms: Record<string, Record<string, unknown>>
 }
+
+// ── System detection (ADR-082 §3) ─────────────────────────────────────────────
+
+/** How a detected system install got onto the machine, read from where it lives. */
+export type HarnessInstallKind =
+  | 'npm'
+  | 'pnpm'
+  | 'bun'
+  | 'native-installer'
+  | 'homebrew'
+  | 'scoop'
+  | 'winget'
+  | 'standalone'
+  | 'pi-managed'
+  | 'path'
+
+/**
+ * A detected install's label. The first four are `classifyVersion`'s
+ * (`src/core/harness/version-gate.ts`); `unsupported` means ClaudeUI cannot
+ * run it at all (a script launcher, a version-manager shim, pi without a
+ * suitable Node, Codex without its code-mode host); `failed` means its
+ * `--version` probe errored, timed out or printed something unrecognisable.
+ */
+export type DetectedVerdict =
+  'tested' | 'untested' | 'too-old' | 'incompatible' | 'unsupported' | 'failed'
+
+/**
+ * The node that runs a Node-script install (pi): a node found on disk, or
+ * Electron itself with `ELECTRON_RUN_AS_NODE=1` (`kind: 'electron'`).
+ */
+export type DetectedNode = { path: string; version: string } | { kind: 'electron'; version: string }
+
+export interface DetectedInstall {
+  id: HarnessId
+  /** What the user would recognise: the PATH hit or shim, else the install's own path. */
+  displayPath: string
+  /** The file that runs: the native executable, or for pi the `cli.js` node runs. */
+  realPath: string
+  /** How to spawn it; null when it is `unsupported` (or could not be resolved to a launch). */
+  launch: HarnessLaunch | null
+  installKind: HarnessInstallKind
+  /** What `--version` printed, parsed; null when the probe did not run or failed. */
+  version: string | null
+  verdict: DetectedVerdict
+  /** Why it is not tested/untested, or a note on it. User-readable. */
+  reason?: string
+  /** `realPath`'s size and mtime at detection, so a cached result can be checked with one stat. */
+  fingerprint: { path: string; size: number; mtimeMs: number }
+  /** pi only: the node that runs `cli.js`. */
+  node?: DetectedNode
+}
+
+export interface HarnessDetection {
+  id: HarnessId
+  /** ISO timestamp. */
+  detectedAt: string
+  installs: DetectedInstall[]
+}
