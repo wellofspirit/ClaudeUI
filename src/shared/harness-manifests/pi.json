@@ -2,6 +2,7 @@
   "id": "pi",
   "tested": "0.87.1",
   "floor": "0.87.1",
+  "ceiling": "1.0.0",
   "platforms": {
     "win32-x64": {
       "asset": "pi-windows-x64.zip",

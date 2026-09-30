@@ -9,7 +9,8 @@ group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harnes
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
 harness), [ADR-061](adr-061_ci-build-gates-and-release-artifact-matrix.md) (release artifacts lose
 three engine directories), [ADR-066](adr-066_codex-fourth-engine.md) (Codex is downloaded, not
-bundled; the exact-version gate stays).
+bundled; ClaudeUI's own copy stays at the pin, and a System Codex from the floor up to the ceiling
+runs as untested, §3).
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
 
@@ -50,11 +51,11 @@ pass so the rest of the UI (welcome picker, dispatch targets, provider engine pi
 
 Each harness row has a segmented control and a version dropdown:
 
-| Harness      | Left segment                           | Right segment                                 | Version dropdown                         |
-| ------------ | -------------------------------------- | --------------------------------------------- | ---------------------------------------- |
-| Claude Code  | **Bundled** (the patched `bun-claude`) | **System**                                    | Bundled: locked to the shipped version   |
-| opencode, pi | **ClaudeUI** (a managed download)      | **System**                                    | ClaudeUI: Latest, Tested, or one version |
-| Codex        | **ClaudeUI**                           | **System**, only when it prints the exact pin | ClaudeUI: locked to the pin              |
+| Harness      | Left segment                           | Right segment                       | Version dropdown                         |
+| ------------ | -------------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Claude Code  | **Bundled** (the patched `bun-claude`) | **System**                          | Bundled: locked to the shipped version   |
+| opencode, pi | **ClaudeUI** (a managed download)      | **System**                          | ClaudeUI: Latest, Tested, or one version |
+| Codex        | **ClaudeUI**                           | **System**, tested or untested (§3) | ClaudeUI: locked to the pin              |
 
 - **System** is the newest compatible install detection finds. The row shows its version and path
   read-only. ClaudeUI never modifies, updates or deletes a system install.
@@ -62,7 +63,21 @@ Each harness row has a segmented control and a version dropdown:
   this ClaudeUI release pins, so it moves when ClaudeUI updates. Choosing a version keeps it.
 - Switching to System keeps the last ClaudeUI choice, greyed out, so switching back restores it.
 - A System segment is disabled when nothing usable was found, and the row's description says why
-  (not found, too old, wrong Codex version).
+  (not found, too old, incompatible).
+- A System Codex newer than the pin is allowed and labelled untested (owner, 2026-09-30). Earlier
+  drafts offered System Codex only when it printed the exact pin; Homebrew, scoop and WinGet ship
+  newer releases and the standalone installer updates itself, so that segment would almost never
+  have been usable. The generated protocol types still describe the pin.
+- A System pi runs under Node (owner, 2026-09-30). npm, the pi.dev installer and Homebrew all install
+  pi as a Node script (`dist/bundle/cli.js`, `engines.node >=22.19.0`); a native pi exists only
+  where someone unpacked a release archive by hand. ClaudeUI spawns `<node> <cli.js>` itself, never
+  the `.cmd` or `sh` shim, so node is the pi process and signals and process-tree kills reach it
+  directly. The node is chosen in this order: the install's own node (the managed installer's
+  `pi-node`, Homebrew's `node`, a `node` beside the npm shim) when it is 22.19 or newer, then the
+  first suitable `node` on PATH, then Electron itself with `ELECTRON_RUN_AS_NODE=1` (Electron 43
+  embeds Node 24). `claudeui-server` has no Electron, so it needs a system node. The resolver's
+  answer carries a launch (`command`, leading `args`, `env`) for this, and every spawn site composes
+  its argv from it; the choice of node is arc 2, S2b.
 - The setting lives in `~/.claude/ui/harnesses.json` as `selections.<harness>: { source, version }`,
   written only by the main process. It is not a field of `engines/<harness>.json`: that file is
   replaced whole on every save, and renderer screens save their own snapshots of it, so an unrelated
@@ -80,14 +95,31 @@ Each harness row has a segmented control and a version dropdown:
 Detection searches PATH, the npm global prefix, and each harness's own install directories. On macOS
 and Linux it also reads the login shell's PATH once, because an app started from the Finder doesn't
 get it. A Windows npm `.cmd` shim resolves to the real executable, because signals and process-tree
-kills need the real process.
+kills need the real process; for pi that is its `cli.js`, run under node (§2).
 
-Each candidate runs `--version` in an isolated environment and gets one of three labels: **tested**
-(equals the pin), **untested** (newer, selectable), **too old** (below the floor, listed but not
-selectable). Each harness declares its floor in the release manifest (§5). For Claude Code the floor
-is the first release that accepts every flag and control request ClaudeUI always sends
-(`--forward-subagent-text`, `background_tasks`, `command_lifecycle`, `reload_plugins`). Arc 2
-measures it; nobody has checked it yet.
+Each candidate runs `--version` in an isolated environment and gets one of four labels:
+
+- **tested**: equals the pin.
+- **untested**: at or above the floor and below the ceiling, and not the pin. This includes versions
+  older than the pin. Selectable.
+- **too old**: below the floor. Listed, not selectable.
+- **incompatible**: at or above the ceiling, or output that is not a version. Listed, not
+  selectable. A pre-release of the ceiling counts as the ceiling.
+
+Each harness declares its floor and ceiling in the release manifest (§5). The ceiling is exclusive
+and is the next major version, so a new major is never "untested but selectable": opencode 2.x
+(`@opencode/cli`) already ships an executable named `opencode` whose configuration is incompatible
+with 1.x. The ceilings are Claude Code 3.0.0, opencode 2.0.0, pi 1.0.0 and Codex 1.0.0. pi and Codex
+are 0.x, where a minor release may break in semver terms; their ceilings are set at 1.0.0 anyway,
+because what ClaudeUI depends on (pi's RPC and extension API, Codex's app-server protocol) is what
+the tested version is checked against. This is a judgement call, not a guarantee.
+
+The Claude Code floor is 2.1.275 (owner, 2026-09-30). `--forward-subagent-text`, which ClaudeUI
+always passes, first appeared in 2.1.211; older builds exit on it with `unknown option`. The
+behaviour the protocol docs describe also depends on later fixes: nested subagent forwarding
+(2.1.219), headless `/reload-plugins` (2.1.260), forked skills streaming (2.1.265), a subagent's
+final messages after it moves to the background (2.1.273) and `context: fork` skill subagents
+(2.1.275). opencode, pi and Codex keep floor = tested until someone measures lower.
 
 ### 4. Downloads
 
@@ -112,12 +144,12 @@ measures it; nobody has checked it yet.
 ### 5. The release manifest
 
 Each ClaudeUI release carries one manifest per harness, `src/shared/harness-manifests/<harness>.json`:
-the tested version, the floor, the download coordinates per platform, and the reviewed digests. It
-replaces the `package.json` pins (`opencodeCliVersion`, `piCliVersion`, `codexCliVersion`) and the
-`scripts/*-digests.json` files as the source of truth for what "Tested" means; the `ensure-*`
-scripts and CI cache keys read it. `claudeCliVersion` stays, because Claude Code stays bundled; the
-Claude manifest's `tested` matches it. Until arc 2 measures real floors, each floor equals its tested
-version.
+the tested version, the floor, the ceiling, the download coordinates per platform, and the reviewed
+digests. It replaces the `package.json` pins (`opencodeCliVersion`, `piCliVersion`,
+`codexCliVersion`) and the `scripts/*-digests.json` files as the source of truth for what "Tested"
+means; the `ensure-*` scripts and CI cache keys read it. `claudeCliVersion` stays, because Claude
+Code stays bundled; the Claude manifest's `tested` matches it. The Claude Code floor is below its
+tested version (§3); the other floors equal their tested versions until measured.
 
 ### 6. Updates
 
@@ -160,10 +192,11 @@ session on it is opened.
 - A System opencode or pi can be newer than anything ClaudeUI tested. The untested label is the
   honest answer; ADR-081 removes the judge's dependency on engine internals, which was the largest
   version-sensitive piece.
-- Codex users get a download even when they already have Codex installed, unless their version
-  matches the pin exactly.
-- `getCliVersion()` must read `--version` for a non-bundled Claude Code instead of returning
-  `unknown`.
+- A System Codex newer than the pin runs against protocol types generated from the pin, which do not
+  describe what a newer app-server added or changed. The untested label says so.
+  `CodexAppServerClient.checkVersion` refuses anything below the floor or at or above the ceiling.
+- `getCliVersion()` reports the version detection read with `--version` for a System Claude Code,
+  and `version.json` otherwise. It never spawns `--version` itself, because it sits on hot paths.
 
 ## Resolved questions (owner, 2026-09-30)
 

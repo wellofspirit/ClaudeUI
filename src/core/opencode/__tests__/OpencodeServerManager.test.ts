@@ -52,7 +52,7 @@ function makeFakeMcpHost(port = 19999): FakeMcpHost {
  * fake child per call. `delayMs` lets us widen the async window so concurrent
  * acquires genuinely overlap (proving the pending-promise dedupe).
  *
- * The spawnFn now receives 5 args: binary, cwd, password, mcpPort, mcpToken.
+ * The spawnFn now receives 5 args: launch, cwd, password, mcpPort, mcpToken.
  * The recorded calls include mcpPort and mcpToken so tests can assert on them.
  */
 function makeSpawnFn(delayMs = 0): {
@@ -61,7 +61,7 @@ function makeSpawnFn(delayMs = 0): {
 } {
   const calls: Array<{ cwd: string; mcpPort: number; mcpToken: string; child: FakeChild }> = []
   let port = 40000
-  const spawnFn: SpawnServerFn = async (_binary, cwd, _password, mcpPort, mcpToken) => {
+  const spawnFn: SpawnServerFn = async (_launch, cwd, _password, mcpPort, mcpToken) => {
     const child = makeFakeChild()
     calls.push({ cwd, mcpPort, mcpToken, child })
     if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
@@ -463,10 +463,10 @@ describe('OpencodeServerManager lifecycle', () => {
     let attempt = 0
     const goodSpawn = makeSpawnFn()
     const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const spawnFn: SpawnServerFn = async (binary, cwd, password, mcpPort, mcpToken) => {
+    const spawnFn: SpawnServerFn = async (launch, cwd, password, mcpPort, mcpToken) => {
       attempt++
       if (attempt === 1) throw new Error('boom: serve failed to start')
-      return goodSpawn.spawnFn(binary, cwd, password, mcpPort, mcpToken)
+      return goodSpawn.spawnFn(launch, cwd, password, mcpPort, mcpToken)
     }
     const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'

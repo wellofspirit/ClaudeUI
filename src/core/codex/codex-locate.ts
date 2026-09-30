@@ -1,5 +1,11 @@
 import { posix } from 'node:path'
-import { codexCodeModeHostPath, harnessAvailable, resolveHarness } from '../harness/resolve'
+import type { HarnessLaunch } from '../../shared/harness-types'
+import {
+  codexCodeModeHostPath,
+  harnessAvailable,
+  harnessLaunch,
+  resolveHarness
+} from '../harness/resolve'
 
 // The reviewed-host gate lives with the resolver, which needs it for
 // `harnessAvailable('codex')`; re-exported here for existing callers.
@@ -57,10 +63,15 @@ export function locateCodexBinary(): string | null {
   return resolveHarness('codex').path
 }
 
+/** How to spawn the resolved `codex`, or null when none was found. */
+export function locateCodexLaunch(): HarnessLaunch | null {
+  return harnessLaunch('codex')
+}
+
 /**
- * Codex resolves `codex-code-mode-host` from the directory of its own executable
- * (`install-context::code_mode_host_program_from_exe`), so only a host beside the
- * resolved `codex` counts. Exported for diagnostics.
+ * The `codex-code-mode-host` the resolved `codex` will run, found in Codex's own
+ * order (`install-context::code_mode_host_program`; `codexHostFor` in the
+ * resolver). Exported for diagnostics.
  */
 export function locateCodexCodeModeHost(): string | null {
   return codexCodeModeHostPath()

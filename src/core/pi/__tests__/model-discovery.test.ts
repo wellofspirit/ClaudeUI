@@ -12,7 +12,7 @@ const {
   mockRequest,
   mockDispose,
   MockPiRpcClient,
-  mockLocatePiBinary,
+  mockLocatePiLaunch,
   mockPiBinaryAvailable,
   mockLoadEngineConfig
 } = vi.hoisted(() => {
@@ -25,7 +25,7 @@ const {
   const MockPiRpcClient = vi.fn().mockImplementation(function () {
     return { start: mockStart, request: mockRequest, dispose: mockDispose }
   })
-  const mockLocatePiBinary = vi.fn().mockReturnValue('/fake/pi')
+  const mockLocatePiLaunch = vi.fn().mockReturnValue({ command: '/fake/pi', args: [] })
   const mockPiBinaryAvailable = vi.fn().mockReturnValue(true)
   const mockLoadEngineConfig = vi.fn().mockReturnValue({})
   return {
@@ -33,7 +33,7 @@ const {
     mockRequest,
     mockDispose,
     MockPiRpcClient,
-    mockLocatePiBinary,
+    mockLocatePiLaunch,
     mockPiBinaryAvailable,
     mockLoadEngineConfig
   }
@@ -41,7 +41,7 @@ const {
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../pi-locate', () => ({
-  locatePiBinary: mockLocatePiBinary,
+  locatePiLaunch: mockLocatePiLaunch,
   piBinaryAvailable: mockPiBinaryAvailable
 }))
 vi.mock('../../services/logger', () => ({
@@ -95,7 +95,7 @@ beforeEach(() => {
   mockStart.mockClear().mockResolvedValue(undefined)
   mockRequest.mockReset()
   mockDispose.mockClear()
-  mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
+  mockLocatePiLaunch.mockClear().mockReturnValue({ command: '/fake/pi', args: [] })
   mockPiBinaryAvailable.mockClear().mockReturnValue(true)
   MockPiRpcClient.mockClear()
   mockLoadEngineConfig.mockReset().mockReturnValue({})
@@ -280,7 +280,7 @@ describe('discoverPiModels', () => {
     const { discoverPiModels } = await importFresh()
     await discoverPiModels()
     expect(MockPiRpcClient).toHaveBeenCalledWith(
-      '/fake/pi',
+      { command: '/fake/pi', args: [] },
       expect.objectContaining({ args: ['--mode', 'rpc', '--no-session'] })
     )
     expect(mockDispose).toHaveBeenCalled()

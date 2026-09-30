@@ -17,7 +17,7 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { onHarnessChanged } from '../harness/resolve'
+import { onHarnessChanged, resolveHarness } from '../harness/resolve'
 import { locateBunClaude } from './locate'
 
 export interface HarnessInfo {
@@ -102,7 +102,12 @@ export function harnessHasPatch(name: string): boolean {
   return spawnedInfo().patches.has(name)
 }
 
-/** The spawned binary's Claude Code version, or `'unknown'`. */
+/**
+ * The spawned binary's Claude Code version, or `'unknown'`. The resolution's
+ * version wins when it has one (a System install carries what its `--version`
+ * printed at detection, ADR-082 §3); otherwise the `version.json` beside the
+ * binary. Never spawns anything: this sits on hot paths.
+ */
 export function getCliVersion(): string {
-  return spawnedInfo().version
+  return resolveHarness('claude').version ?? spawnedInfo().version
 }

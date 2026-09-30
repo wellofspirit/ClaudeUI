@@ -33,10 +33,12 @@ vi.mock('node:fs', async (importOriginal) => {
 import { setHostPaths } from '../../host'
 import {
   codexCodeModeHostPath,
+  codexHostFor,
   codexHostSupported,
   engineInstalled,
   harnessAvailable,
   harnessEnvVar,
+  harnessLaunch,
   invalidateHarness,
   onHarnessChanged,
   resolveHarness
@@ -111,6 +113,7 @@ describe('bundled', () => {
     expect(resolveHarness('claude')).toEqual({
       id: 'claude',
       path: bin,
+      launch: { command: bin, args: [] },
       dir: vendorDir('claude'),
       source: 'bundled',
       version: '2.1.280'
@@ -172,7 +175,13 @@ describe('bundled', () => {
 describe('missing everywhere', () => {
   it('resolves to a null path with a reason, never throwing', () => {
     const resolved = resolveHarness('claude')
-    expect(resolved).toMatchObject({ path: null, dir: null, source: 'bundled', version: null })
+    expect(resolved).toMatchObject({
+      path: null,
+      launch: null,
+      dir: null,
+      source: 'bundled',
+      version: null
+    })
     expect(resolved.reason).toBe('Claude Code was not found in this ClaudeUI build')
     expect(harnessAvailable('claude')).toBe(false)
   })
@@ -271,6 +280,7 @@ describe('managed selection', () => {
     expect(resolveHarness('opencode')).toEqual({
       id: 'opencode',
       path: path.join(dir, exeName('opencode')),
+      launch: { command: path.join(dir, exeName('opencode')), args: [] },
       dir,
       source: 'managed',
       version: TESTED
@@ -413,5 +423,144 @@ describe('engineInstalled', () => {
     expect(engineInstalled('opencode')).toBe(false)
     expect(engineInstalled('gemini')).toBe(false)
     expect(engineInstalled(undefined)).toBe(false)
+  })
+})
+
+describe('launch', () => {
+  it('is a native launch of the path for every source, and null with it', () => {
+    const bundled = writeHarnessPayload(vendorDir('pi'), 'pi')
+    expect(harnessLaunch('pi')).toEqual({ command: bundled, args: [] })
+
+    const custom = writeHarnessPayload(path.join(tmp, 'custom'), 'pi')
+    process.env[harnessEnvVar('pi')] = custom
+    expect(harnessLaunch('pi')).toEqual({ command: custom, args: [] })
+
+    const dir = fakeHarnessInstall(store, 'opencode', TESTED)
+    expect(harnessLaunch('opencode')).toEqual({
+      command: path.join(dir, exeName('opencode')),
+      args: []
+    })
+
+    expect(harnessLaunch('claude')).toBeNull()
+    expect(resolveHarness('claude').launch).toBeNull()
+  })
+
+  it('is frozen with the resolution', () => {
+    writeHarnessPayload(vendorDir('opencode'), 'opencode')
+    const launch = harnessLaunch('opencode')!
+    expect(Object.isFrozen(launch)).toBe(true)
+    expect(Object.isFrozen(launch.args)).toBe(true)
+    expect(resolveHarness('opencode').launch).toBe(launch)
+  })
+})
+
+/**
+ * Codex's own order (`install-context/src/lib.rs`, `code_mode_host_program`):
+ * `codex-resources/` of a package layout, then the layout's `bin/` (or the
+ * canonical exe dir without a layout), then the dir it was started from.
+ */
+describe('codexHostFor', () => {
+  const HOST = exeName('codex-code-mode-host')
+
+  /** `<tmp>/<name>/` with `codex-package.json` and the given files (empty). */
+  function pkg(name: string, files: string[], metadata: object = {}): string {
+    const root = path.join(tmp, name)
+    fs.mkdirSync(root, { recursive: true })
+    fs.writeFileSync(path.join(root, 'codex-package.json'), JSON.stringify(metadata))
+    for (const file of files) {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true })
+      fs.writeFileSync(path.join(root, file), '')
+    }
+    return root
+  }
+
+  it('prefers codex-resources over bin in a package layout', () => {
+    const root = pkg('p', [`bin/${exeName('codex')}`, `bin/${HOST}`, `codex-resources/${HOST}`])
+    expect(codexHostFor(path.join(root, 'bin', exeName('codex')))).toBe(
+      path.join(fs.realpathSync(root), 'codex-resources', HOST)
+    )
+  })
+
+  it('falls back to the layout bin dir', () => {
+    const root = pkg('p', [`bin/${exeName('codex')}`, `bin/${HOST}`, 'codex-resources/other'])
+    expect(codexHostFor(path.join(root, 'bin', exeName('codex')))).toBe(
+      path.join(fs.realpathSync(root), 'bin', HOST)
+    )
+  })
+
+  it('ignores codex-resources without codex-package.json (no layout)', () => {
+    const root = pkg('p', [`bin/${exeName('codex')}`, `codex-resources/${HOST}`])
+    fs.rmSync(path.join(root, 'codex-package.json'))
+    expect(codexHostFor(path.join(root, 'bin', exeName('codex')))).toBeNull()
+    fs.writeFileSync(path.join(root, 'bin', HOST), '')
+    expect(codexHostFor(path.join(root, 'bin', exeName('codex')))).toBe(
+      path.join(fs.realpathSync(root), 'bin', HOST)
+    )
+  })
+
+  it('maps an executable inside codex-resources to the package bin dir', () => {
+    const root = pkg('p', [`codex-resources/${exeName('codex')}`, `bin/${HOST}`])
+    expect(codexHostFor(path.join(root, 'codex-resources', exeName('codex')))).toBe(
+      path.join(fs.realpathSync(root), 'bin', HOST)
+    )
+  })
+
+  it('finds the host beside a plain executable (the vendored and managed layout)', () => {
+    const bin = writeHarnessPayload(path.join(tmp, 'plain'), 'codex')
+    expect(codexHostFor(bin)).toBe(path.join(fs.realpathSync(path.dirname(bin)), HOST))
+    expect(
+      codexHostFor(writeHarnessPayload(path.join(tmp, 'bare'), 'codex', { codeModeHost: false }))
+    ).toBeNull()
+  })
+
+  it('resolves the layout through a linked directory, as Codex canonicalizes its exe', () => {
+    const root = pkg('real', [`bin/${exeName('codex')}`, `codex-resources/${HOST}`])
+    const link = path.join(tmp, 'linked-bin')
+    fs.symlinkSync(path.join(root, 'bin'), link, 'junction')
+    expect(codexHostFor(path.join(link, exeName('codex')))).toBe(
+      path.join(fs.realpathSync(root), 'codex-resources', HOST)
+    )
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'last, looks beside the path it was started from (a symlinked executable)',
+    () => {
+      const root = pkg('real', [`bin/${exeName('codex')}`])
+      const shimDir = path.join(tmp, 'shims')
+      fs.mkdirSync(shimDir)
+      const shim = path.join(shimDir, 'codex')
+      fs.symlinkSync(path.join(root, 'bin', 'codex'), shim)
+      expect(codexHostFor(shim)).toBeNull()
+      fs.writeFileSync(path.join(shimDir, HOST), '')
+      expect(codexHostFor(shim)).toBe(path.join(shimDir, HOST))
+      fs.writeFileSync(path.join(root, 'bin', HOST), '')
+      expect(codexHostFor(shim)).toBe(path.join(fs.realpathSync(root), 'bin', HOST))
+    }
+  )
+
+  it.skipIf(process.platform !== 'win32')(
+    "recognizes WinGet's flat package root only when the metadata names this executable",
+    () => {
+      const entry = 'codex-x86_64-pc-windows-msvc.exe'
+      const root = pkg('winget', [entry, `codex-resources/${HOST}`], {
+        layoutVersion: 1,
+        entrypoint: entry
+      })
+      expect(codexHostFor(path.join(root, entry))).toBe(
+        path.join(fs.realpathSync(root), 'codex-resources', HOST)
+      )
+      fs.writeFileSync(
+        path.join(root, 'codex-package.json'),
+        JSON.stringify({ layoutVersion: 1, entrypoint: 'other.exe' })
+      )
+      expect(codexHostFor(path.join(root, entry))).toBeNull()
+    }
+  )
+
+  it.skipIf(!codexHostSupported())('is what harnessAvailable checks for the resolved codex', () => {
+    const root = pkg('managed-like', [`bin/${exeName('codex')}`, `codex-resources/${HOST}`])
+    process.env[harnessEnvVar('codex')] = path.join(root, 'bin', exeName('codex'))
+    expect(codexCodeModeHostPath()).toBe(path.join(fs.realpathSync(root), 'codex-resources', HOST))
+    expect(harnessAvailable('codex')).toBe(true)
   })
 })

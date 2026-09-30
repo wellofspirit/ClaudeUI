@@ -15,6 +15,7 @@ import { subagentPermissionConfigFor } from './subagent-permissions'
 import type { SubagentPermissionConfig } from './subagent-permissions'
 import { killProcessTree } from '../services/process-tree'
 import { harnessAvailable, resolveHarness } from '../harness/resolve'
+import { toLaunch, withLaunch, type HarnessLaunch } from '../harness/launch'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
 
@@ -50,7 +51,7 @@ export interface SpawnResult {
 }
 
 export type SpawnServerFn = (
-  binary: string,
+  launch: HarnessLaunch,
   cwd: string,
   password: string,
   mcpPort: number,
@@ -60,17 +61,17 @@ export type SpawnServerFn = (
 const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
 
 /**
- * The opencode executable for the next spawn, from the harness resolver
+ * How to spawn opencode next, from the harness resolver
  * (`../harness/resolve.ts`, ADR-082): `CLAUDEUI_OPENCODE_CLI`, then the
  * harnesses.json selection, then the vendored copy. Throws the resolver's
  * user-readable reason when there is none, which the acquire path surfaces.
  */
-function locateBinary(): string {
+function locateLaunch(): HarnessLaunch {
   const resolved = resolveHarness('opencode')
-  if (resolved.path === null) {
+  if (resolved.launch === null) {
     throw new Error(resolved.reason ?? 'opencode was not found in this ClaudeUI build')
   }
-  return resolved.path
+  return resolved.launch
 }
 
 /**
@@ -209,7 +210,7 @@ export function buildOpencodeConfigContent(
  * Rejects on spawn error, early exit, or a 15s timeout.
  */
 function spawnServer(
-  binary: string,
+  launch: HarnessLaunch,
   cwd: string,
   password: string,
   mcpPort: number,
@@ -219,35 +220,36 @@ function spawnServer(
     // Bridged Claude MCP servers — computed once: the config block below, and
     // the MCP keys the subagent asks name (ADR-085 S4).
     const bridged = collectClaudeMcpForOpencode(cwd)
-    const child = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
+    const spec = withLaunch(launch, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
+      ...process.env,
+      OPENCODE_SERVER_PASSWORD: password,
+      // Hard kill switch for opencode's cloud share (share-next.ts reads
+      // OPENCODE_DISABLE_SHARE once at module load and short-circuits every
+      // create/sync/remove path). The config-level `share` key is NOT enough:
+      // it lives in opencode's own config file, which the user — or a project
+      // file — can set back to "auto", and sharing uploads whole sessions
+      // (messages, file diffs) to opencode's servers. An env var on the child
+      // we spawn cannot be overridden from a config file.
+      OPENCODE_DISABLE_SHARE: '1',
+      // Inject the per-cwd in-process MCP server so opencode connects to it
+      // without requiring any global plugin installation. Bridged Claude MCP
+      // servers are also injected here so secrets (env/headers) never touch
+      // opencode's on-disk config. Engine-native settings (model, providers,
+      // agents) are now written to opencode's own config file by
+      // opencode-config.ts — not injected here. The one agent field that IS
+      // injected is ADR-085 S4's per-subagent permission asks (ephemeral,
+      // never written to a user file — ADR-031).
+      OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(
+        mcpPort,
+        mcpToken,
+        bridged,
+        locatePluginFile(),
+        subagentPermissionConfigFor(cwd, Object.keys(bridged))
+      )
+    })
+    const child = spawn(spec.command, spec.args, {
       cwd,
-      env: {
-        ...process.env,
-        OPENCODE_SERVER_PASSWORD: password,
-        // Hard kill switch for opencode's cloud share (share-next.ts reads
-        // OPENCODE_DISABLE_SHARE once at module load and short-circuits every
-        // create/sync/remove path). The config-level `share` key is NOT enough:
-        // it lives in opencode's own config file, which the user — or a project
-        // file — can set back to "auto", and sharing uploads whole sessions
-        // (messages, file diffs) to opencode's servers. An env var on the child
-        // we spawn cannot be overridden from a config file.
-        OPENCODE_DISABLE_SHARE: '1',
-        // Inject the per-cwd in-process MCP server so opencode connects to it
-        // without requiring any global plugin installation. Bridged Claude MCP
-        // servers are also injected here so secrets (env/headers) never touch
-        // opencode's on-disk config. Engine-native settings (model, providers,
-        // agents) are now written to opencode's own config file by
-        // opencode-config.ts — not injected here. The one agent field that IS
-        // injected is ADR-085 S4's per-subagent permission asks (ephemeral,
-        // never written to a user file — ADR-031).
-        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(
-          mcpPort,
-          mcpToken,
-          bridged,
-          locatePluginFile(),
-          subagentPermissionConfigFor(cwd, Object.keys(bridged))
-        )
-      },
+      env: spec.env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
 
@@ -328,10 +330,11 @@ export interface OpencodeServerManagerOptions {
    */
   spawnFn?: SpawnServerFn
   /**
-   * Override the binary locator. Defaults to the harness resolver; called on
+   * Override the launch locator. Defaults to the harness resolver; called on
    * every spawn, so an install or a selection change reaches the next server.
+   * A bare path is a native launch (`toLaunch`).
    */
-  locateBinaryFn?: () => string
+  locateBinaryFn?: () => string | HarnessLaunch
   /**
    * Override the MCP host starter. Defaults to startMcpHttpHost + the real
    * createOpencodeHostedToolsServer. Tests inject a fake to avoid binding real
@@ -362,7 +365,7 @@ export class OpencodeServerManager {
    */
   private disposed = false
   private readonly spawnFn: SpawnServerFn
-  private readonly locateBinaryFn: () => string
+  private readonly locateBinaryFn: () => string | HarnessLaunch
   private readonly startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
   /**
    * Cross-engine dispatch (ADR-033 M2) dependencies, threaded in from OUTSIDE
@@ -379,7 +382,7 @@ export class OpencodeServerManager {
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? spawnServer
-    this.locateBinaryFn = opts.locateBinaryFn ?? locateBinary
+    this.locateBinaryFn = opts.locateBinaryFn ?? locateLaunch
     this.startMcpHostFn = opts.startMcpHostFn ?? startMcpHttpHost
   }
 
@@ -399,8 +402,8 @@ export class OpencodeServerManager {
    * Resolved per spawn, never memoised here: the resolver caches, and its
    * `invalidateHarness` is how a new install reaches the next server.
    */
-  private getBinary(): string {
-    return this.locateBinaryFn()
+  private getLaunch(): HarnessLaunch {
+    return toLaunch(this.locateBinaryFn())
   }
 
   /**
@@ -429,7 +432,7 @@ export class OpencodeServerManager {
     const spawnPromise = (async (): Promise<ServerHandle> => {
       const password = randomBytes(24).toString('base64url')
       const authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
-      const binary = this.getBinary()
+      const launch = this.getLaunch()
 
       // Start the per-cwd MCP host BEFORE spawning opencode so we have the
       // port + token to inject via OPENCODE_CONFIG_CONTENT.
@@ -450,7 +453,7 @@ export class OpencodeServerManager {
       let child: ChildProcess
       let baseUrl: string
       try {
-        const result = await this.spawnFn(binary, key, password, mcpHost.port, mcpHost.token)
+        const result = await this.spawnFn(launch, key, password, mcpHost.port, mcpHost.token)
         child = result.process
         baseUrl = result.baseUrl
       } catch (err) {

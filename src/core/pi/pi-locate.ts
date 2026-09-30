@@ -9,11 +9,20 @@
  * scripts/ensure-pi.mjs downloads it; electron-builder copies vendor/pi-cli →
  * extraResources `pi-cli`.
  */
-import { harnessAvailable, resolveHarness } from '../harness/resolve'
+import type { HarnessLaunch } from '../../shared/harness-types'
+import { harnessAvailable, harnessLaunch, resolveHarness } from '../harness/resolve'
 
-/** The pi executable, or null when none was found. */
+/** The pi executable, or null when none was found. For display and gating; spawn with {@link locatePiLaunch}. */
 export function locatePiBinary(): string | null {
   return resolveHarness('pi').path
+}
+
+/**
+ * How to spawn pi, or null when none was found. A System npm install runs as
+ * `<node> <cli.js>` (ADR-082 §2), so every pi spawn goes through this.
+ */
+export function locatePiLaunch(): HarnessLaunch | null {
+  return harnessLaunch('pi')
 }
 
 /** Cheap "is pi installed?" check. Never spawns a process. */

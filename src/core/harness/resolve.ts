@@ -23,6 +23,10 @@
  * Nothing is ever looked up on PATH here. A harness found nowhere resolves to
  * `path: null` with a reason; this module never throws.
  *
+ * Each resolution carries its `launch` (`./launch.ts`): how to spawn it. Every
+ * resolution today is a native executable, `{ command: path, args: [] }`;
+ * System detection (arc 2, S2b) adds Node-script launches for pi.
+ *
  * Caching: one resolution per harness, reused until `invalidateHarness` (an
  * install or a selection change) or until that harness's env override changes
  * (a string compare, no filesystem work). Callers on hot paths, such as
@@ -35,10 +39,11 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { HarnessId, ResolvedHarness } from '../../shared/harness-types'
+import type { HarnessId, HarnessLaunch, ResolvedHarness } from '../../shared/harness-types'
 import { HARNESS_IDS, isHarnessId } from '../../shared/harness-types'
 import { getAppPath } from '../host'
 import { logger } from '../services/logger'
+import { nativeLaunch } from './launch'
 import { harnessManifest } from './manifests'
 import { harnessSelection } from './selection-store'
 import { installDir, installedVersions, readInstallRecord } from './store'
@@ -147,13 +152,117 @@ export function bundledHarnessPath(id: HarnessId): string {
   return path.join(bundledRoots(id)[0], exe(EXECUTABLES[id]))
 }
 
+// ── Codex code-mode host ──────────────────────────────────────────────────────
+
+function isDir(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function canonical(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+interface CodexPackageLayout {
+  binDir: string
+  /** `<package>/codex-resources`, when it is a directory. */
+  resourcesDir: string | null
+}
+
+/**
+ * `<package>/bin` is a package layout only when the package root carries a
+ * `codex-package.json` (`CodexPackageLayout::from_package_bin_dir`).
+ */
+function layoutFromBinDir(binDir: string): CodexPackageLayout | null {
+  if (!isDir(binDir)) return null
+  const packageDir = path.dirname(binDir)
+  if (!isFile(path.join(packageDir, 'codex-package.json'))) return null
+  const resources = path.join(packageDir, 'codex-resources')
+  return { binDir, resourcesDir: isDir(resources) ? resources : null }
+}
+
+/**
+ * Codex's own package-layout detection from its canonical executable
+ * (`vendor/codex-src/codex-rs/install-context/src/lib.rs`,
+ * `CodexPackageLayout::from_exe`): WinGet's flat package root (Windows only,
+ * when `codex-package.json` names this executable as a layout-1 entrypoint),
+ * then an exe in `bin/`, in `codex-resources/`, or in a `CodexCLI.app` bundle.
+ */
+function codexPackageLayout(canonicalExe: string): CodexPackageLayout | null {
+  const exeDir = path.dirname(canonicalExe)
+  if (process.platform === 'win32') {
+    try {
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(exeDir, 'codex-package.json'), 'utf-8')
+      ) as { layoutVersion?: unknown; entrypoint?: unknown } | null
+      if (meta?.layoutVersion === 1 && meta.entrypoint === path.basename(canonicalExe)) {
+        const resources = path.join(exeDir, 'codex-resources')
+        return { binDir: exeDir, resourcesDir: isDir(resources) ? resources : null }
+      }
+    } catch {
+      // No metadata here: not the WinGet layout.
+    }
+  }
+  const name = path.basename(exeDir)
+  if (name === 'bin') return layoutFromBinDir(exeDir)
+  if (name === 'codex-resources') return layoutFromBinDir(path.join(path.dirname(exeDir), 'bin'))
+  if (name === 'MacOS') {
+    const contents = path.dirname(exeDir)
+    const bundle = path.dirname(contents)
+    if (path.basename(contents) !== 'Contents' || path.basename(bundle) !== 'CodexCLI.app') {
+      return null
+    }
+    return layoutFromBinDir(path.join(path.dirname(bundle), 'bin'))
+  }
+  return null
+}
+
+/**
+ * The `codex-code-mode-host` the Codex at `exePath` will run, in Codex's own
+ * order (`InstallContext::code_mode_host_program`):
+ *
+ *   1. `<package>/codex-resources/`, when the executable sits in a package
+ *      layout that has one;
+ *   2. the layout's `bin/` directory, or the executable's canonical directory
+ *      when there is no layout;
+ *   3. the directory of the path Codex was started from.
+ *
+ * Codex's legacy standalone branch (a release directory under
+ * `$CODEX_HOME/packages/standalone/releases`) is not mirrored: it depends on
+ * the child's `CODEX_HOME`, which ClaudeUI sets per account, so Codex may not
+ * take it under our spawn. A host there is still found by step 2 or 3 when it
+ * sits beside the executable. Null when none exists.
+ */
+export function codexHostFor(exePath: string): string | null {
+  const host = exe('codex-code-mode-host')
+  const canonicalExe = canonical(exePath)
+  const layout = codexPackageLayout(canonicalExe)
+  const dirs = [
+    ...(layout?.resourcesDir ? [layout.resourcesDir] : []),
+    layout ? layout.binDir : path.dirname(canonicalExe),
+    path.dirname(exePath)
+  ]
+  for (const dir of dirs) {
+    const candidate = path.join(dir, host)
+    if (isFile(candidate)) return candidate
+  }
+  return null
+}
+
 // ── Resolution ────────────────────────────────────────────────────────────────
 
 interface CacheEntry {
   /** The env override's raw value at resolution time. */
   env: string | undefined
   resolved: ResolvedHarness
-  /** Codex only: `codex-code-mode-host` beside the resolved `codex`, when present. */
+  /** Codex only: the `codex-code-mode-host` the resolved `codex` will run (`codexHostFor`). */
   codexHost: string | null
 }
 
@@ -180,7 +289,7 @@ function envOverride(id: HarnessId, raw: string | undefined): string | null {
 function realDir(bin: string): string {
   try {
     // A symlinked binary (a system install's shim) keeps its companions beside
-    // the target, and that is where Codex looks for its code-mode host.
+    // the target, not beside the link.
     return path.dirname(fs.realpathSync(bin))
   } catch {
     return path.dirname(bin)
@@ -213,6 +322,7 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
     return {
       id,
       path: override,
+      launch: nativeLaunch(override),
       dir,
       source: 'env',
       version: readVersionField(path.join(dir, 'version.json'))
@@ -232,6 +342,7 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
           return {
             id,
             path: bin,
+            launch: nativeLaunch(bin),
             dir: path.dirname(bin),
             source: 'managed',
             version: picked.version
@@ -252,6 +363,7 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
       return {
         id,
         path: bin,
+        launch: nativeLaunch(bin),
         dir: path.dirname(bin),
         source: 'bundled',
         version: readVersionField(path.join(root, 'version.json')),
@@ -264,6 +376,7 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
   return {
     id,
     path: null,
+    launch: null,
     dir: null,
     source: 'bundled',
     version: null,
@@ -275,12 +388,13 @@ function entry(id: HarnessId): CacheEntry {
   const env = process.env[harnessEnvVar(id)] || undefined
   const hit = cache.get(id)
   if (hit && hit.env === env) return hit
-  const resolved = Object.freeze(resolveUncached(id, env))
-  let codexHost: string | null = null
-  if (id === 'codex' && resolved.dir !== null) {
-    const host = path.join(resolved.dir, exe('codex-code-mode-host'))
-    if (isFile(host)) codexHost = host
-  }
+  const raw = resolveUncached(id, env)
+  const resolved = Object.freeze({
+    ...raw,
+    launch:
+      raw.launch && Object.freeze({ ...raw.launch, args: Object.freeze([...raw.launch.args]) })
+  })
+  const codexHost = id === 'codex' && resolved.path !== null ? codexHostFor(resolved.path) : null
   const next: CacheEntry = { env, resolved, codexHost }
   cache.set(id, next)
   return next
@@ -292,10 +406,17 @@ export function resolveHarness(id: HarnessId): ResolvedHarness {
 }
 
 /**
- * Can `id` run? Codex additionally needs a reviewed host and its
- * `codex-code-mode-host` beside the executable: catalog models are
- * `code_mode_only`, and Codex resolves the host from its own executable's
- * directory (`install-context::code_mode_host_program_from_exe`).
+ * How to spawn `id`, or null when it was not found. Every harness spawn site
+ * composes its argv from this with `withLaunch` (`./launch.ts`).
+ */
+export function harnessLaunch(id: HarnessId): HarnessLaunch | null {
+  return entry(id).resolved.launch
+}
+
+/**
+ * Can `id` run? Codex additionally needs a reviewed host and the
+ * `codex-code-mode-host` it will run (`codexHostFor`): catalog models are
+ * `code_mode_only`.
  */
 export function harnessAvailable(id: HarnessId): boolean {
   const e = entry(id)
@@ -304,7 +425,7 @@ export function harnessAvailable(id: HarnessId): boolean {
   return true
 }
 
-/** `codex-code-mode-host` beside the resolved `codex`, or null. */
+/** The `codex-code-mode-host` the resolved `codex` will run, or null. */
 export function codexCodeModeHostPath(): string | null {
   return entry('codex').codexHost
 }

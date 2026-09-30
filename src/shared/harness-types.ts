@@ -39,10 +39,26 @@ export interface HarnessesConfig {
 /** Where a resolved harness actually came from. */
 export type HarnessResolvedSource = 'env' | 'bundled' | 'managed' | 'system'
 
+/**
+ * How to start a harness: the process to spawn, the arguments that go before
+ * the site's own, and environment entries laid over the site's environment.
+ * A native executable is `{ command: path, args: [] }`; a Node-script install
+ * (pi from npm, ADR-082 §2) is `{ command: node, args: [cli.js] }`, so node is
+ * the harness process itself. Compose argv only with `withLaunch`
+ * (`src/core/harness/launch.ts`).
+ */
+export interface HarnessLaunch {
+  command: string
+  args: readonly string[]
+  env?: Readonly<Record<string, string>>
+}
+
 export interface ResolvedHarness {
   id: HarnessId
   /** The executable (claude: bun-claude; codex: codex), or null when none was found. */
   path: string | null
+  /** How to spawn it; null exactly when `path` is null. */
+  launch: HarnessLaunch | null
   /** The executable's directory: the payload root (Codex's host and pi's assets live here). */
   dir: string | null
   source: HarnessResolvedSource
@@ -73,6 +89,12 @@ export interface HarnessManifest {
   tested: string
   /** The oldest version ClaudeUI accepts from a system install. */
   floor: string
+  /**
+   * The first version ClaudeUI refuses (exclusive upper bound): the next major,
+   * whose config or protocol may be incompatible (opencode 2.x). Versions in
+   * `[floor, ceiling)` other than `tested` are accepted as untested.
+   */
+  ceiling: string
   /** Download coordinates and reviewed digests, keyed `<platform>-<arch>`. */
   platforms: Record<string, Record<string, unknown>>
 }

@@ -827,16 +827,19 @@ describe('getPiInvocation — bun-virtual script detection (review fix, probed a
     argv1: string,
     execPath: string,
     existsTrueFor: string[]
-  ): Promise<{ command: string; args: string[] }> {
+  ): Promise<{ command: string; args: string[]; options: Record<string, unknown> }> {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-invoke-'))
     writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes' }, '')
 
-    let captured: { command: string; args: string[] } | null = null
+    let captured: { command: string; args: string[]; options: Record<string, unknown> } | null =
+      null
     const fakeProc = new FakeChildProcess()
-    mockSpawn.mockImplementation((command: string, args: string[]) => {
-      captured = { command, args }
-      return fakeProc
-    })
+    mockSpawn.mockImplementation(
+      (command: string, args: string[], options: Record<string, unknown>) => {
+        captured = { command, args, options }
+        return fakeProc
+      }
+    )
 
     const prevArgv1 = process.argv[1]
     const prevExecPath = process.execPath
@@ -910,6 +913,31 @@ describe('getPiInvocation — bun-virtual script detection (review fix, probed a
       expect(command).toBe(exec)
       expect(args[0]).toBe(script)
       expect(args[1]).toBe('--mode')
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true })
+    }
+  })
+
+  it('pi under Electron-as-Node (ADR-082 §2): respawns Electron with the script, inheriting ELECTRON_RUN_AS_NODE', async () => {
+    // A System npm pi may run as `<electron> <cli.js>` with ELECTRON_RUN_AS_NODE=1
+    // when no suitable node exists. execPath is then Electron, whose basename
+    // is not a generic runtime: the real, existing argv[1] must still win, and
+    // the child must get no explicit env so it inherits the flag.
+    const scriptDir = mkdtempSync(join(tmpdir(), 'pi-subagent-script-'))
+    const script = join(scriptDir, 'cli.js')
+    writeFileSync(script, '// fake pi entry\n', 'utf-8')
+    try {
+      const exec =
+        process.platform === 'win32'
+          ? 'C:\\Program Files\\ClaudeUI\\ClaudeUI.exe'
+          : '/Applications/ClaudeUI.app/Contents/MacOS/ClaudeUI'
+      const { command, args, options } = await withEnv({ ELECTRON_RUN_AS_NODE: '1' }, () =>
+        runWithProcessIdentity(script, exec, [])
+      )
+      expect(command).toBe(exec)
+      expect(args[0]).toBe(script)
+      expect(args[1]).toBe('--mode')
+      expect(options).not.toHaveProperty('env')
     } finally {
       rmSync(scriptDir, { recursive: true, force: true })
     }

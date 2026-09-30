@@ -16,7 +16,14 @@
  * `version.json` beside it (`./harness.ts`); the official one has none, so it
  * counts as unpatched.
  */
-import { bundledHarnessPath, harnessEnvVar, resolveHarness } from '../harness/resolve'
+import type { HarnessLaunch } from '../../shared/harness-types'
+import { nativeLaunch } from '../harness/launch'
+import {
+  bundledHarnessPath,
+  harnessEnvVar,
+  harnessLaunch,
+  resolveHarness
+} from '../harness/resolve'
 
 /** Env var naming a Claude Code binary to spawn instead of the bundled one. */
 export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
@@ -28,6 +35,15 @@ export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
  */
 export function locateBunClaude(): string {
   return resolveHarness('claude').path ?? bundledHarnessPath('claude')
+}
+
+/**
+ * How to spawn Claude Code (ADR-082 §2). Never null, like `locateBunClaude`:
+ * when nothing was found it is a native launch of where the bundled binary
+ * would be, so the spawn error names that path.
+ */
+export function locateClaudeLaunch(): HarnessLaunch {
+  return harnessLaunch('claude') ?? nativeLaunch(bundledHarnessPath('claude'))
 }
 
 /** @deprecated Use {@link locateBunClaude}. Kept for callers mid-migration. */

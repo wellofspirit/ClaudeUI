@@ -88,17 +88,15 @@ export function getCliJsPath(): string {
 const RETRACTION_UUID_PREFIX_LEN = 24
 
 /**
- * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
- * it runs natively, carries all of Anthropic's bundled assets (ripgrep,
- * native addons, helper scripts), and does not need `ELECTRON_RUN_AS_NODE`
- * or a `NODE_PATH` injection.
+ * SDK options for the CLI spawn. They name no executable: `query()` spawns the
+ * harness resolver's launch for Claude Code (`locateClaudeLaunch`, ADR-082 §2),
+ * so a launch with leading args or its own env reaches every caller that
+ * spreads these. The bundled binary is our rebundled Bun build; it runs
+ * natively, carries all of Anthropic's bundled assets (ripgrep, native addons,
+ * helper scripts), and needs no `ELECTRON_RUN_AS_NODE` or `NODE_PATH`.
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
-  const bunClaude = locateBunClaude()
   return {
-    pathToClaudeCodeExecutable: bunClaude,
-    executable: bunClaude,
-    executableArgs: [],
     standaloneExecutable: true,
     env: {}
   }
@@ -709,14 +707,12 @@ export class ClaudeSession extends BaseSession {
 
     try {
       const execOpts = getSdkExecutableOpts()
-      const cliPath = execOpts.pathToClaudeCodeExecutable as string | undefined
-      if (cliPath) {
-        const cliExists = fs.existsSync(cliPath)
-        logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
-        if (!cliExists) {
-          this.send('session:error', `CLI not found at: ${cliPath}`)
-          return
-        }
+      const cliPath = locateBunClaude()
+      const cliExists = fs.existsSync(cliPath)
+      logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
+      if (!cliExists) {
+        this.send('session:error', `CLI not found at: ${cliPath}`)
+        return
       }
       // Load MCP servers from config files and pass explicitly via mcpServers.
       // This supplements the SDK's own settingSources config loading. Plugin MCP

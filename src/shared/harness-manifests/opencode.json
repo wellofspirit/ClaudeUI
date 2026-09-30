@@ -2,6 +2,7 @@
   "id": "opencode",
   "tested": "1.18.32",
   "floor": "1.18.32",
+  "ceiling": "2.0.0",
   "platforms": {
     "win32-x64": {
       "package": "opencode-windows-x64",

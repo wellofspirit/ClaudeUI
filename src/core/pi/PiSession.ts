@@ -25,7 +25,7 @@ import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
-import { locatePiBinary } from './pi-locate'
+import { locatePiLaunch } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import {
   mapPiEvent,
@@ -710,8 +710,8 @@ export class PiSession extends BaseSession {
   }
 
   private async doStart(): Promise<void> {
-    const bin = locatePiBinary()
-    if (!bin) {
+    const launch = locatePiLaunch()
+    if (!launch) {
       throw new Error(
         'pi binary not found — run `bun run ensure-pi` to vendor it ' +
           '(vendor/pi-cli/pi' +
@@ -780,7 +780,7 @@ export class PiSession extends BaseSession {
         args.push('--session', resolvedPath ?? this.resumeSessionId)
       }
 
-      client = new PiRpcClient(bin, {
+      client = new PiRpcClient(launch, {
         cwd: this.cwd,
         args,
         env: {
@@ -1677,7 +1677,7 @@ export class PiSession extends BaseSession {
    *   3. Spawn a brand-new, fully isolated `pi --mode rpc --no-session
    *      --no-tools --no-extensions --no-skills --no-context-files
    *      --no-prompt-templates` process — the spawn shape model-discovery.ts's
-   *      `fetchPiModelCatalog` uses (locatePiBinary, no `-e` bridge/subagent
+   *      `fetchPiModelCatalog` uses (locatePiLaunch, no `-e` bridge/subagent
    *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS the isolation
    *      flags below.
    *      TOOL EXECUTION DISABLED AT THE PROCESS LEVEL: `--no-tools` (pi
@@ -1735,8 +1735,8 @@ export class PiSession extends BaseSession {
   async askSideQuestion(question: string): Promise<string | null> {
     if (!this.client || !this.piSessionId) return null
 
-    const bin = locatePiBinary()
-    if (!bin) return null
+    const launch = locatePiLaunch()
+    if (!launch) return null
 
     const prompt = buildSideQuestionPrompt(this.buildTranscriptContext(), question)
     // `--no-tools` (pi usage.md:211 — "Disable all tools"; probed: accepted
@@ -1749,7 +1749,7 @@ export class PiSession extends BaseSession {
     // The `--no-*` discovery flags close the repo-writable input paths (see the
     // doc comment's "DISCOVERY DISABLED" note). All probed accepted together in
     // `--mode rpc` against the vendored pi.
-    const client = new PiRpcClient(bin, {
+    const client = new PiRpcClient(launch, {
       cwd: this.cwd,
       args: [
         '--mode',

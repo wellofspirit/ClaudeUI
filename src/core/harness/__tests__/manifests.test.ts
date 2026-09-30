@@ -14,13 +14,22 @@ import { compareVersions } from '../store'
 import pkg from '../../../../package.json'
 
 describe('harness manifests', () => {
-  it.each(HARNESS_IDS)('%s names itself and pins a well-formed tested/floor', (id) => {
+  it.each(HARNESS_IDS)('%s names itself and pins floor <= tested < ceiling', (id) => {
     const manifest = harnessManifest(id)
     expect(manifest.id).toBe(id)
     expect(manifest.tested).toMatch(HARNESS_VERSION_RE)
     expect(manifest.floor).toMatch(HARNESS_VERSION_RE)
+    expect(manifest.ceiling).toMatch(HARNESS_VERSION_RE)
     expect(compareVersions(manifest.floor, manifest.tested)).toBeLessThanOrEqual(0)
+    expect(compareVersions(manifest.tested, manifest.ceiling)).toBeLessThan(0)
     expect(typeof manifest.platforms).toBe('object')
+  })
+
+  it('floors Claude Code at 2.1.275, the build the protocol docs rely on', () => {
+    // 2.1.211 added --forward-subagent-text (older builds exit on it); fixes
+    // through 2.1.275 (background-moved and forked-skill subagents) are what
+    // docs/protocol-cc describes.
+    expect(harnessManifest('claude').floor).toBe('2.1.275')
   })
 
   it('keeps Claude Code on the bundled build that package.json pins', () => {

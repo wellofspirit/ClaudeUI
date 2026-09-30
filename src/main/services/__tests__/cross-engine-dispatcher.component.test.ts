@@ -21,11 +21,11 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 // Every pi-target TEST in this file injects a fake spawnPiTarget dep (bypassing
-// defaultSpawnPiTarget entirely), so mocking locatePiBinary here has no effect
+// defaultSpawnPiTarget entirely), so mocking locatePiLaunch here has no effect
 // on them either way — see buildPiTargetChildEnv's own dedicated test for the
 // real defaultSpawnPiTarget's recursion-guard property.
 vi.mock('../../../core/pi/pi-locate', () => ({
-  locatePiBinary: vi.fn(() => null),
+  locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
 // Every codex-target TEST injects a fake spawnCodexTarget (bypassing

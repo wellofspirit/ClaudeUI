@@ -84,7 +84,7 @@ import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
-import { locatePiBinary } from '../pi/pi-locate'
+import { locatePiLaunch } from '../pi/pi-locate'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
@@ -133,7 +133,7 @@ import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
-import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
+import { query as sdkQuery, sendProgress } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
   CanUseTool,
@@ -1984,9 +1984,9 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
  * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
  * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
  * it — claude-session.ts imports THIS module (for the collab server /
- * disposeFor wiring), so importing back would form a require-cycle. The
- * duplicated shape is 5 fields wide and changes only if the Bun-binary spawn
- * pipeline itself changes (ADR-006).
+ * disposeFor wiring), so importing back would form a require-cycle. Like it,
+ * this names no executable: `query()` spawns the resolver's Claude Code launch
+ * (ADR-082 §2).
  */
 async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<QueryHandle> {
   const engineCfg = loadEngineConfig('claude')
@@ -1994,13 +1994,9 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
   // After the spawn prep: it is what sets an endpoint profile, which decides
   // whether this spawn carries a host token at all.
   await ensureHostTokenFresh()
-  const bunClaude = locateBunClaude()
   return sdkQuery({
     prompt: opts.prompt as AsyncIterable<never>,
     options: {
-      pathToClaudeCodeExecutable: bunClaude,
-      executable: bunClaude,
-      executableArgs: [],
       standaloneExecutable: true,
       env: {},
       cwd: opts.cwd,
@@ -2055,7 +2051,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
  * function (rather than inlined into `defaultSpawnPiTarget`) so the
  * recursion-guard property is DIRECTLY unit-testable without mocking
- * PiRpcClient/PiBridgeHost/locatePiBinary: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
+ * PiRpcClient/PiBridgeHost/locatePiLaunch: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
  * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
  * `defaultSpawnPiTarget`'s doc comment for the full rationale.
  *
@@ -2082,8 +2078,8 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
 }
 
 async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPrimitives> {
-  const bin = locatePiBinary()
-  if (!bin) {
+  const launch = locatePiLaunch()
+  if (!launch) {
     throw new Error(
       'pi binary not found — run `bun run ensure-pi` to vendor it ' +
         `(vendor/pi-cli/pi${process.platform === 'win32' ? '.exe' : ''} is missing).`
@@ -2097,7 +2093,7 @@ async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPr
     throw err instanceof Error ? err : new Error(String(err))
   }
   const bridgePath = writeBridgeExtension()
-  const client = new PiRpcClient(bin, {
+  const client = new PiRpcClient(launch, {
     cwd: opts.cwd,
     args: ['--mode', 'rpc', '--no-session', '-e', bridgePath],
     env: buildPiTargetChildEnv(bridge)

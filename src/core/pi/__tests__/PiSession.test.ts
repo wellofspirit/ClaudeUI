@@ -54,7 +54,7 @@ const {
   mockPickJudgeFetch,
   MockPiRpcClient,
   mockLoadEngineConfig,
-  mockLocatePiBinary,
+  mockLocatePiLaunch,
   mockGetPiModelCatalog,
   mockDiscoverPiModels,
   mockLoadPiSessionHistory,
@@ -248,7 +248,7 @@ const {
     // Default DISABLED: every pre-phase-4 test asserts the historical
     // allow-everything `full`/`auto` base; the auto-mode block opts in.
     mockLoadEngineConfig: vi.fn().mockReturnValue({ autoMode: { enabled: false } }),
-    mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
+    mockLocatePiLaunch: vi.fn().mockReturnValue({ command: '/fake/pi', args: [] }),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
     mockDiscoverPiModels: vi.fn().mockResolvedValue([]),
     mockLoadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
@@ -304,7 +304,7 @@ vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: mockResolveJud
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
 vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 vi.mock('../pi-locate', () => ({
-  locatePiBinary: mockLocatePiBinary,
+  locatePiLaunch: mockLocatePiLaunch,
   piBinaryAvailable: () => true
 }))
 // Mocks getPiModelCatalog only — effortLevelsFromModel is kept as the REAL
@@ -514,7 +514,7 @@ beforeEach(() => {
   mockLoadEngineConfig.mockReset().mockReturnValue({ autoMode: { enabled: false } })
   mockDiscoverPiModels.mockReset().mockResolvedValue([])
   MockPiRpcClient.mockClear()
-  mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
+  mockLocatePiLaunch.mockClear().mockReturnValue({ command: '/fake/pi', args: [] })
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
   mockLoadPiSessionHistory.mockReset().mockResolvedValue({ messages: [], statusLine: null })
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
@@ -662,26 +662,29 @@ describe('PiSession.run — sends a prompt', () => {
     // is a static-true engine capability, same as hostedMcp above. In-pi
     // subagents (M5b): a SECOND -e <subagent file>, plus its own two env vars
     // — `subagents` is likewise a static-true engine capability.
-    expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
-      cwd: '/cwd',
-      args: [
-        '--mode',
-        'rpc',
-        '-e',
-        '/fake/tmp/claudeui-bridge.ts',
-        '-e',
-        '/fake/tmp/claudeui-subagent.ts'
-      ],
-      env: {
-        CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
-        CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
-        CLAUDEUI_PI_HOSTED_TOOLS: '1',
-        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
-        CLAUDEUI_PI_PLAN_TOOLS: '1',
-        CLAUDEUI_PI_SUBAGENTS: '1',
-        CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'anthropic/claude-sonnet-4-6'
+    expect(MockPiRpcClient).toHaveBeenCalledWith(
+      { command: '/fake/pi', args: [] },
+      {
+        cwd: '/cwd',
+        args: [
+          '--mode',
+          'rpc',
+          '-e',
+          '/fake/tmp/claudeui-bridge.ts',
+          '-e',
+          '/fake/tmp/claudeui-subagent.ts'
+        ],
+        env: {
+          CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
+          CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
+          CLAUDEUI_PI_HOSTED_TOOLS: '1',
+          CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+          CLAUDEUI_PI_PLAN_TOOLS: '1',
+          CLAUDEUI_PI_SUBAGENTS: '1',
+          CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'anthropic/claude-sonnet-4-6'
+        }
       }
-    })
+    )
     expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
     // set_model called (opts.model was present)
     expect(mockRequest).toHaveBeenCalledWith({
@@ -718,7 +721,7 @@ describe('PiSession.run — sends a prompt', () => {
   })
 
   it('throws-through as session:error when the pi binary is not found', async () => {
-    mockLocatePiBinary.mockReturnValue(null)
+    mockLocatePiLaunch.mockReturnValue(null)
     const win = new MockWindow()
     const session = new PiSession('rid-4', win as never, '/cwd', {})
     await session.run('hello')
@@ -5309,7 +5312,7 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     const session = new PiSession('rid-btw-nobin', win as never, '/cwd', {})
     await session.run('hi')
 
-    mockLocatePiBinary.mockReturnValue(null)
+    mockLocatePiLaunch.mockReturnValue(null)
     const answer = await session.askSideQuestion('why?')
     expect(answer).toBeNull()
     expect(mockEphemeralInstances).toHaveLength(0)
