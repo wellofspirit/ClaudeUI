@@ -174,7 +174,8 @@ describe('SettingsDialog mobile fork', () => {
       await renderDialog({ onClose })
       const tabs = screen.getAllByTestId('SettingsMobileView.tab')
       expect(tabs.map((t) => t.getAttribute('data-id'))).toEqual(['app', 'features', 'engines'])
-      expect(tabs.map((t) => t.textContent)).toEqual(['App', 'Features', 'Engines'])
+      // ADR-082 §1: the Engines group is Harnesses now; its id is unchanged.
+      expect(tabs.map((t) => t.textContent)).toEqual(['App', 'Features', 'Harnesses'])
       expect(tabs[0]).toHaveAttribute('data-active', 'true')
     })
 
@@ -190,7 +191,13 @@ describe('SettingsDialog mobile fork', () => {
 
       await tapTab('engines')
 
-      expect(idsOf('SettingsMobileView.page')).toEqual(['claude', 'opencode', 'pi', 'codex'])
+      expect(idsOf('SettingsMobileView.page')).toEqual([
+        'harnesses',
+        'claude',
+        'opencode',
+        'pi',
+        'codex'
+      ])
       expect(byId('SettingsMobileView.tab', 'engines')).toHaveAttribute('data-active', 'true')
     })
 
@@ -280,7 +287,9 @@ describe('SettingsDialog mobile fork', () => {
       await expandPage('sessions')
 
       const autonomy = within(byId('SettingsMobileView.group', 'autonomy'))
-      expect(autonomy.getByTestId('SettingsMobileView.groupBadge')).toHaveTextContent('All engines')
+      expect(autonomy.getByTestId('SettingsMobileView.groupBadge')).toHaveTextContent(
+        'All harnesses'
+      )
       expect(autonomy.queryByTestId('SettingsMobileView.groupStorage')).not.toBeInTheDocument()
 
       const trust = within(byId('SettingsMobileView.group', 'trust'))

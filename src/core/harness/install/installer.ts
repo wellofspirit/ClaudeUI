@@ -264,7 +264,8 @@ export function createInstaller(deps: InstallerDeps = {}): Installer {
           : `${LABELS[id]} ${version} could not be installed: ${
               err instanceof Error ? err.message : String(err)
             }`
-      if (!signal.aborted) logger.warn('harness', `install of ${id} ${version} failed: ${reason}`)
+      if (signal.aborted) logger.info('harness', `install of ${id} ${version} cancelled`)
+      else logger.warn('harness', `install of ${id} ${version} failed: ${reason}`)
       report('failed', { reason })
       return { status: 'failed', id, version, reason }
     } finally {

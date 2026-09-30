@@ -353,7 +353,7 @@ describe('the setup step', () => {
     expect(screen.getByTestId('ProviderAddSheet.setup')).toHaveAttribute('data-id', 'deepseek')
     expect(screen.getByTestId('ProviderAddSheet.steps')).toHaveAttribute('data-id', '2')
     expect(screen.getByTestId('ProviderAddSheet.key')).toHaveTextContent(
-      'Entered once. ClaudeUI stores it and delivers it to each engine you pick.'
+      'Entered once. ClaudeUI stores it and delivers it to each harness you pick.'
     )
 
     await typeInto('ProviderAddSheet.keyInput', 'sk-live')

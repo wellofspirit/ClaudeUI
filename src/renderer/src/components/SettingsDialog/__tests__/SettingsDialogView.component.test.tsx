@@ -11,6 +11,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SettingsDialogView, type SettingsDialogViewProps } from '../View'
 import { DEFAULT_SETTINGS, useSessionStore } from '../../../stores/session-store'
 import { PAGES } from '../settings-pages'
+import { harnessStore } from '../harness-store'
 import type { EngineId } from '../../../../../shared/types'
 
 const byId = (testid: string, id: string): HTMLElement =>
@@ -87,13 +88,44 @@ afterEach(() => {
 })
 
 describe('the rail', () => {
-  it('lists the three rail groups and all 12 pages', () => {
+  it('lists the three rail groups and all 14 pages', () => {
     renderView()
-    for (const label of ['App', 'Features', 'Engines']) {
+    for (const label of ['App', 'Features', 'Harnesses']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
     const items = screen.getAllByTestId('SettingsDialog.railItem')
     expect(items.map((el) => el.dataset.id)).toEqual(PAGES.map((p) => p.id))
+  })
+
+  it('the Harnesses group opens with Installed, then the per-harness pages (ADR-082 §1)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => {
+      throw new Error('not in this test')
+    })
+    renderView({ activePage: 'harnesses' })
+    const nav = screen.getByRole('navigation', { name: 'Settings pages' })
+    const heading = within(nav).getByText('Harnesses')
+    const group = heading.parentElement as HTMLElement
+    expect(
+      within(group)
+        .getAllByTestId('SettingsDialog.railItem')
+        .map((el) => [el.dataset.id, el.textContent])
+    ).toEqual([
+      ['harnesses', 'Installed'],
+      ['claude', 'Claude Code'],
+      ['opencode', 'opencode'],
+      ['pi', 'pi'],
+      ['codex', 'Codex']
+    ])
+    expect(screen.getByTestId('SettingsDialog.pageTitle')).toHaveTextContent('Installed')
+    // The page's own actions sit in the header, beside the title.
+    expect(
+      within(screen.getByTestId('SettingsDialog.pageAccessory')).getByTestId('HarnessesPageActions')
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('SettingsDialog.page')).getByTestId('HarnessesInstalled')
+    ).toBeInTheDocument()
+    await act(async () => {})
+    harnessStore.resetForTests()
   })
 
   it('marks the active page and shows ONLY its groups as sub-entries', () => {
@@ -396,7 +428,7 @@ describe('the page pane', () => {
 
   it('shows the group badge', () => {
     renderView({ activePage: 'sessions' })
-    expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All engines')
+    expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All harnesses')
   })
 
   it('renders a group header ACTION at the right of the header, and only where declared', () => {

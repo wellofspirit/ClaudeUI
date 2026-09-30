@@ -30,6 +30,7 @@ import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId } from './settings-target'
 import { UsageHubSettings } from './UsageHubSettings'
+import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -108,7 +109,13 @@ export interface SettingsPage {
   icon: React.JSX.Element
   /** One line under the title. */
   description: string
-  /** Engines pages only: the engine the page is about (drives the gating). */
+  /**
+   * Page-level controls drawn at the right of the title (under the description
+   * on a phone): actions and status that belong to the whole page rather than
+   * to one group — the Installed page's Detect again and install progress.
+   */
+  accessory?: React.ComponentType
+  /** A per-harness page's engine (drives the gating). */
   engine?: EngineId
   groups: SettingsGroup[]
 }
@@ -116,7 +123,8 @@ export interface SettingsPage {
 export const RAIL_GROUPS: ReadonlyArray<{ id: RailGroupId; label: string }> = [
   { id: 'app', label: 'App' },
   { id: 'features', label: 'Features' },
-  { id: 'engines', label: 'Engines' }
+  // The id predates ADR-082's rename; only the label is user-facing.
+  { id: 'engines', label: 'Harnesses' }
 ]
 
 // ── Item lookup ──────────────────────────────────────────────────────
@@ -156,7 +164,7 @@ const SANDBOX_CROSS_LINK: SettingItem = {
     <ActionRow
       testid="SandboxCrossLinkRow"
       label="Command sandbox"
-      description="Isolation, network and filesystem rules live on the Claude engine page."
+      description="Isolation, network and filesystem rules live on the Claude Code page."
       engine="claude"
       action="Configure"
       onAction={() => ctx?.navigate({ page: 'claude', group: 'sandbox' })}
@@ -226,12 +234,26 @@ const USAGE_HUB: SettingItem = {
     'usage hub sync metering device token cloudflare access service token machines resync forget combined spend',
   render: () => <UsageHubSettings />
 }
+
+/**
+ * The Installed page's rows (ADR-082 §2). Page-local: the harness selection is
+ * main's own file (`harnesses.json`, written only through `harness:*`), never a
+ * ClaudeUI setting.
+ */
+const HARNESSES_INSTALLED: SettingItem = {
+  key: 'harnessesInstalled',
+  label: 'Installed harnesses',
+  keywords:
+    'harness harnesses installed install download update version tested latest system bundled managed claude code opencode pi codex detect path',
+  render: () => <HarnessesInstalled />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
   VERSIONS,
   CODEX_ACCOUNT,
-  USAGE_HUB
+  USAGE_HUB,
+  HARNESSES_INSTALLED
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -306,6 +328,13 @@ const ICON_REMOTE = icon(
     <path d="M1.42 9a16 16 0 0121.16 0" />
     <path d="M8.53 16.11a6 6 0 016.95 0" />
     <circle cx="12" cy="20" r="1" />
+  </>
+)
+const ICON_INSTALLED = icon(
+  <>
+    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+    <line x1="12" y1="22.08" x2="12" y2="12" />
   </>
 )
 const ICON_CLAUDE = icon(<path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z" />)
@@ -417,7 +446,7 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'autonomy',
         label: 'Autonomy default',
-        badge: 'All engines',
+        badge: 'All harnesses',
         items: itemsOf('autonomy')
       },
       {
@@ -480,7 +509,7 @@ export const PAGES: SettingsPage[] = [
     label: 'About',
     rail: 'app',
     icon: ICON_ABOUT,
-    description: 'Versions of ClaudeUI and the engines it runs.',
+    description: 'Versions of ClaudeUI and the harnesses it runs.',
     groups: [{ id: 'about', label: 'Versions', items: [VERSIONS] }]
   },
   {
@@ -489,7 +518,7 @@ export const PAGES: SettingsPage[] = [
     rail: 'features',
     icon: ICON_MODELS,
     description:
-      'Which providers ClaudeUI can reach, and which model each engine starts a session with.',
+      'Which providers ClaudeUI can reach, and which model each harness starts a session with.',
     groups: [
       {
         // ADR-074 §7: sign-in subscriptions first, each a card with its
@@ -556,7 +585,7 @@ export const PAGES: SettingsPage[] = [
     rail: 'features',
     icon: ICON_DISPATCH,
     description:
-      'A session on one engine can hand a task to an agent on another. Configure what each engine accepts when it is the target.',
+      'A session on one harness can hand a task to an agent on another. Configure what each harness accepts when it is the target.',
     groups: [
       {
         // App-level and first: the slot count bounds every direction at once,
@@ -661,8 +690,28 @@ export const PAGES: SettingsPage[] = [
     ]
   },
   {
+    // The Harnesses group's first page (ADR-082 §1): which program runs for
+    // each engine, and from where. The per-harness pages follow it.
+    id: 'harnesses',
+    label: 'Installed',
+    rail: 'engines',
+    icon: ICON_INSTALLED,
+    description:
+      "Run each harness from ClaudeUI's managed copy, or from what's installed on this computer.",
+    accessory: HarnessesPageActions,
+    groups: [
+      {
+        id: 'harnesses',
+        label: 'Harnesses',
+        appliesOn: 'next-session',
+        note: 'New and respawned sessions use the selection. Running sessions keep theirs.',
+        items: [HARNESSES_INSTALLED]
+      }
+    ]
+  },
+  {
     id: 'claude',
-    label: 'Claude',
+    label: 'Claude Code',
     rail: 'engines',
     icon: ICON_CLAUDE,
     engine: 'claude',
@@ -935,7 +984,7 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'mcp',
         label: 'MCP servers',
-        badge: 'Shared · all engines',
+        badge: 'Shared · all harnesses',
         appliesOn: 'next-session',
         note: 'The inherited list is read when a Codex thread starts, so a change applies to the next session.',
         storage: CODEX_FILE,

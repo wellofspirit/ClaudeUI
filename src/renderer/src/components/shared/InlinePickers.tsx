@@ -146,8 +146,8 @@ export function EnginePicker({
         disabled={locked}
         title={
           locked
-            ? 'Engine cannot change after session initialization or for historical sessions'
-            : 'Engine'
+            ? 'Harness cannot change after session initialization or for historical sessions'
+            : 'Harness'
         }
         data-testid="EnginePicker.trigger"
         onClick={(e) => {

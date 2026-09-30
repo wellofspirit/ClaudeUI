@@ -975,7 +975,7 @@ function DispatchLimitsSection({
 // possible caller means the config has nothing to configure). pi gates on pi.
 
 const CLAUDE_DISPATCH_ABSENT =
-  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller.'
+  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other harness installed, there is no possible caller.'
 const OPENCODE_DISPATCH_ABSENT =
   'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
 const PI_DISPATCH_ABSENT =

@@ -187,7 +187,7 @@ describe('EnginePicker', () => {
     expect(trigger).toBeDisabled()
     expect(trigger).toHaveAttribute(
       'title',
-      'Engine cannot change after session initialization or for historical sessions'
+      'Harness cannot change after session initialization or for historical sessions'
     )
     fireEvent.click(trigger)
     expect(screen.queryByTestId('EnginePicker.option')).toBeNull()

@@ -30,7 +30,7 @@ export function NewSessionModelSetting({
       testid={NEW_SESSION_MODEL_TESTID}
       dataId="newSessionModel"
       label="New sessions start on"
-      description="Per engine. The composer's model picker always changes the session you are in."
+      description="Per harness. The composer's model picker always changes the session you are in."
     >
       <Segmented
         testid={`${NEW_SESSION_MODEL_TESTID}.choice`}

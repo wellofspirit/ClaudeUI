@@ -114,8 +114,8 @@ export function ProviderForm({
           label="Provider id"
           description={
             idLocked
-              ? 'The key each engine stores this provider under. Fixed after creation.'
-              : 'The key each engine will store this provider under.'
+              ? 'The key each harness stores this provider under. Fixed after creation.'
+              : 'The key each harness will store this provider under.'
           }
         >
           <TextField
@@ -163,7 +163,7 @@ export function ProviderForm({
           testid={`${FORM}.field`}
           dataId="routes"
           label="Enable for"
-          description="One definition, projected into every enabled engine."
+          description="One definition, projected into every enabled harness."
         >
           <ChipSet
             testid={`${FORM}.engines`}
@@ -185,7 +185,7 @@ export function ProviderForm({
           dataId="models"
           layout="stacked"
           label="Models"
-          description="What this endpoint serves. Every delivered model stays available unless an engine’s own list restricts it."
+          description="What this endpoint serves. Every delivered model stays available unless a harness’s own list restricts it."
           error={error ?? undefined}
           errorTestid={`${FORM}.error`}
         >
@@ -232,7 +232,7 @@ export function ProviderForm({
           testid={`${FORM}.field`}
           dataId="key"
           label="API key"
-          description="Optional. Held once by ClaudeUI and vended to each enabled engine; never read back, so this field starts empty even when a key is set."
+          description="Optional. Held once by ClaudeUI and vended to each enabled harness; never read back, so this field starts empty even when a key is set."
         >
           <TextField
             type="password"

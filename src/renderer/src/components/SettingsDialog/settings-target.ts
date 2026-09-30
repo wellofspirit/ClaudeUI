@@ -23,6 +23,7 @@ export const SETTINGS_PAGE_IDS = [
   'dispatch',
   'mockups',
   'remote',
+  'harnesses',
   'claude',
   'opencode',
   'pi',

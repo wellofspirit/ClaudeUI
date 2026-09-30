@@ -338,7 +338,7 @@ export function AddAnotherKeySheet({
           testid={`${ADD}.field`}
           dataId="key"
           label="API key"
-          description="Stored once; delivered to the engines below."
+          description="Stored once; delivered to the harnesses below."
         >
           <TextField
             type="password"
@@ -349,7 +349,7 @@ export function AddAnotherKeySheet({
             className="w-[180px]"
           />
         </SettingRow>
-        <SettingRow testid={`${ADD}.field`} dataId="engines" label="Engines">
+        <SettingRow testid={`${ADD}.field`} dataId="engines" label="Harnesses">
           <ChipSet
             testid={`${ADD}.engines`}
             value={engines}
@@ -539,7 +539,7 @@ export function RefreshModelsSheet({
                 {error}
               </span>
             ) : (
-              'Saved to the vault, then delivered to each enabled engine.'
+              'Saved to the vault, then delivered to each enabled harness.'
             )}
           </span>
           <Button variant="link" testid={`${REFRESH}.cancel`} onClick={onClose}>

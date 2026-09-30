@@ -669,7 +669,7 @@ function EnginesRow({
       className="flex items-center gap-3 mx-4 mb-3 px-3 py-2.5 rounded-[10px] border border-border bg-bg-primary/40"
     >
       <span className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
-        Engines
+        Harnesses
       </span>
       <span className="flex-1 min-w-0 flex flex-wrap gap-1.5">{children}</span>
       {trailing}
@@ -1241,7 +1241,7 @@ function ChatgptCard({
     return removeConsequence({
       active: id === accounts?.activeId,
       ...(successor ? { successor: successor.email } : {}),
-      lastAccount: 'ChatGPT is then disconnected from every engine.',
+      lastAccount: 'ChatGPT is then disconnected from every harness.',
       sessions: successor
         ? chatgptSwitchConsequence(live, routes)
         : n > 0
@@ -1347,7 +1347,7 @@ function ChatgptCard({
           summary={
             perSession
               ? 'Codex sessions can pin an account'
-              : 'All engines follow the active account'
+              : 'All harnesses follow the active account'
           }
         >
           <OptionRow

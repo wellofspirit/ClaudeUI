@@ -671,14 +671,26 @@ export function SettingsDialogView({
               </div>
             ) : (
               <div data-testid="SettingsDialog.page" data-id={page.id}>
-                <div
-                  data-testid="SettingsDialog.pageTitle"
-                  className="text-[18px] font-semibold leading-6 text-text-primary"
-                >
-                  {page.label}
-                </div>
-                <div className="mt-[3px] text-[12px] leading-4 text-text-secondary">
-                  {page.description}
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div
+                      data-testid="SettingsDialog.pageTitle"
+                      className="text-[18px] font-semibold leading-6 text-text-primary"
+                    >
+                      {page.label}
+                    </div>
+                    <div className="mt-[3px] text-[12px] leading-4 text-text-secondary">
+                      {page.description}
+                    </div>
+                  </div>
+                  {page.accessory && (
+                    <div
+                      data-testid="SettingsDialog.pageAccessory"
+                      className="shrink-0 max-w-[60%]"
+                    >
+                      <page.accessory />
+                    </div>
+                  )}
                 </div>
                 {groups.map((group) => {
                   const engine = engineOf(group)

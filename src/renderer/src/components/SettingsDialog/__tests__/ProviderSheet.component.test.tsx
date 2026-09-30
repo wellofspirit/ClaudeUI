@@ -476,7 +476,7 @@ describe('a subscription’s sheet', () => {
     expect(groups).not.toContain('accounts')
     expect(within(sheet).queryByTestId('ProviderSheet.credential')).not.toBeInTheDocument()
     expect(within(sheet).queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
-    expect(sheet).toHaveTextContent('ChatGPT · engines & models')
+    expect(sheet).toHaveTextContent('ChatGPT · harnesses & models')
     // ENABLED FOR keeps its rows.
     expect(groups).toContain('enabled')
   })
@@ -1188,7 +1188,7 @@ describe('API providers — one key, delivered to each engine', () => {
   it('Remove is allowed for a catalog provider, and says what it deletes', async () => {
     await openSheet('openrouter')
     expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(
-      'Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+      'Removing deletes the key from ClaudeUI and from each harness it’s delivered to.'
     )
     await click(screen.getByTestId('ProviderSheet.remove'))
     expect(sent('shared-provider:remove')).toEqual([])
@@ -1315,7 +1315,7 @@ describe('native keys — conflict and adoption (ADR-074 §6)', () => {
     // Nothing yet — the other engine's key is about to be replaced.
     expect(sent('shared-provider:adopt-native')).toEqual([])
     expect(screen.getByTestId('ProviderSheet.adoptConfirmRow')).toHaveTextContent(
-      'opencode’s key (…a41f) is deleted, and pi’s key (…09c2) is delivered to both engines.'
+      'opencode’s key (…a41f) is deleted, and pi’s key (…09c2) is delivered to both harnesses.'
     )
     // The confirm takes focus; the panel is a labelled group.
     expect(document.activeElement).toBe(screen.getByTestId('ProviderSheet.adoptConfirm'))
@@ -1841,7 +1841,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     })
     await openSheet('openrouter-work')
     expect(screen.getByTestId('ProviderSheet.offNotice')).toHaveTextContent(
-      'Off — not delivered to any engine. Its key and settings are kept'
+      'Off — not delivered to any harness. Its key and settings are kept'
     )
     expect(engineRow('pi')).toHaveTextContent(
       'Off while OpenRouter (Work) is off — back on with it.'

@@ -719,6 +719,11 @@ export function SettingsMobileView({
                       <div className="px-1 text-[12px] leading-4 text-text-secondary">
                         {page.description}
                       </div>
+                      {page.accessory && (
+                        <div data-testid="SettingsMobileView.pageAccessory" className="mt-2 px-1">
+                          <page.accessory />
+                        </div>
+                      )}
                       {visibleGroups(page).map((group) => renderGroup(page, group))}
                     </div>
                   )}

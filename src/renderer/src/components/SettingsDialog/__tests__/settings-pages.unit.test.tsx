@@ -49,7 +49,7 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 13 documented pages, in order', () => {
+  it('has the 14 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
@@ -60,6 +60,7 @@ describe('PAGES structure', () => {
       'dispatch',
       'mockups',
       'remote',
+      'harnesses',
       'claude',
       'opencode',
       'pi',
@@ -73,16 +74,31 @@ describe('PAGES structure', () => {
     for (const page of PAGES) expect(ids.has(page.rail)).toBe(true)
   })
 
-  it('rail membership matches ADR-065 (App / Features / Engines)', () => {
+  it('rail membership matches ADR-065 / ADR-082 (App / Features / Harnesses)', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
     expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
     expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'remote'])
-    expect(byRail('engines')).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    // ADR-082 §1: Installed first, then the per-harness pages.
+    expect(byRail('engines')).toEqual(['harnesses', 'claude', 'opencode', 'pi', 'codex'])
   })
 
-  it('only the Engines pages declare an engine', () => {
+  it('the rail group reads Harnesses, Installed comes first and Claude reads Claude Code', () => {
+    expect(RAIL_GROUPS.find((g) => g.id === 'engines')?.label).toBe('Harnesses')
+    const rail = PAGES.filter((p) => p.rail === 'engines')
+    expect(rail[0].label).toBe('Installed')
+    expect(pageOf('claude').label).toBe('Claude Code')
+    expect(rail.map((p) => p.label)).toEqual([
+      'Installed',
+      'Claude Code',
+      'opencode',
+      'pi',
+      'Codex'
+    ])
+  })
+
+  it('only the per-harness pages declare an engine', () => {
     for (const page of PAGES) {
-      if (page.rail === 'engines') expect(page.engine).toBe(page.id)
+      if (page.rail === 'engines' && page.id !== 'harnesses') expect(page.engine).toBe(page.id)
       else expect(page.engine).toBeUndefined()
     }
   })
@@ -114,6 +130,7 @@ describe('PAGES structure', () => {
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
+      harnesses: ['harnesses'],
       // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
       claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
       opencode: [
@@ -398,7 +415,8 @@ describe('inventory guard', () => {
       'otherEnginePermissions',
       'versions',
       'codexNativeAccount',
-      'usageHub'
+      'usageHub',
+      'harnessesInstalled'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())

@@ -264,7 +264,7 @@ export function ProviderAddSheet({
           a terminal, so it belongs with the providers that engine owns. */}
       {showClaudeForPi && (
         <div className="mt-4">
-          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Engine sign-ins">
+          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Harness sign-ins">
             <SettingRow
               testid={`${SHEET}.engineSignIn`}
               dataId="claude-pi"
@@ -306,7 +306,7 @@ export function ProviderAddSheet({
                     : catalogState === 'failed'
                       ? 'opencode’s provider catalog could not be read — its server did not answer.'
                       : candidates.length === 0
-                        ? 'Every provider these engines offer is already set up.'
+                        ? 'Every provider these harnesses offer is already set up.'
                         : 'No providers match.'
                 }
               />
@@ -349,7 +349,7 @@ export function ProviderAddSheet({
             as="button"
             testid={`${SHEET}.custom`}
             label="Add an OpenAI-compatible endpoint"
-            description="One definition, delivered to each engine you enable — a local server, a proxy, or a gateway."
+            description="One definition, delivered to each harness you enable — a local server, a proxy, or a gateway."
             onClick={() => setStep({ kind: 'custom' })}
           >
             <span className="text-[12px] text-accent">Configure ›</span>
@@ -418,7 +418,7 @@ export function ProviderAddSheet({
                 {error}
               </span>
             ) : (
-              'Pick one, then choose which engines get it.'
+              'Pick one, then choose which harnesses get it.'
             )}
           </span>
           {step.kind !== 'list' && (
@@ -482,7 +482,7 @@ function catalogDefinition(
 }
 
 /** Provider → Key & engines → Models (mockup D); the last step is the Manage sheet. */
-const STEPS = ['Provider', 'Key & engines', 'Models'] as const
+const STEPS = ['Provider', 'Key & harnesses', 'Models'] as const
 
 function StepIndicator({ current }: { current: 1 | 2 }): React.JSX.Element {
   return (
@@ -572,7 +572,7 @@ function CatalogSetup({
           testid={`${SHEET}.enableFor`}
           layout="stacked"
           label="Use it in"
-          description="The key is delivered to each selected engine’s own auth file."
+          description="The key is delivered to each selected harness’s own auth file."
         >
           <ChipSet
             testid={`${SHEET}.engines`}
@@ -591,7 +591,7 @@ function CatalogSetup({
         <SettingRow
           testid={`${SHEET}.key`}
           label="API key"
-          description="Entered once. ClaudeUI stores it and delivers it to each engine you pick."
+          description="Entered once. ClaudeUI stores it and delivers it to each harness you pick."
         >
           <TextField
             type="password"

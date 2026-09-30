@@ -537,7 +537,7 @@ export function ProviderSheet({
 
   const keyStore =
     entry.origin === 'shared'
-      ? "Stored once in ClaudeUI's vault, and delivered to each engine below."
+      ? "Stored once in ClaudeUI's vault, and delivered to each harness below."
       : entry.origin === 'pi-native'
         ? "Stored in pi's own auth.json, never in ClaudeUI's config."
         : "Stored in opencode's own auth.json, never in ClaudeUI's config."
@@ -636,7 +636,7 @@ export function ProviderSheet({
         {confirmAdopt ? (
           <SettingRow
             testid={`${SHEET}.adoptConfirmRow`}
-            description={`${label(other)}’s key${hinted(other)} is deleted, and ${label(keep)}’s key${hinted(keep)} is delivered to both engines.`}
+            description={`${label(other)}’s key${hinted(other)} is deleted, and ${label(keep)}’s key${hinted(keep)} is delivered to both harnesses.`}
           >
             <span ref={confirmRef}>
               <Button
@@ -702,7 +702,7 @@ export function ProviderSheet({
         testid={`${SHEET}.adoptable`}
         dataId={engine}
         label={`This key is only in ${label}.`}
-        description="Use it for both engines? ClaudeUI stores it once and delivers it to each."
+        description="Use it for both harnesses? ClaudeUI stores it once and delivers it to each."
       >
         <Button
           variant="link"
@@ -1529,7 +1529,7 @@ export function ProviderSheet({
     }
     if (rows.length === 0) return null
     return (
-      <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Engine-specific">
+      <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Harness-specific">
         {rows}
       </SheetGroup>
     )
@@ -1542,7 +1542,7 @@ export function ProviderSheet({
       <SheetFrame
         testid={SHEET}
         dataId={entry.id}
-        title={entry.subscription ? `${entry.name} · engines & models` : entry.name}
+        title={entry.subscription ? `${entry.name} · harnesses & models` : entry.name}
         titleExtras={
           <>
             <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
@@ -1617,7 +1617,7 @@ export function ProviderSheet({
                 className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
               >
                 {entry.credential === 'api-key'
-                  ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+                  ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each harness it’s delivered to.'
                   : 'Off keeps the settings; Remove deletes them.'}
               </span>
             )}
@@ -1659,7 +1659,7 @@ export function ProviderSheet({
           entry.disabled && (
             <SettingRow
               testid={`${SHEET}.offNotice`}
-              description="Off — not delivered to any engine. Its key and settings are kept; turn it on to restore them."
+              description="Off — not delivered to any harness. Its key and settings are kept; turn it on to restore them."
             />
           )
         )}
@@ -1675,7 +1675,7 @@ export function ProviderSheet({
         <SheetGroup
           testid={`${SHEET}.group`}
           id="enabled"
-          label={isApiShared ? 'Engines' : 'Enabled for'}
+          label={isApiShared ? 'Harnesses' : 'Enabled for'}
           trailing={
             // The vault re-delivers this definition to every enabled engine, so
             // only a shared row has anything to sync.

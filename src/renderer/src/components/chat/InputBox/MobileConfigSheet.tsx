@@ -35,14 +35,14 @@ import {
 import { accountDisplayName } from '../../../utils/sign-in-provider'
 
 const ENGINE_LOCKED_TOOLTIP =
-  'Engine cannot change after session initialization or for historical sessions'
+  'Harness cannot change after session initialization or for historical sessions'
 
 type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort' | 'account'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
   mode: 'Autonomy mode',
-  engine: 'Engine',
+  engine: 'Harness',
   model: 'Model',
   thinking: 'Thinking mode',
   variant: 'Reasoning variant',
@@ -245,7 +245,7 @@ function ModePage({
               enabled
                 ? undefined
                 : mode === 'plan'
-                  ? "Engine doesn't support plan mode"
+                  ? "This harness doesn't support plan mode"
                   : 'Auto mode is unavailable for this account/organization'
             }
             onClick={() => enabled && onSelect(mode)}
@@ -775,7 +775,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                   {showEnginePicker && (
                     <RootRow
                       testId="MobileConfigSheet.engine"
-                      label="Engine"
+                      label="Harness"
                       value={engineMeta(selectedEngineId).label}
                       disabled={engineLocked}
                       title={engineLocked ? ENGINE_LOCKED_TOOLTIP : undefined}

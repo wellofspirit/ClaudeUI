@@ -296,7 +296,7 @@ describe('MobileConfigSheet — engine submenu', () => {
     expect(row).toBeDisabled()
     expect(row).toHaveAttribute(
       'title',
-      expect.stringContaining('Engine cannot change after session initialization')
+      expect.stringContaining('Harness cannot change after session initialization')
     )
     fireEvent.click(row)
     expect(screen.queryByTestId('MobileConfigSheet.engineOption')).not.toBeInTheDocument()
