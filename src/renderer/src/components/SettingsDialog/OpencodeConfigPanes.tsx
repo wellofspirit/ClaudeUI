@@ -46,8 +46,6 @@ import {
   SettingsToggle
 } from './settings-controls'
 import { RawJsonField } from './OpencodeSchemaForm'
-import { useOpencodeInstalled } from './use-engine-installed'
-import { NotInstalledRow } from './HarnessInstallLink'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { OpencodeAgentSummary, RawConfigPatch } from '../../../../shared/types'
 
@@ -544,45 +542,26 @@ function StringListRow({
   )
 }
 
-// ── Pane shell (install gate) ────────────────────────────────────────────────
+// ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * Loading and not-installed are ONE description-only row each (ADR-065), and
- * there is no footer: the group card already carries `opencode.jsonc` and the
- * "Next server start" note.
+ * Loading is ONE description-only row (ADR-065), and there is no footer: the
+ * group card already carries `opencode.jsonc` and the "Next server start" note.
+ *
+ * Nothing here asks whether opencode is installed: the opencode page cannot be
+ * opened while it is not (ADR-082 §8), and the file is ClaudeUI's own read.
  */
 function PaneShell({
   testid,
   api,
-  secondary = false,
   children
 }: {
   testid: string
   api: OpencodeNativeConfigLeaf
-  /**
-   * A later section of its Configuration page. While the harness is not
-   * installed it renders nothing (an empty root, for its testid): the page's
-   * first section says so once, with the install link (ADR-082 §8, S7b),
-   * instead of one identical row per section.
-   */
-  secondary?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-
-  if (installed === null || api.config === null) {
+  if (api.config === null) {
     return <SettingRow testid={testid} description="Loading…" />
-  }
-  if (!installed) {
-    if (secondary) return <div data-testid={testid} data-state="not-installed" />
-    return (
-      <NotInstalledRow
-        testid={testid}
-        harness="opencode"
-        lead="opencode is not installed."
-        rest="This edits opencode's own config file."
-      />
-    )
   }
   return (
     <div data-testid={testid} className="divide-y divide-border/55">
@@ -657,7 +636,7 @@ export function OpencodeSessionBehaviorSection(): React.JSX.Element {
 export function OpencodeToolOutputSection(): React.JSX.Element {
   const api = useOpencodeNativeConfigLeaf()
   return (
-    <PaneShell testid="OpencodeToolOutputSection" api={api} secondary>
+    <PaneShell testid="OpencodeToolOutputSection" api={api}>
       <NumberRow
         api={api}
         path={['tool_output', 'max_lines']}
@@ -686,7 +665,7 @@ export function OpencodeAttachmentsSection(): React.JSX.Element {
   const heightPath: LeafPath = ['attachment', 'image', 'max_height']
   const dimsSet = api.read(widthPath) !== undefined || api.read(heightPath) !== undefined
   return (
-    <PaneShell testid="OpencodeAttachmentsSection" api={api} secondary>
+    <PaneShell testid="OpencodeAttachmentsSection" api={api}>
       <AbsentDefaultToggleRow
         api={api}
         path={['attachment', 'image', 'auto_resize']}
@@ -773,7 +752,7 @@ export function OpencodeWorkspaceSection(): React.JSX.Element {
   const current = api.read(agentPath)
 
   return (
-    <PaneShell testid="OpencodeWorkspaceSection" api={api} secondary>
+    <PaneShell testid="OpencodeWorkspaceSection" api={api}>
       <StringListRow
         api={api}
         path={['instructions']}
@@ -923,7 +902,7 @@ export function OpencodeToolsSection(): React.JSX.Element {
   const overridden = OPENCODE_BUILTIN_TOOLS.filter((id) => toolsObj[id] !== undefined)
 
   return (
-    <PaneShell testid="OpencodeToolsSection" api={api} secondary>
+    <PaneShell testid="OpencodeToolsSection" api={api}>
       <StackedRow
         configKey="tools"
         label="Built-in tools"
@@ -990,7 +969,7 @@ export function OpencodeDiagnosticsSection(): React.JSX.Element {
   const level = api.read(logPath)
 
   return (
-    <PaneShell testid="OpencodeDiagnosticsSection" api={api} secondary>
+    <PaneShell testid="OpencodeDiagnosticsSection" api={api}>
       <LeafRow
         configKey={pathId(logPath)}
         label="Log level"

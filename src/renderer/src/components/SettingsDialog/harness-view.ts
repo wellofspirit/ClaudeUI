@@ -522,6 +522,26 @@ export function harnessCanRun(readiness: HarnessReadiness): boolean {
   return readiness === 'ready' || readiness === 'unknown'
 }
 
+/**
+ * Whether an engine's harness runs, as Settings asks it (ADR-082 §8): a
+ * harness page opens, and a harness's parts on shared pages show, only while
+ * it does. Claude Code is always installed; `unknown` counts as running.
+ */
+export type EngineRuns = (engine: string) => boolean
+
+/** {@link EngineRuns} for one snapshot. */
+export function engineRunsIn(snapshot: HarnessStateSnapshot | null | undefined): EngineRuns {
+  return (engine) =>
+    engine === 'claude' ||
+    !(HARNESS_IDS as readonly string[]).includes(engine) ||
+    harnessCanRun(harnessReadiness(snapshot, engine as HarnessId))
+}
+
+/** The hover title of a greyed harness page or dispatch target. */
+export function notInstalledTitle(id: HarnessId): string {
+  return `${HARNESS_LABEL[id]} is not installed · install it from Harnesses › Installed`
+}
+
 /** How the harness picker marks a harness: one rule for every harness, Codex included. */
 export function harnessPickerMark(
   readiness: HarnessReadiness

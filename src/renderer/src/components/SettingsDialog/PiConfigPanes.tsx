@@ -79,8 +79,6 @@ import { openProviderSettings, type SettingsTarget } from './settings-target'
 import { isPiModelAllowed, splitPiModelValue } from '../../../../shared/pi-model-allowlist'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { LastPickNote } from './NewSessionModelSetting'
-import { usePiInstalled } from './use-engine-installed'
-import { NotInstalledRow } from './HarnessInstallLink'
 import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { ModelInfo, RawConfigPatch } from '../../../../shared/types'
@@ -177,53 +175,32 @@ function usePiNativeConfigLeaf(): PiNativeConfigLeaf {
   return { config, text, filePath, read, patch, errorAt, reload }
 }
 
-// ── Pane shell (install gate) ────────────────────────────────────────────────
+// ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * The install gate, and the hairline between rows.
+ * The Loading row, and the hairline between rows.
  *
  * A group CARD divides its items (View.tsx), but a whole pane is one item, so
  * the rows inside it need the same divider to read as the card's rows rather
  * than as one block of text. There is no footer: what the group applies to and
  * where it is stored are the card header's storage tag and its note (ADR-065).
+ *
+ * Nothing here asks whether pi is installed: while it is not, the pi page cannot
+ * be opened and the Models page's pi segment is hidden (ADR-082 §8).
  */
 function PaneShell({
   testid,
   api,
-  secondary = false,
   children
 }: {
   testid: string
   api: PiNativeConfigLeaf
-  /**
-   * A later section of its Configuration page. While the harness is not
-   * installed it renders nothing (an empty root, for its testid): the page's
-   * first section says so once, with the install link (ADR-082 §8, S7b),
-   * instead of one identical row per section.
-   */
-  secondary?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
-  const installed = usePiInstalled()
-
-  if (installed === null || api.config === null) {
+  if (api.config === null) {
     return (
       <div data-testid={testid}>
         <SettingRow testid={`${PANE}.status`} dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    if (secondary) return <div data-testid={testid} data-state="not-installed" />
-    return (
-      <div data-testid={testid}>
-        <NotInstalledRow
-          testid={`${PANE}.status`}
-          dataId="not-installed"
-          harness="pi"
-          lead="pi is not installed."
-          rest="These settings edit pi's own settings file."
-        />
       </div>
     )
   }
@@ -613,7 +590,7 @@ export function PiSessionBehaviorSection(): React.JSX.Element {
 export function PiRetrySection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiRetrySection" api={api} secondary>
+    <PaneShell testid="PiRetrySection" api={api}>
       <AbsentDefaultToggleRow
         api={api}
         path={['retry', 'enabled']}
@@ -680,7 +657,7 @@ export function PiRetrySection(): React.JSX.Element {
  * block.
  *
  * Its testids are unchanged across the ADR-065 restyle so the deep links and
- * tests that name them keep working. The install gate lives in `PaneShell`.
+ * tests that name them keep working.
  */
 function PiSessionDefaultModel({
   navigate
@@ -999,7 +976,7 @@ export function PiToolsSection(): React.JSX.Element {
   const npmPath: LeafPath = ['npmCommand']
   const npmValue = api.read(npmPath)
   return (
-    <PaneShell testid="PiToolsSection" api={api} secondary>
+    <PaneShell testid="PiToolsSection" api={api}>
       <DefaultToolsRow api={api} />
       <TextRow
         api={api}
@@ -1044,7 +1021,7 @@ export function PiToolsSection(): React.JSX.Element {
 export function PiImagesSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiImagesSection" api={api} secondary>
+    <PaneShell testid="PiImagesSection" api={api}>
       <AbsentDefaultToggleRow
         api={api}
         path={['images', 'autoResize']}
@@ -1074,7 +1051,7 @@ const PROJECT_TRUST_OPTIONS = [
 export function PiWorkspaceSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiWorkspaceSection" api={api} secondary>
+    <PaneShell testid="PiWorkspaceSection" api={api}>
       <SegmentedRow
         api={api}
         path={['defaultProjectTrust']}
@@ -1108,7 +1085,7 @@ export function PiWorkspaceSection(): React.JSX.Element {
 export function PiResourcesSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiResourcesSection" api={api} secondary>
+    <PaneShell testid="PiResourcesSection" api={api}>
       <StringListRow
         api={api}
         path={['packages']}
@@ -1157,7 +1134,7 @@ export function PiNetworkSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
 
   return (
-    <PaneShell testid="PiNetworkSection" api={api} secondary>
+    <PaneShell testid="PiNetworkSection" api={api}>
       <TextRow
         api={api}
         path={['httpProxy']}
@@ -1300,7 +1277,7 @@ function PiRawEditor({ api }: { api: PiNativeConfigLeaf }): React.JSX.Element {
 export function PiRawConfigSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiRawConfigSection" api={api} secondary>
+    <PaneShell testid="PiRawConfigSection" api={api}>
       <PiRawEditor api={api} />
     </PaneShell>
   )

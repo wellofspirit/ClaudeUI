@@ -26,6 +26,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 import { ProviderList } from '../ProviderList'
 import type {
   ProviderEntry,
@@ -166,7 +168,16 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup()
   app.teardown()
+  harnessStore.resetForTests()
 })
+
+/** The harness store says these do not run — read before the sheet opens, as in the app. */
+async function harnessMissing(missing: Parameters<typeof harnessSnapshot>[0]): Promise<void> {
+  app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(missing))
+  await act(async () => {
+    await harnessStore.refresh()
+  })
+}
 
 /** Render the list and open the Add sheet the way the group header does. */
 async function openAddSheet(): Promise<HTMLElement> {
@@ -295,9 +306,9 @@ describe('the list', () => {
   })
 
   it('hides the catalog entirely when nothing offers one', async () => {
-    // No opencode binary and no pi auth options: there is no catalog to show,
-    // and an empty section would suggest the user had exhausted it.
-    snapshot = { ...snapshot, opencodeInstalled: false }
+    // opencode not installed and no pi auth options: there is no catalog to
+    // show, and an empty section would suggest the user had exhausted it.
+    await harnessMissing(['opencode'])
     piOptions = {}
     await openAddSheet()
     expect(screen.queryAllByTestId('ProviderAddSheet.catalog')).toHaveLength(0)
@@ -320,6 +331,21 @@ describe('the list', () => {
     expect(screen.getByTestId('ProviderAddSheet.catalogEmpty')).toHaveTextContent(
       'could not be read'
     )
+  })
+
+  it('reads no catalog from a harness that does not run (ADR-082 §8)', async () => {
+    await harnessMissing(['pi'])
+    await openAddSheet()
+    // groq and deepseek come from opencode; the pi-only ones (openai, radius)
+    // and pi's chip on deepseek are gone, and so is pi's own sign-in row.
+    expect(catalogIds()).toEqual(['deepseek', 'groq'])
+    expect(
+      within(catalogRow('deepseek'))
+        .getAllByTestId('ProviderAddSheet.engineChip')
+        .map((el) => el.dataset.id)
+    ).toEqual(['opencode'])
+    expect(screen.queryByTestId('ProviderAddSheet.copyCommand')).toBeNull()
+    expect(screen.getByTestId('ProviderAddSheet').textContent).not.toMatch(/not installed/)
   })
 
   it('copies pi’s login command rather than pretending to run it', async () => {
@@ -515,6 +541,28 @@ describe('the custom endpoint', () => {
     // The key never travels inside the definition (ADR-037's plaintext vault
     // holds it; the definition is config).
     expect(sent('shared-provider:set-key')).toEqual([['internal-gateway', 'sk-gateway']])
+  })
+
+  it('offers no chip for a harness that does not run, and saves no route for it', async () => {
+    await harnessMissing(['pi'])
+    await fillCustom()
+    expect(screen.getAllByTestId('ProviderForm.engines.chip').map((el) => el.dataset.id)).toEqual([
+      'opencode'
+    ])
+    await click(screen.getByTestId('ProviderAddSheet.customSave'))
+    expect((sent('shared-provider:save')[0][0] as SharedProviderDefinition).routes).toEqual({
+      pi: { enabled: false },
+      opencode: { enabled: true }
+    })
+  })
+
+  it('offers no custom endpoint while neither opencode nor pi runs', async () => {
+    await harnessMissing(['opencode', 'pi'])
+    await openAddSheet()
+    expect(screen.queryByTestId('ProviderAddSheet.custom')).toBeNull()
+    expect(
+      screen.queryAllByTestId('ProviderAddSheet.group').map((el) => el.dataset.id)
+    ).not.toContain('custom')
   })
 
   it('turns a route off before saving, so the definition reaches one engine only', async () => {

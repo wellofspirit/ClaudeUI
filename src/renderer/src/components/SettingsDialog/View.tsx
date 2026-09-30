@@ -8,16 +8,22 @@ import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
+  actionShown,
   bucketSearchHits,
-  enginesOf,
+  engineFor,
   itemsFor,
   noteOf,
   pageOf,
+  pageOpens,
+  segmentOptions,
   storageOf,
   visibleGroups,
+  type SegmentOption,
   type SettingsGroup
 } from './settings-pages'
 import { groupKey } from './settings-target'
+import { useEngineRuns } from './harness-store'
+import { notInstalledTitle } from './harness-view'
 import { ChevronIcon } from '../shared/ChevronIcon'
 import type {
   SettingsPageId,
@@ -191,15 +197,20 @@ function StorageTag({ file }: { file: string }): React.JSX.Element {
   )
 }
 
-/** The header's engine segment: one items list per engine, one shown at a time. */
+/**
+ * The header's engine segment: one items list per engine, one shown at a time.
+ * A dispatch target that cannot run is greyed and not clickable (ADR-082 §8):
+ * `aria-disabled` rather than `disabled`, so its title — the one place that
+ * says why — still shows on hover, and out of the tab order.
+ */
 function EngineSegment({
   groupId,
-  engines,
+  options,
   value,
   onChange
 }: {
   groupId: string
-  engines: EngineId[]
+  options: SegmentOption[]
   value: EngineId
   onChange: (engine: EngineId) => void
 }): React.JSX.Element {
@@ -209,17 +220,24 @@ function EngineSegment({
       data-id={groupId}
       className="shrink-0 inline-flex items-center gap-0.5 bg-bg-input border border-border rounded-md p-0.5"
     >
-      {engines.map((engine) => (
+      {options.map(({ engine, selectable, title }) => (
         <button
           key={engine}
           type="button"
           data-testid="SettingsGroup.engineSegment.option"
           data-id={engine}
-          onClick={() => onChange(engine)}
+          aria-disabled={selectable ? undefined : true}
+          tabIndex={selectable ? undefined : -1}
+          title={title}
+          onClick={() => {
+            if (selectable) onChange(engine)
+          }}
           className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default ${
-            engine === value
-              ? 'bg-accent/15 text-accent font-medium'
-              : 'text-text-secondary hover:text-text-primary'
+            !selectable
+              ? 'text-text-muted opacity-50'
+              : engine === value
+                ? 'bg-accent/15 text-accent font-medium'
+                : 'text-text-secondary hover:text-text-primary'
           }`}
         >
           {engineMeta(engine).label}
@@ -287,8 +305,10 @@ export function SettingsDialogView({
   const query = search.trim()
   const searching = query.length > 0
 
+  /** Which harnesses run: a page of one that does not is greyed in the rail (ADR-082 §8). */
+  const runs = useEngineRuns()
   const page = pageOf(activePage)
-  const groups = useMemo(() => visibleGroups(page), [page])
+  const groups = useMemo(() => visibleGroups(page, undefined, runs), [page, runs])
   /**
    * The group the rail dots. Switching page clears `activeGroup`, and the spy
    * only speaks once the user scrolls — so without a display-side default the
@@ -308,10 +328,11 @@ export function SettingsDialogView({
     if (scrollNonce > 0) setRailOpen(true)
   }, [scrollNonce])
 
-  // Capability visibility is static; one-group pages need no disclosure.
+  // One-group pages need no disclosure.
   const expandablePages = useMemo(
-    () => new Set(PAGES.filter((p) => visibleGroups(p).length > 1).map((p) => p.id)),
-    []
+    () =>
+      new Set(PAGES.filter((p) => visibleGroups(p, undefined, runs).length > 1).map((p) => p.id)),
+    [runs]
   )
   const railId = useId()
 
@@ -352,9 +373,9 @@ export function SettingsDialogView({
       // `engineFrom` names the SIBLING group whose segment this one follows, so
       // two cards about the same target can never fall out of step.
       const key = groupKey(activePage, group.engineFrom ?? group.id)
-      return engineByGroup[key] ?? enginesOf(group)[0]
+      return engineFor(group, engineByGroup[key], runs)
     },
-    [activePage, engineByGroup]
+    [activePage, engineByGroup, runs]
   )
 
   const scrollToGroup = useCallback((id: string) => {
@@ -431,8 +452,8 @@ export function SettingsDialogView({
    * presentations can never bucket or cap the same query differently.
    */
   const { buckets, total } = useMemo(
-    () => (searching ? bucketSearchHits(query) : { buckets: [], total: 0 }),
-    [searching, query]
+    () => (searching ? bucketSearchHits(query, undefined, runs) : { buckets: [], total: 0 }),
+    [searching, query, runs]
   )
 
   return (
@@ -513,8 +534,12 @@ export function SettingsDialogView({
                   {railGroup.label}
                 </div>
                 {PAGES.filter((p) => p.rail === railGroup.id).map((p) => {
+                  // A harness that does not run: greyed, not clickable, out of
+                  // the tab order, and saying why (ADR-082 §8).
+                  const opens = pageOpens(p, runs)
                   const active = p.id === activePage
-                  const expandable = expandablePages.has(p.id)
+                  // An item that cannot open has nothing to expand either.
+                  const expandable = opens && expandablePages.has(p.id)
                   const open = active && expandable && railOpen
                   // A one-group page has no sub-entry to mark, so the page row
                   // is itself the leaf — and wears the accent a child would.
@@ -527,7 +552,11 @@ export function SettingsDialogView({
                         data-id={p.id}
                         data-active={active ? 'true' : 'false'}
                         data-expanded={expandable ? (open ? 'true' : 'false') : undefined}
+                        data-state={opens ? undefined : 'not-installed'}
                         disabled={searching}
+                        aria-disabled={opens ? undefined : true}
+                        tabIndex={opens ? undefined : -1}
+                        title={opens || !p.engine ? undefined : notInstalledTitle(p.engine)}
                         aria-expanded={expandable ? open : undefined}
                         // Only while the list is mounted: `aria-controls` naming
                         // an element that is not in the DOM is a broken
@@ -535,6 +564,7 @@ export function SettingsDialogView({
                         aria-controls={open ? listId : undefined}
                         aria-current={leaf ? 'page' : undefined}
                         onClick={() => {
+                          if (!opens) return
                           // On the page you are already on the header is the
                           // accordion's own trigger; anywhere else it navigates,
                           // and arriving somewhere always opens it.
@@ -546,11 +576,13 @@ export function SettingsDialogView({
                           }
                         }}
                         className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] leading-[18px] text-left transition-colors cursor-default outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
-                          leaf
-                            ? 'bg-accent/15 text-accent font-medium'
-                            : active
-                              ? 'bg-bg-hover/60 text-text-primary font-medium'
-                              : 'text-text-secondary hover:bg-bg-hover'
+                          !opens
+                            ? 'text-text-muted opacity-50'
+                            : leaf
+                              ? 'bg-accent/15 text-accent font-medium'
+                              : active
+                                ? 'bg-bg-hover/60 text-text-primary font-medium'
+                                : 'text-text-secondary hover:bg-bg-hover'
                         }`}
                       >
                         <span
@@ -695,7 +727,7 @@ export function SettingsDialogView({
                 {groups.map((group) => {
                   const engine = engineOf(group)
                   // A group that FOLLOWS a sibling's segment draws none itself.
-                  const engines = group.engineFrom ? [] : enginesOf(group)
+                  const options = group.engineFrom ? [] : segmentOptions(group, runs)
                   const storage = storageOf(group, engine)
                   const note = noteOf(group, engine)
                   const appliesOn = appliesOnOf(group, engine)
@@ -719,10 +751,11 @@ export function SettingsDialogView({
                         <span className="flex-1 min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
                           {group.label}
                         </span>
-                        {engines.length > 0 && engine && (
+                        {/* One option is no choice: no segment, that engine's rows. */}
+                        {options.length > 1 && engine && (
                           <EngineSegment
                             groupId={group.id}
-                            engines={engines}
+                            options={options}
                             value={engine}
                             onChange={(next) =>
                               onSelectEngine(groupKey(activePage, group.id), next)
@@ -738,7 +771,7 @@ export function SettingsDialogView({
                           </span>
                         )}
                         {storage && <StorageTag file={storage} />}
-                        {group.action && (
+                        {group.action && actionShown(group, runs) && (
                           <Button
                             testid="SettingsGroup.action"
                             dataId={group.id}
@@ -755,7 +788,7 @@ export function SettingsDialogView({
                           </Button>
                         )}
                       </div>
-                      <GroupCard items={itemsFor(group, engine)} render={renderItem} />
+                      <GroupCard items={itemsFor(group, engine, runs)} render={renderItem} />
                       {note && (
                         <div
                           data-testid="SettingsGroup.note"

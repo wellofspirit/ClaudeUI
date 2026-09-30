@@ -84,6 +84,7 @@ import {
   ToggleSwitch
 } from './settings-controls'
 import { EnginePill, factsCount } from './provider-pills'
+import { useEngineRuns } from './harness-store'
 import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
@@ -291,8 +292,6 @@ function EngineRow({
 
 export interface ProviderSheetProps {
   entry: ProviderEntry
-  /** The registry's one degraded case — no opencode binary (owner ruling 2). */
-  opencodeInstalled: boolean
   onClose: () => void
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
@@ -306,12 +305,13 @@ export interface ProviderSheetProps {
   onWrote: (follow?: string) => Promise<void>
 }
 
-export function ProviderSheet({
-  entry,
-  opencodeInstalled,
-  onClose,
-  onWrote
-}: ProviderSheetProps): React.JSX.Element {
+export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): React.JSX.Element {
+  /**
+   * Which harnesses run: one that does not has no row, switch, delivery,
+   * curation or model setup here (ADR-082 §8). Its saved routes are untouched,
+   * so installing it brings them back as they were.
+   */
+  const runs = useEngineRuns()
   /**
    * The shared DEFINITION behind a shared row. The read model deliberately does
    * not carry `kind` — but a disconnected subscription and a disconnected custom
@@ -795,9 +795,12 @@ export function ProviderSheet({
         />
       )
     }
-    if (entry.keyConflict && !isConflictDismissed(nativeId, entry.keyConflict))
+    // Both are about opencode AND pi holding a key: while either does not run,
+    // there is no second harness to reconcile or share with (ADR-082 §8).
+    const bothRun = runs('opencode') && runs('pi')
+    if (bothRun && entry.keyConflict && !isConflictDismissed(nativeId, entry.keyConflict))
       return conflictPanel(entry.keyConflict)
-    if (entry.adoptable) {
+    if (bothRun && entry.adoptable) {
       return (
         <>
           {keyRow}
@@ -805,7 +808,9 @@ export function ProviderSheet({
         </>
       )
     }
-    if (isShared && definition?.kind === 'catalog') {
+    // A second key goes to opencode or pi: with neither running there is
+    // nowhere to deliver it (ADR-082 §8).
+    if (isShared && definition?.kind === 'catalog' && (runs('opencode') || runs('pi'))) {
       return (
         <>
           {keyRow}
@@ -854,13 +859,13 @@ export function ProviderSheet({
    * catalog is read inside the block, which says why when it is empty.
    */
   const curationAdapters: CurationAdapter[] = [
-    ...(opencodeInstalled &&
+    ...(runs('opencode') &&
     opencodeFacts?.enabled === true &&
     opencodeFacts.native === true &&
     opencodeFacts.providerId
       ? [opencodeCurationAdapter(opencodeFacts.providerId)]
       : []),
-    ...(piFacts?.enabled === true && piFacts.providerId
+    ...(runs('pi') && piFacts?.enabled === true && piFacts.providerId
       ? [piCurationAdapter(piFacts.providerId)]
       : [])
   ]
@@ -1048,19 +1053,15 @@ export function ProviderSheet({
   const isApiShared = isShared && !entry.subscription
 
   function opencodeRow(): React.JSX.Element {
-    if (isApiShared && opencodeInstalled) return deliveryRow('opencode')
-    if (!opencodeInstalled || !opencodeFacts) {
+    if (isApiShared) return deliveryRow('opencode')
+    if (!opencodeFacts) {
       return (
         <SettingRow
           testid={`${SHEET}.engine`}
           dataId="opencode"
           dimmed
           label="opencode"
-          description={
-            opencodeInstalled
-              ? 'Not set up in opencode. Add it under opencode providers.'
-              : 'opencode is not installed.'
-          }
+          description="Not set up in opencode. Add it under opencode providers."
         />
       )
     }
@@ -1298,10 +1299,10 @@ export function ProviderSheet({
    * control reports what is actually saved rather than silently reading as "no
    * default".
    */
-  function defaultModelRows(): React.ReactNode {
-    if (!isShared || definition?.kind !== 'custom') return null
+  function defaultModelRows(): React.JSX.Element[] {
+    if (!isShared || definition?.kind !== 'custom') return []
     return (['pi', 'opencode'] as ConfigurableHarnessId[])
-      .filter((harness) => definition.routes[harness].enabled)
+      .filter((harness) => runs(harness) && definition.routes[harness].enabled)
       .map((harness) => {
         const saved = definition.routes[harness].defaultModel ?? ''
         const available = sharedModels.filter(
@@ -1460,7 +1461,7 @@ export function ProviderSheet({
           ? opencodeFacts.providerId
           : undefined
     const rows: React.ReactNode[] = []
-    if (opencodeModelsId) {
+    if (opencodeModelsId && runs('opencode')) {
       rows.push(
         <SettingRow
           key="opencode"
@@ -1472,7 +1473,7 @@ export function ProviderSheet({
           <Button
             variant="link"
             testid={`${SHEET}.opencodeModels`}
-            disabled={busy || !opencodeInstalled}
+            disabled={busy}
             onClick={() =>
               void window.api
                 .getOpencodeProviders()
@@ -1488,7 +1489,9 @@ export function ProviderSheet({
         </SettingRow>
       )
     }
-    if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
+    if (!runs('pi')) {
+      // pi does not run: neither of its model editors (ADR-082 §8).
+    } else if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
       rows.push(
         <SettingRow
           key="pi"
@@ -1536,6 +1539,22 @@ export function ProviderSheet({
   }
 
   // ── Frame ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The ENABLED FOR rows. Codex is filtered rather than rendered as null: the
+   * group card draws its separators with `divide-y`, so an empty wrapper would
+   * leave a stray rule under the last real row. A harness that does not run has
+   * none (ADR-082 §8); with none left at all, the group is not drawn.
+   */
+  const engineRows = ENGINE_ORDER.filter(
+    (engine) =>
+      runs(engine) &&
+      (engine !== 'codex' || entry.engines.codex !== undefined) &&
+      // An API provider's rows are its deliveries (opencode, pi); Claude
+      // talks to Anthropic only, which the Claude page already says.
+      (engine !== 'claude' || !isApiShared)
+  )
+  const defaultRows = defaultModelRows()
 
   return (
     <>
@@ -1672,39 +1691,32 @@ export function ProviderSheet({
           </SheetGroup>
         )}
 
-        <SheetGroup
-          testid={`${SHEET}.group`}
-          id="enabled"
-          label={isApiShared ? 'Harnesses' : 'Enabled for'}
-          trailing={
-            // The vault re-delivers this definition to every enabled engine, so
-            // only a shared row has anything to sync.
-            isShared ? (
-              <Button
-                variant="link"
-                testid={`${SHEET}.sync`}
-                disabled={busy}
-                onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
-              >
-                Sync now
-              </Button>
-            ) : undefined
-          }
-        >
-          {/* Codex is filtered rather than rendered as null: the group card
-              draws its separators with `divide-y`, so an empty wrapper would
-              leave a stray rule under the last real row. */}
-          {ENGINE_ORDER.filter(
-            (engine) =>
-              (engine !== 'codex' || entry.engines.codex !== undefined) &&
-              // An API provider's rows are its deliveries (opencode, pi); Claude
-              // talks to Anthropic only, which the Claude page already says.
-              (engine !== 'claude' || !isApiShared)
-          ).map((engine) => (
-            <div key={engine}>{engineRow(engine)}</div>
-          ))}
-          {defaultModelRows()}
-        </SheetGroup>
+        {(engineRows.length > 0 || defaultRows.length > 0) && (
+          <SheetGroup
+            testid={`${SHEET}.group`}
+            id="enabled"
+            label={isApiShared ? 'Harnesses' : 'Enabled for'}
+            trailing={
+              // The vault re-delivers this definition to every enabled engine, so
+              // only a shared row has anything to sync.
+              isShared ? (
+                <Button
+                  variant="link"
+                  testid={`${SHEET}.sync`}
+                  disabled={busy}
+                  onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
+                >
+                  Sync now
+                </Button>
+              ) : undefined
+            }
+          >
+            {engineRows.map((engine) => (
+              <div key={engine}>{engineRow(engine)}</div>
+            ))}
+            {defaultRows}
+          </SheetGroup>
+        )}
 
         {curationAdapters.length > 0 && (
           <SheetGroup testid={`${SHEET}.group`} id="models" label="Models in the picker">
@@ -1838,7 +1850,8 @@ export function ProviderSheet({
         />
       )}
 
-      {modelEditor === 'opencode' && (
+      {/* An editor whose harness stops running goes with it (ADR-082 §8). */}
+      {modelEditor === 'opencode' && runs('opencode') && (
         <OpencodeProviderConfigModal
           providerId={
             entry.origin === 'opencode-native' ? nativeId : (opencodeFacts?.providerId ?? nativeId)
@@ -1853,7 +1866,7 @@ export function ProviderSheet({
         />
       )}
 
-      {modelEditor === 'pi' && (
+      {modelEditor === 'pi' && runs('pi') && (
         <PiProviderModal
           providerId={nativeId}
           onClose={() => {
@@ -1866,7 +1879,7 @@ export function ProviderSheet({
       {/* `piBuiltinId`, never `nativeId`: on a shared row the native id is the
           DEFINITION id (`chatgpt`), and `providers.chatgpt` is not the entry pi
           reads its ChatGPT models from. */}
-      {modelEditor === 'pi-builtin' && entry.piBuiltinId && (
+      {modelEditor === 'pi-builtin' && runs('pi') && entry.piBuiltinId && (
         <PiProviderModal
           providerId={entry.piBuiltinId}
           builtin

@@ -29,6 +29,8 @@ import type {
 } from '../../../../shared/shared-provider'
 import { Button, ChipSet, SelectField, SettingRow, TextField } from './settings-controls'
 import { SheetGroup } from './SheetFrame'
+import { useEngineRuns } from './harness-store'
+import type { EngineRuns } from './harness-view'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const FORM = 'ProviderForm'
@@ -42,11 +44,23 @@ export const PROTOCOL_OPTIONS: { value: SharedProviderProtocol; label: string }[
 
 const HARNESSES: readonly ConfigurableHarnessId[] = ['pi', 'opencode']
 
+/**
+ * The harnesses a custom endpoint can be enabled for right now: the two it
+ * supports, less any that does not run (ADR-082 §8). A hidden harness's saved
+ * route is left as it is.
+ */
+export function endpointHarnesses(runs: EngineRuns): ConfigurableHarnessId[] {
+  return HARNESSES.filter((harness) => runs(harness))
+}
+
 /** The message `SharedProviders` used, unchanged — it names all three fields. */
 export const REQUIRED_FIELDS_MESSAGE = 'Provider id, name, and model id are required'
 
-/** A blank draft: one empty model row, both routes on. */
-export function blankProviderDraft(): SharedProviderDefinition {
+/**
+ * A blank draft: one empty model row, a route on for each harness that runs
+ * (both, unless told otherwise) — never one the user could not see to turn off.
+ */
+export function blankProviderDraft(runs: EngineRuns = () => true): SharedProviderDefinition {
   return {
     id: '',
     name: '',
@@ -54,7 +68,7 @@ export function blankProviderDraft(): SharedProviderDefinition {
     protocol: 'openai-completions',
     baseUrl: '',
     models: [{ id: '', name: '' }],
-    routes: { pi: { enabled: true }, opencode: { enabled: true } },
+    routes: { pi: { enabled: runs('pi') }, opencode: { enabled: runs('opencode') } },
     managed: true
   }
 }
@@ -102,6 +116,7 @@ export function ProviderForm({
   idLocked?: boolean
 }): React.JSX.Element {
   const set = (patch: Partial<SharedProviderDefinition>): void => onDraft({ ...draft, ...patch })
+  const harnesses = endpointHarnesses(useEngineRuns())
   const setModel = (index: number, patch: Partial<SharedProviderModel>): void =>
     set({ models: draft.models.map((model, i) => (i === index ? { ...model, ...patch } : model)) })
 
@@ -159,27 +174,29 @@ export function ProviderForm({
             className="w-[180px]"
           />
         </SettingRow>
-        <SettingRow
-          testid={`${FORM}.field`}
-          dataId="routes"
-          label="Enable for"
-          description="One definition, projected into every enabled harness."
-        >
-          <ChipSet
-            testid={`${FORM}.engines`}
-            value={HARNESSES.filter((harness) => draft.routes[harness].enabled)}
-            options={HARNESSES.map((harness) => ({ value: harness, label: harness }))}
-            onToggle={(value) => {
-              const harness = value as ConfigurableHarnessId
-              set({
-                routes: {
-                  ...draft.routes,
-                  [harness]: { ...draft.routes[harness], enabled: !draft.routes[harness].enabled }
-                }
-              })
-            }}
-          />
-        </SettingRow>
+        {harnesses.length > 0 && (
+          <SettingRow
+            testid={`${FORM}.field`}
+            dataId="routes"
+            label="Enable for"
+            description="One definition, projected into every enabled harness."
+          >
+            <ChipSet
+              testid={`${FORM}.engines`}
+              value={harnesses.filter((harness) => draft.routes[harness].enabled)}
+              options={harnesses.map((harness) => ({ value: harness, label: harness }))}
+              onToggle={(value) => {
+                const harness = value as ConfigurableHarnessId
+                set({
+                  routes: {
+                    ...draft.routes,
+                    [harness]: { ...draft.routes[harness], enabled: !draft.routes[harness].enabled }
+                  }
+                })
+              }}
+            />
+          </SettingRow>
+        )}
         <SettingRow
           testid={`${FORM}.field`}
           dataId="models"

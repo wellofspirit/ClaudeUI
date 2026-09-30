@@ -431,17 +431,45 @@ As built (arc 3, S7b; mockup `b51cb3df`):
   commands" where the harness has slash commands.
 - A session that never spawned shows its harness's logo in the sidebar: its in-memory row takes
   the engine from `sessionEngines` instead of reading as Claude Code.
-- Settings. The dispatch panes' and the opencode, pi and Codex configuration panes' not-installed
-  rows offer "Install <version>" for a `missing` harness to an admin connection, through the same
-  install path. Dispatch into Claude Code gates on any of opencode, pi or Codex being installed and
-  says "No harness that can call Claude is installed (opencode, pi or Codex)." The Codex
-  configuration pane re-reads when Codex starts to run.
-- One not-installed row per Configuration page. The opencode, pi and Codex pages say "<Label> is
-  not installed" once, in their first section (Session behaviour; Model behaviour for Codex),
-  with the install link; their later sections render nothing while the harness is not installed
-  (an empty root keeps each section's `data-testid`, `data-state="not-installed"`). A Codex that
-  runs but whose `config.toml` cannot be read still says so in every section. Sections on other
-  pages (Models, Auto mode, Dispatch) keep their own row.
+- Settings for a harness that does not run (owner ruling 2026-09-30, resolved question 10;
+  replaces S7b's not-installed rows). "Does not run" is `harnessReadiness` `missing`,
+  `system-unusable` or `unavailable-here`; `ready` and `unknown` behave as before. One reading
+  serves every rule: `useEngineRuns` (`harness-store.ts`), with Claude Code always running.
+  - The harness's page cannot be opened. Its rail item (desktop) and page row (phone) are greyed,
+    `aria-disabled`, out of the tab order and inert to clicks, with no chevron or expanded state,
+    titled "<Label> is not installed · install it from Harnesses › Installed". A deep link or `open-settings` to it, a cross-link, the
+    page remembered from the last open, and the page being open when the harness goes all land on
+    Harnesses › Installed (`pageOpens`, `openableTarget`); the phone folds it. The item lights up
+    when the snapshot says the harness runs.
+  - Search returns no rows from such a page, and none from a hidden segment or group.
+  - On shared pages its parts are hidden, by one rule in the page model (`settings-pages.tsx`):
+    a `byEngine` group drops the segments of a harness that does not run (Default models, the
+    Auto-mode judge) and is itself hidden when none is left; a group or row that names the
+    harnesses it serves (`harnesses`) is hidden while none of them runs — Trust & protection
+    (`automode.json`, read only by the opencode and pi judges) and the Permissions group's
+    "opencode and pi" row. A group with no row left is not drawn, and a segment left with one
+    option is not drawn either: the group shows that engine's rows (Default models with only
+    Claude, the judge with only one harness).
+  - The dispatch page is the exception: its target segment (`dispatchTargets`, on both the
+    Dispatch into and Limits groups) greys a target that cannot run instead of hiding it, with the
+    same title; the Claude target is greyed while no caller (opencode, pi, Codex) runs, titled "No
+    harness that can call Claude is installed · install one from Harnesses › Installed". A selected
+    target that cannot be chosen shows the first one that can; with none, both groups are hidden.
+  - Models & providers: the provider list has no chip or delivery-failure pill for a harness that
+    does not run, and no "not installed" row; the provider sheet has no engine row, delivery row,
+    default-model row, curation or model-setup row (opencode models, pi models, pi overrides) or
+    model editor for it, and no key conflict or "use it for both" between opencode and pi while
+    either does not run; the ChatGPT card has no pill for it, and with no pill at all no
+    "Harnesses" label (Manage stays). The Add provider sheet reads no catalog from it. A custom
+    endpoint and a second key go to opencode and pi only: their "Enable for" / "Harnesses" chips
+    leave out one that does not run (a new endpoint is saved with no route to it; an existing
+    one's saved route is kept); with neither running, the Add sheet offers no custom endpoint, the
+    sheet offers no second key, and the "+ Add provider" header action is not drawn. Providers
+    stay listed and saved routes are not changed, so installing the harness brings its parts back
+    as they were. The registry's `opencodeInstalled` stays for main's own decisions; the renderer
+    does not read it.
+  - The panes do not ask whether their harness is installed: they mount only for one that runs.
+    A Codex that runs but whose `config.toml` cannot be read still says so in every section.
 - Installs outside the update flow show on the sidebar footer's update button (§6), so a sheet
   install is visible outside Settings. Any harness install in flight makes it spin, with a
   tooltip naming the harness, its version and its progress; one that finishes shows the same
@@ -486,6 +514,18 @@ As built (arc 3, S7b; mockup `b51cb3df`):
    managed store, `~/.claude/ui/harnesses` (owner, 2026-09-30), as §8 says.
 8. The upgrade sheet counts past sessions only (owner, 2026-09-30): a harness is "used" when
    `session_meta` holds a session on it. Sign-ins and config files are not a second signal.
+9. The Installed page as built is kept (owner, 2026-09-30), with its departures from design 1: with
+   System selected the version box keeps the ClaudeUI choice greyed (the System version sits in
+   the row's line); the version menu scrolls, with no "Older versions…" entry; the real harness
+   logos replace the mockup's squares and are hidden at phone width; the rows sit under a
+   "Sources" group heading. §1's "engine" → "harness" wording pass is kept as built too, the
+   composer's picker label ("Harness") included; "Cross-engine dispatch", the usage dashboard's
+   engine grouping and internal ids keep "engine".
+10. The settings of a harness that is not installed are not shown (owner, 2026-09-30, revising a
+    first ruling that showed them disabled): its settings page cannot be opened (its rail item is
+    greyed and routes to it land on Harnesses › Installed), search does not return it, and its
+    parts on other pages are hidden, except the dispatch target, which is greyed in its segment.
+    §8 "As built (arc 3, S7b)" describes it.
 
 ## Rejected alternatives
 

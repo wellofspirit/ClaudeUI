@@ -3,8 +3,8 @@
  *
  * The list is a pure projection of `provider-registry:list` onto the row
  * vocabulary, so what is pinned here is the projection: which rows appear and in
- * what order, what the credential badge and the engine chips say, what happens
- * to the opencode chips when opencode is not installed, that Manage opens the
+ * what order, what the credential badge and the engine chips say, that a
+ * harness that does not run has no chip and no line (ADR-082 §8), that Manage opens the
  * sheet, and that SUBSCRIPTIONS are not listed at all (ADR-074 §7: they have
  * their own cards above, filtered on the registry's `subscription` fact).
  *
@@ -15,8 +15,10 @@
  * whose contract with main drifted is exactly the failure this must catch.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 import { ProviderList } from '../ProviderList'
 import { useSessionStore } from '../../../stores/session-store'
 import { UNKNOWN_PROVIDER_AUTH } from '../../../utils/sign-in-provider'
@@ -95,6 +97,7 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup()
   app.teardown()
+  harnessStore.resetForTests()
 })
 
 async function renderList(): Promise<void> {
@@ -250,19 +253,29 @@ describe('the rows', () => {
     }
   })
 
-  it('says opencode is not installed ONCE, and drops every opencode chip', async () => {
-    // The one degraded case (owner ruling 2): a stopped server is not degraded.
-    snapshot = { entries: [chatgpt, ollama], opencodeInstalled: false }
-    await renderList()
-    const notInstalled = screen.getByTestId('ProviderList.notInstalled')
-    expect(notInstalled).toHaveTextContent('opencode is not installed.')
-    expect(
-      within(row('chatgpt'))
-        .getAllByTestId('ProviderList.engine')
+  it('hides the chips of a harness that does not run, says nothing, and brings them back', async () => {
+    // ADR-082 §8: readiness, for opencode, pi and Codex alike — not the
+    // registry's `opencodeInstalled`, which stays true here.
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    const chips = (id: string): (string | undefined)[] =>
+      within(row(id))
+        .queryAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id)
-      // Codex does not go through opencode, so a missing opencode binary says
-      // nothing about it.
-    ).toEqual(['pi', 'codex'])
+    await renderList()
+    await waitFor(() => expect(chips('chatgpt')).toEqual(['codex']))
+    // The providers stay listed: their credentials exist.
+    expect(chips('opencode:openrouter')).toEqual([])
+    expect(chips('pi:ollama')).toEqual([])
+    expect(screen.queryByTestId('ProviderList.notInstalled')).toBeNull()
+    expect(screen.getByTestId('ProviderList').textContent).not.toMatch(/not installed/)
+
+    // Installed again: the chips come back as they were (no route was touched).
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
+    expect(chips('pi:ollama')).toEqual(['pi'])
   })
 
   it('keeps the card readable when the registry read fails', async () => {

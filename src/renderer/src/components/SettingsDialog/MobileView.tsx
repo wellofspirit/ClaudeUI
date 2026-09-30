@@ -8,18 +8,25 @@ import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
+  actionShown,
   bucketSearchHits,
-  enginesOf,
+  engineFor,
   itemsFor,
   noteOf,
+  openableTarget,
   pageOf,
+  pageOpens,
+  segmentOptions,
   storageOf,
   visibleGroups,
   type RailGroupId,
+  type SegmentOption,
   type SettingsGroup,
   type SettingsPage
 } from './settings-pages'
 import { groupKey } from './settings-target'
+import { useEngineRuns } from './harness-store'
+import { notInstalledTitle } from './harness-view'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -165,16 +172,17 @@ function StorageTag({ file }: { file: string }): React.JSX.Element {
 
 /**
  * The header's engine segment: one items list per engine, one shown at a time.
- * Taller than the desktop's — this one is a touch target.
+ * Taller than the desktop's — this one is a touch target. A dispatch target
+ * that cannot run is greyed and not clickable, as on the desktop (ADR-082 §8).
  */
 function EngineSegment({
   groupId,
-  engines,
+  options,
   value,
   onChange
 }: {
   groupId: string
-  engines: EngineId[]
+  options: SegmentOption[]
   value: EngineId
   onChange: (engine: EngineId) => void
 }): React.JSX.Element {
@@ -184,17 +192,24 @@ function EngineSegment({
       data-id={groupId}
       className="shrink-0 inline-flex items-center gap-0.5 bg-bg-input border border-border rounded-md p-0.5"
     >
-      {engines.map((engine) => (
+      {options.map(({ engine, selectable, title }) => (
         <button
           key={engine}
           type="button"
           data-testid="SettingsMobileView.engineSegment.option"
           data-id={engine}
-          onClick={() => onChange(engine)}
+          aria-disabled={selectable ? undefined : true}
+          tabIndex={selectable ? undefined : -1}
+          title={title}
+          onClick={() => {
+            if (selectable) onChange(engine)
+          }}
           className={`px-3 py-1.5 text-[12px] leading-4 rounded transition-colors ${
-            engine === value
-              ? 'bg-accent/15 text-accent font-medium'
-              : 'text-text-secondary hover:text-text-primary'
+            !selectable
+              ? 'text-text-muted opacity-50'
+              : engine === value
+                ? 'bg-accent/15 text-accent font-medium'
+                : 'text-text-secondary hover:text-text-primary'
           }`}
         >
           {engineMeta(engine).label}
@@ -235,13 +250,16 @@ function GroupCard({
 function GroupHeader({
   group,
   engine,
-  engines,
+  options,
+  showAction,
   onSelectEngine
 }: {
   group: SettingsGroup
   engine: EngineId | undefined
+  /** Whether the header action is drawn (`actionShown`). */
+  showAction: boolean
   /** Empty when the group follows a sibling's segment (`engineFrom`). */
-  engines: EngineId[]
+  options: SegmentOption[]
   onSelectEngine: (engine: EngineId) => void
 }): React.JSX.Element {
   const storage = storageOf(group, engine)
@@ -256,10 +274,11 @@ function GroupHeader({
       >
         {group.label}
       </span>
-      {engines.length > 0 && engine && (
+      {/* One option is no choice: no segment, that engine's rows. */}
+      {options.length > 1 && engine && (
         <EngineSegment
           groupId={group.id}
-          engines={engines}
+          options={options}
           value={engine}
           onChange={onSelectEngine}
         />
@@ -273,7 +292,7 @@ function GroupHeader({
         </span>
       )}
       {storage && <StorageTag file={storage} />}
-      {group.action && (
+      {group.action && showAction && (
         <Button
           testid="SettingsMobileView.groupAction"
           dataId={group.id}
@@ -372,12 +391,20 @@ export function SettingsMobileView({
     }
   }, [])
 
+  /**
+   * Which harnesses run. A page of one that does not cannot be unfolded, and a
+   * route onto it lands on Harnesses › Installed (ADR-082 §8) — the deep link
+   * below re-applies when that answer changes, so a link that arrived before
+   * the harness snapshot still lands right.
+   */
+  const runs = useEngineRuns()
   const targetPage = initialTarget?.page
   const targetGroup = initialTarget?.group
+  const targetOpens = targetPage ? pageOpens(pageOf(targetPage), runs) : true
   useEffect(() => {
     if (!targetPage) return
-    openPage({ page: targetPage, group: targetGroup })
-  }, [targetPage, targetGroup, openPage])
+    openPage(targetOpens ? { page: targetPage, group: targetGroup } : { page: 'harnesses' })
+  }, [targetPage, targetGroup, targetOpens, openPage])
 
   const togglePage = useCallback((id: SettingsPageId) => {
     setExpanded((prev) => {
@@ -439,9 +466,9 @@ export function SettingsMobileView({
   const handleNavigate = useCallback(
     (target: SettingsTarget): void => {
       navigate(target)
-      openPage(target)
+      openPage(openableTarget(target, runs))
     },
-    [navigate, openPage]
+    [navigate, openPage, runs]
   )
 
   /**
@@ -484,9 +511,9 @@ export function SettingsMobileView({
     (pageId: SettingsPageId, group: SettingsGroup): EngineId | undefined => {
       if (!group.byEngine) return undefined
       const key = groupKey(pageId, group.engineFrom ?? group.id)
-      return engineByGroup[key] ?? enginesOf(group)[0]
+      return engineFor(group, engineByGroup[key], runs)
     },
-    [engineByGroup]
+    [engineByGroup, runs]
   )
 
   /** The pages of the active tab. */
@@ -498,15 +525,15 @@ export function SettingsMobileView({
    * (hits are live rows, so every bucket shown mounts a real pane).
    */
   const { buckets, total } = useMemo(
-    () => (searching ? bucketSearchHits(q) : { buckets: [], total: 0 }),
-    [searching, q]
+    () => (searching ? bucketSearchHits(q, undefined, runs) : { buckets: [], total: 0 }),
+    [searching, q, runs]
   )
 
   /** One group of an open page: header, card, note. */
   const renderGroup = (page: SettingsPage, group: SettingsGroup): React.JSX.Element => {
     const engine = engineOf(page.id, group)
     // A group that FOLLOWS a sibling's segment draws none itself.
-    const engines = group.engineFrom ? [] : enginesOf(group)
+    const options = group.engineFrom ? [] : segmentOptions(group, runs)
     const key = groupKey(page.id, group.id)
     return (
       <div
@@ -522,10 +549,11 @@ export function SettingsMobileView({
         <GroupHeader
           group={group}
           engine={engine}
-          engines={engines}
+          options={options}
+          showAction={actionShown(group, runs)}
           onSelectEngine={(next) => onSelectEngine(key, next)}
         />
-        <GroupCard items={itemsFor(group, engine)} render={renderItem} />
+        <GroupCard items={itemsFor(group, engine, runs)} render={renderItem} />
         <GroupNote group={group} engine={engine} />
       </div>
     )
@@ -684,7 +712,10 @@ export function SettingsMobileView({
         ) : (
           <div className="pb-6">
             {pages.map((page) => {
-              const open = expanded.has(page.id)
+              // A harness that does not run: greyed, not unfoldable, and folded
+              // if it was open when the harness went (ADR-082 §8).
+              const opens = pageOpens(page, runs)
+              const open = opens && expanded.has(page.id)
               return (
                 <div
                   key={page.id}
@@ -696,9 +727,17 @@ export function SettingsMobileView({
                   <button
                     data-testid="SettingsMobileView.pageToggle"
                     data-id={page.id}
-                    aria-expanded={open}
-                    onClick={() => togglePage(page.id)}
-                    className="w-full min-h-[44px] flex items-center gap-2.5 px-3 py-2.5 text-left"
+                    data-state={opens ? undefined : 'not-installed'}
+                    aria-expanded={opens ? open : undefined}
+                    aria-disabled={opens ? undefined : true}
+                    tabIndex={opens ? undefined : -1}
+                    title={opens || !page.engine ? undefined : notInstalledTitle(page.engine)}
+                    onClick={() => {
+                      if (opens) togglePage(page.id)
+                    }}
+                    className={`w-full min-h-[44px] flex items-center gap-2.5 px-3 py-2.5 text-left ${
+                      opens ? '' : 'opacity-50'
+                    }`}
                   >
                     <span className={open ? 'text-accent shrink-0' : 'text-text-muted shrink-0'}>
                       {page.icon}
@@ -708,7 +747,7 @@ export function SettingsMobileView({
                     >
                       {page.label}
                     </span>
-                    <ChevronIcon open={open} />
+                    {opens && <ChevronIcon open={open} />}
                   </button>
                   {open && (
                     <div
@@ -724,7 +763,9 @@ export function SettingsMobileView({
                           <page.accessory />
                         </div>
                       )}
-                      {visibleGroups(page).map((group) => renderGroup(page, group))}
+                      {visibleGroups(page, undefined, runs).map((group) =>
+                        renderGroup(page, group)
+                      )}
                     </div>
                   )}
                 </div>

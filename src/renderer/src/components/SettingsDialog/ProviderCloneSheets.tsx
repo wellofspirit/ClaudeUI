@@ -30,6 +30,7 @@ import type {
 } from '../../../../shared/shared-provider'
 import { Button, ChipSet, SelectField, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
+import { useEngineRuns } from './harness-store'
 import { opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
 import {
   ModelCurationList,
@@ -127,7 +128,13 @@ export function AddAnotherKeySheet({
 }): React.JSX.Element {
   const [label, setLabel] = useState('')
   const [key, setKey] = useState('')
-  const [engines, setEngines] = useState<ConfigurableHarnessId[]>([...ENGINES])
+  /** The harnesses the new entry can go to: a harness that does not run is not offered (ADR-082 §8). */
+  const runs = useEngineRuns()
+  const offered = ENGINES.filter((engine) => runs(engine))
+  const [engines, setEngines] = useState<ConfigurableHarnessId[]>(() =>
+    ENGINES.filter((engine) => runs(engine))
+  )
+  const chosen = engines.filter((engine) => offered.includes(engine))
   const [catalog, setCatalog] = useState<CloneCatalogModel[] | null>(null)
   const [seed, setSeed] = useState<Seed>('picks')
   const [picked, setPicked] = useState<string[]>([])
@@ -197,7 +204,7 @@ export function AddAnotherKeySheet({
     label.trim().length > 0 &&
     idError === null &&
     key.trim().length > 0 &&
-    engines.length > 0 &&
+    chosen.length > 0 &&
     picked.length > 0 &&
     baseUrl.length > 0 &&
     urlError === null &&
@@ -222,8 +229,8 @@ export function AddAnotherKeySheet({
       baseUrl,
       models: declareModels(picked, catalog),
       routes: {
-        pi: { enabled: engines.includes('pi') },
-        opencode: { enabled: engines.includes('opencode') }
+        pi: { enabled: chosen.includes('pi') },
+        opencode: { enabled: chosen.includes('opencode') }
       },
       derivedFrom: origin.id,
       copiedAt: today(),
@@ -352,8 +359,8 @@ export function AddAnotherKeySheet({
         <SettingRow testid={`${ADD}.field`} dataId="engines" label="Harnesses">
           <ChipSet
             testid={`${ADD}.engines`}
-            value={engines}
-            options={ENGINES.map((engine) => ({ value: engine, label: engine }))}
+            value={chosen}
+            options={offered.map((engine) => ({ value: engine, label: engine }))}
             onToggle={(value) =>
               setEngines((current) =>
                 current.includes(value as ConfigurableHarnessId)

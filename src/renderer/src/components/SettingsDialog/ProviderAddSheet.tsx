@@ -55,6 +55,7 @@ import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import { LARGE_CATALOG, opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
 import { EngineChip } from './ProviderSheet'
+import { useEngineRuns } from './harness-store'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
 
@@ -116,24 +117,35 @@ export function ProviderAddSheet({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const { entries, opencodeInstalled } = snapshot
+  const { entries } = snapshot
+  /**
+   * A catalog source is a harness that runs (ADR-082 §8): one that does not
+   * offers no providers here, and nothing is read from it.
+   */
+  const runs = useEngineRuns()
+  const opencodeSource = runs('opencode')
+  const piSource = runs('pi')
 
   useEffect(() => {
     let cancelled = false
     let failed = false
     void Promise.all([
-      opencodeInstalled
+      opencodeSource
         ? window.api.getOpencodeProviders().catch((): OpencodeProviderCatalogEntry[] => {
             failed = true
             return []
           })
         : Promise.resolve<OpencodeProviderCatalogEntry[]>([]),
-      opencodeInstalled
+      opencodeSource
         ? window.api
             .vendorAuthListOptions('opencode')
             .catch((): Record<string, VendorAuthOption[]> => ({}))
         : Promise.resolve<Record<string, VendorAuthOption[]>>({}),
-      window.api.vendorAuthListOptions('pi').catch((): Record<string, VendorAuthOption[]> => ({})),
+      piSource
+        ? window.api
+            .vendorAuthListOptions('pi')
+            .catch((): Record<string, VendorAuthOption[]> => ({}))
+        : Promise.resolve<Record<string, VendorAuthOption[]>>({}),
       window.api.listSharedProviders().catch((): SharedProviderDefinition[] => []),
       window.api.getPiBinaryPath().catch((): string | null => null)
     ]).then(([cat, opencodeOpts, piOpts, defs, piPath]) => {
@@ -148,7 +160,7 @@ export function ProviderAddSheet({
     return () => {
       cancelled = true
     }
-  }, [opencodeInstalled])
+  }, [opencodeSource, piSource])
 
   /** The vault owns the native ids its routes resolve to — never offer those. */
   const managed = useMemo(() => {
@@ -180,7 +192,7 @@ export function ProviderAddSheet({
       entries.filter((e) => e.origin === 'pi-native').map((e) => e.id.slice('pi:'.length))
     )
     const byId = new Map<string, Candidate>()
-    if (opencodeInstalled) {
+    if (opencodeSource) {
       for (const entry of catalog) {
         if (entry.authState !== 'unauthenticated' || entry.disabled) continue
         // A shared definition already names this id — a catalog provider with its
@@ -208,16 +220,16 @@ export function ProviderAddSheet({
     return [...byId.values()].sort(
       (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
     )
-  }, [catalog, opencodeOptions, piOptions, entries, managed, opencodeInstalled])
+  }, [catalog, opencodeOptions, piOptions, entries, managed, opencodeSource])
 
   /** Nothing offers a catalog at all — the section is not rendered empty. */
-  const hasCatalogSource = opencodeInstalled || Object.keys(piOptions).length > 0
+  const hasCatalogSource = opencodeSource || Object.keys(piOptions).length > 0
 
   const query = search.trim().toLowerCase()
   const matches = (...text: string[]): boolean =>
     !query || text.some((value) => value.toLowerCase().includes(query))
   const shownCandidates = candidates.filter((c) => matches(c.id, c.name))
-  const showClaudeForPi = piCommand !== null && matches('claude', 'pro', 'max', 'pi')
+  const showClaudeForPi = piSource && piCommand !== null && matches('claude', 'pro', 'max', 'pi')
 
   /** Run one write: report a rejection here rather than closing on a failure. */
   const run = useCallback(async (action: () => Promise<void>): Promise<void> => {
@@ -343,19 +355,23 @@ export function ProviderAddSheet({
         </div>
       )}
 
-      <div className="mt-4">
-        <SheetGroup testid={`${SHEET}.group`} id="custom" label="Custom endpoint">
-          <SettingRow
-            as="button"
-            testid={`${SHEET}.custom`}
-            label="Add an OpenAI-compatible endpoint"
-            description="One definition, delivered to each harness you enable — a local server, a proxy, or a gateway."
-            onClick={() => setStep({ kind: 'custom' })}
-          >
-            <span className="text-[12px] text-accent">Configure ›</span>
-          </SettingRow>
-        </SheetGroup>
-      </div>
+      {/* A custom endpoint is delivered to pi and opencode only: with neither
+          running there is nothing to enable it for, so it is not offered. */}
+      {(opencodeSource || piSource) && (
+        <div className="mt-4">
+          <SheetGroup testid={`${SHEET}.group`} id="custom" label="Custom endpoint">
+            <SettingRow
+              as="button"
+              testid={`${SHEET}.custom`}
+              label="Add an OpenAI-compatible endpoint"
+              description="One definition, delivered to each harness you enable — a local server, a proxy, or a gateway."
+              onClick={() => setStep({ kind: 'custom' })}
+            >
+              <span className="text-[12px] text-accent">Configure ›</span>
+            </SettingRow>
+          </SheetGroup>
+        </div>
+      )}
     </>
   )
 
@@ -646,7 +662,8 @@ function CustomEndpointStep({
   busy: boolean
   onSave: (definition: SharedProviderDefinition, key: string) => void
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<SharedProviderDefinition>(blankProviderDraft)
+  const runs = useEngineRuns()
+  const [draft, setDraft] = useState<SharedProviderDefinition>(() => blankProviderDraft(runs))
   const [key, setKey] = useState('')
   const [invalid, setInvalid] = useState<string | null>(null)
 

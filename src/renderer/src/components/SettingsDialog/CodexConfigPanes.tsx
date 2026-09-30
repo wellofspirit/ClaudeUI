@@ -52,12 +52,9 @@
  * the Tools group writes.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, ListEditor, Segmented, SelectField, SettingRow } from './settings-controls'
 import { LeafNumberInput, LeafRow, StackedRow, ToggleRow } from './OpencodeConfigPanes'
-import { NotInstalledRow, useHarnessInstallOffered } from './HarnessInstallLink'
-import { useHarnessReadiness } from './harness-store'
-import { harnessCanRun } from './harness-view'
 import {
   codexPathId,
   useCodexConfig,
@@ -76,7 +73,7 @@ const UNSET = ''
 // ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * Loading / not-installed gating and the hairline between rows.
+ * The Loading and unreadable states, and the hairline between rows.
  *
  * A group CARD divides its items (View.tsx), but a whole pane is one item, so
  * the rows inside it need the same divider to read as the card's rows. There is
@@ -90,33 +87,12 @@ const UNSET = ''
 function PaneShell({
   testid,
   api,
-  secondary = false,
   children
 }: {
   testid: string
   api: CodexConfigApi
-  /**
-   * A later section of its Configuration page. While the harness is not
-   * installed it renders nothing (an empty root, for its testid): the page's
-   * first section says so once, with the install link (ADR-082 §8, S7b),
-   * instead of one identical row per section.
-   */
-  secondary?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
-  // Codex not installed (ADR-082 §8): the row offers the install, and the
-  // page re-reads once it runs, instead of staying unreadable until reopened.
-  const offered = useHarnessInstallOffered('codex')
-  const readiness = useHarnessReadiness('codex')
-  const unavailable = api.status === 'unavailable'
-  const { reload } = api
-  const previous = useRef(readiness)
-  useEffect(() => {
-    const was = previous.current
-    previous.current = readiness
-    if (readiness === 'ready' && was !== 'ready' && was !== 'unknown' && unavailable) reload()
-  }, [readiness, unavailable, reload])
-
   if (api.status === 'loading') {
     return (
       <div data-testid={testid}>
@@ -124,25 +100,10 @@ function PaneShell({
       </div>
     )
   }
-  // Unreadable because Codex does not run: said once per page, by its first
-  // section. A Codex that runs but whose config cannot be read still says so
-  // in every section, as before.
-  if (api.status === 'unavailable' && secondary && !harnessCanRun(readiness)) {
-    return <div data-testid={testid} data-state="not-installed" />
-  }
-  if (api.status === 'unavailable' && offered) {
-    return (
-      <div data-testid={testid}>
-        <NotInstalledRow
-          testid={`${PANE}.status`}
-          dataId="not-installed"
-          harness="codex"
-          lead="Codex is not installed."
-          rest="These settings edit Codex's own config.toml."
-        />
-      </div>
-    )
-  }
+  // Nothing here asks whether Codex is installed: while it is not, the Codex
+  // page cannot be opened and the judge's Codex segment is hidden (ADR-082 §8),
+  // so a pane mounts fresh — and reads — once Codex runs. A Codex that runs but
+  // whose config cannot be read says so, in every section.
   if (api.status === 'unavailable') {
     return (
       <div data-testid={testid}>
@@ -548,7 +509,7 @@ export function CodexModelBehaviorSection(): React.JSX.Element {
 export function CodexContextSection(): React.JSX.Element {
   const api = useCodexConfig()
   return (
-    <PaneShell testid="CodexContextSection" api={api} secondary>
+    <PaneShell testid="CodexContextSection" api={api}>
       <NumberRow
         api={api}
         path={['model_context_window']}
@@ -616,7 +577,7 @@ export function CodexContextSection(): React.JSX.Element {
 export function CodexInstructionsSection(): React.JSX.Element {
   const api = useCodexConfig()
   return (
-    <PaneShell testid="CodexInstructionsSection" api={api} secondary>
+    <PaneShell testid="CodexInstructionsSection" api={api}>
       <TextAreaRow
         api={api}
         path={['developer_instructions']}
@@ -671,7 +632,7 @@ export function CodexSandboxSection(): React.JSX.Element {
   const api = useCodexConfig()
   const windows = window.api.platform === 'win32'
   return (
-    <PaneShell testid="CodexSandboxSection" api={api} secondary>
+    <PaneShell testid="CodexSandboxSection" api={api}>
       {/* The mock's first row: this group tunes the workspace-write profile;
           WHETHER a turn runs under it is the session's permission mode
           (ADR-067), which is not set here. */}
@@ -764,7 +725,7 @@ export function CodexSandboxSection(): React.JSX.Element {
 export function CodexShellEnvSection(): React.JSX.Element {
   const api = useCodexConfig()
   return (
-    <PaneShell testid="CodexShellEnvSection" api={api} secondary>
+    <PaneShell testid="CodexShellEnvSection" api={api}>
       <SegmentedRow
         api={api}
         path={['shell_environment_policy', 'inherit']}
@@ -813,7 +774,7 @@ export function CodexShellEnvSection(): React.JSX.Element {
 export function CodexToolsSection(): React.JSX.Element {
   const api = useCodexConfig()
   return (
-    <PaneShell testid="CodexToolsSection" api={api} secondary>
+    <PaneShell testid="CodexToolsSection" api={api}>
       <SegmentedRow
         api={api}
         path={['web_search']}
@@ -890,7 +851,7 @@ export function CodexAgentsSection(): React.JSX.Element {
   // nested rows are live unless the user has explicitly turned the tools off.
   const on = typeof enabled === 'boolean' ? enabled : true
   return (
-    <PaneShell testid="CodexAgentsSection" api={api} secondary>
+    <PaneShell testid="CodexAgentsSection" api={api}>
       <BoolRow
         api={api}
         path={['agents', 'enabled']}
@@ -956,7 +917,7 @@ export function CodexMcpSection(): React.JSX.Element {
       : []
   const { inherited, skipped } = api.mcp
   return (
-    <PaneShell testid="CodexMcpSection" api={api} secondary>
+    <PaneShell testid="CodexMcpSection" api={api}>
       <SettingRow
         testid={`${PANE}.row`}
         dataId="inherited"
@@ -1009,7 +970,7 @@ export function CodexMcpSection(): React.JSX.Element {
 export function CodexHistorySection(): React.JSX.Element {
   const api = useCodexConfig()
   return (
-    <PaneShell testid="CodexHistorySection" api={api} secondary>
+    <PaneShell testid="CodexHistorySection" api={api}>
       <SegmentedRow
         api={api}
         path={['history', 'persistence']}
@@ -1057,7 +1018,7 @@ export function CodexManagedSection(): React.JSX.Element {
   const api = useCodexConfig()
   const rules = api.rules
   return (
-    <PaneShell testid="CodexManagedSection" api={api} secondary>
+    <PaneShell testid="CodexManagedSection" api={api}>
       <ManagedRow
         configKey="model_provider"
         label="Model provider"
@@ -1190,7 +1151,7 @@ export function CodexRawConfigSection(): React.JSX.Element {
   const api = useCodexConfig()
   const text = api.snapshot ? JSON.stringify(api.snapshot.user, null, 2) : ''
   return (
-    <PaneShell testid="CodexRawConfigSection" api={api} secondary>
+    <PaneShell testid="CodexRawConfigSection" api={api}>
       <SettingRow
         testid={`${PANE}.row`}
         dataId="rawText"

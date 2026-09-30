@@ -29,7 +29,7 @@
  * outlives that is still running on the host, so a timeout is not a failure:
  * the events and the next read carry on.
  */
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import type {
   HarnessId,
@@ -40,7 +40,14 @@ import type {
   HarnessVersionsResult
 } from '../../../../shared/harness-types'
 import { ipcErrorMessage, isInvokeTimeout, isPermissionDenied } from '../../utils/ipc-error'
-import { harnessReadiness, installKey, installNeeded, type HarnessReadiness } from './harness-view'
+import {
+  engineRunsIn,
+  harnessReadiness,
+  installKey,
+  installNeeded,
+  type EngineRuns,
+  type HarnessReadiness
+} from './harness-view'
 
 /** `harness:changed` arrives once per harness a detection touched; one read answers them all. */
 export const CHANGED_DEBOUNCE_MS = 150
@@ -577,6 +584,15 @@ export function useHarnessStore(): HarnessStoreState {
 /** Mark a mounted Installed page as a visit (`HarnessStore.beginVisit`). */
 export function useHarnessPageVisit(): void {
   useEffect(() => harnessStore.beginVisit(), [])
+}
+
+/** `engineRunsIn` for the live snapshot: which engines' Settings parts show (ADR-082 §8). */
+export function useEngineRuns(): EngineRuns {
+  const snapshot = useSyncExternalStore(
+    harnessStore.subscribe,
+    () => harnessStore.getState().snapshot
+  )
+  return useMemo(() => engineRunsIn(snapshot), [snapshot])
 }
 
 /** `harnessReadiness` for one harness, live. Subscribes the store (and so starts its feed). */

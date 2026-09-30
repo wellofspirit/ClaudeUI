@@ -29,10 +29,12 @@
  * Models & providers › Subscriptions, with their accounts on them; this list is
  * API providers — keys and self-hosted endpoints — only.
  *
- * ONE DEGRADED CASE (owner ruling 2, 2026-09-08): the opencode BINARY is
- * missing. A stopped server is not degraded — catalog discovery starts one — so
- * there is no "start a session" note and no retry; there is one dimmed row
- * saying opencode is not installed, and no opencode chips on any row.
+ * A HARNESS THAT DOES NOT RUN (ADR-082 §8, owner ruling 2026-09-30) has no chip
+ * on any row and no line of its own: the provider stays listed (its credential
+ * exists) and its saved routes are untouched, so installing the harness brings
+ * its chips back as they were. Readiness comes from the harness store, for
+ * opencode, pi and Codex alike (`useEngineRuns`). A stopped opencode server is
+ * not that — catalog discovery starts one.
  *
  * The group header's "+ Add provider" is declared by the page model
  * (`settings-pages.tsx`) and dispatches the `settings:add-provider` window
@@ -57,6 +59,8 @@ import {
 import { EnginePill, Pill, factsCount } from './provider-pills'
 import { isConflictDismissed } from './key-conflicts'
 import { ProviderAddSheet } from './ProviderAddSheet'
+import { useEngineRuns } from './harness-store'
+import type { EngineRuns } from './harness-view'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const LIST = 'ProviderList'
@@ -92,9 +96,9 @@ function describe(entry: ProviderEntry): string | undefined {
   return text || undefined
 }
 
-/** The first engine whose shared delivery failed, for the row's danger pill. */
-function failedEngine(entry: ProviderEntry): EngineId | undefined {
-  return ENGINE_ORDER.find((engine) => entry.engines[engine]?.error)
+/** The first engine that runs whose shared delivery failed, for the row's danger pill. */
+function failedEngine(entry: ProviderEntry, runs: EngineRuns): EngineId | undefined {
+  return ENGINE_ORDER.find((engine) => runs(engine) && entry.engines[engine]?.error)
 }
 
 export function ProviderList(): React.JSX.Element {
@@ -119,6 +123,7 @@ export function ProviderList(): React.JSX.Element {
   /** A row whose switch-on would replace an engine's own key, asking first. */
   const [confirmOn, setConfirmOn] = useState<string | null>(null)
   const [, setRenderTick] = useState(0)
+  const runs = useEngineRuns()
 
   /**
    * Read the registry. Returns the snapshot so a write can close the sheet on an
@@ -238,7 +243,6 @@ export function ProviderList(): React.JSX.Element {
     )
   }
 
-  const { opencodeInstalled } = snapshot
   // Subscriptions are the section above (see the header); filtered on the
   // registry's own fact, never on ids.
   const entries = snapshot.entries.filter((entry) => !entry.subscription)
@@ -293,6 +297,8 @@ export function ProviderList(): React.JSX.Element {
                   />
                 )}
                 {entry.keyConflict &&
+                  runs('opencode') &&
+                  runs('pi') &&
                   !isConflictDismissed(
                     entry.id.slice(entry.id.indexOf(':') + 1),
                     entry.keyConflict
@@ -301,9 +307,13 @@ export function ProviderList(): React.JSX.Element {
                       2 different keys
                     </Pill>
                   )}
-                {failedEngine(entry) && (
-                  <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failedEngine(entry)}>
-                    Not delivered to {failedEngine(entry)}
+                {failedEngine(entry, runs) && (
+                  <Pill
+                    tone="bad"
+                    testid={`${LIST}.deliveryFailed`}
+                    dataId={failedEngine(entry, runs)}
+                  >
+                    Not delivered to {failedEngine(entry, runs)}
                   </Pill>
                 )}
               </>
@@ -313,9 +323,9 @@ export function ProviderList(): React.JSX.Element {
             {ENGINE_ORDER.filter(
               (engine) =>
                 entry.engines[engine] !== undefined &&
-                // The degraded case: with no opencode binary there is no opencode
-                // picker for anything to reach, whatever the route says.
-                (engine !== 'opencode' || opencodeInstalled)
+                // A harness that does not run has no picker for anything to
+                // reach, whatever the route says (ADR-082 §8).
+                runs(engine)
             ).map((engine) => (
               // The same pill the Subscriptions Engines row wears, counting from
               // the registry's facts — no catalog read per row.
@@ -393,22 +403,12 @@ export function ProviderList(): React.JSX.Element {
         </Fragment>
       ))}
 
-      {!opencodeInstalled && (
-        <SettingRow
-          testid={`${LIST}.notInstalled`}
-          dimmed
-          label="opencode"
-          description="opencode is not installed."
-        />
-      )}
-
       {open && (
         <ProviderSheet
           // One sheet per provider: switching rows must remount, or provider
           // A's loaded curation state renders under provider B's adapters.
           key={open.id}
           entry={open}
-          opencodeInstalled={opencodeInstalled}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
         />

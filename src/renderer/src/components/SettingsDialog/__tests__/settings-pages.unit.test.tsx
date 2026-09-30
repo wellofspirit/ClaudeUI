@@ -19,14 +19,20 @@ import {
   SECTION_TARGET,
   appliesOnOf,
   bucketSearchHits,
+  engineFor,
   enginesOf,
+  itemsFor,
   noteOf,
+  openableTarget,
   pageOf,
+  pageOpens,
   searchSettings,
+  segmentOptions,
   storageOf,
   visibleGroups,
   type SettingsGroup
 } from '../settings-pages'
+import type { EngineRuns } from '../harness-view'
 import type { EngineCapabilities } from '../../../../../shared/model-capabilities'
 
 /**
@@ -601,5 +607,103 @@ describe('bucketSearchHits', () => {
 
   it('is empty for a query that matches nothing', () => {
     expect(bucketSearchHits('zzzznotasetting')).toEqual({ buckets: [], total: 0 })
+  })
+})
+
+// ── A harness that does not run (ADR-082 §8) ─────────────────────────
+
+describe('harnesses that do not run', () => {
+  /** Every engine runs except the named ones (Claude always does). */
+  const except =
+    (...missing: string[]): EngineRuns =>
+    (engine) =>
+      !missing.includes(engine)
+  const group = (pageId: Parameters<typeof pageOf>[0], id: string): SettingsGroup =>
+    pageOf(pageId).groups.find((g) => g.id === id)!
+
+  it('a harness page opens only while its harness runs; a route onto it lands on Installed', () => {
+    const runs = except('pi')
+    expect(pageOpens(pageOf('pi'), runs)).toBe(false)
+    expect(pageOpens(pageOf('opencode'), runs)).toBe(true)
+    expect(pageOpens(pageOf('claude'), except('opencode', 'pi', 'codex'))).toBe(true)
+    expect(pageOpens(pageOf('models'), except('opencode', 'pi', 'codex'))).toBe(true)
+    expect(openableTarget({ page: 'pi', group: 'retry' }, runs)).toEqual({ page: 'harnesses' })
+    expect(openableTarget({ page: 'codex', group: 'mcp' }, runs)).toEqual({
+      page: 'codex',
+      group: 'mcp'
+    })
+  })
+
+  it('an ordinary segment hides the harness; a dispatch target greys it instead', () => {
+    const runs = except('pi')
+    expect(segmentOptions(group('models', 'defaults'), runs).map((o) => o.engine)).toEqual([
+      'claude',
+      'opencode',
+      'codex'
+    ])
+    const into = segmentOptions(group('dispatch', 'into'), runs)
+    expect(into.map((o) => [o.engine, o.selectable])).toEqual([
+      ['claude', true],
+      ['opencode', true],
+      ['pi', false],
+      ['codex', true]
+    ])
+    expect(into[2].title).toBe('pi is not installed · install it from Harnesses › Installed')
+    // Limits follows the same rule, so the two cards never disagree.
+    expect(segmentOptions(group('dispatch', 'limits'), runs)).toEqual(into)
+  })
+
+  it('the Claude target needs a caller: greyed only while opencode, pi and Codex all do not run', () => {
+    const claude = (runs: EngineRuns) =>
+      segmentOptions(group('dispatch', 'into'), runs).find((o) => o.engine === 'claude')!
+    expect(claude(except('opencode', 'codex')).selectable).toBe(true)
+    expect(claude(except('opencode', 'pi', 'codex'))).toEqual({
+      engine: 'claude',
+      selectable: false,
+      title: 'No harness that can call Claude is installed · install one from Harnesses › Installed'
+    })
+  })
+
+  it('engineFor keeps a selectable request and falls through otherwise', () => {
+    const into = group('dispatch', 'into')
+    expect(engineFor(into, 'codex', except('pi'))).toBe('codex')
+    expect(engineFor(into, 'pi', except('pi'))).toBe('claude')
+    expect(engineFor(into, 'pi', except('opencode', 'pi', 'codex'))).toBeUndefined()
+    expect(engineFor(group('sessions', 'judge'), undefined, except('opencode'))).toBe('pi')
+  })
+
+  it('visibleGroups drops what serves only harnesses that do not run', () => {
+    const ids = (runs: EngineRuns): string[] =>
+      visibleGroups(pageOf('sessions'), undefined, runs).map((g) => g.id)
+    expect(ids(except())).toEqual(['autonomy', 'permissions', 'judge', 'trust', 'retention'])
+    // Trust & protection is read by the opencode and pi judges alone.
+    expect(ids(except('opencode', 'pi'))).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
+    expect(ids(except('opencode', 'pi', 'codex'))).toEqual(['autonomy', 'permissions', 'retention'])
+    // The "opencode and pi" permissions row goes with them; the Claude rules stay.
+    const permissions = group('sessions', 'permissions')
+    expect(
+      itemsFor(permissions, undefined, except('opencode', 'pi')).map((i) => i.key)
+    ).not.toContain('otherEnginePermissions')
+    expect(itemsFor(permissions, undefined, except('pi')).map((i) => i.key)).toContain(
+      'otherEnginePermissions'
+    )
+    expect(
+      visibleGroups(pageOf('dispatch'), undefined, except('opencode', 'pi', 'codex')).map(
+        (g) => g.id
+      )
+    ).toEqual(['concurrency'])
+  })
+
+  it('search skips a page that cannot open, and segments and groups that are hidden', () => {
+    const runs = except('pi')
+    const hits = searchSettings('model', runs)
+    expect(hits.some((h) => h.page.id === 'pi')).toBe(false)
+    expect(hits.some((h) => h.engine === 'pi')).toBe(false)
+    expect(hits.some((h) => h.engine === 'opencode')).toBe(true)
+    expect(searchSettings('retry', runs).some((h) => h.page.id === 'pi')).toBe(false)
+    expect(searchSettings('retry').some((h) => h.page.id === 'pi')).toBe(true)
+    expect(
+      bucketSearchHits('trust', undefined, except('opencode', 'pi')).buckets.map((b) => b.id)
+    ).not.toContain('sessions/trust')
   })
 })

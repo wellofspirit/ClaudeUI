@@ -8,11 +8,13 @@
  *    only closes it, and a connection without `admin` never sees it;
  *  - the composer banner in each state, and its buttons;
  *  - the harness picker's marks: every harness listed (Codex too), a chip on
- *    one that is not installed, disabled where it cannot run;
- *  - the Settings "Install <version>" link on a not-installed row.
+ *    one that is not installed, disabled where it cannot run.
+ *
+ * Settings for a harness that does not run are hidden or cannot be opened
+ * (ADR-082 §8, S7c): `SettingsDialog/__tests__/SettingsDialogView.component.test.tsx`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type {
   HarnessId,
   HarnessInstallProgress,
@@ -33,7 +35,6 @@ vi.mock('../../../../../core/shared/sync/client-registry', () => ({
 import { HarnessUpgradeSheet } from '../HarnessUpgradeSheet'
 import { HarnessInstallBanner } from '../HarnessInstallBanner'
 import { EnginePicker } from '../../shared/InlinePickers'
-import { NotInstalledRow } from '../../SettingsDialog/HarnessInstallLink'
 import { harnessStore } from '../../SettingsDialog/harness-store'
 import { installEnrollBridge } from '../../SettingsDialog/enroll-flow'
 
@@ -473,42 +474,5 @@ describe('EnginePicker marks (ADR-082 §8)', () => {
     fireEvent.click(screen.getByTestId('EnginePicker.trigger'))
     expect(screen.getAllByTestId('EnginePicker.option')).toHaveLength(4)
     expect(screen.queryByTestId('EnginePicker.notInstalled')).toBeNull()
-  })
-})
-
-// ── The Settings install link ─────────────────────────────────────────
-
-describe('NotInstalledRow (Settings, mockup D)', () => {
-  it('offers "Install <version>" for a missing harness and installs through the shared path', async () => {
-    api.harnessState.mockResolvedValue(snapshot({ codex: missing('codex') }))
-    render(
-      <NotInstalledRow
-        testid="Row"
-        harness="codex"
-        lead="Codex is not installed."
-        rest="Cross-engine dispatch lets a Claude, opencode or pi session delegate a task to a Codex agent."
-      />
-    )
-    await flush()
-    const link = await screen.findByTestId('HarnessInstallLink')
-    expect(link).toHaveTextContent('Install 0.156.0')
-    expect(screen.getByTestId('Row').textContent).toBe(
-      'Codex is not installed. Install 0.156.0 · Cross-engine dispatch lets a Claude, opencode or pi session delegate a task to a Codex agent.'
-    )
-    fireEvent.click(link)
-    await flush()
-    expect(api.installHarness).toHaveBeenCalledWith('codex', '0.156.0')
-    await waitFor(() =>
-      expect(screen.getByTestId('HarnessInstallLink')).toHaveAttribute('data-state', 'installing')
-    )
-  })
-
-  it('offers nothing to a connection without admin, or for a harness that cannot be installed here', async () => {
-    webConnection('none')
-    api.harnessState.mockResolvedValue(snapshot({ pi: missing('pi') }))
-    render(<NotInstalledRow testid="Row" harness="pi" lead="pi is not installed." rest="Why." />)
-    await flush()
-    expect(screen.queryByTestId('HarnessInstallLink')).toBeNull()
-    expect(screen.getByTestId('Row').textContent).toBe('pi is not installed. Why.')
   })
 })

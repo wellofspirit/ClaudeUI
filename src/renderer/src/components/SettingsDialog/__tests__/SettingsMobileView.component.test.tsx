@@ -16,12 +16,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, act, within } from '@testing-library/react'
+import { render, screen, fireEvent, act, cleanup, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SettingsDialog } from '../SettingsDialog'
 import { pageOf } from '../settings-pages'
 import type { SettingsPageId } from '../settings-target'
 import { useSessionStore } from '../../../stores/session-store'
+import { harnessStore } from '../harness-store'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
 
 const originalMatchMedia = window.matchMedia
 const originalInnerWidth = window.innerWidth
@@ -75,6 +77,14 @@ async function expandPage(id: string): Promise<void> {
   })
 }
 
+async function settle(): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+  }
+}
+
 async function type(value: string): Promise<void> {
   await act(async () => {
     fireEvent.change(screen.getByTestId('SettingsMobileView.search'), { target: { value } })
@@ -121,6 +131,7 @@ describe('SettingsDialog mobile fork', () => {
 
   afterEach(() => {
     app.teardown()
+    harnessStore.resetForTests()
     window.matchMedia = originalMatchMedia
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
@@ -137,6 +148,53 @@ describe('SettingsDialog mobile fork', () => {
 
     expect(screen.getByTestId('SettingsMobileView')).toBeInTheDocument()
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+  })
+
+  describe('routes onto a harness page that does not run (ADR-082 §8)', () => {
+    beforeEach(() => setViewportIsMobile(false))
+
+    const title = (): string | null => screen.getByTestId('SettingsDialog.pageTitle').textContent
+
+    it('a deep link lands on Harnesses › Installed', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      await renderDialog({ onClose, initialTarget: { page: 'pi', group: 'retry' } })
+      await settle()
+      expect(title()).toBe('Installed')
+      expect(screen.queryAllByTestId('PiConfigPane.row')).toHaveLength(0)
+    })
+
+    it('the page being open when the harness goes, and the remembered page, land there too', async () => {
+      await renderDialog({ onClose, initialTarget: { page: 'pi' } })
+      await settle()
+      expect(title()).toBe('pi')
+      // pi goes while its page is open.
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      await act(async () => {
+        await harnessStore.refresh()
+      })
+      expect(title()).toBe('Installed')
+      // …and it does not come back by itself when pi runs again.
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+      await act(async () => {
+        await harnessStore.refresh()
+      })
+      expect(title()).toBe('Installed')
+      cleanup()
+
+      // Reopening on the remembered page while pi is missing: Installed.
+      await renderDialog({ onClose, initialTarget: { page: 'pi' } })
+      cleanup()
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      await act(async () => {
+        await harnessStore.refresh()
+      })
+      await renderDialog({ onClose })
+      await settle()
+      expect(title()).toBe('Installed')
+      cleanup()
+      // Leave the remembered page where the other cases expect it.
+      await renderDialog({ onClose, initialTarget: { page: 'appearance' } })
+    })
   })
 
   it('renders the untouched desktop view above 768px', async () => {
@@ -472,6 +530,40 @@ describe('SettingsDialog mobile fork', () => {
       expect(byId('SettingsMobileView.tab', 'engines')).toHaveAttribute('data-active', 'true')
       expect(byId('SettingsMobileView.page', 'claude')).toHaveAttribute('data-open', 'true')
       expect(byId('SettingsMobileView.group', 'sandbox')).toBeInTheDocument()
+    })
+
+    it('a harness that does not run: its page row is greyed and does not unfold', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      await renderDialog({ onClose })
+      await tapTab('engines')
+      await settle()
+      const toggle = byId('SettingsMobileView.pageToggle', 'pi')
+      expect(toggle).toHaveAttribute('aria-disabled', 'true')
+      expect(toggle).toHaveAttribute('tabindex', '-1')
+      // Nothing to unfold: no expanded state and no chevron.
+      expect(toggle).not.toHaveAttribute('aria-expanded')
+      expect(toggle.querySelector('polyline')).toBeNull()
+      expect(
+        byId('SettingsMobileView.pageToggle', 'opencode').querySelector('polyline')
+      ).not.toBeNull()
+      expect(toggle).toHaveAttribute(
+        'title',
+        'pi is not installed · install it from Harnesses › Installed'
+      )
+      await expandPage('pi')
+      expect(byId('SettingsMobileView.page', 'pi')).toHaveAttribute('data-open', 'false')
+      expect(screen.queryByTestId('SettingsMobileView.pageContent')).toBeNull()
+      // opencode is fine.
+      await expandPage('opencode')
+      expect(byId('SettingsMobileView.page', 'opencode')).toHaveAttribute('data-open', 'true')
+    })
+
+    it('a deep link to it lands on Harnesses › Installed', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      await renderDialog({ onClose, initialTarget: { page: 'pi', group: 'retry' } })
+      await settle()
+      expect(byId('SettingsMobileView.page', 'harnesses')).toHaveAttribute('data-open', 'true')
+      expect(byId('SettingsMobileView.page', 'pi')).toHaveAttribute('data-open', 'false')
     })
 
     // ── search: wide, live rows ─────────────────────────────────────────────

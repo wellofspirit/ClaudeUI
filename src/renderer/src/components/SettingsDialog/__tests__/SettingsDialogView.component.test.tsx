@@ -12,7 +12,9 @@ import { SettingsDialogView, type SettingsDialogViewProps } from '../View'
 import { DEFAULT_SETTINGS, useSessionStore } from '../../../stores/session-store'
 import { PAGES } from '../settings-pages'
 import { harnessStore } from '../harness-store'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
 import type { EngineId } from '../../../../../shared/types'
+import type { HarnessId } from '../../../../../shared/harness-types'
 
 const byId = (testid: string, id: string): HTMLElement =>
   screen.getAllByTestId(testid).find((el) => el.dataset.id === id)!
@@ -776,5 +778,247 @@ describe('shell chrome', () => {
     const { props } = renderView({ activePage: 'sessions' })
     fireEvent.click(screen.getByTestId('SandboxCrossLinkRow.action'))
     expect(props.navigate).toHaveBeenCalledWith({ page: 'claude', group: 'sandbox' })
+  })
+})
+
+describe('a harness that does not run (ADR-082 §8)', () => {
+  /** The harness store's answer; `null` never answers (readiness `unknown`). */
+  function harnesses(missing: HarnessId[] | null): void {
+    app.bridge.ipcMain.handle('harness:state', async () =>
+      missing === null ? new Promise(() => {}) : harnessSnapshot(missing)
+    )
+  }
+
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+  }
+
+  const railItem = (id: string): HTMLElement => byId('SettingsDialog.railItem', id)
+  const segment = (): (string | undefined)[] =>
+    screen.queryAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
+  const groupIds = (): (string | undefined)[] =>
+    screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)
+
+  afterEach(() => harnessStore.resetForTests())
+
+  it('greys its rail item: aria-disabled, out of the tab order, titled, and a click does nothing', async () => {
+    harnesses(['pi', 'codex'])
+    const { props } = renderView({ activePage: 'claude' })
+    await settle()
+    for (const [id, label] of [
+      ['pi', 'pi'],
+      ['codex', 'Codex']
+    ]) {
+      const item = railItem(id)
+      expect(item).toHaveAttribute('aria-disabled', 'true')
+      expect(item).toHaveAttribute('tabindex', '-1')
+      expect(item).toHaveAttribute('data-state', 'not-installed')
+      expect(item).toHaveAttribute(
+        'title',
+        `${label} is not installed · install it from Harnesses › Installed`
+      )
+      expect(item.className).toContain('opacity-50')
+      // Greyed, not struck through.
+      expect(item.className).not.toContain('line-through')
+      fireEvent.click(item)
+    }
+    expect(props.onSelectPage).not.toHaveBeenCalled()
+    // The others are normal.
+    for (const id of ['opencode', 'claude', 'harnesses']) {
+      expect(railItem(id)).not.toHaveAttribute('aria-disabled')
+      expect(railItem(id)).not.toHaveAttribute('title')
+    }
+    fireEvent.click(railItem('opencode'))
+    expect(props.onSelectPage).toHaveBeenCalledWith('opencode')
+  })
+
+  it('a greyed rail item has no chevron and nothing to expand', async () => {
+    harnesses(['pi'])
+    renderView({ activePage: 'claude' })
+    await settle()
+    const pi = railItem('pi')
+    expect(pi).not.toHaveAttribute('aria-expanded')
+    expect(pi).not.toHaveAttribute('data-expanded')
+    expect(within(pi).queryByTestId('SettingsDialog.railChevron')).toBeNull()
+    // opencode's page has groups to disclose, so its item keeps both.
+    expect(railItem('opencode')).toHaveAttribute('aria-expanded', 'false')
+    expect(within(railItem('opencode')).getByTestId('SettingsDialog.railChevron')).toBeTruthy()
+  })
+
+  it('+ Add provider is not offered while neither opencode nor pi runs', async () => {
+    harnesses(['opencode'])
+    renderView({ activePage: 'models' })
+    await settle()
+    expect(screen.getByTestId('SettingsGroup.action')).toHaveTextContent('+ Add provider')
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi'])
+    renderView({ activePage: 'models' })
+    await settle()
+    expect(screen.queryByTestId('SettingsGroup.action')).toBeNull()
+  })
+
+  it('lights the rail item up live once the harness runs', async () => {
+    harnesses(['pi'])
+    const { props } = renderView({ activePage: 'claude' })
+    await settle()
+    expect(railItem('pi')).toHaveAttribute('aria-disabled', 'true')
+    harnesses([])
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(railItem('pi')).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(railItem('pi'))
+    expect(props.onSelectPage).toHaveBeenCalledWith('pi')
+  })
+
+  it('an unknown readiness (no snapshot yet) is normal', async () => {
+    harnesses(null)
+    renderView({ activePage: 'claude' })
+    await settle()
+    for (const id of ['opencode', 'pi', 'codex']) {
+      expect(railItem(id)).not.toHaveAttribute('aria-disabled')
+    }
+  })
+
+  it('search returns no row from its page, segment or group', async () => {
+    harnesses(['pi'])
+    renderView({ search: 'model' })
+    await settle()
+    const ids = screen.getAllByTestId('SettingsDialog.resultBucket').map((el) => el.dataset.id!)
+    expect(ids.filter((id) => id.startsWith('pi/') || id.endsWith('/pi'))).toEqual([])
+    expect(ids).toContain('sessions/judge/opencode')
+
+    cleanup()
+    renderView({ search: 'automatic retry' })
+    await settle()
+    expect(screen.queryAllByTestId('SettingsDialog.resultBucket')).toHaveLength(0)
+  })
+
+  it('Default models: no segment or row for it; back when it runs', async () => {
+    harnesses(['pi', 'codex'])
+    renderView({
+      activePage: 'models',
+      engineByGroup: { 'models/defaults': 'pi' as EngineId }
+    })
+    await settle()
+    expect(
+      within(byId('SettingsGroup', 'defaults'))
+        .getAllByTestId('SettingsGroup.engineSegment.option')
+        .map((el) => el.dataset.id)
+    ).toEqual(['claude', 'opencode'])
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({
+      activePage: 'models',
+      engineByGroup: { 'models/defaults': 'pi' as EngineId }
+    })
+    await settle()
+    const defaults = within(byId('SettingsGroup', 'defaults'))
+    // One option is no choice: no segment at all, only Claude's rows.
+    expect(defaults.queryByTestId('SettingsGroup.engineSegment')).toBeNull()
+    // The requested pi segment falls through to the first one that shows.
+    const keys = defaults.getAllByTestId('SettingsItem').map((el) => el.dataset.id)
+    expect(keys).not.toContain('piModels')
+    expect(keys).toContain('claudeDefaults')
+    expect(screen.getByTestId('SettingsDialog.page').textContent).not.toMatch(/not installed/)
+
+    harnesses([])
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(
+      within(byId('SettingsGroup', 'defaults'))
+        .getAllByTestId('SettingsGroup.engineSegment.option')
+        .map((el) => el.dataset.id)
+    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+  })
+
+  it('Sessions: the judge segments and Trust & protection follow opencode, pi and Codex', async () => {
+    harnesses(['pi'])
+    renderView({ activePage: 'sessions', engineByGroup: { 'sessions/judge': 'pi' as EngineId } })
+    await settle()
+    expect(segment()).toEqual(['opencode', 'codex'])
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
+      'opencodeAutoMode'
+    )
+    // Trust & protection serves opencode's judge too: kept.
+    expect(groupIds()).toContain('trust')
+    expect(screen.getByTestId('OtherEnginePermissionsRow')).toBeInTheDocument()
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi'])
+    renderView({ activePage: 'sessions' })
+    await settle()
+    // Only Codex's guardian is left in the judge — one option, so no segment —
+    // and the opencode/pi-only parts go.
+    expect(segment()).toEqual([])
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
+      'codexAutoMode'
+    )
+    expect(groupIds()).not.toContain('trust')
+    expect(screen.queryByTestId('OtherEnginePermissionsRow')).toBeNull()
+    expect(groupIds()).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({ activePage: 'sessions' })
+    await settle()
+    expect(groupIds()).toEqual(['autonomy', 'permissions', 'retention'])
+  })
+
+  it('Dispatch: a target that does not run is greyed and unselectable, the next one shows', async () => {
+    harnesses(['pi'])
+    const { props } = renderView({
+      activePage: 'dispatch',
+      engineByGroup: { 'dispatch/into': 'pi' as EngineId }
+    })
+    await settle()
+    expect(segment()).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    const pi = byId('SettingsGroup.engineSegment.option', 'pi')
+    expect(pi).toHaveAttribute('aria-disabled', 'true')
+    expect(pi).toHaveAttribute('tabindex', '-1')
+    expect(pi).toHaveAttribute(
+      'title',
+      'pi is not installed · install it from Harnesses › Installed'
+    )
+    fireEvent.click(pi)
+    expect(props.onSelectEngine).not.toHaveBeenCalled()
+    // The selected pi is not selectable: the first that is shows, both cards.
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
+      'claudeDispatch',
+      'claudeDispatchLimits'
+    ])
+    expect(byId('SettingsGroup.engineSegment.option', 'claude')).not.toHaveAttribute(
+      'aria-disabled'
+    )
+  })
+
+  it('Dispatch: Claude is greyed while no caller runs; with no target at all, both cards go', async () => {
+    harnesses(['opencode', 'codex'])
+    renderView({ activePage: 'dispatch' })
+    await settle()
+    // pi can still call Claude.
+    expect(byId('SettingsGroup.engineSegment.option', 'claude')).not.toHaveAttribute(
+      'aria-disabled'
+    )
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({ activePage: 'dispatch' })
+    await settle()
+    // No caller for Claude, no other target: nothing to configure but the slots.
+    expect(groupIds()).toEqual(['concurrency'])
   })
 })

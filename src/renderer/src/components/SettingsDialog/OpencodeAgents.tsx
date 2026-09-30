@@ -33,7 +33,6 @@ import {
   SettingsToggle,
   TextField
 } from './settings-controls'
-import { useOpencodeInstalled } from './use-engine-installed'
 
 // ── Shared look ──────────────────────────────────────────────────────
 
@@ -783,8 +782,11 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
 
 // ── OpencodeAgentsSection ────────────────────────────────────────────
 
+/**
+ * The agent files are ClaudeUI's own read, and the opencode page cannot be
+ * opened while opencode is not installed (ADR-082 §8), so nothing here asks.
+ */
 export function OpencodeAgentsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   const cwd = useActiveSession((s) => s.cwd)
   const [view, setView] = useState<ViewState>({ mode: 'list' })
   const [refresh, setRefresh] = useState(0)
@@ -793,12 +795,6 @@ export function OpencodeAgentsSection(): React.JSX.Element {
     setRefresh((n) => n + 1)
     setView({ mode: 'list' })
   }
-
-  if (installed === null) return <SettingRow testid={TESTID} description="Loading…" />
-
-  // Not installed: the opencode page's first section says so once, with the
-  // install link (ADR-082 §8, S7b); this later section says nothing.
-  if (!installed) return <div data-testid={TESTID} data-state="not-installed" />
 
   return (
     <div data-testid={TESTID} className="divide-y divide-border/55">

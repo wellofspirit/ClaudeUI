@@ -16,8 +16,10 @@
  * that pair's shared contract and cannot be seen from either half alone.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
 import { SubscriptionsSection } from '../SubscriptionsSection'
@@ -222,6 +224,7 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup()
   app.teardown()
+  harnessStore.resetForTests()
 })
 
 /**
@@ -366,13 +369,99 @@ describe('ENABLED FOR', () => {
     expect(called('vendorAuthSetKey')).toEqual([['pi', 'openrouter', 'sk-or-live']])
   })
 
-  it('says opencode is not installed instead of offering a toggle', async () => {
-    snapshot = { entries: [chatgpt], opencodeInstalled: false }
+  it('has no row, pill or curation for a harness that does not run, until it runs (ADR-082 §8)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi', 'codex']))
+    const rows = (): (string | undefined)[] =>
+      screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+    const pills = (): (string | undefined)[] =>
+      screen.queryAllByTestId('SubscriptionsSection.enginePill').map((el) => el.dataset.id)
     await openSheet('chatgpt')
-    expect(engineRow('opencode')).toHaveTextContent('opencode is not installed.')
+    await waitFor(() => expect(rows()).toEqual(['claude', 'opencode']))
+    // The ChatGPT card's Engines row, behind the sheet, says the same.
+    expect(pills()).toEqual(['opencode'])
     expect(
-      screen.queryAllByTestId('ProviderSheet.engineToggle').map((el) => el.dataset.id)
-    ).toEqual(['claude', 'pi'])
+      screen.queryAllByTestId('ProviderSheet.curate').map((el) => el.dataset.id)
+    ).not.toContain('pi')
+    expect(document.body.textContent).not.toMatch(/not installed/)
+
+    // Installed again: back as they were — no route was changed on the way.
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(rows()).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(pills()).toEqual(['codex', 'opencode', 'pi'])
+    expect(sent('shared-provider:set-route')).toEqual([])
+  })
+
+  it('the ChatGPT sheet has no "pi overrides" while pi does not run (ADR-082 §8)', async () => {
+    // chatgpt's pi route lands on a vendor pi ships (`piBuiltinId`), which is
+    // what draws Harness-specific › pi overrides.
+    const setup = (): (string | undefined)[] =>
+      screen.queryAllByTestId('ProviderSheet.modelSetup').map((el) => el.dataset.id)
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('chatgpt')
+    await waitFor(() =>
+      expect(
+        screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+      ).not.toContain('pi')
+    )
+    expect(setup()).not.toContain('pi-builtin')
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).toBeNull()
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(setup()).toContain('pi-builtin')
+  })
+
+  it('no key reconciliation between opencode and pi while one of them does not run', async () => {
+    snapshot = {
+      entries: [{ ...openrouter, keyConflict: { opencode: '…abcd', pi: '…wxyz' } }],
+      opencodeInstalled: true
+    }
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('opencode:openrouter')
+    await waitFor(() =>
+      expect(
+        screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+      ).not.toContain('pi')
+    )
+    expect(screen.queryByTestId('ProviderSheet.keyConflict')).toBeNull()
+    expect(screen.queryByTestId('ProviderList.keyConflict')).toBeNull()
+  })
+
+  it('the ChatGPT card draws no Harnesses label with no pill to show, and keeps Manage', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () =>
+      harnessSnapshot(['opencode', 'pi', 'codex'])
+    )
+    render(<SubscriptionsSection />)
+    await waitFor(() => expect(screen.getByTestId('SubscriptionsSection.manage')).toBeTruthy())
+    await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+    const row = screen.getByTestId('SubscriptionsSection.engines')
+    expect(within(row).queryByTestId('SubscriptionsSection.enginesLabel')).toBeNull()
+    expect(within(row).queryAllByTestId('SubscriptionsSection.enginePill')).toHaveLength(0)
+    expect(within(row).getByTestId('SubscriptionsSection.manage')).toBeInTheDocument()
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(within(row).getByTestId('SubscriptionsSection.enginesLabel')).toHaveTextContent(
+      'Harnesses'
+    )
+  })
+
+  it('an API provider has no delivery or default-model row for a harness that does not run', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('ollama-local')
+    await waitFor(() =>
+      expect(screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).toEqual([
+        'opencode'
+      ])
+    )
+    expect(screen.queryAllByTestId('ProviderSheet.defaultModel')).toHaveLength(0)
   })
 })
 
@@ -1467,6 +1556,27 @@ describe('a second key for a catalog provider (ADR-074 slice 10)', () => {
     await openSheet('openrouter')
     await click(screen.getByTestId('ProviderSheet.addAnotherKey'))
   }
+
+  it('offers only the harnesses that run, and none at all while neither does (ADR-082 §8)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    await openForm()
+    expect(
+      within(addSheet())
+        .getAllByTestId('AddAnotherKeySheet.engines.chip')
+        .map((el) => el.dataset.id)
+    ).toEqual(['opencode'])
+    cleanup()
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    await openSheet('openrouter')
+    expect(screen.queryByTestId('ProviderSheet.anotherKey')).toBeNull()
+  })
 
   it('is offered on a catalog provider’s Key section', async () => {
     await openSheet('openrouter')

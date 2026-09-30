@@ -39,6 +39,7 @@ import type { AccountsState, EngineId } from '../../../../shared/types'
 import { accountDisplayName } from '../../utils/sign-in-provider'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { ProviderSheet } from './ProviderSheet'
+import { useEngineRuns } from './harness-store'
 import { EnginePill as SharedEnginePill, Pill } from './provider-pills'
 import {
   curationCount,
@@ -658,19 +659,27 @@ function CardHeader({
 
 function EnginesRow({
   children,
-  trailing
+  trailing,
+  empty = false
 }: {
   children: React.ReactNode
   trailing: React.ReactNode
+  /** No pill to show (no harness it reaches runs): no label either; the action stays put. */
+  empty?: boolean
 }): React.JSX.Element {
   return (
     <div
       data-testid={`${SUBS}.engines`}
       className="flex items-center gap-3 mx-4 mb-3 px-3 py-2.5 rounded-[10px] border border-border bg-bg-primary/40"
     >
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
-        Harnesses
-      </span>
+      {!empty && (
+        <span
+          data-testid={`${SUBS}.enginesLabel`}
+          className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary"
+        >
+          Harnesses
+        </span>
+      )}
       <span className="flex-1 min-w-0 flex flex-wrap gap-1.5">{children}</span>
       {trailing}
     </div>
@@ -1133,13 +1142,11 @@ function useCurationSummary(
 
 function ChatgptCard({
   entry,
-  opencodeInstalled,
   managing,
   menus,
   onManage
 }: {
   entry: ProviderEntry
-  opencodeInstalled: boolean
   /** Its Manage sheet is open — the pill counts wait until it closes. */
   managing: boolean
   menus: MenuControl
@@ -1157,8 +1164,11 @@ function ChatgptCard({
   const active = list.find((account) => account.id === accounts?.activeId)
   const reauth = active?.needsReauth === true
 
-  const opencodeOn = opencodeInstalled && entry.engines.opencode?.enabled === true
-  const piOn = entry.engines.pi?.enabled === true
+  // A harness that does not run has no pill here (ADR-082 §8); its route is
+  // kept, so installing it brings the pill back as it was.
+  const runs = useEngineRuns()
+  const opencodeOn = runs('opencode') && entry.engines.opencode?.enabled === true
+  const piOn = runs('pi') && entry.engines.pi?.enabled === true
   const opencodeCount = useCurationSummary(
     'opencode',
     entry.engines.opencode?.providerId,
@@ -1313,20 +1323,27 @@ function ChatgptCard({
       </div>
 
       <EnginesRow
+        empty={!runs('codex') && !runs('opencode') && !runs('pi')}
         trailing={
           <Button variant="tinted" testid={`${SUBS}.manage`} dataId={entry.id} onClick={onManage}>
             Manage
           </Button>
         }
       >
-        <EnginePill engine="codex" on={entry.engines.codex?.enabled !== false} warn={reauth} />
-        <EnginePill
-          engine="opencode"
-          on={opencodeOn}
-          count={pillCount(opencodeCount)}
-          warn={reauth}
-        />
-        <EnginePill engine="pi" on={piOn} count={pillCount(piCount)} warn={reauth} />
+        {runs('codex') && (
+          <EnginePill engine="codex" on={entry.engines.codex?.enabled !== false} warn={reauth} />
+        )}
+        {runs('opencode') && (
+          <EnginePill
+            engine="opencode"
+            on={opencodeOn}
+            count={pillCount(opencodeCount)}
+            warn={reauth}
+          />
+        )}
+        {runs('pi') && (
+          <EnginePill engine="pi" on={piOn} count={pillCount(piCount)} warn={reauth} />
+        )}
       </EnginesRow>
       {reauth && (
         <div
@@ -1409,7 +1426,6 @@ export function SubscriptionsSection(): React.JSX.Element {
           <ChatgptCard
             key={entry.id}
             entry={entry}
-            opencodeInstalled={registry.opencodeInstalled}
             managing={managing === entry.id}
             menus={menus}
             onManage={() => setManaging(entry.id)}
@@ -1420,7 +1436,6 @@ export function SubscriptionsSection(): React.JSX.Element {
         <ProviderSheet
           key={open.id}
           entry={open}
-          opencodeInstalled={registry.opencodeInstalled}
           onWrote={handleWrote}
           onClose={() => setManaging(null)}
         />
