@@ -42,8 +42,7 @@ floor and a tested version.
 ### 1. Names
 
 A **harness** is the program ClaudeUI runs: Claude Code, opencode, pi, Codex. The Settings rail group
-"Engines" becomes **Harnesses**. Its first page manages the programs. The working name is
-**Installed**; the owner's alternative is "Engines", and the choice is open until arc 2. The existing
+"Engines" becomes **Harnesses**. Its first page manages the programs and is named **Installed** (owner, 2026-09-30). The existing
 per-harness pages follow it unchanged, with "Claude" renamed "Claude Code". Arc 2 includes a copy
 pass so the rest of the UI (welcome picker, dispatch targets, provider engine pills) uses one term.
 
@@ -131,6 +130,12 @@ After arc 2 ships, the installer, the release zips and the Linux server tarball 
 same managed store, so development and integration tests exercise the download path. Claude Code
 stays bundled, and so does `audio-capture.node`, which voice loads from `claude-cli/vendor`.
 
+Upgrading from a bundled release (owner, 2026-09-30): on the first launch without the bundled
+engines, ClaudeUI shows one sheet listing the harnesses this profile has used (past sessions or
+config), with one Install button for their Tested versions. Nothing downloads without that click;
+the sheet does not come back once answered. A harness the sheet skipped is offered again when a
+session on it is opened.
+
 ## Consequences
 
 - The installer shrinks by about 650 MB. A first run needs one download per extra harness a user
@@ -145,13 +150,13 @@ stays bundled, and so does `audio-capture.node`, which voice loads from `claude-
 - `getCliVersion()` must read `--version` for a non-bundled Claude Code instead of returning
   `unknown`.
 
-## Open questions (defaults proposed, owner to confirm)
+## Resolved questions (owner, 2026-09-30)
 
-1. The page name: Installed or Engines.
-2. Whether a custom file path (outside detection) gets UI, or stays an environment variable for
-   development. Default: environment variable only, generalised from `CLAUDEUI_CLAUDE_CLI` to each
-   harness.
-3. The retention window for unused versions. Default: seven days.
+1. The page is named **Installed**.
+2. A custom file path gets no UI: it stays an environment variable for development, generalised from
+   `CLAUDEUI_CLAUDE_CLI` to one variable per harness.
+3. Unused versions are kept for seven days (the proposed default, not challenged).
+4. Upgrades from a bundled release prompt once (§8).
 
 ## Rejected alternatives
 
