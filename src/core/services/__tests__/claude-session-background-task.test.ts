@@ -425,6 +425,47 @@ describe('ClaudeSession — the tool_result of a backgrounded Bash', () => {
     }
   )
 
+  // ADR-073 §7: a subagent's run_in_background Bash is listed in the roster
+  // and opens like the main agent's, so its entry must tail the file too. Its
+  // result arrives under the agent's id (S0, cli.js 2.1.280). Only the output
+  // file is recorded: a nested result's text never seeds agent identity.
+  it("tails a subagent's background command, without mapping its task from the text", async () => {
+    const NESTED_BASH = 'toolu_0111zu17CxKLxtxfR7bbYRSV'
+    const NESTED_TASK = 'bxfh7umpu'
+    const outputPath = path.join(dir, `${NESTED_TASK}.output`)
+    fs.writeFileSync(outputPath, 'bg\n')
+    const { session, sent, handle } = await startSession('routing-bg-nested')
+    await feed(handle, taskStarted(AGENT, AGENT_TASK, 'local_agent', true))
+    // The entry opened before the result named the file: the watch is parked.
+    session.watchBackground(NESTED_BASH)
+    expect(backgroundOutputs(sent)).toEqual([])
+
+    await feed(handle, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            tool_use_id: NESTED_BASH,
+            type: 'tool_result',
+            content: `Command running in background with ID: ${NESTED_TASK}. Output is being written to: ${outputPath}. You will be notified when it completes.`,
+            is_error: false
+          }
+        ]
+      },
+      parent_tool_use_id: AGENT
+    })
+    expect(backgroundOutputs(sent)).toEqual([
+      { toolUseId: NESTED_BASH, tail: 'bg\n', totalSize: 3, done: false }
+    ])
+    const internals = session as unknown as {
+      taskIdMap: Map<string, string>
+      originByTaskId: Map<string, string>
+    }
+    expect(internals.taskIdMap.has(NESTED_TASK)).toBe(false)
+    expect(internals.originByTaskId.has(NESTED_TASK)).toBe(false)
+  })
+
   it('maps the task to the call when task_started never arrived', async () => {
     const { sent, handle } = await startSession('routing-bg-manual-map')
     await feed(handle, manualBackgroundResult(path.join(dir, `${BASH_TASK}.output`)), {
