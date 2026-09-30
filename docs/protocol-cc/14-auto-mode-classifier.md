@@ -563,6 +563,13 @@ Where it runs:
    (char `3587446`) re-applies `ZIe` live, which also catches rules added
    mid-session (e.g. "always allow" session rules).
 
+ClaudeUI mirrors this predicate in `src/core/permissions/shell-rules.ts`
+`isClassifierBypassingRule` (one union of the Bash and PowerShell lists,
+`classifyAllShell` read from the user settings by the caller) and uses it, plus
+a carve-out and safety checks cli.js does not make, to let narrow allow rules
+skip the opencode/pi judge — `docs/adr/adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md`
+§4.
+
 ### 3.1 The safe allowlist (`rIe`, char `9835278`)
 
 Fast path B. Structure unchanged since 2.1.220:

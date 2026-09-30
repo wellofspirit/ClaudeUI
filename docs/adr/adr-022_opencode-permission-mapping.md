@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-22
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex phase 1 from shared-rule parity; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex now runs under the shared modes and Claude permission rules through ClaudeUI's own evaluator rather than a compiled native ruleset. Existing Claude/opencode/pi rules are unchanged.
-**Amended by:** [ADR-084](adr-084_read-only-judge-bypass.md) §3 — the `autoEdit` (`acceptEdits`) ruleset gains `edit` asks for agent-control paths, and auto mode asks for every edit and clears ordinary ones host-side.
+**Amended by:** [ADR-084](adr-084_read-only-judge-bypass.md) §3 — the `autoEdit` (`acceptEdits`) ruleset gains `edit` asks for agent-control paths, and auto mode asks for every edit and clears ordinary ones host-side. [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) — Bash deny/ask rules also compile to broad over-approximating globs, MCP rules compile to opencode keys, a host-side pre-check (deny/ask, plan refusal, session allows, the parent's rules for task children) runs on every ask, ClaudeUI never replies `always`, plan mode withholds `edit`/`bash`/`task` allows, and task children carry per-agent asks.
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md) (neutral autonomy modes), [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend)
 
 ## Context
@@ -134,11 +134,13 @@ so the same allow/ask/deny rules + additional directories govern both engines.
   which ClaudeUI applies host-side to plan-safe commands only — ADR-085 ruling 7), emitted **allow → ask → deny** so deny wins last-match-wins,
   replicating Claude's deny>ask>allow precedence. All three scopes (user/project/local) merged.
 
-**Pending follow-on (decided, not yet built):**
-
-- **"Always-allow" write-back** — generate Claude-format `suggestions` for opencode approvals and, on
-  accept, `replyPermission('always')` (live session) **and** persist via `saveClaudePermissions`
-  (shared store → reapplies next spawn, visible in PermissionsDialog). Full parity with Claude.
+**"Always-allow" write-back (built; amended by ADR-085 §3):** opencode approvals carry Claude-format
+`suggestions`; on accept with a ticked suggestion the rule is persisted via `saveClaudePermissions`
+(shared store → reapplies next spawn, visible in the permissions UI) and the live ask is answered
+`once`. ClaudeUI **never** replies `always`: opencode's `approved` list is per instance (per
+directory), not per session, so an `always` leaked across chats and modes and outranked deny/ask
+rules. A per-session host-side allow set (keyed by the ask's own `always` patterns) replaces it —
+[ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §3.
 
 ## Auto mode — LLM permission gatekeeper
 

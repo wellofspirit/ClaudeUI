@@ -5,6 +5,9 @@
 contract and what the judge is told about the user's rules),
 [ADR-081](adr-081_claudeui-owned-judge-transport.md) §4 (the stage-1 reasoning effort on OpenAI
 reasoning routes).
+**Amended by:** [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §4
+— the §3 deviation is retired for narrow allow rules: with the robust deny/ask matcher in place, an
+allow rule cli.js would keep as a direct allow skips the judge, subject to safety checks.
 **Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (the user's permission rules, which
 the judge now reads), [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the shared `automode.json` and its
 Trust & protection group, which gain the guidance lists),
@@ -134,6 +137,12 @@ argument-reordering evasion defeats pattern matching. The judge now sees the all
 so the cost of review is latency, not false blocks. Keeping narrow allow rules as direct allows, as
 `cli.js` does, remains an open option for the owner (§Consequences).
 
+_Superseded by [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md)
+§4 (2026-09-30): the engine rulesets still strip every allow rule, so every allowed call reaches the
+host, but the host now lets a usable, un-carved-out allow rule skip the judge under strict coverage
+and safety checks. The reordering evasion is closed by ADR-085 §1's matcher, which runs on every call
+in every mode._
+
 ### 4. User guidance lists
 
 `~/.claude/ui/automode.json` gains two optional lists, edited under Settings › Sessions & autonomy ›
@@ -171,6 +180,8 @@ are Self-Modification territory for the agent.
 - The system prompt grows by the permission-rule lines and the guidance entries. Both are stable
   within a session. An edit to the rules mid-session costs one uncached prefix.
 - Open for the owner: whether narrow user allow rules should bypass the judge again, as `cli.js`
-  does. That would cut latency but reopen argument-reordering evasion for broad rules.
+  does. That would cut latency but reopen argument-reordering evasion for broad rules. _Decided in
+  [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §4: yes, with
+  a robust deny/ask matcher, a carve-out for rules a deny/ask narrows, and safety checks._
 - `docs/protocol-cc/14-auto-mode-classifier.md` is updated for 2.1.280: rules asset, deny-rule line,
   severity mode, and allow-rule stripping.

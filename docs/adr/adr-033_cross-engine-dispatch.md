@@ -61,7 +61,12 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
    parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
 5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
    ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is _not_
-   spun up for targets in v1, `full` maps to allow-all). Target approval requests are re-emitted as
+   spun up for targets in v1, `full` maps to allow-all _minus the user's deny/ask rules_: since
+   [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §2 every
+   target engine carries the user's deny and ask rules — never the allow rules — and the host's
+   robust matcher runs on every forwarded ask, so a denied command is refused and an ask-rule command
+   reaches the human in every mode; target child sessions are registered so their asks are
+   forwarded too). Target approval requests are re-emitted as
    `session:approval-request` under the **dispatching** session's routing with a reserved requestId
    prefix (`xeng:`); the approve IPC handler routes that prefix to the dispatcher instead of the
    session. Output streams into the dispatching chat through the existing
