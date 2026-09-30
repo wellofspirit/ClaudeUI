@@ -685,6 +685,13 @@ put in, and ClaudeUI does not sign itself back in from what stays.
     us. But one directly connected in pi can stay." ClaudeUI then does not sign itself back in from
     the sign-in that stayed until the user signs in through ClaudeUI. §8 "As built (arc 3, S7e)"
     describes it.
+13. A harness's ChatGPT switch decides whose sign-in its ChatGPT slot holds (owner, 2026-10-01).
+    Switched ON, the slot is ClaudeUI's: ClaudeUI feeds it, a newer sign-in found there is taken as
+    a rotation of ClaudeUI's own, and a disconnect removes it. Switched OFF, the slot is the
+    harness's own: ClaudeUI never writes, adopts or removes a sign-in there that it did not put
+    there. So a sign-in made directly in pi or opencode survives a disconnect where that harness's
+    ChatGPT is switched off; the disconnect note says so. Telling accounts apart with the switch on
+    was rejected: the harness would then run on a different account than ClaudeUI shows.
 
 ## Rejected alternatives
 

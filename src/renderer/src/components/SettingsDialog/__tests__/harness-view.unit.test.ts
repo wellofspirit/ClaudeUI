@@ -523,10 +523,10 @@ describe('chatgptDisconnectText (ADR-082 §8, S7e)', () => {
 
   it('names every harness that runs, and the ones whose own sign-in stays', () => {
     expect(chatgptDisconnectText(running('codex', 'pi', 'opencode'))).toBe(
-      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode; one made directly in pi or opencode stays.'
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
     )
     expect(chatgptDisconnectText(running('opencode'))).toBe(
-      'ClaudeUI’s ChatGPT sign-in is removed from opencode; one made directly in opencode stays.'
+      'ClaudeUI’s ChatGPT sign-in is removed from opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
     )
   })
 

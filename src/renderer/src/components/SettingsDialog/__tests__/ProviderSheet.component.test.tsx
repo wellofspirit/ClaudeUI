@@ -555,7 +555,7 @@ describe('ENABLED FOR', () => {
           .find((el) => el.dataset.id === 'remove')!
       )
       const confirm = within(row).getByTestId('SubscriptionsSection.confirm')
-      expect(confirm.textContent).not.toMatch(/removed from|made directly/)
+      expect(confirm.textContent).not.toMatch(/removed from|made there directly/)
     })
 
     it('pi alone not running: the last account’s removal names only what runs (S7e)', async () => {
@@ -570,7 +570,7 @@ describe('ENABLED FOR', () => {
       )
       await waitFor(() =>
         expect(within(row).getByTestId('SubscriptionsSection.confirm')).toHaveTextContent(
-          'ClaudeUI’s ChatGPT sign-in is removed from Codex and opencode; one made directly in opencode stays.'
+          'ClaudeUI’s ChatGPT sign-in is removed from Codex and opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
         )
       )
     })
@@ -582,7 +582,7 @@ describe('ENABLED FOR', () => {
       expect(screen.queryByTestId('ProviderSheet.disconnectNote')).toBeNull()
       await click(screen.getByTestId('ProviderSheet.disconnect'))
       expect(screen.getByTestId('ProviderSheet.disconnectNote')).toHaveTextContent(
-        'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode; one made directly in pi or opencode stays.'
+        'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
       )
       expect(sent('shared-provider:disconnect')).toEqual([])
     })

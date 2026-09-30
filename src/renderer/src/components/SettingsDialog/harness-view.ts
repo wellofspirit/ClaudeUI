@@ -544,9 +544,10 @@ export function notInstalledTitle(id: HarnessId): string {
 
 /**
  * What disconnecting ChatGPT does to the harnesses that run (ADR-082 §8, "As
- * built (S7e)"): ClaudeUI's sign-in goes from each, and one made directly in pi
- * or opencode stays. Only harnesses that run are named; `undefined` when none
- * does.
+ * built (S7e)"): ClaudeUI's sign-in goes from each; a sign-in made directly in
+ * pi or opencode stays where ChatGPT is switched off for it (with it on, the
+ * harness's ChatGPT sign-in is ClaudeUI's). Only harnesses that run are named;
+ * `undefined` when none does.
  */
 export function chatgptDisconnectText(runs: EngineRuns): string | undefined {
   const users = (['codex', 'pi', 'opencode'] as const).filter((id) => runs(id))
@@ -559,8 +560,11 @@ export function chatgptDisconnectText(runs: EngineRuns): string | undefined {
   }
   const own = users.filter((id) => id !== 'codex')
   const removed = `ClaudeUI’s ChatGPT sign-in is removed from ${names(users, 'and')}`
+  // Owner ruling 2026-10-01 (ADR-082 resolved question 13): with a harness's
+  // ChatGPT switched ON, ClaudeUI owns that harness's sign-in; switched OFF,
+  // the harness keeps its own, which a disconnect never touches.
   return own.length > 0
-    ? `${removed}; one made directly in ${names(own, 'or')} stays.`
+    ? `${removed}. Where ChatGPT is switched off for ${names(own, 'or')}, a sign-in made there directly stays.`
     : `${removed}.`
 }
 

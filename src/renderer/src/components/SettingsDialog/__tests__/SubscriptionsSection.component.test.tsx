@@ -645,7 +645,7 @@ describe('ChatGPT', () => {
     await click(menuItem(account('acc-1'), 'remove'))
     const confirm = within(account('acc-1')).getByTestId('SubscriptionsSection.confirm')
     expect(confirm).toHaveTextContent(
-      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode; one made directly in pi or opencode stays.'
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
     )
     expect(confirm).not.toHaveTextContent('Another account')
   })
