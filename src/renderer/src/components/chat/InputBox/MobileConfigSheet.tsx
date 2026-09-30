@@ -22,6 +22,7 @@ import {
   PERMISSION_MODE_LABELS
 } from '../../../../../shared/permission-modes'
 import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
+import { modelLabel } from './utils'
 import { EngineLogo } from '../../shared/EngineLogo'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
@@ -378,7 +379,7 @@ function ModelPage({
                   </span>
                   {m.description && (
                     <span className="text-[11px] text-text-muted truncate">
-                      {m.description.split('·')[1]?.trim()}
+                      {modelLabel(m).detail}
                     </span>
                   )}
                 </div>

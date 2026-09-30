@@ -91,6 +91,10 @@ Real `supportedModels()` output for a Max-plan user:
 ]
 ```
 
+The `"Name · tagline"` descriptions above are the shape up to 2.1.280. From 2.1.285 `displayName`
+carries the full name and `description` the tagline alone, except on `default` (see
+`docs/protocol-cc/09-initialize.md`, `models`).
+
 `haiku` ships without capability fields; ClaudeUI's id heuristic recognises the `haiku` substring and correctly reports no effort / no adaptive.
 
 The id-based table below applies to canonical model ids and to heuristic fallback when the SDK omits fields for a new model.

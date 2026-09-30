@@ -11,7 +11,7 @@ import {
 import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels } from './utils'
+import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
@@ -262,18 +262,7 @@ export function InputBox(): React.JSX.Element {
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const models = useMemo(
-    () =>
-      availableModels.map((m) => {
-        // claude/opencode/pi discovery all emit "Name · detail" descriptions, so
-        // the head of the split is the name. Codex's native catalog puts a
-        // marketing sentence there instead ("Our most capable model for …"),
-        // which splits to the whole sentence — use its display name directly.
-        const shortName =
-          m.engineId === 'codex'
-            ? m.displayName
-            : m.description?.split('·')[0]?.trim() || m.displayName
-        return { ...m, shortName }
-      }),
+    () => availableModels.map((m) => ({ ...m, shortName: modelLabel(m).shortName })),
     [availableModels]
   )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
