@@ -10,8 +10,8 @@
  * arbitrary file path outside any package context").
  *
  * Ported from pi's OWN shipped reference implementation
- * (`vendor/pi-cli/examples/extensions/subagent/{index,agents}.ts`), cut down
- * to v1 scope per the M5b kickoff spec:
+ * (`vendor/pi-src/packages/coding-agent/examples/extensions/subagent/{index,agents}.ts`),
+ * cut down to v1 scope per the M5b kickoff spec:
  *   - Agent discovery is USER-LEVEL ONLY (`~/.pi/agent/agents/*.md`, or
  *     `CLAUDEUI_PI_AGENTS_DIR` for tests/override) — the example's
  *     project-local `.pi/agents` + agentScope/confirmProjectAgents dance is
@@ -174,7 +174,8 @@ export default function (pi) {
     return agents.map(function (a) { return a.name + ' \\u2014 ' + a.description; }).join('; ');
   }
 
-  // ---- Self-invocation (ported from vendor/pi-cli/examples/extensions/subagent/index.ts's
+  // ---- Self-invocation (ported from
+  // vendor/pi-src/packages/coding-agent/examples/extensions/subagent/index.ts's
   // getPiInvocation -- correctly targets the SAME pi binary currently running,
   // whether that's a bun-compiled standalone executable or an interpreted
   // script). DELIBERATE DIVERGENCE from the example: bun-compiled standalone

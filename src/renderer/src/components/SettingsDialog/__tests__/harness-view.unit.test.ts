@@ -104,12 +104,16 @@ describe('the version dropdown', () => {
 })
 
 describe('the row line (one line, the active side only)', () => {
-  const bundled = (version: string, reason?: string): HarnessStateEntry['resolved'] => ({
-    source: 'bundled',
-    version,
-    path: '/opt/claudeui/vendor/pi-cli/pi',
-    available: true,
-    ...(reason ? { reason } : {})
+  /** What the resolver answers when nothing runs (ADR-082 §8: nothing bundled). */
+  const nothing = (
+    source: 'managed' | 'system',
+    reason: string
+  ): HarnessStateEntry['resolved'] => ({
+    source,
+    version: null,
+    path: null,
+    available: false,
+    reason
   })
 
   it("ClaudeUI's copy says so, with the running path only in the title", () => {
@@ -123,42 +127,81 @@ describe('the row line (one line, the active side only)', () => {
     expect(line.text).not.toContain('/opt')
   })
 
-  it('a bundled copy of the selected version satisfies the selection: no "not installed"', () => {
-    const entry = pi({
-      managed: [],
-      resolved: bundled('0.87.4', 'pi 0.87.4 is not installed in ClaudeUI')
-    })
-    expect(installNeeded(entry)).toBeNull()
-    expect(rowLine(entry)).toMatchObject({
-      state: 'running',
-      text: 'Bundled with ClaudeUI · 0.87.4',
-      tone: 'normal'
+  it('an empty store is the actionable state: "<v> is not installed" with Install', () => {
+    const entry = pi({ managed: [], resolved: nothing('managed', 'pi 0.87.4 is not installed') })
+    expect(installNeeded(entry)).toEqual({ request: '0.87.4', version: '0.87.4' })
+    expect(rowLine(entry)).toEqual({
+      state: 'not-installed',
+      text: '0.87.4 is not installed',
+      tone: 'warning',
+      title: 'pi 0.87.4 is not installed'
     })
   })
 
-  it('a selected version that is neither installed nor bundled is the actionable state', () => {
+  it('never mentions a bundled copy for opencode, pi or Codex', () => {
+    for (const id of ['opencode', 'pi', 'codex'] as const) {
+      const entry = pi({
+        id,
+        managed: [],
+        resolved: nothing('managed', `${id} 0.87.4 is not installed`)
+      })
+      expect(rowLine(entry).text).not.toMatch(/bundled/i)
+      expect(rowLine(pi({ id })).text).not.toMatch(/bundled/i)
+    }
+  })
+
+  it('a selected version that is not installed is the actionable state', () => {
     const entry = pi({
       selection: { source: 'managed', version: '0.88.0' },
-      managed: [],
-      resolved: bundled('0.87.4', 'pi 0.88.0 is not installed in ClaudeUI')
+      resolved: nothing('managed', 'pi 0.88.0 is not installed')
     })
     expect(installNeeded(entry)).toEqual({ request: '0.88.0', version: '0.88.0' })
     expect(rowLine(entry)).toMatchObject({
       state: 'not-installed',
-      // What runs meanwhile, so the row does not hide the bundled copy.
-      text: '0.88.0 is not installed; running the bundled 0.87.4',
+      text: '0.88.0 is not installed',
       tone: 'warning'
     })
   })
 
-  it("Codex reads design 1's uiNote", () => {
-    const codex = pi({
-      id: 'codex',
-      manifest: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' },
+  it('an environment override runs instead and offers no install', () => {
+    const entry = pi({
       managed: [],
-      resolved: { ...bundled('0.156.0', 'Codex 0.156.0 is not installed in ClaudeUI') }
+      resolved: { source: 'env', version: '9.9.9', path: '/dev/pi', available: true }
     })
-    expect(rowLine(codex).text).toBe('Exact version this ClaudeUI release speaks · 0.156.0')
+    expect(installNeeded(entry)).toBeNull()
+    expect(rowLine(entry)).toMatchObject({
+      state: 'running',
+      text: 'Environment override · 9.9.9'
+    })
+  })
+
+  it("Codex reads design 1's uiNote when installed, else the not-installed state", () => {
+    const codexEntry = (managed: HarnessStateEntry['managed']): HarnessStateEntry =>
+      pi({
+        id: 'codex',
+        manifest: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' },
+        managed,
+        resolved:
+          managed.length > 0
+            ? {
+                source: 'managed',
+                version: '0.156.0',
+                path: '/opt/store/codex/0.156.0/codex',
+                available: true
+              }
+            : nothing('managed', 'Codex 0.156.0 is not installed')
+      })
+    expect(
+      rowLine(
+        codexEntry([
+          { version: '0.156.0', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }
+        ])
+      ).text
+    ).toBe('Exact version this ClaudeUI release speaks · 0.156.0')
+    expect(rowLine(codexEntry([]))).toMatchObject({
+      state: 'not-installed',
+      text: '0.156.0 is not installed'
+    })
   })
 
   it("Claude Code's bundled copy carries the patches", () => {
@@ -190,14 +233,26 @@ describe('the row line (one line, the active side only)', () => {
     expect(systemVerdict(pi())).toBeNull()
   })
 
-  it('an unusable System selection says why, and what runs instead', () => {
-    const entry = pi({
+  it('an unusable System selection says why; only Claude Code has a bundled copy to run', () => {
+    const reason = 'pi 0.80.0 is older than 0.87.4, the oldest ClaudeUI supports'
+    expect(
+      rowLine(pi({ selection: { source: 'system' }, resolved: nothing('system', reason) }))
+    ).toMatchObject({ state: 'unavailable', text: reason, tone: 'danger' })
+
+    const claude = pi({
+      id: 'claude',
       selection: { source: 'system' },
-      resolved: bundled('0.87.4', 'pi 0.80.0 is older than 0.87.4, the oldest ClaudeUI supports')
+      resolved: {
+        source: 'bundled',
+        version: '2.1.280',
+        path: '/opt/claude',
+        available: true,
+        reason: 'No usable System Claude Code found'
+      }
     })
-    expect(rowLine(entry)).toMatchObject({
+    expect(rowLine(claude)).toMatchObject({
       state: 'fallback',
-      text: 'pi 0.80.0 is older than 0.87.4, the oldest ClaudeUI supports; running the bundled copy',
+      text: 'No usable System Claude Code found; running the bundled copy',
       tone: 'warning'
     })
   })
@@ -206,7 +261,8 @@ describe('the row line (one line, the active side only)', () => {
     expect(
       rowLine(
         pi({
-          resolved: { source: 'bundled', version: null, path: null, available: false, reason: 'x' }
+          // The version is in the store, but its executable is gone.
+          resolved: { source: 'managed', version: null, path: null, available: false, reason: 'x' }
         })
       )
     ).toMatchObject({ state: 'unavailable', text: 'x', tone: 'danger' })

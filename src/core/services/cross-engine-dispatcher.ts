@@ -731,7 +731,7 @@ const CODEX_TIMEOUT_AFTERMATH =
  * ZERO, deliberately — the comparison is strict. Two reasons it can afford to
  * be, and one reason it must be:
  *  - SAME CLOCK. The opencode server is ALWAYS a local child of this process
- *    (`OpencodeServerManager` spawns the vendored binary and talks to it over
+ *    (`OpencodeServerManager` spawns the resolved binary and talks to it over
  *    127.0.0.1), so both timestamps come from the same host clock and cannot
  *    genuinely disagree.
  *  - STRICT ORDERING. `turnStartedAt` is taken BEFORE the `prompt_async` POST;

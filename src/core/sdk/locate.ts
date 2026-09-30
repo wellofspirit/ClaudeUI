@@ -18,12 +18,7 @@
  */
 import type { HarnessLaunch } from '../../shared/harness-types'
 import { nativeLaunch } from '../harness/launch'
-import {
-  bundledHarnessPath,
-  harnessEnvVar,
-  harnessLaunch,
-  resolveHarness
-} from '../harness/resolve'
+import { bundledClaudePath, harnessEnvVar, harnessLaunch, resolveHarness } from '../harness/resolve'
 
 /** Env var naming a Claude Code binary to spawn instead of the bundled one. */
 export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
@@ -36,7 +31,7 @@ export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
  * that path.
  */
 export function locateBunClaude(): string {
-  return resolveHarness('claude').launch?.command ?? bundledHarnessPath('claude')
+  return resolveHarness('claude').launch?.command ?? bundledClaudePath()
 }
 
 /**
@@ -45,7 +40,7 @@ export function locateBunClaude(): string {
  * would be, so the spawn error names that path.
  */
 export function locateClaudeLaunch(): HarnessLaunch {
-  return harnessLaunch('claude') ?? nativeLaunch(bundledHarnessPath('claude'))
+  return harnessLaunch('claude') ?? nativeLaunch(bundledClaudePath())
 }
 
 /** @deprecated Use {@link locateBunClaude}. Kept for callers mid-migration. */

@@ -9,21 +9,25 @@
  *      override. Resolved against the cwd, it must name a regular file; any
  *      other value warns once and falls through.
  *   2. The selection in `~/.claude/ui/harnesses.json` (`selection-store.ts`):
- *      - `managed`: the selected version (`tested` = the manifest's, `latest` =
- *        the newest installed, or an exact one) from the store (`store.ts`);
- *        not installed falls back to bundled, with a `reason`.
+ *      - `managed` (opencode, pi, Codex): the selected version (`tested` = the
+ *        manifest's, `latest` = the newest installed, or an exact one) from
+ *        the store (`store.ts`).
  *      - `system`: the best install in the detection cache
  *        (`./system-source.ts`), used only while its files are unchanged and
- *        its cached launch matches them; otherwise bundled, with a `reason`,
- *        and a stale or missing cache asks the background scheduler
- *        (`./detect/scheduler.ts`) for a re-detection. Detection itself never
- *        runs here.
- *      - `bundled`: the vendored copy.
- *   3. The vendored copy:
- *        dev / claudeui-server   <appPath>/vendor/<id>-cli/
- *        packaged                <Resources>/<id>-cli/            (extraResources)
- *                                <app.asar.unpacked>/vendor/<id>-cli/  (fallback)
- *      pi's payload may be flat (`pi-cli/pi`) or nested (`pi-cli/pi/pi`).
+ *        its cached launch matches them; a stale or missing cache asks the
+ *        background scheduler (`./detect/scheduler.ts`) for a re-detection.
+ *        Detection itself never runs here.
+ *      - `bundled` (Claude Code): the vendored copy.
+ *   3. Claude Code only: the vendored copy, whatever the selection, with the
+ *      reason the selection could not be honoured:
+ *        dev / claudeui-server   <appPath>/vendor/claude-cli/
+ *        packaged                <Resources>/claude-cli/            (extraResources)
+ *                                <app.asar.unpacked>/vendor/claude-cli/  (fallback)
+ *
+ * opencode, pi and Codex are not bundled (ADR-082 §8): a selection that cannot
+ * be honoured (the version is not in the store, no usable System install)
+ * resolves to `path: null` with the reason. A vendored or packaged copy is
+ * never looked for, even when an old checkout still has one on disk.
  *
  * Nothing is ever looked up on PATH here. A harness found nowhere resolves to
  * `path: null` with a reason; this module never throws.
@@ -44,7 +48,12 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { HarnessId, HarnessLaunch, ResolvedHarness } from '../../shared/harness-types'
+import type {
+  HarnessId,
+  HarnessLaunch,
+  HarnessSelection,
+  ResolvedHarness
+} from '../../shared/harness-types'
 import { HARNESS_IDS, isHarnessId } from '../../shared/harness-types'
 import { getAppPath, hostIsPackaged } from '../host'
 import { logger } from '../services/logger'
@@ -112,8 +121,9 @@ function isFile(p: string): boolean {
 }
 
 /**
- * The executable inside a payload directory laid out like `vendor/<id>-cli`
- * (a vendored copy, or a managed version directory), or null.
+ * The executable inside a payload directory (a managed version directory, or
+ * for Claude Code the vendored `claude-cli`), or null. pi's release archive
+ * may be flat (`<dir>/pi`) or nested (`<dir>/pi/pi`).
  */
 export function payloadExecutable(id: HarnessId, root: string): string | null {
   const name = exe(EXECUTABLES[id])
@@ -133,7 +143,7 @@ function readVersionField(file: string): string | null {
   }
 }
 
-// ── Bundled ───────────────────────────────────────────────────────────────────
+// ── Bundled (Claude Code only) ───────────────────────────────────────────────
 
 /**
  * The `app.asar` path when `appPath` is inside a packaged app, else null. Matches
@@ -145,9 +155,12 @@ function asarPath(appPath: string): string | null {
   return m ? appPath.slice(0, m.index + m[0].length) : null
 }
 
-/** The vendored payload directories for `id`, in probe order. No filesystem access. */
-function bundledRoots(id: HarnessId): string[] {
-  const dirName = `${id}-cli`
+/**
+ * The vendored Claude Code payload directories, in probe order. No filesystem
+ * access. Only Claude Code is bundled (ADR-082 §8).
+ */
+function bundledClaudeRoots(): string[] {
+  const dirName = 'claude-cli'
   const appPath = getAppPath()
   const asar = asarPath(appPath)
   if (!asar) return [path.join(appPath, 'vendor', dirName)]
@@ -155,24 +168,24 @@ function bundledRoots(id: HarnessId): string[] {
 }
 
 /**
- * The version of the bundled copy of `id` (its `version.json`), whatever the
+ * The version of the bundled Claude Code (its `version.json`), whatever the
  * selection, or null when there is no bundled copy or it states none. For the
  * Installed page's "Bundled" label; a few filesystem reads, never cached.
  */
-export function bundledHarnessVersion(id: HarnessId): string | null {
-  for (const root of bundledRoots(id)) {
-    if (payloadExecutable(id, root)) return readVersionField(path.join(root, 'version.json'))
+export function bundledClaudeVersion(): string | null {
+  for (const root of bundledClaudeRoots()) {
+    if (payloadExecutable('claude', root)) return readVersionField(path.join(root, 'version.json'))
   }
   return null
 }
 
 /**
- * Where the bundled executable would be, whether or not it exists: the primary
- * vendored candidate. For callers that must name a path even when nothing was
- * found, so the spawn error names it.
+ * Where the bundled `bun-claude` would be, whether or not it exists: the
+ * primary vendored candidate. For callers that must name a path even when
+ * nothing was found, so the spawn error names it.
  */
-export function bundledHarnessPath(id: HarnessId): string {
-  return path.join(bundledRoots(id)[0], exe(EXECUTABLES[id]))
+export function bundledClaudePath(): string {
+  return path.join(bundledClaudeRoots()[0], exe(EXECUTABLES.claude))
 }
 
 // ── Codex code-mode host ──────────────────────────────────────────────────────
@@ -357,19 +370,96 @@ function managedVersion(
   const label = LABELS[id]
   if (choice === 'latest') {
     const newest = installedVersions(id)[0]
-    return newest
-      ? { version: newest }
-      : { reason: `No version of ${label} is installed in ClaudeUI` }
+    return newest ? { version: newest } : { reason: `No version of ${label} is installed` }
   }
   const version = !choice || choice === 'tested' ? harnessManifest(id).tested : choice
   return readInstallRecord(id, version)
     ? { version }
-    : { reason: `${label} ${version} is not installed in ClaudeUI` }
+    : { reason: `${label} ${version} is not installed` }
+}
+
+type Resolution = { resolved: ResolvedHarness } | { reason: string }
+
+/** The selected version from ClaudeUI's store, or why it cannot run. */
+function resolveManaged(id: HarnessId, choice: string | undefined): Resolution {
+  const picked = managedVersion(id, choice)
+  if (!('version' in picked)) return picked
+  const bin = payloadExecutable(id, installDir(id, picked.version))
+  if (!bin)
+    return { reason: `${LABELS[id]} ${picked.version} in ClaudeUI's store has no executable` }
+  // Retention (`install/gc.ts`): once per resolution, never per spawn.
+  markVersionUsed(id, picked.version)
+  return {
+    resolved: {
+      id,
+      path: bin,
+      launch: nativeLaunch(bin),
+      dir: path.dirname(bin),
+      source: 'managed',
+      version: picked.version
+    }
+  }
+}
+
+/** The best System install from the detection cache, or why it cannot run. */
+function resolveSystem(id: HarnessId): Resolution {
+  const system = resolveSystemInstall(id, loadDetectionCache()[id], {
+    electron: currentElectron()
+  })
+  if (system.kind === 'ok') {
+    return {
+      resolved: {
+        id,
+        path: system.path,
+        launch: system.launch,
+        dir: path.dirname(system.path),
+        source: 'system',
+        version: system.version,
+        displayPath: system.install.displayPath
+      }
+    }
+  }
+  if (system.redetect) requestRedetection(id)
+  return { reason: system.reason }
+}
+
+/** Claude Code: the selection, else the bundled copy with the reason. */
+function resolveClaude(selection: HarnessSelection): ResolvedHarness {
+  let reason: string | undefined
+  if (selection.source === 'managed') {
+    reason = 'Claude Code has no ClaudeUI-managed copy'
+  } else if (selection.source === 'system') {
+    const system = resolveSystem('claude')
+    if ('resolved' in system) return system.resolved
+    reason = system.reason
+  }
+  for (const root of bundledClaudeRoots()) {
+    const bin = payloadExecutable('claude', root)
+    if (bin) {
+      return {
+        id: 'claude',
+        path: bin,
+        launch: nativeLaunch(bin),
+        dir: path.dirname(bin),
+        source: 'bundled',
+        version: readVersionField(path.join(root, 'version.json')),
+        ...(reason ? { reason } : {})
+      }
+    }
+  }
+  const missing = 'Claude Code was not found in this ClaudeUI build'
+  return {
+    id: 'claude',
+    path: null,
+    launch: null,
+    dir: null,
+    source: 'bundled',
+    version: null,
+    reason: reason ? `${reason}, and ${missing}` : missing
+  }
 }
 
 function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHarness {
-  const label = LABELS[id]
-
   const override = envOverride(id, rawEnv)
   if (override) {
     const dir = realDir(override)
@@ -383,76 +473,19 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
     }
   }
 
-  let reason: string | undefined
   const selection = harnessSelection(id)
-  if (selection.source === 'managed') {
-    if (id === 'claude') {
-      reason = 'Claude Code has no ClaudeUI-managed copy'
-    } else {
-      const picked = managedVersion(id, selection.version)
-      if ('version' in picked) {
-        const bin = payloadExecutable(id, installDir(id, picked.version))
-        if (bin) {
-          // Retention (`install/gc.ts`): once per resolution, never per spawn.
-          markVersionUsed(id, picked.version)
-          return {
-            id,
-            path: bin,
-            launch: nativeLaunch(bin),
-            dir: path.dirname(bin),
-            source: 'managed',
-            version: picked.version
-          }
-        }
-        reason = `${label} ${picked.version} in ClaudeUI's store has no executable`
-      } else {
-        reason = picked.reason
-      }
-    }
-  } else if (selection.source === 'system') {
-    const system = resolveSystemInstall(id, loadDetectionCache()[id], {
-      electron: currentElectron()
-    })
-    if (system.kind === 'ok') {
-      return {
-        id,
-        path: system.path,
-        launch: system.launch,
-        dir: path.dirname(system.path),
-        source: 'system',
-        version: system.version,
-        displayPath: system.install.displayPath
-      }
-    }
-    reason = system.reason
-    if (system.redetect) requestRedetection(id)
-  }
+  if (id === 'claude') return resolveClaude(selection)
 
-  for (const root of bundledRoots(id)) {
-    const bin = payloadExecutable(id, root)
-    if (bin) {
-      return {
-        id,
-        path: bin,
-        launch: nativeLaunch(bin),
-        dir: path.dirname(bin),
-        source: 'bundled',
-        version: readVersionField(path.join(root, 'version.json')),
-        ...(reason ? { reason } : {})
-      }
-    }
-  }
-
-  const missing = `${label} was not found in this ClaudeUI build`
-  return {
-    id,
-    path: null,
-    launch: null,
-    dir: null,
-    source: 'bundled',
-    version: null,
-    reason: reason ? `${reason}, and ${missing}` : missing
-  }
+  // opencode, pi and Codex are not bundled (ADR-082 §8): the selection or
+  // nothing. A `bundled` selection (never offered for them) reads as the
+  // default, Tested.
+  const source = selection.source === 'system' ? 'system' : 'managed'
+  const result =
+    source === 'system'
+      ? resolveSystem(id)
+      : resolveManaged(id, selection.source === 'managed' ? selection.version : undefined)
+  if ('resolved' in result) return result.resolved
+  return { id, path: null, launch: null, dir: null, source, version: null, reason: result.reason }
 }
 
 function entry(id: HarnessId): CacheEntry {
@@ -505,9 +538,10 @@ const ENSURE_SCRIPTS: Record<HarnessId, string> = {
 }
 
 /**
- * Why `id` cannot run, for an error the user reads: the resolver's reason
- * (a System or ClaudeUI copy that could not be used, and that nothing was
- * found). A development tree adds how to vendor the bundled copy; a packaged
+ * Why `id` cannot run, for an error the user reads: the resolver's reason (the
+ * ClaudeUI version is not installed, no usable System install, or no bundled
+ * Claude Code). A development tree adds the script that installs ClaudeUI's
+ * copy (Claude Code: vendors it), unless the selection is System; a packaged
  * app never does.
  */
 export function harnessUnavailableMessage(id: HarnessId): string {
@@ -518,9 +552,11 @@ export function harnessUnavailableMessage(id: HarnessId): string {
   }
   if (e.resolved.path === null) {
     const reason = e.resolved.reason ?? `${label} was not found`
-    return hostIsPackaged()
-      ? reason
-      : `${reason} (development: run \`bun run ${ENSURE_SCRIPTS[id]}\` to vendor it)`
+    // The script installs ClaudeUI's own copy, which a System choice would not run.
+    if (hostIsPackaged() || e.resolved.source === 'system') return reason
+    return `${reason} (development: run \`bun run ${ENSURE_SCRIPTS[id]}\` to ${
+      id === 'claude' ? 'vendor' : 'install'
+    } it)`
   }
   if (id === 'codex' && e.codexHost === null) {
     return `Codex at ${e.resolved.path} has no codex-code-mode-host beside it`

@@ -72,8 +72,8 @@ export function choiceVersion(
 }
 
 /**
- * The selection names a ClaudeUI version that is not in the store: the
- * resolver falls back and the row offers to install it. `request` is what to
+ * The selection names a ClaudeUI version that is not in the store: nothing
+ * runs (the resolver answers no path) and the row offers to install it. `request` is what to
  * pass `installHarness` (an exact version when one is known, so its progress
  * matches; `latest` otherwise).
  */
@@ -123,24 +123,17 @@ export function exactVersions(
 }
 
 /**
- * The selected ClaudeUI version is missing AND nothing equivalent runs in its
- * place: the row's one actionable state ("1.18.33 is not installed · Install").
- * Until arc 3 unbundles the engines, a bundled copy of the very version the
- * selection names satisfies it, so that case is not "not installed".
+ * The selected ClaudeUI version is missing: the row's one actionable state
+ * ("1.18.33 is not installed · Install"). opencode, pi and Codex are not
+ * bundled (ADR-082 §8), so nothing runs in its place; an environment override
+ * runs instead and says so, and offers no install.
  */
 export function installNeeded(
   entry: HarnessStateEntry,
   versions?: HarnessVersionsResult
 ): { request: string; version: string | null } | null {
-  const missing = missingManagedVersion(entry, versions)
-  if (!missing) return null
-  return bundledSatisfies(entry, missing.version) ? null : missing
-}
-
-/** The bundled copy that runs is exactly `version` (arc 2 still ships one). */
-export function bundledSatisfies(entry: HarnessStateEntry, version: string | null): boolean {
-  const r = entry.resolved
-  return r.source === 'bundled' && r.path !== null && version !== null && r.version === version
+  if (entry.resolved.source === 'env') return null
+  return missingManagedVersion(entry, versions)
 }
 
 const compareVersions = (a: string, b: string): number =>
@@ -183,26 +176,34 @@ export function rowLine(
     tone: 'danger',
     title
   })
-  const fellBack = (reason: string): HarnessRowLine => ({
-    state: 'fallback',
-    text: `${reason}; ${
-      r.source === 'bundled'
-        ? 'running the bundled copy'
-        : r.source === 'env'
-          ? 'running the environment override'
-          : "running ClaudeUI's copy"
-    }`,
-    tone: 'warning',
-    title
-  })
   const withVersion = (prefix: string): string => (r.version ? `${prefix} · ${r.version}` : prefix)
 
-  if (r.path === null) return unavailable()
-  if (r.source === 'env')
+  if (r.source === 'env' && r.path !== null)
     return { state: 'running', text: withVersion('Environment override'), tone: 'normal', title }
+  // Checked before `unavailable`: with nothing bundled, a missing ClaudeUI
+  // version is the usual reason nothing runs, and it has an action.
+  const need = installNeeded(entry, versions)
+  if (need) {
+    return {
+      state: 'not-installed',
+      text: `${need.version ?? 'Latest'} is not installed`,
+      tone: 'warning',
+      title
+    }
+  }
+  if (r.path === null) return unavailable()
 
   if (entry.selection.source === 'system') {
-    if (r.source !== 'system') return fellBack(r.reason ?? `No usable System ${HARNESS_LABEL[id]}`)
+    // Only Claude Code falls back (to its bundled copy); the others resolve to
+    // nothing, which `unavailable` above already said.
+    if (r.source !== 'system') {
+      return {
+        state: 'fallback',
+        text: `${r.reason ?? `No usable System ${HARNESS_LABEL[id]}`}; running the bundled copy`,
+        tone: 'warning',
+        title
+      }
+    }
     const tested = entry.manifest.tested
     const where = r.displayPath ?? r.path
     const how =
@@ -223,32 +224,7 @@ export function rowLine(
       title
     }
   }
-  const need = installNeeded(entry, versions)
-  if (need) {
-    // Say what runs meanwhile: the line is otherwise the only place a user
-    // would learn that the bundled copy is still in use.
-    const meanwhile =
-      r.source === 'bundled'
-        ? `; running the bundled ${r.version ?? 'copy'}`
-        : r.source === 'managed'
-          ? `; running ClaudeUI's ${r.version ?? 'copy'}`
-          : ''
-    return {
-      state: 'not-installed',
-      text: `${need.version ?? 'Latest'} is not installed${meanwhile}`,
-      tone: 'warning',
-      title
-    }
-  }
-  const missing = missingManagedVersion(entry, versions)
-  // Any other fallback (a store version without its executable) says why.
-  if (r.reason && !(missing && bundledSatisfies(entry, missing.version))) return fellBack(r.reason)
-  const prefix =
-    id === 'codex'
-      ? 'Exact version this ClaudeUI release speaks'
-      : r.source === 'bundled'
-        ? 'Bundled with ClaudeUI'
-        : "ClaudeUI's copy"
+  const prefix = id === 'codex' ? 'Exact version this ClaudeUI release speaks' : "ClaudeUI's copy"
   return { state: 'running', text: withVersion(prefix), tone: 'normal', title }
 }
 

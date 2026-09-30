@@ -1025,7 +1025,7 @@ export function CodexManagedSection(): React.JSX.Element {
       <ManagedRow
         configKey="check_for_update_on_startup"
         label="Self-update check"
-        why="The Codex binary is vendored and pinned, so an update check could only offer one ClaudeUI would not run."
+        why="ClaudeUI installs and updates its own Codex at the pinned version, so an update check could only offer one ClaudeUI would not run."
         value="false"
         locked="Forced off"
       />

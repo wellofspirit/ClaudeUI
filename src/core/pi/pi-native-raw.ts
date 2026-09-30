@@ -2,8 +2,8 @@
  * pi-native-raw.ts
  *
  * Non-lossy reader / leaf-patcher for pi's OWN global settings file,
- * `~/.pi/agent/settings.json` (vendor/pi-cli/docs/settings.md — "Global (all
- * projects)"). The curated pi Configuration panes hand us literal pi field names
+ * `~/.pi/agent/settings.json` (vendor/pi-src/packages/coding-agent/docs/settings.md
+ * — "Global (all projects)"). The curated pi Configuration panes hand us literal pi field names
  * (`theme`, `defaultThinkingLevel`, `compaction.reserveTokens`, …) and we patch
  * exactly those leaves through jsonc-parser modify()+applyEdits, byte-preserving
  * every sibling key and every untouched byte of the file.

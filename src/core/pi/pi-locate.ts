@@ -1,13 +1,14 @@
 /**
  * The pi binary the app spawns: thin delegates to the harness resolver
  * (`../harness/resolve.ts`, ADR-082), which decides for every harness
- * (`CLAUDEUI_PI_CLI`, then the harnesses.json selection, then the vendored copy).
+ * (`CLAUDEUI_PI_CLI`, then the harnesses.json selection: ClaudeUI's store or a
+ * System install; pi is not bundled, ADR-082 §8).
  *
- * The vendored payload is the whole release directory, because pi resolves its
- * wasm, native addons and themes relative to its own executable; it may be flat
- * (`vendor/pi-cli/pi[.exe]`) or nested (`vendor/pi-cli/pi/pi[.exe]`).
- * scripts/ensure-pi.mjs downloads it; electron-builder copies vendor/pi-cli →
- * extraResources `pi-cli`.
+ * A managed version is the whole release directory
+ * (`~/.claude/ui/harnesses/pi/<version>/`), because pi resolves its wasm,
+ * native addons and themes relative to its own executable; it may be flat
+ * (`<version>/pi[.exe]`) or nested (`<version>/pi/pi[.exe]`). The installer
+ * (`../harness/install/`, or `bun run ensure-pi` in development) puts it there.
  */
 import type { HarnessLaunch } from '../../shared/harness-types'
 import { harnessAvailable, harnessLaunch, resolveHarness } from '../harness/resolve'

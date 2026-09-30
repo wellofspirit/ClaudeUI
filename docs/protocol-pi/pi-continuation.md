@@ -226,9 +226,9 @@ are in the scratchpad (`scratchpad/specs/m*.md`) — pattern them for the next m
 
 - **ADR-035** `docs/adr/adr-035_pi-engine-backend.md` — the authoritative design record.
 - **`docs/protocol-pi/README.md`** — verified wire facts (transport, events, sessions, auth,
-  extensions). Version-exact protocol docs ship in `vendor/pi-cli/docs/*.md`.
-- Source questions: **shallow-clone the pinned tag** (`git clone --depth 1 --branch v0.82.1
-https://github.com/earendil-works/pi`) — there is deliberately NO vendored pi source clone.
+  extensions). Version-exact protocol docs: `vendor/pi-src/packages/coding-agent/docs/*.md`.
+- Source questions: the upstream checkout `vendor/pi-src` at the tested tag (CLAUDE.md's rule
+  for engine sources; ADR-082 §8 retired the vendored pi binary and its bundled docs).
 - Auto-memory `project-pi-engine-integration` (loads each session) — the one-line status + gotchas.
 - opencode is the structural template throughout: when unsure how pi should do X, read how
   `src/core/opencode/` does it (ADR-019/022/024/033).

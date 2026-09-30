@@ -200,8 +200,8 @@ export class ClaudeSession extends BaseSession {
   get capabilities(): ResolvedCapabilities {
     const base = resolveClaudeCapabilities(this.model, this.resolvedModelId)
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
-    // but the HONEST per-session value also requires the opencode binary to
-    // actually be vendored — otherwise there is no possible dispatch target.
+    // but the HONEST per-session value also requires an opencode binary the
+    // harness resolver can run — otherwise there is no possible dispatch target.
     // Voice likewise: the voice server is our cli.js patch, so an unpatched
     // Claude Code binary (CLAUDEUI_CLAUDE_CLI) has nothing to talk to.
     return {
@@ -774,7 +774,7 @@ export class ClaudeSession extends BaseSession {
       // does NOT ride the auto-allowed `mcp__claude-ui__` prefix — it goes
       // through canUseTool like an ordinary tool. Gated on the named
       // crossEngineDispatchAvailable('claude') capability (ADR-030/M4-A) —
-      // same underlying check (opencode binary vendored) as before, but now
+      // same underlying check (an opencode binary resolves) as before, but now
       // routed through the honest capability helper instead of a raw proxy.
       const collabServer = crossEngineDispatchAvailable('claude')
         ? createCollabServer({

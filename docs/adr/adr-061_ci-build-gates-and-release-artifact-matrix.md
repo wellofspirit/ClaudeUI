@@ -3,7 +3,9 @@
 **Status:** Accepted (2026-08-25) — implemented at `452318d` (gates + x64 artifact) and
 `0e96475` (arm64 matrix) on `pre-release`. **Amended 2026-09-14** — mac-arm64 and
 win-x64 `claudeui-server` zips; see the amendment section, which supersedes the
-artifact matrix.
+artifact matrix. **Amended by [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md)
+(2026-09-30)** — release artifacts lose the opencode, pi and Codex directories; see the
+last amendment, which supersedes both matrices.
 **Relates to:** ADR-006 (the rebundled bun-claude binary — the mechanism whose linux gap
 this ADR takes a position on), ADR-058 (the `claudeui-server` artifacts this ADR ships),
 ADR-056 (the headless admission model those artifacts serve).
@@ -180,6 +182,37 @@ Consequence, on top of those below: the mirrored-workflow tax grows again — fi
 steps in each of the two files, still kept in sync by hand. A YAML parse of both plus
 a diff proving the only divergence is the pre-existing release-note wording is the
 check that replaces a test here; there is no unit test for a workflow.
+
+## Amendment — 2026-09-30: no opencode, pi or Codex in any artifact (ADR-082 §8)
+
+ClaudeUI now downloads opencode, pi and Codex into its managed store,
+`~/.claude/ui/harnesses`, and the desktop app and `claudeui-server` both resolve them
+there (ADR-082). So no artifact carries `vendor/opencode-cli`, `vendor/pi-cli` or
+`vendor/codex-cli`: `electron-builder.yml` lost the three `extraResources` entries, and
+the server assembly steps in `pre-release.yml` / `release.yml` lost their copies (the
+linux tarball is now the executable alone). Claude Code stays bundled, with
+`audio-capture.node`, in the desktop packages and the mac and Windows server zips. A
+fresh server has no opencode, pi or Codex until an admin installs them from Settings ›
+Harnesses › Installed (ADR-082, resolved question 5).
+
+CI still runs `bun install`, whose `postinstall` installs the three into the runner's
+managed store (ADR-082 §8: development and CI exercise the download path). The
+`vendor/codex-cli` cache step became a cache of the store's `codex/<version>` directory,
+keyed the same way. `src/core/harness/__tests__/packaging.test.ts` now holds what this
+ADR's earlier amendment left to a hand check for this one question: it parses
+`electron-builder.yml` and fails if any unbundled engine is packaged, and fails if a
+workflow copies or caches a vendored one.
+
+### The artifact matrix, as of ADR-082
+
+| Platform    | Desktop (Electron)         | Headless (`claudeui-server`)                      |
+| ----------- | -------------------------- | ------------------------------------------------- |
+| mac-arm64   | released zip (Claude Code) | released zip (Claude Code)                        |
+| win-x64     | released zip (Claude Code) | released zip (Claude Code)                        |
+| linux-x64   | —                          | released tar.gz (no engine; bubblewrap for Codex) |
+| linux-arm64 | —                          | released tar.gz (no engine; bubblewrap for Codex) |
+
+opencode, pi and Codex install on first use in every row.
 
 ## Consequences
 

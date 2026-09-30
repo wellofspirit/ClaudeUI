@@ -37,7 +37,7 @@ export const GITHUB_RELEASES: HostPolicy = {
   redirectHosts: ['release-assets.githubusercontent.com']
 }
 
-/** Codex's LICENSE at the pinned source commit, as `ensure-codex.mjs` fetches it. */
+/** Codex's LICENSE at the pinned source commit (the manifest's `license`). */
 export const GITHUB_RAW: HostPolicy = { hosts: ['raw.githubusercontent.com'], redirectHosts: [] }
 
 /** pi's release list (upstream versions only; nothing is downloaded from it). */

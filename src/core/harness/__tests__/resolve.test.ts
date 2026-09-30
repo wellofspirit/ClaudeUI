@@ -2,9 +2,9 @@
  * @vitest-environment node
  *
  * The harness resolver (ADR-082): which executable runs for each harness.
- * Real temp directories stand in for the app root, the vendored payloads and
- * the managed store; `node:fs` is wrapped in pass-through spies only so the
- * cache test can prove a cached answer touches no filesystem at all.
+ * Real temp directories stand in for the app root, the vendored Claude Code
+ * payload and the managed store; `node:fs` is wrapped in pass-through spies
+ * only so the cache test can prove a cached answer touches no filesystem at all.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
@@ -32,6 +32,8 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import { setHostPaths } from '../../host'
 import {
+  bundledClaudePath,
+  bundledClaudeVersion,
   codexCodeModeHostPath,
   codexHostFor,
   codexHostSupported,
@@ -39,6 +41,7 @@ import {
   harnessAvailable,
   harnessEnvVar,
   harnessLaunch,
+  harnessUnavailableMessage,
   invalidateHarness,
   onHarnessChanged,
   resolveHarness
@@ -55,6 +58,9 @@ import {
 
 const ENV_VARS = ['claude', 'opencode', 'pi', 'codex'].map((id) => harnessEnvVar(id as HarnessId))
 const TESTED = harnessManifest('opencode').tested
+const PI_TESTED = harnessManifest('pi').tested
+const CODEX_TESTED = harnessManifest('codex').tested
+const UNBUNDLED = ['opencode', 'pi', 'codex'] as const
 
 let tmp: string
 let appRoot: string
@@ -105,7 +111,7 @@ afterEach(() => {
   invalidateHarness()
 })
 
-describe('bundled', () => {
+describe('bundled: Claude Code only', () => {
   it('resolves the vendored copy in dev, with its version.json version', () => {
     const bin = writeHarnessPayload(vendorDir('claude'), 'claude', {
       versionJson: { version: '2.1.280' }
@@ -118,11 +124,14 @@ describe('bundled', () => {
       source: 'bundled',
       version: '2.1.280'
     })
+    expect(bundledClaudeVersion()).toBe('2.1.280')
+    expect(bundledClaudePath()).toBe(bin)
   })
 
   it('reads a payload without version.json as version null', () => {
-    writeHarnessPayload(vendorDir('opencode'), 'opencode')
-    expect(resolveHarness('opencode').version).toBeNull()
+    writeHarnessPayload(vendorDir('claude'), 'claude')
+    expect(resolveHarness('claude').version).toBeNull()
+    expect(bundledClaudeVersion()).toBeNull()
   })
 
   it.each([
@@ -132,43 +141,90 @@ describe('bundled', () => {
     const resources = path.join(tmp, 'Resources')
     appPath = shape(resources)
     const unpacked = writeHarnessPayload(
-      path.join(resources, 'app.asar.unpacked', 'vendor', 'opencode-cli'),
-      'opencode'
+      path.join(resources, 'app.asar.unpacked', 'vendor', 'claude-cli'),
+      'claude'
     )
-    expect(resolveHarness('opencode').path).toBe(unpacked)
+    expect(resolveHarness('claude').path).toBe(unpacked)
 
     // extraResources beside app.asar wins over the unpacked fallback.
-    const primary = writeHarnessPayload(path.join(resources, 'opencode-cli'), 'opencode')
+    const primary = writeHarnessPayload(path.join(resources, 'claude-cli'), 'claude')
     invalidateHarness()
-    expect(resolveHarness('opencode').path).toBe(primary)
+    expect(resolveHarness('claude').path).toBe(primary)
   })
 
   it('treats a directory merely named like app.asar as a dev tree', () => {
     appRoot = path.join(tmp, 'my-app.asar-dev')
     appPath = appRoot
-    const bin = writeHarnessPayload(vendorDir('pi'), 'pi')
-    expect(resolveHarness('pi').path).toBe(bin)
-  })
-
-  it('finds pi flat or nested, reading the version at the payload root', () => {
-    const nested = writeHarnessPayload(vendorDir('pi'), 'pi', {
-      nested: true,
-      versionJson: { version: '0.87.1' }
-    })
-    expect(resolveHarness('pi')).toMatchObject({
-      path: nested,
-      dir: path.join(vendorDir('pi'), 'pi'),
-      version: '0.87.1'
-    })
-
-    const flat = writeHarnessPayload(vendorDir('pi'), 'pi')
-    invalidateHarness('pi')
-    expect(resolveHarness('pi').path).toBe(flat)
+    const bin = writeHarnessPayload(vendorDir('claude'), 'claude')
+    expect(resolveHarness('claude').path).toBe(bin)
   })
 
   it('skips a directory where the executable should be', () => {
-    fs.mkdirSync(path.join(vendorDir('opencode'), exeName('opencode')), { recursive: true })
-    expect(resolveHarness('opencode').path).toBeNull()
+    fs.mkdirSync(path.join(vendorDir('claude'), exeName('bun-claude')), { recursive: true })
+    expect(resolveHarness('claude').path).toBeNull()
+  })
+
+  it('falls back to the bundled copy, with the reason, when its System choice is unusable', () => {
+    const bin = writeHarnessPayload(vendorDir('claude'), 'claude')
+    writeSelections({ claude: { source: 'system' } })
+    expect(resolveHarness('claude')).toMatchObject({
+      path: bin,
+      source: 'bundled',
+      reason: 'System detection has not run yet'
+    })
+  })
+})
+
+describe('opencode, pi and Codex are not bundled (ADR-082 §8)', () => {
+  it.each(UNBUNDLED)('%s never resolves a vendored copy an old checkout left behind', (id) => {
+    writeHarnessPayload(vendorDir(id), id, { versionJson: { version: '1.0.0' } })
+    const resolved = resolveHarness(id)
+    expect(resolved).toMatchObject({ path: null, launch: null, dir: null, source: 'managed' })
+    expect(resolved.reason).toBe(
+      `${id === 'codex' ? 'Codex' : id} ${harnessManifest(id).tested} is not installed`
+    )
+    expect(harnessAvailable(id)).toBe(false)
+    expect(engineInstalled(id)).toBe(false)
+  })
+
+  it.each(UNBUNDLED)('%s never resolves a packaged copy either', (id) => {
+    const resources = path.join(tmp, 'Resources')
+    appPath = path.join(resources, 'app.asar')
+    writeHarnessPayload(path.join(resources, `${id}-cli`), id)
+    writeHarnessPayload(path.join(resources, 'app.asar.unpacked', 'vendor', `${id}-cli`), id)
+    expect(resolveHarness(id).path).toBeNull()
+  })
+
+  it('a vendored copy does not stand in for a System choice that cannot be used', () => {
+    writeHarnessPayload(vendorDir('opencode'), 'opencode')
+    writeSelections({ opencode: { source: 'system' } })
+    expect(resolveHarness('opencode')).toMatchObject({
+      path: null,
+      source: 'system',
+      reason: 'System detection has not run yet'
+    })
+  })
+
+  it('an old `bundled` selection reads as Tested from the store', () => {
+    writeHarnessPayload(vendorDir('pi'), 'pi')
+    writeSelections({ pi: { source: 'bundled' } })
+    expect(resolveHarness('pi')).toMatchObject({
+      path: null,
+      source: 'managed',
+      reason: `pi ${PI_TESTED} is not installed`
+    })
+    const dir = fakeHarnessInstall(store, 'pi', PI_TESTED)
+    invalidateHarness('pi')
+    expect(resolveHarness('pi')).toMatchObject({ dir, source: 'managed', version: PI_TESTED })
+  })
+
+  it('names the script that installs it in a development tree', () => {
+    expect(harnessUnavailableMessage('opencode')).toBe(
+      `opencode ${TESTED} is not installed (development: run \`bun run ensure-opencode\` to install it)`
+    )
+    expect(harnessUnavailableMessage('claude')).toBe(
+      'Claude Code was not found in this ClaudeUI build (development: run `bun run ensure-cli` to vendor it)'
+    )
   })
 })
 
@@ -186,36 +242,33 @@ describe('missing everywhere', () => {
     expect(harnessAvailable('claude')).toBe(false)
   })
 
-  it('keeps the fallback reason alongside the missing one', () => {
-    expect(resolveHarness('opencode').reason).toBe(
-      `opencode ${TESTED} is not installed in ClaudeUI, and opencode was not found in this ClaudeUI build`
-    )
+  it('says only why the selection cannot run for a harness that is not bundled', () => {
+    expect(resolveHarness('opencode').reason).toBe(`opencode ${TESTED} is not installed`)
   })
 })
 
 describe('codex needs its code-mode host beside the executable', () => {
   it.skipIf(!codexHostSupported())('is available only with the host in the same directory', () => {
-    writeHarnessPayload(vendorDir('codex'), 'codex', { codeModeHost: false })
+    const dir = path.join(store, 'codex', CODEX_TESTED)
+    fakeHarnessInstall(store, 'codex', CODEX_TESTED, { codeModeHost: false })
     expect(resolveHarness('codex').path).not.toBeNull()
     expect(codexCodeModeHostPath()).toBeNull()
     expect(harnessAvailable('codex')).toBe(false)
 
-    writeHarnessPayload(vendorDir('codex'), 'codex')
+    fakeHarnessInstall(store, 'codex', CODEX_TESTED)
     invalidateHarness('codex')
-    expect(codexCodeModeHostPath()).toBe(
-      path.join(vendorDir('codex'), exeName('codex-code-mode-host'))
-    )
+    expect(codexCodeModeHostPath()).toBe(path.join(dir, exeName('codex-code-mode-host')))
     expect(harnessAvailable('codex')).toBe(true)
   })
 
   it.skipIf(!codexHostSupported())('applies the same rule to an env override', () => {
-    writeHarnessPayload(vendorDir('codex'), 'codex')
+    fakeHarnessInstall(store, 'codex', CODEX_TESTED)
     const elsewhere = path.join(tmp, 'elsewhere')
     process.env[harnessEnvVar('codex')] = writeHarnessPayload(elsewhere, 'codex', {
       codeModeHost: false
     })
     expect(resolveHarness('codex').source).toBe('env')
-    // The bundled host does not count: it is not beside the codex that runs.
+    // The store's host does not count: it is not beside the codex that runs.
     expect(harnessAvailable('codex')).toBe(false)
   })
 
@@ -227,7 +280,7 @@ describe('codex needs its code-mode host beside the executable', () => {
 
 describe('env override', () => {
   it('wins over everything, resolved against the cwd, version from beside it', () => {
-    writeHarnessPayload(vendorDir('opencode'), 'opencode')
+    fakeHarnessInstall(store, 'opencode', TESTED)
     const bin = writeHarnessPayload(path.join(tmp, 'custom'), 'opencode', {
       versionJson: { version: '9.9.9' }
     })
@@ -242,12 +295,12 @@ describe('env override', () => {
   })
 
   it('falls through, warning once, when it names no file', () => {
-    const bundled = writeHarnessPayload(vendorDir('pi'), 'pi')
+    const dir = fakeHarnessInstall(store, 'pi', PI_TESTED)
     const missing = path.join(tmp, 'no-such', exeName('pi'))
     process.env[harnessEnvVar('pi')] = missing
-    expect(resolveHarness('pi')).toMatchObject({ path: bundled, source: 'bundled' })
+    expect(resolveHarness('pi')).toMatchObject({ dir, source: 'managed' })
     invalidateHarness()
-    expect(resolveHarness('pi').path).toBe(bundled)
+    expect(resolveHarness('pi').dir).toBe(dir)
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(String(warnSpy.mock.calls[0][0])).toContain(missing)
     expect(String(warnSpy.mock.calls[0][0])).toContain('CLAUDEUI_PI_CLI')
@@ -272,6 +325,7 @@ describe('env override', () => {
 
 describe('managed selection', () => {
   beforeEach(() => {
+    // An old checkout's vendored copy of the very version: never a stand-in.
     writeHarnessPayload(vendorDir('opencode'), 'opencode', { versionJson: { version: TESTED } })
   })
 
@@ -287,13 +341,16 @@ describe('managed selection', () => {
     })
   })
 
-  it('falls back to bundled with a reason when the tested version is not installed', () => {
+  it('resolves to nothing, with the reason, when the tested version is not installed', () => {
     fakeHarnessInstall(store, 'opencode', '1.0.0')
-    expect(resolveHarness('opencode')).toMatchObject({
-      path: path.join(vendorDir('opencode'), exeName('opencode')),
-      source: 'bundled',
-      version: TESTED,
-      reason: `opencode ${TESTED} is not installed in ClaudeUI`
+    expect(resolveHarness('opencode')).toEqual({
+      id: 'opencode',
+      path: null,
+      launch: null,
+      dir: null,
+      source: 'managed',
+      version: null,
+      reason: `opencode ${TESTED} is not installed`
     })
   })
 
@@ -312,20 +369,22 @@ describe('managed selection', () => {
     })
   })
 
-  it('latest with nothing installed falls back with a reason', () => {
+  it('latest with nothing installed resolves to nothing, with a reason', () => {
     writeSelections({ opencode: { source: 'managed', version: 'latest' } })
     expect(resolveHarness('opencode')).toMatchObject({
-      source: 'bundled',
-      reason: 'No version of opencode is installed in ClaudeUI'
+      path: null,
+      source: 'managed',
+      reason: 'No version of opencode is installed'
     })
   })
 
-  it('an explicit version runs exactly that version, or falls back naming it', () => {
+  it('an explicit version runs exactly that version, or nothing, naming it', () => {
     const dir = fakeHarnessInstall(store, 'pi', '0.80.0', { nested: true })
     writeHarnessPayload(vendorDir('pi'), 'pi')
     writeSelections({ pi: { source: 'managed', version: '0.80.0' } })
     expect(resolveHarness('pi')).toMatchObject({
       path: path.join(dir, 'pi', exeName('pi')),
+      dir: path.join(dir, 'pi'),
       source: 'managed',
       version: '0.80.0'
     })
@@ -333,15 +392,22 @@ describe('managed selection', () => {
     writeSelections({ pi: { source: 'managed', version: '0.81.0' } })
     invalidateHarness('pi')
     expect(resolveHarness('pi')).toMatchObject({
-      source: 'bundled',
-      reason: 'pi 0.81.0 is not installed in ClaudeUI'
+      path: null,
+      source: 'managed',
+      reason: 'pi 0.81.0 is not installed'
     })
   })
 
-  it('an install without its executable falls back with a reason', () => {
+  it('finds pi flat in its version directory too (nested: above)', () => {
+    const flat = fakeHarnessInstall(store, 'pi', PI_TESTED)
+    expect(resolveHarness('pi').path).toBe(path.join(flat, exeName('pi')))
+  })
+
+  it('an install without its executable resolves to nothing, with a reason', () => {
     fakeHarnessInstall(store, 'opencode', TESTED, { noExecutable: true })
     expect(resolveHarness('opencode')).toMatchObject({
-      source: 'bundled',
+      path: null,
+      source: 'managed',
       reason: `opencode ${TESTED} in ClaudeUI's store has no executable`
     })
   })
@@ -358,12 +424,11 @@ describe('managed selection', () => {
 
 describe('system selection', () => {
   // The System source in depth: resolve-system.test.ts.
-  it('falls back to bundled until detection has run', () => {
-    const bin = writeHarnessPayload(vendorDir('opencode'), 'opencode')
+  it('resolves to nothing until detection has run', () => {
     writeSelections({ opencode: { source: 'system' } })
     expect(resolveHarness('opencode')).toMatchObject({
-      path: bin,
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: 'System detection has not run yet'
     })
   })
@@ -371,9 +436,10 @@ describe('system selection', () => {
 
 describe('caching', () => {
   it('answers a second time without touching the filesystem', () => {
-    for (const id of ['claude', 'opencode', 'pi', 'codex'] as const) {
-      writeHarnessPayload(vendorDir(id), id, { versionJson: { version: '1.0.0' } })
-    }
+    writeHarnessPayload(vendorDir('claude'), 'claude', { versionJson: { version: '1.0.0' } })
+    fakeHarnessInstall(store, 'opencode', '1.0.0')
+    fakeHarnessInstall(store, 'pi', PI_TESTED)
+    fakeHarnessInstall(store, 'codex', CODEX_TESTED)
     writeSelections({ opencode: { source: 'managed', version: 'latest' } })
     for (const id of ['claude', 'opencode', 'pi', 'codex'] as const) {
       resolveHarness(id)
@@ -422,6 +488,9 @@ describe('engineInstalled', () => {
     invalidateHarness()
     expect(engineInstalled('claude')).toBe(true)
     expect(engineInstalled('opencode')).toBe(false)
+    fakeHarnessInstall(store, 'opencode', TESTED)
+    invalidateHarness('opencode')
+    expect(engineInstalled('opencode')).toBe(true)
     expect(engineInstalled('gemini')).toBe(false)
     expect(engineInstalled(undefined)).toBe(false)
   })
@@ -429,25 +498,22 @@ describe('engineInstalled', () => {
 
 describe('launch', () => {
   it('is a native launch of the path for every source, and null with it', () => {
-    const bundled = writeHarnessPayload(vendorDir('pi'), 'pi')
-    expect(harnessLaunch('pi')).toEqual({ command: bundled, args: [] })
+    const dir = fakeHarnessInstall(store, 'pi', PI_TESTED)
+    expect(harnessLaunch('pi')).toEqual({ command: path.join(dir, exeName('pi')), args: [] })
 
     const custom = writeHarnessPayload(path.join(tmp, 'custom'), 'pi')
     process.env[harnessEnvVar('pi')] = custom
     expect(harnessLaunch('pi')).toEqual({ command: custom, args: [] })
 
-    const dir = fakeHarnessInstall(store, 'opencode', TESTED)
-    expect(harnessLaunch('opencode')).toEqual({
-      command: path.join(dir, exeName('opencode')),
-      args: []
-    })
+    const bundled = writeHarnessPayload(vendorDir('claude'), 'claude')
+    expect(harnessLaunch('claude')).toEqual({ command: bundled, args: [] })
 
-    expect(harnessLaunch('claude')).toBeNull()
-    expect(resolveHarness('claude').launch).toBeNull()
+    expect(harnessLaunch('opencode')).toBeNull()
+    expect(resolveHarness('opencode').launch).toBeNull()
   })
 
   it('is frozen with the resolution', () => {
-    writeHarnessPayload(vendorDir('opencode'), 'opencode')
+    fakeHarnessInstall(store, 'opencode', TESTED)
     const launch = harnessLaunch('opencode')!
     expect(Object.isFrozen(launch)).toBe(true)
     expect(Object.isFrozen(launch.args)).toBe(true)

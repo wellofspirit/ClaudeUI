@@ -1,7 +1,8 @@
 /**
  * Fabricate harness payloads on disk for resolver tests (ADR-082): a vendored
- * `vendor/<id>-cli` directory, or a managed store version with its
- * `install.json`. The executables are empty files; nothing here is ever run.
+ * `vendor/claude-cli` directory (or a stale `vendor/<id>-cli` a test proves is
+ * ignored), or a managed store version with its `install.json`. The
+ * executables are empty files; nothing here is ever run.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,7 +29,7 @@ export interface FakePayloadOptions {
 }
 
 /**
- * Write a payload laid out like `vendor/<id>-cli` into `root`. Returns the
+ * Write a harness payload (the release's layout) into `root`. Returns the
  * executable's path.
  */
 export function writeHarnessPayload(

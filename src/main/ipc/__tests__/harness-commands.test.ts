@@ -304,8 +304,14 @@ describe('harness:state', () => {
       kind: 'fallback',
       reason: 'No usable System opencode found: a version-manager shim'
     })
-    // Falls back to the bundled copy, which this test app does not have.
-    expect(opencode.resolved).toMatchObject({ source: 'bundled', path: null, available: false })
+    // Nothing is bundled (ADR-082 §8), and an unusable System choice does not
+    // fall back to ClaudeUI's copy: nothing runs, and the reason says why.
+    expect(opencode.resolved).toMatchObject({
+      source: 'system',
+      path: null,
+      available: false,
+      reason: 'No usable System opencode found: a version-manager shim'
+    })
     expect(opencode.managed).toEqual([
       expect.objectContaining({ version: '1.18.40', verified: 'publisher' }),
       expect.objectContaining({ version: OPENCODE.tested, verified: 'reviewed' })
@@ -414,8 +420,9 @@ describe('harness:set-selection', () => {
         id: 'opencode',
         selection: { source: 'managed', version: '1.18.40' },
         resolved: {
-          source: 'bundled',
-          reason: expect.stringContaining('opencode 1.18.40 is not installed in ClaudeUI')
+          source: 'managed',
+          path: null,
+          reason: 'opencode 1.18.40 is not installed'
         }
       })
     } finally {
@@ -735,7 +742,8 @@ describe('events (startHarnessEvents)', () => {
     }
     expect(emit.mock.calls).toEqual([
       ['harness:changed', [{ id: 'opencode' }]],
-      ['harness:changed', [{ id: 'pi' }]]
+      ['harness:changed', [{ id: 'pi' }]],
+      ['harness:changed', [{ id: 'codex' }]]
     ])
   })
 

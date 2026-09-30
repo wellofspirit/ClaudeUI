@@ -3,7 +3,8 @@
 **Status:** Accepted (2026-09-30, arc 2 landed; proposed 2026-09-28). The design is owner-ruled
 from mockups `8bf84c23` (design 1, the Harnesses rows) and `04c3853c` (the sidebar update button).
 Implementation is arcs 2 and 3 of the 3.6 line, after
-[ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8, unbundling) is still to come.
+[ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8, unbundling) is in progress: the
+engines are unbundled (S7a, "As built" in §8); the upgrade sheet and the download offers are S7b.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -87,8 +88,10 @@ Each harness row has a segmented control and a version dropdown:
 - One resolver (`src/core/harness/resolve.ts`) decides the executable for every harness: the
   per-harness environment override, then the selection, then the bundled copy. A selection that
   cannot be honoured (a version not installed, no usable System install) falls back to the
-  bundled copy and says why. The answer is cached per harness and recomputed on an install, a
-  selection change or a finished detection, so status checks do no disk work.
+  bundled copy and says why. Since §8 only Claude Code has a bundled copy: for opencode, pi and
+  Codex such a selection resolves to nothing, with the reason. The answer is cached per harness
+  and recomputed on an install, a selection change or a finished detection, so status checks do
+  no disk work.
 - A System selection reads the detection cache (`~/.claude/ui/harness-detection.json`, §3) and
   never probes. The cache is a file in the user's home, so a record is checked against the files it
   names before it is spawned (`src/core/harness/system-source.ts`). That catches a stale, corrupt or
@@ -240,7 +243,8 @@ tested version (§3); the other floors equal their tested versions until measure
   amber after a failure. Clicking during or after an update opens a small panel naming each harness,
   its versions, and any failure with its reason.
 - Bundled Claude Code and Codex move only with ClaudeUI releases. System installs update themselves.
-  Neither counts toward the button.
+  Neither counts toward the button. (Superseded for Codex by resolved question 6: a release that
+  moves the pin offers it as an update; see §8 "As built".)
 - Latest combined with Automatically is allowed, with a warning on the row.
 
 As built (arc 2, S6; `src/core/harness/install/updater.ts`, `Sidebar/HarnessUpdateButton.tsx`):
@@ -254,8 +258,9 @@ As built (arc 2, S6; `src/core/harness/install/updater.ts`, `Sidebar/HarnessUpda
   whose ClaudeUI choice is Latest or Tested, when the version that choice names is newer than the
   newest version of that harness in the store, and the store holds at least one. Latest names
   upstream's newest as last checked; Tested names the manifest's `tested`. An exact version, a
-  System selection (even with a ClaudeUI version kept for switching back), Codex and Claude Code
-  never count. A bundled copy is not "installed" here, so a first install is not an update.
+  System selection (even with a ClaudeUI version kept for switching back) and Claude Code never
+  count; Codex counts for Tested only (since arc 3, S7a: resolved question 6). An empty store is
+  not an update: a first install is not.
 - Checks. After the boot detection (`afterBoot`, after retention) and every six hours on an
   unref'd timer, the updater asks upstream (`upstream.ts`, cached an hour) for the newest version
   of each harness on Latest with something installed; Tested needs no network. Check now
@@ -308,6 +313,62 @@ engines, ClaudeUI shows one sheet listing the harnesses this profile has used (p
 config), with one Install button for their Tested versions. Nothing downloads without that click;
 the sheet does not come back once answered. A harness the sheet skipped is offered again when a
 session on it is opened.
+
+As built (arc 3, S7a; the upgrade sheet and the per-session download offers are S7b):
+
+- The resolver. `bundledRoots` became Claude Code's alone (`bundledClaudeVersion`,
+  `bundledClaudePath`). For opencode, pi and Codex the order is the environment override, then
+  the selection — `managed` from the store, `system` from detection — then nothing: `path: null`
+  with the selection's reason: "<Label> <version> is not installed", "No version of <Label> is
+  installed" for Latest with an empty store, or the System reason. There is no fallback to a
+  vendored or packaged copy, even one an older checkout left in `vendor/`, and an unusable System
+  choice does not fall back to ClaudeUI's copy either: the row says why nothing runs. A saved
+  `bundled` selection for them (never offered) reads as the default, Tested.
+  `harnessAvailable`, `engine:is-installed` and dispatch availability follow, since they read
+  the resolver. `harnessUnavailableMessage` names `bun run ensure-<id>` in a development tree
+  (not for a System choice, which that copy would not serve).
+- The Installed page (`harness-view.ts`). "Bundled with ClaudeUI" and "running the bundled copy"
+  are Claude Code's alone. An empty store reads "<tested> is not installed · Install" (the
+  row's actionable state, checked before the unavailable line); a System choice that cannot run
+  is the unavailable line with its reason; Codex installed reads "Exact version this ClaudeUI
+  release speaks · <pin>". An environment override runs instead and offers no Install.
+- Codex updates (resolved question 6). `computeUpdates` counts Codex for its Tested choice when
+  the pin is newer than the newest Codex in the store and the store holds one; a saved Latest
+  never follows upstream for Codex, and the updater never asks upstream about it.
+- `ensure-*`. `scripts/ensure-{opencode,pi,codex}.mjs` are thin wrappers over
+  `scripts/ensure-harness.mjs`, which calls `installHarness(id, <tested>)` from
+  `src/core/harness/install/installer.ts` under bun (`scripts/build.mjs` spawns `bun`), so the
+  target is the managed store, `CLAUDEUI_HARNESS_STORE` honoured. A valid install is kept.
+  `update-*` (`--force`) moves the installed tested version aside (`moveToTrash`: renamed into
+  the store's `.trash/` and removed there at once; a locked file stays until released) and
+  installs it again; it fails, changing nothing, only when the move is refused. On Windows 11 the
+  move succeeds even while a session runs that copy — the directory of a running executable can
+  be renamed — so a running session loses every file it has not opened yet (pi loads assets
+  relative to its executable). §4's retention has the same gap: a successful rename-to-trash does
+  not prove a version unused (open follow-up). Codex on a host without reviewed digests skips with one line and exit 0. The old
+  scripts' own download, extraction and cache checks, and their `--archive` / `--license`
+  offline inputs, are gone. No build target runs `ensure-opencode/pi/codex` any more; only
+  `postinstall` does.
+- The Codex scripts. `scripts/codex-tooling.mjs` holds what `generate-codex-protocol.mjs` and
+  `codex-native-status.mjs` share; both run the pinned Codex from the store (the tested
+  version's directory, not the resolver's answer, which a System selection could make another
+  version), and the generator re-hashes it against this host's reviewed digest. Both run under
+  bun.
+- Packaging. `electron-builder.yml` ships `vendor/claude-cli` (with `vendor/**/*.node`) and no
+  other engine; the release workflows' server zips carry `vendor/claude-cli` only and the Linux
+  tarball carries no engine (ADR-061's 2026-09-30 amendment). CI's `vendor/codex-cli` cache is a
+  cache of the store's `codex/<version>` directory. `claudeui-server` copied no engine itself
+  (`scripts/build-server.mjs`); it resolves engines through the resolver, so a fresh server has
+  none until an admin installs them (resolved question 5).
+  `src/core/harness/__tests__/packaging.test.ts` fails if a package or workflow carries an
+  unbundled engine again.
+- Tests. The integration project names the real store (`CLAUDEUI_HARNESS_STORE`, set in
+  `vitest.config.ts`, since its setup moves HOME), and each suite skips when its engine is not
+  installed. The Codex suites copy the store's pinned binary into their fixture and point the
+  resolver at the copy through `CLAUDEUI_CODEX_CLI`.
+- Documentation. pi's version-exact docs are read from the upstream checkout
+  `vendor/pi-src/packages/coding-agent/docs/` at the tested tag (CLAUDE.md's rule for engine
+  sources), no longer from the vendored payload.
 
 ## Consequences
 

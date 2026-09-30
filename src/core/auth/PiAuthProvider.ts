@@ -5,7 +5,8 @@
  * ClaudeUI reads/writes `~/.pi/agent/auth.json` DIRECTLY. This is the ONE
  * sanctioned write into `~/.pi/**`: a read-modify-write that preserves every
  * unknown provider entry and unknown field byte-for-byte, and keeps 0600 on
- * POSIX (see docs/protocol-pi/README.md "Auth" + vendor/pi-cli/docs/providers.md).
+ * POSIX (see docs/protocol-pi/README.md "Auth" +
+ * vendor/pi-src/packages/coding-agent/docs/providers.md).
  *
  * pi's native `pi /login` is TUI-interactive, but as of M6 ClaudeUI DOES drive
  * the `openai-codex` (ChatGPT) login itself via its own auth vault

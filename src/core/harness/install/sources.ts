@@ -1,8 +1,9 @@
 /**
  * Where each managed harness comes from and how its download is verified
- * (ADR-082 §4). The pipelines in `scripts/ensure-{opencode,pi,codex}.mjs` are
- * the reference; these put the same payload into a staging directory in the
- * layout the resolver reads (`store.ts`).
+ * (ADR-082 §4). These put the payload into a staging directory in the layout
+ * the resolver reads (`store.ts`). They replaced the vendoring pipelines of the
+ * old `scripts/ensure-{opencode,pi,codex}.mjs`, which are now thin wrappers
+ * over the installer (ADR-082 §8).
  *
  *   opencode  npm registry: `<platform-package>/<version>` metadata gives
  *             `dist.tarball` (must be on registry.npmjs.org) and
@@ -135,8 +136,8 @@ async function extract(
 // ── opencode ──────────────────────────────────────────────────────────────────
 
 /**
- * The manifest platform whose package runs on this host (`ensure-opencode.mjs`
- * `detectPlatformKey`): Windows on arm64 runs the x64 build under emulation.
+ * The manifest platform whose package runs on this host: Windows on arm64 runs
+ * the x64 build under emulation.
  */
 export function opencodePlatformKey(platform: string, arch: string): string | null {
   if (platform === 'win32') return 'win32-x64'
@@ -232,7 +233,7 @@ async function acquireOpencode(ctx: AcquireContext): Promise<Acquired> {
 
 // ── pi ────────────────────────────────────────────────────────────────────────
 
-/** `ensure-pi.mjs`'s host naming: anything but Windows and macOS is linux, anything but arm64 is x64. */
+/** pi's host naming: anything but Windows and macOS is linux, anything but arm64 is x64. */
 export function piPlatformKey(platform: string, arch: string): string {
   const plat = platform === 'win32' || platform === 'darwin' ? platform : 'linux'
   return `${plat}-${arch === 'arm64' ? 'arm64' : 'x64'}`
@@ -365,7 +366,7 @@ async function acquireCodex(ctx: AcquireContext): Promise<Acquired> {
         `${binary.member}.tar.gz SHA-256 ${archive.sha256} does not match the reviewed ${binary.archiveSha256}`
       )
     }
-    // Exactly one regular member, named as reviewed (as `ensure-codex.mjs`).
+    // Exactly one regular member, named as reviewed.
     const files = await extract(ctx, archive.file, 'tar.gz', (p) =>
       p === binary.member ? binary.name : null
     )

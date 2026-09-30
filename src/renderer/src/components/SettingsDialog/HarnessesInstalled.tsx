@@ -41,7 +41,6 @@ import {
   leftLabel,
   leftSource,
   managedChoice,
-  bundledSatisfies,
   installNeeded,
   missingManagedVersion,
   progressPercent,
@@ -338,10 +337,10 @@ function HarnessRow({
         : choice === 'tested'
           ? entry.manifest.tested
           : choice
-    // The save answers with the resolver's fresh view: a bundled copy of the
-    // very version picked satisfies it, and nothing downloads.
+    // The save answers with the store's fresh view: an installed version needs
+    // no download.
     const fresh = harnessStore.getState().snapshot?.harnesses[id] ?? entry
-    if (!target || isInstalled(fresh, target) || bundledSatisfies(fresh, target)) return
+    if (!target || isInstalled(fresh, target)) return
     const inFlight = state.installs.some(
       (p) => p.id === id && p.version === target && p.phase !== 'failed'
     )

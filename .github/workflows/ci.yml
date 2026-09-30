@@ -74,13 +74,16 @@ jobs:
         shell: bash
         run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
 
-      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
-      # hit from another pin is a guaranteed re-download rather than a saving.
-      - name: Cache codex CLI binaries
+      # postinstall installs the tested opencode, pi and Codex into ClaudeUI's
+      # managed store (ADR-082 §8). Codex is the large one (two ~100 MB
+      # archives), so its version directory is cached; a restored directory
+      # with a valid install.json satisfies ensure-codex without a download.
+      # No restore-keys: another pin's directory is never this pin's.
+      - name: Cache codex harness
         uses: actions/cache@v6
         with:
-          path: vendor/codex-cli
-          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+          path: ~/.claude/ui/harnesses/codex/${{ steps.codex-version.outputs.version }}
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-harness-${{ steps.codex-version.outputs.version }}
 
       - name: Cache Electron binaries
         uses: actions/cache@v6
@@ -92,8 +95,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-electron-
 
-      # Full install (runs postinstall: install-app-deps + ensure-cli/opencode/pi),
-      # mirroring the release workflows. postinstall's ensure-cli also proves the
+      # Full install (runs postinstall: install-app-deps + ensure-cli, and
+      # ensure-opencode/pi/codex into the runner's managed store), mirroring the
+      # release workflows. postinstall's ensure-cli also proves the
       # cli.js patches still APPLY against the pinned claudeCliVersion — a patch
       # that no longer applies fails the install and turns CI red. (Behavioural
       # correctness of the applied patches is a separate, live-only concern:

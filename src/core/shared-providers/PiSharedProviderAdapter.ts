@@ -19,7 +19,7 @@ const DEFAULT_MAX_TOKENS = 16_384
 /**
  * The `apiKey` written into a keyless custom provider's models.json entry
  * (ADR-074 §4). pi omits a provider with no usable credential from
- * `get_available_models` (`vendor/pi-cli/pi/docs/models.md`: "The dummy key
+ * `get_available_models` (`vendor/pi-src/packages/coding-agent/docs/models.md`: "The dummy key
  * makes the model available"), so a self-hosted endpoint added with the key
  * left blank would never reach pi's picker without one.
  *

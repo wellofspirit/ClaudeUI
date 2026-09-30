@@ -392,7 +392,8 @@ describe.skipIf(!OC_KEY)('opencode', () => {
     const fx = opencodeFixture(OC_TESTED)
     // The real invalidation, as in the app.
     const installer = installerFor(fx, OC_TESTED, { invalidate: (id) => invalidateHarness(id) })
-    expect(resolveHarness('opencode').source).not.toBe('managed')
+    // Nothing is bundled (ADR-082 §8): before the install, nothing runs.
+    expect(resolveHarness('opencode').path).toBeNull()
     await installer.installHarness('opencode', 'tested')
     const dir = path.join(store, 'opencode', OC_TESTED)
     expect(resolveHarness('opencode')).toMatchObject({

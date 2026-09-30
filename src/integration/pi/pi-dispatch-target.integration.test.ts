@@ -6,7 +6,7 @@
  * controls its deps precisely) is constructed with its REAL default
  * `spawnPiTarget` (i.e. NOT injected — `defaultSpawnPiTarget`'s actual
  * PiRpcClient + PiBridgeHost construction runs), dispatching `engine: 'pi'`
- * against the real vendored binary and a real model call. Unit-level coverage
+ * against the real installed binary and a real model call. Unit-level coverage
  * for guards/model-resolution/gate/streaming/cost-cap/stop already lives in
  * cross-engine-dispatcher.component.test.ts (a FAKE spawnPiTarget) — this file
  * exists solely to prove the REAL wiring (bridge host transport, `--no-session`

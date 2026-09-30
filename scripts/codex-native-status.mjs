@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { execFile } from 'node:child_process'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { root, cacheValid, assertPin, codexExecutableName } from './ensure-codex.mjs'
+import { assertPin, storeCodexExecutable } from './codex-tooling.mjs'
 
 // CLI status may contain key fragments. Neither captured stream nor errors leave this function.
 export function classifyStatus(code, output) {
@@ -28,10 +28,12 @@ export function classifyStatus(code, output) {
 export async function nativeStatus() {
   try {
     assertPin()
-    if (!cacheValid(join(root, 'vendor/codex-cli'))) return { failure: 'binary-unavailable' }
+    // The pinned Codex in ClaudeUI's managed store (`bun run ensure-codex`).
+    const binary = storeCodexExecutable()
+    if (!binary) return { failure: 'binary-unavailable' }
     return await new Promise((resolve) => {
       execFile(
-        join(root, 'vendor/codex-cli', codexExecutableName()),
+        binary,
         ['login', 'status'],
         {
           // Preserve native identity/storage selection. Do not import any shared vault credentials.

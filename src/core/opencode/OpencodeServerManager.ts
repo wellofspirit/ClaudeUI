@@ -63,8 +63,9 @@ const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
 /**
  * How to spawn opencode next, from the harness resolver
  * (`../harness/resolve.ts`, ADR-082): `CLAUDEUI_OPENCODE_CLI`, then the
- * harnesses.json selection, then the vendored copy. Throws the resolver's
- * user-readable reason when there is none, which the acquire path surfaces.
+ * harnesses.json selection (ClaudeUI's store or a System install; nothing is
+ * bundled, ADR-082 §8). Throws the resolver's user-readable reason when there
+ * is none, which the acquire path surfaces.
  */
 function locateLaunch(): HarnessLaunch {
   const resolved = resolveHarness('opencode')
@@ -94,12 +95,13 @@ const DISPATCH_MCP_TIMEOUT_MS = 20 * 60 * 1000
 
 /**
  * Locate the caller-identity plugin (ADR-033 M2) that must be loaded by the
- * EXTERNAL opencode process — the same dev/packaged split as the vendored
- * harnesses (`../harness/resolve.ts`).
- * The file lives under `resources/opencode/` (not `vendor/opencode-cli/`
- * like the binary): it ships via electron-builder's `asarUnpack: resources/**`
- * rather than `extraResources`, so the packaged path swaps `app.asar` →
- * `app.asar.unpacked` IN PLACE instead of moving to a new Resources subdir.
+ * EXTERNAL opencode process — the same dev/packaged split as the bundled
+ * Claude Code (`../harness/resolve.ts`), although the opencode binary itself
+ * comes from ClaudeUI's harness store or a System install (ADR-082 §8).
+ * The file lives under `resources/opencode/`: it ships via electron-builder's
+ * `asarUnpack: resources/**` rather than `extraResources`, so the packaged
+ * path swaps `app.asar` → `app.asar.unpacked` IN PLACE instead of moving to a
+ * new Resources subdir.
  * Returns null (never throws) when the file isn't found — the plugin is a
  * best-effort feature; its absence just means `dispatch_agent` (opencode →
  * Claude direction) fails loud with a clear message (see
@@ -185,9 +187,10 @@ export function buildOpencodeConfigContent(
     // permissions on any reject, which carry no message. Ephemeral env-var
     // config only — never written to a user file (ADR-031).
     experimental: { continue_loop_on_deny: true },
-    // The binary we spawn is the pinned, digest-checked upstream release that
-    // ensure-opencode vendors (ADR-081 §7): a ClaudeUI-spawned server must not
-    // replace it under a running session. Version is owned by
+    // The binary we spawn is a digest-checked upstream release from ClaudeUI's
+    // harness store (ADR-081 §7, ADR-082 §4), or a System install ClaudeUI
+    // never updates: a ClaudeUI-spawned server must not replace it under a
+    // running session. Version is owned by
     // `src/shared/harness-manifests/opencode.json` (ADR-082), never
     // by the running process. Ephemeral like the block above — a user config
     // file is never rewritten to say this (ADR-031).

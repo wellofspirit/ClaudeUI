@@ -5,24 +5,26 @@ Current pin: **0.87.1** ([stable release](https://github.com/earendil-works/pi/r
 How ClaudeUI drives the [pi coding agent](https://github.com/earendil-works/pi) and what we
 verified against the real binary. Everything here was probed on Windows against the pinned
 standalone build (`src/shared/harness-manifests/pi.json#tested`). The **authoritative protocol reference for the
-pinned version ships inside the vendored payload**: `vendor/pi-cli/docs/rpc.md` (plus
-`extensions.md`, `providers.md`, `session-format.md`, `settings.md`, `skills.md`) — consult those
-before theorizing, they are version-exact and offline.
+pinned version is pi's own docs at the pinned tag**: `vendor/pi-src/packages/coding-agent/docs/rpc.md`
+(plus `extensions.md`, `providers.md`, `session-format.md`, `settings.md`, `skills.md`) — consult
+those before theorizing, they are version-exact and offline. (Until ADR-082 §8 unbundled pi, the
+same files shipped in the vendored payload's `docs/`; the release archive in ClaudeUI's store,
+`~/.claude/ui/harnesses/pi/<version>/docs/`, still carries them.)
 
-For source-level questions (internals not covered by docs), **do not** keep a vendored source
-clone — shallow-checkout the pinned tag instead:
+`vendor/pi-src` is the upstream source checkout at the tested tag (CLAUDE.md's rule for engine
+sources; gitignored). Create or move it with:
 
 ```bash
-git clone --depth 1 --branch v<pi tested version> https://github.com/earendil-works/pi <scratch-dir>
+git clone --depth 1 --branch v<pi tested version> https://github.com/earendil-works/pi vendor/pi-src
 ```
 
-Key source locations: `packages/coding-agent/src/modes/rpc/` (RPC types + server),
+Key source locations (in `vendor/pi-src`): `packages/coding-agent/src/modes/rpc/` (RPC types + server),
 `packages/coding-agent/src/core/session-manager.ts` (session files),
 `packages/ai/src/auth/` (credentials), `packages/ai/src/providers/*.models.ts` (built-in catalog).
 
 ## Transport
 
-- Spawn: `vendor/pi-cli/pi.exe --mode rpc [-e <extension.ts>] [--session <path>] [--no-session] [--session-dir <dir>]`,
+- Spawn: `<store>/pi/<version>/pi.exe --mode rpc [-e <extension.ts>] [--session <path>] [--no-session] [--session-dir <dir>]`,
   one process per ClaudeUI session (pi has no server mode; this is the claude-shaped lifecycle,
   not the opencode-shaped one).
 - **Framing**: strict JSONL. Split stdout on `\n` only, strip a trailing `\r`, never use Node
@@ -35,7 +37,7 @@ Key source locations: `packages/coding-agent/src/modes/rpc/` (RPC types + server
 
 ## Commands ClaudeUI uses
 
-See `vendor/pi-cli/docs/rpc.md` for full shapes. The integration surface:
+See `vendor/pi-src/packages/coding-agent/docs/rpc.md` for full shapes. The integration surface:
 
 | Command                                                                              | Use                                                                                                                 |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
@@ -143,7 +145,7 @@ display (live path only sums assistant `message_end` usage) — accepted, not a 
   `session-manager.ts`, verified): strip a leading `/` or `\`, then replace every `[/\\:]` with
   `-`, wrap in `--…--`. `D:\Work\App` → `--D--Work-App--`. Lossy one-way, same philosophy as our
   `projectKey` (ADR-025) — always map cwd → dir, never parse back.
-- File format: documented in `vendor/pi-cli/docs/session-format.md` (header `{type:"session",
+- File format: documented in `vendor/pi-src/packages/coding-agent/docs/session-format.md` (header `{type:"session",
 version:3, id, timestamp, cwd, parentSession?}`, then tree entries `{type, id, parentId,
 timestamp, …}`; `message` / `model_change` / `thinking_level_change` / `compaction` /
   `branch_summary` / `session_info` / `label` / `custom` / `custom_message`).
@@ -153,7 +155,7 @@ timestamp, …}`; `message` / `model_change` / `thinking_level_change` / `compac
 ## Auth (`~/.pi/agent/auth.json`, 0600)
 
 - Shapes: `{"<provider>": {"type":"api_key","key":"…"} | {"type":"oauth","refresh","access","expires",…extras}}`.
-  Provider-id ↔ env-var table: `vendor/pi-cli/docs/providers.md`. Model catalog cache:
+  Provider-id ↔ env-var table: `vendor/pi-src/packages/coding-agent/docs/providers.md`. Model catalog cache:
   `~/.pi/agent/models-store.json`.
 - `get_available_models` returns only models whose provider has credentials (empty file → `[]`).
 - **ChatGPT-subscription (provider `openai-codex`)**: same public OAuth client id as opencode's
@@ -181,8 +183,8 @@ All **verified against the standalone `pi.exe`** (this was the M0 go/no-go):
 - `ctx.ui.confirm/select/input/editor` emit `extension_ui_request` on stdout and block for an
   `extension_ui_response` on stdin; `notify`/`setStatus`/`setWidget`/`setTitle` are
   fire-and-forget. `ctx.mode === "rpc"`, `ctx.hasUI === true`.
-- Useful shipped references: `vendor/pi-cli/examples/extensions/permission-gate.ts`,
-  `examples/rpc-extension-ui.ts` + `examples/extensions/rpc-demo.ts`, `examples/extensions/subagent/`,
+- Useful shipped references (in `vendor/pi-src/packages/coding-agent/`):
+  `examples/extensions/permission-gate.ts`, `examples/rpc-extension-ui.ts` + `examples/extensions/rpc-demo.ts`, `examples/extensions/subagent/`,
   `examples/extensions/plan-mode/`.
 
 ### Long-poll protocol (bridge v6, probed 2026-09-09)

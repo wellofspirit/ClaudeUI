@@ -10,9 +10,9 @@ A desktop client for coding agents, built with Electron + React 19 + TypeScript.
 
 Full documentation index: [docs/README.md](docs/README.md)
 
-Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
+Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-src/packages/coding-agent/docs/` at the pinned tag; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
-**Engine source trees live under `vendor/`:** upstream checkouts in `vendor/<engine>-src/` (`vendor/codex-src`, `vendor/opencode-src`, `vendor/pi-src`), checked out at the tag matching that engine's `package.json` pin. No engine is forked any more: opencode is the upstream npm release, digest-checked by `ensure-opencode` (ADR-081). Claude Code has no public source — use `vendor/claude-cli/cli.js` + `docs/protocol-cc/`. The source trees are gitignored (`/vendor/*-src/`) and excluded from ESLint and electron-builder. Never clone source into `.cache/` (build caches only), `/tmp` or the scratchpad. Read the source before black-box probing an engine's behavior, cite paths as `vendor/<engine>-src/...`, and bump the checkout together with the pin.
+**Engine source trees live under `vendor/`:** upstream checkouts in `vendor/<engine>-src/` (`vendor/codex-src`, `vendor/opencode-src`, `vendor/pi-src`), checked out at the tag matching that engine's pin (`src/shared/harness-manifests/<engine>.json#tested`). The engines themselves are not vendored: only Claude Code is (`vendor/claude-cli`); opencode, pi and Codex install into ClaudeUI's managed store `~/.claude/ui/harnesses` (ADR-082 §8). No engine is forked any more: opencode is the upstream npm release, digest-checked by the harness installer (ADR-081, ADR-082 §4). Claude Code has no public source — use `vendor/claude-cli/cli.js` + `docs/protocol-cc/`. The source trees are gitignored (`/vendor/*-src/`) and excluded from ESLint and electron-builder. Never clone source into `.cache/` (build caches only), `/tmp` or the scratchpad. Read the source before black-box probing an engine's behavior, cite paths as `vendor/<engine>-src/...`, and bump the checkout together with the pin.
 
 ## Development Workflow (read this first)
 
@@ -32,7 +32,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run typecheck` / `bun run lint` / `bun run format`
 - `bun run rebuild:native` — **run after every `bun install`/`add`/`remove`**; bun leaves a Node-ABI `better-sqlite3` that crashes the app on boot (`ERR_DLOPEN_FAILED`)
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary; version pinned via `package.json#claudeCliVersion`
-- `bun run ensure-pi` / `update-pi` — vendor the pinned pi binary (`src/shared/harness-manifests/pi.json#tested`); `ensure-opencode` / `update-opencode` likewise for opencode
+- `bun run ensure-opencode` / `ensure-pi` / `ensure-codex` — install the tested version (`src/shared/harness-manifests/<id>.json#tested`) into ClaudeUI's managed store `~/.claude/ui/harnesses` through the app's own installer (`CLAUDEUI_HARNESS_STORE` moves the store); `update-*` reinstalls it. `postinstall` runs all three
 - `bun run build:server` — `claudeui-server` pure-asset bundle → `dist/server/` (needs `build:web` first)
 - `bun run build:server:compile` — bun-compiled `claudeui-server` executable → `dist/server-bin/`; run it from source instead with `bun src/server/main.ts --help`
 - `bun run verify:sqlite` — SQLite driver conformance against `bun:sqlite` (the arm vitest can't host); both `build:server*` targets run it first
@@ -42,7 +42,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run test` — default local run: unit + component + e2e (~15 s)
 - `bun run test:ci` — adds the slow git project (what CI runs)
 - `bun run test:git:changed` — after touching git-service/worktree code
-- `bun run test:integration` — gated, real engine binaries
+- `bun run test:integration` — gated, real engine binaries (Claude Code from `vendor/`, the others from the managed store; a suite skips when its engine is not installed)
 
 Layers, infra, and conventions: `docs/testing-strategy.md`. Components carry two-tier `data-testid` attributes (ADR-027) — assert structurally first, screenshot last.
 

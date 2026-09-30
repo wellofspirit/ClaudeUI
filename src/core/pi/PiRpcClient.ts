@@ -1,6 +1,7 @@
 /**
  * PiRpcClient — owns a single `pi --mode rpc` child process and speaks its
- * JSONL wire protocol (see docs/protocol-pi/README.md + vendor/pi-cli/docs/rpc.md).
+ * JSONL wire protocol (see docs/protocol-pi/README.md +
+ * vendor/pi-src/packages/coding-agent/docs/rpc.md).
  *
  * Framing rules (verified — README.md "Transport"): split stdout on `\n` ONLY,
  * strip a trailing `\r`, never use Node `readline` (it also splits on

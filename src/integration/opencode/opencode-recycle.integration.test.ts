@@ -31,6 +31,10 @@ function findBinary(): string | null {
   return resolveHarness('opencode').path
 }
 
+// Evaluated once at collection time: a checkout without opencode installed
+// (`bun run ensure-opencode`, or a System selection) skips rather than fails.
+const BINARY_MISSING = !findBinary()
+
 async function alive(baseUrl: string, authHeader: string): Promise<boolean> {
   try {
     const res = await fetch(`${baseUrl}/config/providers`, {
@@ -42,7 +46,7 @@ async function alive(baseUrl: string, authHeader: string): Promise<boolean> {
   }
 }
 
-describe.skipIf(SKIP)('opencode recycleAll smoke', () => {
+describe.skipIf(SKIP || BINARY_MISSING)('opencode recycleAll smoke', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'oc-recycle-'))
   let mgr: OpencodeServerManager
 

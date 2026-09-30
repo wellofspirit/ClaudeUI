@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join, dirname, posix, resolve, sep } from 'node:path'
@@ -8,12 +8,12 @@ import {
   root,
   manifest,
   assertPin,
-  cacheValid,
   codexExecutableName,
   isolatedEnv,
+  storeCodexExecutable,
   verifyVersion,
   sha256
-} from './ensure-codex.mjs'
+} from './codex-tooling.mjs'
 
 // Only selected methods enter the dependency closure, never the full RPC unions.
 export const methods = {
@@ -192,9 +192,16 @@ function main() {
   const temp = mkdtempSync(join(tmpdir(), 'codex-protocol-'))
   try {
     assertPin()
-    const vendor = join(root, 'vendor/codex-cli')
-    if (!cacheValid(vendor)) throw new Error('Run ensure-codex first')
-    const binary = join(vendor, codexExecutableName())
+    // The pinned Codex from ClaudeUI's managed store (`bun run ensure-codex`),
+    // re-hashed against this host's reviewed digest: the protocol is generated
+    // by exactly the binary provenance names.
+    const binary = storeCodexExecutable()
+    if (!binary) throw new Error('Run ensure-codex first')
+    const reviewed =
+      manifest.platforms[`${process.platform}-${process.arch}`].binaries[codexExecutableName()]
+    if (sha256(readFileSync(binary)) !== reviewed.binarySha256) {
+      throw new Error('Codex payload digest mismatch')
+    }
     const env = isolatedEnv(temp)
     verifyVersion(binary, temp, env)
     const generated = join(temp, 'generated')

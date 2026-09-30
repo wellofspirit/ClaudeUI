@@ -2,9 +2,9 @@
  * ClaudeUI's managed harness store (ADR-082 §4):
  *
  *   ~/.claude/ui/harnesses/<id>/<version>/
- *     <payload>       same layout as the vendored `vendor/<id>-cli` directory
- *                     (opencode: the binary; pi: its whole directory; Codex:
- *                     `codex` + `codex-code-mode-host` + LICENSE)
+ *     <payload>       the release's payload (opencode: the binary; pi: its
+ *                     whole release directory; Codex: `codex` +
+ *                     `codex-code-mode-host` + LICENSE)
  *     install.json    HarnessInstallRecord, written last
  *     last-used       touched when the resolver picks this version (GC)
  *   ~/.claude/ui/harnesses/.staging/   installs in progress (`install/store-writer.ts`)

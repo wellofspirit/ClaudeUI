@@ -98,12 +98,13 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
       id: 'pi',
       manifest: { tested: '0.87.4', floor: '0.87.4', ceiling: '1.0.0' },
       selection: { source: 'managed', version: 'tested' },
+      // An empty store: nothing runs (ADR-082 §8, nothing but Claude Code is bundled).
       resolved: {
-        source: 'bundled',
-        version: '0.87.4',
-        path: '/opt/claudeui/vendor/pi-cli/pi',
-        reason: 'pi 0.87.4 is not installed in ClaudeUI',
-        available: true
+        source: 'managed',
+        version: null,
+        path: null,
+        reason: 'pi 0.87.4 is not installed',
+        available: false
       },
       system: {
         detectedAt: '2026-09-30T00:00:00.000Z',
@@ -212,13 +213,13 @@ const sourceOption = (id: HarnessId, value: string): HTMLElement =>
 
 const line = (id: HarnessId): HTMLElement => within(row(id)).getByTestId('HarnessRow.line')
 
-/** pi selected on an exact version that is neither installed nor the bundled copy's. */
+/** pi selected on an exact version that is not installed. */
 function piWants(version: string): HarnessStateSnapshot {
   const s = snapshot()
   s.harnesses.pi = {
     ...s.harnesses.pi,
     selection: { source: 'managed', version },
-    resolved: { ...s.harnesses.pi.resolved, reason: `pi ${version} is not installed in ClaudeUI` }
+    resolved: { ...s.harnesses.pi.resolved, reason: `pi ${version} is not installed` }
   }
   return s
 }
@@ -294,13 +295,13 @@ describe('rows', () => {
     expect(claude).not.toHaveTextContent('older than')
   })
 
-  it('a bundled copy of the selected version satisfies it: no "not installed", no Install', async () => {
+  it('an empty store reads "<tested> is not installed · Install", never a bundled copy', async () => {
     renderPage()
     await loaded()
-    expect(line('pi')).toHaveAttribute('data-state', 'running')
-    expect(line('pi')).toHaveTextContent('Bundled with ClaudeUI · 0.87.4')
-    expect(line('pi')).not.toHaveTextContent('not installed')
-    expect(within(row('pi')).queryByTestId('HarnessRow.install')).toBeNull()
+    expect(line('pi')).toHaveAttribute('data-state', 'not-installed')
+    expect(line('pi')).toHaveTextContent('0.87.4 is not installed')
+    expect(line('pi')).not.toHaveTextContent(/bundled/i)
+    expect(within(row('pi')).getByTestId('HarnessRow.install')).toHaveAttribute('data-id', '0.87.4')
   })
 
   it('disables System when nothing usable was found; its tooltip says why', async () => {
@@ -355,26 +356,25 @@ describe('rows', () => {
     )
   })
 
-  it('an unusable System selection becomes the line: the reason, and what runs instead', async () => {
+  it('an unusable System selection becomes the line: the reason, and nothing runs', async () => {
     const s = snapshot()
     s.harnesses.opencode = {
       ...s.harnesses.opencode,
       selection: { source: 'system' },
       resolved: {
-        source: 'bundled',
-        version: '1.18.32',
-        path: '/opt/claudeui/vendor/opencode-cli/opencode',
+        source: 'system',
+        version: null,
+        path: null,
         reason: 'No usable System opencode found',
-        available: true
+        available: false
       }
     }
     api.harnessState.mockResolvedValue(s)
     renderPage()
     await loaded()
-    expect(line('opencode')).toHaveAttribute('data-state', 'fallback')
-    expect(line('opencode')).toHaveTextContent(
-      'No usable System opencode found; running the bundled copy'
-    )
+    expect(line('opencode')).toHaveAttribute('data-state', 'unavailable')
+    expect(line('opencode')).toHaveTextContent('No usable System opencode found')
+    expect(line('opencode')).not.toHaveTextContent(/bundled/i)
     expect(within(row('opencode')).queryByTestId('HarnessRow.install')).toBeNull()
   })
 
@@ -397,7 +397,7 @@ describe('rows', () => {
     expect(trigger).toHaveTextContent('1.18.30')
   })
 
-  it('a selected version that is neither installed nor bundled says so, and installs', async () => {
+  it('a selected version that is not installed says so, and installs', async () => {
     api.harnessState.mockResolvedValue(piWants('0.88.0'))
     api.installHarness.mockReturnValue(new Promise(() => {}))
     renderPage()

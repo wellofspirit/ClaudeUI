@@ -56,8 +56,9 @@ export function codexBinaryAvailable(): boolean {
 /**
  * The `codex` executable, resolved by the harness resolver
  * (`../harness/resolve.ts`, ADR-082): `CLAUDEUI_CODEX_CLI`, then the
- * harnesses.json selection, then the vendored copy (`vendor/codex-cli`, or
- * `<Resources>/codex-cli` packaged). Never PATH.
+ * harnesses.json selection (ClaudeUI's store at the pin, or a System install
+ * from detection). Codex is not bundled (ADR-082 §8); nothing is looked up on
+ * PATH here.
  */
 export function locateCodexBinary(): string | null {
   return resolveHarness('codex').path

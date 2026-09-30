@@ -122,22 +122,47 @@ describe('computeUpdates', () => {
     ).toEqual([])
   })
 
-  it('Codex and Claude Code never count: they move with ClaudeUI releases', () => {
+  it('Codex counts for Tested, its one choice: a release that moves the pin offers it', () => {
+    const codex = (installed: string[], selection = managed('tested')) =>
+      computeUpdates(inputs({ selections: { codex: selection }, installed: { codex: installed } }))
+    expect(codex(['0.150.0'])).toEqual([
+      { id: 'codex', from: '0.150.0', to: '0.156.0', choice: 'tested' }
+    ])
+    // A selection without a version is Tested.
+    expect(codex(['0.150.0'], { source: 'managed' })).toEqual([
+      { id: 'codex', from: '0.150.0', to: '0.156.0', choice: 'tested' }
+    ])
+    expect(codex(['0.150.0', '0.156.0'])).toEqual([])
+    // Nothing installed is a first install, not an update; System updates itself.
+    expect(codex([])).toEqual([])
+    expect(codex(['0.150.0'], { source: 'system', version: 'tested' })).toEqual([])
+  })
+
+  it('Codex never follows Latest, even saved as Latest', () => {
     expect(
       computeUpdates(
         inputs({
-          selections: {
-            codex: managed('tested'),
-            claude: managed('tested')
-          },
-          installed: { codex: ['0.150.0'], claude: ['2.1.270'] },
-          latest: { codex: '0.160.0', claude: '2.1.290' }
+          selections: { codex: managed('latest') },
+          installed: { codex: ['0.150.0'] },
+          latest: { codex: '0.160.0' }
         })
       )
     ).toEqual([])
   })
 
-  it('nothing installed (bundled only, or nothing at all) is not an update: a first install is not', () => {
+  it('Claude Code never counts: its bundled copy moves with ClaudeUI releases', () => {
+    expect(
+      computeUpdates(
+        inputs({
+          selections: { claude: managed('tested') },
+          installed: { claude: ['2.1.270'] },
+          latest: { claude: '2.1.290' }
+        })
+      )
+    ).toEqual([])
+  })
+
+  it('nothing installed is not an update: a first install is not', () => {
     expect(
       computeUpdates(
         inputs({
@@ -213,9 +238,10 @@ describe('the check', () => {
       selections: {
         opencode: managed('latest'),
         pi: managed('latest'),
-        codex: managed('tested')
+        // Codex has no Latest: upstream is never asked for it.
+        codex: managed('latest')
       },
-      store: { opencode: ['1.18.40'], pi: [] }
+      store: { opencode: ['1.18.40'], pi: [], codex: ['0.156.0'] }
     })
     await updater.check('boot')
     expect(latestVersion.mock.calls.map(([id]) => id)).toEqual(['opencode'])
@@ -412,7 +438,7 @@ describe('Automatically', () => {
     await updater.idle()
     expect(install).toHaveBeenCalledWith('pi', '0.87.4')
     // Every updatable harness is nudged for the mode itself.
-    expect(changes[0]).toEqual(['opencode', 'pi'])
+    expect(changes[0]).toEqual(['opencode', 'pi', 'codex'])
   })
 })
 

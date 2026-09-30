@@ -25,7 +25,11 @@ function findBinary(): string | null {
   return resolveHarness('opencode').path
 }
 
-describe.skipIf(SKIP)('opencode server smoke', () => {
+// Evaluated once at collection time: a checkout without opencode installed
+// (`bun run ensure-opencode`, or a System selection) skips rather than fails.
+const BINARY_MISSING = !findBinary()
+
+describe.skipIf(SKIP || BINARY_MISSING)('opencode server smoke', () => {
   let proc: ChildProcess
   let baseUrl: string
   let authHeader: string

@@ -107,7 +107,7 @@
  *    keeps the marker so the subagent extension can put the variable back for
  *    the pi it spawns. First thing in the factory is early enough: pi calls
  *    every extension factory during startup and waits for it before startup
- *    continues, and tools run only in a session (vendor/pi-cli/docs/
+ *    continues, and tools run only in a session (vendor/pi-src/packages/coding-agent/docs/
  *    extensions.md, "Respect the runtime lifecycle").
  */
 
@@ -124,7 +124,7 @@ export default function (pi) {
   // Electron-as-Node: ClaudeUI started this pi on Electron's own Node, which
   // needs ELECTRON_RUN_AS_NODE=1; no child of pi may inherit it (an Electron
   // app the bash tool opens would start as plain Node). pi runs this factory
-  // during startup, before any tool can (vendor/pi-cli/docs/extensions.md,
+  // during startup, before any tool can (vendor/pi-src/packages/coding-agent/docs/extensions.md,
   // "Respect the runtime lifecycle"). The marker stays for nested pi spawns.
   if (process.env.CLAUDEUI_PI_ELECTRON_NODE === '1') {
     delete process.env.ELECTRON_RUN_AS_NODE;
@@ -159,7 +159,7 @@ export default function (pi) {
   // neither bridgeUrl nor bridgeToken to function (though the tool_call gate
   // a few lines down, which is what actually turns exit_plan's call into an
   // approval prompt, does need them -- PiSession always sets both together).
-  // Mirrors vendor/pi-cli/examples/extensions/plan-mode/index.ts's
+  // Mirrors vendor/pi-src/packages/coding-agent/examples/extensions/plan-mode/index.ts's
   // togglePlanMode/enablePlanModeTools/restoreNormalModeTools pattern: only
   // edit/write are dropped from the active set (ported verbatim from that
   // example's PLAN_MODE_DISABLED_TOOLS) -- bash and any other active tool

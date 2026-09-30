@@ -5,8 +5,8 @@
  *
  * Sources (all version-pinned to src/shared/harness-manifests/pi.json#tested, verified against
  * the real binary — see docs/protocol-pi/README.md for the M0 probe notes):
- *   - vendor/pi-cli/docs/rpc.md            — commands, responses, events
- *   - vendor/pi-cli/docs/session-format.md — on-disk session entry shapes
+ *   - vendor/pi-src/packages/coding-agent/docs/rpc.md            — commands, responses, events
+ *   - vendor/pi-src/packages/coding-agent/docs/session-format.md — on-disk session entry shapes
  *
  * Verified doc drift (v0.82.1, first verified v0.80.10; #1 re-verified v0.84.3
  * — docs/protocol-pi/README.md "Verified doc drift" section):

@@ -11,19 +11,23 @@
  *   - Latest names upstream's newest (below the ceiling), as last checked;
  *   - Tested names the manifest's `tested`, which moves when ClaudeUI updates;
  *   - an exact version never updates;
- *   - System installs update themselves, and Claude Code's bundled copy and
- *     Codex move only with ClaudeUI releases, so neither ever counts;
- *   - a bundled copy is not "installed" here: a first install is not an update
- *     (the upgrade prompt handles first installs, arc 3).
+ *   - Codex counts for Tested only, its one choice: a ClaudeUI release that
+ *     moves the pin offers the new pin (ADR-082, resolved question 6). Until
+ *     it is installed ClaudeUI's Codex is unavailable, because the exact-pin
+ *     gate refuses the old version;
+ *   - System installs update themselves, and Claude Code's bundled copy moves
+ *     only with ClaudeUI releases, so neither ever counts;
+ *   - an empty store is not an update: a first install is not (the upgrade
+ *     prompt and the Installed page handle first installs, arc 3).
  *
  * ## The service (`createHarnessUpdater`)
  *
  * - `check` asks upstream (`upstream.ts`, cached an hour) for the newest
- *   version of every harness on Latest with something installed; Tested needs
- *   no network. It runs after the boot detection and every six hours on an
- *   unref'd timer (`startHarnessUpdater`), and on "Check now"
- *   (`harness:check-updates`), which accepts an upstream answer at most a
- *   minute old.
+ *   version of every harness on Latest with something installed (opencode and
+ *   pi; Codex has no Latest); Tested needs no network. It runs after the boot
+ *   detection and every six hours on an unref'd timer (`startHarnessUpdater`),
+ *   and on "Check now" (`harness:check-updates`), which accepts an upstream
+ *   answer at most a minute old.
  * - The update set is recomputed from memory on every read (the last upstream
  *   answers, the selections, the store), so `harness:state` does no network,
  *   and an install or a selection change moves it at once.
@@ -66,9 +70,10 @@ export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const USER_CHECK_MAX_AGE_MS = 60 * 1000
 
 /** Only these harnesses have ClaudeUI copies that follow Latest or Tested. */
-const UPDATABLE: readonly HarnessId[] = HARNESS_IDS.filter(
-  (id) => id !== 'claude' && id !== 'codex'
-)
+const UPDATABLE: readonly HarnessId[] = HARNESS_IDS.filter((id) => id !== 'claude')
+
+/** Codex is locked to its pin: Tested is its one choice, so it never follows Latest. */
+const followsLatest = (id: HarnessId): boolean => id !== 'codex'
 
 // ── What counts as an update ──────────────────────────────────────────────────
 
@@ -96,7 +101,7 @@ export function computeUpdates(inputs: UpdateInputs): HarnessUpdate[] {
     if (selection?.source !== 'managed') continue
     const version = selection.version ?? 'tested'
     const choice: HarnessUpdate['choice'] | null =
-      version === 'latest' ? 'latest' : version === 'tested' ? 'tested' : null
+      version === 'latest' && followsLatest(id) ? 'latest' : version === 'tested' ? 'tested' : null
     // An exact version stays where it is.
     if (choice === null) continue
     const from = newest(inputs.installed[id])
@@ -269,6 +274,7 @@ export function createHarnessUpdater(deps: HarnessUpdaterDeps = {}): HarnessUpda
       const asking = UPDATABLE.filter((id) => {
         const selection = selectionOf(id)
         return (
+          followsLatest(id) &&
           selection.source === 'managed' &&
           selection.version === 'latest' &&
           installedOf(id).length > 0

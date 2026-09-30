@@ -23,7 +23,7 @@
  * editors wear the same frame. What stays here is pi's own semantics.
  *
  * It edits pi's OWN model catalog (`~/.pi/agent/models.json`,
- * vendor/pi-cli/docs/models.md) through the leaf-patch IPC pair
+ * vendor/pi-src/packages/coding-agent/docs/models.md) through the leaf-patch IPC pair
  * (`readPiModelsRaw` / `patchPiModels`), the models twin of the settings pair
  * the Configuration panes use. Conventions are theirs (PiConfigPanes.tsx,
  * OpencodeModelCapabilities.tsx), and they are what the tests pin:

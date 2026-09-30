@@ -30,6 +30,10 @@ function findBinary(): string | null {
   return resolveHarness('opencode').path
 }
 
+// Evaluated once at collection time: a checkout without opencode installed
+// (`bun run ensure-opencode`, or a System selection) skips rather than fails.
+const BINARY_MISSING = !findBinary()
+
 function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
   const config = {
     mcp: {
@@ -46,7 +50,7 @@ function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
   return JSON.stringify(config)
 }
 
-describe.skipIf(SKIP)('opencode MCP integration: hosted tools', () => {
+describe.skipIf(SKIP || BINARY_MISSING)('opencode MCP integration: hosted tools', () => {
   let proc: ChildProcess
   let baseUrl: string
   let authHeader: string

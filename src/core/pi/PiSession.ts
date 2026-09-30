@@ -689,8 +689,9 @@ export class PiSession extends BaseSession {
    * (`CLAUDEUI_PI_SKILL_DIRS`, `path.delimiter`-joined — the extension just
    * splits it, no fs access there; see pi-bridge-source.ts). Claude skills are
    * SKILL.md dirs under `~/.claude/skills/*` and `<cwd>/.claude/skills/*` — the
-   * same agentskills convention pi itself uses (vendor/pi-cli/docs/skills.md's
-   * "Using Skills from Other Harnesses" documents exactly this
+   * same agentskills convention pi itself uses
+   * (vendor/pi-src/packages/coding-agent/docs/skills.md's "Using Skills from
+   * Other Harnesses" documents exactly this
    * `["~/.claude/skills", "../.claude/skills"]`-style settings array).
    *
    * Returns `{}` (key entirely ABSENT, not an empty-string value) when neither
@@ -1025,7 +1026,7 @@ export class PiSession extends BaseSession {
     }
 
     // Slash commands + skills (M2b): get_commands lists extension commands,
-    // prompt templates, and skill:* entries (vendor/pi-cli/docs/rpc.md
+    // prompt templates, and skill:* entries (vendor/pi-src/packages/coding-agent/docs/rpc.md
     // "get_commands"). Once per spawn, best-effort — a failure here must
     // never block the session (discovery is optional, mirrors
     // OpencodeSession.eagerConnect's identical treatment of

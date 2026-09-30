@@ -42,7 +42,8 @@ import {
   setDetectionRequester
 } from '../resolve'
 import { harnessesConfigPath } from '../selection-store'
-import { writeHarnessPayload } from '../../../test/helpers/fake-harness'
+import { HARNESS_STORE_ENV } from '../store'
+import { fakeHarnessInstall } from '../../../test/helpers/fake-harness'
 
 const EXE = process.platform === 'win32' ? '.exe' : ''
 const CLAUDE_TESTED = harnessManifest('claude').tested
@@ -141,6 +142,8 @@ beforeEach(() => {
     savedEnv[id] = process.env[harnessEnvVar(id)]
     delete process.env[harnessEnvVar(id)]
   }
+  savedEnv.store = process.env[HARNESS_STORE_ENV]
+  process.env[HARNESS_STORE_ENV] = path.join(tmp, 'store')
   fs.rmSync(harnessesConfigPath(), { force: true })
   fs.rmSync(harnessDetectionPath(), { force: true })
   requested = []
@@ -153,8 +156,9 @@ afterEach(() => {
   setDetectionRequester(null)
   setHostPaths(null)
   for (const [id, value] of Object.entries(savedEnv)) {
-    if (value === undefined) delete process.env[harnessEnvVar(id as HarnessId)]
-    else process.env[harnessEnvVar(id as HarnessId)] = value
+    const name = id === 'store' ? HARNESS_STORE_ENV : harnessEnvVar(id as HarnessId)
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
   }
   fs.rmSync(harnessesConfigPath(), { force: true })
   fs.rmSync(harnessDetectionPath(), { force: true })
@@ -223,7 +227,8 @@ describe('a usable System install', () => {
   })
 
   it('`pi:binary-path` is the executable itself for every other source', () => {
-    const bin = writeHarnessPayload(path.join(tmp, 'app', 'vendor', 'pi-cli'), 'pi')
+    const dir = fakeHarnessInstall(path.join(tmp, 'store'), 'pi', PI_TESTED)
+    const bin = path.join(dir, `pi${EXE}`)
     expect(locatePiDisplayPath()).toBe(bin)
     expect(resolveHarness('pi').displayPath).toBeUndefined()
   })
@@ -237,17 +242,20 @@ describe('a usable System install', () => {
   })
 })
 
-describe('falling back to bundled', () => {
-  function bundledOpencode(): string {
-    return writeHarnessPayload(path.join(tmp, 'app', 'vendor', 'opencode-cli'), 'opencode')
+// Only Claude Code falls back (to its bundled copy); opencode, pi and Codex are
+// not bundled (ADR-082 §8), so an unusable System choice resolves to nothing,
+// even with ClaudeUI's own copy installed.
+describe('an unusable System install', () => {
+  function managedOpencode(): void {
+    fakeHarnessInstall(path.join(tmp, 'store'), 'opencode', harnessManifest('opencode').tested)
   }
 
   it('before detection has run, and asks for one', () => {
-    const bin = bundledOpencode()
+    managedOpencode()
     writeSelections({ opencode: { source: 'system' } })
     expect(resolveHarness('opencode')).toMatchObject({
-      path: bin,
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: 'System detection has not run yet'
     })
     expect(requested).toEqual(['opencode'])
@@ -257,15 +265,14 @@ describe('falling back to bundled', () => {
   })
 
   it('when the install changed since detection (stale fingerprint), and asks for a re-detection', () => {
-    const bin = bundledOpencode()
     const install = nativeInstall('opencode', harnessManifest('opencode').tested)
     saveDetectionCache([detection('opencode', [install])])
     writeSelections({ opencode: { source: 'system' } })
     touch(install.realPath)
 
     expect(resolveHarness('opencode')).toMatchObject({
-      path: bin,
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: 'System opencode changed since it was detected'
     })
     expect(requested).toEqual(['opencode'])
@@ -299,14 +306,13 @@ describe('falling back to bundled', () => {
       (i) => ({ ...i, fingerprint: fingerprintOf(file('other/opencode.exe')) })
     ]
   ])('rejects a tampered cache: %s', (_label, tamper) => {
-    const bin = bundledOpencode()
     saveDetectionCache([
       detection('opencode', [tamper(nativeInstall('opencode', harnessManifest('opencode').tested))])
     ])
     writeSelections({ opencode: { source: 'system' } })
     expect(resolveHarness('opencode')).toMatchObject({
-      path: bin,
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: "System opencode's detection record does not match the install"
     })
   })
@@ -340,7 +346,8 @@ describe('falling back to bundled', () => {
     saveDetectionCache([detection('pi', [tamper(piOnNode())])])
     writeSelections({ pi: { source: 'system' } })
     expect(resolveHarness('pi')).toMatchObject({
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: expect.stringMatching(/^System pi's detection record does not match the install/)
     })
   })
@@ -405,7 +412,8 @@ describe("pi on Electron's own Node", () => {
     saveDetectionCache([detection('pi', [piOnElectron()])])
     writeSelections({ pi: { source: 'system' } })
     expect(resolveHarness('pi')).toMatchObject({
-      source: 'bundled',
+      path: null,
+      source: 'system',
       reason: expect.stringMatching(
         /^No usable System pi found: the one detected runs on ClaudeUI's own Node/
       )
@@ -434,7 +442,7 @@ describe("pi on Electron's own Node", () => {
       ])
     ])
     writeSelections({ pi: { source: 'system' } })
-    expect(resolveHarness('pi').source).toBe('bundled')
+    expect(resolveHarness('pi')).toMatchObject({ path: null, source: 'system' })
   })
 })
 
@@ -452,20 +460,16 @@ describe('a System Claude Code', () => {
 })
 
 describe('harnessUnavailableMessage', () => {
-  it("surfaces the resolver's reason, with a vendoring hint in a development tree", () => {
+  it("surfaces the resolver's reason; installing ClaudeUI's copy would not help a System choice", () => {
     writeSelections({ pi: { source: 'system' } })
-    expect(harnessUnavailableMessage('pi')).toBe(
-      'System detection has not run yet, and pi was not found in this ClaudeUI build (development: run `bun run ensure-pi` to vendor it)'
-    )
+    expect(harnessUnavailableMessage('pi')).toBe('System detection has not run yet')
   })
 
   it('gives a packaged app only the reason', () => {
     setHostIsPackaged(() => true)
     try {
       writeSelections({ pi: { source: 'system' } })
-      expect(harnessUnavailableMessage('pi')).toBe(
-        'System detection has not run yet, and pi was not found in this ClaudeUI build'
-      )
+      expect(harnessUnavailableMessage('pi')).toBe('System detection has not run yet')
     } finally {
       setHostIsPackaged(null)
     }

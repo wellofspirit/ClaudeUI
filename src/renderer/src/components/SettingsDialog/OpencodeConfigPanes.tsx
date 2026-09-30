@@ -1032,7 +1032,7 @@ const MANAGED_KEYS: ManagedKey[] = [
     configKey: 'autoupdate',
     label: 'Self-update',
     forcedOn: false,
-    why: 'The vendored fork binary must never self-update over our patches.'
+    why: 'ClaudeUI installs and updates its own opencode; a self-update would replace it under a running session.'
   },
   {
     configKey: 'share',

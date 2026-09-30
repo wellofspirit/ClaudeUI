@@ -72,7 +72,7 @@ import {
 } from '../harness/install/updater'
 import { harnessManifest } from '../harness/manifests'
 import {
-  bundledHarnessVersion,
+  bundledClaudeVersion,
   harnessAvailable,
   invalidateHarness,
   onHarnessChanged,
@@ -190,7 +190,7 @@ function stateEntry(
     },
     system: systemView(id, detection),
     managed: managedView(id),
-    ...(id === 'claude' ? { bundledVersion: bundledHarnessVersion('claude') } : {})
+    ...(id === 'claude' ? { bundledVersion: bundledClaudeVersion() } : {})
   }
 }
 
