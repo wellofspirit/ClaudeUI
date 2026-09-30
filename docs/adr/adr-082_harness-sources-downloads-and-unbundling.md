@@ -1,6 +1,6 @@
 # ADR-082: Harnesses run from ClaudeUI's managed copy or the system install, ClaudeUI downloads and updates its copies, and the installer stops shipping opencode, pi and Codex
 
-**Status:** Accepted (2026-09-30, arcs 2 and 3 landed; proposed 2026-09-28). The design is
+**Status:** Accepted (2026-09-30, confirmed by the owner; arcs 2 and 3 landed; proposed 2026-09-28). The design is
 owner-ruled from mockups `8bf84c23` (design 1, the Harnesses rows), `04c3853c` (the sidebar update
 button) and `b51cb3df` (the upgrade sheet and the download offers). Implementation is arcs 2 and 3
 of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
@@ -310,8 +310,10 @@ same managed store, so development and integration tests exercise the download p
 stays bundled, and so does `audio-capture.node`, which voice loads from `claude-cli/vendor`.
 
 Upgrading from a bundled release (owner, 2026-09-30): on the first launch without the bundled
-engines, ClaudeUI shows one sheet listing the harnesses this profile has used (past sessions or
-config), with one Install button for their Tested versions. Nothing downloads without that click;
+engines, ClaudeUI shows one sheet listing the harnesses this profile has used, with one Install
+button for their Tested versions. "Used" means past sessions only (owner, 2026-09-30, resolved
+question 8): ClaudeUI's own database records every session's harness (`session_meta.engine_id`), so
+the count needs no harness installed; a sign-in or a config file alone does not count. Nothing downloads without that click;
 the sheet does not come back once answered. A harness the sheet skipped is offered again when a
 session on it is opened.
 
@@ -482,6 +484,8 @@ As built (arc 3, S7b; mockup `b51cb3df`):
    refuses the old version.
 7. In a development checkout, `postinstall` installs the tested opencode, pi and Codex into the real
    managed store, `~/.claude/ui/harnesses` (owner, 2026-09-30), as §8 says.
+8. The upgrade sheet counts past sessions only (owner, 2026-09-30): a harness is "used" when
+   `session_meta` holds a session on it. Sign-ins and config files are not a second signal.
 
 ## Rejected alternatives
 
