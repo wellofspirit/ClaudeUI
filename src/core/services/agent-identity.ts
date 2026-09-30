@@ -256,6 +256,38 @@ export function readAgentSidecar(transcriptPath: string, agentId: string): Agent
   }
 }
 
+const SIDECAR_FILE_RE = /^agent-(.+)\.meta\.json$/
+
+/**
+ * Every NESTED agent's origin, from the sidecars in the flat `subagents/`
+ * directory beside a transcript: agent id → the tool_use id that spawned it,
+ * for each sidecar that names a `parentAgentId` (ADR-073 §7).
+ *
+ * A reopened session learns its depth-1 agents from the main transcript's
+ * spawn results; a nested agent's spawn result lives in its parent's
+ * transcript instead, so without this its own transcript is never loaded and
+ * its row is never listed. Each file goes through {@link readAgentSidecar},
+ * which refuses an id that is not a plain token. A missing directory, or an
+ * agent with no sidecar (older CLIs), yields nothing: never a throw.
+ */
+export function readNestedAgentOrigins(transcriptPath: string): Record<string, string> {
+  const dir = path.join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents')
+  let names: string[]
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return {}
+  }
+  const origins: Record<string, string> = {}
+  for (const name of names) {
+    const agentId = SIDECAR_FILE_RE.exec(name)?.[1]
+    if (!agentId) continue
+    const sidecar = readAgentSidecar(transcriptPath, agentId)
+    if (sidecar?.parentAgentId) origins[agentId] = sidecar.toolUseId
+  }
+  return origins
+}
+
 function collectToolResults(line: unknown, into: TranscriptToolResult[]): void {
   if (!isRecord(line) || line.type !== 'user' || line.isSidechain === true) return
   const message = line.message
