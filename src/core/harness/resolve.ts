@@ -53,7 +53,7 @@ import { currentElectron } from './detect/node-choice'
 import { nativeLaunch } from './launch'
 import { harnessManifest } from './manifests'
 import { harnessSelection } from './selection-store'
-import { installDir, installedVersions, readInstallRecord } from './store'
+import { installDir, installedVersions, markVersionUsed, readInstallRecord } from './store'
 import { resolveSystemInstall } from './system-source'
 
 const LABELS: Record<HarnessId, string> = {
@@ -111,8 +111,11 @@ function isFile(p: string): boolean {
   }
 }
 
-/** The executable inside a payload directory laid out like `vendor/<id>-cli`. */
-function payloadExecutable(id: HarnessId, root: string): string | null {
+/**
+ * The executable inside a payload directory laid out like `vendor/<id>-cli`
+ * (a vendored copy, or a managed version directory), or null.
+ */
+export function payloadExecutable(id: HarnessId, root: string): string | null {
   const name = exe(EXECUTABLES[id])
   const candidates = [path.join(root, name)]
   // pi's release archive may nest its payload in a `pi/` directory.
@@ -378,6 +381,8 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
       if ('version' in picked) {
         const bin = payloadExecutable(id, installDir(id, picked.version))
         if (bin) {
+          // Retention (`install/gc.ts`): once per resolution, never per spawn.
+          markVersionUsed(id, picked.version)
           return {
             id,
             path: bin,

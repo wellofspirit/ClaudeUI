@@ -172,6 +172,54 @@ final messages after it moves to the background (2.1.273) and `context: fork` sk
 - The page shows the active download as a progress pill in its top-right corner; several downloads
   show a count that opens the list.
 
+As built (arc 2, S3; `src/core/harness/install/`):
+
+- Hosts. opencode comes from `registry.npmjs.org` only: the metadata of
+  `opencode-<os>-<arch>@<version>` names the tarball, which must itself be on
+  `https://registry.npmjs.org/`, and only `package/bin/opencode[.exe]` is kept. pi and Codex come
+  from `github.com/<owner>/<repo>/releases/download/...`, whose redirect may go only to
+  `release-assets.githubusercontent.com` (the one host those assets redirected to when this was
+  written). The Codex LICENSE comes from `raw.githubusercontent.com` at the pinned commit. pi's
+  version list comes from `api.github.com`. Every request is HTTPS, redirects are followed by hand
+  and checked hop by hop, and any other host fails the install. Requests go through the same
+  proxy-aware `fetch` as the judge (`services/net-fetch.ts`).
+- `verified` in `install.json` is `reviewed` when the version is the manifest's tested one and every
+  reviewed digest matched: opencode's tarball `integrity` and `binarySha256`; pi's `archiveSha256`
+  and its `SHA256SUMS` entry; Codex's `archiveSha256` and `binarySha256` for `codex` and
+  `codex-code-mode-host`, and `licenseSha256`. Any other version is `publisher`: npm's `integrity`
+  or pi's `SHA256SUMS` only. Codex installs its tested version only; any other version is refused
+  before anything is downloaded. A version outside [floor, ceiling) is refused the same way.
+- Limits: 400 MB of downloads per install, 30 s for a response to arrive and 30 s without data
+  while a body streams. Downloads stream to disk and are hashed as they arrive. Archives are
+  unpacked by one dependency-free reader (`archive.ts`, tar.gz and zip); an absolute path, a drive
+  letter, a `..` segment, a symlink or hardlink, or a duplicate entry anywhere in an archive fails
+  it. After the checks, the staged executable's isolated `--version` must print the version being
+  installed.
+- Staging. An install is built in `<store>/.staging/<harness>-<version>-<random>/`, with its
+  archives in a sibling `.downloads` directory that is removed first. `install.json` is written
+  last and the directory is renamed to `<store>/<harness>/<version>/`. An existing valid version
+  satisfies the request without a download; an invalid one (no or a bad `install.json`, no
+  executable) is renamed into `<store>/.trash/` first. Any failure or cancellation removes the
+  staging directories. `.staging` and `.trash` entries untouched for an hour are removed at the
+  next install or retention run.
+- One install per harness and version runs at a time, and concurrent requests share it; at most
+  two installs run at once. Progress is reported per phase (resolving, downloading, verifying,
+  extracting, checking, done or failed), at most four times a second.
+- Retention. When the resolver picks a managed version it touches `<version>/last-used` (once per
+  resolution; resolutions are cached, so not per spawn). A version directory is removed when it is
+  not the tested version, not the version the selection names (an exact version, or for Latest the
+  newest installed; this holds while the source is System too), not the managed version the
+  resolver runs now (a session spawned from it may still be running), and `last-used`, or else
+  `install.json`'s `installedAt`, is more than seven days old. Removal renames the directory into
+  `.trash/` first; a rename that fails because a process holds a file is skipped and retried at the
+  next run. Retention runs in the background after the boot detection run (`afterBoot` of
+  `startDetectionScheduler`), never on a spawn path, and logs one line with its counts.
+- Upstream versions (`upstream.ts`) are stable releases in [floor, ceiling), newest first: opencode
+  from the registry's abbreviated document of this host's platform package, pi from GitHub's
+  release list (no drafts or prereleases, and only releases carrying this host's asset and
+  `SHA256SUMS`), Codex always its tested version. Answers are cached for an hour, failures for five
+  minutes.
+
 ### 5. The release manifest
 
 Each ClaudeUI release carries one manifest per harness, `src/shared/harness-manifests/<harness>.json`:

@@ -168,3 +168,36 @@ export interface HarnessDetection {
   detectedAt: string
   installs: DetectedInstall[]
 }
+
+// ── Managed installs (ADR-082 §4) ─────────────────────────────────────────────
+
+/** Where an install is: `resolving` covers waiting for a free slot and reading upstream metadata. */
+export type HarnessInstallPhase =
+  'resolving' | 'downloading' | 'verifying' | 'extracting' | 'checking' | 'done' | 'failed'
+
+/** One install's state, as `onInstallProgress` reports it (at most four updates a second). */
+export interface HarnessInstallProgress {
+  id: HarnessId
+  /** The exact version being installed (`latest` / `tested` already resolved). */
+  version: string
+  phase: HarnessInstallPhase
+  /** Bytes downloaded so far across the install's files. */
+  receivedBytes?: number
+  /** The download's expected size, when the server states it. */
+  totalBytes?: number
+  /** `failed` only: why. User-readable. */
+  reason?: string
+}
+
+/**
+ * An install's outcome. Discriminated by `status`, never `ok`: the preload and
+ * web transports treat any object with an `ok` key as their own envelope.
+ */
+export type HarnessInstallResult =
+  | {
+      status: 'installed'
+      id: HarnessId
+      version: string
+      verified: HarnessInstallRecord['verified']
+    }
+  | { status: 'failed'; id: HarnessId; version: string; reason: string }

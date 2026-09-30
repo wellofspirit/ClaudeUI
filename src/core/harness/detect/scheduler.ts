@@ -203,10 +203,13 @@ export const DISABLE_DETECTION_ENV = 'CLAUDEUI_DISABLE_HARNESS_DETECTION'
 /**
  * Arm background detection for this process: the resolver's stale-cache
  * requests, and one run for every harness `bootDelayMs` after boot (an
- * unref'd timer, so it never holds the process or delays startup). A no-op
+ * unref'd timer, so it never holds the process or delays startup), followed
+ * by `afterBoot` (the managed store's retention, `install/gc.ts`). A no-op
  * when `CLAUDEUI_DISABLE_HARNESS_DETECTION=1`. Returns a disarm function.
  */
-export function startDetectionScheduler(options: { bootDelayMs?: number } = {}): () => void {
+export function startDetectionScheduler(
+  options: { bootDelayMs?: number; afterBoot?: () => unknown } = {}
+): () => void {
   if (process.env[DISABLE_DETECTION_ENV] === '1') {
     logger.info('harness', `background harness detection disabled (${DISABLE_DETECTION_ENV})`)
     return () => {}
@@ -215,7 +218,15 @@ export function startDetectionScheduler(options: { bootDelayMs?: number } = {}):
     void scheduler.request([id], 'stale')
   })
   const timer = setTimeout(() => {
-    void scheduler.request(HARNESS_IDS, 'boot')
+    void scheduler
+      .request(HARNESS_IDS, 'boot')
+      .then(() => options.afterBoot?.())
+      .catch((err: unknown) => {
+        logger.warn(
+          'harness',
+          `after-boot harness task failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+      })
   }, options.bootDelayMs ?? 3000)
   timer.unref?.()
   return () => {

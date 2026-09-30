@@ -6,10 +6,14 @@
  *                     (opencode: the binary; pi: its whole directory; Codex:
  *                     `codex` + `codex-code-mode-host` + LICENSE)
  *     install.json    HarnessInstallRecord, written last
+ *     last-used       touched when the resolver picks this version (GC)
+ *   ~/.claude/ui/harnesses/.staging/   installs in progress (`install/store-writer.ts`)
+ *   ~/.claude/ui/harnesses/.trash/     directories moved aside, deleted later
  *
- * The downloader (arc 2, S3) writes versions by atomic directory rename; this
- * module only reads. A directory without a valid `install.json` for this host is
- * not an install. `CLAUDEUI_HARNESS_STORE` moves the root (tests, development).
+ * The installer (`install/store-writer.ts`) writes versions by atomic
+ * directory rename; this module reads them, and writes only `last-used`. A
+ * directory without a valid `install.json` for this host is not an install.
+ * `CLAUDEUI_HARNESS_STORE` moves the root (tests, development).
  */
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -31,6 +35,26 @@ export function harnessStoreRoot(): string {
 export function installDir(id: HarnessId, version: string): string {
   if (!HARNESS_VERSION_RE.test(version)) throw new Error(`Invalid ${id} version: ${version}`)
   return path.join(harnessStoreRoot(), id, version)
+}
+
+/**
+ * `<versionDir>/last-used`: its mtime is when the resolver last picked this
+ * version. Retention (`install/gc.ts`) keeps a version used in the last seven
+ * days.
+ */
+export const LAST_USED_FILE = 'last-used'
+
+/**
+ * Record that `version` was just resolved for a spawn. Once per resolution
+ * (the resolver caches), never per spawn. Never throws: a read-only store only
+ * loses retention precision.
+ */
+export function markVersionUsed(id: HarnessId, version: string, now: Date = new Date()): void {
+  try {
+    fs.writeFileSync(path.join(installDir(id, version), LAST_USED_FILE), `${now.toISOString()}\n`)
+  } catch {
+    // Missing directory or read-only store: GC falls back to install.json's installedAt.
+  }
 }
 
 /**
