@@ -200,6 +200,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     cancelHarnessInstall: (id, version) =>
       ipcRenderer.invoke('harness:install-cancel', { id, version }),
     detectHarnesses: (ids) => ipcRenderer.invoke('harness:detect', ids ? { ids } : {}),
+    setHarnessUpdateMode: (mode) => ipcRenderer.invoke('harness:set-update-mode', { mode }),
+    updateHarnesses: () => ipcRenderer.invoke('harness:update-all'),
+    checkHarnessUpdates: () => ipcRenderer.invoke('harness:check-updates'),
     getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
     getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>

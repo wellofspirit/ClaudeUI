@@ -59,7 +59,8 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    `config`, because asking "may I?" must be answerable without the grant.
  *  - `admin` (ADR-082 §7, `harness:*` writes) — choosing a harness's source,
  *    installing one into the host's store, cancelling an install, running
- *    detection. Putting a program on the host from a phone is close to remote
+ *    detection, and the update commands (§6: the update mode, Update all,
+ *    Check now). Putting a program on the host from a phone is close to remote
  *    code execution, so a base connection only SEES the Installed page:
  *    `harness:state` and `harness:versions` declare `config` and are absent here.
  *
@@ -75,10 +76,13 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'harness:check-updates',
   'harness:detect',
   'harness:install',
   'harness:install-cancel',
   'harness:set-selection',
+  'harness:set-update-mode',
+  'harness:update-all',
   'ide:mint-entry',
   'terminal:attach',
   'terminal:create',

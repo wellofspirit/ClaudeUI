@@ -338,8 +338,9 @@ export interface SyncEventMap {
   /**
    * The harness resolver was invalidated for `id` (ADR-082 arc 2): a detection
    * or an install finished, a selection was saved, retention removed a
-   * version. A nudge: `harness:state` / `engine:is-installed` are the shapes,
-   * and a consumer debounces its re-read.
+   * version, the update set or the updater's state moved (§6). A nudge:
+   * `harness:state` / `engine:is-installed` are the shapes, and a consumer
+   * debounces its re-read.
    */
   'harness:changed': (data: { id: HarnessId }) => void
   /** A managed install's progress (ADR-082 §4), at most four a second per install. */

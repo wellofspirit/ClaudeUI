@@ -14,7 +14,7 @@
  *
  * Only stable versions (`x.y.z`) at or above the floor and below the ceiling
  * are listed, newest first. Answers are cached in memory for an hour, and a
- * failure for five minutes. Errors are logged and answered with null or an
+ * failure for five minutes; a caller may ask for a younger answer (`maxAgeMs`). Errors are logged and answered with null or an
  * empty list; nothing here throws.
  */
 import type { HarnessId, HarnessManifest } from '../../../shared/harness-types'
@@ -39,9 +39,18 @@ export interface UpstreamDeps {
   arch?: string
 }
 
+export interface UpstreamReadOptions {
+  /**
+   * Accept a cached answer only when it is younger than this (and than the
+   * usual TTLs). The update checker's "Check now" passes a minute, so a user
+   * check reaches upstream without letting repeated clicks hammer it.
+   */
+  maxAgeMs?: number
+}
+
 export interface Upstream {
   /** The newest installable version, or null when it cannot be told. */
-  latestVersion(id: HarnessId): Promise<string | null>
+  latestVersion(id: HarnessId, opts?: UpstreamReadOptions): Promise<string | null>
   /** Installable versions, newest first, at most `limit`. */
   availableVersions(id: HarnessId, limit?: number): Promise<string[]>
 }
@@ -131,10 +140,13 @@ export function createUpstream(deps: UpstreamDeps = {}): Upstream {
     }
   }
 
-  function versions(id: HarnessId): Promise<string[] | null> {
+  function versions(id: HarnessId, maxAgeMs = Infinity): Promise<string[] | null> {
     const hit = cache.get(id)
     if (hit) {
-      const ttl = hit.versions === null ? UPSTREAM_FAILURE_TTL_MS : UPSTREAM_TTL_MS
+      const ttl = Math.min(
+        hit.versions === null ? UPSTREAM_FAILURE_TTL_MS : UPSTREAM_TTL_MS,
+        maxAgeMs
+      )
       if (now() - hit.at < ttl) return Promise.resolve(hit.versions)
     }
     const pending = inflight.get(id)
@@ -149,8 +161,8 @@ export function createUpstream(deps: UpstreamDeps = {}): Upstream {
   }
 
   return {
-    async latestVersion(id) {
-      return (await versions(id))?.[0] ?? null
+    async latestVersion(id, opts) {
+      return (await versions(id, opts?.maxAgeMs))?.[0] ?? null
     },
     async availableVersions(id, limit = 20) {
       return ((await versions(id)) ?? []).slice(0, Math.max(0, limit))
@@ -161,8 +173,8 @@ export function createUpstream(deps: UpstreamDeps = {}): Upstream {
 const defaultUpstream = createUpstream()
 
 /** The newest installable upstream version of `id`, or null. Never throws. */
-export function latestVersion(id: HarnessId): Promise<string | null> {
-  return defaultUpstream.latestVersion(id)
+export function latestVersion(id: HarnessId, opts?: UpstreamReadOptions): Promise<string | null> {
+  return defaultUpstream.latestVersion(id, opts)
 }
 
 /** Installable upstream versions of `id`, newest first. Never throws. */

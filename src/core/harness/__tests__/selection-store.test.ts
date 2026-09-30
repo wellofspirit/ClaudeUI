@@ -1,8 +1,8 @@
 /**
  * @vitest-environment node
  *
- * `~/.claude/ui/harnesses.json` (ADR-082 §2): reads never throw and fall back to
- * the defaults; saves keep what this version does not understand.
+ * `~/.claude/ui/harnesses.json` (ADR-082 §2, §6): reads never throw and fall back
+ * to the defaults; saves keep what this version does not understand.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
@@ -11,6 +11,7 @@ import * as path from 'node:path'
 import {
   defaultSelection,
   harnessSelection,
+  harnessUpdateMode,
   loadHarnessesConfig,
   saveHarnessesConfig
 } from '../selection-store'
@@ -132,5 +133,45 @@ describe('saveHarnessesConfig', () => {
       /Refusing to overwrite/
     )
     expect(fs.readFileSync(file, 'utf-8')).toBe('{ not json')
+  })
+})
+
+describe('the update mode (ADR-082 §6)', () => {
+  it('defaults to Ask me: missing file, missing key, or a value it does not know', () => {
+    expect(harnessUpdateMode(loadHarnessesConfig(file))).toBe('ask')
+    write(JSON.stringify({ selections: {} }))
+    expect(harnessUpdateMode(loadHarnessesConfig(file))).toBe('ask')
+    write(JSON.stringify({ updates: 'always' }))
+    expect(harnessUpdateMode(loadHarnessesConfig(file))).toBe('ask')
+  })
+
+  it('reads the mode even when there are no selections', () => {
+    write(JSON.stringify({ updates: 'auto' }))
+    expect(loadHarnessesConfig(file)).toEqual({ updates: 'auto' })
+    expect(harnessUpdateMode(loadHarnessesConfig(file))).toBe('auto')
+  })
+
+  it('saves the mode, keeping the selections and unknown keys, and a selection save keeps it', () => {
+    write(
+      JSON.stringify({
+        future: 1,
+        selections: { opencode: { source: 'managed', version: 'latest' } }
+      })
+    )
+    saveHarnessesConfig({ updates: 'auto' }, file)
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toEqual({
+      future: 1,
+      selections: { opencode: { source: 'managed', version: 'latest' } },
+      updates: 'auto'
+    })
+    saveHarnessesConfig({ selections: { pi: { source: 'system' } } }, file)
+    expect(loadHarnessesConfig(file)).toMatchObject({ updates: 'auto' })
+  })
+
+  it('refuses an invalid mode instead of writing it', () => {
+    expect(() => saveHarnessesConfig({ updates: 'always' as 'auto' }, file)).toThrow(
+      /Invalid harness update mode/
+    )
+    expect(fs.existsSync(file)).toBe(false)
   })
 })

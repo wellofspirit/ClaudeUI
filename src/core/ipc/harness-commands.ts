@@ -10,11 +10,14 @@
  * - Writes declare `admin` (ADR-082 §7): installing a binary from a remote
  *   device is close to remote code execution, and so is choosing which program
  *   runs (`set-selection`) or running every program detection finds on the
- *   host (`detect`). A base remote connection never holds `admin`; a passkey or
- *   break-glass one does, and at the `strong` tier a write also needs the
- *   mutation window (`classifyDispatch` → `mutation`). The desktop renderer's
- *   host connection holds every capability. The four are pinned in
- *   `PINNED_CAPABILITIES`, so no later edit can relabel one `config`.
+ *   host (`detect`). The update commands (§6) are writes too: choosing whether
+ *   binaries install themselves (`set-update-mode`), installing every update
+ *   (`update-all`), and sending the host to upstream (`check-updates`). A base
+ *   remote connection never holds `admin`; a passkey or break-glass one does,
+ *   and at the `strong` tier a write also needs the mutation window
+ *   (`classifyDispatch` → `mutation`). The desktop renderer's host connection
+ *   holds every capability. The seven are pinned in `PINNED_CAPABILITIES`, so
+ *   no later edit can relabel one `config`.
  *
  * ## Results
  *
@@ -26,7 +29,9 @@
  *
  * `harness:changed { id }` whenever the resolver is invalidated for a harness
  * (a detection finished, an install finished, a selection was saved, retention
- * removed a version): a nudge, and the client re-reads `harness:state`.
+ * removed a version) or its update entry or the updater's state moved (a
+ * check found a new version, a run started or ended, the mode was saved): a
+ * nudge, and the client re-reads `harness:state`.
  * `harness:install-progress` carries `HarnessInstallProgress` (at most four a
  * second per install, from the installer). Both are replicated sync events, so
  * the desktop renderer and every remote client get them the same way.
@@ -47,6 +52,8 @@ import type {
   HarnessStateSnapshot,
   HarnessSystemInstallView,
   HarnessSystemView,
+  HarnessUpdateMode,
+  HarnessUpdatesView,
   HarnessVersionsResult,
   HarnessesConfig
 } from '../../shared/harness-types'
@@ -56,6 +63,13 @@ import { currentElectron } from '../harness/detect/node-choice'
 import { detectionStatus, requestDetection } from '../harness/detect/scheduler'
 import { activeInstalls, installHarness, onInstallProgress } from '../harness/install/installer'
 import { availableVersions, latestVersion } from '../harness/install/upstream'
+import {
+  checkHarnessUpdates,
+  harnessUpdateModeChanged,
+  harnessUpdatesView,
+  onHarnessUpdatesChanged,
+  updateAllHarnesses
+} from '../harness/install/updater'
 import { harnessManifest } from '../harness/manifests'
 import {
   bundledHarnessVersion,
@@ -82,7 +96,10 @@ export const HARNESS_CHANNELS = [
   'harness:set-selection',
   'harness:install',
   'harness:install-cancel',
-  'harness:detect'
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates'
 ] as const
 
 const LABELS: Record<HarnessId, string> = {
@@ -329,6 +346,28 @@ export interface HarnessCommandDeps {
   requestDetection?: (ids: readonly HarnessId[] | undefined, reason: 'user') => Promise<void>
   detectionStatus?: () => HarnessDetectionStatus
   requests?: InstallRequests
+  /** The updater (`install/updater.ts`): its view, and the three update commands' work. */
+  updates?: {
+    view(): HarnessUpdatesView
+    check(): Promise<void>
+    updateAll(): Promise<unknown>
+    modeChanged(): void
+  }
+}
+
+const defaultUpdates: NonNullable<HarnessCommandDeps['updates']> = {
+  view: harnessUpdatesView,
+  check: () => checkHarnessUpdates('user'),
+  updateAll: updateAllHarnesses,
+  modeChanged: harnessUpdateModeChanged
+}
+
+function updateModeArg(payload: unknown): HarnessUpdateMode {
+  const mode = isRecord(payload) ? payload.mode : undefined
+  if (mode !== 'auto' && mode !== 'ask') {
+    throw new Error(`Invalid harness update mode: ${JSON.stringify(mode)}`)
+  }
+  return mode
 }
 
 /** `harness:state`: filesystem reads only (the store, the two JSON files, a stat per install). */
@@ -340,7 +379,8 @@ export function harnessStateSnapshot(deps: HarnessCommandDeps = {}): HarnessStat
   return {
     harnesses,
     detection: { ...(deps.detectionStatus ?? detectionStatus)() },
-    installs: (deps.activeInstalls ?? activeInstalls)()
+    installs: (deps.activeInstalls ?? activeInstalls)(),
+    updates: (deps.updates ?? defaultUpdates).view()
   }
 }
 
@@ -354,6 +394,7 @@ export function harnessCommands(
     deps.requestDetection ??
     ((ids: readonly HarnessId[] | undefined, reason: 'user') => requestDetection(ids, reason))
   const requests = deps.requests ?? installRequests
+  const updates = deps.updates ?? defaultUpdates
 
   /** `tested` / `latest` as the exact version the installer will act on, when it can be told. */
   async function exactVersion(id: HarnessId, version: string): Promise<string> {
@@ -436,6 +477,42 @@ export function harnessCommands(
         await detect(harnessIdsArg(payload), 'user')
         return harnessStateSnapshot(deps)
       }
+    },
+    {
+      // Install updates: Automatically | Ask me (ADR-082 §6). Switching to
+      // Automatically installs what is available now, in the background.
+      channel: 'harness:set-update-mode',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (payload?: unknown): Promise<HarnessUpdatesView> => {
+        saveHarnessesConfig({ updates: updateModeArg(payload) })
+        updates.modeChanged()
+        return updates.view()
+      }
+    },
+    {
+      // Install every available update now; resolves when the run finishes
+      // (progress rides `harness:install-progress`). A run already in flight is
+      // joined, not doubled.
+      channel: 'harness:update-all',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (): Promise<HarnessStateSnapshot> => {
+        await updates.updateAll()
+        return harnessStateSnapshot(deps)
+      }
+    },
+    {
+      // "Check now": ask upstream (an answer at most a minute old). Runs even
+      // when the background checks are disabled. In Automatically mode what it
+      // finds starts installing; this resolves without waiting for that.
+      channel: 'harness:check-updates',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (): Promise<HarnessStateSnapshot> => {
+        await updates.check()
+        return harnessStateSnapshot(deps)
+      }
     }
   ]
 }
@@ -447,8 +524,8 @@ export type HarnessEventEmitter = (channel: string, args: unknown[]) => void
 let stopEvents: (() => void) | null = null
 
 /**
- * Forward the resolver's invalidations and the installer's progress to the
- * sync funnel (`emitEvent`), from `startCoreServices`. A second call replaces
+ * Forward the resolver's invalidations, the updater's changes and the
+ * installer's progress to the sync funnel (`emitEvent`), from `startCoreServices`. A second call replaces
  * the first (a test that boots core twice), so each event goes out once.
  * Returns the unsubscribe function.
  */
@@ -462,9 +539,13 @@ export function startHarnessEvents(emit: HarnessEventEmitter): () => void {
     }
   }
   const offChanged = onHarnessChanged((id) => send('harness:changed', [{ id }]))
+  const offUpdates = onHarnessUpdatesChanged((ids) => {
+    for (const id of ids) send('harness:changed', [{ id }])
+  })
   const offProgress = onInstallProgress((progress) => send('harness:install-progress', [progress]))
   const stop = (): void => {
     offChanged()
+    offUpdates()
     offProgress()
     if (stopEvents === stop) stopEvents = null
   }

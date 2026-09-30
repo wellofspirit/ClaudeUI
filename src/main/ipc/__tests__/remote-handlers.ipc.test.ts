@@ -1916,8 +1916,8 @@ const USAGE_HUB_CHANNELS = [
 /**
  * The harness manager (ADR-082 arc 2). Restated rather than imported from
  * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
- * reads are `config`; the four writes `admin` (§7), which a base connection
- * never holds.
+ * reads are `config`; the seven writes `admin` (§7), which a base connection
+ * never holds: four for sources and installs, three for updates (§6).
  */
 const HARNESS_CHANNELS = [
   'harness:state',
@@ -1925,15 +1925,21 @@ const HARNESS_CHANNELS = [
   'harness:set-selection',
   'harness:install',
   'harness:install-cancel',
-  'harness:detect'
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates'
 ] as const
 
-/** The half of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
+/** The part of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
 const HARNESS_ADMIN_CHANNELS = [
   'harness:set-selection',
   'harness:install',
   'harness:install-cancel',
-  'harness:detect'
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates'
 ] as const
 
 /** channel → the capability it must declare (the reachability decision). */

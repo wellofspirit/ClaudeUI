@@ -24,6 +24,7 @@ import { useConnectionHoldsAdmin } from './connection-admin'
 import {
   detectionRunning,
   harnessStore,
+  useHarnessPageVisit,
   useHarnessStore,
   type HarnessStoreState,
   type HarnessVersionsState
@@ -31,6 +32,7 @@ import {
 import {
   HARNESS_LABEL,
   VERDICT_LABEL,
+  autoLatestWarning,
   choiceLabel,
   exactVersions,
   hasVersionChoice,
@@ -93,7 +95,8 @@ const VERDICT_TONE: Record<DetectedVerdict, ChipTone> = {
   failed: 'danger'
 }
 
-function ProgressBar({
+/** A thin progress bar: determinate with a percentage, pulsing without. Shared with the sidebar's update panel. */
+export function ProgressBar({
   percent,
   className,
   testid,
@@ -313,6 +316,8 @@ function HarnessRow({
   const active = rowInstalls.find((p) => p.phase !== 'failed')
   const failed = active ? undefined : rowInstalls.find((p) => p.phase === 'failed')
   const detected = entry.system.installs
+  // Latest + Automatically is allowed, with a warning (ADR-082 §6).
+  const autoLatest = state.snapshot ? autoLatestWarning(entry, state.snapshot.updates.mode) : false
 
   const onSource = (source: 'bundled' | 'managed' | 'system'): void => {
     if (!writable || source === entry.selection.source) return
@@ -458,6 +463,16 @@ function HarnessRow({
           </>
         )}
       </span>
+      {autoLatest && (
+        <span
+          data-testid="HarnessRow.autoLatest"
+          data-id={id}
+          title="Install updates is Automatically and this harness follows Latest: new upstream releases install without asking, before ClaudeUI has tested them."
+          className="block text-warning"
+        >
+          Installs untested releases automatically
+        </span>
+      )}
       {active && (
         <ProgressBar
           testid="HarnessRow.progress"
@@ -507,6 +522,7 @@ const READ_ONLY_TEXT =
   'Read only: installing or switching a harness needs an admin connection. Sign in with a passkey or the password to change it.'
 
 export function HarnessesInstalled(): React.JSX.Element {
+  useHarnessPageVisit()
   const state = useHarnessStore()
   const holdsAdmin = useConnectionHoldsAdmin()
   const stacked = useIsMobile()
@@ -746,6 +762,7 @@ function lastRunTitle(lastRunAt: string | undefined): string | undefined {
 
 /** The Installed page's header accessory. */
 export function HarnessesPageActions(): React.JSX.Element {
+  useHarnessPageVisit()
   const state = useHarnessStore()
   const holdsAdmin = useConnectionHoldsAdmin()
   const writable = holdsAdmin && !state.denied

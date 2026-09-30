@@ -31,6 +31,7 @@ import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId } from './settings-target'
 import { UsageHubSettings } from './UsageHubSettings'
 import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
+import { HarnessUpdateSettings } from './HarnessUpdateSettings'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -247,13 +248,27 @@ const HARNESSES_INSTALLED: SettingItem = {
     'harness harnesses installed install download update version tested latest system bundled managed claude code opencode pi codex detect path',
   render: () => <HarnessesInstalled />
 }
+
+/**
+ * The Installed page's update rows (ADR-082 §6): Install updates and Check
+ * now. Page-local for the same reason: `updates` in `harnesses.json`, written
+ * only through `harness:set-update-mode`.
+ */
+const HARNESS_UPDATES: SettingItem = {
+  key: 'harnessUpdates',
+  label: 'Install updates',
+  keywords:
+    'harness harnesses update updates install automatically ask me check now new version latest tested upstream',
+  render: () => <HarnessUpdateSettings />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
   VERSIONS,
   CODEX_ACCOUNT,
   USAGE_HUB,
-  HARNESSES_INSTALLED
+  HARNESSES_INSTALLED,
+  HARNESS_UPDATES
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -702,10 +717,20 @@ export const PAGES: SettingsPage[] = [
     groups: [
       {
         id: 'harnesses',
-        label: 'Harnesses',
+        // Not "Harnesses": the rail group already says that, and a second one
+        // would sit right under it as this page's group entry.
+        label: 'Sources',
         appliesOn: 'next-session',
+        storage: 'harnesses.json',
         note: 'New and respawned sessions use the selection. Running sessions keep theirs.',
         items: [HARNESSES_INSTALLED]
+      },
+      {
+        // Mockup `04c3853c` tab A: its own card under the harness rows.
+        id: 'updates',
+        label: 'Updates',
+        storage: 'harnesses.json',
+        items: [HARNESS_UPDATES]
       }
     ]
   },

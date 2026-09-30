@@ -570,7 +570,13 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'harness:set-selection': 'admin',
   'harness:install': 'admin',
   'harness:install-cancel': 'admin',
-  'harness:detect': 'admin'
+  'harness:detect': 'admin',
+  // The update commands (ADR-082 §6) for the same reason: whether binaries
+  // install themselves, installing every update, and sending the host to
+  // upstream.
+  'harness:set-update-mode': 'admin',
+  'harness:update-all': 'admin',
+  'harness:check-updates': 'admin'
 }
 
 // ---------------------------------------------------------------------------

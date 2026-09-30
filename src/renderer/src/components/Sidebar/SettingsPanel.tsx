@@ -4,6 +4,7 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { settingsTargetFromEvent, type SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
+import { HarnessUpdateButton, useHarnessUpdateIndicator } from './HarnessUpdateButton'
 
 // Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
 // below is desktop-only, so on the web client THIS modal is unreachable. Its
@@ -48,6 +49,10 @@ export function SettingsPanel(): React.JSX.Element {
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
+  // The harness update button (ADR-082 §6): left of Remote Access, and while
+  // it shows it takes the footer's `ml-auto`, so Remote and Settings stay
+  // right-aligned (mockup `04c3853c`).
+  const harnessUpdates = useHarnessUpdateIndicator()
 
   // Track remote server status — DESKTOP: the host anchor pushes it to its own
   // window, so read once and subscribe.
@@ -248,9 +253,10 @@ export function SettingsPanel(): React.JSX.Element {
       )}
       <div
         style={{ padding: '8px 16px' }}
-        className="border-t border-border/50 flex items-center gap-2.5 text-[11px] text-text-muted"
+        className="relative border-t border-border/50 flex items-center gap-2.5 text-[11px] text-text-muted"
       >
         <UsageRing />
+        <HarnessUpdateButton indicator={harnessUpdates} />
         {/* Both platforms raise an overlay; only WHICH one differs. The desktop
             modal renders the access links, which carry channel keys — mounting it
             on a web client would hand a connected device the credentials to admit
@@ -260,7 +266,9 @@ export function SettingsPanel(): React.JSX.Element {
         <button
           data-testid="SettingsPanel.remoteAccess"
           onClick={() => setRemoteModalOpen(true)}
-          className="flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto px-1"
+          className={`flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default px-1 ${
+            harnessUpdates.visible ? '' : 'ml-auto'
+          }`}
           title={window.api.platform === 'web' ? 'Remote access status' : 'Remote Access'}
         >
           <svg
@@ -285,9 +293,9 @@ export function SettingsPanel(): React.JSX.Element {
             </span>
           )}
         </button>
-        {/* The indicator above always carries `ml-auto` now, so the cog no longer
-            needs the web-only variant it used to take when it was the first item
-            after the usage ring. */}
+        {/* The indicator above carries `ml-auto` (or the harness update button
+            does, while it shows), so the cog no longer needs the web-only variant
+            it used to take when it was the first item after the usage ring. */}
         <button
           data-testid="SettingsPanel.toggle"
           onClick={() => setOpen(!open)}

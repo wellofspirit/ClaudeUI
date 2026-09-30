@@ -1,5 +1,6 @@
 /**
- * `~/.claude/ui/harnesses.json`: which source each harness runs from (ADR-082 §2).
+ * `~/.claude/ui/harnesses.json`: which source each harness runs from (ADR-082 §2),
+ * and whether harness updates install themselves (`updates`, §6).
  *
  * Main-owned. It is deliberately not a field of `engines/<id>.json`: that file
  * is replaced whole by `saveEngineConfig`, and renderer screens save their own
@@ -18,6 +19,7 @@ import type {
   HarnessId,
   HarnessSelection,
   HarnessSourceChoice,
+  HarnessUpdateMode,
   HarnessesConfig
 } from '../../shared/harness-types'
 import { isHarnessId } from '../../shared/harness-types'
@@ -57,7 +59,11 @@ function sanitizeSelection(value: unknown): HarnessSelection | null {
   return selection
 }
 
-/** The file's selections, validated. Never throws. */
+function isUpdateMode(value: unknown): value is HarnessUpdateMode {
+  return value === 'auto' || value === 'ask'
+}
+
+/** The file's selections and update mode, validated. Never throws. */
 export function loadHarnessesConfig(file = harnessesConfigPath()): HarnessesConfig {
   let parsed: unknown
   try {
@@ -65,14 +71,16 @@ export function loadHarnessesConfig(file = harnessesConfigPath()): HarnessesConf
   } catch {
     return {}
   }
-  if (!isRecord(parsed) || !isRecord(parsed.selections)) return {}
+  if (!isRecord(parsed)) return {}
+  const config: HarnessesConfig = isUpdateMode(parsed.updates) ? { updates: parsed.updates } : {}
+  if (!isRecord(parsed.selections)) return config
   const selections: Partial<Record<HarnessId, HarnessSelection>> = {}
   for (const [id, value] of Object.entries(parsed.selections)) {
     if (!isHarnessId(id)) continue
     const selection = sanitizeSelection(value)
     if (selection) selections[id] = selection
   }
-  return { selections }
+  return { ...config, selections }
 }
 
 /** The selection in effect for `id`: the saved one, else the default. */
@@ -84,11 +92,25 @@ export function harnessSelection(
 }
 
 /**
- * Merge `update.selections` into the file, per harness. Top-level keys and
- * selections for harnesses this version does not know are kept. Refuses (throws)
- * rather than overwrite a present-but-unreadable file, which is backed up first.
+ * Install updates (ADR-082 §6): Automatically (`auto`) or Ask me (`ask`), the
+ * default for a missing or unrecognised value.
+ */
+export function harnessUpdateMode(
+  config: HarnessesConfig = loadHarnessesConfig()
+): HarnessUpdateMode {
+  return config.updates ?? 'ask'
+}
+
+/**
+ * Merge `update.selections` into the file, per harness, and set `updates` when
+ * given. Top-level keys and selections for harnesses this version does not
+ * know are kept. Throws on an invalid value, and rather than overwrite a
+ * present-but-unreadable file, which is backed up first.
  */
 export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesConfigPath()): void {
+  if (update.updates !== undefined && !isUpdateMode(update.updates)) {
+    throw new Error(`Invalid harness update mode: ${JSON.stringify(update.updates)}`)
+  }
   const current = readJsonFileForWrite(file)
   const selections = isRecord(current.selections) ? { ...current.selections } : {}
   for (const [id, value] of Object.entries(update.selections ?? {})) {
@@ -97,7 +119,9 @@ export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesCon
     if (!selection) throw new Error(`Invalid harness selection for ${id}`)
     selections[id] = selection
   }
-  writeFileAtomicSync(file, JSON.stringify({ ...current, selections }, null, 2) + '\n', {
+  const next: Record<string, unknown> = { ...current, selections }
+  if (update.updates !== undefined) next.updates = update.updates
+  writeFileAtomicSync(file, JSON.stringify(next, null, 2) + '\n', {
     mode: 0o600,
     dirMode: 0o700
   })

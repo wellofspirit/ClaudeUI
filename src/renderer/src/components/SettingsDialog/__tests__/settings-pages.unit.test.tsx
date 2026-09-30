@@ -130,7 +130,7 @@ describe('PAGES structure', () => {
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
-      harnesses: ['harnesses'],
+      harnesses: ['harnesses', 'updates'],
       // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
       claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
       opencode: [
@@ -416,7 +416,8 @@ describe('inventory guard', () => {
       'versions',
       'codexNativeAccount',
       'usageHub',
-      'harnessesInstalled'
+      'harnessesInstalled',
+      'harnessUpdates'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())

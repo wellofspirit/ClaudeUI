@@ -64,6 +64,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { claudeHostTokenKeeper } from '../services/claude-host-token'
 import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
+import { startHarnessUpdater } from '../harness/install/updater'
 import { startHarnessEvents } from '../ipc/harness-commands'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
@@ -292,8 +293,15 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // server resolves harnesses the same way. Test runs switch it off
   // (`CLAUDEUI_DISABLE_HARNESS_DETECTION`, set in the vitest setup files).
   // After that first run, the managed store's retention (ADR-082 §4): versions
-  // no session used for seven days are removed, off every spawn path.
-  startDetectionScheduler({ afterBoot: () => collectHarnessGarbage() })
+  // no session used for seven days are removed, off every spawn path. Then the
+  // harness updater (§6): one check against upstream now and every six hours,
+  // installing what it finds only when Install updates is Automatically.
+  startDetectionScheduler({
+    afterBoot: async () => {
+      await collectHarnessGarbage()
+      startHarnessUpdater()
+    }
+  })
 
   // Learn what every Codex thread is a branch OF, once per launch, alongside the
   // Claude session scan the line above sits next to (`registerSessionIpc` seeds

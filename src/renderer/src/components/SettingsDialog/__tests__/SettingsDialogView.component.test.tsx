@@ -103,6 +103,8 @@ describe('the rail', () => {
     })
     renderView({ activePage: 'harnesses' })
     const nav = screen.getByRole('navigation', { name: 'Settings pages' })
+    // The rail group's heading, once: the page's own groups are "Sources" and
+    // "Updates" (ADR-082 §6), never a second "Harnesses".
     const heading = within(nav).getByText('Harnesses')
     const group = heading.parentElement as HTMLElement
     expect(

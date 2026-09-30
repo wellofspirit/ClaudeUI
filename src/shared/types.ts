@@ -24,6 +24,8 @@ import type {
   HarnessSelection,
   HarnessStateEntry,
   HarnessStateSnapshot,
+  HarnessUpdateMode,
+  HarnessUpdatesView,
   HarnessVersionsResult
 } from './harness-types'
 
@@ -1679,6 +1681,12 @@ interface SessionAPI {
   cancelHarnessInstall(id: HarnessId, version: string): Promise<HarnessInstallCancelResult>
   /** Re-detect System installs (all harnesses when omitted); resolves with the new state. */
   detectHarnesses(ids?: HarnessId[]): Promise<HarnessStateSnapshot>
+  /** Install updates: Automatically | Ask me (ADR-082 §6). Answers the updates view. */
+  setHarnessUpdateMode(mode: HarnessUpdateMode): Promise<HarnessUpdatesView>
+  /** Install every available harness update; resolves with the state once the run ends. */
+  updateHarnesses(): Promise<HarnessStateSnapshot>
+  /** Ask upstream for new versions now; resolves with the new state. */
+  checkHarnessUpdates(): Promise<HarnessStateSnapshot>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>

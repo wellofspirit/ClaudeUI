@@ -1,9 +1,14 @@
 /**
  * The harness manager's client state (ADR-082 arc 2): one store per client,
  * shared by every surface that shows harnesses (the Installed page's rows and
- * its progress pill today, the sidebar's update button next), so they read
- * one snapshot and one install list instead of each subscribing and
- * re-reading on its own.
+ * its progress pill, and the sidebar's update button, S6), so they read one
+ * snapshot and one install list instead of each subscribing and re-reading on
+ * its own.
+ *
+ * The sidebar button keeps the store subscribed for as long as the sidebar is
+ * mounted, so what describes one visit to the Installed page (its errors, the
+ * upstream versions it fetched, a detection error) is reset when the page
+ * closes (`useHarnessPageVisit`), not only when the last subscriber leaves.
  *
  * ## Where the truth is
  *
@@ -23,13 +28,14 @@
  * outlives that is still running on the host, so a timeout is not a failure:
  * the events and the next read carry on.
  */
-import { useSyncExternalStore } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import type {
   HarnessId,
   HarnessInstallProgress,
   HarnessSelection,
   HarnessStateSnapshot,
+  HarnessUpdateMode,
   HarnessVersionsResult
 } from '../../../../shared/harness-types'
 import { ipcErrorMessage, isInvokeTimeout, isPermissionDenied } from '../../utils/ipc-error'
@@ -57,12 +63,36 @@ export interface HarnessStoreState {
   errors: Partial<Record<HarnessId, string>>
   /** A write was refused for want of `admin`. */
   denied: boolean
+  /** This client's Update all is in flight. */
+  updatePending: boolean
+  /** This client's Check now is in flight. */
+  checkPending: boolean
+  /** Update all, Check now or the update-mode save failed. */
+  updateError: string | null
+  /** Update failures this client dismissed (`updateResultKey`). */
+  dismissedUpdates: readonly string[]
 }
 
 const INITIAL: HarnessStoreState = {
   snapshot: null,
   loadError: null,
   installs: [],
+  detectPending: false,
+  detectError: null,
+  versions: {},
+  errors: {},
+  denied: false,
+  updatePending: false,
+  checkPending: false,
+  updateError: null,
+  dismissedUpdates: []
+}
+
+/** What describes one visit to the Installed page; reset when it closes. */
+const VISIT_RESET: Pick<
+  HarnessStoreState,
+  'detectPending' | 'detectError' | 'versions' | 'errors' | 'denied'
+> = {
   detectPending: false,
   detectError: null,
   versions: {},
@@ -79,6 +109,7 @@ class HarnessStore {
   private state: HarnessStoreState = INITIAL
   private readonly listeners = new Set<() => void>()
   private retained = 0
+  private visits = 0
   private offEvents: (() => void) | null = null
   private readSeq = 0
   private changedTimer: ReturnType<typeof setTimeout> | null = null
@@ -134,13 +165,22 @@ class HarnessStore {
     this.readSeq++
     // The snapshot and the install list stay as a cache for the next mount,
     // which re-reads (and reconciles) anyway. What described this visit goes.
-    this.state = {
-      ...this.state,
-      detectPending: false,
-      detectError: null,
-      versions: {},
-      errors: {},
-      denied: false
+    this.state = { ...this.state, ...VISIT_RESET }
+  }
+
+  /**
+   * The Installed page opened; the returned function closes it. When the last
+   * visit closes, what described it goes, even though the sidebar button keeps
+   * the store subscribed.
+   */
+  beginVisit = (): (() => void) => {
+    this.visits++
+    let open = true
+    return () => {
+      if (!open) return
+      open = false
+      this.visits--
+      if (this.visits === 0) this.set(VISIT_RESET)
     }
   }
 
@@ -365,6 +405,67 @@ class HarnessStore {
     this.set({ versions: { ...this.state.versions, [id]: next } })
   }
 
+  /**
+   * Install every available update (ADR-082 §6). Resolves when the host's run
+   * ends; the events and the snapshot carry the progress. A remote invoke that
+   * times out is a run still going on the host, not a failure.
+   */
+  updateAll = async (): Promise<void> => {
+    this.set({ updatePending: true, updateError: null })
+    try {
+      await window.api.updateHarnesses()
+    } catch (error) {
+      this.updateFailed(error)
+    } finally {
+      this.set({ updatePending: false })
+      void this.refresh()
+    }
+  }
+
+  /** "Check now": the host asks upstream for new versions. */
+  checkUpdates = async (): Promise<void> => {
+    this.set({ checkPending: true, updateError: null })
+    try {
+      await window.api.checkHarnessUpdates()
+    } catch (error) {
+      this.updateFailed(error)
+    } finally {
+      this.set({ checkPending: false })
+      void this.refresh()
+    }
+  }
+
+  /** Install updates: Automatically | Ask me. Moves at once, reverts on a refusal. */
+  setUpdateMode = async (mode: HarnessUpdateMode): Promise<void> => {
+    const before = this.state.snapshot?.updates.mode
+    const patchMode = (next: HarnessUpdateMode): void => {
+      const snapshot = this.state.snapshot
+      if (snapshot)
+        this.set({ snapshot: { ...snapshot, updates: { ...snapshot.updates, mode: next } } })
+    }
+    patchMode(mode)
+    this.set({ updateError: null })
+    try {
+      const view = await window.api.setHarnessUpdateMode(mode)
+      const snapshot = this.state.snapshot
+      if (snapshot) this.set({ snapshot: { ...snapshot, updates: view } })
+    } catch (error) {
+      if (before) patchMode(before)
+      this.updateFailed(error)
+    }
+  }
+
+  /** Put an update failure away (this client only); a retry that fails again shows again. */
+  dismissUpdate = (key: string): void => {
+    if (this.state.dismissedUpdates.includes(key)) return
+    this.set({ dismissedUpdates: [...this.state.dismissedUpdates, key] })
+  }
+
+  private updateFailed(error: unknown): void {
+    if (isPermissionDenied(error)) this.set({ denied: true })
+    else if (!isInvokeTimeout(error)) this.set({ updateError: ipcErrorMessage(error) })
+  }
+
   private writeFailed(id: HarnessId, error: unknown): void {
     if (isPermissionDenied(error)) this.set({ denied: true })
     else this.setError(id, ipcErrorMessage(error))
@@ -377,6 +478,7 @@ class HarnessStore {
     this.clearTimers()
     this.listeners.clear()
     this.retained = 0
+    this.visits = 0
     this.readSeq++
     this.cancelled.clear()
     this.requested.clear()
@@ -389,4 +491,9 @@ export const harnessStore = new HarnessStore()
 /** The store's state; the first mounted user starts the feed, the last one stops it. */
 export function useHarnessStore(): HarnessStoreState {
   return useSyncExternalStore(harnessStore.subscribe, harnessStore.getState)
+}
+
+/** Mark a mounted Installed page as a visit (`HarnessStore.beginVisit`). */
+export function useHarnessPageVisit(): void {
+  useEffect(() => harnessStore.beginVisit(), [])
 }

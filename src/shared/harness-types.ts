@@ -31,9 +31,17 @@ export interface HarnessSelection {
   version?: 'latest' | 'tested' | (string & {})
 }
 
+/**
+ * Whether main installs harness updates itself (`auto`) or the sidebar's
+ * update button asks first (`ask`, the default). ADR-082 §6.
+ */
+export type HarnessUpdateMode = 'auto' | 'ask'
+
 /** `~/.claude/ui/harnesses.json`. Unknown keys are preserved on save. */
 export interface HarnessesConfig {
   selections?: Partial<Record<HarnessId, HarnessSelection>>
+  /** Install updates: Automatically (`auto`) or Ask me (`ask`, the default). */
+  updates?: HarnessUpdateMode
 }
 
 /** Where a resolved harness actually came from. */
@@ -285,12 +293,64 @@ export interface HarnessStateEntry {
   bundledVersion?: string | null
 }
 
+// ── Updates (ADR-082 §6; `src/core/harness/install/updater.ts`) ──────────────
+
+/**
+ * A ClaudeUI-managed harness on Latest or Tested whose choice names a version
+ * newer than the newest one in the store. `from` is that newest installed
+ * version; `to` is what the choice names now.
+ */
+export interface HarnessUpdate {
+  id: HarnessId
+  from: string
+  to: string
+  choice: 'latest' | 'tested'
+}
+
+/** One update's outcome in the updater's current (or last) run. */
+export interface HarnessUpdateResult {
+  id: HarnessId
+  from: string
+  to: string
+  status: 'installed' | 'failed'
+  /** `failed` only: why. User-readable. */
+  reason?: string
+}
+
+export interface HarnessUpdaterStatus {
+  /** An update run (Update all, or an automatic one) is installing. */
+  running: boolean
+  /** ISO time upstream was last asked for new versions. */
+  lastCheckedAt?: string
+  /**
+   * ISO time the current or last update run started: the run's identity, so a
+   * client can tell a new run's results (and failures it dismissed) from an
+   * old one's.
+   */
+  lastRunAt?: string
+  /**
+   * The current or last run's outcomes, in order. A failure whose version has
+   * since been installed some other way is dropped.
+   */
+  results: HarnessUpdateResult[]
+}
+
+/** `harness:state`'s `updates`, computed from main's memory: no network. */
+export interface HarnessUpdatesView {
+  mode: HarnessUpdateMode
+  /** What an update run would install now. */
+  available: HarnessUpdate[]
+  status: HarnessUpdaterStatus
+}
+
 /** `harness:state`. Filesystem reads only: no probes, no network. */
 export interface HarnessStateSnapshot {
   harnesses: Record<HarnessId, HarnessStateEntry>
   detection: HarnessDetectionStatus
   /** Every install in flight, with its latest progress. */
   installs: HarnessInstallProgress[]
+  /** The update setting, what counts as an update now, and the updater's state. */
+  updates: HarnessUpdatesView
 }
 
 /** `harness:versions`: what upstream has released (cached for an hour). */

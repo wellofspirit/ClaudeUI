@@ -1,9 +1,9 @@
 # ADR-082: Harnesses run from ClaudeUI's managed copy or the system install, ClaudeUI downloads and updates its copies, and the installer stops shipping opencode, pi and Codex
 
-**Status:** Proposed (2026-09-28). The design is owner-ruled from mockups `8bf84c23` (design 1, the
-Harnesses rows) and `04c3853c` (the sidebar update button). Implementation is arcs 2 and 3 of the
-3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md). This ADR moves to Accepted
-when arc 2 lands.
+**Status:** Accepted (2026-09-30, arc 2 landed; proposed 2026-09-28). The design is owner-ruled
+from mockups `8bf84c23` (design 1, the Harnesses rows) and `04c3853c` (the sidebar update button).
+Implementation is arcs 2 and 3 of the 3.6 line, after
+[ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8, unbundling) is still to come.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -242,6 +242,53 @@ tested version (§3); the other floors equal their tested versions until measure
 - Bundled Claude Code and Codex move only with ClaudeUI releases. System installs update themselves.
   Neither counts toward the button.
 - Latest combined with Automatically is allowed, with a warning on the row.
+
+As built (arc 2, S6; `src/core/harness/install/updater.ts`, `Sidebar/HarnessUpdateButton.tsx`):
+
+- The setting is `updates: 'auto' | 'ask'` at the top level of `~/.claude/ui/harnesses.json`,
+  beside `selections`; missing or unrecognised reads as `ask`. It is written only through
+  `harness:set-update-mode`, and a selection save keeps it (and every other unknown key). On the
+  Installed page it is its own **Updates** group under the harness rows: a segmented control and a
+  "Check for new versions" row with Check now.
+- What counts as an update (`computeUpdates`, pure): a harness whose selection is `managed` and
+  whose ClaudeUI choice is Latest or Tested, when the version that choice names is newer than the
+  newest version of that harness in the store, and the store holds at least one. Latest names
+  upstream's newest as last checked; Tested names the manifest's `tested`. An exact version, a
+  System selection (even with a ClaudeUI version kept for switching back), Codex and Claude Code
+  never count. A bundled copy is not "installed" here, so a first install is not an update.
+- Checks. After the boot detection (`afterBoot`, after retention) and every six hours on an
+  unref'd timer, the updater asks upstream (`upstream.ts`, cached an hour) for the newest version
+  of each harness on Latest with something installed; Tested needs no network. Check now
+  (`harness:check-updates`) accepts an upstream answer at most a minute old, so it reaches
+  upstream without repeated clicks hammering it. A failed answer keeps the last good one. The
+  background checks are off under `CLAUDEUI_DISABLE_HARNESS_DETECTION=1`, like detection; the
+  commands still work.
+- The update set is recomputed from memory on every `harness:state` read (the last upstream
+  answers, the selections, the store): the snapshot's `updates` carries the mode, the available
+  updates and the updater's status (`running`, `lastCheckedAt`, `lastRunAt`, which names the
+  current or last run, and that run's results). No network in the snapshot.
+- Runs. One at a time, one install after another, through the S3 installer; Update all during a
+  run joins it. Automatically: a check that finds updates starts a run itself, and so does
+  switching the setting to Automatically. Ask me: nothing installs until Update all. One info line
+  per update. A run's results stay until the next run starts; a failure whose version was
+  installed some other way is dropped. Selections never change: Latest and Tested already point
+  at the new version. The old version stays until retention removes it (§4).
+- Clients hear `harness:changed` for every harness whose update entry changed after a check, and
+  for a run's harnesses when it starts and ends; progress rides `harness:install-progress`.
+- Commands, all `admin` and pinned (§7): `harness:set-update-mode {mode}`, `harness:update-all`
+  (resolves when the run ends, answering `harness:state`; a remote invoke that times out at 30 s
+  is a run still going, and the client says so), `harness:check-updates`.
+- The footer button follows mockup `04c3853c`: a count badge (Ask me with updates; one click
+  installs them all and opens the panel), a spinner (a run, this client's Update all, or an install
+  of an available update in flight), a check for five seconds after a run that installed
+  everything, then a fade, and amber while a failure is not dismissed. Automatically never shows
+  the count. The panel lists each harness with `from → to`, its install phase and progress, a
+  check, or the failure's reason with a dismiss; Update all (Ask me) or Retry (after a failure),
+  Check now, and "Harness settings", which opens Settings › Harnesses › Installed. Dismissing a
+  failure is per client and per run, so a retry that fails again shows again. A connection
+  without `admin` sees the same state with the actions disabled.
+- Latest with Automatically shows "Installs untested releases automatically", warning-toned, on
+  that harness's row.
 
 ### 7. Remote devices
 

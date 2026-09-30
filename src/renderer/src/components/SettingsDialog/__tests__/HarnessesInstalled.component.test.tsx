@@ -1,8 +1,9 @@
 /**
  * Settings › Harnesses › Installed (ADR-082 arc 2, S5): the rows, the source
  * segment, the version dropdown, the install progress pill, Detect again, the
- * live re-read and the remote read-only mode — against a mocked `window.api`
- * and hand-fired sync events.
+ * live re-read and the remote read-only mode, plus the update rows and the
+ * Latest + Automatically warning (S6) — against a mocked `window.api` and
+ * hand-fired sync events.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -26,6 +27,7 @@ vi.mock('../../../../../core/shared/sync/client-registry', () => ({
 }))
 
 import { HarnessesInstalled, HarnessesPageActions } from '../HarnessesInstalled'
+import { HarnessUpdateSettings } from '../HarnessUpdateSettings'
 import { CHANGED_DEBOUNCE_MS, harnessStore } from '../harness-store'
 import { installEnrollBridge } from '../enroll-flow'
 
@@ -137,6 +139,7 @@ function snapshot(patch: Partial<HarnessStateSnapshot> = {}): HarnessStateSnapsh
     harnesses: entries(),
     detection: { running: false, lastRunAt: '2026-09-30T00:00:00.000Z' },
     installs: [],
+    updates: { mode: 'ask', available: [], status: { running: false, results: [] } },
     ...patch
   }
 }
@@ -148,7 +151,9 @@ const api = {
   setHarnessSelection: vi.fn(),
   installHarness: vi.fn(),
   cancelHarnessInstall: vi.fn(),
-  detectHarnesses: vi.fn()
+  detectHarnesses: vi.fn(),
+  setHarnessUpdateMode: vi.fn(),
+  checkHarnessUpdates: vi.fn()
 }
 
 beforeEach(() => {
@@ -174,6 +179,11 @@ beforeEach(() => {
     version
   }))
   api.detectHarnesses.mockResolvedValue(snapshot())
+  api.setHarnessUpdateMode.mockImplementation(async (mode: 'auto' | 'ask') => ({
+    ...snapshot().updates,
+    mode
+  }))
+  api.checkHarnessUpdates.mockResolvedValue(snapshot())
   ;(globalThis as unknown as { window: { api: unknown } }).window.api = api
 })
 
@@ -748,5 +758,116 @@ describe('remote read-only', () => {
     )
     expect(screen.queryByTestId('HarnessRow.error')).toBeNull()
     expect(sourceOption('pi', 'managed')).toHaveAttribute('aria-disabled', 'true')
+  })
+})
+
+describe('updates (ADR-082 §6)', () => {
+  function renderWithUpdates(): void {
+    render(
+      <>
+        <HarnessesInstalled />
+        <HarnessUpdateSettings />
+      </>
+    )
+  }
+
+  const modeOption = (value: string): HTMLElement =>
+    screen.getAllByTestId('HarnessUpdates.modeOption').find((el) => el.dataset.id === value)!
+
+  /** opencode on Latest, with the given update mode. */
+  function latestWith(mode: 'auto' | 'ask'): HarnessStateSnapshot {
+    const s = snapshot()
+    s.harnesses.opencode = {
+      ...s.harnesses.opencode,
+      selection: { source: 'managed', version: 'latest' }
+    }
+    s.updates = { ...s.updates, mode }
+    return s
+  }
+
+  it('Install updates: Ask me by default; picking Automatically saves it', async () => {
+    renderWithUpdates()
+    await loaded()
+    expect(screen.getByTestId('HarnessUpdates.modeControl')).toHaveAttribute('role', 'radiogroup')
+    expect(modeOption('ask')).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(modeOption('auto'))
+    expect(modeOption('auto')).toHaveAttribute('aria-checked', 'true')
+    await waitFor(() => expect(api.setHarnessUpdateMode).toHaveBeenCalledWith('auto'))
+    expect(screen.getByTestId('HarnessUpdates.mode')).toHaveTextContent('installs new versions')
+  })
+
+  it('a refused save reverts the mode and says why', async () => {
+    api.setHarnessUpdateMode.mockRejectedValue(new Error('disk full'))
+    renderWithUpdates()
+    await loaded()
+    fireEvent.click(modeOption('auto'))
+    await waitFor(() =>
+      expect(screen.getByTestId('HarnessUpdates.mode.error')).toHaveTextContent('disk full')
+    )
+    expect(modeOption('ask')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('Check now asks the host, and the row says when it last checked', async () => {
+    api.harnessState.mockResolvedValue({
+      ...snapshot(),
+      updates: {
+        mode: 'ask',
+        available: [],
+        status: { running: false, lastCheckedAt: '2026-09-30T00:00:00.000Z', results: [] }
+      }
+    })
+    renderWithUpdates()
+    await loaded()
+    expect(screen.getByTestId('HarnessUpdates.check')).toHaveTextContent('Last checked')
+    fireEvent.click(screen.getByTestId('HarnessUpdates.checkNow'))
+    await waitFor(() => expect(api.checkHarnessUpdates).toHaveBeenCalledTimes(1))
+  })
+
+  it('warns on a Latest row when updates install automatically, and only then', async () => {
+    api.harnessState.mockResolvedValue(latestWith('auto'))
+    renderWithUpdates()
+    await loaded()
+    const warning = within(row('opencode')).getByTestId('HarnessRow.autoLatest')
+    expect(warning).toHaveTextContent('Installs untested releases automatically')
+    expect(warning.className).toContain('text-warning')
+    expect(within(row('pi')).queryByTestId('HarnessRow.autoLatest')).toBeNull()
+
+    fireEvent.click(modeOption('ask'))
+    await waitFor(() =>
+      expect(within(row('opencode')).queryByTestId('HarnessRow.autoLatest')).toBeNull()
+    )
+  })
+
+  it('is read only for a connection without admin', async () => {
+    api.platform = 'web'
+    installEnrollBridge({
+      authMethod: () => 'none' as never,
+      capableOrigin: () => false,
+      browserCapable: () => false,
+      enroll: async () => {},
+      subscribe: () => () => {}
+    })
+    renderWithUpdates()
+    await loaded()
+    expect(modeOption('auto')).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByTestId('HarnessUpdates.checkNow')).toBeDisabled()
+    fireEvent.click(modeOption('auto'))
+    expect(api.setHarnessUpdateMode).not.toHaveBeenCalled()
+  })
+
+  it("closing the page drops the visit's upstream versions even while the sidebar keeps the store", async () => {
+    // The sidebar's button holds its own subscription.
+    const offSidebar = harnessStore.subscribe(() => {})
+    try {
+      const view = render(<HarnessesInstalled />)
+      await loaded()
+      await waitFor(() => expect(harnessStore.getState().versions.opencode).toBeDefined())
+      view.unmount()
+      expect(harnessStore.getState().versions).toEqual({})
+      // The feed is still live for the sidebar.
+      expect(syncHandlers.get('harness:changed')?.size ?? 0).toBe(1)
+    } finally {
+      offSidebar()
+    }
   })
 })

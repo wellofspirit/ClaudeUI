@@ -134,6 +134,21 @@ describe('caching and failures', () => {
     expect(f.calls).toHaveLength(2)
   })
 
+  it('a caller may ask for a younger answer (Check now), which also refreshes the cache', async () => {
+    const { u, f, now } = upstream({ [REGISTRY]: opencodeDoc })
+    await u.latestVersion('opencode')
+    now.t += 30_000
+    await u.latestVersion('opencode', { maxAgeMs: 60_000 })
+    expect(f.calls).toHaveLength(1)
+    now.t += 30_000
+    await u.latestVersion('opencode', { maxAgeMs: 60_000 })
+    expect(f.calls).toHaveLength(2)
+    // The fresh answer serves later callers for the usual hour.
+    now.t += UPSTREAM_TTL_MS - 1
+    await u.latestVersion('opencode')
+    expect(f.calls).toHaveLength(2)
+  })
+
   it('shares one request between concurrent calls', async () => {
     const { u, f } = upstream({ [REGISTRY]: opencodeDoc })
     await Promise.all([u.latestVersion('opencode'), u.availableVersions('opencode')])

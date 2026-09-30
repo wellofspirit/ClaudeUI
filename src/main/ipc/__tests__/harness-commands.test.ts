@@ -14,6 +14,9 @@
  *    manifest and never carries a launch, an environment or a fingerprint;
  *  - selections are validated per harness before they are saved;
  *  - install / cancel / detect are wired to the work they hand off;
+ *  - the update commands (ADR-082 §6): the mode is saved beside the other keys,
+ *    Update all installs the update set, Check now refreshes upstream, and the
+ *    snapshot carries the updates view;
  *  - invalidations and install progress go out as sync events;
  *  - no result carries an `ok` key (the transports' envelope marker).
  */
@@ -30,6 +33,7 @@ import type {
   HarnessId,
   HarnessInstallResult,
   HarnessStateSnapshot,
+  HarnessUpdatesView,
   HarnessesConfig
 } from '../../../shared/harness-types'
 import { setHostPaths } from '../../../core/host'
@@ -62,6 +66,7 @@ import {
   resolveHarness
 } from '../../../core/harness/resolve'
 import { harnessesConfigPath, loadHarnessesConfig } from '../../../core/harness/selection-store'
+import { createHarnessUpdater } from '../../../core/harness/install/updater'
 import { HARNESS_STORE_ENV } from '../../../core/harness/store'
 import { fakeHarnessInstall, writeHarnessPayload } from '../../../test/helpers/fake-harness'
 
@@ -191,7 +196,10 @@ describe('capabilities (ADR-082 §7)', () => {
       'harness:set-selection': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:install': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:install-cancel': expect.objectContaining({ capability: 'admin', kind: 'command' }),
-      'harness:detect': expect.objectContaining({ capability: 'admin', kind: 'command' })
+      'harness:detect': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'harness:set-update-mode': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'harness:update-all': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'harness:check-updates': expect.objectContaining({ capability: 'admin', kind: 'command' })
     })
     expect(registry.channels('remote')).toEqual([...HARNESS_CHANNELS].sort())
     expect(registry.channels('desktop')).toEqual([...HARNESS_CHANNELS].sort())
@@ -211,7 +219,14 @@ describe('capabilities (ADR-082 §7)', () => {
     const admin = makeRemoteConnection('webauthn', 'phone', FULL_REMOTE_GRANTS)
     const args = [{ id: 'opencode', version: 'tested' }]
 
-    for (const channel of ['harness:install', 'harness:set-selection', 'harness:detect']) {
+    for (const channel of [
+      'harness:install',
+      'harness:set-selection',
+      'harness:detect',
+      'harness:set-update-mode',
+      'harness:update-all',
+      'harness:check-updates'
+    ]) {
       await expect(registry.dispatch(channel, 'remote', args, base)).rejects.toThrow(
         /Permission denied/
       )
@@ -229,12 +244,20 @@ describe('capabilities (ADR-082 §7)', () => {
     )
   })
 
-  it('pins the writes: registering one as `config` throws', () => {
+  it.each([
+    'harness:set-selection',
+    'harness:install',
+    'harness:install-cancel',
+    'harness:detect',
+    'harness:set-update-mode',
+    'harness:update-all',
+    'harness:check-updates'
+  ])('pins %s: registering it as `config` throws', (channel) => {
     const registry = new CommandRegistry()
-    const install = commands().find((c) => c.channel === 'harness:install')!
-    expect(() =>
-      registry.register({ ...install, capability: 'config', transport: 'remote' })
-    ).toThrow(/pinned to "admin"/)
+    const cmd = commands().find((c) => c.channel === channel)!
+    expect(() => registry.register({ ...cmd, capability: 'config', transport: 'remote' })).toThrow(
+      /pinned to "admin"/
+    )
   })
 })
 
@@ -544,6 +567,127 @@ describe('harness:detect and harness:versions', () => {
   })
 })
 
+// ── Updates (ADR-082 §6) ──────────────────────────────────────────────────────
+
+/** A fake updater: a fixed view, and spies for the three commands' work. */
+function fakeUpdates(view: Partial<HarnessUpdatesView> = {}) {
+  const full: HarnessUpdatesView = {
+    mode: 'ask',
+    available: [],
+    status: { running: false, results: [] },
+    ...view
+  }
+  return {
+    view: vi.fn(() => full),
+    check: vi.fn(async () => {}),
+    updateAll: vi.fn(async () => []),
+    modeChanged: vi.fn()
+  }
+}
+
+describe('updates', () => {
+  it('harness:state carries the updater view, and the default mode is Ask me', async () => {
+    const updates = fakeUpdates({
+      available: [{ id: 'pi', from: '0.87.1', to: '0.87.4', choice: 'tested' }]
+    })
+    const answer = (await call(
+      registryOf(commands({ updates })),
+      'harness:state'
+    )) as HarnessStateSnapshot
+    expect(answer.updates).toEqual(updates.view())
+    // The app's own updater, from the file: nothing saved reads as Ask me.
+    const real = (await call(registryOf(commands()), 'harness:state')) as HarnessStateSnapshot
+    expect(real.updates).toMatchObject({ mode: 'ask', available: [], status: { running: false } })
+  })
+
+  it('harness:set-update-mode saves the mode beside the other keys and tells the updater', async () => {
+    fs.mkdirSync(path.dirname(harnessesConfigPath()), { recursive: true })
+    fs.writeFileSync(
+      harnessesConfigPath(),
+      JSON.stringify({ future: { keep: true }, selections: { pi: { source: 'system' } } })
+    )
+    const updates = fakeUpdates({ mode: 'auto' })
+    const registry = registryOf(commands({ updates }))
+    await expect(call(registry, 'harness:set-update-mode', { mode: 'auto' })).resolves.toEqual(
+      updates.view()
+    )
+    expect(JSON.parse(fs.readFileSync(harnessesConfigPath(), 'utf-8'))).toEqual({
+      future: { keep: true },
+      selections: { pi: { source: 'system' } },
+      updates: 'auto'
+    })
+    expect(loadHarnessesConfig().updates).toBe('auto')
+    expect(updates.modeChanged).toHaveBeenCalledTimes(1)
+
+    await call(registry, 'harness:set-update-mode', { mode: 'ask' })
+    expect(loadHarnessesConfig()).toMatchObject({
+      updates: 'ask',
+      selections: { pi: { source: 'system' } }
+    })
+
+    for (const bad of [{ mode: 'sometimes' }, {}, undefined]) {
+      await expect(call(registry, 'harness:set-update-mode', bad)).rejects.toThrow(
+        /Invalid harness update mode/
+      )
+    }
+    expect(updates.modeChanged).toHaveBeenCalledTimes(2)
+  })
+
+  it('harness:update-all installs the update set through the updater and answers the new state', async () => {
+    // The real updater over the real store and selections; only the installer
+    // and upstream are fakes. opencode on Latest has an older version in the
+    // store; pi on an exact version never updates.
+    fakeHarnessInstall(store, 'opencode', OPENCODE.tested)
+    fakeHarnessInstall(store, 'pi', harnessManifest('pi').tested)
+    writeSelections({
+      opencode: { source: 'managed', version: 'latest' },
+      pi: { source: 'managed', version: harnessManifest('pi').tested }
+    })
+    const newer = '1.99.0'
+    const install = vi.fn(async (id: HarnessId, version: string): Promise<HarnessInstallResult> => {
+      fakeHarnessInstall(store, id, version)
+      return { status: 'installed', id, version, verified: 'publisher' }
+    })
+    const updater = createHarnessUpdater({ latestVersion: async () => newer, install })
+    const updates = {
+      view: () => updater.view(),
+      check: () => updater.check('user'),
+      updateAll: () => updater.updateAll(),
+      modeChanged: () => updater.modeChanged()
+    }
+    const registry = registryOf(commands({ updates }))
+
+    const checked = (await call(registry, 'harness:check-updates')) as HarnessStateSnapshot
+    expect(checked.updates.available).toEqual([
+      { id: 'opencode', from: OPENCODE.tested, to: newer, choice: 'latest' }
+    ])
+    expect(checked.updates.status.lastCheckedAt).toBeDefined()
+    // Ask me (the default): the check itself installed nothing.
+    expect(install).not.toHaveBeenCalled()
+
+    const answer = (await call(registry, 'harness:update-all')) as HarnessStateSnapshot
+    expect(install.mock.calls).toEqual([['opencode', newer]])
+    expect(answer.updates).toMatchObject({
+      available: [],
+      status: {
+        running: false,
+        results: [{ id: 'opencode', from: OPENCODE.tested, to: newer, status: 'installed' }]
+      }
+    })
+    // The old version stays: retention removes it later.
+    expect(answer.harnesses.opencode.managed.map((m) => m.version)).toEqual([
+      newer,
+      OPENCODE.tested
+    ])
+  })
+
+  it('harness:check-updates refreshes upstream even while background checks are disabled', async () => {
+    const updates = fakeUpdates()
+    await call(registryOf(commands({ updates })), 'harness:check-updates')
+    expect(updates.check).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('events (startHarnessEvents)', () => {
   it('sends harness:changed for each invalidated harness, until unsubscribed', () => {
     const emit = vi.fn()
@@ -578,6 +722,21 @@ describe('events (startHarnessEvents)', () => {
     const progress = emit.mock.calls.filter(([channel]) => channel === 'harness:install-progress')
     expect(progress.map(([, [p]]) => p.phase)).toEqual(['resolving', 'done'])
     expect(progress[0][1][0]).toMatchObject({ id: 'opencode', version: OPENCODE.tested })
+  })
+
+  it("sends harness:changed for the updater's changes (a saved mode nudges every updatable harness)", async () => {
+    const emit = vi.fn()
+    const stop = startHarnessEvents(emit)
+    try {
+      // The app's updater: Ask me, so saving the mode installs nothing.
+      await call(registryOf(commands()), 'harness:set-update-mode', { mode: 'ask' })
+    } finally {
+      stop()
+    }
+    expect(emit.mock.calls).toEqual([
+      ['harness:changed', [{ id: 'opencode' }]],
+      ['harness:changed', [{ id: 'pi' }]]
+    ])
   })
 
   it('a second start replaces the first, so each event goes out once', () => {
@@ -629,7 +788,19 @@ describe('no result carries an `ok` key (the transports read it as their envelop
         install: async () => result,
         latestVersion: async () => OPENCODE.tested,
         availableVersions: async () => [OPENCODE.tested],
-        activeInstalls: () => [{ id: 'pi', version: '0.99.0', phase: 'downloading' }]
+        activeInstalls: () => [{ id: 'pi', version: '0.99.0', phase: 'downloading' }],
+        updates: fakeUpdates({
+          available: [{ id: 'pi', from: '0.87.1', to: '0.87.4', choice: 'tested' }],
+          status: {
+            running: false,
+            lastCheckedAt: '2026-09-30T00:00:00.000Z',
+            lastRunAt: '2026-09-30T00:00:00.000Z',
+            results: [
+              { id: 'pi', from: '0.87.1', to: '0.87.4', status: 'failed', reason: 'x' },
+              { id: 'opencode', from: '1.18.32', to: '1.18.40', status: 'installed' }
+            ]
+          }
+        })
       })
     )
     const answers: unknown[] = [
@@ -642,7 +813,10 @@ describe('no result carries an `ok` key (the transports read it as their envelop
       }),
       await call(registry, 'harness:install', { id: 'opencode', version: 'tested' }),
       await call(registry, 'harness:install-cancel', { id: 'opencode', version: 'tested' }),
-      await call(registry, 'harness:detect', {})
+      await call(registry, 'harness:detect', {}),
+      await call(registry, 'harness:set-update-mode', { mode: 'ask' }),
+      await call(registry, 'harness:update-all'),
+      await call(registry, 'harness:check-updates')
     ]
     result = { status: 'failed', id: 'opencode', version: OPENCODE.tested, reason: 'x' }
     answers.push(await call(registry, 'harness:install', { id: 'opencode', version: 'tested' }))

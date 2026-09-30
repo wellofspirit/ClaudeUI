@@ -433,7 +433,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: 'ADR-082 arc 2: the harness resolver was invalidated for one harness (a detection finished, an install finished, a selection was saved, retention removed a version) — a nudge carrying only `{ id }`; clients re-read `harness:state`, the one shape. Replicated because every device shows the Installed page and the engine-installed gates, and a harness can appear or disappear while the app runs (ADR-082 Consequences). No snapshot field.'
+    why: 'ADR-082 arc 2: the harness resolver was invalidated for one harness (a detection finished, an install finished, a selection was saved, retention removed a version), or its update entry or the updater status moved (§6: a check found a version, an update run started or ended, the update mode was saved) — a nudge carrying only `{ id }`; clients re-read `harness:state`, the one shape. Replicated because every device shows the Installed page and the engine-installed gates, and a harness can appear or disappear while the app runs (ADR-082 Consequences). No snapshot field.'
   },
   'harness:install-progress': {
     cls: 'replicated',

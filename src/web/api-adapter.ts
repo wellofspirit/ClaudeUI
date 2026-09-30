@@ -333,6 +333,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('harness:detect', ids ? { ids } : {}) as ReturnType<
         ClaudeAPI['detectHarnesses']
       >,
+    setHarnessUpdateMode: (mode) =>
+      connection.invoke('harness:set-update-mode', { mode }) as ReturnType<
+        ClaudeAPI['setHarnessUpdateMode']
+      >,
+    // Resolves when the run ends; the 30 s invoke timeout may come first, which
+    // the harness store treats as still running (the events carry on).
+    updateHarnesses: () =>
+      connection.invoke('harness:update-all') as ReturnType<ClaudeAPI['updateHarnesses']>,
+    checkHarnessUpdates: () =>
+      connection.invoke('harness:check-updates') as ReturnType<ClaudeAPI['checkHarnessUpdates']>,
     getPiBinaryPath: () =>
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>
