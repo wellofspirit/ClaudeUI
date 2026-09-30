@@ -638,13 +638,15 @@ describe('ChatGPT', () => {
     )
   })
 
-  it('removing the LAST account says ChatGPT is disconnected from every harness', async () => {
+  it('removing the LAST account says ClaudeUI’s sign-in leaves every harness, a direct one stays', async () => {
     withChatgpt({ accounts: { ...twoChatgpt, list: [twoChatgpt.list[0]] } })
     await renderSection()
     await click(byId(account('acc-1'), 'SubscriptionsSection.more', 'acc-1'))
     await click(menuItem(account('acc-1'), 'remove'))
     const confirm = within(account('acc-1')).getByTestId('SubscriptionsSection.confirm')
-    expect(confirm).toHaveTextContent('ChatGPT is then disconnected from every harness.')
+    expect(confirm).toHaveTextContent(
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode; one made directly in pi or opencode stays.'
+    )
     expect(confirm).not.toHaveTextContent('Another account')
   })
 

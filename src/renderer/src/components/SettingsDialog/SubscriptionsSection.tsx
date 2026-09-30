@@ -40,6 +40,7 @@ import { accountDisplayName } from '../../utils/sign-in-provider'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { ProviderSheet } from './ProviderSheet'
 import { useEngineRuns } from './harness-store'
+import { chatgptDisconnectText } from './harness-view'
 import { EnginePill as SharedEnginePill, Pill } from './provider-pills'
 import {
   curationCount,
@@ -1193,6 +1194,8 @@ function ChatgptCard({
     .filter((engine) => runs(engine))
     .map((engine) => engineMeta(engine).label)
   const users = [...(codexRuns ? [engineMeta('codex').label] : []), ...others]
+  // Removing the last account is a disconnect (ADR-082 §8, "As built (S7e)").
+  const disconnectText = chatgptDisconnectText(runs)
 
   const header = (status: React.ReactNode): React.JSX.Element => (
     <CardHeader
@@ -1273,9 +1276,7 @@ function ChatgptCard({
     return removeConsequence({
       active: id === accounts?.activeId,
       ...(successor ? { successor: successor.email } : {}),
-      ...(users.length > 0
-        ? { lastAccount: 'ChatGPT is then disconnected from every harness.' }
-        : {}),
+      ...(disconnectText ? { lastAccount: disconnectText } : {}),
       sessions: successor
         ? chatgptSwitchConsequence(live, routes)
         : n > 0

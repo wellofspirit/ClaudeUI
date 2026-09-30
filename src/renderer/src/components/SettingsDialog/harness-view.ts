@@ -542,6 +542,28 @@ export function notInstalledTitle(id: HarnessId): string {
   return `${HARNESS_LABEL[id]} is not installed · install it from Harnesses › Installed`
 }
 
+/**
+ * What disconnecting ChatGPT does to the harnesses that run (ADR-082 §8, "As
+ * built (S7e)"): ClaudeUI's sign-in goes from each, and one made directly in pi
+ * or opencode stays. Only harnesses that run are named; `undefined` when none
+ * does.
+ */
+export function chatgptDisconnectText(runs: EngineRuns): string | undefined {
+  const users = (['codex', 'pi', 'opencode'] as const).filter((id) => runs(id))
+  if (users.length === 0) return undefined
+  const names = (ids: readonly HarnessId[], last: string): string => {
+    const labels = ids.map((id) => HARNESS_LABEL[id])
+    return labels.length < 2
+      ? (labels[0] ?? '')
+      : `${labels.slice(0, -1).join(', ')} ${last} ${labels[labels.length - 1]}`
+  }
+  const own = users.filter((id) => id !== 'codex')
+  const removed = `ClaudeUI’s ChatGPT sign-in is removed from ${names(users, 'and')}`
+  return own.length > 0
+    ? `${removed}; one made directly in ${names(own, 'or')} stays.`
+    : `${removed}.`
+}
+
 /** How the harness picker marks a harness: one rule for every harness, Codex included. */
 export function harnessPickerMark(
   readiness: HarnessReadiness

@@ -5,7 +5,8 @@ owner-ruled from mockups `8bf84c23` (design 1, the Harnesses rows), `04c3853c` (
 button) and `b51cb3df` (the upgrade sheet and the download offers). Implementation is arcs 2 and 3
 of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
 unbundling) is complete: the engines are unbundled (S7a) and ClaudeUI offers them (S7b), and
-writes no key into one that is not installed (S7d), all "As built" in §8.
+writes no key into one that is not installed (S7d), and a ChatGPT disconnect takes out only the
+sign-ins ClaudeUI put into pi and opencode (S7e), all "As built" in §8.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -540,10 +541,8 @@ As built (arc 3, S7d; resolved question 11): no key is written into a harness th
   ClaudeUI's `engines/<engine>.json` allowlists, except for a catalog vendor an engine still holds
   a credential for, whose list now curates that engine's own provider.
 
-  ChatGPT is not a catalog route: `disconnectChatgpt` (and the last account's removal) still takes
-  both engines' ChatGPT entry out unconditionally, as before S7d; only the start-time clean-up of
-  a disabled route's copy (`removeManagedCopy`) matches the entry's refresh token against the
-  vault's.
+  ChatGPT is not a catalog route; its removals match the entry's refresh token against the
+  vault's accounts instead (S7e, below).
 
 - CredentialSync neither arms the fs watcher for a harness that does not run nor reads its store
   at boot for a credential to adopt; a legacy-vault recovery still reads it, since it may hold the
@@ -580,6 +579,53 @@ As built (arc 3, S7d; resolved question 11): no key is written into a harness th
 - Switching a provider on (`setDisabled`, `ownCredentialRoutes`) and its confirm
   (`ownKeysReplacedOnSwitchOn(entry, runs)` in the sheet and the list) ignore a harness that does
   not run: nothing is replaced there, and its arrival keeps any own key instead of asking.
+
+As built (arc 3, S7e; resolved question 12): a ChatGPT disconnect takes out only what ClaudeUI
+put in, and ClaudeUI does not sign itself back in from what stays.
+
+- `CredentialSync.disconnectChatgpt` and `removeAccount`'s last-account path remove an engine's
+  ChatGPT OAuth entry (pi `openai-codex`, opencode `openai`) only when it is ClaudeUI's: its
+  refresh token is one of the vault's ChatGPT accounts' now — any account, active or not, since
+  a background account was the active one when it was fed — or is in that engine's fed-token
+  history (below). Both read the vault's tokens before the vault empties, then remove. Any other
+  entry is a sign-in made in the harness itself and stays, with one info line ("<context>:
+  <engine> holds a ChatGPT sign-in ClaudeUI did not make — kept"; never token material). One
+  helper does it (`removeManagedCopy` over `managedRefreshTokens` and the history), for pi and
+  opencode, running or not, and it goes through `removeOne`, so S7d's direct file edit for a
+  harness that does not run stays. The start-time clean-up of a disabled route's copy and an
+  arrival's use the same helper. Removing an account that is not the last is unchanged: the
+  promoted account is fed.
+- A STALE copy of ClaudeUI's is still ClaudeUI's (orchestrator ruling, 2026-10-01, closing the
+  first review's gap). The fed-token history (`auth/vault/fed-token-history.ts`,
+  `~/.claude/ui/chatgpt-fed-token-fingerprints.json`, 0600, atomic writes, beside S7d's
+  delivered-key fingerprints and in their style) keeps per engine the SHA-256 of every refresh
+  token ClaudeUI put into it (`feedOne`, recorded before the write) or adopted from it as a
+  rotation of its own copy (`persistAdopted` with a prior credential: reconcile-on-start and the
+  watcher) — never a token — the last 32 per engine. So a harness that did not run while the
+  vault rotated, and so still holds an older token ClaudeUI fed it, loses that copy on a
+  disconnect. Once ClaudeUI's copy is out of an engine (removed, or found absent), that engine's
+  history is forgotten. It decides removals only: feeding and adoption never read it. The class
+  defaults to an in-memory history; the boot seam (`core-services.ts`) wires the file for both
+  hosts. Migration: an engine with no history is judged by the vault's tokens alone, the rule
+  before it. A disconnect (or the last account's removal) first runs any watcher reconcile still
+  waiting out its debounce (`flushPendingWatches`), so a rotation the engine made just before is
+  adopted, and recognised, rather than kept as a direct sign-in. The history is best-effort: a
+  failure logs, never fails a feed or a removal, and an unreadable history recognises nothing.
+- The disconnect marker: both paths first record `disconnected: ["chatgpt"]` in ClaudeUI's vault
+  file (`~/.claude/ui/auth-vault.json`, `AuthVault.setDisconnected` / `isDisconnected`) — a flag
+  beside the accounts it speaks about, written by the vault's one atomic writer, never token
+  material, and written before the accounts go so no crash leaves an empty vault unmarked. An
+  emptied vault keeps its file while the marker is there. While the vault holds no ChatGPT
+  account and the marker is set, `reconcileOnStart` does not bootstrap from an engine's entry;
+  the fs watcher never adopts into an empty vault anyway. The marker is cleared by a sign-in
+  through ClaudeUI: `applyCompletedLogin`, the one tail of the desktop loopback, the remote
+  paste-back and the device code. The legacy unreadable-vault recovery is blocked too (the
+  disconnect happened after that vault existed; writing the marker replaces the legacy file, so
+  the two do not meet on disk). Adoption of a rotation while the vault holds an account is
+  unchanged: a marker beside an account is inert.
+- The copy says it: the ChatGPT card's last-account removal and the sheet's armed Disconnect
+  read "ClaudeUI’s ChatGPT sign-in is removed from <harnesses that run>; one made directly in
+  <pi or opencode, those that run> stays." (`chatgptDisconnectText`, `harness-view.ts`).
 
 ## Consequences
 
@@ -634,6 +680,11 @@ As built (arc 3, S7d; resolved question 11): no key is written into a harness th
     it holds of its own. Deleting ClaudeUI's own entries is not writing a key: it happens at once,
     as a file edit where the harness's own removal would need its process. Switching a provider on does not name a harness that does not run among the keys it would
     replace. §8 "As built (arc 3, S7d)" describes it.
+12. Disconnecting ChatGPT signs out of pi and opencode only where ClaudeUI injected the sign-in
+    (owner, 2026-10-01): "Disconnect should sign out from both when the credential was injected by
+    us. But one directly connected in pi can stay." ClaudeUI then does not sign itself back in from
+    the sign-in that stayed until the user signs in through ClaudeUI. §8 "As built (arc 3, S7e)"
+    describes it.
 
 ## Rejected alternatives
 

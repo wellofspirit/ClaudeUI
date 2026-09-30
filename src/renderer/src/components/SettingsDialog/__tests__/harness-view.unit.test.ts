@@ -22,7 +22,8 @@ import {
   installNeeded,
   rowLine,
   systemOffReason,
-  systemVerdict
+  systemVerdict,
+  chatgptDisconnectText
 } from '../harness-view'
 
 function pi(patch: Partial<HarnessStateEntry> = {}): HarnessStateEntry {
@@ -511,5 +512,28 @@ describe('installPanelRows (S7b)', () => {
     expect(rowsOf[1].reason).toBe('no network')
     // pi 0.87.4 is an available update: it is an update row, not an install row.
     expect(otherInstalls(view, [{ id: 'pi', version: '0.87.4' }])).toEqual([])
+  })
+})
+
+describe('chatgptDisconnectText (ADR-082 §8, S7e)', () => {
+  const running =
+    (...ids: string[]) =>
+    (engine: string): boolean =>
+      ids.includes(engine)
+
+  it('names every harness that runs, and the ones whose own sign-in stays', () => {
+    expect(chatgptDisconnectText(running('codex', 'pi', 'opencode'))).toBe(
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode; one made directly in pi or opencode stays.'
+    )
+    expect(chatgptDisconnectText(running('opencode'))).toBe(
+      'ClaudeUI’s ChatGPT sign-in is removed from opencode; one made directly in opencode stays.'
+    )
+  })
+
+  it('Codex alone keeps nothing to mention; none running says nothing', () => {
+    expect(chatgptDisconnectText(running('codex'))).toBe(
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex.'
+    )
+    expect(chatgptDisconnectText(running())).toBeUndefined()
   })
 })

@@ -555,7 +555,36 @@ describe('ENABLED FOR', () => {
           .find((el) => el.dataset.id === 'remove')!
       )
       const confirm = within(row).getByTestId('SubscriptionsSection.confirm')
-      expect(confirm.textContent).not.toMatch(/every harness/)
+      expect(confirm.textContent).not.toMatch(/removed from|made directly/)
+    })
+
+    it('pi alone not running: the last account’s removal names only what runs (S7e)', async () => {
+      withChatgpt({ accounts: { ...twoAccounts, list: [twoAccounts.list[0]] } })
+      const gpt = await renderCard(['pi'])
+      const row = byId(gpt, 'SubscriptionsSection.account', 'acc-1')
+      await click(byId(row, 'SubscriptionsSection.more', 'acc-1'))
+      await click(
+        within(row)
+          .getAllByTestId('SubscriptionsSection.menuItem')
+          .find((el) => el.dataset.id === 'remove')!
+      )
+      await waitFor(() =>
+        expect(within(row).getByTestId('SubscriptionsSection.confirm')).toHaveTextContent(
+          'ClaudeUI’s ChatGPT sign-in is removed from Codex and opencode; one made directly in opencode stays.'
+        )
+      )
+    })
+
+    it('the sheet’s armed Disconnect says what each running harness keeps (S7e)', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['codex']))
+      await openSheet('chatgpt')
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      expect(screen.queryByTestId('ProviderSheet.disconnectNote')).toBeNull()
+      await click(screen.getByTestId('ProviderSheet.disconnect'))
+      expect(screen.getByTestId('ProviderSheet.disconnectNote')).toHaveTextContent(
+        'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode; one made directly in pi or opencode stays.'
+      )
+      expect(sent('shared-provider:disconnect')).toEqual([])
     })
 
     it('the sheet offers Sync now only while opencode or pi, which it syncs to, runs', async () => {

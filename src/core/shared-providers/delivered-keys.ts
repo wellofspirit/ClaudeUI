@@ -14,12 +14,12 @@
  * that preceded it: only the vault key is ClaudeUI's. The first delivery after
  * the upgrade records it.
  */
-import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { logger } from '../services/logger'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
+import { keyFingerprint } from '../services/secret-fingerprint'
 
 type Route = 'pi' | 'opencode'
 type Records = Partial<Record<Route, Record<string, string>>>
@@ -32,9 +32,7 @@ export interface DeliveredKeyFingerprints {
   forget(route: Route, vendorId: string): void
 }
 
-export function keyFingerprint(key: string): string {
-  return createHash('sha256').update(key, 'utf8').digest('hex')
-}
+export { keyFingerprint } from '../services/secret-fingerprint'
 
 function defaultPath(): string {
   return path.join(os.homedir(), '.claude', 'ui', 'delivered-key-fingerprints.json')

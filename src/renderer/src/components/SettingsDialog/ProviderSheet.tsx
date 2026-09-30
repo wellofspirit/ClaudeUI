@@ -85,7 +85,7 @@ import {
 } from './settings-controls'
 import { EnginePill, factsCount } from './provider-pills'
 import { useEngineRuns } from './harness-store'
-import type { EngineRuns } from './harness-view'
+import { chatgptDisconnectText, type EngineRuns } from './harness-view'
 import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
@@ -1333,6 +1333,14 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   const remove = removeAction()
   /** What Remove deletes, said beside it while nothing failed. */
   const removeNote = !error && isApiShared && remove !== null
+  /**
+   * What disconnecting ChatGPT does to each harness (ADR-082 §8, "As built
+   * (S7e)"), said while the Disconnect press is armed and nothing failed.
+   */
+  const disconnectNote =
+    !error && confirming === 'disconnect' && entry.id === 'chatgpt'
+      ? chatgptDisconnectText(runs)
+      : undefined
   const removeTitle = isShared
     ? 'Built-in providers cannot be removed — disconnect it instead.'
     : 'This provider is not ClaudeUI’s to remove.'
@@ -1674,10 +1682,18 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                 a surface ends up reporting a stale failure next to a fresh row. */}
             <span
               data-testid={`${SHEET}.error`}
-              className={`${removeNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
+              className={`${removeNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
             >
               {error}
             </span>
+            {disconnectNote && (
+              <span
+                data-testid={`${SHEET}.disconnectNote`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                {disconnectNote}
+              </span>
+            )}
             {/* Wraps rather than truncating: a half-read warning about what
                 Remove deletes is worse than none. */}
             {removeNote && (

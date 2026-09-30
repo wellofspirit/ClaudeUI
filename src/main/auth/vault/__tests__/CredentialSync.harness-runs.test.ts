@@ -154,6 +154,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
 
   it('opencode running: the disconnect takes its server path', async () => {
     const h = setup(cred('r1'), { pi: true, opencode: true })
+    h.opencode.store.set(OPENCODE_CODEX_VENDOR_ID, cred('r1'))
     await h.sync.disconnectChatgpt()
     expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
     expect(h.opencode.removeDirect).not.toHaveBeenCalled()

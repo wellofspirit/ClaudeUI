@@ -54,6 +54,7 @@ import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { fedTokenHistory } from '../auth/vault/fed-token-history'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
@@ -255,7 +256,11 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // is a direct file edit (ADR-082 §8, S7d); the arrival wiring below catches
     // it up. Here, not in the desktop registrar, so the headless server
     // honours it too.
-    harnessRuns: harnessWritable
+    harnessRuns: harnessWritable,
+    // Which ChatGPT tokens ClaudeUI put into each engine, so a disconnect takes
+    // out a stale copy of its own too (ADR-082 §8, S7e). The file, here, for
+    // both hosts; the class defaults to memory so its tests touch no home.
+    fedTokens: fedTokenHistory()
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
