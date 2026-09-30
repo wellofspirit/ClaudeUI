@@ -1459,6 +1459,89 @@ describe('mapEvent — Phase 8d: child-session registration (task tool part)', (
   })
 })
 
+describe("mapEvent — nested subagent (a child's own task call, ADR-073 §7)", () => {
+  const GRANDCHILD_SESSION_ID = 'ses_grandchild_1'
+  const CHILD_TASK_CALL_ID = 'call_child_task_1'
+
+  const childTaskPart = (): OpencodeEvent =>
+    makeEvent('message.part.updated', {
+      sessionID: CHILD_SESSION_ID,
+      part: {
+        id: 'cp_task',
+        messageID: 'child_msg_task',
+        type: 'tool',
+        tool: 'task',
+        callID: CHILD_TASK_CALL_ID,
+        state: {
+          status: 'running',
+          input: { description: 'nested work', subagent_type: 'general' },
+          metadata: { sessionId: GRANDCHILD_SESSION_ID }
+        }
+      }
+    })
+
+  it("registers the grandchild under the child's task call id", () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const out = mapEvent(
+      childTaskPart(),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    // The child's task call itself still reaches the child's bucket.
+    expect(out.kind).toBe('subagent-message')
+    if (out.kind === 'subagent-message') expect(out.toolUseId).toBe(PARENT_CALL_ID)
+    expect(childSessions.get(GRANDCHILD_SESSION_ID)).toBe(CHILD_TASK_CALL_ID)
+  })
+
+  it("routes the grandchild's parts and idle to the grandchild's call id", () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    mapEvent(childTaskPart(), SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: GRANDCHILD_SESSION_ID,
+        info: { id: 'gc_msg_1', role: 'assistant' }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    const part = mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: GRANDCHILD_SESSION_ID,
+        part: { id: 'gc_p1', messageID: 'gc_msg_1', type: 'text', text: 'from the grandchild' }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    expect(part.kind).toBe('subagent-message')
+    if (part.kind === 'subagent-message') expect(part.toolUseId).toBe(CHILD_TASK_CALL_ID)
+
+    const idle = mapEvent(
+      makeEvent('session.idle', { sessionID: GRANDCHILD_SESSION_ID }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
+    expect(idle.kind).toBe('task-notification')
+    if (idle.kind === 'task-notification') {
+      expect(idle.notification.toolUseId).toBe(CHILD_TASK_CALL_ID)
+      expect(idle.notification.taskId).toBe(GRANDCHILD_SESSION_ID)
+    }
+  })
+})
+
 describe('mapEvent — Phase 8d: parent session.idle still → result (not task-notification)', () => {
   it('parent session.idle (no childSessions entry for it) → result, NOT task-notification', () => {
     // The PARENT session's own session.idle must still end the turn normally.
