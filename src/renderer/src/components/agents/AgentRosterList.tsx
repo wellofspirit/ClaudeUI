@@ -10,23 +10,87 @@
  * The filter and the folds are local component state on purpose. They are a way
  * of looking at the list for a moment, not a preference: persisting them would
  * eventually hide a finished agent from someone who had forgotten they set it.
+ *
+ * Agents form a tree (ADR-073 §7): a nested agent sits under the agent that
+ * spawned it. Under Running, a finished ancestor of a running (or open) row is
+ * kept as dimmed context, so an indented row never floats without its parent;
+ * context rows are not counted. The shells section is not filtered: every row
+ * in it is running, or open.
  */
 import { useState } from 'react'
 import type { AgentRoster, AgentRosterRow } from '../../hooks/useAgentRoster'
-import { AgentRow } from './AgentRow'
+import { AgentRow, type RowGuide } from './AgentRow'
 
 type SectionLabel = 'Agents' | 'Background shells'
+
+interface ListedRow {
+  row: AgentRosterRow
+  isContext: boolean
+  guide?: RowGuide
+}
+
+/**
+ * The rows the Running filter keeps: running or open ones, plus every ancestor
+ * of those, marked as context unless it qualifies on its own.
+ */
+export function keepRunning(
+  rows: readonly AgentRosterRow[],
+  selectedIds: readonly string[]
+): { row: AgentRosterRow; isContext: boolean }[] {
+  const byId = new Map(rows.map((r) => [r.toolUseId, r]))
+  const kept = new Set(
+    rows.filter((r) => r.isRunning || selectedIds.includes(r.toolUseId)).map((r) => r.toolUseId)
+  )
+  const context = new Set<string>()
+  for (const id of kept) {
+    let parent = byId.get(id)?.parentToolUseId
+    while (parent && !kept.has(parent) && !context.has(parent)) {
+      context.add(parent)
+      parent = byId.get(parent)?.parentToolUseId
+    }
+  }
+  return rows
+    .filter((r) => kept.has(r.toolUseId) || context.has(r.toolUseId))
+    .map((row) => ({ row, isContext: context.has(row.toolUseId) }))
+}
+
+/**
+ * Tree guides for the rows as listed (depth-first order). A row has a later
+ * sibling when the next row at its depth or shallower is at its depth: in a
+ * depth-first list anything between them is its own subtree.
+ */
+function withGuides(listed: { row: AgentRosterRow; isContext: boolean }[]): ListedRow[] {
+  const laterSibling = listed.map(({ row }, i) => {
+    for (let j = i + 1; j < listed.length; j++) {
+      const d = listed[j].row.depth
+      if (d <= row.depth) return d === row.depth
+    }
+    return false
+  })
+  // hasLaterSibling of the most recent row at each depth: the ancestors of the
+  // current row, since the list is depth-first.
+  const open: boolean[] = []
+  return listed.map((item, i) => {
+    const { depth } = item.row
+    open[depth] = laterSibling[i]
+    if (depth === 0) return item
+    return { ...item, guide: { last: !laterSibling[i], through: open.slice(1, depth) } }
+  })
+}
 
 function Section({
   label,
   rows,
+  count,
   selectedIds,
   collapsed,
   onToggleCollapsed,
   onOpen
 }: {
   label: SectionLabel
-  rows: AgentRosterRow[]
+  rows: ListedRow[]
+  /** The heading's number: the rows shown, context rows excluded. */
+  count: number
   selectedIds: string[]
   collapsed: boolean
   onToggleCollapsed: () => void
@@ -53,15 +117,17 @@ function Section({
           <polyline points="6 9 12 15 18 9" />
         </svg>
         <span>{label}</span>
-        <span className="tabular-nums normal-case">{rows.length}</span>
+        <span className="tabular-nums normal-case">{count}</span>
       </button>
       {!collapsed &&
-        rows.map((row) => (
+        rows.map(({ row, isContext, guide }) => (
           <AgentRow
             key={row.toolUseId}
             row={row}
             selected={selectedIds.includes(row.toolUseId)}
             onOpen={onOpen}
+            isContext={isContext}
+            guide={guide}
           />
         ))}
     </div>
@@ -93,11 +159,15 @@ export function AgentRosterList({
 
   // An open row stays listed after it finishes: it is still on screen below,
   // and clicking its row again is how it gets put away.
-  const keep = (rows: AgentRosterRow[]): AgentRosterRow[] =>
-    runningOnly ? rows.filter((r) => r.isRunning || selectedIds.includes(r.toolUseId)) : rows
-  const agents = keep(roster.agents)
-  const shells = keep(roster.shells)
-  const shown = agents.length + shells.length
+  const agents = withGuides(
+    runningOnly
+      ? keepRunning(roster.agents, selectedIds)
+      : roster.agents.map((row) => ({ row, isContext: false }))
+  )
+  const agentCount = agents.filter((a) => !a.isContext).length
+  // Already running-or-open by construction (the shell rule), so never filtered.
+  const shells: ListedRow[] = roster.shells.map((row) => ({ row, isContext: false }))
+  const shown = agentCount + shells.length
 
   const filterButton = (running: boolean, label: string): React.JSX.Element => {
     const active = runningOnly === running
@@ -159,6 +229,7 @@ export function AgentRosterList({
           <Section
             label="Agents"
             rows={agents}
+            count={agentCount}
             selectedIds={selectedIds}
             collapsed={collapsed.has('Agents')}
             onToggleCollapsed={() => toggleCollapsed('Agents')}
@@ -167,6 +238,7 @@ export function AgentRosterList({
           <Section
             label="Background shells"
             rows={shells}
+            count={shells.length}
             selectedIds={selectedIds}
             collapsed={collapsed.has('Background shells')}
             onToggleCollapsed={() => toggleCollapsed('Background shells')}

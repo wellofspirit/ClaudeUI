@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { findTaskBlocks } from '../utils'
 import type { ContentBlock } from '../../../../../shared/types'
+import {
+  A,
+  A_BG_BASH,
+  B,
+  B_FG_BASH,
+  nestedBuckets,
+  nestedMessages
+} from '@test/factories/nested-agents'
 
 describe('findTaskBlocks', () => {
   const toolUseBlock: ContentBlock = {
@@ -55,5 +63,32 @@ describe('findTaskBlocks', () => {
     const result = findTaskBlocks(messages, 'tu-1')
     expect(result.taskBlock?.toolUseId).toBe('tu-1')
     expect(result.resultBlock?.toolResult).toBe('done')
+  })
+
+  // ADR-073 §7: a nested agent's spawn and its result live in the parent's bucket.
+  describe('with sub-agent buckets', () => {
+    it("finds a nested call and its result in the parent's bucket", () => {
+      const r = findTaskBlocks(nestedMessages(), B, nestedBuckets())
+      expect(r.taskBlock?.toolUseId).toBe(B)
+      expect(r.resultBlock?.toolResult).toContain('Async agent launched')
+      expect(r.ownerToolUseId).toBe(A)
+    })
+
+    it('finds a call two levels down, and a subagent Bash with its result', () => {
+      expect(findTaskBlocks(nestedMessages(), B_FG_BASH, nestedBuckets()).ownerToolUseId).toBe(B)
+      const bg = findTaskBlocks(nestedMessages(), A_BG_BASH, nestedBuckets())
+      expect(bg.taskBlock?.toolInput?.run_in_background).toBe(true)
+      expect(bg.resultBlock?.toolResult).toContain('Command running in background')
+    })
+
+    it('prefers the main transcript, where it reports no owner', () => {
+      const r = findTaskBlocks(nestedMessages(), A, nestedBuckets())
+      expect(r.taskBlock?.toolUseId).toBe(A)
+      expect(r.ownerToolUseId).toBeNull()
+    })
+
+    it('does not search buckets it is not given', () => {
+      expect(findTaskBlocks(nestedMessages(), B).taskBlock).toBeNull()
+    })
   })
 })

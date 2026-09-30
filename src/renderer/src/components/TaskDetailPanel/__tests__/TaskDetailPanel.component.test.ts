@@ -14,6 +14,13 @@ import { render, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { TaskDetailPanelViewProps } from '../View'
+import {
+  A_BG_BASH,
+  B,
+  nestedActiveTasks,
+  nestedBuckets,
+  nestedMessages
+} from '@test/factories/nested-agents'
 
 let viewProps: TaskDetailPanelViewProps | null = null
 vi.mock('../View', () => ({
@@ -105,6 +112,29 @@ describe('TaskDetailPanel FC', () => {
       { toolUseId: 'tu-bash-bg', kind: 'bash-background' },
       { toolUseId: 'tu-task', kind: 'task' },
       { toolUseId: 'tu-gone', kind: 'missing' }
+    ])
+  })
+
+  it("opens a nested agent and a subagent's background Bash, not as missing (§7)", async () => {
+    useSessionStore.getState().openTaskPanel(ROUTE, B)
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          openedTaskToolUseIds: [B, A_BG_BASH],
+          messages: nestedMessages(),
+          subagentMessages: nestedBuckets(),
+          activeTasks: nestedActiveTasks()
+        }
+      }
+    }))
+
+    await renderFC()
+
+    expect(viewProps?.entries).toEqual([
+      { toolUseId: B, kind: 'task' },
+      { toolUseId: A_BG_BASH, kind: 'bash-background' }
     ])
   })
 

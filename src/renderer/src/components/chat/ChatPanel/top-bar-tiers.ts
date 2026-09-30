@@ -24,6 +24,11 @@
  * `AgentPill` was re-measured on 2026-09-21 (ADR-073) at its widest honest
  * label — a two-digit running count, "12 agents" — in the same fixture.
  *
+ * On 2026-09-30 the pill narrowed to a dot and a bare number (ADR-073 §7), so
+ * its 81.6 above is now a conservative upper bound and the thresholds below
+ * are deliberately unchanged: a narrower pill only frees room. Measured in the
+ * real app at a two-digit count: 48.7px (41.3px at one digit).
+ *
  * The left group's floor is 96px: `TopBar.info` measures 56.9px at the default
  * "Session" label, and the title group reserves 34px for one compact `AuthPill`
  * plus its gutter while a pill is actually shown (Slice E). So the cluster stops

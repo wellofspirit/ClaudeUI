@@ -1667,8 +1667,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * Agent task — BEFORE the corresponding tool_result arrives. It carries
    * task_id ↔ tool_use_id directly, so we can register the mapping early and
    * stop depending on the regex-extraction inside detectTaskMapping for the
-   * notification plumbing. (We still need detectTaskMapping for the output
-   * file path, which only ships in tool_result.)
+   * notification plumbing. (We still need recordBackgroundOutput for the
+   * output file path, which only ships in tool_result.)
    *
    * Also relayed to the renderer as `session:task-started` — the only
    * reliable "this task is running" signal since 2.1.219 made Agent/Task
@@ -3112,10 +3112,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // tool-result-content.ts. The text collapse is unchanged.
       const { text: resultText, images } = extractToolResultContent(b.content)
 
-      // Record agentId→toolUseId mapping for task notifications
+      // Record agentId→toolUseId mapping for task notifications. Main agent
+      // only: a nested result's text must not seed agent identity, and
+      // task_started already maps every nested task (ADR-073 §7).
       if (!parentToolUseId) {
         this.detectTaskMapping(toolUseId, resultText)
       }
+      // A backgrounded Bash's output file, at any depth: a subagent's
+      // run_in_background command is listed in the roster and opens like the
+      // main agent's, so its entry must be able to tail the file (ADR-073 §7).
+      this.recordBackgroundOutput(toolUseId, resultText)
 
       if (parentToolUseId) {
         this.send('session:subagent-tool-result', {
@@ -3216,8 +3222,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.runCountByOrigin.set(toolUseId, this.runCountByOrigin.get(toolUseId) ?? 1)
       }
     }
+  }
 
-    // Record output file path for background commands (permanent — survives completion).
+  /**
+   * Record the output file a backgrounded Bash's tool_result names (permanent —
+   * survives completion), create its dormant poller, and drain a watch that
+   * raced ahead of the result. Runs for every tool_result, a subagent's
+   * included; only the identity half above is main-agent only.
+   */
+  private recordBackgroundOutput(toolUseId: string, resultText: string): void {
     // Only a backgrounded Bash's tool_result names its file this way.
     const filePath = backgroundBashOutputFile(resultText)
     if (filePath) {
@@ -3262,7 +3275,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const poller = this.backgroundPollers.get(toolUseId)
     if (!poller) {
       // The tool_result carrying the output file path hasn't arrived yet
-      // (detectTaskMapping runs on tool_result). Remember the request so
+      // (recordBackgroundOutput runs on tool_result). Remember the request so
       // polling auto-starts the moment the poller is registered. Without
       // this, a watchBackground call from the renderer that races ahead of
       // tool_result is silently dropped.

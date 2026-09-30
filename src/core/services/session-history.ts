@@ -27,6 +27,7 @@ import { extractToolResultContent } from './tool-result-content'
 import {
   agentIdOf,
   foldAgentIdentity,
+  readNestedAgentOrigins,
   type TranscriptAgentEvent,
   type TranscriptTerminal
 } from './agent-identity'
@@ -1358,6 +1359,18 @@ export async function loadSessionHistory(
     })
 
     rl.on('close', async () => {
+      // Nested agents (ADR-073 §7): their spawn results live in the parent
+      // agent's transcript, so the loop above never mapped them. Their
+      // sidecars name each one's origin; the Sidebar then loads their
+      // transcripts like any other. A notification the main transcript holds
+      // for one could not be attributed while reading — attribute it now.
+      for (const [agentId, toolUseId] of Object.entries(readNestedAgentOrigins(filePath))) {
+        if (agentIdToToolUseId[agentId]) continue
+        agentIdToToolUseId[agentId] = toolUseId
+        for (const entry of taskNotifications) {
+          if (entry.taskId === agentId && entry.toolUseId === null) entry.toolUseId = toolUseId
+        }
+      }
       // An agent whose last run the transcript opens and never closes gets a
       // neutral `unfinished` entry, so its card stops reading "completed" off
       // the launch result. Never `stopped`: this loader also serves sessions a

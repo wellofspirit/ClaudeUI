@@ -270,8 +270,11 @@ The registry record's `isBackgrounded` at registration, read as
 - `false`: the task runs in the FOREGROUND and blocks its tool call — a Bash command without
   `run_in_background`, or an agent the model launched synchronously. Only such a task can be
   moved with `background_tasks` (07 §7.3).
-- `true`: it started in the background (`run_in_background: true`, an async agent launch, or a
-  Bash started inside a subagent).
+- `true`: it started in the background (`run_in_background: true`, or an async agent launch).
+  _Corrected 2026-09-30 (2.1.280, `scripts/probe-nested-agents.mjs`):_ an earlier revision listed
+  "a Bash started inside a subagent" here. It is wrong: a subagent's **foreground** Bash registers
+  `false` at depth 1 and depth 2 alike (with `owned_by_subagent: true`), exactly like the main
+  agent's, and only `run_in_background` or a later move makes it `true`.
 
 **Registration timing.** An agent registers within milliseconds of its tool_use. A foreground
 Bash registers only once it has run for 2 s: the Bash progress loop calls the registrar (`Ovn`,
@@ -300,6 +303,33 @@ are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
 **Scoping gotcha (probed 2026-08-26):** a background Bash started INSIDE a subagent emits its own
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
 `parent_tool_use_id`** — task events are not scoped to the agent that spawned the task.
+
+**Nested agents (probed 2026-09-30, 2.1.280, Haiku 4.5, `scripts/probe-nested-agents.mjs`).** The
+main agent spawned background agent A; A spawned background agent B, ran a foreground Bash past 2 s
+and a `run_in_background` Bash; B ran a foreground Bash past 2 s. The same scoping holds one level
+down, and every id stays the call's own:
+
+- B's `task_started` is **top-level**: `task_type: "local_agent"`, `spawn_depth: 2`,
+  `is_backgrounded: true`, and `tool_use_id` = **A's Agent call for B** (not A's id).
+- B's `assistant`/`user` snapshots carry `parent_tool_use_id` = B's own call id. B's `stream_event`s
+  carry the same plus `agent_id` = B's task id (Patch E). A consumer keyed by call id places B's
+  output under B, not A.
+- A's Agent `tool_use` for B, and its "Async agent launched" `tool_result`, arrive as A's
+  sub-agent frames (`parent_tool_use_id` = A's origin): the spawn call lives in **A's** transcript.
+- B's terminal `task_updated` + `task_notification` are top-level with `tool_use_id` = B's call id.
+  The `<task-notification>` user text for B landed in the MAIN transcript in this run (A had already
+  finished; which transcript receives it is timing-dependent). A's own background Bash's
+  notification went to A and resumed it: a second `task_started` for A under its origin id, whose
+  stream events carry only `agent_id` (ADR-078's idle self-resume).
+- On disk `subagents/` is flat: `agent-<id>.jsonl` + `agent-<id>.meta.json` for A and B alike. B's
+  sidecar names its parent, `{"toolUseId":"<B's call>","parentAgentId":"<A's id>","spawnDepth":2,…}`;
+  A's has no `parentAgentId` and `spawnDepth: 1`.
+- Shells: A's and B's foreground Bashes register `is_backgrounded: false`, `owned_by_subagent: true`
+  (see the correction above). A's `run_in_background` Bash registers `is_backgrounded: true`,
+  `owned_by_subagent: true`, and its `tool_use` arrives in A's bucket with `run_in_background: true`
+  intact.
+
+ClaudeUI's use of this is ADR-073 §7.
 
 ### A RESUMED agent emits a second `task_started` (probed 2026-09-21, 2.1.268)
 

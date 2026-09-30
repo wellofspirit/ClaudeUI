@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -114,6 +114,7 @@ One `useAgentRoster()` selector, one row component, three placements:
 - **Panel** — the existing `rightPanel === 'task'` dock gains a roster header above the entry stack,
   in two sections: **Agents** and **Background shells**. It keeps its scope: a background Bash is
   lost to scrolling for the same reason and already has `local_bash` lifecycle events.
+  _Amended by §7:_ a shell is listed only while it runs, and agents are listed at every depth.
 
 The pill is **never dropped** by the tier system, for the same reason `GitChangesPill` is not: it is
 a panel's only entry point. It therefore has no `⋯` row — the bar's rule is that a menu row is the
@@ -283,6 +284,100 @@ owner's rulings of 2026-09-29:
   (`removeTaskFromPanel`), which closes the panel with it. The composer overlay still only opens:
   it is a door into the panel, not the panel.
 
+### 7. Nested agents, running-only shells, and a bare number (amendment, 2026-09-30)
+
+In session `4dc0e3dc` a depth-1 background agent spawned a depth-2 implementer, handed back and went
+idle. The roster showed sixteen finished rows and nothing running, the pill read a grey "17 agents"
+(sixteen agents plus a background shell that had long finished), and all twelve depth-2 agents in the
+session were missing. The roster scanned only the main transcript, while a nested spawn call lives in
+its parent agent's bucket (`subagentMessages[<parent origin id>]`). The owner's rulings of
+2026-09-30, from mockup `6be482b8`:
+
+**Wire facts** (S0 probe, cli.js 2.1.280, `scripts/probe-nested-agents.mjs`;
+`docs/protocol-cc/04-system-subtypes.md` §4.5). A nested agent's `task_started` is on the top-level
+stream, keyed by its own spawn call's id, with `spawn_depth: 2`, so ClaudeSession already records it
+like any task. Its snapshots carry its own call id as `parent_tool_use_id`. Its spawn call and that
+call's result arrive in the parent's bucket. Its sidecar names `parentAgentId`. A subagent's
+**foreground** Bash registers `is_backgrounded: false`, like the main agent's.
+
+**The roster lists every depth.** `useAgentRoster` walks the main transcript, then, depth-first, the
+bucket of every agent it finds, with a visited set so a malformed bucket cannot loop. Each walk is
+cached by the bucket array's identity, and the reducer replaces only the bucket it touched, so a
+streaming delta in one agent re-walks that bucket alone. A nested row sits directly under the agent
+that spawned it, in the parent's spawn order, indented 14px per level with a file-tree guide.
+Top-level rows keep transcript order. There is no per-parent fold.
+
+**Context ancestors.** Under the Running filter, a finished ancestor of a running (or open) row is
+kept, dimmed (`data-context="true"`), so an indented row never floats without its parent. The whole
+chain is kept. A context row is not counted as running, not counted in the section's number, and
+offers no Stop, but still opens on click.
+
+**Dot and number.** The pill and the composer tab show a dot and a bare number, no noun. While
+anything runs the number is the running count: running agents at every depth plus running shells, so
+a lone shell lights the pill. Otherwise the pill shows the session's agent total. The panel header
+counts the same way. The tooltip and `aria-label` carry the breakdown, for example
+`1 agent, 1 shell running · 28 agents in this session`. This supersedes the 2026-09-22 "N agents"
+label ruling. The tab adds the longest clock, and it now appears when only a nested agent or a shell
+runs. The top-bar tier thresholds are unchanged: a narrower pill only frees room.
+
+**Background shells: running only.** A shell row exists only while the shell runs. Nobody reads a
+finished shell's output from the roster, and the row's real value is a Stop that does not depend on
+scrolling. This amends §2's "Background shells" section and reverses the roster half of `1b484442`,
+which listed finished and moved shells from the transcript (its Bash-card and entry-panel half
+stays). Shell rows come from the live lifecycle records, not from a transcript scan: a shell is
+listed when `activeTasks[id]` exists, its `taskType` is `local_bash` and its `isBackgrounded` is
+`true`, at any depth. The kickoff first needed a second clause, because protocol-cc said cli.js
+registers every subagent Bash as backgrounded. S0 showed otherwise: a foreground Bash registers
+`false` at every depth, and only `run_in_background` or a later move flips it, so the flag alone means
+"running in the background", including a nested command a timeout moves. Rows are flat, in a section
+that renders only while it has rows and that the Running filter does not touch. The one exception
+follows §6: a finished shell whose entry is open stays listed until the entry is put away. It is
+recognized the way the panel recognizes a background Bash (a terminal event, plus
+`run_in_background` or the moved-to-background result). A reopened session lists no shells. Only
+Claude reports shell lifecycles, so only Claude lists shells. A subagent's background command now
+also gets its output file recorded (`recordBackgroundOutput`, split out of `detectTaskMapping`), so
+its entry can tail it; the identity half of that function stays main-agent only, since
+`task_started` maps nested tasks.
+
+**Opening a nested row.** `findTaskBlocks` takes the buckets: it searches the main transcript, then
+the first bucket that holds the call, and takes the result from that bucket. A nested entry then
+renders `subagentMessages[<its id>]`, its own transcript, like any agent.
+
+**Stop guard.** A nested row, and a nested entry in the panel, offers Stop only when
+`activeTasks[id]` exists. Without a lifecycle record the engine has nothing to target, and Claude's
+`stopTask` would fall back to `interrupt()` and abort the main turn.
+
+**A nested row with no lifecycle record cannot outlive its parent.** It runs only by ADR-040's
+legacy heuristic (no result yet), and on some engines the result never comes. In tree assembly,
+evaluated top-down so a parent's final state decides its children's: a row at depth > 0 with no
+`activeTasks` entry and no terminal event, whose parent is not running, is not running, and without a
+result it settles as neutral (`isLoaded`), not "done". A row nothing reported on must not claim it
+finished. A row WITH a record is never touched: a Claude agent running on after its parent went idle
+is exactly what this section exists to show. Nested rows without lifecycle events are best-effort.
+
+**History.** `loadSessionHistory` reads every sidecar in the flat `subagents/` directory
+(`readNestedAgentOrigins`, through `readAgentSidecar`'s id validation) and adds each one that names a
+`parentAgentId` to `agentIdToToolUseId`, so the Sidebar loads its transcript like any other. A
+notification the main transcript holds for a nested agent is attributed to its origin. Agents
+without a sidecar (older CLIs) stay unlisted. Historical rows never read running.
+
+**Per engine.** The renderer is engine-neutral; engine plumbing changed only where nested content
+was delivered and dropped.
+
+- **Claude:** as above.
+- **opencode:** a subagent may call `task` when `subagent_depth` > 1 (default 1) and its agent's
+  permissions allow it (`vendor/opencode-src/packages/opencode/src/tool/task.ts:104-117,145-149`;
+  ClaudeUI exposes the setting). `handleChildEvent` now registers a child's own `task` call the way
+  the own-session path does, so a grandchild's messages reach a bucket under its call id and its
+  `session.idle` becomes that call's task-notification.
+- **pi:** ClaudeUI's child processes load no `-e` extension, so its own `subagent` tool cannot
+  recurse. A user-installed extension discovered in the child could spawn one; its content stays
+  inside that extension's tool result and is not shown. Such a row settles through the rule above.
+- **Codex:** nesting stays refused (one warning), but the grandchild's spawn card is still published
+  into the child's bucket, live and in history. A v2 `started` card never gets a result and settles
+  as `isLoaded` through the rule above. A v1 spawn call returns at once, so its row reads "done"
+  while the grandchild runs on natively. That is accepted: Codex refuses nesting and says so.
+
 ## Consequences
 
 - A resumed agent re-arms its own card, streams into it live, and reports the run that actually
@@ -299,3 +394,6 @@ owner's rulings of 2026-09-29:
   `scripts/probe-agent-resume.mjs` re-run against the new binary at the next CLI bump.
 - The ADR-040 invariant is unchanged in spirit: running state still mirrors explicit lifecycle
   events. What changes is that a task's identity is the task id, and one task can have several runs.
+- §7 follow-ups, not addressed: a reopened nested agent that died mid-run reads "done", not
+  "unfinished" (the `unfinished` fold covers only the main transcript's agents); and a reopened
+  opencode session loads no child transcripts at all.

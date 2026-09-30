@@ -14,13 +14,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
+import type { ActiveTask, ChatMessage, ContentBlock } from '../../../../../shared/types'
 
 vi.mock('../../chat/MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
 import { TaskEntry } from '../TaskEntry'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { B, nestedActiveTasks, nestedBuckets, nestedMessages } from '@test/factories/nested-agents'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
@@ -147,5 +148,68 @@ describe('TaskEntry — a running task’s clock', () => {
       vi.advanceTimersByTime(22_000)
     })
     expect(screen.getByTestId('TaskEntry.elapsed').textContent).toBe('22s')
+  })
+})
+
+/**
+ * ADR-073 §7: a nested agent opens from the roster like any agent. Its spawn is
+ * in its parent's bucket; its own transcript is `subagentMessages[<its id>]`.
+ */
+describe('TaskEntry — a nested agent', () => {
+  let app: TestApp
+
+  const stage = (activeTasks: Record<string, ActiveTask>): void => {
+    const buckets = nestedBuckets()
+    // B's own transcript. Its Bash card is left out: rendering it would watch
+    // background output over IPC, which this layer does not host.
+    buckets[B] = [
+      {
+        id: 'b-text',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'NESTED_B_TRANSCRIPT' }],
+        timestamp: 0
+      }
+    ]
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: nestedMessages(),
+          subagentMessages: buckets,
+          activeTasks
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it("renders the nested agent's own transcript", () => {
+    stage(nestedActiveTasks())
+    render(<TaskEntry toolUseId={B} />)
+    expect(screen.getByTestId('TaskEntry').getAttribute('data-id')).toBe(B)
+    expect(screen.getByText('NESTED_B_TRANSCRIPT')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskEntry.stop')).toBeInTheDocument()
+  })
+
+  it('offers no Stop while it runs with no lifecycle record', () => {
+    // Running by the legacy heuristic (background input, no terminal event).
+    // Stop would reach Claude's interrupt() fallback and end the MAIN turn.
+    stage({})
+    render(<TaskEntry toolUseId={B} />)
+    expect(screen.getByTestId('TaskEntry')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskEntry.stop')).toBeNull()
   })
 })
