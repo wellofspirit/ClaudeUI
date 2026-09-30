@@ -319,11 +319,11 @@ describe('modelDefaultThinkingMode', () => {
 })
 
 describe('canonicalizeModelValue', () => {
-  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.261)', () => {
+  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.285)', () => {
     expect(canonicalizeModelValue('opus')).toBe('claude-opus-5-5')
     expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5-5')
-    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5')
-    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5')
+    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5-5')
+    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5-5')
     expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')
   })
   it('passes canonical ids through (normalised, date stripped)', () => {
@@ -359,7 +359,7 @@ describe('claudeEffortKey (ADR-074 §8)', () => {
     )
   })
   it('falls back to canonicalizeModelValue without a usable resolvedModel', () => {
-    expect(claudeEffortKey({ value: 'sonnet' })).toBe('claude-sonnet-5')
+    expect(claudeEffortKey({ value: 'sonnet' })).toBe('claude-sonnet-5-5')
     expect(claudeEffortKey({ value: 'claude-fable-5-1[1m]' })).toBe('claude-fable-5-1')
     // A non-Claude target is not a key; the value's rule answers instead.
     expect(claudeEffortKey({ value: 'opus', resolvedModel: 'gw-opus' })).toBe('claude-opus-5-5')

@@ -55,8 +55,8 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.280):
- *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5`,
+ * catalog aliases at the time of writing (2.1.285):
+ *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5-5`,
  *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
  *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
  *   `fable` value falls through to the unknown-family "assume modern"
@@ -74,9 +74,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     case 'opus[1m]':
       return 'claude-opus-5-5'
     case 'sonnet':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'sonnet[1m]':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'haiku':
       return 'claude-haiku-4-5'
     default:
@@ -384,7 +384,7 @@ const IMPLICIT_1M_BASE_MODELS = [
 /**
  * Picker aliases that cli.js currently resolves to an implicit-1M base model:
  * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
- * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
+ * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197).
  * Aliases track the latest model generation, so re-verify this set on
  * claudeCliVersion bumps.
  */

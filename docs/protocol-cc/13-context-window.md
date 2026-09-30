@@ -10,6 +10,21 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.285:** one new model, `claude-sonnet-5-5` (Sonnet 5.5): 1M native
+(`context:{window:1e6,native_1m:!0}`), 128K output (`default` and `upper`),
+`tier_2_10` pricing, `default_effort:"medium"`, capabilities `effort`,
+`max_effort`, `xhigh_effort` and `adaptive_thinking`, plus the new
+`org_locked_thinking`. The `sonnet` alias and `latest_per_family.sonnet` moved
+from `claude-sonnet-5` to `claude-sonnet-5-5`; the per-provider sonnet targets did
+not change. `IMPLICIT_1M_BASE_MODELS` needs no change because the
+`claude-sonnet-5` prefix covers it. `canonicalizeModelValue` now maps
+`sonnet`/`sonnet[1m]` → `claude-sonnet-5-5`, and `pricing.ts` gained a `sonnet-5`
+entry at `tier_2_10` ($2/$10, cache write $2.50 / 1h $4, read $0.20). Sonnet 5
+itself had been `tier_2_10` since at least 2.1.280, but ClaudeUI billed it at the
+Sonnet 4.x $3/$15 until this entry. Not mirrored: the id-heuristic
+`defaultEffort()` still answers `high` for Sonnet 5.5 and Opus 5.5, where the
+catalog says `medium`.
+
 Partial 2.1.280 drift check: the baked catalog's native-1M model prefixes
 remain covered by `IMPLICIT_1M_BASE_MODELS`; its `opus` default moved to
 `claude-opus-5-5` and its `tier_4_20_cache_read_0_20` is now mirrored in
@@ -68,13 +83,13 @@ Picker aliases resolve to concrete models via the catalog's `aliases` table
 (`default` + `per_provider` overrides) before the window resolver ever sees
 them. In 2.1.261:
 
-| Alias         | Resolves to (first-party default)                                                                                  | Window |
-| ------------- | ------------------------------------------------------------------------------------------------------------------ | ------ |
-| `fable`       | `claude-fable-5-1` (gateway: `claude-fable-5`)                                                                     | 1M     |
-| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                           | 1M     |
-| `sonnet`      | `claude-sonnet-5` (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
-| `haiku`       | `claude-haiku-4-5`                                                                                                 | 200K   |
-| `<alias>[1m]` | resolved model + `[1m]` suffix                                                                                     | 1M     |
+| Alias         | Resolves to (first-party default)                                                                                                  | Window |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `fable`       | `claude-fable-5-1` (gateway: `claude-fable-5`)                                                                                     | 1M     |
+| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                                           | 1M     |
+| `sonnet`      | `claude-sonnet-5-5` since 2.1.285 (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
+| `haiku`       | `claude-haiku-4-5`                                                                                                                 | 200K   |
+| `<alias>[1m]` | resolved model + `[1m]` suffix                                                                                                     | 1M     |
 
 ¹ first-party; the per-provider sonnet targets are 200K models (row 4's
 kelp_forest override may apply to sonnet-4-6).
