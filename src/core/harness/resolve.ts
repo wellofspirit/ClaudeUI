@@ -155,6 +155,18 @@ function bundledRoots(id: HarnessId): string[] {
 }
 
 /**
+ * The version of the bundled copy of `id` (its `version.json`), whatever the
+ * selection, or null when there is no bundled copy or it states none. For the
+ * Installed page's "Bundled" label; a few filesystem reads, never cached.
+ */
+export function bundledHarnessVersion(id: HarnessId): string | null {
+  for (const root of bundledRoots(id)) {
+    if (payloadExecutable(id, root)) return readVersionField(path.join(root, 'version.json'))
+  }
+  return null
+}
+
+/**
  * Where the bundled executable would be, whether or not it exists: the primary
  * vendored candidate. For callers that must name a path even when nothing was
  * found, so the spawn error names it.
@@ -408,7 +420,8 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
         launch: system.launch,
         dir: path.dirname(system.path),
         source: 'system',
-        version: system.version
+        version: system.version,
+        displayPath: system.install.displayPath
       }
     }
     reason = system.reason

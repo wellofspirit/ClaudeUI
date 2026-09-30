@@ -22,7 +22,8 @@
  * skipped and retried next time. Stale `.staging` / `.trash` entries go too.
  *
  * Runs in the background after the boot detection (`startDetectionScheduler`'s
- * `afterBoot`), never on a spawn path. One info line with the counts.
+ * `afterBoot`), never on a spawn path. One info line with the counts. A harness
+ * that lost a version is invalidated once, so clients hear `harness:changed`.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -35,7 +36,7 @@ import type {
 import { HARNESS_IDS } from '../../../shared/harness-types'
 import { logger } from '../../services/logger'
 import { harnessManifest } from '../manifests'
-import { resolveHarness } from '../resolve'
+import { invalidateHarness, resolveHarness } from '../resolve'
 import { HARNESS_VERSION_RE, harnessSelection } from '../selection-store'
 import { LAST_USED_FILE, harnessStoreRoot, installedVersions, readInstallRecord } from '../store'
 import { cleanStaleEntries, moveToTrash } from './store-writer'
@@ -50,6 +51,11 @@ export interface GcDeps {
   resolved?: (id: HarnessId) => Pick<ResolvedHarness, 'source' | 'version'>
   /** Moves a version directory aside (default `moveToTrash`); throws when it is in use. */
   remove?: (dir: string, label: string) => Promise<void>
+  /**
+   * Called once per harness that lost a version (default `invalidateHarness`),
+   * so the Installed page hears `harness:changed` and re-reads the store.
+   */
+  invalidate?: (id: HarnessId) => void
 }
 
 export interface GcResult {
@@ -103,6 +109,7 @@ export async function collectHarnessGarbage(deps: GcDeps = {}): Promise<GcResult
   const selectionOf = deps.selection ?? ((id: HarnessId) => harnessSelection(id))
   const resolvedOf = deps.resolved ?? ((id: HarnessId) => resolveHarness(id))
   const remove = deps.remove ?? moveToTrash
+  const invalidate = deps.invalidate ?? ((id: HarnessId) => invalidateHarness(id))
   const result: GcResult = { removed: [], kept: 0, skipped: [], stale: 0 }
 
   try {
@@ -119,6 +126,7 @@ export async function collectHarnessGarbage(deps: GcDeps = {}): Promise<GcResult
         continue
       }
       const keep = protectedVersions(id, manifestOf(id), selectionOf(id), resolvedOf(id))
+      let removedAny = false
       for (const version of names) {
         const dir = path.join(root, version)
         if (keep.has(version) || now - lastUsed(id, version, dir) < RETENTION_MS) {
@@ -128,12 +136,20 @@ export async function collectHarnessGarbage(deps: GcDeps = {}): Promise<GcResult
         try {
           await remove(dir, `${id}-${version}`)
           result.removed.push(`${id} ${version}`)
+          removedAny = true
         } catch (err) {
           result.skipped.push(`${id} ${version}`)
           logger.debug(
             'harness',
             `could not remove ${id} ${version} (${(err as NodeJS.ErrnoException).code ?? String(err)}); retrying next time`
           )
+        }
+      }
+      if (removedAny) {
+        try {
+          invalidate(id)
+        } catch (err) {
+          logger.warn('harness', `invalidating ${id} after GC failed`, err)
         }
       }
     }

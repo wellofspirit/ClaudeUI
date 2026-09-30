@@ -29,6 +29,7 @@ import type {
 import { setHostIsPackaged, setHostPaths } from '../../host'
 import { getCliVersion, harnessHasPatch } from '../../sdk/harness'
 import { locateBunClaude } from '../../sdk/locate'
+import { locatePiDisplayPath } from '../../pi/pi-locate'
 import { harnessDetectionPath, saveDetectionCache } from '../detect/detection-cache'
 import { fingerprintOf } from '../detect/fs-util'
 import { withLaunch } from '../launch'
@@ -173,7 +174,8 @@ describe('a usable System install', () => {
       launch: { command: install.realPath, args: [] },
       dir: path.dirname(install.realPath),
       source: 'system',
-      version: install.version
+      version: install.version,
+      displayPath: install.displayPath
     })
     expect(requested).toEqual([])
   })
@@ -196,6 +198,8 @@ describe('a usable System install', () => {
     expect(resolved).toMatchObject({
       source: 'system',
       path: install.realPath,
+      // The shim the user would run, not the `cli.js` node runs.
+      displayPath: install.displayPath,
       version: PI_TESTED,
       launch: {
         command: node,
@@ -207,6 +211,21 @@ describe('a usable System install', () => {
     const composed = withLaunch(resolved.launch!, ['--mode', 'rpc'], { PATH: '/site/bin' }, 'linux')
     expect(composed.args).toEqual([install.realPath, '--mode', 'rpc'])
     expect(composed.env?.PATH).toBe(`${path.dirname(node)}:/site/bin`)
+  })
+
+  it("`pi:binary-path` names the System pi's shim, not the cli.js node runs", () => {
+    const install = piOnNode()
+    saveDetectionCache([detection('pi', [install])])
+    writeSelections({ pi: { source: 'system' } })
+    expect(locatePiDisplayPath()).toBe(install.displayPath)
+    // What spawns is still the script, under node.
+    expect(resolveHarness('pi').path).toBe(install.realPath)
+  })
+
+  it('`pi:binary-path` is the executable itself for every other source', () => {
+    const bin = writeHarnessPayload(path.join(tmp, 'app', 'vendor', 'pi-cli'), 'pi')
+    expect(locatePiDisplayPath()).toBe(bin)
+    expect(resolveHarness('pi').displayPath).toBeUndefined()
   })
 
   it('picks the newest usable install, as bestSystemInstall does', () => {
@@ -343,7 +362,10 @@ describe('falling back to bundled', () => {
     writeSelections({ claude: { source: 'system' } })
     expect(resolveHarness('claude')).toMatchObject({
       source: 'bundled',
-      reason: expect.stringMatching(/^No usable System Claude Code found/)
+      // The fallback names why, in this build's terms (the cached reason was the old label's).
+      reason: expect.stringMatching(
+        /^No usable System Claude Code found: Claude Code 2\.1\.270 is older than 2\.1\.275, the oldest ClaudeUI supports/
+      )
     })
     expect(requested).toEqual([])
   })

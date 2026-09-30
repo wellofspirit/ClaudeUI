@@ -55,6 +55,7 @@ import type {
   UISessionConfig,
   WatchUpdate
 } from '../../../shared/types'
+import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 /** Attachment shape as it rides `session:user-message` / a queued item. */
@@ -334,6 +335,15 @@ export interface SyncEventMap {
    * it carries figures a fan-out has no business duplicating.
    */
   'usage-hub:changed': () => void
+  /**
+   * The harness resolver was invalidated for `id` (ADR-082 arc 2): a detection
+   * or an install finished, a selection was saved, retention removed a
+   * version. A nudge: `harness:state` / `engine:is-installed` are the shapes,
+   * and a consumer debounces its re-read.
+   */
+  'harness:changed': (data: { id: HarnessId }) => void
+  /** A managed install's progress (ADR-082 §4), at most four a second per install. */
+  'harness:install-progress': (progress: HarnessInstallProgress) => void
   /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's

@@ -34,7 +34,7 @@ import {
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { locatePiBinary } from '../pi/pi-locate'
+import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
@@ -90,6 +90,7 @@ import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { usageHubCommands } from './usage-hub-commands'
+import { harnessCommands } from './harness-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -178,21 +179,27 @@ function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
  */
 let remoteHandlersRegistered = false
 
+/** What `app:version-info` answers. */
+export interface VersionInfo {
+  appVersion: string
+  cliVersion: string
+}
+
 /**
  * Register the `app:version-info` channel on the remote transport. Called from
  * the main bootstrap once the build versions are known (they're computed after
  * registerRemoteHandlers runs). No-op if remote handlers aren't set up.
+ *
+ * A function is read per call: the Claude Code version follows the harness
+ * selection (ADR-082), so the desktop passes one that asks `getCliVersion()`.
  */
-export function registerRemoteVersionInfo(versionInfo: {
-  appVersion: string
-  cliVersion: string
-}): void {
+export function registerRemoteVersionInfo(versionInfo: VersionInfo | (() => VersionInfo)): void {
   if (!remoteHandlersRegistered) return
   handleRemote({
     channel: 'app:version-info',
     capability: 'config',
     kind: 'query',
-    handler: async () => versionInfo
+    handler: async () => (typeof versionInfo === 'function' ? versionInfo() : versionInfo)
   })
 }
 
@@ -1288,7 +1295,7 @@ export function registerRemoteHandlers(
     channel: 'pi:binary-path',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<string | null> => locatePiBinary()
+    handler: async (): Promise<string | null> => locatePiDisplayPath()
   })
   handleRemote({
     channel: 'pi:auth-status',
@@ -1562,6 +1569,19 @@ export function registerRemoteHandlers(
   // settings group that configures it. `capability: 'config'`, like the rest of
   // the metering surface — and no shape here can return the device secret.
   for (const cmd of usageHubCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The harness manager (ADR-082 arc 2, §7)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop spreads. Every device sees the
+  // Installed page (`harness:state` / `harness:versions` are `config` queries);
+  // installing, choosing a source and running detection are `admin`, because
+  // putting a program on the host from a phone is close to remote code
+  // execution. A base connection is refused them by the registry.
+  for (const cmd of harnessCommands()) {
     handleRemote(cmd)
   }
 

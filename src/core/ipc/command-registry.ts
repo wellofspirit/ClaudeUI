@@ -559,7 +559,18 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'authcfg:end': 'admin',
   'authcfg:set-password': 'admin',
   'authcfg:lan-link': 'admin',
-  'authcfg:rotate-lan-key': 'admin'
+  'authcfg:rotate-lan-key': 'admin',
+  // The harness manager's writes (ADR-082 §7), registered on BOTH transports.
+  // `admin` stretches past the session-security area here on purpose: choosing
+  // which program runs, downloading one onto the host, or running every program
+  // detection finds there is close to remote code execution. Relabelled
+  // `config`, each would be reachable from any authenticated connection. The
+  // two reads (`harness:state`, `harness:versions`) declare `config` and are
+  // not pinned, for the reason `ide:availability` is not.
+  'harness:set-selection': 'admin',
+  'harness:install': 'admin',
+  'harness:install-cancel': 'admin',
+  'harness:detect': 'admin'
 }
 
 // ---------------------------------------------------------------------------

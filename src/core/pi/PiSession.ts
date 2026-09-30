@@ -283,16 +283,15 @@ export class PiSession extends BaseSession {
   /**
    * ADR-030/ADR-033 M4-A: the STATIC PI_ENGINE_CAPABILITIES.crossEngineDispatch
    * flag is true (M4b shipped), but the HONEST per-session value additionally
-   * requires crossEngineDispatchAvailable('pi') — currently always true for
-   * the non-'claude' branch (pi-as-source only needs SOME target, and Claude
-   * is always installed), but ANDed here so a future tightening of that
-   * helper takes effect for pi automatically. ANDed at this GETTER (not
-   * baked into every `_capabilities` assignment site — the constructor's
-   * sync+async assignments, resolveCapsForModel, adoptEngineModel, setModel —
-   * since unlike OpencodeSession's single resolveCapsForModel() choke point,
-   * PiSession has several; one computed getter is the DRY single point of
-   * truth, mirroring ClaudeSession's identical live-getter pattern instead of
-   * opencode's "bake into every producer" pattern).
+   * requires crossEngineDispatchAvailable('pi') — some target (Claude Code,
+   * opencode or Codex) being available, which ADR-082 made a live question.
+   * ANDed at this GETTER (not baked into every `_capabilities` assignment
+   * site — the constructor's sync+async assignments, resolveCapsForModel,
+   * adoptEngineModel, setModel — since unlike OpencodeSession's single
+   * resolveCapsForModel() choke point, PiSession has several; one computed
+   * getter is the DRY single point of truth, mirroring ClaudeSession's
+   * identical live-getter pattern instead of opencode's "bake into every
+   * producer" pattern).
    */
   get capabilities(): ResolvedCapabilities {
     return {

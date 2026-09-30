@@ -57,6 +57,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    `allow_ide` is on, and toggle-off revokes it in place. Its sibling
  *    `ide:availability` is deliberately ABSENT from this list — it declares
  *    `config`, because asking "may I?" must be answerable without the grant.
+ *  - `admin` (ADR-082 §7, `harness:*` writes) — choosing a harness's source,
+ *    installing one into the host's store, cancelling an install, running
+ *    detection. Putting a program on the host from a phone is close to remote
+ *    code execution, so a base connection only SEES the Installed page:
+ *    `harness:state` and `harness:versions` declare `config` and are absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -70,6 +75,10 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'harness:detect',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:set-selection',
   'ide:mint-entry',
   'terminal:attach',
   'terminal:create',
@@ -122,7 +131,10 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/codex-commands.ts',
   // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
-  'src/core/ipc/usage-hub-commands.ts'
+  'src/core/ipc/usage-hub-commands.ts',
+  // ADR-082 arc 2 — the harness manager, one declaration spread by both
+  // transports (`registerSessionIpc` on the desktop side).
+  'src/core/ipc/harness-commands.ts'
 ]
 
 /**

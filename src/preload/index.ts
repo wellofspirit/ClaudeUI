@@ -235,6 +235,14 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+  harnessState: () => ipcRenderer.invoke('harness:state'),
+  harnessVersions: (id) => ipcRenderer.invoke('harness:versions', { id }),
+  setHarnessSelection: (id, selection) =>
+    ipcRenderer.invoke('harness:set-selection', { id, selection }),
+  installHarness: (id, version) => ipcRenderer.invoke('harness:install', { id, version }),
+  cancelHarnessInstall: (id, version) =>
+    ipcRenderer.invoke('harness:install-cancel', { id, version }),
+  detectHarnesses: (ids) => ipcRenderer.invoke('harness:detect', ids ? { ids } : {}),
   getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
   getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
   generateTitle: (conversationText: string) =>

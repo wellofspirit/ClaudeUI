@@ -3508,44 +3508,61 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
 // ADR-033 M4-A — crossEngineDispatchAvailable capability helper
 // ---------------------------------------------------------------------------
 
-describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
-  it("'opencode' is always true — Claude is ClaudeUI's bundled default engine", () => {
-    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+describe('crossEngineDispatchAvailable (ADR-030/M4-A, ADR-082)', () => {
+  const setInstalled = (claude: boolean, opencode: boolean, pi: boolean, codex: boolean): void => {
+    Object.assign(harnessInstalled, { claude, opencode, pi, codex })
+  }
+  afterEach(() => {
+    setInstalled(true, true, true, false)
   })
 
-  const setInstalled = (opencode: boolean, pi: boolean, codex: boolean): void => {
-    Object.assign(harnessInstalled, { opencode, pi, codex })
-  }
-  afterEach(() => setInstalled(true, true, false))
-
   it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
-    setInstalled(true, false, false)
+    setInstalled(true, true, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-    setInstalled(false, false, false)
+    setInstalled(true, false, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
 
     // pi alone is enough — M4c made pi a Claude target but left this branch
     // asking only about opencode, so a pi-only machine hid the tool.
-    setInstalled(false, true, false)
+    setInstalled(true, false, true, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
 
     // codex alone is enough (slice H).
-    setInstalled(false, false, true)
+    setInstalled(true, false, false, true)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
   })
 
-  it("'pi' mirrors the pi harness being available (ADR-033 M4c)", () => {
-    setInstalled(true, true, false)
-    expect(crossEngineDispatchAvailable('pi')).toBe(true)
-    setInstalled(true, false, false)
-    expect(crossEngineDispatchAvailable('pi')).toBe(false)
+  it("'opencode' is no longer unconditionally true: Claude Code can resolve to nothing (ADR-082)", () => {
+    setInstalled(true, false, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    setInstalled(false, false, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(false)
+    // Any other target is enough while Claude Code is unavailable.
+    setInstalled(false, false, true, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    setInstalled(false, false, false, true)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    // opencode itself is not a target of opencode (the same-engine guard).
+    setInstalled(false, true, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(false)
   })
 
-  it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
-    // Neither of the two OPTIONAL target binaries being present may change the
-    // answer: the claude target needs nothing installed, so a Codex session
-    // always has somewhere to dispatch to.
-    setInstalled(false, false, false)
+  it("'pi' asks about its targets, not about pi itself", () => {
+    setInstalled(true, false, false, false)
+    expect(crossEngineDispatchAvailable('pi')).toBe(true)
+    setInstalled(false, false, true, false)
+    expect(crossEngineDispatchAvailable('pi')).toBe(false)
+    setInstalled(false, true, true, false)
+    expect(crossEngineDispatchAvailable('pi')).toBe(true)
+  })
+
+  it("'codex' counts Codex itself as a target (ADR-069 §7), and Claude Code no longer by default", () => {
+    setInstalled(false, false, false, false)
+    expect(crossEngineDispatchAvailable('codex')).toBe(false)
+    setInstalled(true, false, false, false)
+    expect(crossEngineDispatchAvailable('codex')).toBe(true)
+    // codex → codex is one more thread on the caller's host.
+    setInstalled(false, false, false, true)
     expect(crossEngineDispatchAvailable('codex')).toBe(true)
   })
 })

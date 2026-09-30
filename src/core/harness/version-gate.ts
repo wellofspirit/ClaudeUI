@@ -39,3 +39,34 @@ export function versionAccepted(id: HarnessId, version: string): boolean {
   const verdict = classifyVersion(id, version)
   return verdict === 'tested' || verdict === 'untested'
 }
+
+const LABELS: Record<HarnessId, string> = {
+  claude: 'Claude Code',
+  opencode: 'opencode',
+  pi: 'pi',
+  codex: 'Codex'
+}
+
+/**
+ * Why a version is labelled as it is, for the user (detection, the Installed
+ * page, a System fallback); undefined for `tested`. One wording everywhere, and
+ * always from the manifest this build carries.
+ */
+export function versionReason(
+  id: HarnessId,
+  version: string,
+  verdict: HarnessVersionClass
+): string | undefined {
+  const { tested, floor, ceiling } = harnessManifest(id)
+  const label = LABELS[id]
+  switch (verdict) {
+    case 'too-old':
+      return `${label} ${version} is older than ${floor}, the oldest ClaudeUI supports`
+    case 'incompatible':
+      return `${label} ${version} is not supported: ClaudeUI needs a version from ${floor} up to, not including, ${ceiling}`
+    case 'untested':
+      return `ClaudeUI was tested with ${label} ${tested}`
+    default:
+      return undefined
+  }
+}

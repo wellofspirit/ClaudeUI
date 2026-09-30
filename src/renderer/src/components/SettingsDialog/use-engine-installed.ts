@@ -11,25 +11,42 @@
  * `null` means "not resolved yet" (render a Loading… row, never the
  * not-installed copy), so a slow IPC round-trip can't flash "not installed" at
  * a user who has it.
+ *
+ * LIVE since ADR-082: a harness can be installed, removed or re-sourced while
+ * the app runs, so the answer is re-read on every `harness:changed` for this
+ * engine (a replicated sync event, so the desktop and a phone both hear it).
+ * A re-read keeps the previous answer on screen until the new one lands, and
+ * only the newest read may set it, so a slow earlier answer cannot overwrite
+ * a later one.
  */
 
 import { useEffect, useState } from 'react'
+import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import type { EngineId } from '../../../../shared/types'
 
 export function useEngineInstalled(engineId: EngineId): boolean | null {
   const [installed, setInstalled] = useState<boolean | null>(null)
   useEffect(() => {
     let cancelled = false
-    window.api
-      .engineIsInstalled(engineId)
-      .then((v) => {
-        if (!cancelled) setInstalled(v)
-      })
-      .catch(() => {
-        if (!cancelled) setInstalled(false)
-      })
+    let latest = 0
+    const read = (): void => {
+      const seq = ++latest
+      window.api
+        .engineIsInstalled(engineId)
+        .then((v) => {
+          if (!cancelled && seq === latest) setInstalled(v)
+        })
+        .catch(() => {
+          if (!cancelled && seq === latest) setInstalled(false)
+        })
+    }
+    read()
+    const off = onSyncEvent('harness:changed', (data) => {
+      if (data?.id === engineId) read()
+    })
     return () => {
       cancelled = true
+      off()
     }
   }, [engineId])
   return installed

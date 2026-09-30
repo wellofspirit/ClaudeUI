@@ -34,7 +34,8 @@ import type {
 import { bestSystemInstall, isFingerprintFresh } from './detect/detection-cache'
 import { nodeVersionOk } from './detect/node-choice'
 import { ELECTRON_NODE_ENV, nativeLaunch, nodeScriptLaunch } from './launch'
-import { classifyVersion } from './version-gate'
+import { compareVersions } from './store'
+import { classifyVersion, versionReason } from './version-gate'
 
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
@@ -89,12 +90,20 @@ function runnable(install: DetectedInstall): boolean {
   return install.verdict === 'tested' || install.verdict === 'untested'
 }
 
-/** Re-label an install's version against the current manifest. */
-function reclassified(id: HarnessId, install: DetectedInstall): DetectedInstall {
+/**
+ * Re-label an install's version against the current manifest: a cache written
+ * by an older build may call a version tested that this build does not. Only
+ * the four version verdicts move; `unsupported` and `failed` stand.
+ */
+export function reclassifyInstall(id: HarnessId, install: DetectedInstall): DetectedInstall {
   const versionVerdicts = ['tested', 'untested', 'too-old', 'incompatible']
   if (!install.version || !versionVerdicts.includes(install.verdict)) return install
   const verdict = classifyVersion(id, install.version)
-  return verdict === install.verdict ? install : { ...install, verdict }
+  if (verdict === install.verdict) return install
+  // The reason moves with the label: the cached one describes the old verdict.
+  const reason = versionReason(id, install.version, verdict)
+  const { reason: _stale, ...rest } = install
+  return { ...rest, verdict, ...(reason !== undefined ? { reason } : {}) }
 }
 
 /**
@@ -168,15 +177,27 @@ export function resolveSystemInstall(
 
   // Electron's Node is only there inside Electron, and only when new enough.
   const electronOk = ctx.electron !== null && nodeVersionOk(ctx.electron.nodeVersion)
-  const current = detection.installs.map((install) => reclassified(id, install))
+  const current = detection.installs.map((install) => reclassifyInstall(id, install))
   const installs = current.filter((install) => electronOk || !onElectronNode(install))
   const best = bestSystemInstall({ ...detection, installs })
   if (!best) {
     const onlyOnElectron = current.some((i) => runnable(i) && onElectronNode(i))
+    if (onlyOnElectron) {
+      return {
+        kind: 'fallback',
+        reason: `No usable System ${label} found: the one detected runs on ClaudeUI's own Node, which this process does not have`,
+        redetect: false
+      }
+    }
+    // Name why the install the user most likely means (the newest one) is not
+    // usable, so the fallback explains itself ("2.1.198 is older than 2.1.275").
+    const newest = [...current]
+      .filter((i) => i.reason !== undefined)
+      .sort((a, b) => compareVersions(b.version ?? '0.0.0', a.version ?? '0.0.0'))[0]
     return {
       kind: 'fallback',
-      reason: onlyOnElectron
-        ? `No usable System ${label} found: the one detected runs on ClaudeUI's own Node, which this process does not have`
+      reason: newest
+        ? `No usable System ${label} found: ${newest.reason}`
         : `No usable System ${label} found`,
       redetect: false
     }

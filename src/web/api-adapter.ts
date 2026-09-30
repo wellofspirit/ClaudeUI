@@ -311,6 +311,28 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('engine:is-installed', engineId) as ReturnType<
         ClaudeAPI['engineIsInstalled']
       >,
+    // The harness manager (ADR-082 arc 2). Plain results (no safeHandler
+    // envelope), so `connection.invoke` like the reads beside them. The writes
+    // declare `admin`: a base connection is refused them by the registry.
+    harnessState: () => connection.invoke('harness:state') as ReturnType<ClaudeAPI['harnessState']>,
+    harnessVersions: (id) =>
+      connection.invoke('harness:versions', { id }) as ReturnType<ClaudeAPI['harnessVersions']>,
+    setHarnessSelection: (id, selection) =>
+      connection.invoke('harness:set-selection', { id, selection }) as ReturnType<
+        ClaudeAPI['setHarnessSelection']
+      >,
+    installHarness: (id, version) =>
+      connection.invoke('harness:install', { id, version }) as ReturnType<
+        ClaudeAPI['installHarness']
+      >,
+    cancelHarnessInstall: (id, version) =>
+      connection.invoke('harness:install-cancel', { id, version }) as ReturnType<
+        ClaudeAPI['cancelHarnessInstall']
+      >,
+    detectHarnesses: (ids) =>
+      connection.invoke('harness:detect', ids ? { ids } : {}) as ReturnType<
+        ClaudeAPI['detectHarnesses']
+      >,
     getPiBinaryPath: () =>
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>

@@ -71,6 +71,12 @@ export interface ResolvedHarness {
   source: HarnessResolvedSource
   /** The version when a `version.json` / `install.json` states it, else null. */
   version: string | null
+  /**
+   * What to show the user, and what they could run themselves, when it is not
+   * `path`: a System install's PATH hit or shim (`pi.cmd`, `~/.local/bin/pi`)
+   * rather than the `cli.js` node runs. Unset means `path`.
+   */
+  displayPath?: string
   /** Why `path` is null, or why a fallback was taken. User-readable. */
   reason?: string
 }
@@ -201,3 +207,100 @@ export type HarnessInstallResult =
       verified: HarnessInstallRecord['verified']
     }
   | { status: 'failed'; id: HarnessId; version: string; reason: string }
+
+// ── The Installed page's API (ADR-082 arc 2, S4: `src/core/ipc/harness-commands.ts`) ──
+//
+// Every result below is discriminated by `status` or `kind`, never `ok`: the
+// preload and web transports treat any object with an `ok` key as their own
+// envelope and would hand the caller `.data` (undefined) instead.
+
+/** Where a detection is: the background scheduler's own status. */
+export interface HarnessDetectionStatus {
+  running: boolean
+  /** ISO time the last run finished. */
+  lastRunAt?: string
+}
+
+/** The node a detected Node-script install (pi) would run on, for display. */
+export type HarnessNodeSummary =
+  { kind: 'node'; path: string; version: string } | { kind: 'electron'; version: string }
+
+/**
+ * One detected System install, for display only: never its launch, its
+ * environment or its fingerprint. `verdict` is re-labelled against this
+ * build's manifest, so it can differ from what detection wrote.
+ */
+export interface HarnessSystemInstallView {
+  displayPath: string
+  version: string | null
+  verdict: DetectedVerdict
+  reason?: string
+  installKind: HarnessInstallKind
+  node?: HarnessNodeSummary
+}
+
+/** What a System selection of the harness would run right now. */
+export type HarnessSystemChoice =
+  { kind: 'ok'; displayPath: string; version: string } | { kind: 'fallback'; reason: string }
+
+export interface HarnessSystemView {
+  /** When the cached detection ran (ISO), or null when it never has. */
+  detectedAt: string | null
+  installs: HarnessSystemInstallView[]
+  choice: HarnessSystemChoice
+}
+
+/** One version in ClaudeUI's managed store. */
+export interface HarnessManagedVersionView {
+  version: string
+  verified: HarnessInstallRecord['verified']
+  installedAt: string
+  /** ISO time the resolver last picked it; absent when it never has. */
+  lastUsed?: string
+}
+
+/** The resolver's current answer, without its launch. */
+export interface HarnessResolvedView {
+  source: HarnessResolvedSource
+  version: string | null
+  path: string | null
+  /** A System install's PATH hit or shim, when it is not `path`. */
+  displayPath?: string
+  /** Why `path` is null, or why a fallback was taken. */
+  reason?: string
+  /** `harnessAvailable`: can a session start on it (Codex also needs its host). */
+  available: boolean
+}
+
+export interface HarnessStateEntry {
+  id: HarnessId
+  manifest: Pick<HarnessManifest, 'tested' | 'floor' | 'ceiling'>
+  /** The saved selection, or the default. */
+  selection: HarnessSelection
+  resolved: HarnessResolvedView
+  system: HarnessSystemView
+  /** Installed versions, newest first. */
+  managed: HarnessManagedVersionView[]
+  /** Claude Code only: the bundled copy's version (the "Bundled" segment's label). */
+  bundledVersion?: string | null
+}
+
+/** `harness:state`. Filesystem reads only: no probes, no network. */
+export interface HarnessStateSnapshot {
+  harnesses: Record<HarnessId, HarnessStateEntry>
+  detection: HarnessDetectionStatus
+  /** Every install in flight, with its latest progress. */
+  installs: HarnessInstallProgress[]
+}
+
+/** `harness:versions`: what upstream has released (cached for an hour). */
+export type HarnessVersionsResult =
+  | { status: 'ok'; id: HarnessId; latest: string | null; available: string[] }
+  | { status: 'unsupported'; id: HarnessId; reason: string }
+
+/** `harness:install-cancel`. */
+export interface HarnessInstallCancelResult {
+  status: 'cancelled' | 'not-running'
+  id: HarnessId
+  version: string
+}

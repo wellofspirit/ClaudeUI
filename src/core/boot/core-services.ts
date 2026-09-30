@@ -64,6 +64,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { claudeHostTokenKeeper } from '../services/claude-host-token'
 import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
+import { startHarnessEvents } from '../ipc/harness-commands'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -275,6 +276,13 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
   armCodexRulesSync()
   syncCodexRulesFile()
+
+  // The Installed page and every engine-installed gate follow harnesses live:
+  // each resolver invalidation goes out as `harness:changed { id }`, and each
+  // install's progress as `harness:install-progress`, to the desktop renderer
+  // and every remote client alike. Before the scheduler, so its first run's
+  // invalidations are not missed.
+  startHarnessEvents(emitEvent)
 
   // System harness detection (ADR-082 §3), in the background: one run for
   // every harness a few seconds after boot, on an unref'd timer, and from then

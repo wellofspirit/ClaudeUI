@@ -29,9 +29,8 @@ import type {
 } from '../../../shared/harness-types'
 import { HARNESS_IDS } from '../../../shared/harness-types'
 import { ELECTRON_NODE_ENV, nodeScriptLaunch } from '../launch'
-import { harnessManifest } from '../manifests'
 import { codexHostFor } from '../resolve'
-import { classifyVersion } from '../version-gate'
+import { classifyVersion, versionReason } from '../version-gate'
 import { harnessCandidates } from './candidates'
 import { fingerprintOf } from './fs-util'
 import { chooseNode, currentElectron } from './node-choice'
@@ -64,13 +63,6 @@ export interface DetectDeps {
   /** Where probe directories are created (default `os.tmpdir()`). */
   tmpdir?: string
   now?: () => Date
-}
-
-const LABELS: Record<HarnessId, string> = {
-  claude: 'Claude Code',
-  opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
 }
 
 interface Context {
@@ -121,25 +113,6 @@ async function prepare(deps: DetectDeps): Promise<Context> {
 
 function key(p: string, platform: NodeJS.Platform): string {
   return platform === 'win32' ? p.toLowerCase() : p
-}
-
-function versionReason(
-  id: HarnessId,
-  version: string,
-  verdict: DetectedInstall['verdict']
-): string | undefined {
-  const { tested, floor, ceiling } = harnessManifest(id)
-  const label = LABELS[id]
-  switch (verdict) {
-    case 'too-old':
-      return `${label} ${version} is older than ${floor}, the oldest ClaudeUI supports`
-    case 'incompatible':
-      return `${label} ${version} is not supported: ClaudeUI needs a version from ${floor} up to, not including, ${ceiling}`
-    case 'untested':
-      return `ClaudeUI was tested with ${label} ${tested}`
-    default:
-      return undefined
-  }
 }
 
 async function finish(r: InstallResolution, ctx: Context): Promise<DetectedInstall> {

@@ -90,7 +90,7 @@ import {
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { locatePiBinary } from '../pi/pi-locate'
+import { locatePiDisplayPath } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
@@ -104,6 +104,7 @@ import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
+import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -477,7 +478,12 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS, ...USAGE_HUB_CHANNELS])
+  unbindDesktopChannels([
+    ...SESSION_IPC_CHANNELS,
+    ...CODEX_CHANNELS,
+    ...USAGE_HUB_CHANNELS,
+    ...HARNESS_CHANNELS
+  ])
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -1200,13 +1206,15 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: (engineId: EngineId): boolean => engineInstalled(engineId)
   })
-  // Absolute path to the vendored pi binary, for the Settings › pi subscription
-  // hint's copyable "run this command in a terminal" block. Null if not found.
+  // The pi a user can run in a terminal, for the Settings › pi subscription
+  // hint's copyable "run this command in a terminal" block: the resolved
+  // executable, or for a System pi the shim detection found rather than the
+  // `cli.js` node runs (ADR-082 §2). Null if not found.
   handleIpc({
     channel: 'pi:binary-path',
     capability: 'config',
     kind: 'query',
-    handler: (): string | null => locatePiBinary()
+    handler: (): string | null => locatePiDisplayPath()
   })
   // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
   // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
@@ -1804,6 +1812,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // one of them a credential write, and one declaration is what keeps the
   // capability and the sanitiser identical on both transports.
   for (const cmd of usageHubCommands()) {
+    handleIpc(cmd)
+  }
+
+  // The harness manager (ADR-082 arc 2), from the same declarations the remote
+  // transport spreads: reads are `config`, every write `admin` (§7).
+  for (const cmd of harnessCommands()) {
     handleIpc(cmd)
   }
 

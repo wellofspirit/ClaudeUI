@@ -79,6 +79,21 @@ describe('collectHarnessGarbage', () => {
     expect(fs.readdirSync(path.join(store, TRASH_DIR))).toEqual([])
   })
 
+  it('invalidates each harness that lost a version, once, and no other', async () => {
+    install('opencode', '1.18.40', 30)
+    install('opencode', '1.18.41', 30)
+    install('pi', harnessManifest('pi').tested, 30)
+    const invalidated: HarnessId[] = []
+    await collectHarnessGarbage({
+      now: () => NOW,
+      selection: () => ({ source: 'managed', version: 'tested' }),
+      resolved: () => ({ source: 'bundled', version: null }),
+      invalidate: (id) => invalidated.push(id)
+    })
+    // opencode lost two versions (one `harness:changed`); pi kept its tested one.
+    expect(invalidated).toEqual(['opencode'])
+  })
+
   it('keeps the version the selection names, even while the source is System', async () => {
     const exact = install('opencode', '1.18.40', 30)
     await gc(() => ({ source: 'system', version: '1.18.40' }))

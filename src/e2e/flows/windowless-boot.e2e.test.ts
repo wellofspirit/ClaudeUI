@@ -211,7 +211,8 @@ vi.mock('../../core/pi/model-discovery', () => ({
 }))
 vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
 }))
 // Same reason as `pi-locate`: the boot seed walks every engine's session list,
 // and `listCodexSessions()` spawns a real `codex app-server` whenever the

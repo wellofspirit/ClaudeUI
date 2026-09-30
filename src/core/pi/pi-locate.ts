@@ -18,6 +18,17 @@ export function locatePiBinary(): string | null {
 }
 
 /**
+ * The pi a user can run in a terminal (`pi:binary-path`, the Settings "run
+ * `pi /login`" hint), or null when none was found. For a System pi from npm or
+ * pi.dev that is the shim or launcher detection found on PATH, not the `cli.js`
+ * ClaudeUI hands to node; every other source runs its executable directly.
+ */
+export function locatePiDisplayPath(): string | null {
+  const resolved = resolveHarness('pi')
+  return resolved.displayPath ?? resolved.path
+}
+
+/**
  * How to spawn pi, or null when none was found. A System npm install runs as
  * `<node> <cli.js>` (ADR-082 §2), so every pi spawn goes through this.
  */

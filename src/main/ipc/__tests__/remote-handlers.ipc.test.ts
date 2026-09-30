@@ -91,7 +91,8 @@ vi.mock('../../../core/pi/model-discovery', () => ({
 
 vi.mock('../../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
 }))
 
 // `engine:is-installed` is the harness resolver's answer (ADR-082), tested in
@@ -1912,6 +1913,29 @@ const USAGE_HUB_CHANNELS = [
   'usage-hub:forget'
 ] as const
 
+/**
+ * The harness manager (ADR-082 arc 2). Restated rather than imported from
+ * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
+ * reads are `config`; the four writes `admin` (§7), which a base connection
+ * never holds.
+ */
+const HARNESS_CHANNELS = [
+  'harness:state',
+  'harness:versions',
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect'
+] as const
+
+/** The half of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
+const HARNESS_ADMIN_CHANNELS = [
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1990,7 +2014,10 @@ describe('remote surface parity (phase 1 port)', () => {
         // the combined dashboard and the settings group that configures it are
         // not desktop-only — and no shape among them can return the device
         // secret, which is why a write-only `set-secret` command is safe here.
-        ...USAGE_HUB_CHANNELS
+        ...USAGE_HUB_CHANNELS,
+        // ADR-082 arc 2: the Installed page is on every device (reads are
+        // `config`); installing, re-sourcing and detecting are `admin`.
+        ...HARNESS_CHANNELS
       ].sort()
     )
   })
@@ -2161,7 +2188,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
       // deliberately absent — it declares `config` and IS reachable at connect,
       // which is what makes the button able to explain itself.
-      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const)
+      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
+      // ADR-082 §7: the harness manager's writes. The two reads are `config`.
+      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -2333,12 +2362,13 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // FOUR sanctioned widenings, each deliberate and each behind a ceremony:
-    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), the
-    // `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with the
-    // two LAN-channel verbs — which is also when the namespace joined the pin
-    // table, `admin` having shrunk to exactly these two families), and the IDE
-    // mint (ADR-064).
+    // FIVE sanctioned widenings, each deliberate and each behind a proven
+    // identity: the terminal set (ADR-052 decision 6), the passkey set
+    // (decision 1), the `authcfg:*` settings namespace (ADR-054 §6, extended by
+    // ADR-056 with the two LAN-channel verbs — which is also when the namespace
+    // joined the pin table, `admin` having shrunk to exactly these two
+    // families), the IDE mint (ADR-064), and the harness manager's writes
+    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -2351,7 +2381,8 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
       // remote, and reachable only behind the toggle + a step-up. Same shape as
       // the terminal set above.
-      ...IDE_GATED_CHANNELS
+      ...IDE_GATED_CHANNELS,
+      ...HARNESS_ADMIN_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

@@ -177,44 +177,40 @@ import type {
 } from '../../shared/types'
 
 /**
+ * Which engines a session on each engine can dispatch into: every OTHER engine
+ * (ADR-033's same-engine guard, `dispatchInner`), plus Codex into Codex, which
+ * ADR-069 §7 lifts the guard for (a target is one more thread on the caller's
+ * host).
+ */
+const DISPATCH_TARGETS: Readonly<Record<EngineId, readonly EngineId[]>> = {
+  claude: ['opencode', 'pi', 'codex'],
+  opencode: ['claude', 'pi', 'codex'],
+  pi: ['claude', 'opencode', 'codex'],
+  codex: ['claude', 'opencode', 'pi', 'codex']
+}
+
+/**
  * Whether cross-engine dispatch is a real, honest capability for `engineId`
- * (ADR-030 + ADR-033 M4-A): "this engine can host the dispatch tool AND at
- * least one OTHER installed engine can be a target." Lives here (not in
- * shared/model-capabilities.ts, which must stay renderer-safe / import-free
- * of main-process-only modules) — both ClaudeSession.ts and OpencodeSession.ts
- * already import THIS module (for `crossEngineDispatcher`/`disposeFor`), so
- * adding one more named export here forms no new import edge, let alone a
- * cycle.
- *  - 'claude' hosts the tool for opencode-originated dispatches into Claude;
- *    the only other engine is opencode, so honesty requires the opencode
- *    binary actually being vendored/available.
- *  - 'opencode' hosts the tool for Claude-originated dispatches into opencode;
- *    the only other engine is Claude, which is ClaudeUI's bundled default
- *    engine — always present, so always true.
- *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
- *    dispatches into pi — gates on the vendored pi binary actually being
- *    present, mirroring the 'claude' branch's opencode-binary check.
- *  - 'codex' (slice E) hosts the tool for Codex-originated dispatches into
- *    claude/opencode/pi. Claude is one of those three and is ClaudeUI's
- *    bundled default engine, so — same reasoning as the 'opencode' branch —
- *    a Codex session always has somewhere to dispatch to; the other two
- *    binaries being absent only narrows the useful target list, which the
- *    dispatcher's own per-request guards report.
+ * (ADR-030 + ADR-033 M4-A): "a session on this engine hosts the dispatch tool
+ * AND at least one engine it can dispatch into is available." Lives here (not
+ * in shared/model-capabilities.ts, which must stay renderer-safe / import-free
+ * of main-process-only modules) — every session class already imports THIS
+ * module (for `crossEngineDispatcher`/`disposeFor`), so the export forms no new
+ * import edge, let alone a cycle.
  *
- * Slice H makes CODEX a target as well, so the 'claude' branch is no longer a
- * one-engine question: a Claude session can dispatch into opencode, pi OR
- * codex, and ANY of the three being installed makes the tool honest. (The pi
- * disjunct also closes a gap left when M4c made pi a target without widening
- * this branch — a machine with the pi binary but no opencode one hid
- * dispatch_agent from Claude sessions that could in fact use it.)
+ * One rule for every engine since ADR-082: ANY target being available makes
+ * the tool honest; the ones that are not only narrow the useful list, which
+ * the dispatcher's own per-request guards report. Before it, the opencode and
+ * Codex branches answered `true` because Claude Code was always bundled, and
+ * pi's asked about pi itself. Neither holds any more: a harness is chosen,
+ * installed and removed while the app runs, and a Claude Code selection can
+ * resolve to nothing. Callers read this when a session's capabilities are
+ * computed, so a session spawned after a harness change sees the new answer.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
   // `harnessAvailable` is cached by the resolver: this runs on every
   // ClaudeSession status emit and must do no filesystem work.
-  if (engineId === 'claude')
-    return harnessAvailable('opencode') || harnessAvailable('pi') || harnessAvailable('codex')
-  if (engineId === 'pi') return harnessAvailable('pi')
-  return true
+  return DISPATCH_TARGETS[engineId].some((target) => harnessAvailable(target))
 }
 
 /**

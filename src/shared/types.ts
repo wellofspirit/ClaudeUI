@@ -17,6 +17,15 @@ import type {
   SharedProviderStatus
 } from './shared-provider'
 import type { ProviderRegistrySnapshot } from './provider-registry'
+import type {
+  HarnessId,
+  HarnessInstallCancelResult,
+  HarnessInstallResult,
+  HarnessSelection,
+  HarnessStateEntry,
+  HarnessStateSnapshot,
+  HarnessVersionsResult
+} from './harness-types'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -1654,6 +1663,22 @@ interface SessionAPI {
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>
+  // ── Harness manager (ADR-082 arc 2; `core/ipc/harness-commands.ts`) ──
+  // Reads are `config`; every write is `admin` (§7), so a base remote
+  // connection is refused them. Live updates arrive as the `harness:changed`
+  // and `harness:install-progress` sync events (`onSyncEvent`).
+  /** Every harness: manifest, selection, resolver answer, detection, store. No probes. */
+  harnessState(): Promise<HarnessStateSnapshot>
+  /** Upstream releases for the version dropdown (network, cached for an hour). */
+  harnessVersions(id: HarnessId): Promise<HarnessVersionsResult>
+  /** Save a harness's source; running sessions keep their binary. Throws on an invalid choice. */
+  setHarnessSelection(id: HarnessId, selection: HarnessSelection): Promise<HarnessStateEntry>
+  /** Install into ClaudeUI's store; resolves when the install finishes. */
+  installHarness(id: HarnessId, version: string): Promise<HarnessInstallResult>
+  /** Abort an in-flight `installHarness` for this harness and version. */
+  cancelHarnessInstall(id: HarnessId, version: string): Promise<HarnessInstallCancelResult>
+  /** Re-detect System installs (all harnesses when omitted); resolves with the new state. */
+  detectHarnesses(ids?: HarnessId[]): Promise<HarnessStateSnapshot>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
@@ -3073,7 +3098,8 @@ export interface ClaudeAPI
   getVersionInfo(): Promise<{ appVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
-  /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
+  /** The pi a user can run in a terminal (`locatePiDisplayPath()`): the resolved
+   *  executable, or a System pi's shim rather than its `cli.js`; null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
   /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
