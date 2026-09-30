@@ -333,6 +333,15 @@ session on it is opened.
    A Codex override still needs `codex-code-mode-host` beside it to count as installed.
 3. Unused versions are kept for seven days (the proposed default, not challenged).
 4. Upgrades from a bundled release prompt once (§8).
+5. `claudeui-server` gets no special path (owner, 2026-09-30): its web UI shows the same one-time
+   sheet and Installed page to an admin connection; a fresh server has no opencode, pi or Codex
+   until an admin installs them.
+6. When a ClaudeUI release moves Codex's pin, the new pin is an update (owner, 2026-09-30): Codex
+   joins §6's update rule for its Tested choice, so Ask me offers it on the footer button and
+   Automatically installs it. Until then ClaudeUI's Codex is unavailable, because the exact-pin gate
+   refuses the old version.
+7. In a development checkout, `postinstall` installs the tested opencode, pi and Codex into the real
+   managed store, `~/.claude/ui/harnesses` (owner, 2026-09-30), as §8 says.
 
 ## Rejected alternatives
 
