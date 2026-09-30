@@ -100,7 +100,11 @@ function isMacKeyboard(): boolean {
  *
  * The last header at or above the spy line — `max(SPY_OFFSET_PX,
  * SPY_LINE_FRACTION × pane height)` below the pane's top — wins, EXCEPT at the
- * bottom of the pane, where the last group wins outright. A group near the end
+ * top of the pane, where the FIRST group wins outright, and at the bottom, where
+ * the last one does. At the top the line sits 45% down, so a short first group
+ * (pi's Session behaviour) would hand the rail to the group after it while the
+ * page is still showing its first block — and resetting `scrollTop` when a page
+ * opens fires exactly that measurement. A group near the end
  * of a page can never bring its header to the top edge (there is not enough
  * content below it to scroll), so without the `atBottom` case clicking the last
  * sub-entry scrolls correctly and is then immediately re-marked as the previous
@@ -117,9 +121,12 @@ function isMacKeyboard(): boolean {
 export function pickActiveGroup(
   pane: { top: number; height: number },
   headers: Array<{ id: string; top: number }>,
-  atBottom: boolean
+  atBottom: boolean,
+  atTop = false
 ): string | null {
   if (headers.length === 0) return null
+  // A page that fits entirely is both: its top is what is on screen.
+  if (atTop) return headers[0].id
   if (atBottom) return headers[headers.length - 1].id
   const line = pane.top + Math.max(SPY_OFFSET_PX, SPY_LINE_FRACTION * pane.height)
   let current: string | null = null
@@ -413,11 +420,13 @@ export function SettingsDialogView({
         .filter((h): h is { id: string; el: HTMLElement } => h.el !== undefined)
         .map((h) => ({ id: h.id, top: h.el.getBoundingClientRect().top }))
       const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 2
+      const atTop = pane.scrollTop <= 1
       const paneRect = pane.getBoundingClientRect()
       const current = pickActiveGroup(
         { top: paneRect.top, height: paneRect.height },
         headers,
-        atBottom
+        atBottom,
+        atTop
       )
       if (current && current !== activeGroup) onActiveGroupChange(current)
     }

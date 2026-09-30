@@ -52,6 +52,14 @@ describe('pickActiveGroup', () => {
     expect(pickActiveGroup(SHORT, headers(-400, LINE + 250), true)).toBe('g1')
   })
 
+  it('gives the top of the pane to the FIRST group, even with the next header above the line', () => {
+    // pi's page opened at the top: Session behaviour is short, so Automatic
+    // retry's header already sits above the 45% line.
+    expect(pickActiveGroup(SHORT, headers(0, LINE - 10, LINE + 300), false, true)).toBe('g0')
+    // A page that fits entirely is at its top and bottom at once: the top wins.
+    expect(pickActiveGroup(SHORT, headers(0, 40), true, true)).toBe('g0')
+  })
+
   it('in a short pane the line is the fixed minimum offset', () => {
     expect(SPY_LINE_FRACTION * SHORT.height).toBeLessThan(SPY_OFFSET_PX)
     expect(pickActiveGroup(SHORT, headers(-50, LINE), false)).toBe('g1')
