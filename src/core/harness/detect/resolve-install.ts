@@ -55,8 +55,10 @@ export interface NodeScriptTarget {
   script: string
   /** The install's own nodes, in preference order; each exists. */
   preferredNodes: string[]
-  /** Environment entries the install's launcher sets. */
+  /** Environment entries the install's launcher sets (never `PATH`). */
   env?: Record<string, string>
+  /** Directories the install's launcher puts in front of `PATH` (pi.dev's `pi-node`). */
+  pathPrepend?: string[]
 }
 
 interface ResolutionBase {
@@ -421,10 +423,11 @@ export function resolvePiManaged(
   const managedNode = path.join(nodeBin, exe('node', deps.platform))
   const env: Record<string, string> = { PI_MANAGED_INSTALL_ROOT: root }
   const preferredNodes: string[] = []
+  const pathPrepend: string[] = []
   if (isFile(managedNode)) {
     preferredNodes.push(managedNode)
-    const current = envGet(deps.env, 'PATH', deps.platform)
-    env.PATH = current ? `${nodeBin}${path.delimiter}${current}` : nodeBin
+    // The spawn site's PATH, not this one: `withLaunch` prepends at spawn time.
+    pathPrepend.push(nodeBin)
   }
   const script = realpathOrNull(cli) ?? cli
   return {
@@ -434,7 +437,7 @@ export function resolvePiManaged(
     realPath: script,
     installKind: 'pi-managed',
     launch: null,
-    nodeFor: { script, preferredNodes, env }
+    nodeFor: { script, preferredNodes, env, ...(pathPrepend.length > 0 ? { pathPrepend } : {}) }
   }
 }
 

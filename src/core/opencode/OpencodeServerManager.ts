@@ -14,7 +14,7 @@ import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { subagentPermissionConfigFor } from './subagent-permissions'
 import type { SubagentPermissionConfig } from './subagent-permissions'
 import { killProcessTree } from '../services/process-tree'
-import { harnessAvailable, resolveHarness } from '../harness/resolve'
+import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, withLaunch, type HarnessLaunch } from '../harness/launch'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
@@ -68,9 +68,7 @@ const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
  */
 function locateLaunch(): HarnessLaunch {
   const resolved = resolveHarness('opencode')
-  if (resolved.launch === null) {
-    throw new Error(resolved.reason ?? 'opencode was not found in this ClaudeUI build')
-  }
+  if (resolved.launch === null) throw new Error(harnessUnavailableMessage('opencode'))
   return resolved.launch
 }
 

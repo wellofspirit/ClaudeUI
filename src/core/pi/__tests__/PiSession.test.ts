@@ -307,6 +307,12 @@ vi.mock('../pi-locate', () => ({
   locatePiLaunch: mockLocatePiLaunch,
   piBinaryAvailable: () => true
 }))
+// The resolver's reason is what a missing pi surfaces (ADR-082); pinned here
+// because the real one depends on what this checkout vendors.
+vi.mock('../../harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../harness/resolve')>()),
+  harnessUnavailableMessage: (id: string) => `resolver says ${id} is unavailable`
+}))
 // Mocks getPiModelCatalog only — effortLevelsFromModel is kept as the REAL
 // pure function (M3) via importActual, since PiSession's resolveCapsForModel
 // calls it directly and it has no I/O to fake.
@@ -727,7 +733,7 @@ describe('PiSession.run — sends a prompt', () => {
     await session.run('hello')
     expect(sentChannels(win)).toContain('session:error')
     const [error] = sentPayloads(win, 'session:error')
-    expect(String(error)).toMatch(/pi binary not found/)
+    expect(String(error)).toContain('resolver says pi is unavailable')
   })
 })
 

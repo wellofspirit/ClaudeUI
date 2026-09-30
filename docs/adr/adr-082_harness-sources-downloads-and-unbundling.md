@@ -86,9 +86,33 @@ Each harness row has a segmented control and a version dropdown:
   rule, extended).
 - One resolver (`src/core/harness/resolve.ts`) decides the executable for every harness: the
   per-harness environment override, then the selection, then the bundled copy. A selection that
-  cannot be honoured (a version not installed, System before detection exists) falls back to the
-  bundled copy and says why. The answer is cached per harness and recomputed on an install or a
-  selection change, so status checks do no disk work.
+  cannot be honoured (a version not installed, no usable System install) falls back to the
+  bundled copy and says why. The answer is cached per harness and recomputed on an install, a
+  selection change or a finished detection, so status checks do no disk work.
+- A System selection reads the detection cache (`~/.claude/ui/harness-detection.json`, §3) and
+  never probes. The cache is a file in the user's home, so a record is checked against the files it
+  names before it is spawned (`src/core/harness/system-source.ts`). That catches a stale, corrupt or
+  hand-edited record; it does not defend against someone who can write `~/.claude`, who could
+  equally add a hook to `settings.json`. The resolver takes the newest install whose version is
+  still tested or untested under this build's manifest, and uses it only while the file that runs,
+  and a disk node for pi, still has the size and mtime detection saw, and while its cached launch
+  is the one detection would have built for those files: a native install runs as its fingerprinted
+  path; pi runs as the fingerprinted node with `cli.js` as its only leading argument, no environment
+  but the pi.dev launcher's `PI_MANAGED_INSTALL_ROOT` (a directory above the script), and at most
+  that node's directory on PATH. The launch is rebuilt from those checked fields. For pi on
+  Electron's own Node the cached command is ignored and rebuilt from the running app's executable,
+  so an app update does not strand it; `claudeui-server` has no Electron, and such an install is
+  not usable there. A stale or missing cache, or a record that does not match its files, falls back
+  with the reason and asks for a background re-detection; the next resolution after it finishes
+  picks up the result.
+- A launch's PATH entries (pi.dev's `pi-node`) are prepended to the spawn site's own PATH when the
+  process starts, never captured from the PATH detection saw.
+- pi on Electron's own Node needs `ELECTRON_RUN_AS_NODE=1`, which no child of pi may inherit: an
+  Electron app pi's bash tool opens would start as plain Node. The launch also sets the marker
+  `CLAUDEUI_PI_ELECTRON_NODE=1`. ClaudeUI's bridge extension deletes `ELECTRON_RUN_AS_NODE` when
+  pi loads it, before any tool runs, and the subagent extension puts it back only in the
+  environment of the pi it spawns. A subagent pi loads no extensions, so its own children still
+  inherit the variable.
 
 ### 3. Detection classifies, it doesn't just list
 
@@ -105,6 +129,13 @@ Each candidate runs `--version` in an isolated environment and gets one of four 
 - **too old**: below the floor. Listed, not selectable.
 - **incompatible**: at or above the ceiling, or output that is not a version. Listed, not
   selectable. A pre-release of the ceiling counts as the ceiling.
+
+Detection runs in the background, never on a spawn (`src/core/harness/detect/scheduler.ts`):
+once for every harness a few seconds after the app or `claudeui-server` starts, and again for a
+harness when the resolver finds its cache missing or stale. One run is in flight at a time, and
+requests made during it are merged into one follow-up. Each run writes the cache and invalidates
+the resolver for the harnesses it detected, so the next spawn reads the new answer and nothing waits
+on a `--version` probe.
 
 Each harness declares its floor and ceiling in the release manifest (§5). The ceiling is exclusive
 and is the next major version, so a new major is never "untested but selectable": opencode 2.x

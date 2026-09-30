@@ -29,12 +29,14 @@ import {
 export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
 
 /**
- * Resolve the path to the Claude Code binary the app spawns. Never null: when
- * nothing was found it returns where the bundled binary would be, so the spawn
- * error names that path.
+ * Resolve the path to the Claude Code binary the app spawns: the resolved
+ * launch's command (ADR-082 §2), which for Claude Code is always the
+ * executable itself, a System install's included. Never null: when nothing was
+ * found it returns where the bundled binary would be, so the spawn error names
+ * that path.
  */
 export function locateBunClaude(): string {
-  return resolveHarness('claude').path ?? bundledHarnessPath('claude')
+  return resolveHarness('claude').launch?.command ?? bundledHarnessPath('claude')
 }
 
 /**

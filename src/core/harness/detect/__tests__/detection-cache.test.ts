@@ -59,7 +59,14 @@ describe('detection cache', () => {
     const pi: HarnessDetection = {
       id: 'pi',
       detectedAt: '2026-09-30T00:00:00.000Z',
-      installs: [install(), install({ node: { kind: 'electron', version: '24.18.1' } })]
+      installs: [
+        install(),
+        install({ node: { kind: 'electron', version: '24.18.1' } }),
+        install({
+          launch: { command: '/n/node', args: ['/cli.js'], pathPrepend: ['/n'] },
+          nodeFingerprint: { path: '/n/node', size: 3, mtimeMs: 9 }
+        })
+      ]
     }
     const claude: HarnessDetection = {
       id: 'claude',
@@ -107,6 +114,8 @@ describe('detection cache', () => {
               { ...good, verdict: 'great' },
               { ...good, launch: { command: 'x', args: [1] } },
               { ...good, fingerprint: { path: '/x' } },
+              { ...good, launch: { ...good.launch, pathPrepend: '/n' } },
+              { ...good, nodeFingerprint: { path: '/n/node' } },
               { ...good, id: 'claude' }
             ]
           },
@@ -142,5 +151,18 @@ describe('isFingerprintFresh', () => {
     expect(isFingerprintFresh({ fingerprint: again })).toBe(false)
     fs.rmSync(bin)
     expect(isFingerprintFresh({ fingerprint: again })).toBe(false)
+  })
+
+  it('holds for pi only while its node is unchanged too', () => {
+    const cli = path.join(tmp, 'cli.js')
+    const node = path.join(tmp, 'node')
+    fs.writeFileSync(cli, 'js')
+    fs.writeFileSync(node, 'n1')
+    const prints = { fingerprint: fingerprintOf(cli), nodeFingerprint: fingerprintOf(node) }
+    expect(isFingerprintFresh(prints)).toBe(true)
+    fs.writeFileSync(node, 'node two')
+    expect(isFingerprintFresh(prints)).toBe(false)
+    fs.rmSync(node)
+    expect(isFingerprintFresh(prints)).toBe(false)
   })
 })

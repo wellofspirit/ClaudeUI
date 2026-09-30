@@ -339,7 +339,9 @@ describe('pi', () => {
       expect(r.nodeFor).toEqual({
         script: cli,
         preferredNodes: [node],
-        env: { PI_MANAGED_INSTALL_ROOT: root, PATH: `${nodeBin}${path.delimiter}/usr/bin` }
+        env: { PI_MANAGED_INSTALL_ROOT: root },
+        // Prepended to the spawn site's PATH at spawn, never a snapshot of this one.
+        pathPrepend: [nodeBin]
       })
     }
   })

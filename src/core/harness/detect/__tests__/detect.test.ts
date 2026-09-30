@@ -14,6 +14,7 @@ import type { DetectedInstall, HarnessDetection } from '../../../../shared/harne
 import { harnessManifest } from '../../manifests'
 import { bestSystemInstall, detectHarness, detectHarnesses, type DetectDeps } from '../detect'
 import type { RunFn, RunResult } from '../run'
+import { fingerprintOf } from '../fs-util'
 import { cmdShim, writeNative, writePackage, writeText } from './layout'
 
 const WIN = process.platform === 'win32'
@@ -191,6 +192,8 @@ describe('pi', () => {
       verdict: 'tested'
     })
     expect(install.fingerprint.path).toBe(cli)
+    // The node is fingerprinted too, so the resolver notices it change.
+    expect(install.nodeFingerprint).toEqual(fingerprintOf(node))
   })
 
   it('reports Electron as the node when nothing suitable is installed', async () => {
@@ -204,10 +207,67 @@ describe('pi', () => {
     const deps = depsFor({}, { probeRun, electron, pathEntries: [shimDir], platform: 'win32' })
     const [install] = mine(await detectHarness('pi', deps))
     expect(install).toMatchObject({
-      launch: { command: electron.execPath, args: [cli], env: { ELECTRON_RUN_AS_NODE: '1' } },
+      launch: {
+        command: electron.execPath,
+        args: [cli],
+        env: { ELECTRON_RUN_AS_NODE: '1', CLAUDEUI_PI_ELECTRON_NODE: '1' }
+      },
       node: { kind: 'electron', version: '24.18.1' },
       verdict: 'tested'
     })
+    expect(install).not.toHaveProperty('nodeFingerprint')
+  })
+
+  function managedPi(): { root: string; cli: string; nodeBin: string; dataHome: string } {
+    const root = path.join(home, '.pi', 'agent', 'install')
+    writeText(
+      path.join(root, 'managed-install.json'),
+      JSON.stringify({ kind: 'pi-managed-install', schemaVersion: 1, layout: 'releases-v1' })
+    )
+    writeText(path.join(root, 'current-version'), '0.87.1\n')
+    const pkg = writePackage(
+      path.join(root, 'releases', '0.87.1', 'node_modules', ...PI.split('/')),
+      { name: PI, version: '0.87.1' },
+      { 'dist/bundle/cli.js': '#!/usr/bin/env node\n' }
+    )
+    const dataHome = path.join(tmp, 'data')
+    return {
+      root,
+      cli: path.join(pkg, 'dist', 'bundle', 'cli.js'),
+      nodeBin: path.join(dataHome, 'pi-node', 'current', 'bin'),
+      dataHome
+    }
+  }
+
+  it("puts pi.dev's pi-node first on PATH when it is the node chosen", async () => {
+    const { root, cli, nodeBin, dataHome } = managedPi()
+    const node = writeNative(path.join(nodeBin, `node${EXE}`))
+    const run = vi.fn<RunFn>(async () => ok('v24.1.0\n'))
+    const probeRun = vi.fn<RunFn>(async () => ok('0.87.1\n'))
+    const deps = depsFor({}, { run, probeRun })
+    deps.env = { ...deps.env, XDG_DATA_HOME: dataHome, PATH: '/detection/time/path' }
+    const [install] = mine(await detectHarness('pi', deps))
+    expect(install.launch).toEqual({
+      command: node,
+      args: [cli],
+      env: { PI_MANAGED_INSTALL_ROOT: root },
+      pathPrepend: [nodeBin]
+    })
+  })
+
+  it('leaves pi-node off PATH when it is too old and another node runs pi', async () => {
+    const { cli, nodeBin, dataHome } = managedPi()
+    const oldNode = writeNative(path.join(nodeBin, `node${EXE}`))
+    const pathDir = path.join(tmp, 'usr', 'bin')
+    const good = writeNative(path.join(pathDir, `node${EXE}`))
+    const run = vi.fn<RunFn>(async (command) => ok(command === oldNode ? 'v18.0.0\n' : 'v24.1.0\n'))
+    const probeRun = vi.fn<RunFn>(async () => ok('0.87.1\n'))
+    const deps = depsFor({}, { run, probeRun, pathEntries: [pathDir] })
+    deps.env = { ...deps.env, XDG_DATA_HOME: dataHome }
+    const [install] = mine(await detectHarness('pi', deps))
+    expect(install.launch?.command).toBe(good)
+    expect(install.launch?.args).toEqual([cli])
+    expect(install.launch).not.toHaveProperty('pathPrepend')
   })
 
   it('is unsupported without a suitable node or Electron', async () => {

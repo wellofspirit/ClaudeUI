@@ -50,7 +50,14 @@ export type HarnessResolvedSource = 'env' | 'bundled' | 'managed' | 'system'
 export interface HarnessLaunch {
   command: string
   args: readonly string[]
+  /** Never `PATH`: `withLaunch` drops it. Directories go in `pathPrepend`. */
   env?: Readonly<Record<string, string>>
+  /**
+   * Directories put in front of the spawn site's own `PATH` (pi.dev's
+   * `pi-node`). Prepended at spawn time, so a PATH captured at detection never
+   * replaces the site's.
+   */
+  pathPrepend?: readonly string[]
 }
 
 export interface ResolvedHarness {
@@ -148,6 +155,11 @@ export interface DetectedInstall {
   fingerprint: { path: string; size: number; mtimeMs: number }
   /** pi only: the node that runs `cli.js`. */
   node?: DetectedNode
+  /**
+   * pi with a node on disk: that node's fingerprint at detection. The resolver
+   * trusts the install only while both fingerprints hold.
+   */
+  nodeFingerprint?: { path: string; size: number; mtimeMs: number }
 }
 
 export interface HarnessDetection {

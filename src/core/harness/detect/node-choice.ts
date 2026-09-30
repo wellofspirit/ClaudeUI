@@ -9,7 +9,8 @@
  *   `engines.node`), probed with a 2 s timeout and cached per realpath;
  *   3. Electron itself with `ELECTRON_RUN_AS_NODE=1`, when running inside
  *      Electron and its embedded Node is new enough. This is reported as a
- *      distinct choice; whether to use it is the resolver's call (S2c).
+ *      distinct choice; the resolver uses it only inside Electron
+ *      (`../system-source.ts`).
  *
  * No suitable node and no Electron → `none`, with the reason.
  */

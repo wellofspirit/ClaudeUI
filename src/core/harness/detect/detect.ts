@@ -14,9 +14,12 @@
  *       with a version). A Codex without its `codex-code-mode-host`
  *       (`codexHostFor`) is `unsupported` even at a good version.
  *
- * Not wired into the resolver yet (arc 2, S2c). Never throws.
+ * The scheduler (`./scheduler.ts`) runs it in the background and caches the
+ * result (`./detection-cache.ts`), which the resolver reads for a System
+ * selection; nothing on a spawn path waits on it. Never throws.
  */
 import * as os from 'node:os'
+import * as path from 'node:path'
 import type {
   DetectedInstall,
   DetectedNode,
@@ -25,10 +28,9 @@ import type {
   HarnessLaunch
 } from '../../../shared/harness-types'
 import { HARNESS_IDS } from '../../../shared/harness-types'
-import { nodeScriptLaunch } from '../launch'
+import { ELECTRON_NODE_ENV, nodeScriptLaunch } from '../launch'
 import { harnessManifest } from '../manifests'
 import { codexHostFor } from '../resolve'
-import { compareVersions } from '../store'
 import { classifyVersion } from '../version-gate'
 import { harnessCandidates } from './candidates'
 import { fingerprintOf } from './fs-util'
@@ -37,6 +39,8 @@ import { searchPathEntries } from './path-entries'
 import { probeVersion } from './probe'
 import { resolveCandidate, type InstallResolution } from './resolve-install'
 import type { RunFn, SpawnFn } from './run'
+
+export { bestSystemInstall } from './detection-cache'
 
 export interface DetectDeps {
   env?: NodeJS.ProcessEnv
@@ -153,6 +157,7 @@ async function finish(r: InstallResolution, ctx: Context): Promise<DetectedInsta
 
   let launch: HarnessLaunch | null = r.launch
   let node: DetectedNode | undefined
+  let nodeFingerprint: DetectedInstall['nodeFingerprint']
   if (r.nodeFor) {
     const choice = await chooseNode(r.nodeFor.preferredNodes, {
       env: ctx.env,
@@ -166,14 +171,22 @@ async function finish(r: InstallResolution, ctx: Context): Promise<DetectedInsta
       return { ...base, launch: null, version: null, verdict: 'unsupported', reason: choice.reason }
     }
     if (choice.kind === 'electron') {
+      // No `pathPrepend`: the launcher's own node is not the one that runs.
       launch = nodeScriptLaunch(choice.path, r.nodeFor.script, {
         ...r.nodeFor.env,
-        ELECTRON_RUN_AS_NODE: '1'
+        ...ELECTRON_NODE_ENV
       })
       node = { kind: 'electron', version: choice.version }
     } else {
-      launch = nodeScriptLaunch(choice.path, r.nodeFor.script, r.nodeFor.env)
+      // The launcher's node directory goes first on PATH only when that node
+      // is the one chosen; a too-old `pi-node` must not shadow the real one.
+      const nodeDir = key(path.dirname(choice.path), ctx.platform)
+      const prepend = (r.nodeFor.pathPrepend ?? []).filter(
+        (dir) => key(dir, ctx.platform) === nodeDir
+      )
+      launch = nodeScriptLaunch(choice.path, r.nodeFor.script, r.nodeFor.env, prepend)
       node = { path: choice.path, version: choice.version }
+      nodeFingerprint = fingerprintOf(choice.path)
     }
   }
   if (!launch) {
@@ -185,7 +198,10 @@ async function finish(r: InstallResolution, ctx: Context): Promise<DetectedInsta
       reason: 'Nothing to run'
     }
   }
-  const withNode = node ? { node } : {}
+  const withNode = {
+    ...(node ? { node } : {}),
+    ...(nodeFingerprint ? { nodeFingerprint } : {})
+  }
 
   const probe = await probeVersion(r.id, launch, {
     env: ctx.env,
@@ -285,25 +301,4 @@ export async function detectHarnesses(
 ): Promise<HarnessDetection[]> {
   const ctx = await prepare(deps)
   return Promise.all(ids.map((id) => detectWith(id, ctx)))
-}
-
-/**
- * The install a System selection would run: the newest `tested` or `untested`
- * one (at the same version, `tested` wins), or null when none qualifies.
- */
-export function bestSystemInstall(detection: HarnessDetection): DetectedInstall | null {
-  let best: DetectedInstall | null = null
-  for (const install of detection.installs) {
-    if (install.verdict !== 'tested' && install.verdict !== 'untested') continue
-    if (!install.version || !install.launch) continue
-    if (!best) {
-      best = install
-      continue
-    }
-    const order = compareVersions(install.version, best.version as string)
-    if (order > 0 || (order === 0 && install.verdict === 'tested' && best.verdict !== 'tested')) {
-      best = install
-    }
-  }
-  return best
 }

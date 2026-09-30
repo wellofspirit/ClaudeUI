@@ -68,6 +68,7 @@ import { locateBunClaude } from '../sdk'
 // barrel with a factory that lists only `query`, and `capabilities` is read on
 // every status emission.
 import { harnessHasPatch } from '../sdk/harness'
+import { harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 
 export { getCliVersion } from '../sdk'
 
@@ -711,7 +712,15 @@ export class ClaudeSession extends BaseSession {
       const cliExists = fs.existsSync(cliPath)
       logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
       if (!cliExists) {
-        this.send('session:error', `CLI not found at: ${cliPath}`)
+        // The resolver's reason when it found nothing (a System or bundled
+        // copy that could not be used); otherwise the file vanished after it
+        // was resolved.
+        this.send(
+          'session:error',
+          resolveHarness('claude').path === null
+            ? harnessUnavailableMessage('claude')
+            : `CLI not found at: ${cliPath}`
+        )
         return
       }
       // Load MCP servers from config files and pass explicitly via mcpServers.

@@ -25,6 +25,7 @@ import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
+import { harnessUnavailableMessage } from '../harness/resolve'
 import { locatePiLaunch } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import {
@@ -711,14 +712,7 @@ export class PiSession extends BaseSession {
 
   private async doStart(): Promise<void> {
     const launch = locatePiLaunch()
-    if (!launch) {
-      throw new Error(
-        'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-          '(vendor/pi-cli/pi' +
-          (process.platform === 'win32' ? '.exe' : '') +
-          ' is missing).'
-      )
-    }
+    if (!launch) throw new Error(harnessUnavailableMessage('pi'))
 
     // Approval bridge (M2a): a fresh loopback host + version-keyed extension
     // file per spawn (docs/protocol-pi/README.md "Extensions"; pi-bridge-

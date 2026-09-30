@@ -4,11 +4,24 @@
  * install (pi from npm runs as `<node> <cli.js>`) and a native executable take
  * the same path through each spawn site.
  *
- * Pure: no filesystem, no process.
+ * No filesystem. `withLaunch` reads `process.env` only when a launch carries
+ * environment and the site passed none.
  */
 import type { HarnessLaunch } from '../../shared/harness-types'
 
 export type { HarnessLaunch }
+
+/**
+ * The environment that makes Electron run a script as plain Node. The marker
+ * tells ClaudeUI's pi extensions that pi runs this way, so the bridge can drop
+ * `ELECTRON_RUN_AS_NODE` before pi starts children (an Electron app pi's bash
+ * tool starts must not start as Node) and the subagent extension can put it
+ * back for the pi it spawns (`pi-bridge-source.ts`, `pi-subagent-source.ts`).
+ */
+export const ELECTRON_NODE_ENV: Readonly<Record<string, string>> = Object.freeze({
+  ELECTRON_RUN_AS_NODE: '1',
+  CLAUDEUI_PI_ELECTRON_NODE: '1'
+})
 
 /** A native executable: spawned as itself, with no leading arguments. */
 export function nativeLaunch(executable: string): HarnessLaunch {
@@ -16,17 +29,22 @@ export function nativeLaunch(executable: string): HarnessLaunch {
 }
 
 /**
- * A Node script run by `nodePath` (node, or Electron with
- * `ELECTRON_RUN_AS_NODE=1` in `env`). ClaudeUI spawns node itself, never a
- * `.cmd`/`sh` shim, so node is the harness process: signals and process-tree
- * kills reach it directly.
+ * A Node script run by `nodePath` (node, or Electron with `ELECTRON_NODE_ENV`
+ * in `env`). ClaudeUI spawns node itself, never a `.cmd`/`sh` shim, so node is
+ * the harness process: signals and process-tree kills reach it directly.
  */
 export function nodeScriptLaunch(
   nodePath: string,
   script: string,
-  env?: Readonly<Record<string, string>>
+  env?: Readonly<Record<string, string>>,
+  pathPrepend?: readonly string[]
 ): HarnessLaunch {
-  return env ? { command: nodePath, args: [script], env } : { command: nodePath, args: [script] }
+  return {
+    command: nodePath,
+    args: [script],
+    ...(env ? { env } : {}),
+    ...(pathPrepend && pathPrepend.length > 0 ? { pathPrepend } : {})
+  }
 }
 
 /** Accepts either a launch or a bare executable path (a native launch). */
@@ -38,24 +56,50 @@ export interface ComposedLaunch {
   command: string
   args: string[]
   /**
-   * `siteEnv` with `launch.env` laid over it. Undefined when neither was given,
-   * so a site that passes no env keeps spawn's default (inherit).
+   * The site's env with the launch's laid over it. Undefined when the launch
+   * adds nothing and the site gave none, so spawn keeps its default (inherit).
    */
   env?: NodeJS.ProcessEnv
+}
+
+function isPathKey(key: string): boolean {
+  return key.toUpperCase() === 'PATH'
 }
 
 /**
  * The one place a harness argv is composed: `launch.args` first, then the
  * site's own arguments. The launch's env entries win over the site's, because
- * they are what makes the command run at all (e.g. `ELECTRON_RUN_AS_NODE`).
+ * they are what makes the command run at all (e.g. `ELECTRON_RUN_AS_NODE`),
+ * except `PATH`, which always stays the site's: `launch.pathPrepend` goes in
+ * front of it. On Windows the key is kept as the site spells it (`Path`), and
+ * every spelling present is prepended to. A launch that adds env to a site
+ * that passed none starts from `process.env`, which is what the site would
+ * otherwise have inherited.
  */
 export function withLaunch(
   launch: HarnessLaunch,
   args: readonly string[],
-  siteEnv?: NodeJS.ProcessEnv
+  siteEnv?: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform
 ): ComposedLaunch {
   const composed: ComposedLaunch = { command: launch.command, args: [...launch.args, ...args] }
-  if (launch.env) composed.env = { ...siteEnv, ...launch.env }
-  else if (siteEnv) composed.env = siteEnv
+  const prepend = launch.pathPrepend ?? []
+  if (!launch.env && prepend.length === 0) {
+    if (siteEnv) composed.env = siteEnv
+    return composed
+  }
+  const env: NodeJS.ProcessEnv = { ...(siteEnv ?? process.env) }
+  for (const [key, value] of Object.entries(launch.env ?? {})) {
+    if (!isPathKey(key)) env[key] = value
+  }
+  if (prepend.length > 0) {
+    const delimiter = platform === 'win32' ? ';' : ':'
+    const keys = platform === 'win32' ? Object.keys(env).filter(isPathKey) : []
+    for (const key of keys.length > 0 ? keys : ['PATH']) {
+      const current = env[key]
+      env[key] = [...prepend, ...(current ? [current] : [])].join(delimiter)
+    }
+  }
+  composed.env = env
   return composed
 }

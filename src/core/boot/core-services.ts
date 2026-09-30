@@ -62,6 +62,7 @@ import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
 import { claudeHostTokenKeeper } from '../services/claude-host-token'
+import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -273,6 +274,15 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
   armCodexRulesSync()
   syncCodexRulesFile()
+
+  // System harness detection (ADR-082 §3), in the background: one run for
+  // every harness a few seconds after boot, on an unref'd timer, and from then
+  // on whenever the resolver finds a System selection's cache missing or stale.
+  // It spawns `--version` probes, so it never runs on boot's critical path or
+  // on a spawn; the resolver only ever reads its cache. Both hosts need it: the
+  // server resolves harnesses the same way. Test runs switch it off
+  // (`CLAUDEUI_DISABLE_HARNESS_DETECTION`, set in the vitest setup files).
+  startDetectionScheduler()
 
   // Learn what every Codex thread is a branch OF, once per launch, alongside the
   // Claude session scan the line above sits next to (`registerSessionIpc` seeds

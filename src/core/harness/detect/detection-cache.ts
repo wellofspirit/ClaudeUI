@@ -1,7 +1,8 @@
 /**
  * `~/.claude/ui/harness-detection.json`: the last detection per harness, so a
- * spawn never waits on a `--version` probe (ADR-082 §3; the resolver reads it
- * in arc 2, S2c).
+ * spawn never waits on a `--version` probe (ADR-082 §3). The resolver reads it
+ * for a System selection (`../system-source.ts`); the background scheduler
+ * (`./scheduler.ts`) writes it.
  *
  * Main-owned, like `harnesses.json` (`../selection-store.ts`): written
  * atomically with mode 0600, per harness (a save replaces the harnesses it is
@@ -9,8 +10,9 @@
  * malformed file, or a malformed entry, reads as nothing cached.
  *
  * A cached install is trusted only while its fingerprint holds
- * (`isFingerprintFresh`: one `stat` of the file that runs, matching size and
- * mtime), so an upgrade or removal behind the cache is noticed without a probe.
+ * (`isFingerprintFresh`: one `stat` of the file that runs, and of pi's node,
+ * matching size and mtime), so an upgrade or removal behind the cache is
+ * noticed without a probe.
  */
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -24,6 +26,7 @@ import type {
 } from '../../../shared/harness-types'
 import { isHarnessId } from '../../../shared/harness-types'
 import { readJsonFileForWrite, writeFileAtomicSync } from '../../services/write-json-atomic'
+import { compareVersions } from '../store'
 
 /** Resolved at call time so a redirected home (tests) is honoured. */
 export function harnessDetectionPath(): string {
@@ -62,17 +65,36 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((v) => typeof v === 'string')
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((a) => typeof a === 'string')
+}
+
 function sanitizeLaunch(value: unknown): DetectedInstall['launch'] | undefined {
   if (value === null) return null
   if (!isRecord(value) || typeof value.command !== 'string' || !value.command) return undefined
-  if (!Array.isArray(value.args) || !value.args.every((a) => typeof a === 'string'))
-    return undefined
+  if (!isStringArray(value.args)) return undefined
   if (value.env !== undefined && !isStringRecord(value.env)) return undefined
+  if (value.pathPrepend !== undefined && !isStringArray(value.pathPrepend)) return undefined
   return {
     command: value.command,
-    args: [...(value.args as string[])],
-    ...(value.env ? { env: { ...(value.env as Record<string, string>) } } : {})
+    args: [...value.args],
+    ...(value.env ? { env: { ...(value.env as Record<string, string>) } } : {}),
+    ...(value.pathPrepend ? { pathPrepend: [...value.pathPrepend] } : {})
   }
+}
+
+type Fingerprint = DetectedInstall['fingerprint']
+
+function sanitizeFingerprint(value: unknown): Fingerprint | null {
+  if (
+    !isRecord(value) ||
+    typeof value.path !== 'string' ||
+    typeof value.size !== 'number' ||
+    typeof value.mtimeMs !== 'number'
+  ) {
+    return null
+  }
+  return { path: value.path, size: value.size, mtimeMs: value.mtimeMs }
 }
 
 function sanitizeNode(value: unknown): DetectedInstall['node'] | null {
@@ -89,18 +111,15 @@ function sanitizeInstall(id: HarnessId, value: unknown): DetectedInstall | null 
   if (typeof verdict !== 'string' || !VERDICTS.has(verdict)) return null
   if (version !== null && typeof version !== 'string') return null
   if (reason !== undefined && typeof reason !== 'string') return null
-  if (
-    !isRecord(fingerprint) ||
-    typeof fingerprint.path !== 'string' ||
-    typeof fingerprint.size !== 'number' ||
-    typeof fingerprint.mtimeMs !== 'number'
-  ) {
-    return null
-  }
+  const print = sanitizeFingerprint(fingerprint)
+  if (!print) return null
   const launch = sanitizeLaunch(value.launch)
   if (launch === undefined) return null
   const node = value.node === undefined ? undefined : sanitizeNode(value.node)
   if (node === null) return null
+  const nodePrint =
+    value.nodeFingerprint === undefined ? undefined : sanitizeFingerprint(value.nodeFingerprint)
+  if (nodePrint === null) return null
   return {
     id,
     displayPath,
@@ -110,8 +129,9 @@ function sanitizeInstall(id: HarnessId, value: unknown): DetectedInstall | null 
     version,
     verdict: verdict as DetectedVerdict,
     ...(reason !== undefined ? { reason } : {}),
-    fingerprint: { path: fingerprint.path, size: fingerprint.size, mtimeMs: fingerprint.mtimeMs },
-    ...(node ? { node } : {})
+    fingerprint: print,
+    ...(node ? { node } : {}),
+    ...(nodePrint ? { nodeFingerprint: nodePrint } : {})
   }
 }
 
@@ -170,12 +190,43 @@ export function saveDetectionCache(
   })
 }
 
-/** Is the file that runs still the one detection saw (same size and mtime)? */
-export function isFingerprintFresh(install: Pick<DetectedInstall, 'fingerprint'>): boolean {
+function fresh(print: Fingerprint): boolean {
   try {
-    const st = fs.statSync(install.fingerprint.path)
-    return st.size === install.fingerprint.size && st.mtimeMs === install.fingerprint.mtimeMs
+    const st = fs.statSync(print.path)
+    return st.isFile() && st.size === print.size && st.mtimeMs === print.mtimeMs
   } catch {
     return false
   }
+}
+
+/**
+ * Is the file that runs still the one detection saw (same size and mtime)?
+ * For pi on a node from disk, that node too (`nodeFingerprint`).
+ */
+export function isFingerprintFresh(
+  install: Pick<DetectedInstall, 'fingerprint' | 'nodeFingerprint'>
+): boolean {
+  if (!fresh(install.fingerprint)) return false
+  return install.nodeFingerprint === undefined || fresh(install.nodeFingerprint)
+}
+
+/**
+ * The install a System selection would run: the newest `tested` or `untested`
+ * one (at the same version, `tested` wins), or null when none qualifies.
+ */
+export function bestSystemInstall(detection: HarnessDetection): DetectedInstall | null {
+  let best: DetectedInstall | null = null
+  for (const install of detection.installs) {
+    if (install.verdict !== 'tested' && install.verdict !== 'untested') continue
+    if (!install.version || !install.launch) continue
+    if (!best) {
+      best = install
+      continue
+    }
+    const order = compareVersions(install.version, best.version as string)
+    if (order > 0 || (order === 0 && install.verdict === 'tested' && best.verdict !== 'tested')) {
+      best = install
+    }
+  }
+  return best
 }

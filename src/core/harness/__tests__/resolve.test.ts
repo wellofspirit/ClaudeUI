@@ -357,13 +357,14 @@ describe('managed selection', () => {
 })
 
 describe('system selection', () => {
-  it('falls back to bundled until detection exists', () => {
+  // The System source in depth: resolve-system.test.ts.
+  it('falls back to bundled until detection has run', () => {
     const bin = writeHarnessPayload(vendorDir('opencode'), 'opencode')
     writeSelections({ opencode: { source: 'system' } })
     expect(resolveHarness('opencode')).toMatchObject({
       path: bin,
       source: 'bundled',
-      reason: 'System detection not available yet'
+      reason: 'System detection has not run yet'
     })
   })
 })

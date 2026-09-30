@@ -85,6 +85,7 @@ import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // reasoning as the opencode imports above — this is a one-way edge, not a
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
 import { locatePiLaunch } from '../pi/pi-locate'
+import { harnessUnavailableMessage } from '../harness/resolve'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
@@ -2079,12 +2080,7 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
 
 async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPrimitives> {
   const launch = locatePiLaunch()
-  if (!launch) {
-    throw new Error(
-      'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-        `(vendor/pi-cli/pi${process.platform === 'win32' ? '.exe' : ''} is missing).`
-    )
-  }
+  if (!launch) throw new Error(harnessUnavailableMessage('pi'))
   const bridgeHost = new PiBridgeHost(opts.gateHandler)
   let bridge: { url: string; token: string }
   try {

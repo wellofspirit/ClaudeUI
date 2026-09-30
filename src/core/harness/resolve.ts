@@ -12,7 +12,12 @@
  *      - `managed`: the selected version (`tested` = the manifest's, `latest` =
  *        the newest installed, or an exact one) from the store (`store.ts`);
  *        not installed falls back to bundled, with a `reason`.
- *      - `system`: detection is not built yet; falls back to bundled.
+ *      - `system`: the best install in the detection cache
+ *        (`./system-source.ts`), used only while its files are unchanged and
+ *        its cached launch matches them; otherwise bundled, with a `reason`,
+ *        and a stale or missing cache asks the background scheduler
+ *        (`./detect/scheduler.ts`) for a re-detection. Detection itself never
+ *        runs here.
  *      - `bundled`: the vendored copy.
  *   3. The vendored copy:
  *        dev / claudeui-server   <appPath>/vendor/<id>-cli/
@@ -23,12 +28,12 @@
  * Nothing is ever looked up on PATH here. A harness found nowhere resolves to
  * `path: null` with a reason; this module never throws.
  *
- * Each resolution carries its `launch` (`./launch.ts`): how to spawn it. Every
- * resolution today is a native executable, `{ command: path, args: [] }`;
- * System detection (arc 2, S2b) adds Node-script launches for pi.
+ * Each resolution carries its `launch` (`./launch.ts`): how to spawn it. A
+ * native executable is `{ command: path, args: [] }`; a System pi from npm or
+ * pi.dev is `<node> <cli.js>`, and its `path` is that script.
  *
  * Caching: one resolution per harness, reused until `invalidateHarness` (an
- * install or a selection change) or until that harness's env override changes
+ * install, a selection change or a finished detection) or until that harness's env override changes
  * (a string compare, no filesystem work). Callers on hot paths, such as
  * `ClaudeSession.capabilities`, therefore do no filesystem work after the
  * first call. The accepted staleness: a binary deleted or replaced behind a
@@ -41,12 +46,15 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { HarnessId, HarnessLaunch, ResolvedHarness } from '../../shared/harness-types'
 import { HARNESS_IDS, isHarnessId } from '../../shared/harness-types'
-import { getAppPath } from '../host'
+import { getAppPath, hostIsPackaged } from '../host'
 import { logger } from '../services/logger'
+import { loadDetectionCache } from './detect/detection-cache'
+import { currentElectron } from './detect/node-choice'
 import { nativeLaunch } from './launch'
 import { harnessManifest } from './manifests'
 import { harnessSelection } from './selection-store'
 import { installDir, installedVersions, readInstallRecord } from './store'
+import { resolveSystemInstall } from './system-source'
 
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
@@ -271,6 +279,37 @@ const listeners = new Set<(id: HarnessId) => void>()
 /** Override values already warned about, so each warns once per process. */
 const warnedOverrides = new Set<string>()
 
+function freezeLaunch(launch: HarnessLaunch): HarnessLaunch {
+  return Object.freeze({
+    ...launch,
+    args: Object.freeze([...launch.args]),
+    ...(launch.env ? { env: Object.freeze({ ...launch.env }) } : {}),
+    ...(launch.pathPrepend ? { pathPrepend: Object.freeze([...launch.pathPrepend]) } : {})
+  })
+}
+
+// ── Background re-detection hook ──────────────────────────────────────────────
+
+let detectionRequester: ((id: HarnessId) => void) | null = null
+
+/**
+ * Who to ask for a background re-detection when a System selection finds the
+ * cache missing or stale. The scheduler (`./detect/scheduler.ts`) registers
+ * itself when the app starts it; unset (unit tests, scripts), nothing is asked.
+ * A hook rather than an import: the scheduler imports this module.
+ */
+export function setDetectionRequester(fn: ((id: HarnessId) => void) | null): void {
+  detectionRequester = fn
+}
+
+function requestRedetection(id: HarnessId): void {
+  try {
+    detectionRequester?.(id)
+  } catch (err) {
+    logger.warn('harness', `re-detection request failed for ${id}`, err)
+  }
+}
+
 function envOverride(id: HarnessId, raw: string | undefined): string | null {
   if (!raw) return null
   const bin = path.resolve(raw)
@@ -354,7 +393,21 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
       }
     }
   } else if (selection.source === 'system') {
-    reason = 'System detection not available yet'
+    const system = resolveSystemInstall(id, loadDetectionCache()[id], {
+      electron: currentElectron()
+    })
+    if (system.kind === 'ok') {
+      return {
+        id,
+        path: system.path,
+        launch: system.launch,
+        dir: path.dirname(system.path),
+        source: 'system',
+        version: system.version
+      }
+    }
+    reason = system.reason
+    if (system.redetect) requestRedetection(id)
   }
 
   for (const root of bundledRoots(id)) {
@@ -389,11 +442,7 @@ function entry(id: HarnessId): CacheEntry {
   const hit = cache.get(id)
   if (hit && hit.env === env) return hit
   const raw = resolveUncached(id, env)
-  const resolved = Object.freeze({
-    ...raw,
-    launch:
-      raw.launch && Object.freeze({ ...raw.launch, args: Object.freeze([...raw.launch.args]) })
-  })
+  const resolved = Object.freeze({ ...raw, launch: raw.launch && freezeLaunch(raw.launch) })
   const codexHost = id === 'codex' && resolved.path !== null ? codexHostFor(resolved.path) : null
   const next: CacheEntry = { env, resolved, codexHost }
   cache.set(id, next)
@@ -428,6 +477,37 @@ export function harnessAvailable(id: HarnessId): boolean {
 /** The `codex-code-mode-host` the resolved `codex` will run, or null. */
 export function codexCodeModeHostPath(): string | null {
   return entry('codex').codexHost
+}
+
+const ENSURE_SCRIPTS: Record<HarnessId, string> = {
+  claude: 'ensure-cli',
+  opencode: 'ensure-opencode',
+  pi: 'ensure-pi',
+  codex: 'ensure-codex'
+}
+
+/**
+ * Why `id` cannot run, for an error the user reads: the resolver's reason
+ * (a System or ClaudeUI copy that could not be used, and that nothing was
+ * found). A development tree adds how to vendor the bundled copy; a packaged
+ * app never does.
+ */
+export function harnessUnavailableMessage(id: HarnessId): string {
+  const e = entry(id)
+  const label = LABELS[id]
+  if (id === 'codex' && !codexHostSupported()) {
+    return `Codex is not available for ${process.platform}-${process.arch} (supported: macOS arm64, Windows x64, Linux x64, Linux arm64)`
+  }
+  if (e.resolved.path === null) {
+    const reason = e.resolved.reason ?? `${label} was not found`
+    return hostIsPackaged()
+      ? reason
+      : `${reason} (development: run \`bun run ${ENSURE_SCRIPTS[id]}\` to vendor it)`
+  }
+  if (id === 'codex' && e.codexHost === null) {
+    return `Codex at ${e.resolved.path} has no codex-code-mode-host beside it`
+  }
+  return `${label} is not available`
 }
 
 /**

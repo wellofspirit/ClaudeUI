@@ -156,9 +156,9 @@ describe('codex spawn prep', () => {
     const { spawnPrepRegistry } = await import('../../providers/SpawnPrepRegistry')
     locateMocks.codexBinaryAvailable.mockReturnValue(false)
 
-    await expect(spawnPrepRegistry.require('codex')('gpt-5.6-codex', {})).rejects.toThrow(
-      'Codex is not installed'
-    )
+    // The resolver's reason (`harnessUnavailableMessage`), which depends on
+    // what this checkout vendors; only that it failed matters here.
+    await expect(spawnPrepRegistry.require('codex')('gpt-5.6-codex', {})).rejects.toThrow(/Codex/)
     expect(rulesSyncMocks.syncCodexRulesFile).not.toHaveBeenCalled()
   })
 })
