@@ -5,8 +5,11 @@
  * The rows used to be a hard-coded list of five model ids; they are now built
  * from the live Claude catalog in the store. What is guarded here:
  *
- *  - one effort row per `claudeEffortKey`, so an alias and the model it resolves
- *    to share a row, with the aliases listed and the levels taken from the row;
+ *  - one effort row per `claudeEffortKey`: a family alias keys by name, and
+ *    `default` shares the row of the alias that resolves where it does, with the
+ *    aliases listed and the levels taken from the row;
+ *  - a v3.5 value saved under the resolved model id still applies, and editing
+ *    the row moves it to the alias key;
  *  - a model with no effort control says so instead of offering a select;
  *  - "Start new sessions on" writes `claudeConfig.defaultModel` (blank DELETES
  *    it) and mirrors the store, and never offers `default` twice;
@@ -106,53 +109,72 @@ const effortRow = (key: string): HTMLElement =>
   screen.getAllByTestId(`${T}.effortRow`).find((el) => el.getAttribute('data-id') === key)!
 
 describe('Default models › Claude — the effort table', () => {
-  it('is one row per resolved model, in catalog order, with the aliases that reach it', () => {
+  it('is one row per alias, in catalog order, with the aliases that reach it', () => {
     renderSection()
     expect(screen.getAllByTestId(`${T}.effortRow`).map((r) => r.getAttribute('data-id'))).toEqual([
-      'claude-opus-5',
-      'claude-sonnet-5',
-      'claude-haiku-4-5'
+      'opus',
+      'sonnet',
+      'haiku'
     ])
     // The name is not "Default (recommended)": the first non-`default` row names it.
-    expect(effortRow('claude-opus-5').textContent).toContain('Opus 5 (1M)')
+    expect(effortRow('opus').textContent).toContain('Opus 5 (1M)')
+    // The model the alias runs on today is shown under the name.
+    expect(effortRow('opus').textContent).toContain('claude-opus-5')
     const aliases = (key: string): string =>
       screen.getAllByTestId(`${T}.aliases`).find((el) => el.getAttribute('data-id') === key)!
         .textContent ?? ''
-    expect(aliases('claude-opus-5')).toBe('defaultopus[1m]')
-    expect(aliases('claude-sonnet-5')).toBe('sonnetsonnet[1m]')
+    expect(aliases('opus')).toBe('defaultopus[1m]')
+    expect(aliases('sonnet')).toBe('sonnetsonnet[1m]')
   })
 
   it("offers each model's OWN levels, and no select at all without effort control", () => {
     renderSection()
-    const select = within(effortRow('claude-sonnet-5')).getByTestId(`${T}.effort`)
+    const select = within(effortRow('sonnet')).getByTestId(`${T}.effort`)
     expect(select).toBeTruthy()
-    expect(within(effortRow('claude-haiku-4-5')).queryByTestId(`${T}.effort`)).toBeNull()
-    expect(within(effortRow('claude-haiku-4-5')).getByTestId(`${T}.noEffort`).textContent).toBe(
+    expect(within(effortRow('haiku')).queryByTestId(`${T}.effort`)).toBeNull()
+    expect(within(effortRow('haiku')).getByTestId(`${T}.noEffort`).textContent).toBe(
       'No effort control'
     )
   })
 
   it('marks the row a new session starts on: `default` unset, the configured value when set', () => {
     renderSection()
-    expect(within(effortRow('claude-opus-5')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
+    expect(within(effortRow('opus')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
     cleanup()
     renderSection({ engineConfig: { claudeConfig: { defaultModel: 'sonnet[1m]' } } })
-    expect(within(effortRow('claude-sonnet-5')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
-    expect(within(effortRow('claude-opus-5')).queryByTestId(`${T}.startsHere`)).toBeNull()
+    expect(within(effortRow('sonnet')).queryByTestId(`${T}.startsHere`)).toBeTruthy()
+    expect(within(effortRow('opus')).queryByTestId(`${T}.startsHere`)).toBeNull()
   })
 
   it('reset DELETES the key rather than writing the default level', () => {
     const { update } = renderSection({
-      settings: { modelEffortDefaults: { 'claude-opus-5': 'max', 'claude-sonnet-5': 'low' } }
+      settings: { modelEffortDefaults: { opus: 'max', sonnet: 'low' } }
     })
-    expect(within(effortRow('claude-sonnet-5')).queryByTestId(`${T}.effortReset`)).toBeTruthy()
-    fireEvent.click(within(effortRow('claude-opus-5')).getByTestId(`${T}.effortReset`))
-    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { 'claude-sonnet-5': 'low' } })
+    expect(within(effortRow('sonnet')).queryByTestId(`${T}.effortReset`)).toBeTruthy()
+    fireEvent.click(within(effortRow('opus')).getByTestId(`${T}.effortReset`))
+    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { sonnet: 'low' } })
+  })
+
+  it('shows a v3.5 value saved under the resolved model, and moves it to the alias on edit', () => {
+    const { update } = renderSection({
+      settings: { modelEffortDefaults: { 'claude-opus-5': 'max', sonnet: 'low' } }
+    })
+    // Read through, not listed as a model the account no longer offers.
+    expect(screen.queryByTestId(`${T}.orphansToggle`)).toBeNull()
+    const select = within(effortRow('opus')).getByTestId(`${T}.effort`)
+    expect(select.getAttribute('data-value')).toBe('max')
+    fireEvent.click(within(select).getByTestId(`${T}.effort.trigger`))
+    fireEvent.click(
+      within(select)
+        .getAllByTestId(`${T}.effort.option`)
+        .find((el) => el.getAttribute('data-id') === 'low')!
+    )
+    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { opus: 'low', sonnet: 'low' } })
   })
 
   it('folds a saved effort for a model the account no longer offers, with Remove', () => {
     const { update } = renderSection({
-      settings: { modelEffortDefaults: { 'claude-opus-4-7': 'xhigh', 'claude-sonnet-5': 'low' } }
+      settings: { modelEffortDefaults: { 'claude-opus-4-7': 'xhigh', sonnet: 'low' } }
     })
     const toggle = screen.getByTestId(`${T}.orphansToggle`)
     expect(toggle.textContent).toContain(
@@ -162,7 +184,7 @@ describe('Default models › Claude — the effort table', () => {
     fireEvent.click(toggle)
     expect(screen.getByTestId(`${T}.orphan`).textContent).toContain('starts at Extra high')
     fireEvent.click(screen.getByTestId(`${T}.orphanRemove`))
-    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { 'claude-sonnet-5': 'low' } })
+    expect(update).toHaveBeenCalledWith({ modelEffortDefaults: { sonnet: 'low' } })
   })
 })
 

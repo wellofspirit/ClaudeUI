@@ -147,6 +147,16 @@ column listing the aliases that reach it, effort levels from the model's own `su
 A saved effort for a model the account no longer offers is listed, folded, with Remove. When the
 Claude page pins one model or renames aliases, a banner here says so.
 
+**Amended 2026-09-30 (owner ruling), effort keys follow the alias.** cli.js 2.1.285 moved `sonnet`
+from Sonnet 5 to Sonnet 5.5, and a setting keyed on the resolved model stayed behind with the old
+one. Starting effort is now keyed per family alias (`opus`, `sonnet`, `haiku`, `fable`, with `[1m]`
+folded in). `default` shares the row of the alias that resolves to the same model. A row that
+names a specific model id keys on that id. The table still shows the model each row runs on
+today. A value a v3.5 build saved under the resolved id is read for its alias row, is not listed
+as orphaned, and moves to the alias key when the row is edited (`claudeSavedEffort`,
+`claudeLegacyEffortKey` in `src/shared/model-capabilities.ts`). The unset default is cli.js's
+catalog `default_effort` for the resolved model (`medium` on Opus 5.5 and Sonnet 5.5).
+
 ### 9. The Anthropic endpoint moves to the Claude page
 
 `vendors/anthropic.json`'s endpoint and model mapping become **Claude › Endpoint**: first "Claude

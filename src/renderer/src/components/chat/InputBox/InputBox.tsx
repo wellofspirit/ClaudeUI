@@ -26,7 +26,7 @@ import {
   modelResolveEffort,
   modelDefaultEffort,
   modelDefaultThinkingMode,
-  claudeEffortKey,
+  claudeSavedEffort,
   type EffortLevel,
   type ThinkingMode,
   codexPublishesEffort
@@ -549,8 +549,13 @@ export function InputBox(): React.JSX.Element {
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
     // Keyed by `claudeEffortKey` — the rule the Default models table writes
-    // with — so an alias row reads the setting of the model it resolves to.
-    const userDefault = state.settings.modelEffortDefaults?.[claudeEffortKey(modelInfo)]
+    // with — so an alias reads the alias's setting and `default` the setting of
+    // the alias that resolves where it does.
+    const userDefault = claudeSavedEffort(
+      state.settings.modelEffortDefaults,
+      modelInfo,
+      state.availableModels.filter((m) => (m.engineId ?? 'claude') === engineId)
+    )
     // Not the codex branch (returned above): here the store's pick is one of
     // the Claude rungs, the only values the non-native picker can set.
     const desiredEffort: EffortLevel =

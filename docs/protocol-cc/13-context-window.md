@@ -21,9 +21,9 @@ not change. `IMPLICIT_1M_BASE_MODELS` needs no change because the
 `sonnet`/`sonnet[1m]` → `claude-sonnet-5-5`, and `pricing.ts` gained a `sonnet-5`
 entry at `tier_2_10` ($2/$10, cache write $2.50 / 1h $4, read $0.20). Sonnet 5
 itself had been `tier_2_10` since at least 2.1.280, but ClaudeUI billed it at the
-Sonnet 4.x $3/$15 until this entry. Not mirrored: the id-heuristic
-`defaultEffort()` still answers `high` for Sonnet 5.5 and Opus 5.5, where the
-catalog says `medium`.
+Sonnet 4.x $3/$15 until this entry. `defaultEffort()` now mirrors the catalog's
+`default_effort` (`medium` for Opus 5.5 and Sonnet 5.5, which Opus 5.5 already
+had at 2.1.280), and aliases are judged by the model they resolve to.
 
 Partial 2.1.280 drift check: the baked catalog's native-1M model prefixes
 remain covered by `IMPLICIT_1M_BASE_MODELS`; its `opus` default moved to
