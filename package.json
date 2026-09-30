@@ -7,9 +7,6 @@
   "license": "Apache-2.0",
   "homepage": "https://github.com/wellofspirit/ClaudeUI",
   "claudeCliVersion": "2.1.280",
-  "opencodeCliVersion": "1.18.32",
-  "piCliVersion": "0.87.1",
-  "codexCliVersion": "0.156.0",
   "ripgrepVersion": "14.1.1",
   "overrides": {
     "node-abi": "^4.33.0",

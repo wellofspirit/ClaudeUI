@@ -63,8 +63,17 @@ Each harness row has a segmented control and a version dropdown:
 - Switching to System keeps the last ClaudeUI choice, greyed out, so switching back restores it.
 - A System segment is disabled when nothing usable was found, and the row's description says why
   (not found, too old, wrong Codex version).
-- The setting lives in `engines/<harness>.json` as `harness: { source, version }`. A new or respawned
-  session reads it at spawn; a running session keeps its binary (ADR-079's respawn rule, extended).
+- The setting lives in `~/.claude/ui/harnesses.json` as `selections.<harness>: { source, version }`,
+  written only by the main process. It is not a field of `engines/<harness>.json`: that file is
+  replaced whole on every save, and renderer screens save their own snapshots of it, so an unrelated
+  settings save could revert a harness choice (arc 2, S1). Unknown keys survive a save. A new or
+  respawned session reads the choice at spawn; a running session keeps its binary (ADR-079's respawn
+  rule, extended).
+- One resolver (`src/core/harness/resolve.ts`) decides the executable for every harness: the
+  per-harness environment override, then the selection, then the bundled copy. A selection that
+  cannot be honoured (a version not installed, System before detection exists) falls back to the
+  bundled copy and says why. The answer is cached per harness and recomputed on an install or a
+  selection change, so status checks do no disk work.
 
 ### 3. Detection classifies, it doesn't just list
 
@@ -85,13 +94,16 @@ measures it; nobody has checked it yet.
 - Sources are official only: the npm registry for opencode (`opencode-<os>-<arch>`), GitHub releases
   for pi and Codex. The pipelines `ensure-*.mjs` use today are the reference.
 - Every download is checked before first use. A tested version is checked against a SHA-256 reviewed
-  into this repo, following the `scripts/codex-digests.json` model, extended to opencode and pi. Any
+  into this repo, in the harness's release manifest (§5). Any
   other version can only be checked against the publisher's own hash (npm's `integrity`, pi's
   `SHA256SUMS`). That catches corruption but not a compromised release, and the UI labels it
   untested. A mismatch deletes the file and stops. There is no override.
 - After the hash, `--version` must print the expected version.
-- Installs go to `~/.claude/ui/engines/<harness>/<version>/` by atomic directory rename. A version
-  directory is never overwritten, because a running `opencode serve` holds its binary open (Windows
+- Installs go to `~/.claude/ui/harnesses/<harness>/<version>/` by atomic directory rename. The
+  directory holds the payload in the same layout as the bundled `vendor/<harness>-cli` directory,
+  plus an `install.json` (harness, version, platform, arch, install time, and whether it was checked
+  against a reviewed digest or only the publisher's) written last; a directory without a valid one
+  is not an install. A version directory is never overwritten, because a running `opencode serve` holds its binary open (Windows
   returns EPERM). Versions no session uses are removed after seven days. The desktop app and
   `claudeui-server` share the directory.
 - The page shows the active download as a progress pill in its top-right corner; several downloads
@@ -99,10 +111,13 @@ measures it; nobody has checked it yet.
 
 ### 5. The release manifest
 
-Each ClaudeUI release carries one manifest per harness: the tested version, the floor, the download
-coordinates per platform, and the reviewed digests. It replaces the `package.json` pins
-(`opencodeCliVersion`, `piCliVersion`, `codexCliVersion`) as the source of truth for what "Tested"
-means. `claudeCliVersion` stays, because Claude Code stays bundled.
+Each ClaudeUI release carries one manifest per harness, `src/shared/harness-manifests/<harness>.json`:
+the tested version, the floor, the download coordinates per platform, and the reviewed digests. It
+replaces the `package.json` pins (`opencodeCliVersion`, `piCliVersion`, `codexCliVersion`) and the
+`scripts/*-digests.json` files as the source of truth for what "Tested" means; the `ensure-*`
+scripts and CI cache keys read it. `claudeCliVersion` stays, because Claude Code stays bundled; the
+Claude manifest's `tested` matches it. Until arc 2 measures real floors, each floor equals its tested
+version.
 
 ### 6. Updates
 
@@ -154,7 +169,9 @@ session on it is opened.
 
 1. The page is named **Installed**.
 2. A custom file path gets no UI: it stays an environment variable for development, generalised from
-   `CLAUDEUI_CLAUDE_CLI` to one variable per harness.
+   `CLAUDEUI_CLAUDE_CLI` to one variable per harness: `CLAUDEUI_CLAUDE_CLI`, `CLAUDEUI_OPENCODE_CLI`,
+   `CLAUDEUI_PI_CLI`, `CLAUDEUI_CODEX_CLI`. It must name a file, or it is ignored with one warning.
+   A Codex override still needs `codex-code-mode-host` beside it to count as installed.
 3. Unused versions are kept for seven days (the proposed default, not challenged).
 4. Upgrades from a bundled release prompt once (§8).
 

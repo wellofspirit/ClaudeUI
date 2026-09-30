@@ -5,14 +5,13 @@
  * Puts the upstream opencode release binary for this platform into
  * vendor/opencode-cli/, checked against digests reviewed into the repo
  * (ADR-081 §7). There is one source: `npm pack opencode-<os>-<arch>@<version>`,
- * where `<version>` is `package.json#opencodeCliVersion`.
+ * where `<version>` is the release manifest's `tested`
+ * (`src/shared/harness-manifests/opencode.json`, ADR-082 §5).
  *
- * `scripts/opencode-digests.json` pins, per npm package, the tarball's npm
+ * The manifest pins, per `<platform>-<arch>`, the npm package, the tarball's npm
  * `integrity` (sha512) and the SHA-256 of `package/bin/opencode[.exe]`.
  * Every step fails closed:
  *
- *  - the manifest's `version` must equal the pin (a bump without reviewed
- *    digests is a repository error, as in ensure-codex);
  *  - the tarball's integrity must match, then the extracted binary's SHA-256;
  *  - the staged binary must answer `--version` with the pinned version, run
  *    in an isolated home so the check never touches the developer's own
@@ -27,8 +26,8 @@
  * avoid relying on any external `tar` command (Git Bash's tar treats Windows
  * drive letters like "D:" as hostnames, causing extraction failures).
  *
- * Bumping: set `opencodeCliVersion`, `npm pack` each package in the manifest,
- * record `integrity` from `npm pack --json` and the SHA-256 of the binary
+ * Bumping: set the manifest's `tested` (and `floor`), `npm pack` each package in
+ * it, record `integrity` from `npm pack --json` and the SHA-256 of the binary
  * inside, then run `bun run update-opencode`.
  *
  * Usage:
@@ -60,9 +59,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'opencode-cli')
 
-export const manifest = JSON.parse(
-  readFileSync(join(ROOT, 'scripts', 'opencode-digests.json'), 'utf8')
-)
+const MANIFEST_PATH = 'src/shared/harness-manifests/opencode.json'
+export const manifest = JSON.parse(readFileSync(join(ROOT, MANIFEST_PATH), 'utf8'))
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 /** npm's `integrity` format (Subresource Integrity, sha512). */
 export const sriSha512 = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`
@@ -82,15 +80,14 @@ function info(...args) {
 // ── Platform detection ────────────────────────────────────────────────────────
 
 /**
- * The npm package carrying this host's binary. Windows on arm64 runs the x64
- * build under emulation; any other host has no reviewed package and fails
- * here rather than vendoring a binary that cannot run.
+ * The manifest platform whose package runs on this host. Windows on arm64 runs
+ * the x64 build under emulation; any other host has no reviewed package and
+ * fails here rather than vendoring a binary that cannot run.
  */
-export function detectPackageName(platform = process.platform, arch = process.arch) {
-  if (platform === 'win32') return 'opencode-windows-x64'
-  if (platform === 'darwin' && (arch === 'arm64' || arch === 'x64'))
-    return `opencode-darwin-${arch}`
-  if (platform === 'linux' && (arch === 'arm64' || arch === 'x64')) return `opencode-linux-${arch}`
+export function detectPlatformKey(platform = process.platform, arch = process.arch) {
+  if (platform === 'win32') return 'win32-x64'
+  if ((platform === 'darwin' || platform === 'linux') && (arch === 'arm64' || arch === 'x64'))
+    return `${platform}-${arch}`
   throw new Error(`no reviewed opencode release for ${platform}-${arch}`)
 }
 
@@ -100,44 +97,37 @@ export function binaryName(platform = process.platform) {
 
 // ── Pin + manifest ────────────────────────────────────────────────────────────
 
-export function getPinnedVersion() {
-  const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).opencodeCliVersion
+export function getPinnedVersion(m = manifest) {
+  const version = m.tested
   // The version is interpolated into the `npm pack` command line below.
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
-    throw new Error('package.json#opencodeCliVersion is missing or not a plain semver')
+    throw new Error(`${MANIFEST_PATH}#tested is missing or not a plain semver`)
   }
   return version
 }
 
-/** A pin without a reviewed manifest is a repository error on every host. */
-export function assertManifestPin(pinned = getPinnedVersion(), m = manifest) {
-  if (m.version !== pinned) {
-    throw new Error(
-      `scripts/opencode-digests.json is for opencode ${m.version}, but ` +
-        `package.json#opencodeCliVersion is ${pinned}; record the reviewed digests for the new pin`
-    )
-  }
-}
-
 /**
- * The reviewed record for one package, in exactly the shape `version.json`
- * carries (and `isCacheHit` compares).
+ * The reviewed record for one manifest platform, in exactly the shape
+ * `version.json` carries (and `isCacheHit` compares).
  */
-export function expectedRelease(pkgName, m = manifest) {
-  // Own-property lookup only: the key is a package name, not a trusted path.
-  const entry = Object.hasOwn(m.packages ?? {}, pkgName) ? m.packages[pkgName] : null
+export function expectedRelease(platformKey, m = manifest) {
+  // Own-property lookup only: the key is caller-supplied, not a trusted path.
+  const entry = Object.hasOwn(m.platforms ?? {}, platformKey) ? m.platforms[platformKey] : null
   if (
     !entry ||
+    // The package name is interpolated into the `npm pack` command line below.
+    typeof entry.package !== 'string' ||
+    !/^opencode-[a-z0-9]+-[a-z0-9]+$/.test(entry.package) ||
     typeof entry.integrity !== 'string' ||
     !/^sha512-[A-Za-z0-9+/]+=*$/.test(entry.integrity) ||
     typeof entry.binarySha256 !== 'string' ||
     !/^[0-9a-f]{64}$/.test(entry.binarySha256)
   ) {
-    throw new Error(`scripts/opencode-digests.json has no valid digest record for ${pkgName}`)
+    throw new Error(`${MANIFEST_PATH} has no valid digest record for ${platformKey}`)
   }
   return {
-    version: m.version,
-    package: pkgName,
+    version: getPinnedVersion(m),
+    package: entry.package,
     integrity: entry.integrity,
     binarySha256: entry.binarySha256
   }
@@ -262,7 +252,7 @@ export function extractBinary(tgz, expected, binName = binaryName()) {
   if (integrity !== expected.integrity) {
     throw new Error(
       `${expected.package}@${expected.version} tarball integrity ${integrity} does not match ` +
-        `the reviewed ${expected.integrity} (scripts/opencode-digests.json)`
+        `the reviewed ${expected.integrity} (${MANIFEST_PATH})`
     )
   }
   const tar = gunzipSync(tgz, { maxOutputLength: MAX_BINARY + 1024 * 1024 })
@@ -272,7 +262,7 @@ export function extractBinary(tgz, expected, binName = binaryName()) {
   if (digest !== expected.binarySha256) {
     throw new Error(
       `${expected.package}@${expected.version} binary SHA-256 ${digest} does not match ` +
-        `the reviewed ${expected.binarySha256} (scripts/opencode-digests.json)`
+        `the reviewed ${expected.binarySha256} (${MANIFEST_PATH})`
     )
   }
   return bin
@@ -401,8 +391,8 @@ async function install(expected) {
     // Use execSync with a constructed command string so Node runs it via the
     // shell on all platforms. This avoids the shell:true + array-args deprecation
     // warning (DEP0190), and lets npm be found as a .cmd script on Windows.
-    // The package name comes from detectPackageName() and the version is
-    // validated as plain semver in getPinnedVersion(); the stage path is quoted.
+    // The package name and the version are validated in expectedRelease() and
+    // getPinnedVersion(); the stage path is quoted.
     execSync(`npm pack ${fullPkg} --pack-destination "${stage}"`, { stdio: 'inherit', cwd: ROOT })
 
     const tgzFiles = readdirSync(stage).filter((f) => f.endsWith('.tgz'))
@@ -454,8 +444,7 @@ async function install(expected) {
 async function main() {
   const force = process.argv.includes('--force')
   const version = getPinnedVersion()
-  assertManifestPin(version)
-  const expected = expectedRelease(detectPackageName())
+  const expected = expectedRelease(detectPlatformKey())
 
   if (!force && isCacheHit(expected)) {
     console.log(

@@ -1,11 +1,12 @@
 /**
  * @vitest-environment node
  *
- * Minimal unit tests for pi-locate.ts's dev/production path resolution —
- * mirrors the OpencodeServerManager.locateBinary()/locateBunClaude() split
- * this module was written to match. The core `HostPaths` seam (getAppPath) and
- * `node:fs`'s `statSync` are stubbed so no real vendor/pi-cli directory is
- * required.
+ * Unit tests for pi's dev/production path resolution through pi-locate.ts,
+ * which delegates to the harness resolver (ADR-082). The core `HostPaths` seam
+ * (getAppPath) and `node:fs`'s `statSync` are stubbed so no real vendor/pi-cli
+ * directory is required; every other `node:fs` call is absent from the stub and
+ * throws, which the resolver reads as "no selection file, nothing installed".
+ * The resolver caches, so each test starts from `invalidateHarness()`.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -20,6 +21,7 @@ vi.mock('node:fs', () => ({
 
 import { locatePiBinary, piBinaryAvailable } from '../pi-locate'
 import { setHostPaths } from '../../host'
+import { invalidateHarness } from '../../harness/resolve'
 
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
 const fileStat = { isFile: () => true }
@@ -40,6 +42,7 @@ beforeEach(() => {
   mockGetAppPath.mockReset()
   mockStatSync.mockReset()
   setHostPaths({ getAppPath: () => mockGetAppPath() })
+  invalidateHarness()
 })
 
 describe('locatePiBinary — dev path resolution', () => {

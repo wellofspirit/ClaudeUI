@@ -1,5 +1,5 @@
 import * as fs from 'fs'
-import { codexBinaryAvailable } from '../codex/codex-locate'
+import { engineInstalled } from '../harness/resolve'
 import { discoverCodexModels } from '../codex/model-discovery'
 import { codexCommands, CODEX_CHANNELS } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
@@ -90,7 +90,7 @@ import {
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
+import { locatePiBinary } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
@@ -1190,20 +1190,15 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: (cwd: string) => loadSkillDetails(manager, cwd)
   })
-  // Cheap, deterministic engine availability check. Backs the renderer's
-  // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
-  // transient spawn/HTTP failure can no longer masquerade as "not installed".
-  // Claude is always installed (it's the bundled default engine).
+  // Cheap, deterministic engine availability check (the harness resolver's
+  // answer, shared with the remote handler). Backs the renderer's "is this
+  // engine installed?" gate WITHOUT spawning a server/process — a transient
+  // spawn/HTTP failure can no longer masquerade as "not installed".
   handleIpc({
     channel: 'engine:is-installed',
     capability: 'config',
     kind: 'query',
-    handler: (engineId: EngineId): boolean => {
-      if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
-      if (engineId === 'pi') return piBinaryAvailable()
-      if (engineId === 'codex') return codexBinaryAvailable()
-      return engineId === 'claude'
-    }
+    handler: (engineId: EngineId): boolean => engineInstalled(engineId)
   })
   // Absolute path to the vendored pi binary, for the Settings › pi subscription
   // hint's copyable "run this command in a terminal" block. Null if not found.

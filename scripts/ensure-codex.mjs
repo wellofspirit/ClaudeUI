@@ -16,12 +16,16 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-export const manifest = JSON.parse(readFileSync(join(root, 'scripts/codex-digests.json'), 'utf8'))
+// The release manifest (ADR-082 §5): `tested` is the exact pin, `platforms` the
+// reviewed per-host digests.
+export const manifest = JSON.parse(
+  readFileSync(join(root, 'src/shared/harness-manifests/codex.json'), 'utf8')
+)
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 // Install names and member names both become paths (the former under the install
 // directory, the latter inside the archive); keep every one of them a plain
 // filename on every host, even though the manifest is reviewed in-tree.
-for (const host of Object.values(manifest.hosts)) {
+for (const host of Object.values(manifest.platforms)) {
   for (const [name, entry] of Object.entries(host.binaries)) {
     for (const value of [name, entry.member]) {
       if (/[/\\]/.test(value) || value.startsWith('.'))
@@ -41,17 +45,11 @@ const HOST_LABELS = {
   'linux-arm64': 'Linux arm64'
 }
 const hostLabel = (key) => HOST_LABELS[key] ?? key
-const supportedHostLabels = () => Object.keys(manifest.hosts).map(hostLabel).join(', ')
+const supportedHostLabels = () => Object.keys(manifest.platforms).map(hostLabel).join(', ')
 
 /** The install name of the executable that answers `--version` on this host. */
 export const codexExecutableName = (platform = process.platform) =>
   platform === 'win32' ? 'codex.exe' : 'codex'
-
-/** A mismatched pin is a repository error and fails on every host, supported or not. */
-export function assertManifestPin() {
-  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).codexCliVersion
-  if (version !== manifest.version) throw new Error('Codex pin has no reviewed digest manifest')
-}
 
 /**
  * The reviewed record for one host, flattened into exactly the shape written to
@@ -61,10 +59,17 @@ export function assertManifestPin() {
 export function hostManifest(platform = process.platform, arch = process.arch) {
   // Own-property lookup only: the key is built from caller-supplied strings.
   const key = `${platform}-${arch}`
-  if (!Object.hasOwn(manifest.hosts, key)) return null
-  const host = manifest.hosts[key]
-  const { hosts: _hosts, ...shared } = manifest
-  return { ...shared, platform, arch, binaries: host.binaries }
+  if (!Object.hasOwn(manifest.platforms, key)) return null
+  const host = manifest.platforms[key]
+  return {
+    version: manifest.tested,
+    sourceCommit: manifest.sourceCommit,
+    license: manifest.license,
+    licenseSha256: manifest.licenseSha256,
+    platform,
+    arch,
+    binaries: host.binaries
+  }
 }
 
 /** Only a host the reviewed manifest covers may be provisioned. */
@@ -73,7 +78,6 @@ export function hostSupported(platform = process.platform, arch = process.arch) 
 }
 
 export function assertPin(platform = process.platform, arch = process.arch) {
-  assertManifestPin()
   if (!hostSupported(platform, arch)) {
     throw new Error(`Codex provisioning is verified only on: ${supportedHostLabels()}`)
   }
@@ -223,7 +227,7 @@ export function verifyVersion(binary, cwd, env) {
   } catch {
     throw new Error('Codex version check failed')
   }
-  if (output.trim() !== `codex-cli ${manifest.version}`) throw new Error('Codex version mismatch')
+  if (output.trim() !== `codex-cli ${manifest.tested}`) throw new Error('Codex version mismatch')
 }
 
 export class CodexRecoveryError extends Error {
@@ -279,7 +283,7 @@ export function parseArgs(argv) {
     } else throw new Error('Invalid Codex arguments')
   }
   const members = Math.max(
-    ...Object.values(manifest.hosts).map((host) => Object.keys(host.binaries).length)
+    ...Object.values(manifest.platforms).map((host) => Object.keys(host.binaries).length)
   )
   if (options.archives.length > members) throw new Error('Invalid Codex arguments')
   return options
@@ -287,11 +291,10 @@ export function parseArgs(argv) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
-  assertManifestPin()
   // `postinstall` runs on every platform, so a host without a reviewed manifest is a
-  // skip rather than a failed install: the engine gates itself off (codex-locate.ts)
-  // when the binary is absent. Digest/size mismatches, failed downloads and pins with
-  // no manifest stay hard failures.
+  // skip rather than a failed install: the engine gates itself off (the harness
+  // resolver) when the binary is absent. Digest/size mismatches and failed downloads
+  // stay hard failures.
   const host = hostManifest(...currentHost())
   if (!host) {
     console.log(

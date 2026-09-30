@@ -4,7 +4,7 @@ Current pin: **0.87.1** ([stable release](https://github.com/earendil-works/pi/r
 
 How ClaudeUI drives the [pi coding agent](https://github.com/earendil-works/pi) and what we
 verified against the real binary. Everything here was probed on Windows against the pinned
-standalone build (`package.json#piCliVersion`). The **authoritative protocol reference for the
+standalone build (`src/shared/harness-manifests/pi.json#tested`). The **authoritative protocol reference for the
 pinned version ships inside the vendored payload**: `vendor/pi-cli/docs/rpc.md` (plus
 `extensions.md`, `providers.md`, `session-format.md`, `settings.md`, `skills.md`) — consult those
 before theorizing, they are version-exact and offline.
@@ -13,7 +13,7 @@ For source-level questions (internals not covered by docs), **do not** keep a ve
 clone — shallow-checkout the pinned tag instead:
 
 ```bash
-git clone --depth 1 --branch v<piCliVersion> https://github.com/earendil-works/pi <scratch-dir>
+git clone --depth 1 --branch v<pi tested version> https://github.com/earendil-works/pi <scratch-dir>
 ```
 
 Key source locations: `packages/coding-agent/src/modes/rpc/` (RPC types + server),
@@ -30,7 +30,7 @@ Key source locations: `packages/coding-agent/src/modes/rpc/` (RPC types + server
   stdin one JSON object per line; optional `id` correlates the response.
 - **stdout purity: verified** — with `--mode rpc` (with and without `-e` extensions) every stdout
   line parsed as JSON across full prompt/tool/abort/resume cycles. stderr is free-form logging.
-- No version handshake exists. The pin is the contract: bumping `piCliVersion` requires re-running
+- No version handshake exists. The pin is the contract: bumping the pi manifest's `tested` requires re-running
   the gated integration suite.
 
 ## Commands ClaudeUI uses

@@ -139,7 +139,7 @@ jobs:
       - name: Read codex CLI version
         id: codex-version
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
 
       # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
       # hit from another pin is a guaranteed re-download rather than a saving.
@@ -387,7 +387,7 @@ jobs:
       - name: Read codex CLI version
         id: codex-version
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
 
       # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
       # hit from another pin is a guaranteed re-download rather than a saving.

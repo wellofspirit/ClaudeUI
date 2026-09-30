@@ -20,10 +20,7 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-// piBinaryAvailable is a plain function export (unlike opencodeServerManager,
-// a singleton object whose methods vi.spyOn can target directly) — mocked so
-// crossEngineDispatchAvailable('pi') is controllable per-test. Every pi-target
-// TEST in this file injects a fake spawnPiTarget dep (bypassing
+// Every pi-target TEST in this file injects a fake spawnPiTarget dep (bypassing
 // defaultSpawnPiTarget entirely), so mocking locatePiBinary here has no effect
 // on them either way — see buildPiTargetChildEnv's own dedicated test for the
 // real defaultSpawnPiTarget's recursion-guard property.
@@ -31,8 +28,6 @@ vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiBinary: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
-// Same reasoning as pi-locate above: a plain function export, mocked so
-// crossEngineDispatchAvailable's codex disjunct is controllable per-test.
 // Every codex-target TEST injects a fake spawnCodexTarget (bypassing
 // defaultSpawnCodexTarget, which is the only thing that would ever locate a
 // real binary), so this mock cannot affect them either way.
@@ -40,6 +35,15 @@ vi.mock('../../../core/codex/codex-locate', () => ({
   codexBinaryAvailable: vi.fn(() => false),
   locateCodexBinary: vi.fn(() => null),
   locateCodexCodeModeHost: vi.fn(() => null)
+}))
+// crossEngineDispatchAvailable asks the harness resolver (ADR-082); mocked so
+// each harness's availability is controllable per-test, off the real vendor/.
+const { harnessInstalled } = vi.hoisted(() => ({
+  harnessInstalled: { opencode: true, pi: true, codex: false } as Record<string, boolean>
+}))
+vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
+  harnessAvailable: vi.fn((id: string) => harnessInstalled[id] ?? true)
 }))
 // The bridged Claude MCP servers for a cwd (ADR-085 S4: an opencode target
 // records their keys as child-gated categories). Hermetic — never the dev's
@@ -59,13 +63,10 @@ import {
   crossEngineDispatchAvailable,
   buildPiTargetChildEnv
 } from '../../../core/services/cross-engine-dispatcher'
-import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../../../core/auth/PiAuthProvider'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
-import { piBinaryAvailable } from '../../../core/pi/pi-locate'
-import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
@@ -3512,47 +3513,40 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('opencode')).toBe(true)
   })
 
-  it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
-    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable')
-    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(false)
+  const setInstalled = (opencode: boolean, pi: boolean, codex: boolean): void => {
+    Object.assign(harnessInstalled, { opencode, pi, codex })
+  }
+  afterEach(() => setInstalled(true, true, false))
 
-    spy.mockReturnValue(true)
+  it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
+    setInstalled(true, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-    spy.mockReturnValue(false)
+    setInstalled(false, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
 
     // pi alone is enough — M4c made pi a Claude target but left this branch
     // asking only about opencode, so a pi-only machine hid the tool.
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+    setInstalled(false, true, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-    vi.mocked(piBinaryAvailable).mockReturnValue(false)
 
     // codex alone is enough (slice H).
-    vi.mocked(codexBinaryAvailable).mockReturnValue(true)
+    setInstalled(false, false, true)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-
-    spy.mockRestore()
-    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
-  it("'pi' mirrors piBinaryAvailable() (ADR-033 M4c)", () => {
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(true)
+  it("'pi' mirrors the pi harness being available (ADR-033 M4c)", () => {
+    setInstalled(true, true, false)
     expect(crossEngineDispatchAvailable('pi')).toBe(true)
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    setInstalled(true, false, false)
     expect(crossEngineDispatchAvailable('pi')).toBe(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
   it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
     // Neither of the two OPTIONAL target binaries being present may change the
     // answer: the claude target needs nothing installed, so a Codex session
     // always has somewhere to dispatch to.
-    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable').mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    setInstalled(false, false, false)
     expect(crossEngineDispatchAvailable('codex')).toBe(true)
-    spy.mockRestore()
   })
 })
 

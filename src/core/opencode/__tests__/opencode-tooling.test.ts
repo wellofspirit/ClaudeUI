@@ -10,10 +10,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  assertManifestPin,
   binaryName,
-  detectPackageName,
+  detectPlatformKey,
   expectedRelease,
+  getPinnedVersion,
   extractBinary,
   isCacheHit,
   isolatedEnv,
@@ -23,7 +23,6 @@ import {
   verifyVersion,
   walkTar
 } from '../../../../scripts/ensure-opencode.mjs'
-import pkg from '../../../../package.json'
 
 const directories: string[] = []
 function temp(): string {
@@ -56,26 +55,24 @@ function record(tgz: Buffer, bin: string) {
   }
 }
 
-const PACKAGES = [
-  'opencode-windows-x64',
-  'opencode-darwin-arm64',
-  'opencode-darwin-x64',
-  'opencode-linux-x64',
-  'opencode-linux-arm64'
-]
+const PACKAGES: Record<string, string> = {
+  'win32-x64': 'opencode-windows-x64',
+  'darwin-arm64': 'opencode-darwin-arm64',
+  'darwin-x64': 'opencode-darwin-x64',
+  'linux-x64': 'opencode-linux-x64',
+  'linux-arm64': 'opencode-linux-arm64'
+}
 
 describe('manifest', () => {
-  it('matches the package.json pin, and a pin without reviewed digests throws', () => {
-    const pinned = pkg.opencodeCliVersion
-    expect(manifest.version).toBe(pinned)
-    expect(() => assertManifestPin(pinned)).not.toThrow()
-    expect(() => assertManifestPin(pinned, { ...manifest, version: '0.0.1' })).toThrow(
-      /record the reviewed digests/
+  it('pins a plain semver, and refuses one that could not be interpolated safely', () => {
+    expect(getPinnedVersion()).toBe(manifest.tested)
+    expect(() => getPinnedVersion({ ...manifest, tested: '1.0.0; rm x' })).toThrow(
+      /not a plain semver/
     )
   })
 
-  it('carries a well-formed record for exactly the packages detectPackageName can return', () => {
-    expect(Object.keys(manifest.packages).sort()).toStrictEqual([...PACKAGES].sort())
+  it('carries a well-formed record for exactly the platforms detectPlatformKey can return', () => {
+    expect(Object.keys(manifest.platforms).sort()).toStrictEqual(Object.keys(PACKAGES).sort())
     const hosts: Array<[string, string]> = [
       ['win32', 'x64'],
       ['win32', 'arm64'],
@@ -85,10 +82,10 @@ describe('manifest', () => {
       ['linux', 'arm64']
     ]
     for (const [platform, arch] of hosts) {
-      const name = detectPackageName(platform, arch)
-      expect(expectedRelease(name)).toStrictEqual({
-        version: manifest.version,
-        package: name,
+      const key = detectPlatformKey(platform, arch)
+      expect(expectedRelease(key)).toStrictEqual({
+        version: manifest.tested,
+        package: PACKAGES[key],
         integrity: expect.stringMatching(/^sha512-[A-Za-z0-9+/]+=*$/),
         binarySha256: expect.stringMatching(/^[0-9a-f]{64}$/)
       })
@@ -96,18 +93,26 @@ describe('manifest', () => {
   })
 
   it('refuses a host with no reviewed package instead of picking a likely one', () => {
-    expect(() => detectPackageName('linux', 'ia32')).toThrow(/no reviewed opencode release/)
-    expect(() => detectPackageName('freebsd', 'x64')).toThrow(/no reviewed opencode release/)
+    expect(() => detectPlatformKey('linux', 'ia32')).toThrow(/no reviewed opencode release/)
+    expect(() => detectPlatformKey('freebsd', 'x64')).toThrow(/no reviewed opencode release/)
   })
 
   it('refuses a missing or malformed record, and never reads inherited keys', () => {
-    expect(() => expectedRelease('opencode-sunos-x64')).toThrow(/no valid digest record/)
+    expect(() => expectedRelease('sunos-x64')).toThrow(/no valid digest record/)
     expect(() => expectedRelease('toString')).toThrow(/no valid digest record/)
-    const bad = {
-      version: '1.0.0',
-      packages: { 'opencode-linux-x64': { integrity: 'sha256-abc', binarySha256: 'x' } }
-    }
-    expect(() => expectedRelease('opencode-linux-x64', bad)).toThrow(/no valid digest record/)
+    const good = manifest.platforms['linux-x64']
+    const bad = (entry: Record<string, unknown>) => ({
+      ...manifest,
+      platforms: { 'linux-x64': { ...good, ...entry } }
+    })
+    expect(expectedRelease('linux-x64', bad({}))).toMatchObject({ package: 'opencode-linux-x64' })
+    expect(() =>
+      expectedRelease('linux-x64', bad({ integrity: 'sha256-abc', binarySha256: 'x' }))
+    ).toThrow(/no valid digest record/)
+    // The package name reaches a shell command line.
+    expect(() => expectedRelease('linux-x64', bad({ package: 'opencode-x64 && calc' }))).toThrow(
+      /no valid digest record/
+    )
   })
 })
 

@@ -16,7 +16,6 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import {
   assertPin,
-  assertManifestPin,
   hostManifest,
   hostSupported,
   cacheValid,
@@ -101,7 +100,7 @@ it('rejects unsupported platforms instead of selecting a likely asset', () => {
   expect(() => assertPin('linux', 'x64')).not.toThrow()
   expect(() => assertPin('linux', 'arm64')).not.toThrow()
 })
-it('separates the host check (a skip) from the pin check (a failure everywhere)', () => {
+it('reports which hosts have a reviewed manifest', () => {
   expect(hostSupported('darwin', 'arm64')).toBe(true)
   expect(hostSupported('win32', 'x64')).toBe(true)
   expect(hostSupported('linux', 'x64')).toBe(true)
@@ -109,9 +108,6 @@ it('separates the host check (a skip) from the pin check (a failure everywhere)'
   expect(hostSupported('darwin', 'x64')).toBe(false)
   expect(hostSupported('linux', 'ia32')).toBe(false)
   expect(hostSupported('win32', 'arm64')).toBe(false)
-  // The pinned version is reviewed in-tree, so this passes on every host; only a
-  // package.json/manifest disagreement makes it throw.
-  expect(() => assertManifestPin()).not.toThrow()
 })
 it('treats malformed/missing metadata and modified payload as cache misses', () => {
   const dir = temp()
@@ -137,13 +133,13 @@ const MEMBER_PATTERNS: Record<string, RegExp> = {
   'linux-arm64': /^codex(-code-mode-host)?-aarch64-unknown-linux-musl$/
 }
 it('pins both release assets a code-mode-only catalog needs, for every reviewed host', () => {
-  expect(Object.keys(manifest.hosts)).toStrictEqual([
+  expect(Object.keys(manifest.platforms)).toStrictEqual([
     'darwin-arm64',
     'win32-x64',
     'linux-x64',
     'linux-arm64'
   ])
-  for (const key of Object.keys(manifest.hosts)) {
+  for (const key of Object.keys(manifest.platforms)) {
     const [platform, arch] = key.split('-')
     const host = hostManifest(platform, arch)
     // `hostManifest` flattens to exactly the version.json shape `cacheValid` compares.
@@ -157,7 +153,7 @@ it('pins both release assets a code-mode-only catalog needs, for every reviewed 
       'binaries'
     ])
     expect(host).toMatchObject({
-      version: manifest.version,
+      version: manifest.tested,
       sourceCommit: manifest.sourceCommit,
       license: manifest.license,
       licenseSha256: manifest.licenseSha256,
@@ -178,26 +174,31 @@ it('pins both release assets a code-mode-only catalog needs, for every reviewed 
 // The DRY seam: acquisition installs a host only if the manifest names it, and the
 // runtime gate offers the engine only if this set names it. They must agree.
 it('keeps the runtime host gate in parity with the acquisition manifest', () => {
-  expect([...CODEX_SUPPORTED_HOSTS].sort()).toStrictEqual(Object.keys(manifest.hosts).sort())
+  expect([...CODEX_SUPPORTED_HOSTS].sort()).toStrictEqual(Object.keys(manifest.platforms).sort())
+})
+// The exact-version gate (`CodexAppServerClient.checkVersion`) reads provenance;
+// acquisition installs the manifest's `tested`. A bump must move both.
+it('pins the same Codex version the generated protocol was built from', () => {
+  expect(manifest.tested).toBe(provenance.version)
 })
 // Provenance must name every host's `codex`, not just the one that ran the
 // generator: the output is a pure function of the source commit, so `--check` has
 // to reach the same verdict on every reviewed host.
 it('records the codex payload digest of every reviewed host in provenance', () => {
   expect(codexBinaryDigests()).toStrictEqual({
-    'darwin-arm64': manifest.hosts['darwin-arm64'].binaries.codex.binarySha256,
-    'win32-x64': manifest.hosts['win32-x64'].binaries['codex.exe'].binarySha256,
-    'linux-x64': manifest.hosts['linux-x64'].binaries.codex.binarySha256,
-    'linux-arm64': manifest.hosts['linux-arm64'].binaries.codex.binarySha256
+    'darwin-arm64': manifest.platforms['darwin-arm64'].binaries.codex.binarySha256,
+    'win32-x64': manifest.platforms['win32-x64'].binaries['codex.exe'].binarySha256,
+    'linux-x64': manifest.platforms['linux-x64'].binaries.codex.binarySha256,
+    'linux-arm64': manifest.platforms['linux-arm64'].binaries.codex.binarySha256
   })
   // The checked-in file is what a regeneration would emit for this pin.
   expect(provenance.codexBinaries).toStrictEqual(codexBinaryDigests())
   // The code-mode host is never an input, and a host missing its `codex` is an error.
   expect(Object.values(codexBinaryDigests())).not.toContain(
-    manifest.hosts['darwin-arm64'].binaries['codex-code-mode-host'].binarySha256
+    manifest.platforms['darwin-arm64'].binaries['codex-code-mode-host'].binarySha256
   )
   expect(() =>
-    codexBinaryDigests({ hosts: { 'linux-x64': { binaries: { 'codex.exe': {} } } } })
+    codexBinaryDigests({ platforms: { 'linux-x64': { binaries: { 'codex.exe': {} } } } })
   ).toThrow()
 })
 it('parses repeated archives and a single license, rejecting anything else', () => {

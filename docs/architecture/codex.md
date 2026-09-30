@@ -93,7 +93,7 @@ on macOS or Linux. Process tree: with one session mid-`ping` and again with two 
 two `codex-code-mode-host.exe`, two `PING.EXE`, two Codex `pwsh.exe`), nothing survived five seconds after the app closed;
 the taskkill-first helper reaps the whole tree. Linux evidence is in the Linux section below.
 
-`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64, Windows x64 (installing `codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets); since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
+`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `src/shared/harness-manifests/codex.json#platforms` — macOS arm64, Windows x64 (installing `codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets); since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
 method maps over this generic transport without claiming runtime payload-schema validation.
@@ -103,7 +103,7 @@ engine behavior.
 
 ### Linux
 
-Linux x64 and arm64 are reviewed hosts: `scripts/codex-digests.json#hosts` pins the
+Linux x64 and arm64 are reviewed hosts: `src/shared/harness-manifests/codex.json#platforms` pins the
 statically linked `-unknown-linux-musl` `codex` and `codex-code-mode-host`,
 `CODEX_SUPPORTED_HOSTS` offers the engine, and CI caches `vendor/codex-cli` per
 `runner.arch`. The Linux ARTIFACT is the headless server tarball, not a desktop

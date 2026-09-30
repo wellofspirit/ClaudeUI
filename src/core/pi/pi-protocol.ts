@@ -3,7 +3,7 @@
  * the shapes ClaudeUI actually consumes. No runtime code: every export below
  * is a type/interface declared directly in this file, not a re-export.
  *
- * Sources (all version-pinned to package.json#piCliVersion, verified against
+ * Sources (all version-pinned to src/shared/harness-manifests/pi.json#tested, verified against
  * the real binary — see docs/protocol-pi/README.md for the M0 probe notes):
  *   - vendor/pi-cli/docs/rpc.md            — commands, responses, events
  *   - vendor/pi-cli/docs/session-format.md — on-disk session entry shapes

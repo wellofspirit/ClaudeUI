@@ -1,9 +1,11 @@
 {
-  "version": "0.156.0",
+  "id": "codex",
+  "tested": "0.156.0",
+  "floor": "0.156.0",
   "sourceCommit": "fe74a774532af67b5a4a3dec03ce9469e17f89af",
   "license": "https://raw.githubusercontent.com/openai/codex/fe74a774532af67b5a4a3dec03ce9469e17f89af/LICENSE",
   "licenseSha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
-  "hosts": {
+  "platforms": {
     "darwin-arm64": {
       "binaries": {
         "codex": {

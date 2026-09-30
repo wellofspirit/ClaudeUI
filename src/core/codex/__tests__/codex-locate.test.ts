@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from 'vitest'
-import { lstatSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import { setHostPaths } from '../../host'
+import { invalidateHarness } from '../../harness/resolve'
 import {
   codexBinaryAvailable,
   codexHostSupported,
@@ -10,37 +11,41 @@ import {
   locateCodexBinary,
   locateCodexCodeModeHost
 } from '../codex-locate'
-vi.mock('node:fs', () => ({ lstatSync: vi.fn() }))
+// Only `statSync` is stubbed; the resolver's other `node:fs` calls throw, which
+// it reads as "no selection file, nothing installed". It caches, so every test
+// (and every mid-test filesystem change) starts from `invalidateHarness()`.
+vi.mock('node:fs', () => ({ statSync: vi.fn() }))
 afterEach(() => {
   setHostPaths(null)
   vi.resetAllMocks()
+  invalidateHarness()
 })
 it('uses host dev path and never PATH', () => {
   setHostPaths({ getAppPath: () => '/project' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+  vi.mocked(statSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof statSync>)
   expect(locateCodexBinary()).toBe(
     join('/project/vendor/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
   )
 })
-it('tries packaged resource and unpacked paths, rejecting directories/symlinks', () => {
+it('tries packaged resource and unpacked paths, rejecting non-files', () => {
   setHostPaths({ getAppPath: () => '/Resources/app.asar' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
+  vi.mocked(statSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof statSync>)
   expect(locateCodexBinary()).toBeNull()
-  expect(lstatSync).toHaveBeenCalledTimes(2)
+  expect(statSync).toHaveBeenCalledTimes(2)
   // extraResources puts the binaries beside app.asar, so that is the first probe.
-  expect(vi.mocked(lstatSync).mock.calls[0][0]).toBe(
+  expect(vi.mocked(statSync).mock.calls[0][0]).toBe(
     join('/Resources/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
   )
-  expect(vi.mocked(lstatSync).mock.calls[1][0]).toContain('app.asar.unpacked')
+  expect(vi.mocked(statSync).mock.calls[1][0]).toContain('app.asar.unpacked')
 })
 it('returns unavailable rather than falling back to PATH', () => {
-  vi.mocked(lstatSync).mockImplementation(() => {
+  vi.mocked(statSync).mockImplementation(() => {
     throw new Error('missing')
   })
   expect(locateCodexBinary()).toBeNull()
-  expect(lstatSync).toHaveBeenCalledTimes(1)
+  expect(statSync).toHaveBeenCalledTimes(1)
 })
-// The set is guarded against `scripts/codex-digests.json#hosts` in codex-tooling.test.ts;
+// The set is guarded against `src/shared/harness-manifests/codex.json#platforms` in codex-tooling.test.ts;
 // here only the predicate's own shape matters.
 it('gates on the hosts with a reviewed acquisition manifest', () => {
   expect(codexHostSupported('darwin', 'arm64')).toBe(true)
@@ -56,21 +61,23 @@ it.skipIf(!codexHostSupported())(
   'reports unavailable when the code-mode host is missing beside the binary',
   () => {
     setHostPaths({ getAppPath: () => '/project' })
-    vi.mocked(lstatSync).mockImplementation((path) => {
+    vi.mocked(statSync).mockImplementation((path) => {
       if (String(path).endsWith(HOST_NAME)) throw new Error('missing')
-      return { isFile: () => true } as ReturnType<typeof lstatSync>
+      return { isFile: () => true } as ReturnType<typeof statSync>
     })
     expect(locateCodexBinary()).not.toBeNull()
     expect(codexBinaryAvailable()).toBe(false)
-    vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+    vi.mocked(statSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof statSync>)
+    invalidateHarness()
     expect(codexBinaryAvailable()).toBe(true)
   }
 )
 it.skipIf(!codexHostSupported())('locates the host only beside the located binary', () => {
   setHostPaths({ getAppPath: () => '/project' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+  vi.mocked(statSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof statSync>)
   expect(locateCodexCodeModeHost()).toBe(join('/project/vendor/codex-cli', HOST_NAME))
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
+  vi.mocked(statSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof statSync>)
+  invalidateHarness()
   expect(locateCodexCodeModeHost()).toBeNull()
   expect(codexBinaryAvailable()).toBe(false)
 })

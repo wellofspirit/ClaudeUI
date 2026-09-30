@@ -3,16 +3,21 @@
  * ensure-pi.mjs
  *
  * Downloads the platform-specific pi coding agent standalone build from the
- * earendil-works/pi GitHub release pinned by package.json#piCliVersion,
- * verifies it against the release SHA256SUMS, and extracts it into
- * vendor/pi-cli/. Cache-hit skip on matching version.
+ * earendil-works/pi GitHub release pinned by the release manifest's `tested`
+ * (`src/shared/harness-manifests/pi.json`, ADR-082 §5), verifies it against the
+ * release's SHA256SUMS AND the manifest's reviewed `archiveSha256` for this
+ * platform (a mismatch with either fails; there is no override), and extracts
+ * it into vendor/pi-cli/. Cache-hit skip on matching version.
+ *
+ * Bumping: set the manifest's `tested` (and `floor`) and every platform's
+ * `archiveSha256` from the new release's SHA256SUMS, then `bun run update-pi`.
  *
  * Uses Node.js-native zlib plus minimal zip/tar parsers to avoid relying on
  * external `unzip`/`tar` commands (Git Bash's tar treats Windows drive
  * letters like "D:" as hostnames; unzip is not guaranteed to exist).
  *
  * Usage:
- *   node scripts/ensure-pi.mjs              # pinned version from package.json#piCliVersion
+ *   node scripts/ensure-pi.mjs              # the manifest's tested version
  *   node scripts/ensure-pi.mjs --force      # re-download even if vendor/ has it
  *   node scripts/ensure-pi.mjs --quiet      # suppress info logs (cache-hit/installed lines stay)
  */
@@ -35,6 +40,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'pi-cli')
 const RELEASE_BASE = 'https://github.com/earendil-works/pi/releases/download'
+const MANIFEST_PATH = 'src/shared/harness-manifests/pi.json'
+const manifest = JSON.parse(readFileSync(join(ROOT, MANIFEST_PATH), 'utf8'))
 
 const QUIET = process.argv.includes('--quiet')
 
@@ -45,20 +52,38 @@ function info(...args) {
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
-function detectAssetName() {
-  const plat = process.platform
-  const arch = process.arch
-  if (plat === 'win32') return arch === 'arm64' ? 'pi-windows-arm64.zip' : 'pi-windows-x64.zip'
-  if (plat === 'darwin') return arch === 'arm64' ? 'pi-darwin-arm64.tar.gz' : 'pi-darwin-x64.tar.gz'
-  return arch === 'arm64' ? 'pi-linux-arm64.tar.gz' : 'pi-linux-x64.tar.gz'
+/** The manifest platform for this host: any non-arm64 arch takes the x64 build. */
+function detectPlatformKey() {
+  const plat =
+    process.platform === 'win32' || process.platform === 'darwin' ? process.platform : 'linux'
+  return `${plat}-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
 }
 
-// ── Version from package.json ─────────────────────────────────────────────────
+/** The release asset and its reviewed archive digest for this host. */
+function expectedAsset() {
+  const key = detectPlatformKey()
+  // Own-property lookup only: the key is built from host strings.
+  const entry = Object.hasOwn(manifest.platforms ?? {}, key) ? manifest.platforms[key] : null
+  if (
+    !entry ||
+    typeof entry.asset !== 'string' ||
+    !/^pi-[a-z0-9]+-[a-z0-9]+\.(?:zip|tar\.gz)$/.test(entry.asset) ||
+    typeof entry.archiveSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(entry.archiveSha256)
+  ) {
+    throw new Error(`${MANIFEST_PATH} has no valid record for ${key}`)
+  }
+  return entry
+}
+
+// ── Version from the release manifest ─────────────────────────────────────────
 
 function getPinnedVersion() {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
-  const version = pkg.piCliVersion
-  if (!version) throw new Error('package.json#piCliVersion is not set')
+  const version = manifest.tested
+  // The version becomes part of the download URL.
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`${MANIFEST_PATH}#tested is missing or not a plain semver`)
+  }
   return version
 }
 
@@ -261,7 +286,7 @@ function extractTarGz(gzBuf, destDir) {
 
 // ── Main download + extract logic ─────────────────────────────────────────────
 
-async function download(assetName, version) {
+async function download({ asset: assetName, archiveSha256 }, version) {
   const tag = `v${version}`
   info(`[ensure-pi] Downloading ${assetName} for pi ${tag} ...`)
 
@@ -274,6 +299,14 @@ async function download(assetName, version) {
     `[ensure-pi] Downloaded ${(assetBytes.length / 1024 / 1024).toFixed(1)} MB, verifying SHA256 ...`
   )
   verifySha256(assetBytes, sumsBytes.toString('utf8'), assetName)
+  // The publisher's SHA256SUMS catches corruption; the digest reviewed into this
+  // repo also catches a release replaced after review.
+  const actual = createHash('sha256').update(assetBytes).digest('hex')
+  if (actual !== archiveSha256) {
+    throw new Error(
+      `SHA256 of ${assetName} is ${actual}, not the reviewed ${archiveSha256} (${MANIFEST_PATH})`
+    )
+  }
 
   // Extract into a temp dir, then swap into place for atomicity.
   const tmpDir = VENDOR_DIR + '.tmp'
@@ -294,6 +327,7 @@ async function download(assetName, version) {
       {
         version,
         asset: assetName,
+        archiveSha256,
         platform: process.platform,
         arch: process.arch,
         downloadedAt: new Date().toISOString()
@@ -312,14 +346,14 @@ async function download(assetName, version) {
 
 const force = process.argv.includes('--force')
 const version = getPinnedVersion()
-const assetName = detectAssetName()
+const asset = expectedAsset()
 
 if (!force && isCacheHit(version)) {
   console.log(`[ensure-pi] pi ${version} already vendored (cache hit). Use --force to re-download.`)
   process.exit(0)
 }
 
-download(assetName, version).catch((err) => {
+download(asset, version).catch((err) => {
   console.error(`\n[ensure-pi] FAIL: ${err.message}`)
   if (err.stack) console.error(err.stack)
   process.exit(1)

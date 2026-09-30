@@ -141,7 +141,7 @@ relaxes the review bar.
 - **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the
   verified notes) + the version-exact docs shipped in the vendored payload
   (`vendor/pi-cli/docs/*.md`), then probe the real `vendor/pi-cli/pi` binary. For source-level
-  questions, **shallow-clone the pinned tag** (`git clone --depth 1 --branch v<piCliVersion>
+  questions, **shallow-clone the pinned tag** (`git clone --depth 1 --branch v<pi tested version>
 https://github.com/earendil-works/pi`) — there is deliberately **no** vendored pi source clone
   (unlike `vendor/opencode-src/`). The bridge extension (`pi-bridge-source.ts`) must stay
   **import-free** and **fail-closed**; product code writes only `os.tmpdir()` (the bridge file) +

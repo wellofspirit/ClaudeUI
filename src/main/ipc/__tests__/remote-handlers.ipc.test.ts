@@ -94,6 +94,13 @@ vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiBinary: vi.fn(() => null)
 }))
 
+// `engine:is-installed` is the harness resolver's answer (ADR-082), tested in
+// src/core/harness; here only the routing matters, off the real vendor/ tree.
+vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
+  engineInstalled: vi.fn(() => false)
+}))
+
 vi.mock('../../../core/auth/vault/CredentialSync', () => ({
   credentialSync: { getStatus: vi.fn(() => ({ connected: false })) }
 }))
@@ -300,6 +307,7 @@ import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1030,16 +1038,22 @@ describe('registerRemoteHandlers', () => {
       expect(res).toEqual({ enabled: false, accounts: [] })
     })
 
-    it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
+    it('engine:is-installed asks the harness resolver for every engine, claude included', async () => {
+      vi.mocked(engineInstalled).mockImplementation((id) => id === 'pi')
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)
-      ).toBe(true)
+      ).toBe(false)
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)
       ).toBe(false)
       expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(
-        false
+        true
       )
+      expect(vi.mocked(engineInstalled).mock.calls.map(([id]) => id)).toStrictEqual([
+        'claude',
+        'opencode',
+        'pi'
+      ])
     })
 
     it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {

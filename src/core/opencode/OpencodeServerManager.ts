@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { join, dirname, resolve as resolvePath } from 'node:path'
+import { join, resolve as resolvePath } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { getAppPath } from '../host'
@@ -14,6 +14,7 @@ import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { subagentPermissionConfigFor } from './subagent-permissions'
 import type { SubagentPermissionConfig } from './subagent-permissions'
 import { killProcessTree } from '../services/process-tree'
+import { harnessAvailable, resolveHarness } from '../harness/resolve'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
 
@@ -58,41 +59,18 @@ export type SpawnServerFn = (
 
 const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
 
-const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
-
+/**
+ * The opencode executable for the next spawn, from the harness resolver
+ * (`../harness/resolve.ts`, ADR-082): `CLAUDEUI_OPENCODE_CLI`, then the
+ * harnesses.json selection, then the vendored copy. Throws the resolver's
+ * user-readable reason when there is none, which the acquire path surfaces.
+ */
 function locateBinary(): string {
-  // Mirror the claude-cli locator (src/main/sdk/locate.ts): resolve via
-  // app.getAppPath() — `__dirname` points at the bundled out/main in built/dev
-  // Electron, so it can't find <projectRoot>/vendor. Outside Electron (smoke
-  // scripts, integration tests) no host paths are wired → `getAppPath()` falls
-  // back to cwd, which is the project root in those contexts.
-  const appPath = getAppPath()
-
-  if (!appPath.includes('app.asar')) {
-    // Dev/built — appPath is the project root.
-    const vendor = join(appPath, 'vendor', 'opencode-cli', BINARY_NAME)
-    if (existsSync(vendor)) return vendor
-
-    // Dev fallback: the pre-existing probe binary.
-    const probe = join(appPath, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
-    if (existsSync(probe)) return probe
-
-    throw new Error(
-      `opencode binary not found at ${vendor}. Run \`bun run ensure-opencode\` to vendor it.`
-    )
+  const resolved = resolveHarness('opencode')
+  if (resolved.path === null) {
+    throw new Error(resolved.reason ?? 'opencode was not found in this ClaudeUI build')
   }
-
-  // Production — extraResources copies vendor/opencode-cli → <Resources>/opencode-cli.
-  // dirname(appPath) is the Resources directory (where app.asar lives).
-  const candidates = [
-    join(dirname(appPath), 'opencode-cli', BINARY_NAME),
-    join(appPath.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'opencode-cli', BINARY_NAME)
-  ]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  // Return the primary candidate; the caller surfaces the missing-file error.
-  return candidates[0]
+  return resolved.path
 }
 
 /**
@@ -117,7 +95,8 @@ const DISPATCH_MCP_TIMEOUT_MS = 20 * 60 * 1000
 
 /**
  * Locate the caller-identity plugin (ADR-033 M2) that must be loaded by the
- * EXTERNAL opencode process — mirrors locateBinary()'s dev/packaged split.
+ * EXTERNAL opencode process — the same dev/packaged split as the vendored
+ * harnesses (`../harness/resolve.ts`).
  * The file lives under `resources/opencode/` (not `vendor/opencode-cli/`
  * like the binary): it ships via electron-builder's `asarUnpack: resources/**`
  * rather than `extraResources`, so the packaged path swaps `app.asar` →
@@ -210,7 +189,7 @@ export function buildOpencodeConfigContent(
     // The binary we spawn is the pinned, digest-checked upstream release that
     // ensure-opencode vendors (ADR-081 §7): a ClaudeUI-spawned server must not
     // replace it under a running session. Version is owned by
-    // `package.json#opencodeCliVersion` + `scripts/opencode-digests.json`, never
+    // `src/shared/harness-manifests/opencode.json` (ADR-082), never
     // by the running process. Ephemeral like the block above — a user config
     // file is never rewritten to say this (ADR-031).
     autoupdate: false,
@@ -348,7 +327,10 @@ export interface OpencodeServerManagerOptions {
    * spawn. Tests inject a fake to exercise the lifecycle without a binary.
    */
   spawnFn?: SpawnServerFn
-  /** Override the binary locator. Defaults to the real on-disk resolver. */
+  /**
+   * Override the binary locator. Defaults to the harness resolver; called on
+   * every spawn, so an install or a selection change reaches the next server.
+   */
   locateBinaryFn?: () => string
   /**
    * Override the MCP host starter. Defaults to startMcpHttpHost + the real
@@ -379,7 +361,6 @@ export class OpencodeServerManager {
    * insert and self-terminates instead.
    */
   private disposed = false
-  private binary: string | null = null
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
   private readonly startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
@@ -414,25 +395,23 @@ export class OpencodeServerManager {
     this.dispatchAgentFn = fn
   }
 
+  /**
+   * Resolved per spawn, never memoised here: the resolver caches, and its
+   * `invalidateHarness` is how a new install reaches the next server.
+   */
   private getBinary(): string {
-    if (!this.binary) this.binary = this.locateBinaryFn()
-    return this.binary
+    return this.locateBinaryFn()
   }
 
   /**
-   * Cheap, deterministic "is opencode installed?" check: does the binary resolve
-   * to a file that exists on disk? This NEVER spawns a server, so a transient
-   * spawn/HTTP failure can't masquerade as "not installed" (the regression that
-   * gated the Settings opencode sections off a flaky probe). Auth/model state is
-   * a separate, allowed-to-fail concern — not "installed".
+   * Cheap, deterministic "is opencode installed?" check (the harness resolver's
+   * answer). This NEVER spawns a server, so a transient spawn/HTTP failure can't
+   * masquerade as "not installed" (the regression that gated the Settings
+   * opencode sections off a flaky probe). Auth/model state is a separate,
+   * allowed-to-fail concern — not "installed".
    */
   isBinaryAvailable(): boolean {
-    try {
-      return existsSync(this.getBinary())
-    } catch {
-      // locateBinary throws in dev when the binary isn't vendored.
-      return false
-    }
+    return harnessAvailable('opencode')
   }
 
   /**

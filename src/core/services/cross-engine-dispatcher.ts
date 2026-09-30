@@ -84,7 +84,7 @@ import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
-import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
+import { locatePiBinary } from '../pi/pi-locate'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
@@ -109,7 +109,7 @@ import {
   type CodexThreadConnection,
   type CodexThreadOwner
 } from '../codex/CodexHost'
-import { codexBinaryAvailable } from '../codex/codex-locate'
+import { harnessAvailable } from '../harness/resolve'
 import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
@@ -208,11 +208,11 @@ import type {
  * dispatch_agent from Claude sessions that could in fact use it.)
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
+  // `harnessAvailable` is cached by the resolver: this runs on every
+  // ClaudeSession status emit and must do no filesystem work.
   if (engineId === 'claude')
-    return (
-      opencodeServerManager.isBinaryAvailable() || piBinaryAvailable() || codexBinaryAvailable()
-    )
-  if (engineId === 'pi') return piBinaryAvailable()
+    return harnessAvailable('opencode') || harnessAvailable('pi') || harnessAvailable('codex')
+  if (engineId === 'pi') return harnessAvailable('pi')
   return true
 }
 

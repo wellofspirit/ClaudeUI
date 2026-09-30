@@ -1,5 +1,5 @@
 import * as fs from 'fs'
-import { codexBinaryAvailable } from '../codex/codex-locate'
+import { engineInstalled } from '../harness/resolve'
 import { discoverCodexModels } from '../codex/model-discovery'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
@@ -34,7 +34,7 @@ import {
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
+import { locatePiBinary } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
@@ -1282,12 +1282,7 @@ export function registerRemoteHandlers(
     channel: 'engine:is-installed',
     capability: 'config',
     kind: 'query',
-    handler: async (engineId: EngineId): Promise<boolean> => {
-      if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
-      if (engineId === 'pi') return piBinaryAvailable()
-      if (engineId === 'codex') return codexBinaryAvailable()
-      return engineId === 'claude'
-    }
+    handler: async (engineId: EngineId): Promise<boolean> => engineInstalled(engineId)
   })
   handleRemote({
     channel: 'pi:binary-path',

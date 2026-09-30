@@ -35,7 +35,7 @@ bun run build:win     # Windows
 bun run build:mac     # macOS
 ```
 
-The pinned engine versions live in `package.json` (`claudeCliVersion`, `opencodeCliVersion`); `bun run update-cli` / `update-opencode` re-vendor after a bump.
+The pinned engine versions live in `src/shared/harness-manifests/<engine>.json` (`tested`, with the reviewed download digests); Claude Code's is also `package.json#claudeCliVersion`. `bun run update-cli` / `update-opencode` / `update-pi` / `update-codex` re-vendor after a bump.
 
 ## Contributing
 

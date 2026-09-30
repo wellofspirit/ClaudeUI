@@ -45,7 +45,7 @@ import {
  * unwrapped and the isolation is the fixture's own: a replacement environment (no
  * real `USERPROFILE`/`HOME`, a temp `CODEX_HOME`), a config whose only provider is
  * the localhost fixture, and every network feature off. Windows x64 and Linux
- * x64/arm64 are pinned and shipped (`scripts/codex-digests.json`), so this suite
+ * x64/arm64 are pinned and shipped (`src/shared/harness-manifests/codex.json`), so this suite
  * runs on every reviewed host (`integration-host.ts`).
  */
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
