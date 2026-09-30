@@ -43,7 +43,10 @@ export function ApprovalCardView({
   let summary: React.JSX.Element
   if (toolName === 'Bash' && input?.command) {
     summary = (
-      <pre className="text-[12px] font-mono text-text-primary/80 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-32 overflow-y-auto">
+      <pre
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-primary/80 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-32 overflow-y-auto"
+      >
         $ {String(input.command)}
       </pre>
     )
@@ -52,11 +55,19 @@ export function ApprovalCardView({
     input?.file_path
   ) {
     summary = (
-      <span className="text-[12px] font-mono text-text-secondary">{String(input.file_path)}</span>
+      <span
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-secondary"
+      >
+        {String(input.file_path)}
+      </span>
     )
   } else {
     summary = (
-      <pre className="text-[12px] font-mono text-text-primary/70 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-24 overflow-y-auto">
+      <pre
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-primary/70 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-24 overflow-y-auto"
+      >
         {JSON.stringify(input, null, 2)}
       </pre>
     )
@@ -69,6 +80,7 @@ export function ApprovalCardView({
 
   return (
     <div
+      data-testid="ApprovalCardView"
       className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden animate-fade-in`}
     >
       <div className="px-3 py-2">
@@ -101,13 +113,24 @@ export function ApprovalCardView({
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
           )}
-          <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>
+          <span
+            data-testid="ApprovalCardView.label"
+            className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}
+          >
             {labelText}
           </span>
-          <span className="font-mono text-[12px] text-accent">{toolName}</span>
+          <span
+            data-testid="ApprovalCardView.toolName"
+            className="font-mono text-[12px] text-accent"
+          >
+            {toolName}
+          </span>
         </div>
         {approval.decisionReason && (
-          <p className="text-[11px] text-text-muted/70 mb-2 leading-relaxed">
+          <p
+            data-testid="ApprovalCardView.reason"
+            className="text-[11px] text-text-muted/70 mb-2 leading-relaxed"
+          >
             {approval.decisionReason}
           </p>
         )}
@@ -120,6 +143,7 @@ export function ApprovalCardView({
         {isSandboxEscape && (
           <label className="flex items-center gap-2 mt-2 cursor-default select-none">
             <input
+              data-testid="ApprovalCardView.alwaysAllowOutsideSandbox"
               type="checkbox"
               checked={alwaysAllow}
               onChange={(e) => onAlwaysAllowChange(e.target.checked)}
@@ -141,6 +165,7 @@ export function ApprovalCardView({
       </div>
       <div className={`flex border-t ${dividerColor}`}>
         <button
+          data-testid="ApprovalCardView.deny"
           onClick={() => onRespond('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
@@ -150,6 +175,7 @@ export function ApprovalCardView({
           <>
             <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
             <button
+              data-testid="ApprovalCardView.allowForSession"
               onClick={() => onRespond('allowForSession')}
               className="flex-1 h-8 text-[12px] font-medium text-accent/80 hover:bg-accent/5 transition-colors cursor-pointer"
             >
@@ -159,6 +185,7 @@ export function ApprovalCardView({
         )}
         <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
+          data-testid="ApprovalCardView.allow"
           onClick={() => onRespond('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
         >

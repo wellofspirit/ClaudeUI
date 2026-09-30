@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-22
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex phase 1 from shared-rule parity; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex now runs under the shared modes and Claude permission rules through ClaudeUI's own evaluator rather than a compiled native ruleset. Existing Claude/opencode/pi rules are unchanged.
+**Amended by:** [ADR-084](adr-084_read-only-judge-bypass.md) §3 — the `autoEdit` (`acceptEdits`) ruleset gains `edit` asks for agent-control paths, and auto mode asks for every edit and clears ordinary ones host-side. [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) — Bash deny/ask rules also compile to broad over-approximating globs, MCP rules compile to opencode keys, a host-side pre-check (deny/ask, plan refusal, session allows, the parent's rules for task children) runs on every ask, ClaudeUI never replies `always`, plan mode withholds `edit`/`bash`/`task` allows, and task children carry per-agent asks.
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md) (neutral autonomy modes), [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend)
 
 ## Context
@@ -65,22 +66,30 @@ from a previous mode, since you can't un-patch them.)
 
 | Autonomy (Claude mode string) | agent   | session permission ruleset (last-match-wins)          |
 | ----------------------------- | ------- | ----------------------------------------------------- |
-| `plan`                        | `plan`  | `[{*:allow}, {edit:* deny}, {task:general deny}]`     |
+| `plan`                        | `plan`  | `[{*:allow}, {edit:* ask}, {task:general ask}]` ¹     |
 | `ask` (`default`)             | `build` | `[{*:allow}, {edit:ask}, {bash:ask}, {webfetch:ask}]` |
 | `autoEdit` (`acceptEdits`)    | `build` | `[{*:allow}, {bash:ask}, {webfetch:ask}]`             |
 | `full` (`auto`)               | `build` | `[{*:allow}]`                                         |
 
 - **`ask` is Claude-faithful**: reads/glob/grep/list/`task` auto-allowed; edit/bash/webfetch prompt.
   `task` is _not_ gated → no spurious subagent-spawn prompt, no hang.
-- **`plan`** mirrors opencode's own `plan` agent: deny edits, and deny **only the `general`
-  subagent** (`{task:general deny}`) — read-only subagents (e.g. `explore`) stay allowed via the
-  baseline, so **plan-mode `task`/research still works**. `deny` refuses without a permission
-  round-trip (no approval to surface → no hang). Pairing with the `plan` agent adds its planning
+- **`plan`** mirrors opencode's own `plan` agent: no edits, and **only the `general` subagent** is
+  refused (`{task:general …}`) — read-only subagents (e.g. `explore`) stay allowed via the
+  baseline, so **plan-mode `task`/research still works**. ¹ Since ADR-085 §3 both rules are `ask`
+  server-side and ClaudeUI refuses them host-side with the plan-mode reason (own and task-child
+  asks, and plan dispatch targets): a PATCHed `deny` is cumulative and copied into every task child,
+  so it outlived plan mode. The refusal needs no human (no approval to surface → no hang). Pairing with the `plan` agent adds its planning
   system prompt + plan_exit flow. We deliberately do **not** reproduce opencode's plan-file edit
   allow-list (`.opencode/plans/*.md`) — minor; plan output is surfaced via `plan_exit`.
-- **Subagents are unaffected by the parent ruleset**: a `task` runs in a child session under its own
-  (permissive) subagent agent, so it does not raise child-session `permission.asked` events (which the
-  event mapper would otherwise drop — see Consequences).
+- **`autoEdit` asks for agent-control paths** ([ADR-084](adr-084_read-only-judge-bypass.md) §3):
+  after `{bash:ask}, {webfetch:ask}` it appends `edit` asks for `.git/`, `.claude/`, `CLAUDE.md`,
+  hook directories, `.vscode/` and the other paths listed there, so those edits prompt instead of
+  auto-accepting. Auto mode does not use these rules: its ruleset asks for every edit and ClaudeUI
+  clears the ordinary ones host-side.
+- **Subagents follow the parent ruleset** (ADR-085 S4): a `task` child's agent is given string `ask`s
+  for bash/edit/webfetch/MCP at spawn, so it raises child-session `permission.asked` events, which
+  ClaudeUI answers with the parent session's current ruleset (allow → `once`, deny → reject, ask →
+  the card or the auto-mode judge).
 
 **Defense-in-depth (renderer).** `TaskCard` now consumes a pending `approval` and renders the shared
 `<ApprovalButtons>` (mirroring the lifted plan/question cards). If a `task` ever legitimately asks
@@ -116,18 +125,22 @@ so the same allow/ask/deny rules + additional directories govern both engines.
   strings + `additionalDirectories`, edited by the existing PermissionsDialog). No new store/UI.
 - **`permission-compiler.ts`** (pure, unit-tested) parses `Tool(specifier)` → opencode
   `{permission, pattern, action}`: tool→category map (Read/Glob/Grep→read/glob/grep, Edit/Write/
-  NotebookEdit→edit, Bash→bash, WebFetch→webfetch, Task→task; MCP/unmapped skipped); specifier
+  NotebookEdit→edit, Bash→bash, WebFetch→webfetch, Task→task; MCP rules → opencode MCP keys since
+  ADR-085 §3; other unmapped tools skipped); specifier
   translation (Bash `cmd:*` prefix → glob `cmd*`; WebFetch `domain:x`→`x*`; file globs pass through);
   `additionalDirectories`→`external_directory` ALLOW rules (`join(dir,'*')`, platform-correct).
 - **Composition**: `applyPermissionMode` patches `[...base(mode), ...compiledUserRules]` — user rules
-  appended AFTER the base (override it), emitted **allow → ask → deny** so deny wins last-match-wins,
+  appended AFTER the base (override it; in plan mode without the user's `edit`/`bash`/`task` allow rules,
+  which ClaudeUI applies host-side to plan-safe commands only — ADR-085 ruling 7), emitted **allow → ask → deny** so deny wins last-match-wins,
   replicating Claude's deny>ask>allow precedence. All three scopes (user/project/local) merged.
 
-**Pending follow-on (decided, not yet built):**
-
-- **"Always-allow" write-back** — generate Claude-format `suggestions` for opencode approvals and, on
-  accept, `replyPermission('always')` (live session) **and** persist via `saveClaudePermissions`
-  (shared store → reapplies next spawn, visible in PermissionsDialog). Full parity with Claude.
+**"Always-allow" write-back (built; amended by ADR-085 §3):** opencode approvals carry Claude-format
+`suggestions`; on accept with a ticked suggestion the rule is persisted via `saveClaudePermissions`
+(shared store → reapplies next spawn, visible in the permissions UI) and the live ask is answered
+`once`. ClaudeUI **never** replies `always`: opencode's `approved` list is per instance (per
+directory), not per session, so an `always` leaked across chats and modes and outranked deny/ask
+rules. A per-session host-side allow set (keyed by the ask's own `always` patterns) replaces it —
+[ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §3.
 
 ## Auto mode — LLM permission gatekeeper
 

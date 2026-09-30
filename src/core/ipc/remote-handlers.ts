@@ -144,7 +144,8 @@ import {
   deleteSession,
   deleteProject,
   codexDeletePlanFor,
-  clearConversation
+  clearConversation,
+  judgeModelSupport
 } from './handlers-core'
 
 /**
@@ -650,6 +651,16 @@ export function registerRemoteHandlers(
         ...(await discoverCodexModels().catch(() => []))
       ]
     }
+  })
+
+  // Which judge-picker values ClaudeUI can call for the auto-mode judge
+  // (ADR-081 §3). Mirrors session.ipc.ts's registration: read-only and
+  // token-free (presence checks only), so the class of get-engine-models.
+  handleRemote({
+    channel: 'automode:judge-model-support',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
   // Full opencode provider catalog / per-provider models for the allowlist UI.

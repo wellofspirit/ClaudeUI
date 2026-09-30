@@ -151,33 +151,43 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   const map = engineToolMap(engineId)
   const spawns: ToolUseBlock[] = []
   const results = new Map<string, boolean>() // toolUseId → isError
+  // Calls refused before they ran (a `permission_denial` block): the opencode
+  // host's plan-mode refusal of a subagent spawn (ADR-085 §3), or a Claude
+  // `Task` a deny rule refused. A refused spawn never became an agent, so it is
+  // no row. (A refused shell needs no filter: it never registers a lifecycle
+  // record, which is the only way a shell is listed.)
+  const refused = new Set<string>()
 
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'tool_use' && msg.role === 'assistant') {
         if (map.kindOf(block.toolName) === 'task') spawns.push(block)
+      } else if (block.type === 'permission_denial' && msg.role === 'assistant') {
+        refused.add(block.toolUseId)
       } else if (block.type === 'tool_result') {
         results.set(block.toolUseId, !!block.isError)
       }
     }
   }
 
-  return spawns.map((block) => {
-    const view = map.normalize('task', block.toolInput, undefined, block.toolName) as TaskView
-    const name = view?.name || view?.subagent || map.displayName(block.toolName)
-    const badge = view?.subagent !== name ? view?.subagent : undefined
-    return {
-      toolUseId: block.toolUseId,
-      kind: 'agent' as const,
-      name,
-      ...(badge ? { badge } : {}),
-      description: view?.description || view?.prompt || '',
-      hasResult: results.has(block.toolUseId),
-      resultIsError: results.get(block.toolUseId) ?? false,
-      // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
-      isBackground: !!view?.background
-    }
-  })
+  return spawns
+    .filter((block) => !refused.has(block.toolUseId))
+    .map((block) => {
+      const view = map.normalize('task', block.toolInput, undefined, block.toolName) as TaskView
+      const name = view?.name || view?.subagent || map.displayName(block.toolName)
+      const badge = view?.subagent !== name ? view?.subagent : undefined
+      return {
+        toolUseId: block.toolUseId,
+        kind: 'agent' as const,
+        name,
+        ...(badge ? { badge } : {}),
+        description: view?.description || view?.prompt || '',
+        hasResult: results.has(block.toolUseId),
+        resultIsError: results.get(block.toolUseId) ?? false,
+        // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
+        isBackground: !!view?.background
+      }
+    })
 }
 
 /**

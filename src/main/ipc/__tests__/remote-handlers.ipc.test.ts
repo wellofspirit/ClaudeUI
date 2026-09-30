@@ -1869,6 +1869,16 @@ const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
  */
 const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
 
+/**
+ * ADR-081 §3 — which judge-picker values ClaudeUI can call for the auto-mode
+ * judge. A `query` declaring `config`, the class of `session:get-engine-models`
+ * beside it, so a base connection reaches it: the Settings judge picker is not
+ * desktop-only. Token-free by construction — the resolver's describe path
+ * checks a key for PRESENCE and reads ChatGPT's token-free status, so the
+ * answer is a yes/no and the resolver's own copy per value.
+ */
+const JUDGE_MODEL_SUPPORT_CHANNELS = ['automode:judge-model-support'] as const
+
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
@@ -1939,6 +1949,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
+        ...JUDGE_MODEL_SUPPORT_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the
         // native device-code UI; the vault owns the ChatGPT identity and
         // `provider-account:*` is how a remote client reads it.
@@ -1968,6 +1979,16 @@ describe('remote surface parity (phase 1 port)', () => {
         ...USAGE_HUB_CHANNELS
       ].sort()
     )
+  })
+
+  it('automode:judge-model-support is a base-reachable config QUERY, like get-engine-models', () => {
+    const decl = commandRegistry.declaration('automode:judge-model-support')
+    const twin = commandRegistry.declaration('session:get-engine-models')
+    expect(decl?.capability).toBe('config')
+    expect(decl?.capability).toBe(twin?.capability)
+    expect(decl?.kind).toBe('query')
+    expect(decl?.kind).toBe(twin?.kind)
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
   })
 
   it('the S1b sweep is reachable with the base grant set, and audited where it mutates', async () => {

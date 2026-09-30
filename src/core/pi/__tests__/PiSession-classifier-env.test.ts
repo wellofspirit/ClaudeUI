@@ -6,9 +6,13 @@
  * `~/.claude/ui/automode.json`, not from `engines/pi.json#autoMode`.
  *
  * Two engines, one file: the whole point of the move is that a host trusted for
- * opencode is trusted for pi, so BOTH derivations need their own guard — the
- * wirings are deliberately copies of each other and a fix applied to one is
- * exactly the kind of thing that misses the other.
+ * opencode is trusted for pi, so BOTH derivations need their own guard. The
+ * mapping itself is shared now (`automode/environment.ts`, ADR-083), but each
+ * session still gathers its own inputs — and pi's rules come from its own
+ * `cachedRules` — so the wiring is exactly the kind of thing that misses one.
+ *
+ * ADR-083 adds the user's permission rules and the judge guidance lists to the
+ * same environment; the second block pins that both reach pi's judge.
  *
  * The engine mock returns a stale copy of the old keys; none of it may surface.
  * `classifierEnvironment` is private and reached through a cast (see the
@@ -192,5 +196,65 @@ describe('PiSession classifier environment — shared trust lists', () => {
 
     expect(env).not.toHaveProperty('trustedDomains')
     expect(env.cwd).toBe('/tmp/test-cwd')
+  })
+})
+
+describe('PiSession classifier environment — permission rules + guidance (ADR-083)', () => {
+  it("hands the judge the user's merged rules, deduped across scopes, in scope order", async () => {
+    mockLoadClaudePermissions
+      .mockReturnValueOnce({
+        allow: ['Bash(gh pr create:*)'],
+        deny: ['Read(.env)'],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      })
+      .mockReturnValueOnce({
+        allow: ['Bash(gh pr create:*)', 'Bash(bun run test)'],
+        deny: [],
+        ask: ['Bash(git push:*)'],
+        additionalDirectories: [],
+        defaultMode: undefined
+      })
+
+    const env = await environmentOf(makeSession())
+
+    expect(env.permissionRules).toEqual({
+      allow: ['Bash(gh pr create:*)', 'Bash(bun run test)'],
+      ask: ['Bash(git push:*)'],
+      deny: ['Read(.env)']
+    })
+  })
+
+  it('serves the rules from the same cache the permission engine decides with', async () => {
+    // pi's freshness contract: `currentRules()` is cached until a rule write
+    // invalidates it, and the judge must see exactly what the engine enforces.
+    const session = makeSession()
+    await environmentOf(session)
+    const loadsAfterFirst = mockLoadClaudePermissions.mock.calls.length
+    await environmentOf(session)
+
+    expect(mockLoadClaudePermissions.mock.calls.length).toBe(loadsAfterFirst)
+  })
+
+  it('takes the guidance lists from the shared config', async () => {
+    mockLoadSharedAutoModeConfig.mockReturnValue({
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+
+    const env = await environmentOf(makeSession())
+
+    expect(env.judgeGuidance).toEqual({
+      allow: ['creating and switching git branches'],
+      block: ['running database migrations']
+    })
+  })
+
+  it('omits both slots when there are no rules and no guidance', async () => {
+    const env = await environmentOf(makeSession())
+
+    expect(env).not.toHaveProperty('permissionRules')
+    expect(env).not.toHaveProperty('judgeGuidance')
   })
 })

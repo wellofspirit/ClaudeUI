@@ -13,6 +13,14 @@
  *   4. Emptying a list saves it with the key ABSENT, never `[]`
  *   5. A save touches only the edited list; a failed save does not throw
  *   6. It is registered as the `trust-lists` section
+ *   7. The two judge guidance rows (ADR-083 §4) render below the trust lists and
+ *      save through the same path, alongside the other lists, absent when emptied
+ *   8. The guidance rows refuse what the IPC perimeter would (tabs/line breaks,
+ *      over 300 characters, past 50 entries) BEFORE saving, with an inline error
+ *   9. A failed save is surfaced inline and the section reloads the file, so it
+ *      never shows an entry that is not on disk
+ *  10. The read-only bypass switch (ADR-084 §1) sits above the lists, is ON when
+ *      the key is absent, and saves only an explicit `false`
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
@@ -126,6 +134,194 @@ describe('TrustListsSection — load', () => {
   })
 })
 
+describe('TrustListsSection — judge guidance rows (ADR-083 §4)', () => {
+  it('renders both rows after the three trust lists, with their copy', async () => {
+    await renderLoaded()
+
+    const rows = screen
+      .getAllByTestId(/^TrustListsSection\.[A-Za-z]+$/)
+      .map((el) => el.getAttribute('data-testid'))
+    expect(rows).toEqual([
+      'TrustListsSection.readOnlyBypass',
+      'TrustListsSection.trustedDomains',
+      'TrustListsSection.trustedRegistries',
+      'TrustListsSection.protectedPatterns',
+      'TrustListsSection.judgeAllow',
+      'TrustListsSection.judgeBlock'
+    ])
+
+    const allow = screen.getByTestId('TrustListsSection.judgeAllow')
+    expect(allow.textContent).toContain('Routine for me')
+    expect(allow.textContent).toContain('It still blocks data leaving your trust boundary')
+    expect(
+      within(allow).getByTestId('TrustListsSection.judgeAllow.input').getAttribute('placeholder')
+    ).toBe('creating and switching git branches')
+
+    const block = screen.getByTestId('TrustListsSection.judgeBlock')
+    expect(block.textContent).toContain('Ask me first')
+    expect(block.textContent).toContain('your reply clears it')
+    expect(
+      within(block).getByTestId('TrustListsSection.judgeBlock.input').getAttribute('placeholder')
+    ).toBe('running database migrations')
+  })
+
+  it('seeds both rows from the shared file', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({
+        ...structuredClone(BASE),
+        judgeAllow: ['creating git branches'],
+        judgeBlock: ['running database migrations']
+      }))
+    })
+    await renderLoaded()
+
+    expect(items('judgeAllow')).toEqual(['creating git branches'])
+    expect(items('judgeBlock')).toEqual(['running database migrations'])
+  })
+
+  it('adding guidance saves it ALONGSIDE the existing lists', async () => {
+    await renderLoaded()
+
+    addItem('judgeAllow', 'creating and switching git branches')
+    addItem('judgeBlock', 'running database migrations')
+
+    expect(saveSharedAutoMode).toHaveBeenCalledTimes(2)
+    expect(saved[1]).toEqual({
+      trustedDomains: ['a.dev'],
+      protectedPatterns: ['acme-live-*'],
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+  })
+
+  it('removing the last guidance entry saves the key ABSENT', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({
+        ...structuredClone(BASE),
+        judgeBlock: ['running database migrations']
+      }))
+    })
+    await renderLoaded()
+
+    removeItem('judgeBlock', 'running database migrations')
+
+    expect(JSON.parse(JSON.stringify(saved[0]))).not.toHaveProperty('judgeBlock')
+    expect(saved[0]).toEqual({ trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'] })
+    expect(items('judgeBlock')).toEqual([])
+  })
+})
+
+describe('TrustListsSection — read-only bypass switch (ADR-084 §1)', () => {
+  const toggle = (): HTMLElement => screen.getByTestId('TrustListsSection.readOnlyBypass')
+
+  it('is the first row, ON when the file has no key, with its copy', async () => {
+    await renderLoaded()
+
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+    expect(toggle().textContent).toContain('Skip the judge for read-only commands')
+    expect(toggle().textContent).toContain(
+      'Plainly read-only commands in your workspace (git status, ls, reading source files) run without a judge call.'
+    )
+    expect(toggle().textContent).toContain('to review a read yourself, add an Ask rule.')
+  })
+
+  it('turning it off saves readOnlyBypass: false alongside the lists', async () => {
+    await renderLoaded()
+
+    fireEvent.click(toggle())
+
+    expect(saved).toEqual([
+      { trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'], readOnlyBypass: false }
+    ])
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('turning it back on saves the key ABSENT, never true', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), readOnlyBypass: false }))
+    })
+    await renderLoaded()
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle())
+
+    expect('readOnlyBypass' in saved[0]).toBe(false)
+    expect(saved[0]).toEqual({ trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'] })
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('a list edit keeps the switch off', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), readOnlyBypass: false }))
+    })
+    await renderLoaded()
+
+    addItem('trustedDomains', 'files.acme.com')
+
+    expect(saved[0].readOnlyBypass).toBe(false)
+  })
+})
+
+describe('TrustListsSection — guidance entry rules (ADR-083 §4)', () => {
+  it('refuses an entry over 300 characters, inline, without saving', async () => {
+    await renderLoaded()
+
+    addItem('judgeAllow', 'x'.repeat(301))
+
+    expect(saveSharedAutoMode).not.toHaveBeenCalled()
+    expect(items('judgeAllow')).toEqual([])
+    expect(screen.getByTestId('TrustListsSection.judgeAllow.error').textContent).toContain(
+      '300 characters or fewer'
+    )
+  })
+
+  it('accepts an entry of exactly 300 characters', async () => {
+    await renderLoaded()
+
+    addItem('judgeBlock', 'x'.repeat(300))
+
+    expect(saved[0].judgeBlock).toEqual(['x'.repeat(300)])
+    expect(screen.queryByTestId('TrustListsSection.judgeBlock.error')).toBeNull()
+  })
+
+  it('refuses a tab inside an entry (an input cannot hold a line break)', async () => {
+    await renderLoaded()
+
+    addItem('judgeBlock', 'running\tmigrations')
+
+    expect(saveSharedAutoMode).not.toHaveBeenCalled()
+    expect(screen.getByTestId('TrustListsSection.judgeBlock.error').textContent).toContain(
+      'no tabs or line breaks'
+    )
+  })
+
+  it('refuses a 51st entry', async () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => `action ${i}`)
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), judgeAllow: fifty }))
+    })
+    await renderLoaded()
+
+    addItem('judgeAllow', 'one more')
+
+    expect(saveSharedAutoMode).not.toHaveBeenCalled()
+    expect(items('judgeAllow')).toHaveLength(50)
+    expect(screen.getByTestId('TrustListsSection.judgeAllow.error').textContent).toContain(
+      'At most 50 entries'
+    )
+  })
+
+  it('leaves the trust lists without the guidance caps', async () => {
+    await renderLoaded()
+
+    const long = `${'x'.repeat(301)}.example`
+    addItem('trustedDomains', long)
+
+    expect(saved[0].trustedDomains).toEqual(['a.dev', long])
+    expect(screen.queryByTestId('TrustListsSection.trustedDomains.error')).toBeNull()
+  })
+})
+
 describe('TrustListsSection — saves', () => {
   it('adding a registry saves the appended list and leaves the others alone', async () => {
     await renderLoaded()
@@ -174,13 +370,64 @@ describe('TrustListsSection — saves', () => {
     expect(items('protectedPatterns')).toEqual(['k8s://prod-cluster'])
   })
 
-  it('a rejected save does not throw out of the row', async () => {
+  it('a rejected save says so and reloads what is on disk', async () => {
+    const load = vi.fn(async () => structuredClone(BASE))
     installApiStub({
+      loadSharedAutoMode: load,
       saveSharedAutoMode: vi.fn(async () => Promise.reject(new Error('disk full')))
     })
     await renderLoaded()
+    expect(screen.queryByTestId('TrustListsSection.saveError')).toBeNull()
 
     expect(() => addItem('trustedDomains', 'files.acme.com')).not.toThrow()
-    await waitFor(() => expect(items('trustedDomains')).toEqual(['a.dev', 'files.acme.com']))
+
+    // The error is inline, and the list goes back to the file's contents — the
+    // entry never reached disk, so showing it would be a lie.
+    await waitFor(() =>
+      expect(screen.getByTestId('TrustListsSection.saveError').textContent).toContain(
+        "Couldn't save"
+      )
+    )
+    await waitFor(() => expect(items('trustedDomains')).toEqual(['a.dev']))
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('a later successful save clears the error', async () => {
+    const save = vi
+      .fn<(cfg: SharedAutoModeConfig) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('disk full'))
+      .mockResolvedValue(undefined)
+    installApiStub({ saveSharedAutoMode: save })
+    await renderLoaded()
+
+    addItem('trustedDomains', 'files.acme.com')
+    await waitFor(() => expect(screen.getByTestId('TrustListsSection.saveError')).toBeTruthy())
+
+    addItem('protectedPatterns', 'k8s://prod-cluster')
+    expect(screen.queryByTestId('TrustListsSection.saveError')).toBeNull()
+  })
+
+  it('a stale reload never paints over a newer edit', async () => {
+    // Save #1 fails; its reload resolves only AFTER save #2 was issued. The
+    // reload's (pre-edit) file must not replace the newer edit on screen.
+    let resolveReload: (cfg: SharedAutoModeConfig) => void = () => {}
+    const load = vi
+      .fn<() => Promise<SharedAutoModeConfig>>()
+      .mockResolvedValueOnce(structuredClone(BASE))
+      .mockImplementationOnce(() => new Promise((r) => (resolveReload = r)))
+    const save = vi
+      .fn<(cfg: SharedAutoModeConfig) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('disk full'))
+      .mockResolvedValue(undefined)
+    installApiStub({ loadSharedAutoMode: load, saveSharedAutoMode: save })
+    await renderLoaded()
+
+    addItem('trustedDomains', 'files.acme.com')
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2))
+    addItem('protectedPatterns', 'k8s://prod-cluster')
+
+    resolveReload(structuredClone(BASE))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(items('protectedPatterns')).toEqual(['acme-live-*', 'k8s://prod-cluster'])
   })
 })

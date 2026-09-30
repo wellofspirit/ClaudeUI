@@ -66,6 +66,8 @@ export interface JwtClaims {
   chatgpt_plan_type?: string
   chatgpt_user_id?: string
   user_id?: string
+  /** Where the account's compute must run; see {@link computeResidencyFromToken}. */
+  chatgpt_compute_residency?: string
   organizations?: Array<{ id: string }>
   email?: string
   'https://api.openai.com/auth'?: {
@@ -73,6 +75,7 @@ export interface JwtClaims {
     chatgpt_plan_type?: string
     chatgpt_user_id?: string
     user_id?: string
+    chatgpt_compute_residency?: string
   }
 }
 
@@ -253,6 +256,23 @@ function planTypeFromClaims(claims: JwtClaims): string | undefined {
 function userIdFromClaims(claims: JwtClaims): string | undefined {
   const ns = claims['https://api.openai.com/auth']
   return ns?.chatgpt_user_id || ns?.user_id || claims.chatgpt_user_id || claims.user_id
+}
+
+/**
+ * The access token's compute-residency constraint, for the ChatGPT backend's
+ * `x-openai-internal-codex-residency` header (ADR-081 §4). The auth-namespace
+ * claim wins over the top-level one, and `no_constraint` means no header —
+ * both as the port source's `extractResidency` reads it
+ * (`vendor/opencode-src/packages/opencode/src/plugin/openai/codex.ts`).
+ * Undefined when the claim is absent or the token is malformed.
+ */
+export function computeResidencyFromToken(token: string): string | undefined {
+  const claims = parseJwtClaims(token)
+  const residency =
+    claims?.['https://api.openai.com/auth']?.chatgpt_compute_residency ??
+    claims?.chatgpt_compute_residency
+  if (typeof residency !== 'string' || !residency || residency === 'no_constraint') return undefined
+  return residency
 }
 
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */

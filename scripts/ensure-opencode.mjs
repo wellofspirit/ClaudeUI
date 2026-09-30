@@ -2,67 +2,75 @@
 /**
  * ensure-opencode.mjs
  *
- * Puts a platform-specific opencode binary into vendor/opencode-cli/.
+ * Puts the upstream opencode release binary for this platform into
+ * vendor/opencode-cli/, checked against digests reviewed into the repo
+ * (ADR-081 §7). There is one source: `npm pack opencode-<os>-<arch>@<version>`,
+ * where `<version>` is `package.json#opencodeCliVersion`.
  *
- * Two sources, and the DEFAULT is the fork (ADR-037):
+ * `scripts/opencode-digests.json` pins, per npm package, the tarball's npm
+ * `integrity` (sha512) and the SHA-256 of `package/bin/opencode[.exe]`.
+ * Every step fails closed:
  *
- *  1. **fork build (default)** — clone `package.json#opencodeFork` (our
- *     `sst/opencode` fork, branch `claudeui`, forked from the vendored tag) into
- *     `vendor/opencode-fork-src`, check out `opencodeFork.ref` (a tag on the fork
- *     or a commit reachable from the branch; branch HEAD when unset), build it
- *     with opencode's own release pipeline
- *     (`packages/opencode/script/build.ts --single`), and vendor the result.
- *     `opencodeFork.tag` is provenance only — the upstream release the branch
- *     was last merged with — and is recorded as `forkedFrom`.
- *     This is how ClaudeUI's patches (P1: the tool-less `/judge/completion`
- *     route) reach the running binary. The upstream release tarball has no
- *     patches, so this path is what production uses.
- *  2. **release download (fallback)** — the original `npm pack` path, kept
- *     behind `--from-release` (or `OPENCODE_VENDOR_FROM_RELEASE=1`) for a
- *     machine that cannot build (no toolchain, offline-ish, CI smoke). The
- *     resulting binary lacks every patch; ClaudeUI degrades gracefully (the
- *     judge transport probes `/doc` and falls back to the tool-denied judge
- *     session), it is just slower and weaker.
+ *  - the manifest's `version` must equal the pin (a bump without reviewed
+ *    digests is a repository error, as in ensure-codex);
+ *  - the tarball's integrity must match, then the extracted binary's SHA-256;
+ *  - the staged binary must answer `--version` with the pinned version, run
+ *    in an isolated home so the check never touches the developer's own
+ *    opencode config or data.
  *
- * The download path uses Node.js-native zlib + a minimal tar parser to avoid
- * relying on any external `tar` command (Git Bash's tar treats Windows drive
- * letters like "D:" as hostnames, causing extraction failures).
+ * Any failure deletes the download and leaves the vendored binary untouched.
+ * `version.json` records the package, integrity and `binarySha256`; a cache
+ * hit re-hashes the installed binary against the manifest, so a stale or
+ * swapped binary (including a pre-ADR-081 fork build) is always replaced.
+ *
+ * The tarball is unpacked with Node.js-native zlib + a minimal tar parser to
+ * avoid relying on any external `tar` command (Git Bash's tar treats Windows
+ * drive letters like "D:" as hostnames, causing extraction failures).
+ *
+ * Bumping: set `opencodeCliVersion`, `npm pack` each package in the manifest,
+ * record `integrity` from `npm pack --json` and the SHA-256 of the binary
+ * inside, then run `bun run update-opencode`.
  *
  * Usage:
- *   node scripts/ensure-opencode.mjs                 # build the fork branch
- *   node scripts/ensure-opencode.mjs --force         # rebuild/re-download even on a cache hit
- *   node scripts/ensure-opencode.mjs --from-release  # unpatched upstream release instead
- *   node scripts/ensure-opencode.mjs --quiet         # suppress info logs (cache-hit/installed lines stay)
+ *   node scripts/ensure-opencode.mjs          # vendor the pinned release (cache hit = no-op)
+ *   node scripts/ensure-opencode.mjs --force  # re-download even on a cache hit
+ *   node scripts/ensure-opencode.mjs --quiet  # suppress info logs (cache-hit/installed lines stay)
  */
 
-import { createGunzip } from 'node:zlib'
-import { createReadStream } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   chmodSync,
   rmSync,
   readdirSync,
   readFileSync,
   writeFileSync,
-  openSync,
-  writeSync,
-  closeSync,
-  renameSync
+  renameSync,
+  lstatSync
 } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { execSync, execFileSync } from 'node:child_process'
-import { cpSync, statSync } from 'node:fs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'opencode-cli')
-const CACHE_BASE = join(ROOT, '.cache')
-// Engine source trees live under vendor/: `<engine>-src` for upstream,
-// `<engine>-fork-src` for a fork (CLAUDE.md). Build caches stay in `.cache/`.
-const FORK_DIR = join(ROOT, 'vendor', 'opencode-fork-src')
-const LEGACY_FORK_DIR = join(CACHE_BASE, 'opencode-fork')
+
+export const manifest = JSON.parse(
+  readFileSync(join(ROOT, 'scripts', 'opencode-digests.json'), 'utf8')
+)
+export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+/** npm's `integrity` format (Subresource Integrity, sha512). */
+export const sriSha512 = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`
+
+// The largest pinned tarball is ~60 MB and the largest binary ~185 MB (linux
+// x64, 1.18.32); both caps leave room for growth without accepting anything.
+const MAX_TARBALL = 256 * 1024 * 1024
+const MAX_BINARY = 512 * 1024 * 1024
 
 const QUIET = process.argv.includes('--quiet')
 
@@ -73,93 +81,99 @@ function info(...args) {
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
-function detectPackageName() {
-  const plat = process.platform
-  const arch = process.arch
-  if (plat === 'win32') return 'opencode-windows-x64'
-  if (plat === 'darwin' && arch === 'arm64') return 'opencode-darwin-arm64'
-  if (plat === 'darwin') return 'opencode-darwin-x64'
-  return 'opencode-linux-x64'
+/**
+ * The npm package carrying this host's binary. Windows on arm64 runs the x64
+ * build under emulation; any other host has no reviewed package and fails
+ * here rather than vendoring a binary that cannot run.
+ */
+export function detectPackageName(platform = process.platform, arch = process.arch) {
+  if (platform === 'win32') return 'opencode-windows-x64'
+  if (platform === 'darwin' && (arch === 'arm64' || arch === 'x64'))
+    return `opencode-darwin-${arch}`
+  if (platform === 'linux' && (arch === 'arm64' || arch === 'x64')) return `opencode-linux-${arch}`
+  throw new Error(`no reviewed opencode release for ${platform}-${arch}`)
 }
 
-// ── Version from package.json ─────────────────────────────────────────────────
-
-function readRootPkg() {
-  return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+export function binaryName(platform = process.platform) {
+  return platform === 'win32' ? 'opencode.exe' : 'opencode'
 }
 
-function getPinnedVersion() {
-  return readRootPkg().opencodeCliVersion ?? '1.17.9'
-}
+// ── Pin + manifest ────────────────────────────────────────────────────────────
 
-function getForkConfig() {
-  const fork = readRootPkg().opencodeFork
-  if (!fork?.repo || !fork?.branch) {
-    throw new Error('package.json#opencodeFork must set { repo, branch } to build from the fork')
+export function getPinnedVersion() {
+  const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).opencodeCliVersion
+  // The version is interpolated into the `npm pack` command line below.
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error('package.json#opencodeCliVersion is missing or not a plain semver')
   }
-  return fork
+  return version
 }
 
-function binaryName() {
-  return process.platform === 'win32' ? 'opencode.exe' : 'opencode'
+/** A pin without a reviewed manifest is a repository error on every host. */
+export function assertManifestPin(pinned = getPinnedVersion(), m = manifest) {
+  if (m.version !== pinned) {
+    throw new Error(
+      `scripts/opencode-digests.json is for opencode ${m.version}, but ` +
+        `package.json#opencodeCliVersion is ${pinned}; record the reviewed digests for the new pin`
+    )
+  }
+}
+
+/**
+ * The reviewed record for one package, in exactly the shape `version.json`
+ * carries (and `isCacheHit` compares).
+ */
+export function expectedRelease(pkgName, m = manifest) {
+  // Own-property lookup only: the key is a package name, not a trusted path.
+  const entry = Object.hasOwn(m.packages ?? {}, pkgName) ? m.packages[pkgName] : null
+  if (
+    !entry ||
+    typeof entry.integrity !== 'string' ||
+    !/^sha512-[A-Za-z0-9+/]+=*$/.test(entry.integrity) ||
+    typeof entry.binarySha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(entry.binarySha256)
+  ) {
+    throw new Error(`scripts/opencode-digests.json has no valid digest record for ${pkgName}`)
+  }
+  return {
+    version: m.version,
+    package: pkgName,
+    integrity: entry.integrity,
+    binarySha256: entry.binarySha256
+  }
 }
 
 // ── Cache-hit check ────────────────────────────────────────────────────────────
 
 /**
- * `expect` narrows the hit to one source. A vendor dir holding an unpatched
- * release binary must NOT satisfy a fork-source request (and vice versa),
- * otherwise switching modes silently keeps the wrong binary.
+ * A hit needs the recorded identity (version, platform/arch, release source,
+ * package, digest) AND the installed bytes to match the manifest. Hashing the
+ * binary is what makes a hit trustworthy: an AV quarantine, a partial
+ * checkout, a copy from another machine or an old fork build all miss.
  */
-function isCacheHit(version, expect) {
-  const versionFile = join(VENDOR_DIR, 'version.json')
-  if (!existsSync(versionFile)) return false
-  // The binary must actually be present — an AV quarantine or partial checkout
-  // can leave version.json behind with no executable (M-BD1).
-  if (!existsSync(join(VENDOR_DIR, binaryName()))) return false
+export function isCacheHit(
+  expected,
+  dir = VENDOR_DIR,
+  platform = process.platform,
+  arch = process.arch
+) {
   try {
-    const saved = JSON.parse(readFileSync(versionFile, 'utf8'))
-    // Match platform/arch too — a checkout copied across machines/architectures
-    // otherwise keeps a wrong-arch binary the version alone can't detect.
+    const saved = JSON.parse(readFileSync(join(dir, 'version.json'), 'utf8'))
     if (
-      saved.version !== version ||
-      saved.platform !== process.platform ||
-      saved.arch !== process.arch
+      saved.version !== expected.version ||
+      saved.platform !== platform ||
+      saved.arch !== arch ||
+      saved.source !== 'release' ||
+      saved.package !== expected.package ||
+      saved.binarySha256 !== expected.binarySha256
     ) {
       return false
     }
-    // Pre-ADR-037 version.json files have no `source`; treat them as release.
-    const savedSource = saved.source ?? 'release'
-    if (savedSource !== expect.source) return false
-    if (expect.source === 'fork') {
-      // A pinned ref is part of the binary's identity: changing (or adding) the
-      // pin must miss, otherwise the old branch-HEAD build silently survives.
-      return (
-        saved.fork?.repo === expect.repo &&
-        saved.fork?.branch === expect.branch &&
-        (saved.fork?.ref ?? null) === (expect.ref ?? null)
-      )
-    }
-    return true
+    const bin = join(dir, binaryName(platform))
+    return lstatSync(bin).isFile() && sha256(readFileSync(bin)) === expected.binarySha256
   } catch {
     return false
   }
-}
-
-function writeVersionFile(extra) {
-  writeFileSync(
-    join(VENDOR_DIR, 'version.json'),
-    JSON.stringify(
-      {
-        version: getPinnedVersion(),
-        platform: process.platform,
-        arch: process.arch,
-        ...extra
-      },
-      null,
-      2
-    ) + '\n'
-  )
 }
 
 // ── Minimal tar extractor (Node.js native, no external tar command) ───────────
@@ -170,8 +184,11 @@ function writeVersionFile(extra) {
 //   100 mode[8]
 //   124 size[12]   (octal)
 //   156 typeflag[1]  ('0'/'\0' = file, '5' = dir, 'L' = GNU long-name)
-//   265 prefix[155]  (ustar prefix for long filenames)
+//   345 prefix[155]  (ustar prefix for long filenames)
 // GNU long-name: typeflag='L', data block(s) contain the real path.
+//
+// The parser is lenient because it never decides trust: the tarball's
+// integrity is checked before it runs and the binary's digest after.
 
 const TAR_BLOCK = 512
 
@@ -190,43 +207,10 @@ function readCStr(buf, offset, len) {
 }
 
 /**
- * Extract the first file whose path ends with `targetSuffix` from a .tgz.
- * Reads the file as a stream to avoid loading the 165MB binary fully into RAM
- * before gunzip. Returns a Buffer with the file contents.
+ * Walk a raw tar buffer and return the contents of the regular-file entry
+ * whose path is exactly `targetPath`, or null.
  */
-function extractFileFromTgz(tgzPath, targetSuffix) {
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    const readable = createReadStream(tgzPath)
-    const gunzip = createGunzip()
-
-    readable.on('error', reject)
-    gunzip.on('error', reject)
-
-    gunzip.on('data', (chunk) => chunks.push(chunk))
-    gunzip.on('end', () => {
-      try {
-        const tar = Buffer.concat(chunks)
-        const result = walkTar(tar, targetSuffix)
-        if (!result) {
-          reject(new Error(`"${targetSuffix}" not found in ${tgzPath}`))
-        } else {
-          resolve(result)
-        }
-      } catch (e) {
-        reject(e)
-      }
-    })
-
-    readable.pipe(gunzip)
-  })
-}
-
-/**
- * Walk a raw tar buffer and return the contents of the first entry whose path
- * ends with `targetSuffix`.
- */
-function walkTar(tar, targetSuffix) {
+export function walkTar(tar, targetPath) {
   let pos = 0
   let pendingLongName = null
 
@@ -257,86 +241,105 @@ function walkTar(tar, targetSuffix) {
       name = prefix ? `${prefix}/${fname}` : fname
     }
 
-    // Normalize path separators for cross-platform matching
-    const normName = name.replace(/\\/g, '/')
-    const normTarget = targetSuffix.replace(/\\/g, '/')
-
-    const dataBlocks = Math.ceil(fileSize / TAR_BLOCK) * TAR_BLOCK
-
-    if ((typeFlag === '0' || typeFlag === '\0') && fileSize > 0) {
-      if (normName.endsWith('/' + normTarget) || normName === normTarget) {
-        return Buffer.from(tar.subarray(pos, pos + fileSize))
-      }
+    if ((typeFlag === '0' || typeFlag === '\0') && fileSize > 0 && name === targetPath) {
+      if (pos + fileSize > tar.length) return null // truncated archive
+      return Buffer.from(tar.subarray(pos, pos + fileSize))
     }
 
-    pos += dataBlocks
+    pos += Math.ceil(fileSize / TAR_BLOCK) * TAR_BLOCK
   }
 
   return null
 }
 
-// ── Main download + extract logic ─────────────────────────────────────────────
-
-async function download(pkgName, version) {
-  const tmpDir = join(CACHE_BASE, `opencode-tmp-${Date.now()}`)
-  mkdirSync(tmpDir, { recursive: true })
-
-  try {
-    const fullPkg = `${pkgName}@${version}`
-    info(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
-
-    // Use execSync with a constructed command string so Node runs it via the
-    // shell on all platforms. This avoids the shell:true + array-args deprecation
-    // warning (DEP0190), and lets npm be found as a .cmd script on Windows.
-    // All values are version strings / file paths from trusted sources (not user input).
-    // The tmpDir path is quoted to handle spaces. The package name has no spaces.
-    const packCmd = `npm pack ${fullPkg} --pack-destination "${tmpDir}"`
-    execSync(packCmd, { stdio: 'inherit', cwd: ROOT })
-
-    // Find the .tgz produced by npm pack
-    const tgzFiles = readdirSync(tmpDir).filter((f) => f.endsWith('.tgz'))
-    if (tgzFiles.length === 0) {
-      throw new Error(`npm pack did not produce a .tgz in ${tmpDir}`)
-    }
-    const tgzPath = join(tmpDir, tgzFiles[0])
-
-    const binName = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
-    // The npm pack layout is: package/bin/opencode[.exe]
-    const targetSuffix = `bin/${binName}`
-
-    info(`[ensure-opencode] Extracting ${binName} from ${tgzFiles[0]} ...`)
-    const binBytes = await extractFileFromTgz(tgzPath, targetSuffix)
-    info(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB`)
-
-    mkdirSync(VENDOR_DIR, { recursive: true })
-    const dest = join(VENDOR_DIR, binName)
-
-    // Write via temp file + rename for atomicity
-    const tmpDest = dest + '.tmp'
-    const fd = openSync(tmpDest, 'w')
-    writeSync(fd, binBytes)
-    closeSync(fd)
-    replaceBinary(tmpDest, dest)
-
-    if (process.platform !== 'win32') {
-      chmodSync(dest, 0o755)
-    }
-
-    writeVersionFile({
-      source: 'release',
-      package: pkgName,
-      downloadedAt: new Date().toISOString()
-    })
-
-    console.log(
-      `[ensure-opencode] opencode ${version} installed to vendor/opencode-cli/${binName}` +
-        ' (UNPATCHED upstream release — the /judge/completion route is absent)'
+/**
+ * Verify an npm tarball against its reviewed record and return the binary.
+ * The npm layout is `package/bin/opencode[.exe]`.
+ */
+export function extractBinary(tgz, expected, binName = binaryName()) {
+  if (tgz.length > MAX_TARBALL) throw new Error(`${expected.package} tarball exceeds the size cap`)
+  const integrity = sriSha512(tgz)
+  if (integrity !== expected.integrity) {
+    throw new Error(
+      `${expected.package}@${expected.version} tarball integrity ${integrity} does not match ` +
+        `the reviewed ${expected.integrity} (scripts/opencode-digests.json)`
     )
-  } finally {
-    rmSync(tmpDir, { recursive: true, force: true })
+  }
+  const tar = gunzipSync(tgz, { maxOutputLength: MAX_BINARY + 1024 * 1024 })
+  const bin = walkTar(tar, `package/bin/${binName}`)
+  if (!bin) throw new Error(`package/bin/${binName} not found in ${expected.package}`)
+  const digest = sha256(bin)
+  if (digest !== expected.binarySha256) {
+    throw new Error(
+      `${expected.package}@${expected.version} binary SHA-256 ${digest} does not match ` +
+        `the reviewed ${expected.binarySha256} (scripts/opencode-digests.json)`
+    )
+  }
+  return bin
+}
+
+// ── Version check ─────────────────────────────────────────────────────────────
+
+/**
+ * A throwaway home for `opencode --version`: opencode creates its XDG data,
+ * config, cache and state dirs at startup, and must not do so in the
+ * developer's real ones. PATH is minimal so nothing on the caller's PATH is
+ * picked up; SYSTEMROOT is kept because parts of the Windows runtime resolve
+ * it at startup (as in ensure-codex).
+ */
+export function isolatedEnv(directory, platform = process.platform) {
+  const home = join(directory, 'home')
+  const tmp = join(directory, 'tmp')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(tmp, { recursive: true })
+  const xdg = {
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+    XDG_STATE_HOME: join(home, '.local', 'state')
+  }
+  if (platform === 'win32') {
+    const systemRoot = process.env.SYSTEMROOT ?? 'C:\\Windows'
+    return {
+      USERPROFILE: home,
+      HOME: home,
+      APPDATA: join(home, 'AppData', 'Roaming'),
+      LOCALAPPDATA: join(home, 'AppData', 'Local'),
+      TEMP: tmp,
+      TMP: tmp,
+      SYSTEMROOT: systemRoot,
+      PATH: join(systemRoot, 'System32'),
+      ...xdg
+    }
+  }
+  return { HOME: home, TMPDIR: tmp, PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', ...xdg }
+}
+
+/** `binary --version` must print exactly `version`. */
+export function verifyVersion(binary, cwd, env, version) {
+  let output
+  try {
+    output = execFileSync(binary, ['--version'], {
+      cwd,
+      env,
+      // Generous: the first run of a fresh 180 MB executable can sit behind an
+      // on-access AV scan.
+      timeout: 60000,
+      maxBuffer: 4096,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8'
+    })
+  } catch (err) {
+    throw new Error(`the downloaded opencode failed to run --version (${err.code ?? 'error'})`)
+  }
+  if (output.trim() !== version) {
+    throw new Error(
+      `the downloaded opencode reports version ${JSON.stringify(output.trim())}, expected ${version}`
+    )
   }
 }
-// ── Fork build ────────────────────────────────────────────────────────────────
+
+// ── Install ───────────────────────────────────────────────────────────────────
 
 /**
  * Move `tmp` onto `dest`, tolerating a *running* vendored binary.
@@ -383,265 +386,91 @@ function replaceBinary(tmp, dest) {
     info(`[ensure-opencode] previous binary still in use; left ${displaced} for later cleanup`)
   }
 }
-/** Run git, streaming its output. */
-function gitRun(args, cwd) {
-  execFileSync('git', args, { cwd, stdio: 'inherit' })
-}
 
-/** Run git and capture stdout. */
-function gitOut(args, cwd) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit']
-  }).trim()
-}
-
-/**
- * opencode's build names each dist dir `opencode-<os>-<arch>` with `win32`
- * spelled `windows`. Derive it here rather than reusing the npm package name,
- * which collapses every linux arch onto x64.
- */
-function distDirName() {
-  const os = process.platform === 'win32' ? 'windows' : process.platform
-  return `opencode-${os}-${process.arch}`
-}
-
-/**
- * opencode's build scripts hard-require the bun version in their root
- * `packageManager` field (packages/script/src/index.ts refuses to run
- * otherwise). Rather than force a global `bun upgrade` on the developer, drop a
- * pinned standalone bun in `.cache/` and use it only for this build.
- */
-function ensureBun(forkDir) {
-  const required = JSON.parse(
-    readFileSync(join(forkDir, 'package.json'), 'utf8')
-  ).packageManager?.split('@')[1]
-  if (!required) throw new Error('fork root package.json has no packageManager field')
-
-  const localOk = (() => {
-    try {
-      const have = execFileSync('bun', ['--version'], { encoding: 'utf8' }).trim()
-      const [a, b, c] = have.split('.').map(Number)
-      const [x, y, z] = required.split('.').map(Number)
-      // `^x.y.z` — same major, and >= the pinned minor/patch.
-      return a === x && (b > y || (b === y && c >= z))
-    } catch {
-      return false
-    }
-  })()
-  if (localOk) return 'bun'
-
-  const dir = join(CACHE_BASE, `bun-${required}`)
-  const exe = join(dir, process.platform === 'win32' ? 'bun.exe' : 'bun')
-  if (existsSync(exe)) return exe
-
-  const target =
-    process.platform === 'win32'
-      ? 'bun-windows-x64'
-      : process.platform === 'darwin'
-        ? process.arch === 'arm64'
-          ? 'bun-darwin-aarch64'
-          : 'bun-darwin-x64'
-        : process.arch === 'arm64'
-          ? 'bun-linux-aarch64'
-          : 'bun-linux-x64'
-
-  info(`[ensure-opencode] Local bun does not satisfy ^${required}; fetching ${target} ...`)
-  mkdirSync(dir, { recursive: true })
-  const url = `https://github.com/oven-sh/bun/releases/download/bun-v${required}/${target}.zip`
-  const zip = join(dir, 'bun.zip')
-  execSync(`curl -fsSL -o "${zip}" "${url}"`, { stdio: 'inherit' })
-  // Node has no zip reader; use the platform's. NOT `tar` on Windows: the
-  // bundled bsdtar reads "D:\..." as host:path and fails (the same trap this
-  // file's header calls out for the release tarball).
-  if (process.platform === 'win32') {
-    execFileSync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`
-      ],
-      { stdio: 'inherit' }
-    )
-  } else {
-    execSync(`unzip -o -q "${zip}" -d "${dir}"`, { stdio: 'inherit' })
-  }
-  const nested = join(dir, target, process.platform === 'win32' ? 'bun.exe' : 'bun')
-  if (existsSync(nested)) {
-    cpSync(nested, exe)
-    if (process.platform !== 'win32') chmodSync(exe, 0o755)
-  }
-  if (!existsSync(exe)) throw new Error(`bun ${required} not found after extracting ${url}`)
-  return exe
-}
-
-/**
- * Clone (or refresh) the fork branch, check out the pinned ref (or branch HEAD)
- * and return the sha that will be built.
- */
-function syncFork(fork) {
-  mkdirSync(dirname(FORK_DIR), { recursive: true })
-  if (!existsSync(join(FORK_DIR, '.git'))) {
-    info(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
-    // Blobless: full history/refs (the build reads `git branch --show-current`)
-    // without paying for every blob ever committed.
-    execFileSync(
-      'git',
-      ['clone', '--filter=blob:none', '--branch', fork.branch, fork.repo, FORK_DIR],
-      { stdio: 'inherit' }
-    )
-  } else {
-    info(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
-    // `--tags` so a pinned fork tag that post-dates the clone is visible.
-    gitRun(['fetch', '--tags', 'origin', fork.branch], FORK_DIR)
-  }
-  // The pin is a tag on the fork or a commit reachable from the branch; the
-  // fetch above brings both. Resolve it before touching the working tree so a
-  // typo fails here, not three minutes into a build of the wrong thing.
-  const target = (() => {
-    if (!fork.ref) return gitOut(['rev-parse', `origin/${fork.branch}`], FORK_DIR)
-    try {
-      return gitOut(['rev-parse', '--verify', '--quiet', `${fork.ref}^{commit}`], FORK_DIR)
-    } catch {
-      throw new Error(
-        `opencodeFork.ref "${fork.ref}" is not a tag on ${fork.repo} nor a commit on ${fork.branch}`
-      )
-    }
-  })()
-  if (fork.ref) {
-    // Not fatal — a hotfix may be pinned before it is merged — but worth a line:
-    // a pin the branch does not contain is either drift or a mistake.
-    try {
-      execFileSync('git', ['merge-base', '--is-ancestor', target, `origin/${fork.branch}`], {
-        cwd: FORK_DIR,
-        stdio: 'ignore'
-      })
-    } catch {
-      console.warn(
-        `[ensure-opencode] WARN: pinned ref ${fork.ref} (${target.slice(0, 8)}) is not on ${fork.branch}`
-      )
-    }
-  }
-  // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
-  // this clone, and a plain checkout refuses to switch over a dirty file. The
-  // local branch is re-pointed at the target (not left detached) because
-  // opencode's build reads `git branch --show-current`.
-  gitRun(['checkout', '-f', '-B', fork.branch, target], FORK_DIR)
-  // Any local edit (a rewritten lockfile, the install workaround below, a stray
-  // build artifact) must not leak into the vendored binary. NOT `git clean` —
-  // that would delete the cached node_modules and turn every run into a cold
-  // install.
-  gitRun(['reset', '--hard', target], FORK_DIR)
-  return gitOut(['rev-parse', 'HEAD'], FORK_DIR)
-}
-
-/**
- * Windows-only: `tree-sitter-powershell`'s postinstall runs node-gyp, which
- * fails without a matching MSVC toolchain AND aborts the rest of bun's install,
- * leaving a half-extracted node_modules that then fails the build in confusing
- * ways. opencode only ever imports that package's prebuilt `.wasm`
- * (packages/opencode/src/tool/shell.ts), so the native binding is dead weight —
- * temporarily untrust it so its script never runs.
- */
-function withInstallWorkaround(forkDir, run) {
-  const pkgPath = join(forkDir, 'package.json')
-  const original = readFileSync(pkgPath, 'utf8')
-  if (process.platform === 'win32') {
-    const patched = original.replace(/^[ \t]*"tree-sitter-powershell",[ \t]*\r?\n/m, '')
-    if (patched !== original) writeFileSync(pkgPath, patched)
-  }
-  try {
-    run()
-  } finally {
-    writeFileSync(pkgPath, original)
-  }
-}
-
-async function buildFork(version, fork) {
-  const commit = syncFork(fork)
-  const bun = ensureBun(FORK_DIR)
-
-  info(`[ensure-opencode] Installing fork dependencies (bun: ${bun}) ...`)
-  withInstallWorkaround(FORK_DIR, () => {
-    execFileSync(bun, ['install'], { cwd: FORK_DIR, stdio: 'inherit' })
-  })
-
-  info(
-    `[ensure-opencode] Building opencode ${version} from ${fork.ref ?? fork.branch}@${commit.slice(0, 8)} ...`
-  )
-  const pkgDir = join(FORK_DIR, 'packages', 'opencode')
-  execFileSync(bun, ['run', 'script/build.ts', '--single', '--skip-install'], {
-    cwd: pkgDir,
-    stdio: 'inherit',
-    // Pin the version instead of letting their script derive one from the npm
-    // registry / current branch name (which would produce a 0.0.0-claudeui-*
-    // preview version and break every version comparison downstream).
-    env: { ...process.env, OPENCODE_VERSION: version }
-  })
-
+async function install(expected) {
   const binName = binaryName()
-  const built = join(pkgDir, 'dist', distDirName(), 'bin', binName)
-  if (!existsSync(built)) throw new Error(`fork build produced no binary at ${built}`)
-
   mkdirSync(VENDOR_DIR, { recursive: true })
-  const dest = join(VENDOR_DIR, binName)
-  const tmpDest = dest + '.tmp'
-  cpSync(built, tmpDest)
-  replaceBinary(tmpDest, dest)
-  if (process.platform !== 'win32') chmodSync(dest, 0o755)
+  // Staged inside the vendor dir: gitignored, outside electron-builder's
+  // `opencode*` filter, and on the same volume as the final rename.
+  const stage = mkdtempSync(join(VENDOR_DIR, '.stage-'))
+  const isolation = mkdtempSync(join(tmpdir(), 'opencode-version-'))
+  try {
+    const fullPkg = `${expected.package}@${expected.version}`
+    info(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
 
-  writeVersionFile({
-    source: 'fork',
-    fork: {
-      repo: fork.repo,
-      branch: fork.branch,
-      ...(fork.ref ? { ref: fork.ref } : {}),
-      commit,
-      ...(fork.tag ? { forkedFrom: fork.tag } : {})
-    },
-    builtAt: new Date().toISOString()
-  })
+    // Use execSync with a constructed command string so Node runs it via the
+    // shell on all platforms. This avoids the shell:true + array-args deprecation
+    // warning (DEP0190), and lets npm be found as a .cmd script on Windows.
+    // The package name comes from detectPackageName() and the version is
+    // validated as plain semver in getPinnedVersion(); the stage path is quoted.
+    execSync(`npm pack ${fullPkg} --pack-destination "${stage}"`, { stdio: 'inherit', cwd: ROOT })
 
-  console.log(
-    `[ensure-opencode] opencode ${version} (fork ${fork.ref ?? fork.branch}@${commit.slice(0, 8)}, ` +
-      `${(statSync(dest).size / 1024 / 1024).toFixed(1)} MB) installed to vendor/opencode-cli/${binName}`
-  )
+    const tgzFiles = readdirSync(stage).filter((f) => f.endsWith('.tgz'))
+    if (tgzFiles.length !== 1) {
+      throw new Error(`npm pack produced ${tgzFiles.length} tarballs, expected one`)
+    }
+
+    info(`[ensure-opencode] Verifying and extracting ${binName} from ${tgzFiles[0]} ...`)
+    const binBytes = extractBinary(readFileSync(join(stage, tgzFiles[0])), expected, binName)
+    info(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB (digest ok)`)
+
+    const staged = join(stage, binName)
+    writeFileSync(staged, binBytes, { mode: 0o755 })
+    if (process.platform !== 'win32') chmodSync(staged, 0o755)
+    verifyVersion(staged, isolation, isolatedEnv(isolation), expected.version)
+
+    replaceBinary(staged, join(VENDOR_DIR, binName))
+    writeFileSync(
+      join(VENDOR_DIR, 'version.json'),
+      JSON.stringify(
+        {
+          version: expected.version,
+          platform: process.platform,
+          arch: process.arch,
+          source: 'release',
+          package: expected.package,
+          integrity: expected.integrity,
+          binarySha256: expected.binarySha256,
+          downloadedAt: new Date().toISOString()
+        },
+        null,
+        2
+      ) + '\n'
+    )
+
+    console.log(
+      `[ensure-opencode] opencode ${expected.version} (${expected.package}, sha256 ` +
+        `${expected.binarySha256.slice(0, 12)}…) verified and installed to vendor/opencode-cli/${binName}`
+    )
+  } finally {
+    // The stage holds the tarball, and the binary whenever a check failed.
+    rmSync(stage, { recursive: true, force: true, maxRetries: 3 })
+    rmSync(isolation, { recursive: true, force: true, maxRetries: 3 })
+  }
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
 
-const force = process.argv.includes('--force')
-const fromRelease =
-  process.argv.includes('--from-release') || process.env.OPENCODE_VENDOR_FROM_RELEASE === '1'
-const version = getPinnedVersion()
-const pkgName = detectPackageName()
+async function main() {
+  const force = process.argv.includes('--force')
+  const version = getPinnedVersion()
+  assertManifestPin(version)
+  const expected = expectedRelease(detectPackageName())
 
-const expect = fromRelease ? { source: 'release' } : { source: 'fork', ...getForkConfig() }
-
-// One-time move of a clone made before the vendor/ layout. Runs ahead of the
-// cache check: an up-to-date machine never reaches syncFork, and would
-// otherwise re-clone on the next bump and leave the old tree orphaned.
-if (!existsSync(FORK_DIR) && existsSync(join(LEGACY_FORK_DIR, '.git'))) {
-  mkdirSync(dirname(FORK_DIR), { recursive: true })
-  renameSync(LEGACY_FORK_DIR, FORK_DIR)
-  info(`[ensure-opencode] Moved the fork clone ${LEGACY_FORK_DIR} -> ${FORK_DIR}`)
+  if (!force && isCacheHit(expected)) {
+    console.log(
+      `[ensure-opencode] opencode ${version} (${expected.package}) already vendored and ` +
+        'verified (cache hit). Use --force to re-download.'
+    )
+    return
+  }
+  await install(expected)
 }
 
-if (!force && isCacheHit(version, expect)) {
-  console.log(
-    `[ensure-opencode] opencode ${version} (${expect.source}) already vendored (cache hit). ` +
-      'Use --force to rebuild.'
-  )
-  process.exit(0)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(`\n[ensure-opencode] FAIL: ${err.message}`)
+    if (err.stack) console.error(err.stack)
+    process.exitCode = 1
+  })
 }
-
-const task = fromRelease ? download(pkgName, version) : buildFork(version, getForkConfig())
-
-task.catch((err) => {
-  console.error(`\n[ensure-opencode] FAIL: ${err.message}`)
-  if (err.stack) console.error(err.stack)
-  process.exit(1)
-})

@@ -43,7 +43,7 @@ import {
   sessionAllowKey,
   type PermissionDecision,
   PI_TOOL_TO_CLAUDE_TOOL,
-  PLAN_MODE_DENY_REASON
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import type { CodexMethods } from './protocol/methods'
@@ -3186,8 +3186,10 @@ export class CodexSession extends BaseSession {
    *
    * The verdict comes from the SAME shared engine every other tool goes
    * through. For the hosted THREE it can only answer `allow` (the hosted
-   * auto-allow rung of `decideWithSource` sits above every rung but deny, and
-   * no Claude rule string maps to the `diagram`/`mockup` kinds), but the call
+   * auto-allow rung of `decideWithSource` sits above every rung but the deny
+   * rule and the plan-mode rung (ADR-085 ruling 7 — the hosted three are never
+   * mutating kinds, so it cannot change their verdict), and no Claude rule
+   * string maps to the `diagram`/`mockup` kinds), but the call
    * is made anyway so a future ladder change reaches Codex too — and anything
    * but `allow` refuses with the reason as the tool's own output, which is the
    * only channel that tells the model why. `dispatch_agent` is the one hosted
@@ -3717,7 +3719,7 @@ export class CodexSession extends BaseSession {
             verdict.source === 'deny-rule' && verdict.rule
               ? `Denied by permission rule: ${verdict.rule}`
               : this.permissionMode === 'plan'
-                ? PLAN_MODE_DENY_REASON
+                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
                 : 'Denied by permission rules'
         }
       if (step === 'ask') decision = 'ask'

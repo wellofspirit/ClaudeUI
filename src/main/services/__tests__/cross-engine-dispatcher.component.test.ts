@@ -41,6 +41,16 @@ vi.mock('../../../core/codex/codex-locate', () => ({
   locateCodexBinary: vi.fn(() => null),
   locateCodexCodeModeHost: vi.fn(() => null)
 }))
+// The bridged Claude MCP servers for a cwd (ADR-085 S4: an opencode target
+// records their keys as child-gated categories). Hermetic — never the dev's
+// real Claude config: no bridged server unless a test says so.
+const { mockCollectClaudeMcp } = vi.hoisted(() => ({
+  mockCollectClaudeMcp: vi.fn((): Record<string, unknown> => ({}))
+}))
+vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
+  collectClaudeMcpForOpencode: mockCollectClaudeMcp
+}))
 
 import {
   CrossEngineDispatcher,
@@ -76,6 +86,9 @@ import type { BillingType, EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
+import { broadBashGlobs } from '../../../core/opencode/broad-bash-globs'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
+import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -163,7 +176,7 @@ function storedAssistant(
   }
 }
 
-/** A stored USER message — the one the fork's `createUserMessage` writes BEFORE
+/** A stored USER message — the one opencode's `createUserMessage` writes BEFORE
  *  the turn is marked busy, i.e. the tail of history in the pre-busy window the
  *  reconcile's completion-evidence check exists to reject. */
 function storedUser(
@@ -190,6 +203,7 @@ function makeFakeClient(stream = makeEventStream()): {
     deleteSession: ReturnType<typeof vi.fn<DispatchTargetClient['deleteSession']>>
     abortSession: ReturnType<typeof vi.fn<DispatchTargetClient['abortSession']>>
     replyPermission: ReturnType<typeof vi.fn<DispatchTargetClient['replyPermission']>>
+    agents: ReturnType<typeof vi.fn<DispatchTargetClient['agents']>>
     subscribeEvents: DispatchTargetClient['subscribeEvents']
   }
   stream: typeof stream
@@ -221,6 +235,8 @@ function makeFakeClient(stream = makeEventStream()): {
     deleteSession: vi.fn<DispatchTargetClient['deleteSession']>(async () => true),
     abortSession: vi.fn<DispatchTargetClient['abortSession']>(async () => true),
     replyPermission: vi.fn<DispatchTargetClient['replyPermission']>(async () => ({})),
+    // `GET /agent` (ADR-085 S4 backstop). Default: no agents → no backstop rule.
+    agents: vi.fn<DispatchTargetClient['agents']>(async () => []),
     subscribeEvents: (signal?: AbortSignal, onConnected?: () => void) =>
       stream.subscribe(signal, onConnected)
   }
@@ -228,6 +244,18 @@ function makeFakeClient(stream = makeEventStream()): {
 }
 
 type FakeClient = ReturnType<typeof makeFakeClient>['client']
+
+/** The user's merged permission rules as the dispatcher loads them (ADR-085 §3). */
+function userRules(r: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
+  return {
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined,
+    ...r
+  }
+}
 
 function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
   dispatcher: CrossEngineDispatcher
@@ -261,6 +289,9 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     // (`AppSettings.dispatchMaxConcurrent`), which no test may depend on. Every
     // concurrency test overrides this with the cap it is actually about.
     resolveMaxConcurrent: () => DEFAULT_MAX_CONCURRENT_DISPATCHES,
+    // Hermetic: the production default (`mergedClaudeRulesFor`) reads the
+    // USER's settings files. Tests about the user's rules override it.
+    loadUserRules: () => userRules(),
     ...overrides
   }
   return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
@@ -703,7 +734,7 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBe(true)
     expect(result.text).toContain('server exploded')
-    // The fork starts the turn BEFORE responding, so a rejection (or a dropped
+    // opencode starts the turn BEFORE responding, so a rejection (or a dropped
     // socket on an accepted request) can still leave one running — the old
     // code's missing abort is exactly how a dispatched agent kept editing files
     // after its caller had given up.
@@ -1362,9 +1393,11 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
   })
 
+  // ADR-085 S2: never `always` — an opencode target's allowForSession is a
+  // one-off allow, like the pi/Codex targets'.
   it.each([
     ['allow', 'once'],
-    ['allowForSession', 'always']
+    ['allowForSession', 'once']
   ] as const)('resolveApproval(%s) → replyPermission(%s)', async (decision, reply) => {
     const { dispatcher, client, stream, sessionId } = await makeTarget()
     stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
@@ -1569,7 +1602,8 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
       heartbeatMs: 50,
       piAbortSettleGraceMs: 20,
-      sseReconnectDelayMs: 5
+      sseReconnectDelayMs: 5,
+      loadUserRules: () => userRules()
     }
     return new CrossEngineDispatcher(deps)
   }
@@ -4954,6 +4988,33 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     await pending
   })
 
+  it("'acceptEdits' matches agent-control paths against the target's cwd — an edit inside a .claude/worktrees checkout is not one", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'acceptEdits',
+      cwd: '/repo/.claude/worktrees/feat'
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'edit',
+      input: { path: '/repo/.claude/worktrees/feat/src/a.ts' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
   it("'default' autonomy ASKS for a mutating tool — forwards an xeng:-prefixed approval keyed by the pi tool call's OWN id (not ctx.toolUseId)", async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
@@ -6876,7 +6937,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
         JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
     )
     expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
-      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+      PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
     )
     target.completeTurn()
     await pending
@@ -8913,6 +8974,766 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
       // reported, so the row carries no engine figure at all.
       engineCostUsd: null,
       engineCostIsEquivalent: true
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-085 §3 — dispatch targets get the user's deny/ask rules (never allow),
+// opencode target children are registered, plan refusals are host-side.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every target', () => {
+  const FORCE_DENY = 'Bash(git push --force:*)'
+  const DOCKER_ASK = 'Bash(docker run:*)'
+  const RULES = userRules({
+    allow: ['Bash(git:*)', 'Read'],
+    deny: [FORCE_DENY],
+    ask: [DOCKER_ASK],
+    additionalDirectories: ['/extra']
+  })
+  const approvals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+    ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').map((c) => c[1])
+
+  describe('opencode target', () => {
+    it('(a) the patched ruleset = base + compiled deny/ask (broad globs, no allow) + the dispatch deny LAST', async () => {
+      const { dispatcher, client } = makeHarness({ loadUserRules: () => RULES })
+      const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      expect(result.isError).toBeUndefined()
+      const rules = client.patchSession.mock.calls[0]![1].permission!
+      expect(rules.at(-1)).toEqual({
+        permission: 'claudeui_dispatch_agent*',
+        pattern: '*',
+        action: 'deny'
+      })
+      const bash = rules.filter((r) => r.permission === 'bash')
+      // The deny's globs arrive as asks: the host refuses them
+      // (`opencodeTargetRefusal`), so the server never dumps the ruleset.
+      for (const glob of broadBashGlobs('git push --force:*')) {
+        expect(bash).toContainEqual({ permission: 'bash', pattern: glob, action: 'ask' })
+      }
+      expect(bash.some((r) => r.action === 'deny')).toBe(false)
+      expect(bash).toContainEqual({ permission: 'bash', pattern: 'docker run*', action: 'ask' })
+      // Never the user's allow tier or additional directories.
+      expect(rules.some((r) => r.pattern === 'git*')).toBe(false)
+      expect(rules.some((r) => r.permission === 'external_directory')).toBe(false)
+      expect(rules.filter((r) => r.action === 'allow')).toEqual([
+        { permission: '*', pattern: '*', action: 'allow' },
+        { permission: 'read', pattern: '*.env.example', action: 'allow' }
+      ])
+    })
+
+    const TASK_PART = (childSessionId: string) => ({
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-task-1',
+        messageID: 'msg-1',
+        type: 'tool',
+        tool: 'task',
+        callID: 'call-task-1',
+        state: { status: 'running', input: {}, metadata: { sessionId: childSessionId } }
+      }
+    })
+
+    it("(b) a target task child is registered: its permission.asked forwards as `xeng:` `dispatch:bash`, the reply goes to the child's id, its session.idle does not settle the turn", async () => {
+      const { dispatcher, client, stream } = makeHarness()
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_child' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+
+      stream.push('message.part.updated', TASK_PART('oc-child-1'))
+      await tick()
+      stream.push('permission.asked', {
+        id: 'perm-child-1',
+        sessionID: 'oc-child-1',
+        permission: 'bash',
+        patterns: ['ls -la'],
+        metadata: { command: 'ls -la' },
+        tool: { messageID: 'msg-c', callID: 'call-child-ls' }
+      })
+      await tick()
+      const [approval] = approvals(ctx) as Array<{
+        requestId: string
+        toolName: string
+        toolUseId?: string
+      }>
+      expect(approval).toMatchObject({
+        requestId: `${XENG_REQUEST_PREFIX}perm-child-1`,
+        toolName: 'dispatch:bash',
+        toolUseId: 'call-child-ls'
+      })
+
+      // A child's idle is the subagent finishing, not the target's turn.
+      stream.push('session.idle', { sessionID: 'oc-child-1' })
+      await tick()
+      const sentinel = Symbol('pending')
+      expect(await Promise.race([pending, Promise.resolve(sentinel)])).toBe(sentinel)
+
+      expect(dispatcher.resolveApproval(approval.requestId, 'allow')).toBe(true)
+      expect(client.replyPermission).toHaveBeenCalledWith('perm-child-1', 'once')
+
+      completeTurn(stream)
+      expect((await pending).isError).toBeUndefined()
+    })
+
+    it('(b) an unregistered session stays foreign', async () => {
+      const { dispatcher, client, stream } = makeHarness()
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_foreign' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      stream.push('permission.asked', {
+        id: 'perm-foreign',
+        sessionID: 'not-a-child',
+        permission: 'bash',
+        metadata: { command: 'ls' }
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(0)
+      completeTurn(stream)
+      await pending
+    })
+
+    it('(c) a bash ask a user deny rule hits (reordered) is rejected with the rule, no card; an ask-rule hit is forwarded', async () => {
+      const { dispatcher, client, stream } = makeHarness({ loadUserRules: () => RULES })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_deny' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+
+      stream.push('permission.asked', {
+        id: 'perm-deny',
+        sessionID: 'oc-sess-1',
+        permission: 'bash',
+        patterns: ['git -C . push origin main --force'],
+        metadata: { command: 'git -C . push origin main --force' }
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-deny',
+        'reject',
+        expect.stringMatching(/^Denied by permission rule: Bash\(git push --force:\*\)$/)
+      )
+      expect(approvals(ctx)).toHaveLength(0)
+
+      stream.push('permission.asked', {
+        id: 'perm-ask',
+        sessionID: 'oc-sess-1',
+        permission: 'bash',
+        patterns: ['docker --context x run alpine'],
+        metadata: { command: 'docker --context x run alpine' }
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      expect(client.replyPermission).not.toHaveBeenCalledWith('perm-ask', expect.anything())
+
+      // The patterns stand in when the ask carries no command.
+      stream.push('permission.asked', {
+        id: 'perm-deny-2',
+        sessionID: 'oc-sess-1',
+        permission: 'bash',
+        patterns: ['echo ok', 'sudo git push --force']
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-deny-2',
+        'reject',
+        `Denied by permission rule: ${FORCE_DENY}`
+      )
+      completeTurn(stream)
+      await pending
+    })
+
+    it('(c2) an edit ask a narrow user Edit deny covers is refused host-side (the server got an ask)', async () => {
+      const { dispatcher, client, stream } = makeHarness({
+        loadUserRules: () => userRules({ deny: ['Edit(secrets/**)'] })
+      })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_edit_deny', autonomyMode: 'acceptEdits' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      const rules = client.patchSession.mock.calls[0]![1].permission!
+      expect(rules).toContainEqual({ permission: 'edit', pattern: 'secrets/**', action: 'ask' })
+      expect(rules.some((r) => r.permission === 'edit' && r.action === 'deny')).toBe(false)
+
+      stream.push('permission.asked', {
+        id: 'perm-edit-deny',
+        sessionID: 'oc-sess-1',
+        permission: 'edit',
+        patterns: ['secrets/key.pem'],
+        metadata: { filepath: 'secrets/key.pem' }
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-edit-deny',
+        'reject',
+        'Denied by permission rule: edit(secrets/**)'
+      )
+      expect(approvals(ctx)).toHaveLength(0)
+      completeTurn(stream)
+      await pending
+    })
+
+    it("(c) a child's bash ask a deny rule hits is refused too", async () => {
+      const { dispatcher, client, stream } = makeHarness({ loadUserRules: () => RULES })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_child_deny' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      stream.push('message.part.updated', TASK_PART('oc-child-2'))
+      await tick()
+      stream.push('permission.asked', {
+        id: 'perm-child-deny',
+        sessionID: 'oc-child-2',
+        permission: 'bash',
+        metadata: { command: 'git push origin main --force' }
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-child-deny',
+        'reject',
+        `Denied by permission rule: ${FORCE_DENY}`
+      )
+      expect(approvals(ctx)).toHaveLength(0)
+      completeTurn(stream)
+      await pending
+    })
+
+    it('(d) a plan target: an edit ask and a `general` task ask are rejected with the plan-mode reason; `explore` is forwarded', async () => {
+      const { dispatcher, client, stream } = makeHarness()
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_plan', autonomyMode: 'plan' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      // No server-side deny a child could copy, apart from the dispatch guard.
+      const rules = client.patchSession.mock.calls[0]![1].permission!
+      expect(rules.filter((r) => r.action === 'deny').map((r) => r.permission)).toEqual([
+        'claudeui_dispatch_agent*'
+      ])
+
+      stream.push('permission.asked', {
+        id: 'perm-edit',
+        sessionID: 'oc-sess-1',
+        permission: 'edit',
+        patterns: ['src/a.ts'],
+        metadata: { filepath: 'src/a.ts' }
+      })
+      stream.push('permission.asked', {
+        id: 'perm-general',
+        sessionID: 'oc-sess-1',
+        permission: 'task',
+        patterns: ['general'],
+        metadata: { subagent_type: 'general' }
+      })
+      stream.push('permission.asked', {
+        id: 'perm-explore',
+        sessionID: 'oc-sess-1',
+        permission: 'task',
+        patterns: ['explore'],
+        metadata: { subagent_type: 'explore' }
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-edit',
+        'reject',
+        PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+      )
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-general',
+        'reject',
+        PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+      )
+      expect(approvals(ctx)).toEqual([
+        expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-explore` })
+      ])
+      completeTurn(stream)
+      await pending
+    })
+
+    // ADR-085 S3b — owner ruling 7: a plan target refuses a bash command that
+    // is not plan-safe; a plan-safe one is forwarded; a user deny answers first.
+    describe('ADR-085 S3b — plan target bash asks', () => {
+      it('`rm -rf x` → reject with the plan reason; `git status` → forwarded as a card; a deny-rule hit → the rule reason', async () => {
+        const { dispatcher, client, stream } = makeHarness({ loadUserRules: () => RULES })
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_plan_bash', autonomyMode: 'plan' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+
+        stream.push('permission.asked', {
+          id: 'perm-rm',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['rm -rf x'],
+          metadata: { command: 'rm -rf x' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-status',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['git status'],
+          metadata: { command: 'git status' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-force',
+          sessionID: 'oc-sess-1',
+          permission: 'bash',
+          patterns: ['git push origin main --force'],
+          metadata: { command: 'git push origin main --force' }
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-rm',
+          'reject',
+          PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        )
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-force',
+          'reject',
+          `Denied by permission rule: ${FORCE_DENY}`
+        )
+        expect(client.replyPermission).not.toHaveBeenCalledWith('perm-status', expect.anything())
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-status` })
+        ])
+        completeTurn(stream)
+        await pending
+      })
+    })
+
+    it('(d) outside plan an edit ask is forwarded', async () => {
+      const { dispatcher, client, stream } = makeHarness()
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_edit' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      stream.push('permission.asked', {
+        id: 'perm-edit-d',
+        sessionID: 'oc-sess-1',
+        permission: 'edit',
+        patterns: ['src/a.ts']
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      expect(client.replyPermission).not.toHaveBeenCalled()
+      completeTurn(stream)
+      await pending
+    })
+
+    // ── ADR-085 S4 — subagents follow the target's rules ────────────────────
+    describe('ADR-085 S4 — the subagent backstop and target children', () => {
+      const RECURSION_DENY = {
+        permission: 'claudeui_dispatch_agent*',
+        pattern: '*',
+        action: 'deny'
+      }
+      const ALLOW_ALL = { permission: '*', pattern: '*', action: 'allow' as const }
+
+      it('an ungated subagent gets `task <name> ask` after the compiled deny/ask, before the recursion deny', async () => {
+        const { dispatcher, client } = makeHarness({ loadUserRules: () => RULES })
+        client.agents.mockResolvedValue([
+          { name: 'mybuilder', mode: 'subagent', permission: [ALLOW_ALL] },
+          {
+            name: 'explore',
+            mode: 'subagent',
+            permission: [
+              ALLOW_ALL,
+              { permission: 'bash', pattern: '*', action: 'ask' },
+              { permission: 'edit', pattern: '*', action: 'deny' },
+              { permission: 'webfetch', pattern: '*', action: 'ask' }
+            ]
+          },
+          { name: 'build', mode: 'primary', permission: [ALLOW_ALL] }
+        ])
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+        const rules = client.patchSession.mock.calls[0]![1].permission!
+        expect(rules.at(-1)).toEqual(RECURSION_DENY)
+        expect(rules.at(-2)).toEqual({ permission: 'task', pattern: 'mybuilder', action: 'ask' })
+        // After the compiled user deny/ask rules (the narrow deny arrives as
+        // an ask — `opencodeWireRuleset`).
+        const lastUserRule = rules.findLastIndex(
+          (r) => r.permission === 'bash' && r.pattern.includes('git push --force')
+        )
+        expect(lastUserRule).toBeGreaterThan(-1)
+        expect(lastUserRule).toBeLessThan(rules.length - 2)
+        expect(rules.filter((r) => r.permission === 'task')).toHaveLength(1)
+      })
+
+      it('a failing `GET /agent` → `task * ask` before the recursion deny', async () => {
+        const { dispatcher, client } = makeHarness()
+        client.agents.mockRejectedValue(new Error('boom'))
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+        const rules = client.patchSession.mock.calls[0]![1].permission!
+        expect(rules.at(-1)).toEqual(RECURSION_DENY)
+        expect(rules.at(-2)).toEqual({ permission: 'task', pattern: '*', action: 'ask' })
+      })
+
+      it("a target child's ask the target's ruleset allows → `once`, no card; one it asks for → forwarded", async () => {
+        const { dispatcher, client, stream } = makeHarness()
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4', autonomyMode: 'acceptEdits' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-edit',
+          sessionID: 'oc-child-s4',
+          permission: 'edit',
+          patterns: ['src/a.ts'],
+          metadata: { filepath: 'src/a.ts' }
+        })
+        stream.push('permission.asked', {
+          id: 'perm-child-bash',
+          sessionID: 'oc-child-s4',
+          permission: 'bash',
+          patterns: ['hostname'],
+          metadata: { command: 'hostname' }
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith('perm-child-edit', 'once')
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-child-bash` })
+        ])
+        expect(client.replyPermission).not.toHaveBeenCalledWith(
+          'perm-child-bash',
+          expect.anything()
+        )
+        completeTurn(stream)
+        await pending
+      })
+
+      describe('bridged MCP servers (parity with the target, never wider)', () => {
+        beforeEach(() => {
+          mockCollectClaudeMcp.mockReturnValue({
+            lsphub: { type: 'local', command: ['lsphub'], enabled: true }
+          })
+        })
+        afterEach(() => {
+          mockCollectClaudeMcp.mockReturnValue({})
+        })
+
+        async function childMcpAsk(
+          harness: ReturnType<typeof makeHarness>,
+          permission: string,
+          toolUseId: string
+        ): Promise<{ ctx: ReturnType<typeof makeCtx>; pending: Promise<DispatchResult> }> {
+          const { dispatcher, client, stream } = harness
+          holdTurn(client)
+          const ctx = makeCtx({ toolUseId })
+          const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+          await tick()
+          stream.push('message.part.updated', TASK_PART(`oc-child-${toolUseId}`))
+          await tick()
+          stream.push('permission.asked', {
+            id: `perm-${toolUseId}`,
+            sessionID: `oc-child-${toolUseId}`,
+            permission,
+            patterns: ['*'],
+            metadata: {}
+          })
+          await tick()
+          return { ctx, pending }
+        }
+
+        it("a target child's `lsphub_find_refs` ask → `once`, no card", async () => {
+          const harness = makeHarness()
+          const { ctx, pending } = await childMcpAsk(harness, 'lsphub_find_refs', 'mcp1')
+          expect(harness.client.replyPermission).toHaveBeenCalledWith('perm-mcp1', 'once')
+          expect(approvals(ctx)).toHaveLength(0)
+          completeTurn(harness.stream)
+          await pending
+        })
+
+        it('…a user `mcp__lsphub` deny → refused with the compiled key', async () => {
+          const harness = makeHarness({ loadUserRules: () => userRules({ deny: ['mcp__lsphub'] }) })
+          const { ctx, pending } = await childMcpAsk(harness, 'lsphub_find_refs', 'mcp2')
+          expect(harness.client.replyPermission).toHaveBeenCalledWith(
+            'perm-mcp2',
+            'reject',
+            'Denied by permission rule: lsphub_*(*)'
+          )
+          expect(approvals(ctx)).toHaveLength(0)
+          completeTurn(harness.stream)
+          await pending
+        })
+
+        it('a NON-bridged key `otherserver_tool` → forwarded as a card, no reply', async () => {
+          const harness = makeHarness()
+          const { ctx, pending } = await childMcpAsk(harness, 'otherserver_tool', 'mcp3')
+          expect(approvals(ctx)).toEqual([
+            expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-mcp3` })
+          ])
+          expect(harness.client.replyPermission).not.toHaveBeenCalled()
+          completeTurn(harness.stream)
+          await pending
+        })
+      })
+
+      it("a target child's `external_directory` ask is forwarded as a card, never answered by the target's `{*: allow}`", async () => {
+        const { dispatcher, client, stream } = makeHarness()
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4_ext', autonomyMode: 'acceptEdits' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4e'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-ext',
+          sessionID: 'oc-child-s4e',
+          permission: 'external_directory',
+          patterns: ['/outside/*'],
+          metadata: {}
+        })
+        await tick()
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-child-ext` })
+        ])
+        expect(client.replyPermission).not.toHaveBeenCalled()
+        completeTurn(stream)
+        await pending
+      })
+
+      it("a target child's ask the target's ruleset denies → refused with the rule; the target's OWN ask is forwarded", async () => {
+        const { dispatcher, client, stream } = makeHarness({
+          loadUserRules: () => userRules({ deny: ['WebFetch'] })
+        })
+        holdTurn(client)
+        const ctx = makeCtx({ toolUseId: 'toolu_oc_s4_deny' })
+        const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+        await tick()
+        stream.push('message.part.updated', TASK_PART('oc-child-s4d'))
+        await tick()
+        stream.push('permission.asked', {
+          id: 'perm-child-fetch',
+          sessionID: 'oc-child-s4d',
+          permission: 'webfetch',
+          patterns: ['https://example.invalid'],
+          metadata: { url: 'https://example.invalid' }
+        })
+        // An own-session ask is the server's business (it evaluated the same
+        // ruleset) — never answered by this rung.
+        stream.push('permission.asked', {
+          id: 'perm-own-edit',
+          sessionID: 'oc-sess-1',
+          permission: 'edit',
+          patterns: ['src/a.ts']
+        })
+        await tick()
+        expect(client.replyPermission).toHaveBeenCalledWith(
+          'perm-child-fetch',
+          'reject',
+          'Denied by permission rule: webfetch(*)'
+        )
+        expect(approvals(ctx)).toEqual([
+          expect.objectContaining({ requestId: `${XENG_REQUEST_PREFIX}perm-own-edit` })
+        ])
+        completeTurn(stream)
+        await pending
+      })
+    })
+  })
+
+  describe('(e) pi target', () => {
+    async function start(mode: string) {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        loadUserRules: () => RULES
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await tick()
+      const finish = async (): Promise<void> => {
+        target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+        target.pushEvent(PI_AGENT_SETTLED)
+        await pending
+      }
+      return { target, ctx, finish }
+    }
+
+    it('a deny rule refuses with the rule, even under auto', async () => {
+      const { target, ctx, finish } = await start('auto')
+      const decision = await target.gateHandler()({
+        toolCallId: 'pi-call-d',
+        toolName: 'bash',
+        input: { command: 'git push origin main --force' }
+      })
+      expect(decision).toEqual({
+        behavior: 'deny',
+        reason: `Denied by permission rule: ${FORCE_DENY}`
+      })
+      expect(approvals(ctx)).toHaveLength(0)
+      await finish()
+    })
+
+    it('an ask rule under auto is forwarded (the ask rung precedes the mode base)', async () => {
+      const { target, ctx, finish } = await start('auto')
+      void target.gateHandler()({
+        toolCallId: 'pi-call-a',
+        toolName: 'bash',
+        input: { command: 'docker --context x run alpine' }
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      await finish()
+    })
+
+    it('the user allow tier is not inherited: a `git` command under default still asks', async () => {
+      const { target, ctx, finish } = await start('default')
+      void target.gateHandler()({
+        toolCallId: 'pi-call-g',
+        toolName: 'bash',
+        input: { command: 'git status' }
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      await finish()
+    })
+
+    it('a mode-base deny keeps its own reason', async () => {
+      const { target, finish } = await start('plan')
+      const decision = await target.gateHandler()({
+        toolCallId: 'pi-call-w',
+        toolName: 'write',
+        input: { path: 'a.txt', content: 'x' }
+      })
+      expect(decision).toEqual({ behavior: 'deny', reason: 'Denied by dispatch autonomy mode' })
+      await finish()
+    })
+  })
+
+  describe('(f) codex target', () => {
+    async function start(mode: string) {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        loadUserRules: () => RULES
+      })
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        autonomyMode: mode,
+        toolUseId: 'toolu_dispatch_1'
+      })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await tick()
+      return { target, ctx, pending }
+    }
+    const commandRequest = (command: string): Record<string, unknown> => ({
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      startedAtMs: 0,
+      kind: 'command',
+      environmentId: null,
+      command,
+      cwd: '/tmp/xeng-project'
+    })
+
+    it('an ask rule under auto asks the caller (it no longer allows everything)', async () => {
+      const { target, ctx, pending } = await start('auto')
+      void target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "docker --context x run alpine"')
+      )
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      target.completeTurn()
+      await pending
+    })
+
+    it('a deny rule declines and reports the rule', async () => {
+      const { target, ctx, pending } = await start('auto')
+      const decision = await target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "git push origin main --force"')
+      )
+      expect(decision).toEqual({ decision: 'decline' })
+      expect(approvals(ctx)).toHaveLength(0)
+      const denial = ctx.emit.mock.calls.find(
+        (c) =>
+          c[0] === 'session:subagent-message' &&
+          JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
+      )
+      expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
+        `Denied by permission rule: ${FORCE_DENY}`
+      )
+      target.completeTurn()
+      await pending
+    })
+
+    it('without a matching rule auto still allows (the native reviewer decided)', async () => {
+      const { target, pending } = await start('auto')
+      const decision = await target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "ls"')
+      )
+      expect(decision).toEqual({ decision: 'accept' })
+      target.completeTurn()
+      await pending
+    })
+  })
+
+  describe('(g) Claude target', () => {
+    async function start(rules: MergedClaudeRules, mode = 'default') {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        loadUserRules: () => rules
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: mode })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await tick()
+      const finish = async (): Promise<void> => {
+        target.push(resultMsg({ result: 'ok', session_id: 'claude-sess-1' }))
+        await pending
+      }
+      return { target, ctx, finish }
+    }
+
+    it('spawn opts carry settings.permissions.{deny, ask} — never the allow tier', async () => {
+      const { target, finish } = await start(RULES, 'auto')
+      expect(target.spawnCalls[0].settings).toEqual({
+        permissions: { deny: [FORCE_DENY], ask: [DOCKER_ASK] }
+      })
+      await finish()
+    })
+
+    it('no settings key at all when the user has no deny/ask rule', async () => {
+      const { target, finish } = await start(userRules({ allow: ['Bash(git:*)'] }))
+      expect('settings' in target.spawnCalls[0]).toBe(false)
+      await finish()
+    })
+
+    it('a shell command a deny rule hits is refused with the rule, no card', async () => {
+      const { target, ctx, finish } = await start(RULES)
+      const decision = await target.lastCanUseTool()!(
+        'Bash',
+        { command: 'git -C . push origin main --force' },
+        { signal: new AbortController().signal, toolUseId: 'toolu_c1' }
+      )
+      expect(decision).toEqual({
+        behavior: 'deny',
+        message: `Denied by permission rule: ${FORCE_DENY}`
+      })
+      expect(approvals(ctx)).toHaveLength(0)
+
+      // Anything else still reaches the human.
+      void target.lastCanUseTool()!(
+        'Bash',
+        { command: 'ls' },
+        { signal: new AbortController().signal, toolUseId: 'toolu_c2' }
+      )
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      await finish()
     })
   })
 })

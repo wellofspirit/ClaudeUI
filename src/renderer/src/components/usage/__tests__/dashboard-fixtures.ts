@@ -68,6 +68,7 @@ export function makeAccount(overrides: Partial<DashboardAccount> = {}): Dashboar
     totals: makeTotals({ displayCostUsd: 10, apiCostUsd: 10 }),
     models: [],
     dispatched: null,
+    judge: null,
     ...overrides
   }
 }

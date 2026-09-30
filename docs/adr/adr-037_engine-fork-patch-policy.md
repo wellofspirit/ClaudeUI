@@ -1,6 +1,8 @@
 # ADR-037: Engine customization policy — fork+patch opencode, extend pi, no upstreaming
 
-**Status:** Accepted (2026-08-01)
+**Status:** Accepted (2026-08-01). Superseded in part by
+[ADR-081](adr-081_claudeui-owned-judge-transport.md) (2026-09-28): the opencode half — §1, P1-P4 and
+the §3 bump protocol — is retired; §2 (pi: extend, don't patch) stands.
 **Supersedes:** the "do not fork; do not vendor a pi plugin" decision in
 `docs/automode-rework-plan.md` §2 (amended in place).
 **Related:** ADR-023 (+2026-08-01 amendment), ADR-035 (pi integration), ADR-036 (auth vault).

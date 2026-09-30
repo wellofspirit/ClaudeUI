@@ -1,5 +1,10 @@
 import { useState, useMemo, useEffect } from 'react'
-import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
+import type {
+  ContentBlock,
+  PendingApproval,
+  PermissionDenialBlock,
+  PermissionSuggestion
+} from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
@@ -7,6 +12,7 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
+import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { deriveTaskState, latestNotification } from './task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -27,6 +33,14 @@ interface Props {
    * plan/question lifted cards, which also consume `approval`.
    */
   approval?: PendingApproval
+  /**
+   * A refusal of THIS task call that no judge made — the opencode host's
+   * plan-mode refusal of the subagent spawn (ADR-085 §3), or any engine's
+   * denial of the task tool (a deny rule, a mode). Shown as ToolCard shows
+   * one: a header chip, and a strip when expanded. The card's status is still
+   * `failed` — the tool_result is the error.
+   */
+  denial?: PermissionDenialBlock
 }
 
 export interface ParsedUsage {
@@ -126,7 +140,7 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-export function TaskCard({ block, result, view, approval }: Props): React.JSX.Element {
+export function TaskCard({ block, result, view, approval, denial }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -388,6 +402,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
         <span className="text-text-secondary text-[12px] truncate flex-1 text-left">
           {description}
         </span>
+        {denial && <PermissionDenialChip denial={denial} testIdPrefix="TaskCard" />}
         {elapsed !== undefined && (
           <span
             data-testid="TaskCard.elapsed"
@@ -503,6 +518,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
       {/* Expanded content */}
       {expanded && (
         <>
+          {denial && <PermissionDenialStrip denial={denial} testIdPrefix="TaskCard" />}
           {/* Instructions */}
           {prompt && (
             <div className="border-t border-border px-3 py-2">
@@ -585,6 +601,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               )}
               <div className="flex-1" />
               <button
+                data-testid="TaskCard.expanded.openInPanel"
                 onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
                 className="text-[11px] text-accent hover:underline cursor-pointer"
               >

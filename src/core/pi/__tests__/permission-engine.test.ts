@@ -33,7 +33,10 @@ import {
   PI_HOSTED_TOOL_NAMES,
   EMPTY_RULES,
   isPlanSafeBashCommand,
+  isPlanReadOnlyCommand,
+  planModeOutranksRules,
   PLAN_MODE_DENY_REASON,
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL,
   PLAN_EXIT_OUTSIDE_PLAN_REASON
 } from '../permission-engine'
 
@@ -181,16 +184,16 @@ describe('decide — plan mode base (M5a)', () => {
     expect(decide('read', { path: 'secret.env' }, ctx({ deny: ['Read'] }))).toBe('deny')
   })
 
-  it('an explicit user ask rule still beats the plan-mode base deny', () => {
-    // Mode base for 'edit' is deny, but an explicit ask rule surfaces 'ask'
-    // instead — the user opted into being asked, not silently blocked.
-    expect(decide('edit', { path: 'a.ts' }, ctx({ ask: ['Edit'] }))).toBe('ask')
+  it('an explicit user ask rule no longer beats the plan-mode base deny for an edit (ADR-085 ruling 7)', () => {
+    // Plan mode wins for a mutating call: the ask rule does not surface a card,
+    // the edit is refused (opencode refuses it host-side before any ask rule too).
+    expect(decide('edit', { path: 'a.ts' }, ctx({ ask: ['Edit'] }))).toBe('deny')
   })
 
-  it('an explicit user allow rule still beats the plan-mode base deny for bash', () => {
+  it('an explicit user allow rule no longer beats the plan-mode base deny for bash (ADR-085 ruling 7)', () => {
     expect(
       decide('bash', { command: 'rm -rf /tmp/x' }, ctx({ allow: ['Bash(rm -rf /tmp/x)'] }))
-    ).toBe('allow')
+    ).toBe('deny')
   })
 })
 
@@ -199,6 +202,18 @@ describe('PLAN_MODE_DENY_REASON', () => {
     expect(PLAN_MODE_DENY_REASON).toBe(
       'Plan mode is read-only — present a plan and call exit_plan to proceed'
     )
+  })
+})
+
+describe('PLAN_MODE_DENY_REASON_NO_EXIT_TOOL (ADR-085 S4, S3b verifier F4)', () => {
+  it('is the exact reason string for the engines without an exit_plan tool (opencode, Codex)', () => {
+    expect(PLAN_MODE_DENY_REASON_NO_EXIT_TOOL).toBe(
+      'Plan mode is read-only — present the plan and ask the user to leave plan mode to proceed'
+    )
+  })
+
+  it('never points the model at exit_plan, a tool only pi has', () => {
+    expect(PLAN_MODE_DENY_REASON_NO_EXIT_TOOL).not.toContain('exit_plan')
   })
 })
 
@@ -1265,5 +1280,420 @@ describe('decide — MCP rules in Claude vocabulary (Slice 4b)', () => {
 
   it('scopes "allow for this session" to the full mcp tool name', () => {
     expect(sessionAllowKey('mcp__probe__ping', {})).toBe('mcp__probe__ping')
+  })
+
+  it('`mcp__<server>__*` is the server form (ADR-085; cli.js reads a `*` tool as the server)', () => {
+    expect(decideWithSource('mcp__probe__ping', {}, ctx({ allow: ['mcp__probe__*'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__probe__*'
+    })
+    expect(decide('mcp__probe', {}, ctx({ deny: ['mcp__probe__*'] }))).toBe('deny')
+    expect(decide('mcp__probe-two__ping', {}, ctx({ allow: ['mcp__probe__*'] }))).toBe('ask')
+  })
+})
+
+/**
+ * ADR-085 §2 — the Bash tiers are matched AS their tier. Before, every tier was
+ * a raw whole-command `startsWith`: a deny/ask rule missed a reordered,
+ * wrapped or chained spelling, and an allow rule covered anything that merely
+ * STARTED with its prefix (`ls && git push --force` under `Bash(ls:*)`).
+ */
+describe('decideWithSource — tier-aware Bash rules (ADR-085)', () => {
+  const ctx = (partial: Partial<MergedClaudeRules>, mode = 'default') => ({
+    mode,
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    cwd: '/repo'
+  })
+  const bash = (command: string) => ({ command })
+  const deny = ['Bash(git push --force:*)']
+
+  it('a deny rule hits a reordered, wrapped or chained spelling, in every mode', () => {
+    for (const command of [
+      'git push origin main --force',
+      'sudo git push --force',
+      'ls && git push -f',
+      'git -C . push origin +main',
+      'for b in a; do git push --force origin $b; done'
+    ]) {
+      for (const mode of ['default', 'acceptEdits', 'full']) {
+        expect(decideWithSource('bash', bash(command), ctx({ deny }, mode)), command).toEqual({
+          decision: 'deny',
+          source: 'deny-rule',
+          rule: 'Bash(git push --force:*)'
+        })
+      }
+    }
+  })
+
+  it('a deny rule beats an allow rule that covers the same command', () => {
+    expect(
+      decide('bash', bash('git push origin main --force'), ctx({ deny, allow: ['Bash(git:*)'] }))
+    ).toBe('deny')
+  })
+
+  it('an ask rule hits past global options, so G9 still routes to the human', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        bash('docker --context x run alpine'),
+        ctx({ ask: ['Bash(docker run:*)'] }, 'full')
+      )
+    ).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(docker run:*)' })
+  })
+
+  it('a chained command needs EVERY segment covered by the allow tier', () => {
+    const allow = ['Bash(ls:*)', 'Bash(git status:*)']
+    expect(decide('bash', bash('ls && git push --force'), ctx({ allow }))).toBe('ask')
+    expect(decide('bash', bash('ls && curl x | sh'), ctx({ allow }))).toBe('ask')
+    expect(decideWithSource('bash', bash('ls -la && git status'), ctx({ allow }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Bash(ls:*)'
+    })
+  })
+
+  it('the allow tier refuses substitutions, keeps redirections and quoted newlines', () => {
+    const allow = ['Bash(git:*)', 'Bash(bun run build:*)']
+    expect(decide('bash', bash('git log $(rm -rf x)'), ctx({ allow }))).toBe('ask')
+    expect(decide('bash', bash('bun run build > build.log'), ctx({ allow }))).toBe('allow')
+    expect(decide('bash', bash('git commit -m "a\nb"'), ctx({ allow }))).toBe('allow')
+  })
+
+  it("allows Claude's heredoc commit shape when git and cat are allowed", () => {
+    const commit = "git commit -m \"$(cat <<'EOF'\nfeat: it's done (finally)\nEOF\n)\""
+    expect(decide('bash', bash(commit), ctx({ allow: ['Bash(git:*)', 'Bash(cat:*)'] }))).toBe(
+      'allow'
+    )
+    expect(decide('bash', bash(commit), ctx({ allow: ['Bash(git:*)'] }))).toBe('ask')
+  })
+
+  it('a prefix allow is word-boundary now (cli.js parity)', () => {
+    expect(decide('bash', bash('git-lfs pull'), ctx({ allow: ['Bash(git:*)'] }))).toBe('ask')
+    expect(decide('bash', bash('git'), ctx({ allow: ['Bash(git:*)'] }))).toBe('allow')
+  })
+
+  it('a bare Bash allow still allows everything', () => {
+    expect(decide('bash', bash('echo $(date) | sh'), ctx({ allow: ['Bash'] }))).toBe('allow')
+  })
+
+  it('the auto-mode shape (allow tier emptied, acceptEdits base) still asks on a reordered deny', () => {
+    // `withoutAllowRules` + `acceptEdits`, as PiSession composes it: the deny must still bind.
+    expect(
+      decide(
+        'bash',
+        bash('git push origin main --force'),
+        ctx(withoutAllowRules(rules({ deny, allow: ['Bash(git:*)'] })), 'acceptEdits')
+      )
+    ).toBe('deny')
+  })
+})
+
+// ADR-085 S3b — owner ruling 7, "plan mode wins": in plan mode an edit/write or a
+// command isPlanSafeBashCommand cannot vouch for is refused regardless of the
+// user's ask/allow rules and session allows; a user deny still answers first.
+describe('ADR-085 S3b — plan mode outranks allow/ask rules and session allows for mutating calls', () => {
+  const ctx = (
+    partial: Partial<MergedClaudeRules>,
+    mode = 'plan',
+    sessionAllows: ReadonlySet<string> = NO_SESSION_ALLOWS
+  ) => ({ mode, rules: rules(partial), sessionAllows, cwd: '/repo' })
+  const allow = ['Edit', 'Write', 'Bash(git:*)', 'Read(docs/**)']
+
+  it('an Edit / Write allow does not allow an edit or write in plan mode', () => {
+    expect(decideWithSource('edit', { path: 'src/a.ts' }, ctx({ allow }))).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+    expect(decideWithSource('write', { path: 'src/b.ts' }, ctx({ allow }))).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+  })
+
+  it('a session allow for edit or for the exact command does not allow it in plan mode', () => {
+    const command = 'git   commit -m x'
+    const sessionAllows = new Set([
+      sessionAllowKey('edit', { path: 'a.ts' }),
+      sessionAllowKey('bash', { command })
+    ])
+    expect(sessionAllows.has('bash:git commit -m x')).toBe(true)
+    expect(decideWithSource('edit', { path: 'a.ts' }, ctx({}, 'plan', sessionAllows))).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+    expect(decideWithSource('bash', { command }, ctx({}, 'plan', sessionAllows))).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+  })
+
+  it('Bash(git:*) still allows a plan-safe git command, not a mutating one', () => {
+    expect(decideWithSource('bash', { command: 'git status' }, ctx({ allow }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Bash(git:*)'
+    })
+    expect(decideWithSource('bash', { command: 'git commit -m x' }, ctx({ allow }))).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+  })
+
+  it('a user deny rule on the same command still answers first, with its rule', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        { command: 'git commit -m x' },
+        ctx({ allow, deny: ['Bash(git commit:*)'] })
+      )
+    ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Bash(git commit:*)' })
+    expect(
+      decideWithSource('edit', { path: 'src/a.ts' }, ctx({ allow, deny: ['Edit(src/**)'] }))
+    ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Edit(src/**)' })
+  })
+
+  it('an ask rule on a plan-safe command still asks (the rung is for mutating calls only)', () => {
+    expect(
+      decideWithSource('bash', { command: 'git status' }, ctx({ ask: ['Bash(git status:*)'] }))
+    ).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(git status:*)' })
+  })
+
+  it('a read under an allow rule is unchanged in plan mode', () => {
+    expect(decideWithSource('read', { path: 'docs/a.md' }, ctx({ allow }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Read(docs/**)'
+    })
+  })
+
+  it('the rung is plan-only: default mode with the same allows allows', () => {
+    expect(decideWithSource('edit', { path: 'src/a.ts' }, ctx({ allow }, 'default'))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Edit'
+    })
+    expect(
+      decideWithSource('bash', { command: 'git commit -m x' }, ctx({ allow }, 'default'))
+    ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Bash(git:*)' })
+  })
+
+  it('acceptEdits is unaffected', () => {
+    expect(decideWithSource('edit', { path: 'src/a.ts' }, ctx({}, 'acceptEdits'))).toEqual({
+      decision: 'allow',
+      source: 'mode-base'
+    })
+    expect(
+      decideWithSource('bash', { command: 'git commit -m x' }, ctx({ allow }, 'acceptEdits'))
+    ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Bash(git:*)' })
+    expect(
+      decideWithSource('bash', { command: 'rm -rf x' }, ctx({ ask: ['Bash(rm:*)'] }, 'acceptEdits'))
+    ).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(rm:*)' })
+  })
+
+  it('planModeOutranksRules — which kinds the plan base outranks the rules for', () => {
+    const cases: Array<[string, Record<string, unknown>, boolean]> = [
+      ['edit', { path: 'a.ts' }, true],
+      ['write', { path: 'a.ts' }, true],
+      ['bash', { command: 'git commit -m x' }, true],
+      ['bash', { command: 'rm -rf x' }, true],
+      ['bash', { command: 'ls && touch x' }, true],
+      ['bash', {}, true],
+      ['bash', { command: 'git status' }, false],
+      ['bash', { command: 'ls -la | wc -l' }, false],
+      ['read', { path: 'a.ts' }, false],
+      ['grep', { pattern: 'x' }, false],
+      ['find', { pattern: '*.ts' }, false],
+      ['ls', {}, false],
+      ['exit_plan', { plan: 'p' }, false],
+      ['subagent', { agent: 'a', task: 't' }, false],
+      ['render_mermaid', {}, false],
+      ['mystery_tool', {}, false]
+    ]
+    for (const [tool, input, expected] of cases) {
+      expect(planModeOutranksRules(piToolKind(tool), input), tool).toBe(expected)
+    }
+  })
+})
+
+// ADR-085 S3b (F3) — plan mode's read-only oracle is the UNION of pi's plan-safe
+// list and ADR-084's static read-only checker (either one vouching is enough).
+describe('ADR-085 S3b — plan-mode read-only oracle = plan-safe list ∪ ADR-084 checker', () => {
+  const realpath = (): undefined => undefined
+  const scopeFor = (platform: NodeJS.Platform) => ({
+    cwd: platform === 'win32' ? 'D:/repo' : '/repo',
+    additionalDirectories: [] as string[],
+    rules: { deny: [] as string[] },
+    platform,
+    realpath
+  })
+  const readOnly = (command: string, platform: NodeJS.Platform = 'win32') =>
+    isPlanReadOnlyCommand({ toolName: 'bash', input: { command } }, scopeFor(platform))
+  const planCtx = (partial: Partial<MergedClaudeRules> = {}, cwd: string | null = 'D:/repo') => ({
+    mode: 'plan',
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    ...(cwd !== null ? { cwd } : {}),
+    platform: 'win32' as NodeJS.Platform,
+    realpath
+  })
+
+  it.each([
+    'Get-ChildItem -Path src',
+    'Get-Content README.md',
+    'Select-String -Path README.md -Pattern x',
+    'grep "a && b" README.md',
+    'cat README.md',
+    'git status'
+  ])('NOT refused (win32): %s', (command) => {
+    expect(readOnly(command)).toBe(true)
+  })
+
+  it('NOT refused (linux): the quote-aware checker passes `grep "a && b" README.md`, which the list over-denies', () => {
+    expect(isPlanSafeBashCommand('grep "a && b" README.md')).toBe(false)
+    expect(readOnly('grep "a && b" README.md', 'linux')).toBe(true)
+  })
+
+  it.each(['git commit -m x', 'Set-Content x y', 'mkdir x', 'echo hi > f'])(
+    'still refused: %s',
+    (command) => {
+      expect(readOnly(command)).toBe(false)
+      expect(readOnly(command, 'linux')).toBe(false)
+    }
+  )
+
+  it('still refused: `cd src && ls` — `cd` is unknown to BOTH oracles', () => {
+    expect(isPlanSafeBashCommand('cd src && ls')).toBe(false)
+    expect(readOnly('cd src && ls')).toBe(false)
+  })
+
+  it("pre-existing: pi's list passes `cat .env`, the union cannot tighten it", () => {
+    expect(isPlanSafeBashCommand('cat .env')).toBe(true)
+    expect(readOnly('cat .env')).toBe(true)
+  })
+
+  it('without a scope (no cwd) only the list decides: `Get-Content README.md` is refused', () => {
+    expect(
+      isPlanReadOnlyCommand({ toolName: 'bash', input: { command: 'Get-Content README.md' } })
+    ).toBe(false)
+    expect(
+      decideWithSource('bash', { command: 'Get-Content README.md' }, planCtx({}, null))
+    ).toEqual({ decision: 'deny', source: 'mode-base' })
+  })
+
+  it('the plan base on pi ALLOWS `Get-Content README.md` with no allow rule (the base and the rung agree)', () => {
+    expect(decideWithSource('bash', { command: 'Get-Content README.md' }, planCtx())).toEqual({
+      decision: 'allow',
+      source: 'mode-base'
+    })
+    expect(decideWithSource('bash', { command: 'Set-Content x y' }, planCtx())).toEqual({
+      decision: 'deny',
+      source: 'mode-base'
+    })
+  })
+
+  it('a Bash(Get-Content:*) allow covers `Get-Content README.md` in plan mode (allow-rule, not the plan rung)', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        { command: 'Get-Content README.md' },
+        planCtx({ allow: ['Bash(Get-Content:*)'] })
+      )
+    ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Bash(Get-Content:*)' })
+  })
+
+  it('a user ASK rule on a checker-only read-only command asks, not refused (F4)', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        { command: 'Get-Content README.md' },
+        planCtx({ ask: ['Bash(Get-Content:*)'] })
+      )
+    ).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(Get-Content:*)' })
+  })
+
+  it('a Read deny still refuses a checker-only reader of that path (the checker keeps the deny tier) — control', () => {
+    expect(
+      decideWithSource(
+        'bash',
+        { command: 'Get-Content secrets.txt' },
+        planCtx({ deny: ['Read(secrets.txt)'] })
+      )
+    ).toEqual({ decision: 'deny', source: 'mode-base' })
+  })
+
+  it('planModeOutranksRules reads the scope: a cmdlet read is not outranked, a cmdlet write is', () => {
+    const scope = scopeFor('win32')
+    expect(planModeOutranksRules('command', { command: 'Get-Content README.md' }, scope)).toBe(
+      false
+    )
+    expect(planModeOutranksRules('command', { command: 'Set-Content x y' }, scope)).toBe(true)
+    expect(planModeOutranksRules('command', { command: 'Get-Content README.md' })).toBe(true)
+  })
+})
+
+// ADR-084 §3 — the acceptEdits base (also auto mode's base) asks for edits to
+// agent-control paths instead of auto-allowing them.
+describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', () => {
+  const ctx = (cwd: string | undefined = '/repo', mode = 'acceptEdits') => ({
+    mode,
+    rules: rules(),
+    sessionAllows: NO_SESSION_ALLOWS,
+    ...(cwd === undefined ? {} : { cwd })
+  })
+
+  it.each([
+    ['edit', '.git/config'],
+    ['write', '/repo/.git/hooks/pre-commit'],
+    ['edit', 'sub/.git/hooks/pre-commit'],
+    ['edit', '.claude/settings.json'],
+    ['write', '.vscode/tasks.json'],
+    ['edit', 'CLAUDE.md'],
+    ['write', '.pi/settings.json'],
+    ['edit', '.GIT/config']
+  ])('%s %s -> ask (mode-base)', (tool, p) => {
+    expect(decideWithSource(tool, { path: p }, ctx())).toEqual({
+      decision: 'ask',
+      source: 'mode-base'
+    })
+  })
+
+  it('reads the legacy file_path alias too', () => {
+    expect(decide('edit', { file_path: '.git/config' }, ctx())).toBe('ask')
+  })
+
+  it('an ordinary edit is still auto-allowed', () => {
+    expect(decide('edit', { path: 'src/a.ts' }, ctx())).toBe('allow')
+    expect(decide('write', { path: '/repo/src/.git-hooks-docs.md' }, ctx())).toBe('allow')
+  })
+
+  it('Windows cwd and separators', () => {
+    const win = ctx('D:\\repo')
+    expect(decide('edit', { path: 'D:\\repo\\.git\\config' }, win)).toBe('ask')
+    expect(decide('edit', { path: 'sub\\.claude\\settings.json' }, win)).toBe('ask')
+    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, win)).toBe('allow')
+  })
+
+  it('a session inside a worktree under .claude/ does not ask for every edit', () => {
+    const wt = ctx('/repo/.claude/worktrees/feat')
+    expect(decide('edit', { path: '/repo/.claude/worktrees/feat/src/a.ts' }, wt)).toBe('allow')
+    expect(decide('edit', { path: 'src/a.ts' }, wt)).toBe('allow')
+    // …but a path that climbs out to the repo's own .claude/ is matched absolutely.
+    expect(decide('edit', { path: '../../settings.json' }, wt)).toBe('ask')
+    expect(decide('edit', { path: '/repo/.claude/settings.json' }, wt)).toBe('ask')
+  })
+
+  it('a user ALLOW rule still wins outside auto mode; a user deny still denies', () => {
+    const allow = { ...ctx(), rules: rules({ allow: ['Edit(.claude/**)'] }) }
+    expect(decide('edit', { path: '.claude/settings.json' }, allow)).toBe('allow')
+    const deny = { ...ctx(), rules: rules({ deny: ['Edit(.git/**)'] }) }
+    expect(decide('edit', { path: '.git/config' }, deny)).toBe('deny')
+  })
+
+  it('other modes are unchanged: default asks every edit, full allows, plan denies', () => {
+    expect(decide('edit', { path: 'src/a.ts' }, ctx('/repo', 'default'))).toBe('ask')
+    expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'full'))).toBe('allow')
+    expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'plan'))).toBe('deny')
   })
 })

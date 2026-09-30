@@ -1,6 +1,12 @@
 # ADR-023: opencode auto-mode — LLM permission gatekeeper (parity with Claude)
 
-**Status:** Accepted — amended 2026-08-01 by the auto-mode rework (see Amendment below)
+**Status:** Accepted — amended 2026-08-01 by the auto-mode rework (see Amendment below); amended 2026-09-28 by
+[ADR-081](adr-081_claudeui-owned-judge-transport.md): the judge no longer runs through opencode —
+ClaudeUI makes the model call itself — and `maxTokens` / `stopSequences` are honoured where the
+provider allows them; amended 2026-09-29 by
+[ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md): the policy is rebalanced toward
+routine work, stage 1 grades severity (destructive and shipping shapes skip it), and the judge reads
+the user's permission rules and guidance lists
 **Date:** 2026-06-22
 **Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (autonomy modes), [ADR-059](adr-059_no-silent-model-fallback.md) (extends the unavailable-judge rule: a configured `autoMode.judgeModel` the catalog no longer offers fails closed to the human, loudly — never a substitute judge)
 

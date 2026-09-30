@@ -1036,10 +1036,13 @@ function asBillingType(value: string): RemoteUsageBucketRow['billingType'] {
  * `origin` has no `unknown` member, so a value this build cannot name becomes
  * `session` — the neutral default `usageEventParams` already applies to a local
  * row that states none, and the one the dashboard's Delegated section excludes
- * rather than mis-attributes.
+ * rather than mis-attributes. `judge` (ADR-081 §5) is named since 3.6; a build
+ * older than that folds it into `session` here.
  */
 function asOrigin(value: string): RemoteUsageBucketRow['origin'] {
-  return value === 'session' || value === 'child' || value === 'dispatch' ? value : 'session'
+  return value === 'session' || value === 'child' || value === 'dispatch' || value === 'judge'
+    ? value
+    : 'session'
 }
 
 function toBucketRow(bucket: RemoteBucket): RemoteUsageBucketRow {

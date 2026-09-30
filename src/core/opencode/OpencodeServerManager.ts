@@ -11,6 +11,8 @@ import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 import type { CallerSessionLookup, DispatchAgentFn } from './opencode-hosted-tools'
 import type { OpencodeMcpEntry } from './claude-mcp-bridge'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
+import { subagentPermissionConfigFor } from './subagent-permissions'
+import type { SubagentPermissionConfig } from './subagent-permissions'
 import { killProcessTree } from '../services/process-tree'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
@@ -150,12 +152,31 @@ function locatePluginFile(): string | null {
  * block so the per-cwd MCP host is wired up at spawn time.
  *
  * API keys are NEVER injected — credentials stay in auth.json.
+ *
+ * `agentPermissions` (ADR-085 S4, owner ruling 4) — when present and
+ * non-empty, emitted as the `agent` block: STRING `ask`s per task-able agent
+ * (`agent.<name>.permission.<category> = "ask"`, built by
+ * `subagent-permissions.ts` `buildSubagentPermissionConfig`), so a task
+ * child's bash/edit/webfetch/MCP call raises `permission.asked` instead of
+ * being answered by the agent's own `{*: allow}` (or `explore`'s own
+ * `bash: allow`), and the HOST answers it with the parent's rules. Why this
+ * shape: this env var merges LAST among the user's config sources
+ * (`vendor/opencode-src/packages/opencode/src/config/config.ts:482-490`, after
+ * the `.opencode` agent files) with `mergeDeep`, where a STRING value replaces
+ * the file's value but an object would merge key-wise and keep a file's more
+ * specific allow pattern (research probe, facts Q1). Per agent, never a
+ * top-level `permission` key: the top-level config sits AFTER `explore`'s own
+ * `{*: deny}` (`agent/agent.ts` ~196-218) and would turn its denies into asks.
+ * The server is per cwd and shared by every session and dispatch target in
+ * that folder, in every mode, so the asks are mode-less by design: the host
+ * decides per parent mode (`host-precheck.ts` `parent-allow`).
  */
 export function buildOpencodeConfigContent(
   mcpPort: number,
   mcpToken: string,
   bridgedMcp?: Record<string, OpencodeMcpEntry>,
-  pluginPath?: string | null
+  pluginPath?: string | null,
+  agentPermissions?: SubagentPermissionConfig
 ): string {
   const config: Record<string, unknown> = {
     mcp: {
@@ -174,6 +195,11 @@ export function buildOpencodeConfigContent(
       },
       ...(bridgedMcp ?? {})
     },
+    // ADR-085 S4 — per-agent string asks for task subagents (see the doc
+    // comment above). Absent/empty → the key is not emitted at all.
+    ...(agentPermissions && Object.keys(agentPermissions).length > 0
+      ? { agent: agentPermissions }
+      : {}),
     // Keep permission rejections non-fatal (Claude parity: a deny is a tool
     // error the model responds to, not a turn-killer). Reject-with-message
     // (CorrectedError) already never breaks the loop; this flag covers the
@@ -181,11 +207,12 @@ export function buildOpencodeConfigContent(
     // permissions on any reject, which carry no message. Ephemeral env-var
     // config only — never written to a user file (ADR-031).
     experimental: { continue_loop_on_deny: true },
-    // The binary we spawn is the VENDORED FORK (ADR-037): a self-update would
-    // replace it with an upstream build and silently drop every patch we carry.
-    // Version is owned by `package.json#opencodeCliVersion` + ensure-opencode,
-    // never by the running process. Ephemeral like the block above — a user
-    // config file is never rewritten to say this (ADR-031).
+    // The binary we spawn is the pinned, digest-checked upstream release that
+    // ensure-opencode vendors (ADR-081 §7): a ClaudeUI-spawned server must not
+    // replace it under a running session. Version is owned by
+    // `package.json#opencodeCliVersion` + `scripts/opencode-digests.json`, never
+    // by the running process. Ephemeral like the block above — a user config
+    // file is never rewritten to say this (ADR-031).
     autoupdate: false,
     // ADR-033 M2: the caller-identity plugin, loaded ONLY when vendored (dev
     // and packaged builds both resolve it via locatePluginFile()). Absent in
@@ -210,6 +237,9 @@ function spawnServer(
   mcpToken: string
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
+    // Bridged Claude MCP servers — computed once: the config block below, and
+    // the MCP keys the subagent asks name (ADR-085 S4).
+    const bridged = collectClaudeMcpForOpencode(cwd)
     const child = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
       cwd,
       env: {
@@ -228,12 +258,15 @@ function spawnServer(
         // servers are also injected here so secrets (env/headers) never touch
         // opencode's on-disk config. Engine-native settings (model, providers,
         // agents) are now written to opencode's own config file by
-        // opencode-config.ts — not injected here.
+        // opencode-config.ts — not injected here. The one agent field that IS
+        // injected is ADR-085 S4's per-subagent permission asks (ephemeral,
+        // never written to a user file — ADR-031).
         OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(
           mcpPort,
           mcpToken,
-          collectClaudeMcpForOpencode(cwd),
-          locatePluginFile()
+          bridged,
+          locatePluginFile(),
+          subagentPermissionConfigFor(cwd, Object.keys(bridged))
         )
       },
       stdio: ['ignore', 'pipe', 'pipe']

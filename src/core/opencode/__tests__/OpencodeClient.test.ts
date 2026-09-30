@@ -301,6 +301,51 @@ describe('OpencodeClient', () => {
     })
   })
 
+  describe('mcpStatus (ADR-085 §3)', () => {
+    it('sends GET /mcp and returns the server-name → status map', async () => {
+      const status = { lsphub: { status: 'connected' }, claudeui: { status: 'connected' } }
+      const mock = mockFetch(200, status)
+      vi.stubGlobal('fetch', mock)
+
+      expect(await client.mcpStatus()).toEqual(status)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/mcp`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ Authorization: AUTH })
+        })
+      )
+    })
+  })
+
+  describe('agents (ADR-085 S4)', () => {
+    it('sends GET /agent and returns the agents with their computed rulesets', async () => {
+      const agents = [
+        {
+          name: 'explore',
+          mode: 'subagent',
+          native: true,
+          permission: [
+            { permission: '*', pattern: '*', action: 'deny' },
+            { permission: 'bash', pattern: '*', action: 'ask' }
+          ]
+        },
+        { name: 'build', mode: 'primary', native: true, permission: [] }
+      ]
+      const mock = mockFetch(200, agents)
+      vi.stubGlobal('fetch', mock)
+
+      expect(await client.agents()).toEqual(agents)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/agent`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ Authorization: AUTH })
+        })
+      )
+    })
+  })
+
   describe('listSkills', () => {
     it('sends GET /skill with auth header', async () => {
       const skills = [

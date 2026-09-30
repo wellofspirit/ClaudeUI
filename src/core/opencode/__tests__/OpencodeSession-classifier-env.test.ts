@@ -11,6 +11,11 @@
  * the engine mock even returns a stale copy of the old keys, which must NOT
  * appear.
  *
+ * ADR-083 adds the user's merged permission rules (read fresh on every
+ * approval) and the shared judge guidance lists to the same environment; the
+ * second block pins that both reach the judge. The mapping's own rules (dedupe,
+ * omission, sanitising) are unit-tested in `automode/__tests__/environment.test.ts`.
+ *
  * `classifierEnvironment` is private; it is reached through a cast rather than
  * through a real judged approval, because driving one would need a live server,
  * an SSE stream and a judge transport to observe one object.
@@ -187,5 +192,69 @@ describe('OpencodeSession classifier environment — shared trust lists', () => 
 
     expect(env).not.toHaveProperty('trustedDomains')
     expect(env.cwd).toBe('/tmp/test-cwd')
+  })
+})
+
+describe('OpencodeSession classifier environment — permission rules + guidance (ADR-083)', () => {
+  it("hands the judge the user's merged rules, deduped across scopes, in scope order", async () => {
+    // user → project → local; the project scope repeats a user rule.
+    mockLoadClaudePermissions
+      .mockReturnValueOnce({
+        allow: ['Bash(gh pr create:*)'],
+        deny: ['Read(.env)'],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      })
+      .mockReturnValueOnce({
+        allow: ['Bash(gh pr create:*)', 'Bash(bun run test)'],
+        deny: [],
+        ask: ['Bash(git push:*)'],
+        additionalDirectories: [],
+        defaultMode: undefined
+      })
+
+    const env = await environmentOf(makeSession())
+
+    expect(env.permissionRules).toEqual({
+      allow: ['Bash(gh pr create:*)', 'Bash(bun run test)'],
+      ask: ['Bash(git push:*)'],
+      deny: ['Read(.env)']
+    })
+  })
+
+  it('reads the rules FRESH on every approval, so a mid-session edit reaches the judge', async () => {
+    const session = makeSession()
+    expect(await environmentOf(session)).not.toHaveProperty('permissionRules')
+
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: [],
+      deny: ['Bash(rm -rf:*)'],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+    expect((await environmentOf(session)).permissionRules).toEqual({ deny: ['Bash(rm -rf:*)'] })
+  })
+
+  it('takes the guidance lists from the shared config', async () => {
+    mockLoadSharedAutoModeConfig.mockReturnValue({
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+
+    const env = await environmentOf(makeSession())
+
+    expect(env.judgeGuidance).toEqual({
+      allow: ['creating and switching git branches'],
+      block: ['running database migrations']
+    })
+  })
+
+  it('omits both slots when there are no rules and no guidance', async () => {
+    const env = await environmentOf(makeSession())
+
+    expect(env).not.toHaveProperty('permissionRules')
+    expect(env).not.toHaveProperty('judgeGuidance')
   })
 })

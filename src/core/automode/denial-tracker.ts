@@ -159,3 +159,49 @@ export function autoModeReviewBlock(
     ...(rationale ? { rationale } : {})
   }
 }
+
+/** The card's rationale for a static read-only allow (ADR-084 §1). */
+export const READ_ONLY_REVIEW_RATIONALE =
+  'Read-only command in the workspace — allowed without a judge call'
+
+/**
+ * The review block for a call the static read-only path allowed (ADR-084 §1) —
+ * {@link autoModeReviewBlock}'s sibling, so the card still says auto mode
+ * decided it, and why no judge was asked. Fixed text: there is no model reply
+ * to cap and no corpus rule behind an allow.
+ */
+export function readOnlyReviewBlock(toolUseId: string, reviewId: string): ToolReviewBlock {
+  return {
+    type: 'tool_review',
+    toolUseId,
+    reviewId,
+    reviewer: 'auto-mode',
+    decision: 'approved',
+    rationale: READ_ONLY_REVIEW_RATIONALE
+  }
+}
+
+/** The start of the card's rationale for a call a user allow rule let skip the judge (ADR-085 §4). */
+export const ALLOW_RULE_REVIEW_RATIONALE_PREFIX = 'Allowed by your permission rule '
+
+/**
+ * The review block for a call one of the user's allow rules let skip the
+ * judge (ADR-085 §4) — {@link readOnlyReviewBlock}'s sibling. The rule text is
+ * the user's own, but untrusted length-wise (and it may carry newlines), so it
+ * goes through the same collapse-and-cap as every other rationale.
+ */
+export function allowRuleReviewBlock(
+  toolUseId: string,
+  reviewId: string,
+  rule: string
+): ToolReviewBlock {
+  const rationale = reviewRationale(`${ALLOW_RULE_REVIEW_RATIONALE_PREFIX}${rule}`)
+  return {
+    type: 'tool_review',
+    toolUseId,
+    reviewId,
+    reviewer: 'auto-mode',
+    decision: 'approved',
+    ...(rationale ? { rationale } : {})
+  }
+}
