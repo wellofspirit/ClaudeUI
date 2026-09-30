@@ -1,6 +1,7 @@
 # ADR-086 — Custom endpoints: per-model limits and capabilities in the form, filled by Detect from vLLM and SGLang
 
-**Status:** Implemented (2026-09-30, branch `endpoint-model-details`, S1 `37d091cb` + S2 `673fa304` —
+**Status:** Implemented (2026-09-30, branch `endpoint-model-details`, PR
+[#47](https://github.com/wellofspirit/ClaudeUI/pull/47) → `pre-release`, slices S1 core + S2 form —
 see § As built); accepted 2026-09-30, owner-ruled from mockup `3fdf1efe` (Option A).
 **Amends:** [ADR-074](adr-074_provider-surfaces-v3.md) §7 (the Manage sheet's "Endpoint (custom)"
 now edits each model's context window, max output, vision and reasoning) and §11 (opencode receives
