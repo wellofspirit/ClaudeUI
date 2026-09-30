@@ -476,3 +476,43 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
     )
   })
 })
+
+describe('OpencodeSharedProviderAdapter — a model’s Detect baseline (GUARD)', () => {
+  const plain: SharedProviderDefinition = {
+    ...definition,
+    models: [
+      { id: 'base', name: 'Base', vision: true, contextWindow: 32768, maxTokens: 8192 },
+      { id: 'mapped', harnessOverrides: { opencode: { id: 'native-mapped' } } }
+    ]
+  }
+  const withDetected: SharedProviderDefinition = {
+    ...plain,
+    models: [
+      {
+        ...plain.models[0],
+        detected: {
+          server: 'sglang',
+          at: '2026-09-30T10:00:00.000Z',
+          contextWindow: 32768,
+          maxTokens: 8192,
+          vision: true,
+          reasoning: false
+        }
+      },
+      { ...plain.models[1], detected: { server: 'sglang', at: '2026-09-30T10:00:00.000Z' } }
+    ]
+  }
+
+  it('never reaches opencode: the projection is byte-identical with or without it', () => {
+    const a = setup()
+    a.adapter.applyDefinitionRoute({ definition: plain })
+    const b = setup()
+    b.adapter.applyDefinitionRoute({ definition: withDetected })
+    expect(JSON.stringify(b.writeConfig.mock.calls[0][0])).toBe(
+      JSON.stringify(a.writeConfig.mock.calls[0][0])
+    )
+    // …so a block written before Detect existed is still recognised as ours.
+    const written = setup(a.writeConfig.mock.calls[0][0])
+    expect(written.adapter.hasDefinition(withDetected)).toBe(true)
+  })
+})

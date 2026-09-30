@@ -10,6 +10,8 @@ import {
   validateSharedProviderId,
   validateVendorId,
   type ConfigurableHarnessId,
+  type EndpointProbeInput,
+  type EndpointProbeResult,
   type SharedProviderCuration,
   type SharedProviderDefinition,
   type SharedProviderModel,
@@ -23,6 +25,7 @@ import {
   nativeProviderId
 } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
+import { probeEndpoint } from './endpoint-probe'
 import { keyHint, type NativeApiKeyReader } from './native-api-keys'
 import { memoryDeliveredKeyFingerprints, type DeliveredKeyFingerprints } from './delivered-keys'
 
@@ -98,6 +101,8 @@ export interface SharedProviderServiceDeps {
    * in memory.
    */
   deliveredKeys?: DeliveredKeyFingerprints
+  /** Detect's network half (`endpoint-probe.ts`). Injected for tests. */
+  probeEndpoint?: (request: Parameters<typeof probeEndpoint>[0]) => Promise<EndpointProbeResult>
 }
 
 /** Serializes shared-provider RMW across definitions, vault credentials, and native routes. */
@@ -110,6 +115,7 @@ export class SharedProviderService {
   private readonly writeModelAllowlist: NonNullable<
     SharedProviderServiceDeps['writeModelAllowlist']
   >
+  private readonly probe: NonNullable<SharedProviderServiceDeps['probeEndpoint']>
   private mutation = Promise.resolve()
   private readonly harnessRuns: (route: Route) => boolean
   private readonly deliveredKeys: DeliveredKeyFingerprints
@@ -120,6 +126,7 @@ export class SharedProviderService {
     this.writeModelAllowlist = deps.writeModelAllowlist ?? setProviderModelAllowlist
     this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
     this.deliveredKeys = deps.deliveredKeys ?? memoryDeliveredKeyFingerprints()
+    this.probe = deps.probeEndpoint ?? ((request) => probeEndpoint(request))
   }
 
   listDefinitions(): SharedProviderDefinition[] {
@@ -479,6 +486,41 @@ export class SharedProviderService {
       }
       return holders
     })
+  }
+
+  /**
+   * Detect: what a custom endpoint serves. The key is the one typed into the
+   * form when there is one, else — editing an existing provider — the one in
+   * the vault, read here so it never crosses to the renderer or a remote
+   * client. Not queued behind mutations: it writes nothing, and a slow server
+   * must not hold up a save.
+   *
+   * The stored key goes only where it is already configured to go: to the
+   * saved origin of an existing CUSTOM definition. Any other id — a catalog
+   * provider's `openrouter` key above all — or any other origin would make
+   * Detect a way to send a key to a URL the caller picked, which `config` does
+   * not otherwise grant. Withheld, the probe runs keyless and a failure says so.
+   */
+  async probeEndpoint(input: EndpointProbeInput): Promise<EndpointProbeResult> {
+    const typed = typeof input.apiKey === 'string' && input.apiKey ? input.apiKey : undefined
+    let apiKey = typed
+    let withheld = false
+    if (!typed && input.providerId) {
+      validateSharedProviderId(input.providerId)
+      const definition = this.repository.get(input.providerId)
+      const stored = await this.deps.vault.loadCredential(input.providerId)
+      if (stored?.type === 'api_key') {
+        if (definition?.kind === 'custom' && sameOrigin(input.baseUrl, definition.baseUrl))
+          apiKey = stored.key
+        else withheld = true
+      }
+    }
+    const result = await this.probe({
+      baseUrl: input.baseUrl,
+      ...(input.protocol ? { protocol: input.protocol } : {}),
+      ...(apiKey ? { apiKey } : {})
+    })
+    return withheld && result.status === 'failed' ? { ...result, keyWithheld: true } : result
   }
 
   async syncProvider(id: string): Promise<void> {
@@ -1386,6 +1428,19 @@ function isProviderId(id: string): boolean {
   try {
     validateSharedProviderId(id)
     return true
+  } catch {
+    return false
+  }
+}
+/**
+ * Scheme, host and port equal — what the stored key is allowed to follow. An
+ * unparseable URL, or one with an opaque origin (`file:`), matches nothing.
+ */
+function sameOrigin(typed: string, saved: string | undefined): boolean {
+  if (!saved) return false
+  try {
+    const origin = new URL(typed.trim()).origin
+    return origin !== 'null' && origin === new URL(saved).origin
   } catch {
     return false
   }

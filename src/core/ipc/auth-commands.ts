@@ -72,11 +72,21 @@ import type {
 import {
   validateVendorId,
   type ConfigurableHarnessId,
+  type EndpointProbeInput,
+  type EndpointProbeResult,
   type SharedProviderAccountList,
   type SharedProviderCuration,
-  type SharedProviderDefinition
+  type SharedProviderDefinition,
+  type SharedProviderProtocol
 } from '../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
+
+/** The protocols `shared-provider:probe` accepts — the definition's own enum. */
+const PROBE_PROTOCOLS: ReadonlySet<SharedProviderProtocol> = new Set([
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages'
+])
 
 /**
  * The desktop-auth capabilities this family needs, injected from the boot seam
@@ -474,6 +484,36 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       handler: safeHandler(async (definition: SharedProviderDefinition) =>
         sharedProviderService.saveDefinition(definition)
       )
+    },
+    {
+      // Detect for a custom endpoint: the host reads the server's `/models`
+      // (and SGLang's `/model_info`). `config` like the save beside it, because
+      // it makes the host fetch a URL the caller typed — a view-only remote
+      // session must not get the host as a proxy into its network. The key is
+      // typed, or read from the vault host-side by `providerId`; the answer
+      // carries model facts only.
+      channel: 'shared-provider:probe',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (input: unknown): Promise<EndpointProbeResult> => {
+        // A wire payload: every field is checked before the host dials anything.
+        const { baseUrl, protocol, apiKey, providerId } = (input ?? {}) as Record<string, unknown>
+        if (
+          typeof baseUrl !== 'string' ||
+          (apiKey != null && typeof apiKey !== 'string') ||
+          (providerId != null && typeof providerId !== 'string')
+        )
+          throw new Error('Invalid endpoint probe request')
+        if (protocol != null && !PROBE_PROTOCOLS.has(protocol as SharedProviderProtocol))
+          throw new Error(`Unknown protocol: ${String(protocol)}`)
+        const request: EndpointProbeInput = {
+          baseUrl,
+          ...(protocol != null ? { protocol: protocol as SharedProviderProtocol } : {}),
+          ...(apiKey ? { apiKey: apiKey as string } : {}),
+          ...(providerId ? { providerId: providerId as string } : {})
+        }
+        return sharedProviderService.probeEndpoint(request)
+      })
     },
     {
       channel: 'shared-provider:remove',

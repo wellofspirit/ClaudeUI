@@ -554,6 +554,7 @@ describe('registerRemoteHandlers', () => {
     // the everything-remote ruling reaches provider routing as well.
     for (const channel of [
       'shared-provider:save',
+      'shared-provider:probe',
       'shared-provider:remove',
       'shared-provider:set-route',
       'shared-provider:set-key',
@@ -1751,6 +1752,9 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   // ADR-074 §6 — the key moves host-side; nothing about it comes back.
   'shared-provider:adopt-native',
   'shared-provider:disconnect',
+  // Detect: the host fetches a typed URL, so `config` like the save — never a
+  // view-only session's proxy. The stored key is read host-side; none comes back.
+  'shared-provider:probe',
   'shared-provider:remove',
   'shared-provider:save',
   'shared-provider:set-curation',

@@ -7,6 +7,7 @@ import {
   type SharedProviderRouteDiagnosis
 } from '../../shared/shared-provider'
 import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
+import { PI_DEFAULT_MAX_OUTPUT } from '../../shared/endpoint-detect'
 import { piAgentDir } from '../services/pi-session-list'
 import { loadEngineConfig } from '../services/ui-config'
 import { getPiModelCatalog, invalidatePiModelCache } from '../pi/model-discovery'
@@ -14,7 +15,8 @@ import type { PiModel } from '../pi/pi-protocol'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 
 const DEFAULT_CONTEXT_WINDOW = 128_000
-const DEFAULT_MAX_TOKENS = 16_384
+// Shared with the endpoint form's output warning, which must measure what pi is sent.
+const DEFAULT_MAX_TOKENS = PI_DEFAULT_MAX_OUTPUT
 
 /**
  * The `apiKey` written into a keyless custom provider's models.json entry

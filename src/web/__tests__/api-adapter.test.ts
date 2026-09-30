@@ -543,6 +543,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'shared-provider:save',
     args: [{ id: 'local', name: 'Local', kind: 'custom', models: [{ id: 'local-1' }] }]
   },
+  {
+    method: 'probeSharedEndpoint',
+    channel: 'shared-provider:probe',
+    args: [{ baseUrl: 'http://127.0.0.1:8000/v1', providerId: 'local' }]
+  },
   { method: 'removeSharedProvider', channel: 'shared-provider:remove', args: ['local'] },
   {
     method: 'setSharedProviderRoute',

@@ -250,3 +250,62 @@ describe('SharedProviderRepository — second keys, one level deep (slice 10 rev
     ).toThrow(/itself a second key/)
   })
 })
+
+describe('SharedProviderRepository — a model’s Detect baseline', () => {
+  const at = '2026-09-30T10:00:00.000Z'
+
+  it('round-trips a valid baseline, partial or full', () => {
+    const repo = new SharedProviderRepository()
+    const models = [
+      {
+        id: 'qwen3',
+        contextWindow: 32_768,
+        maxTokens: 8_192,
+        vision: true,
+        reasoning: false,
+        detected: {
+          server: 'sglang' as const,
+          at,
+          contextWindow: 32_768,
+          maxTokens: 8_192,
+          vision: true,
+          reasoning: false
+        }
+      },
+      { id: 'ids-only', detected: { server: 'openai-compatible' as const, at } }
+    ]
+    repo.save({ ...provider, models })
+    expect(new SharedProviderRepository().get('local-api')?.models).toEqual(models)
+  })
+
+  it('rejects a malformed baseline like any other bad model', () => {
+    const repo = new SharedProviderRepository()
+    const bad: unknown[] = [
+      'sglang',
+      null,
+      { at },
+      { server: 'ollama', at },
+      { server: 'vllm' },
+      { server: 'vllm', at: '' },
+      { server: 'vllm', at: 42 },
+      { server: 'vllm', at, contextWindow: 0 },
+      { server: 'vllm', at, contextWindow: 1.5 },
+      { server: 'vllm', at, maxTokens: -8 },
+      { server: 'vllm', at, maxTokens: '8192' },
+      { server: 'vllm', at, vision: 'yes' },
+      { server: 'vllm', at, reasoning: 1 }
+    ]
+    for (const detected of bad) {
+      expect(() =>
+        repo.save({ ...provider, models: [{ id: 'm', detected: detected as never }] })
+      ).toThrow(/models/)
+    }
+    // …and a file holding one is skipped on read, as any malformed record is.
+    repo.save(provider)
+    writeFileSync(
+      sharedProviderPath('local-api'),
+      JSON.stringify({ ...provider, models: [{ id: 'm', detected: { server: 'x', at } }] })
+    )
+    expect(repo.get('local-api')).toBeNull()
+  })
+})

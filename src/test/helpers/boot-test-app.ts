@@ -457,6 +457,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
     saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
     removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
