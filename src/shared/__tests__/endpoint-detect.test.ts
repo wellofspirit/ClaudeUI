@@ -10,6 +10,7 @@ import {
   applyChanges,
   fieldSource,
   importModels,
+  liveChanges,
   mergeProbe,
   modelFromProbe,
   outputWarning,
@@ -358,6 +359,63 @@ describe('applyChanges', () => {
   })
 })
 
+describe('a diff answered by hand in the meantime (GUARD)', () => {
+  // Detected at 32K, then the server doubled its context: a two-line diff.
+  const pendingDiff = () => {
+    const first = mergeProbe(
+      [{ id: 'llama' }, { id: 'x' }],
+      vllm([{ id: 'llama', contextWindow: 32_768 }]),
+      AT
+    ).models
+    return mergeProbe(first, vllm([{ id: 'llama', contextWindow: 65_536 }]), LATER)
+  }
+
+  it('applyChanges skips a change whose value moved away from its `from`', () => {
+    const { models, changes } = pendingDiff()
+    expect(changes.map((change) => change.field)).toEqual(['contextWindow', 'maxTokens'])
+    // The user typed their own max output after the diff was shown.
+    const typed = [{ ...models[0], maxTokens: 4_000 }, models[1]]
+    const [applied] = applyChanges(typed, changes)
+    expect(applied).toMatchObject({ contextWindow: 65_536, maxTokens: 4_000 })
+    expect(applied.detected?.maxTokens).toBe(8_192)
+    expect(fieldSource(applied, 'maxTokens')).toBe('manual')
+  })
+
+  it('liveChanges keeps only what still holds, with `edited` recomputed', () => {
+    const { models, changes } = pendingDiff()
+    expect(liveChanges(models, changes)).toEqual(changes)
+    // Answered by hand: the max output line drops out.
+    const typed = [{ ...models[0], maxTokens: 4_000 }, models[1]]
+    expect(liveChanges(typed, changes)).toEqual([changes[0]])
+    // A model removed since: nothing of it stays.
+    expect(liveChanges([models[1]], changes)).toEqual([])
+  })
+
+  it('liveChanges recomputes `edited`, and drops a max output that became the user’s own', () => {
+    const change = {
+      modelId: 'm',
+      field: 'contextWindow' as const,
+      from: 16_000,
+      to: 32_768,
+      edited: false
+    }
+    // Same value, but no longer the baseline: now it is the user's.
+    const model: SharedProviderModel = {
+      id: 'm',
+      contextWindow: 16_000,
+      maxTokens: 8_192,
+      detected: { server: 'vllm', at: AT, contextWindow: 20_000, maxTokens: 4_096 }
+    }
+    expect(liveChanges([model], [change])).toEqual([{ ...change, edited: true }])
+    expect(
+      liveChanges(
+        [model],
+        [{ modelId: 'm', field: 'maxTokens', from: 8_192, to: 16_384, edited: false }]
+      )
+    ).toEqual([])
+  })
+})
+
 describe('importModels', () => {
   it('appends the named served models, skipping ones already listed', () => {
     const probe = vllm([{ id: 'a' }, { id: 'b', contextWindow: 16_384 }, { id: 'c' }])
@@ -378,9 +436,13 @@ describe('outputWarning', () => {
   })
 
   it('warns on a 32K context with a blank output while opencode is on', () => {
-    expect(outputWarning({ id: 'm', contextWindow: 32_768 }, both)).toEqual({ suggested: 8_192 })
+    expect(outputWarning({ id: 'm', contextWindow: 32_768 }, both)).toEqual({
+      suggested: 8_192,
+      output: 32_000
+    })
     expect(outputWarning({ id: 'm', contextWindow: 32_768 }, opencodeOnly)).toEqual({
-      suggested: 8_192
+      suggested: 8_192,
+      output: 32_000
     })
   })
 
@@ -394,10 +456,12 @@ describe('outputWarning', () => {
 
   it('measures a set output regardless of routes', () => {
     expect(outputWarning({ id: 'm', contextWindow: 32_768, maxTokens: 20_000 }, piOnly)).toEqual({
-      suggested: 8_192
+      suggested: 8_192,
+      output: 20_000
     })
     expect(outputWarning({ id: 'm', contextWindow: 32_768, maxTokens: 20_000 }, none)).toEqual({
-      suggested: 8_192
+      suggested: 8_192,
+      output: 20_000
     })
     expect(outputWarning({ id: 'm', contextWindow: 32_768, maxTokens: 8_192 }, both)).toBeNull()
   })

@@ -1288,6 +1288,18 @@ describe('the re-homed vault flows', () => {
     expect(screen.queryByTestId('ProviderSheet.endpointSheet')).not.toBeInTheDocument()
   })
 
+  it('Detect from Edit endpoint names the provider and sends no key — the host holds it', async () => {
+    stub('shared-provider:probe', () => ({ status: 'detected', server: 'vllm', models: [] }))
+    await openSheet('ollama-local')
+    await click(screen.getByTestId('ProviderSheet.editEndpoint'))
+    await click(screen.getByTestId('ProviderForm.detect'))
+    await screen.findByTestId('ProviderForm.detectResult')
+    // The fixture declares no protocol, so none is sent.
+    expect(sent('shared-provider:probe')).toEqual([
+      [{ baseUrl: 'http://localhost:11434', providerId: 'ollama-local' }]
+    ])
+  })
+
   it('offers no endpoint editor for a subscription — ClaudeUI owns that definition', async () => {
     await openSheet('chatgpt')
     expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()

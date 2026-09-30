@@ -200,13 +200,37 @@ export function mergeProbe(
   }
 }
 
-/** Accept a Detect diff: each value becomes the probed one, and so does its baseline. */
+/**
+ * The changes of an earlier Detect that still hold against `models` as they
+ * are now. A diff waits for Apply while the user keeps editing: a change whose
+ * value has since moved away from its `from` is stale — the user answered it by
+ * hand — and drops out. `edited` is recomputed on the current model, and a max
+ * output that has become the user's own drops out too (a suggestion is never
+ * offered over it).
+ */
+export function liveChanges(models: SharedProviderModel[], changes: ProbeChange[]): ProbeChange[] {
+  return changes.flatMap((change) => {
+    const model = models.find((candidate) => candidate.id === change.modelId)
+    if (!model || model[change.field] !== change.from) return []
+    const edited = fieldSource(model, change.field) === 'manual'
+    if (change.field === 'maxTokens' && edited) return []
+    return [{ ...change, edited }]
+  })
+}
+
+/**
+ * Accept a Detect diff: each value becomes the probed one, and so does its
+ * baseline. A stale change — the value no longer what it was offered over —
+ * is skipped, so Apply can never overwrite an edit made after the diff.
+ */
 export function applyChanges(
   models: SharedProviderModel[],
   changes: ProbeChange[]
 ): SharedProviderModel[] {
   return models.map((model) => {
-    const own = changes.filter((change) => change.modelId === model.id)
+    const own = changes.filter(
+      (change) => change.modelId === model.id && model[change.field] === change.from
+    )
     if (!own.length) return model
     const next: SharedProviderModel = { ...model }
     const detected = model.detected ? { ...model.detected } : undefined
@@ -240,11 +264,12 @@ export function importModels(
  * window. Blank means the largest default among the ENABLED engines, since
  * that is what the busiest of them will reserve. Null when the context is
  * unknown (nothing to measure against) or nothing would use the value.
+ * `output` is the value it measured, so the warning can name it.
  */
 export function outputWarning(
   model: SharedProviderModel,
   routes: Record<ConfigurableHarnessId, { enabled: boolean }>
-): { suggested: number } | null {
+): { suggested: number; output: number } | null {
   const context = model.contextWindow
   if (context === undefined) return null
   const defaults = (Object.keys(ENGINE_DEFAULT_MAX_OUTPUT) as ConfigurableHarnessId[])
@@ -253,7 +278,7 @@ export function outputWarning(
   const effective = model.maxTokens ?? (defaults.length ? Math.max(...defaults) : undefined)
   if (effective === undefined || effective <= context / 2) return null
   const suggested = suggestMaxOutput(context)
-  return suggested > 0 ? { suggested } : null
+  return suggested > 0 ? { suggested, output: effective } : null
 }
 
 /** The values one served model supplies, the max output suggestion included. */
