@@ -17,7 +17,9 @@
  *   and at the `strong` tier a write also needs the mutation window
  *   (`classifyDispatch` → `mutation`). The desktop renderer's host connection
  *   holds every capability. The seven are pinned in `PINNED_CAPABILITIES`, so
- *   no later edit can relabel one `config`.
+ *   no later edit can relabel one `config`. So is the upgrade sheet's answer
+ *   (`answer-upgrade-prompt`, ADR-082 §8): an admin connection is the one the
+ *   sheet is shown to, and it installs from the same click.
  *
  * ## Results
  *
@@ -32,6 +34,9 @@
  * removed a version) or its update entry or the updater's state moved (a
  * check found a new version, a run started or ended, the mode was saved): a
  * nudge, and the client re-reads `harness:state`.
+ * The upgrade sheet's prompt moving (it became pending after the boot
+ * detection, or was answered) nudges the same way, once per harness it can
+ * offer.
  * `harness:install-progress` carries `HarnessInstallProgress` (at most four a
  * second per install, from the installer). Both are replicated sync events, so
  * the desktop renderer and every remote client get them the same way.
@@ -54,6 +59,7 @@ import type {
   HarnessSystemView,
   HarnessUpdateMode,
   HarnessUpdatesView,
+  HarnessUpgradePromptView,
   HarnessVersionsResult,
   HarnessesConfig
 } from '../../shared/harness-types'
@@ -70,6 +76,7 @@ import {
   onHarnessUpdatesChanged,
   updateAllHarnesses
 } from '../harness/install/updater'
+import { harnessInstallable } from '../harness/installable'
 import { harnessManifest } from '../harness/manifests'
 import {
   bundledClaudeVersion,
@@ -82,11 +89,22 @@ import {
   HARNESS_VERSION_RE,
   harnessSelection,
   loadHarnessesConfig,
-  saveHarnessesConfig
+  saveHarnessesConfig,
+  upgradePromptAnswered
 } from '../harness/selection-store'
 import { LAST_USED_FILE, installDir, installedVersions, readInstallRecord } from '../harness/store'
 import { reclassifyInstall, resolveSystemInstall } from '../harness/system-source'
+import {
+  answerUpgradePrompt,
+  markUpgradePromptEvaluated,
+  notifyUpgradePromptChanged,
+  onUpgradePromptChanged,
+  upgradeCandidates,
+  upgradePromptEvaluated
+} from '../harness/upgrade-prompt'
 import { versionAccepted } from '../harness/version-gate'
+import { sessionCountsByEngine } from '../services/db'
+import { logger } from '../services/logger'
 import type { CommandRegistration } from './command-registry'
 
 /** The channels declared here; `registerSessionIpc` unbinds them before re-registering. */
@@ -99,7 +117,8 @@ export const HARNESS_CHANNELS = [
   'harness:detect',
   'harness:set-update-mode',
   'harness:update-all',
-  'harness:check-updates'
+  'harness:check-updates',
+  'harness:answer-upgrade-prompt'
 ] as const
 
 const LABELS: Record<HarnessId, string> = {
@@ -190,6 +209,7 @@ function stateEntry(
     },
     system: systemView(id, detection),
     managed: managedView(id),
+    installable: harnessInstallable(id),
     ...(id === 'claude' ? { bundledVersion: bundledClaudeVersion() } : {})
   }
 }
@@ -346,6 +366,8 @@ export interface HarnessCommandDeps {
   requestDetection?: (ids: readonly HarnessId[] | undefined, reason: 'user') => Promise<void>
   detectionStatus?: () => HarnessDetectionStatus
   requests?: InstallRequests
+  /** Sessions per `engine_id` (`session_meta`), for the upgrade sheet. */
+  sessionCounts?: () => Record<string, number>
   /** The updater (`install/updater.ts`): its view, and the three update commands' work. */
   updates?: {
     view(): HarnessUpdatesView
@@ -370,17 +392,79 @@ function updateModeArg(payload: unknown): HarnessUpdateMode {
   return mode
 }
 
-/** `harness:state`: filesystem reads only (the store, the two JSON files, a stat per install). */
-export function harnessStateSnapshot(deps: HarnessCommandDeps = {}): HarnessStateSnapshot {
-  const config = loadHarnessesConfig()
+const NOT_PENDING: HarnessUpgradePromptView = { pending: false, candidates: [] }
+
+function stateEntries(config: HarnessesConfig): Record<HarnessId, HarnessStateEntry> {
   const cache = loadDetectionCache()
   const harnesses = {} as Record<HarnessId, HarnessStateEntry>
   for (const id of HARNESS_IDS) harnesses[id] = stateEntry(id, config, cache[id])
+  return harnesses
+}
+
+/**
+ * The upgrade sheet's state (`upgrade-prompt.ts`): nothing before the boot
+ * evaluation or once answered; otherwise the candidates as they stand now.
+ * One `session_meta` count per read, and only while the prompt is open. A
+ * failed count offers nothing this read rather than failing the snapshot.
+ */
+function upgradePromptView(
+  harnesses: Record<HarnessId, HarnessStateEntry>,
+  config: HarnessesConfig,
+  deps: HarnessCommandDeps
+): HarnessUpgradePromptView {
+  if (!upgradePromptEvaluated() || upgradePromptAnswered(config)) return NOT_PENDING
+  let counts: Record<string, number>
+  try {
+    counts = (deps.sessionCounts ?? sessionCountsByEngine)()
+  } catch (err) {
+    logger.warn('harness', 'could not count sessions for the upgrade prompt', err)
+    return NOT_PENDING
+  }
+  const candidates = upgradeCandidates(harnesses, counts)
+  return { pending: candidates.length > 0, candidates }
+}
+
+/** `harness:state`: filesystem reads only (the store, the two JSON files, a stat per install). */
+export function harnessStateSnapshot(deps: HarnessCommandDeps = {}): HarnessStateSnapshot {
+  const config = loadHarnessesConfig()
+  const harnesses = stateEntries(config)
   return {
     harnesses,
     detection: { ...(deps.detectionStatus ?? detectionStatus)() },
     installs: (deps.activeInstalls ?? activeInstalls)(),
-    updates: (deps.updates ?? defaultUpdates).view()
+    updates: (deps.updates ?? defaultUpdates).view(),
+    upgradePrompt: upgradePromptView(harnesses, config, deps)
+  }
+}
+
+/**
+ * The upgrade prompt's first evaluation (ADR-082 §8), once the boot detection
+ * has finished, so a usable System install it found is not offered (or at
+ * once when detection is off: the cache as it stands is all there is). From
+ * then on `harness:state` carries the prompt. With nothing to offer the prompt
+ * is answered silently, so it never shows for this profile; with candidates,
+ * clients are nudged to re-read. A failed session count leaves it unanswered,
+ * so a transient error cannot cost the user the prompt. Never throws.
+ */
+export function evaluateUpgradePrompt(deps: HarnessCommandDeps = {}): void {
+  try {
+    markUpgradePromptEvaluated()
+    const config = loadHarnessesConfig()
+    if (upgradePromptAnswered(config)) return
+    const counts = (deps.sessionCounts ?? sessionCountsByEngine)()
+    const candidates = upgradeCandidates(stateEntries(config), counts)
+    if (candidates.length === 0) {
+      answerUpgradePrompt()
+      logger.info('harness', 'upgrade prompt: nothing to offer, marked answered')
+      return
+    }
+    logger.info(
+      'harness',
+      `upgrade prompt: offering ${candidates.map((c) => `${c.id} (${c.sessions})`).join(', ')}`
+    )
+    notifyUpgradePromptChanged(candidates.map((c) => c.id))
+  } catch (err) {
+    logger.warn('harness', 'upgrade prompt evaluation failed; it stays unanswered', err)
   }
 }
 
@@ -513,6 +597,18 @@ export function harnessCommands(
         await updates.check()
         return harnessStateSnapshot(deps)
       }
+    },
+    {
+      // The one-time upgrade sheet's answer (ADR-082 §8), Install or Not now:
+      // it does not come back. Installing is `harness:install` per harness,
+      // before this. Idempotent.
+      channel: 'harness:answer-upgrade-prompt',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (): Promise<HarnessUpgradePromptView> => {
+        answerUpgradePrompt()
+        return NOT_PENDING
+      }
     }
   ]
 }
@@ -543,10 +639,14 @@ export function startHarnessEvents(emit: HarnessEventEmitter): () => void {
     for (const id of ids) send('harness:changed', [{ id }])
   })
   const offProgress = onInstallProgress((progress) => send('harness:install-progress', [progress]))
+  const offPrompt = onUpgradePromptChanged((ids) => {
+    for (const id of ids) send('harness:changed', [{ id }])
+  })
   const stop = (): void => {
     offChanged()
     offUpdates()
     offProgress()
+    offPrompt()
     if (stopEvents === stop) stopEvents = null
   }
   stopEvents = stop

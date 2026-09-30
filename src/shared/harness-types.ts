@@ -42,6 +42,11 @@ export interface HarnessesConfig {
   selections?: Partial<Record<HarnessId, HarnessSelection>>
   /** Install updates: Automatically (`auto`) or Ask me (`ask`, the default). */
   updates?: HarnessUpdateMode
+  /**
+   * The one-time upgrade sheet (ADR-082 §8) was answered, by Install or Not
+   * now, or silently because nothing needed offering. Absent until then.
+   */
+  upgradePrompt?: 'answered'
 }
 
 /** Where a resolved harness actually came from. */
@@ -289,8 +294,31 @@ export interface HarnessStateEntry {
   system: HarnessSystemView
   /** Installed versions, newest first. */
   managed: HarnessManagedVersionView[]
+  /**
+   * ClaudeUI can install its own copy on this host: the manifest has a release
+   * for it (opencode, pi) or the host has reviewed digests (Codex). Claude
+   * Code: false (it is bundled, never downloaded).
+   */
+  installable: boolean
   /** Claude Code only: the bundled copy's version (the "Bundled" segment's label). */
   bundledVersion?: string | null
+}
+
+// ── The one-time upgrade sheet (ADR-082 §8; `src/core/harness/upgrade-prompt.ts`) ──
+
+/** A harness the sheet offers, with how many of this profile's sessions ran on it. */
+export interface HarnessUpgradeCandidate {
+  id: HarnessId
+  sessions: number
+}
+
+/**
+ * `harness:state`'s `upgradePrompt`. `pending` once the boot detection has
+ * finished, while the prompt is unanswered and there is something to offer.
+ */
+export interface HarnessUpgradePromptView {
+  pending: boolean
+  candidates: HarnessUpgradeCandidate[]
 }
 
 // ── Updates (ADR-082 §6; `src/core/harness/install/updater.ts`) ──────────────
@@ -351,6 +379,8 @@ export interface HarnessStateSnapshot {
   installs: HarnessInstallProgress[]
   /** The update setting, what counts as an update now, and the updater's state. */
   updates: HarnessUpdatesView
+  /** The one-time upgrade sheet: whether to show it, and what it offers. */
+  upgradePrompt: HarnessUpgradePromptView
 }
 
 /** `harness:versions`: what upstream has released (cached for an hour). */

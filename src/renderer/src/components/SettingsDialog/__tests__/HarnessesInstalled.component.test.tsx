@@ -66,6 +66,7 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
         choice: { kind: 'fallback', reason: CLAUDE_TOO_OLD }
       },
       managed: [],
+      installable: false,
       bundledVersion: '2.1.280'
     },
     opencode: {
@@ -92,7 +93,8 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
       },
       managed: [
         { version: '1.18.32', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }
-      ]
+      ],
+      installable: true
     },
     pi: {
       id: 'pi',
@@ -111,7 +113,8 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
         installs: [],
         choice: { kind: 'fallback', reason: 'No pi found on this computer' }
       },
-      managed: []
+      managed: [],
+      installable: true
     },
     codex: {
       id: 'codex',
@@ -130,7 +133,8 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
       },
       managed: [
         { version: '0.156.0', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }
-      ]
+      ],
+      installable: true
     }
   }
 }
@@ -141,6 +145,7 @@ function snapshot(patch: Partial<HarnessStateSnapshot> = {}): HarnessStateSnapsh
     detection: { running: false, lastRunAt: '2026-09-30T00:00:00.000Z' },
     installs: [],
     updates: { mode: 'ask', available: [], status: { running: false, results: [] } },
+    upgradePrompt: { pending: false, candidates: [] },
     ...patch
   }
 }

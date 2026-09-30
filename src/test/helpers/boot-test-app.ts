@@ -203,6 +203,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setHarnessUpdateMode: (mode) => ipcRenderer.invoke('harness:set-update-mode', { mode }),
     updateHarnesses: () => ipcRenderer.invoke('harness:update-all'),
     checkHarnessUpdates: () => ipcRenderer.invoke('harness:check-updates'),
+    answerHarnessUpgradePrompt: () => ipcRenderer.invoke('harness:answer-upgrade-prompt'),
     getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
     getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>

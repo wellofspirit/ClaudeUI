@@ -481,13 +481,15 @@ describe('OpencodeAgentsSection', () => {
 
   // ── Not installed gate ────────────────────────────────────────────
 
-  it('shows not-installed message when opencode is not installed', async () => {
+  it('renders nothing when opencode is not installed: the page’s first section says it (ADR-082 S7b)', async () => {
     installApiStub({
       engineIsInstalled: vi.fn(async () => false)
     })
 
     await renderSection()
 
-    expect(screen.getByText(/opencode is not installed/)).toBeTruthy()
+    const root = screen.getByTestId('OpencodeAgentsSection')
+    expect(root).toHaveAttribute('data-state', 'not-installed')
+    expect(root.textContent).toBe('')
   })
 })

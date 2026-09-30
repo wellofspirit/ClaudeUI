@@ -26,6 +26,7 @@ import type {
   HarnessStateSnapshot,
   HarnessUpdateMode,
   HarnessUpdatesView,
+  HarnessUpgradePromptView,
   HarnessVersionsResult
 } from './harness-types'
 
@@ -1687,6 +1688,8 @@ interface SessionAPI {
   updateHarnesses(): Promise<HarnessStateSnapshot>
   /** Ask upstream for new versions now; resolves with the new state. */
   checkHarnessUpdates(): Promise<HarnessStateSnapshot>
+  /** Answer the one-time upgrade sheet (ADR-082 §8): it does not come back. */
+  answerHarnessUpgradePrompt(): Promise<HarnessUpgradePromptView>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>

@@ -80,6 +80,7 @@ import { isPiModelAllowed, splitPiModelValue } from '../../../../shared/pi-model
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { LastPickNote } from './NewSessionModelSetting'
 import { usePiInstalled } from './use-engine-installed'
+import { NotInstalledRow } from './HarnessInstallLink'
 import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { ModelInfo, RawConfigPatch } from '../../../../shared/types'
@@ -189,10 +190,18 @@ function usePiNativeConfigLeaf(): PiNativeConfigLeaf {
 function PaneShell({
   testid,
   api,
+  secondary = false,
   children
 }: {
   testid: string
   api: PiNativeConfigLeaf
+  /**
+   * A later section of its Configuration page. While the harness is not
+   * installed it renders nothing (an empty root, for its testid): the page's
+   * first section says so once, with the install link (ADR-082 §8, S7b),
+   * instead of one identical row per section.
+   */
+  secondary?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
   const installed = usePiInstalled()
@@ -205,13 +214,15 @@ function PaneShell({
     )
   }
   if (!installed) {
+    if (secondary) return <div data-testid={testid} data-state="not-installed" />
     return (
       <div data-testid={testid}>
-        <SettingRow
+        <NotInstalledRow
           testid={`${PANE}.status`}
           dataId="not-installed"
-          dimmed
-          description="pi is not installed. These settings edit pi's own settings file."
+          harness="pi"
+          lead="pi is not installed."
+          rest="These settings edit pi's own settings file."
         />
       </div>
     )
@@ -602,7 +613,7 @@ export function PiSessionBehaviorSection(): React.JSX.Element {
 export function PiRetrySection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiRetrySection" api={api}>
+    <PaneShell testid="PiRetrySection" api={api} secondary>
       <AbsentDefaultToggleRow
         api={api}
         path={['retry', 'enabled']}
@@ -988,7 +999,7 @@ export function PiToolsSection(): React.JSX.Element {
   const npmPath: LeafPath = ['npmCommand']
   const npmValue = api.read(npmPath)
   return (
-    <PaneShell testid="PiToolsSection" api={api}>
+    <PaneShell testid="PiToolsSection" api={api} secondary>
       <DefaultToolsRow api={api} />
       <TextRow
         api={api}
@@ -1033,7 +1044,7 @@ export function PiToolsSection(): React.JSX.Element {
 export function PiImagesSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiImagesSection" api={api}>
+    <PaneShell testid="PiImagesSection" api={api} secondary>
       <AbsentDefaultToggleRow
         api={api}
         path={['images', 'autoResize']}
@@ -1063,7 +1074,7 @@ const PROJECT_TRUST_OPTIONS = [
 export function PiWorkspaceSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiWorkspaceSection" api={api}>
+    <PaneShell testid="PiWorkspaceSection" api={api} secondary>
       <SegmentedRow
         api={api}
         path={['defaultProjectTrust']}
@@ -1097,7 +1108,7 @@ export function PiWorkspaceSection(): React.JSX.Element {
 export function PiResourcesSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiResourcesSection" api={api}>
+    <PaneShell testid="PiResourcesSection" api={api} secondary>
       <StringListRow
         api={api}
         path={['packages']}
@@ -1146,7 +1157,7 @@ export function PiNetworkSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
 
   return (
-    <PaneShell testid="PiNetworkSection" api={api}>
+    <PaneShell testid="PiNetworkSection" api={api} secondary>
       <TextRow
         api={api}
         path={['httpProxy']}
@@ -1289,7 +1300,7 @@ function PiRawEditor({ api }: { api: PiNativeConfigLeaf }): React.JSX.Element {
 export function PiRawConfigSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
-    <PaneShell testid="PiRawConfigSection" api={api}>
+    <PaneShell testid="PiRawConfigSection" api={api} secondary>
       <PiRawEditor api={api} />
     </PaneShell>
   )

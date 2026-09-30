@@ -9,6 +9,7 @@ import type {
   HarnessInstallProgress,
   HarnessSourceChoice,
   HarnessStateEntry,
+  HarnessStateSnapshot,
   HarnessUpdate,
   HarnessUpdateMode,
   HarnessUpdateResult,
@@ -314,24 +315,41 @@ export function openUpdateFailures(
   )
 }
 
-/** An install in flight is one of the available updates (whoever started it). */
-function installingUpdate(
+/**
+ * Is this install part of the update flow: an available update, or one the
+ * current or last update run tried? The update panel shows those as update
+ * rows (`from → to`); every other install gets an install row.
+ */
+export function isUpdateInstall(
   updates: HarnessUpdatesView,
-  installs: readonly HarnessInstallProgress[]
-): HarnessInstallProgress | undefined {
-  return installs.find(
-    (p) =>
-      p.phase !== 'failed' && updates.available.some((u) => u.id === p.id && u.to === p.version)
+  install: { id: HarnessId; version: string }
+): boolean {
+  const same = (id: HarnessId, to: string): boolean => id === install.id && to === install.version
+  return (
+    updates.available.some((u) => same(u.id, u.to)) ||
+    updates.status.results.some((r) => same(r.id, r.to))
   )
 }
 
 /**
- * The footer button (mockup `04c3853c`): `running` while an update run (or an
- * install of an available update) is in flight, `failed` while a failure is
- * not dismissed, `available` with a count in Ask me mode, `done` for the few
- * seconds after a run that installed everything, else hidden. In
- * Automatically mode the button only reports: available updates alone do not
- * show it.
+ * Installs outside the update flow (ADR-082 §8, S7b): the upgrade sheet's,
+ * the composer banner's, a Settings link's or the Installed page's.
+ */
+export function otherInstalls<T extends { id: HarnessId; version: string }>(
+  updates: HarnessUpdatesView | undefined,
+  installs: readonly T[]
+): T[] {
+  return updates ? installs.filter((p) => !isUpdateInstall(updates, p)) : [...installs]
+}
+
+/**
+ * The footer button (mockup `04c3853c`): `running` while an update run or any
+ * harness install is in flight (S7b: the upgrade sheet's installs show here,
+ * not only in Settings), `failed` while an update failure or another install's
+ * failure is not dismissed, `available` with a count in Ask me mode, `done`
+ * for the few seconds after a run that installed everything or an install
+ * that finished, else hidden. In Automatically mode the button only reports:
+ * available updates alone do not show it.
  */
 export type UpdateButtonState = 'hidden' | 'available' | 'running' | 'failed' | 'done'
 
@@ -341,13 +359,15 @@ export function updateButtonState(input: {
   /** This client's Update all is in flight. */
   pending: boolean
   dismissed: ReadonlySet<string>
-  /** A run just finished with every update installed. */
+  /** A run just finished with every update installed, or an install just finished. */
   justFinished: boolean
 }): UpdateButtonState {
   const u = input.updates
   if (!u) return 'hidden'
-  if (input.pending || u.status.running || installingUpdate(u, input.installs)) return 'running'
+  const installing = input.installs.some((p) => p.phase !== 'failed')
+  if (input.pending || u.status.running || installing) return 'running'
   if (openUpdateFailures(u, input.dismissed).length > 0) return 'failed'
+  if (otherInstalls(u, input.installs).some((p) => p.phase === 'failed')) return 'failed'
   if (u.mode === 'ask' && u.available.length > 0) return 'available'
   if (input.justFinished) return 'done'
   return 'hidden'
@@ -406,6 +426,46 @@ export function updatePanelRows(
   return HARNESS_IDS.filter((id) => rows.has(id)).map((id) => rows.get(id)!)
 }
 
+/** One install outside the update flow, in the update panel (S7b). */
+export interface InstallPanelRow {
+  id: HarnessId
+  version: string
+  state: 'installing' | 'installed' | 'failed'
+  /** `installing`: the install's latest progress. */
+  progress?: HarnessInstallProgress
+  /** `failed`: why. */
+  reason?: string
+}
+
+/**
+ * The panel's install rows, in harness order: each install outside the update
+ * flow that is in flight or failed (until dismissed), then each one this
+ * client saw finish since the check last faded (`completed`).
+ */
+export function installPanelRows(
+  updates: HarnessUpdatesView | undefined,
+  installs: readonly HarnessInstallProgress[],
+  completed: readonly { id: HarnessId; version: string }[]
+): InstallPanelRow[] {
+  const rows: InstallPanelRow[] = []
+  const listed = new Set<string>()
+  for (const p of otherInstalls(updates, installs)) {
+    listed.add(installKey(p))
+    rows.push(
+      p.phase === 'failed'
+        ? { id: p.id, version: p.version, state: 'failed', reason: p.reason ?? 'unknown error' }
+        : { id: p.id, version: p.version, state: 'installing', progress: p }
+    )
+  }
+  for (const c of otherInstalls(updates, completed)) {
+    if (listed.has(installKey(c))) continue
+    listed.add(installKey(c))
+    rows.push({ id: c.id, version: c.version, state: 'installed' })
+  }
+  const order = (id: HarnessId): number => HARNESS_IDS.indexOf(id)
+  return rows.sort((a, b) => order(a.id) - order(b.id))
+}
+
 /** "opencode 1.18.41, pi 0.87.4": the button's tooltip and the panel's summary. */
 export function updateSummary(updates: readonly HarnessUpdate[]): string {
   return updates.map((u) => `${HARNESS_LABEL[u.id]} ${u.from} → ${u.to}`).join(', ')
@@ -422,4 +482,139 @@ export function autoLatestWarning(entry: HarnessStateEntry, mode: HarnessUpdateM
     entry.selection.source === 'managed' &&
     entry.selection.version === 'latest'
   )
+}
+
+// ── Offering a harness that does not run (ADR-082 §8, S7b) ──
+//
+// The composer banner, the harness picker, `createNewSession` and the Settings
+// install links read one answer, so they cannot disagree about whether a
+// harness is there.
+
+/**
+ * - `ready`: something runs for it (the resolver's `available`);
+ * - `missing`: ClaudeUI's copy is selected and not installed, and ClaudeUI can
+ *   install it here: offer Install;
+ * - `system-unusable`: a System selection that cannot run, and ClaudeUI could
+ *   install its own copy: offer "Use ClaudeUI's copy";
+ * - `unavailable-here`: nothing runs and ClaudeUI cannot install it on this
+ *   host (or an environment override names something that cannot run): say
+ *   why, offer nothing;
+ * - `unknown`: the snapshot has not loaded; every caller behaves as before
+ *   S7b, so a slow first read never flashes "not installed".
+ */
+export type HarnessReadiness =
+  'ready' | 'missing' | 'system-unusable' | 'unavailable-here' | 'unknown'
+
+export function harnessReadiness(
+  snapshot: HarnessStateSnapshot | null | undefined,
+  id: HarnessId
+): HarnessReadiness {
+  const entry = snapshot?.harnesses[id]
+  if (!entry) return 'unknown'
+  if (entry.resolved.available) return 'ready'
+  // An override runs instead of any selection, so installing changes nothing.
+  if (!entry.installable || entry.resolved.source === 'env') return 'unavailable-here'
+  return entry.selection.source === 'system' ? 'system-unusable' : 'missing'
+}
+
+/** A session on this harness can start (or nothing is known yet, which is today's behaviour). */
+export function harnessCanRun(readiness: HarnessReadiness): boolean {
+  return readiness === 'ready' || readiness === 'unknown'
+}
+
+/** How the harness picker marks a harness: one rule for every harness, Codex included. */
+export function harnessPickerMark(
+  readiness: HarnessReadiness
+): 'none' | 'not-installed' | 'disabled' {
+  if (readiness === 'missing' || readiness === 'system-unusable') return 'not-installed'
+  if (readiness === 'unavailable-here') return 'disabled'
+  return 'none'
+}
+
+export const NOT_AVAILABLE_HERE = 'Not available on this computer'
+
+/** One row of the upgrade sheet: what installing it fetches, and how much it was used. */
+export interface UpgradeSheetRow {
+  id: HarnessId
+  /** The version the install fetches, when it can be named ("latest" otherwise). */
+  version: string
+  /** What to pass `installHarness` (`installNeeded`'s request). */
+  request: string
+  sessions: number
+}
+
+/** The upgrade sheet's rows: each candidate the host offers that still needs an install. */
+export function upgradeSheetRows(
+  snapshot: HarnessStateSnapshot | null | undefined
+): UpgradeSheetRow[] {
+  if (!snapshot?.upgradePrompt.pending) return []
+  const rows: UpgradeSheetRow[] = []
+  for (const candidate of snapshot.upgradePrompt.candidates) {
+    const entry = snapshot.harnesses[candidate.id]
+    const need = entry ? installNeeded(entry) : null
+    if (!need) continue
+    rows.push({
+      id: candidate.id,
+      version: need.version ?? 'latest',
+      request: need.request,
+      sessions: candidate.sessions
+    })
+  }
+  return rows
+}
+
+/** "14 sessions", "1 session". */
+export function sessionCountLabel(n: number): string {
+  return `${n} ${n === 1 ? 'session' : 'sessions'}`
+}
+
+/**
+ * The composer banner (mockup `b51cb3df` C), or null when the harness can run
+ * (or is unknown). An install of this harness in flight or failed outranks the
+ * offer, so the banner follows the click through to the end.
+ */
+export type HarnessBannerState =
+  | { kind: 'offer'; request: string; version: string | null }
+  | { kind: 'installing'; progress: HarnessInstallProgress }
+  | { kind: 'failed'; progress: HarnessInstallProgress; request: string }
+  | { kind: 'system-unusable'; reason: string }
+  | { kind: 'ask-admin' }
+  | { kind: 'unavailable-here'; reason: string }
+
+export function harnessBannerState(
+  snapshot: HarnessStateSnapshot | null | undefined,
+  id: HarnessId,
+  installs: readonly HarnessInstallProgress[],
+  writable: boolean
+): HarnessBannerState | null {
+  const readiness = harnessReadiness(snapshot, id)
+  if (harnessCanRun(readiness)) return null
+  const entry = snapshot!.harnesses[id]
+  if (readiness === 'unavailable-here') {
+    return {
+      kind: 'unavailable-here',
+      reason: entry.resolved.reason ?? `${HARNESS_LABEL[id]} is not available on this computer`
+    }
+  }
+  const mine = installs.filter((p) => p.id === id)
+  const active = mine.find((p) => p.phase !== 'failed')
+  if (active) return { kind: 'installing', progress: active }
+  if (!writable) return { kind: 'ask-admin' }
+  const failed = mine.find((p) => p.phase === 'failed')
+  if (failed) return { kind: 'failed', progress: failed, request: failed.version }
+  if (readiness === 'system-unusable') {
+    return {
+      kind: 'system-unusable',
+      reason: entry.resolved.reason ?? `No usable System ${HARNESS_LABEL[id]} found`
+    }
+  }
+  const need = installNeeded(entry)
+  if (need) return { kind: 'offer', request: need.request, version: need.version }
+  // The selected version is installed yet does not run (a payload missing a
+  // file, e.g. Codex without its code-mode host): an install would be
+  // "already satisfied" and change nothing, so say why instead of offering it.
+  return {
+    kind: 'unavailable-here',
+    reason: entry.resolved.reason ?? `${HARNESS_LABEL[id]} is installed but cannot run`
+  }
 }

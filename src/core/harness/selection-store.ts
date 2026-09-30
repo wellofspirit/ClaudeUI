@@ -1,6 +1,7 @@
 /**
  * `~/.claude/ui/harnesses.json`: which source each harness runs from (ADR-082 §2),
- * and whether harness updates install themselves (`updates`, §6).
+ * whether harness updates install themselves (`updates`, §6), and whether the
+ * one-time upgrade sheet was answered (`upgradePrompt`, §8).
  *
  * Main-owned. It is deliberately not a field of `engines/<id>.json`: that file
  * is replaced whole by `saveEngineConfig`, and renderer screens save their own
@@ -72,7 +73,10 @@ export function loadHarnessesConfig(file = harnessesConfigPath()): HarnessesConf
     return {}
   }
   if (!isRecord(parsed)) return {}
-  const config: HarnessesConfig = isUpdateMode(parsed.updates) ? { updates: parsed.updates } : {}
+  const config: HarnessesConfig = {
+    ...(isUpdateMode(parsed.updates) ? { updates: parsed.updates } : {}),
+    ...(parsed.upgradePrompt === 'answered' ? { upgradePrompt: 'answered' as const } : {})
+  }
   if (!isRecord(parsed.selections)) return config
   const selections: Partial<Record<HarnessId, HarnessSelection>> = {}
   for (const [id, value] of Object.entries(parsed.selections)) {
@@ -101,15 +105,23 @@ export function harnessUpdateMode(
   return config.updates ?? 'ask'
 }
 
+/** Has the one-time upgrade sheet been answered (ADR-082 §8)? */
+export function upgradePromptAnswered(config: HarnessesConfig = loadHarnessesConfig()): boolean {
+  return config.upgradePrompt === 'answered'
+}
+
 /**
- * Merge `update.selections` into the file, per harness, and set `updates` when
- * given. Top-level keys and selections for harnesses this version does not
- * know are kept. Throws on an invalid value, and rather than overwrite a
- * present-but-unreadable file, which is backed up first.
+ * Merge `update.selections` into the file, per harness, and set `updates` and
+ * `upgradePrompt` when given. Top-level keys and selections for harnesses this
+ * version does not know are kept. Throws on an invalid value, and rather than
+ * overwrite a present-but-unreadable file, which is backed up first.
  */
 export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesConfigPath()): void {
   if (update.updates !== undefined && !isUpdateMode(update.updates)) {
     throw new Error(`Invalid harness update mode: ${JSON.stringify(update.updates)}`)
+  }
+  if (update.upgradePrompt !== undefined && update.upgradePrompt !== 'answered') {
+    throw new Error(`Invalid upgrade prompt state: ${JSON.stringify(update.upgradePrompt)}`)
   }
   const current = readJsonFileForWrite(file)
   const selections = isRecord(current.selections) ? { ...current.selections } : {}
@@ -121,6 +133,7 @@ export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesCon
   }
   const next: Record<string, unknown> = { ...current, selections }
   if (update.updates !== undefined) next.updates = update.updates
+  if (update.upgradePrompt !== undefined) next.upgradePrompt = update.upgradePrompt
   writeFileAtomicSync(file, JSON.stringify(next, null, 2) + '\n', {
     mode: 0o600,
     dirMode: 0o700

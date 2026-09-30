@@ -24,8 +24,10 @@
  *                           nothing, only when the move itself is refused
  *   --quiet                 only the result line
  *
- * Codex on a host without reviewed digests (Windows arm64, macOS x64) is
- * skipped with one line and exit 0, so `postinstall` succeeds there.
+ * A harness ClaudeUI cannot install on this host (`harnessInstallable`: Codex
+ * without reviewed digests on Windows arm64 and macOS x64, or a platform the
+ * manifest has no release for) is skipped with one line and exit 0, so
+ * `postinstall` succeeds there.
  *
  * Bumping a harness: set `tested` (and `floor`) in
  * `src/shared/harness-manifests/<id>.json` with the new release's reviewed
@@ -37,7 +39,7 @@
  */
 import * as fs from 'node:fs'
 import { harnessManifest } from '../src/core/harness/manifests.ts'
-import { codexHostSupported } from '../src/core/harness/resolve.ts'
+import { harnessInstallable } from '../src/core/harness/installable.ts'
 import { installDir } from '../src/core/harness/store.ts'
 import { installHarness, onInstallProgress } from '../src/core/harness/install/installer.ts'
 import { isValidInstall, moveToTrash } from '../src/core/harness/install/store-writer.ts'
@@ -58,7 +60,7 @@ export function parseEnsureArgs(argv) {
 
 const defaultDeps = {
   tested: (id) => harnessManifest(id).tested,
-  hostSupported: (id) => id !== 'codex' || codexHostSupported(),
+  hostSupported: (id) => harnessInstallable(id),
   isValid: isValidInstall,
   exists: (id, version) => fs.existsSync(installDir(id, version)),
   dir: installDir,

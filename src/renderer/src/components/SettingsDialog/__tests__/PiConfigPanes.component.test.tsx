@@ -37,6 +37,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 import type { EngineConfig, RawConfigPatch } from '../../../../../shared/types'
 import {
   PiSessionBehaviorSection,
@@ -724,10 +726,14 @@ describe('pi Configuration panes', () => {
   // ── 11. Install gate ───────────────────────────────────────────────
 
   describe('not-installed gate', () => {
-    const panes: [string, React.ReactElement][] = [
+    // The pi page's first section, and the Models page's own pi section, say it.
+    const saying: [string, React.ReactElement][] = [
       ['PiSessionBehaviorSection', <PiSessionBehaviorSection key="a" />],
+      ['PiModelsSection', <PiModelsSection key="c" />]
+    ]
+    // The pi page's later sections (ADR-082 §8, S7b): nothing, not one row each.
+    const quiet: [string, React.ReactElement][] = [
       ['PiRetrySection', <PiRetrySection key="b" />],
-      ['PiModelsSection', <PiModelsSection key="c" />],
       ['PiToolsSection', <PiToolsSection key="e" />],
       ['PiImagesSection', <PiImagesSection key="f" />],
       ['PiWorkspaceSection', <PiWorkspaceSection key="g" />],
@@ -736,13 +742,44 @@ describe('pi Configuration panes', () => {
       ['PiRawConfigSection', <PiRawConfigSection key="j" />]
     ]
 
-    it.each(panes)('%s renders the not-installed copy and no controls', async (testid, node) => {
-      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-      await renderPane(node)
-      expect(screen.getByTestId(testid).textContent).toContain('pi is not installed')
+    afterEach(() => harnessStore.resetForTests())
+
+    function expectNoControls(): void {
       expect(screen.queryAllByTestId('PiConfigPane.toggle')).toHaveLength(0)
       expect(screen.queryAllByTestId('PiConfigPane.number')).toHaveLength(0)
       expect(screen.queryAllByTestId('PiConfigPane.rawText')).toHaveLength(0)
+    }
+
+    it.each(saying)('%s renders the not-installed copy and no controls', async (testid, node) => {
+      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
+      await renderPane(node)
+      expect(screen.getByTestId(testid).textContent).toContain('pi is not installed')
+      expectNoControls()
+    })
+
+    it.each(quiet)('%s renders nothing, leaving it to the first section', async (testid, node) => {
+      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
+      await renderPane(node)
+      expect(screen.getByTestId(testid)).toHaveAttribute('data-state', 'not-installed')
+      expect(screen.getByTestId(testid).textContent).toBe('')
+      expectNoControls()
+    })
+
+    it('the whole pi page says it once, with one install link', async () => {
+      harnessStore.resetForTests()
+      installApiStub({
+        engineIsInstalled: vi.fn(async () => false),
+        harnessState: vi.fn(async () => harnessSnapshot(['pi']))
+      })
+      await renderPane(
+        <>
+          <PiSessionBehaviorSection />
+          {quiet.map(([, node]) => node)}
+        </>
+      )
+      await waitFor(() => expect(screen.getAllByTestId('HarnessInstallLink')).toHaveLength(1))
+      expect(screen.getAllByTestId('PiConfigPane.status')).toHaveLength(1)
+      expect(screen.getByTestId('HarnessInstallLink')).toHaveTextContent('Install 0.87.4')
     })
   })
 

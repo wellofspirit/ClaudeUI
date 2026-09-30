@@ -65,7 +65,7 @@ import { claudeHostTokenKeeper } from '../services/claude-host-token'
 import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
-import { startHarnessEvents } from '../ipc/harness-commands'
+import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -296,11 +296,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // no session used for seven days are removed, off every spawn path. Then the
   // harness updater (§6): one check against upstream now and every six hours,
   // installing what it finds only when Install updates is Automatically.
+  // First of all, the one-time upgrade sheet (§8) is evaluated: after the boot
+  // detection, so a usable System install it found is not offered; with
+  // detection off, at once against the cache as it stands.
   startDetectionScheduler({
     afterBoot: async () => {
+      evaluateUpgradePrompt()
       await collectHarnessGarbage()
       startHarnessUpdater()
-    }
+    },
+    whenDisabled: () => evaluateUpgradePrompt()
   })
 
   // Learn what every Codex thread is a branch OF, once per launch, alongside the

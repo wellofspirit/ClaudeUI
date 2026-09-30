@@ -32,6 +32,9 @@ import {
   OpencodeDiagnosticsSection,
   OpencodeManagedKeysSection
 } from '../OpencodeConfigPanes'
+import { OpencodeAgentsSection } from '../OpencodeAgents'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 
 // ── window.api stub ──────────────────────────────────────────────────
 
@@ -749,8 +752,9 @@ describe('opencode Configuration panes', () => {
   // ── 8. Install gate ────────────────────────────────────────────────
 
   describe('not-installed gate', () => {
-    const panes: [string, React.ReactElement][] = [
-      ['OpencodeSessionBehaviorSection', <OpencodeSessionBehaviorSection key="a" />],
+    // The opencode page's later sections (ADR-082 §8, S7b): nothing, not one
+    // row each; its first section says it once.
+    const quiet: [string, React.ReactElement][] = [
       ['OpencodeToolOutputSection', <OpencodeToolOutputSection key="b" />],
       ['OpencodeAttachmentsSection', <OpencodeAttachmentsSection key="c" />],
       ['OpencodeWorkspaceSection', <OpencodeWorkspaceSection key="d" />],
@@ -758,13 +762,47 @@ describe('opencode Configuration panes', () => {
       ['OpencodeDiagnosticsSection', <OpencodeDiagnosticsSection key="f" />]
     ]
 
-    it.each(panes)('%s renders the not-installed copy and no controls', async (testid, node) => {
-      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-      await renderPane(node)
-      const root = screen.getByTestId(testid)
-      expect(root.textContent).toContain('opencode is not installed')
+    afterEach(() => harnessStore.resetForTests())
+
+    function expectNoControls(): void {
       expect(screen.queryAllByTestId('OpencodeConfigPane.toggle')).toHaveLength(0)
       expect(screen.queryAllByTestId('OpencodeConfigPane.number')).toHaveLength(0)
+    }
+
+    it('the first section renders the not-installed copy and no controls', async () => {
+      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      expect(screen.getByTestId('OpencodeSessionBehaviorSection').textContent).toContain(
+        'opencode is not installed'
+      )
+      expectNoControls()
+    })
+
+    it.each(quiet)('%s renders nothing, leaving it to the first section', async (testid, node) => {
+      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
+      await renderPane(node)
+      expect(screen.getByTestId(testid)).toHaveAttribute('data-state', 'not-installed')
+      expect(screen.getByTestId(testid).textContent).toBe('')
+      expectNoControls()
+    })
+
+    it('the whole opencode page says it once, with one install link', async () => {
+      harnessStore.resetForTests()
+      installApiStub({
+        engineIsInstalled: vi.fn(async () => false),
+        harnessState: vi.fn(async () => harnessSnapshot(['opencode']))
+      })
+      await renderPane(
+        <>
+          <OpencodeSessionBehaviorSection />
+          {quiet.map(([, node]) => node)}
+          <OpencodeManagedKeysSection />
+          <OpencodeAgentsSection />
+        </>
+      )
+      await waitFor(() => expect(screen.getAllByTestId('HarnessInstallLink')).toHaveLength(1))
+      expect(screen.getAllByText(/opencode is not installed/)).toHaveLength(1)
+      expect(screen.getByTestId('HarnessInstallLink')).toHaveTextContent('Install 1.18.32')
     })
   })
 

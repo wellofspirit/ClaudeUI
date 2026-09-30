@@ -21,8 +21,15 @@ import {
   PERMISSION_MODE_CYCLE,
   PERMISSION_MODE_LABELS
 } from '../../../../../shared/permission-modes'
-import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
+import { engineMeta } from '../../../../../shared/engine-meta'
+import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { useHarnessStore } from '../../SettingsDialog/harness-store'
+import {
+  NOT_AVAILABLE_HERE,
+  harnessPickerMark,
+  harnessReadiness
+} from '../../SettingsDialog/harness-view'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
@@ -265,27 +272,40 @@ function EnginePage({
   selectedEngineId: EngineId
   onSelect: (engineId: EngineId) => void
 }): React.JSX.Element {
-  const codexAvailable = useSessionStore((state) =>
-    state.availableModels.some((model) => model.engineId === 'codex')
-  )
+  // The desktop picker's rule (ADR-082 §8): every harness listed, one that
+  // is not installed marked, one this computer cannot run disabled.
+  const harnessSnapshot = useHarnessStore().snapshot
   return (
     <div>
-      {Object.values(ENGINE_META)
-        .filter((meta) => meta.id !== 'codex' || codexAvailable)
-        .map((meta) => (
+      {HARNESS_IDS.map(engineMeta).map((meta) => {
+        const mark = harnessPickerMark(harnessReadiness(harnessSnapshot, meta.id))
+        const disabled = mark === 'disabled'
+        return (
           <OptionButton
             key={meta.id}
             testId="MobileConfigSheet.engineOption"
             dataValue={meta.id}
             active={meta.id === selectedEngineId}
-            onClick={() => onSelect(meta.id)}
+            disabled={disabled}
+            title={disabled ? NOT_AVAILABLE_HERE : undefined}
+            onClick={() => !disabled && onSelect(meta.id)}
           >
             <span className="flex items-center gap-2 min-w-0">
               <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
               <span className="text-[13px] truncate">{meta.label}</span>
+              {mark === 'not-installed' && (
+                <span
+                  data-testid="MobileConfigSheet.notInstalled"
+                  data-engine={meta.id}
+                  className="shrink-0 rounded-full border border-border px-1.5 text-[10px] leading-4 text-text-muted whitespace-nowrap"
+                >
+                  Not installed
+                </span>
+              )}
             </span>
           </OptionButton>
-        ))}
+        )
+      })}
     </div>
   )
 }

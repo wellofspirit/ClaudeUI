@@ -796,15 +796,9 @@ export function OpencodeAgentsSection(): React.JSX.Element {
 
   if (installed === null) return <SettingRow testid={TESTID} description="Loading…" />
 
-  if (!installed) {
-    return (
-      <SettingRow
-        testid={TESTID}
-        dimmed
-        description="opencode is not installed. Agent settings apply to opencode sessions."
-      />
-    )
-  }
+  // Not installed: the opencode page's first section says so once, with the
+  // install link (ADR-082 §8, S7b); this later section says nothing.
+  if (!installed) return <div data-testid={TESTID} data-state="not-installed" />
 
   return (
     <div data-testid={TESTID} className="divide-y divide-border/55">

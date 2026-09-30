@@ -205,13 +205,17 @@ export const DISABLE_DETECTION_ENV = 'CLAUDEUI_DISABLE_HARNESS_DETECTION'
  * requests, and one run for every harness `bootDelayMs` after boot (an
  * unref'd timer, so it never holds the process or delays startup), followed
  * by `afterBoot` (the managed store's retention, `install/gc.ts`). A no-op
- * when `CLAUDEUI_DISABLE_HARNESS_DETECTION=1`. Returns a disarm function.
+ * when `CLAUDEUI_DISABLE_HARNESS_DETECTION=1`, except for `whenDisabled`,
+ * which then runs at once: work that waits for the boot detection (the
+ * upgrade prompt, ADR-082 §8) takes the cache as it stands. Returns a disarm
+ * function.
  */
 export function startDetectionScheduler(
-  options: { bootDelayMs?: number; afterBoot?: () => unknown } = {}
+  options: { bootDelayMs?: number; afterBoot?: () => unknown; whenDisabled?: () => unknown } = {}
 ): () => void {
   if (process.env[DISABLE_DETECTION_ENV] === '1') {
     logger.info('harness', `background harness detection disabled (${DISABLE_DETECTION_ENV})`)
+    options.whenDisabled?.()
     return () => {}
   }
   setDetectionRequester((id) => {

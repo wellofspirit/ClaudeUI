@@ -60,7 +60,7 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *  - `admin` (ADR-082 §7, `harness:*` writes) — choosing a harness's source,
  *    installing one into the host's store, cancelling an install, running
  *    detection, and the update commands (§6: the update mode, Update all,
- *    Check now). Putting a program on the host from a phone is close to remote
+ *    Check now), and the upgrade sheet's answer (§8). Putting a program on the host from a phone is close to remote
  *    code execution, so a base connection only SEES the Installed page:
  *    `harness:state` and `harness:versions` declare `config` and are absent here.
  *
@@ -76,6 +76,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'harness:answer-upgrade-prompt',
   'harness:check-updates',
   'harness:detect',
   'harness:install',

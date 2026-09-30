@@ -18,6 +18,14 @@ import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
+import { HarnessInstallBanner } from '../../harness/HarnessInstallBanner'
+import {
+  useReloadModelsOnHarnessReady,
+  useSeedModelWhenHarnessReady
+} from '../../harness/use-harness-ready'
+import { useHarnessReadiness } from '../../SettingsDialog/harness-store'
+import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
+import { engineMeta } from '../../../../../shared/engine-meta'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
 import type { PermissionMode } from '../../../../../shared/types'
 import {
@@ -291,6 +299,14 @@ export function InputBox(): React.JSX.Element {
   // Once a session exists, it always reflects that session's own engine instead.
   const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
   const engineLocked = sdkActive || !!startedSessionId || !!isHistorical
+  // A harness that does not run (ADR-082 §8): the banner above the input
+  // offers it, Send stays off and the model picker says why, instead of an
+  // error after the first send. A live process keeps its binary, so a session
+  // already running is never blocked; `unknown` (no snapshot yet) is today's
+  // behaviour.
+  const harnessReadiness = useHarnessReadiness(effectiveEngineId)
+  const harnessBlocked = !harnessCanRun(harnessReadiness) && !sdkActive
+  useReloadModelsOnHarnessReady()
   // Deduped: cli.js lists `default` and its concrete equivalent (`opus[1m]`)
   // as two rows with the same description, which the shortName derivation above
   // renders identically. The `selectedModel` memo below deliberately resolves
@@ -428,6 +444,12 @@ export function InputBox(): React.JSX.Element {
     isHistorical,
     startedSessionId
   ])
+  useSeedModelWhenHarnessReady(
+    activeSessionId,
+    effectiveEngineId,
+    selectedModelValue,
+    pickerModels.length
+  )
   const stickyCodexModel = lastSelectedModelByEngine.codex
   // The exact four fields `resolveSessionSdkOptions` reads off the store, so
   // the pill and the spawn ask `codexModelIsExplicit` the same question.
@@ -726,7 +748,7 @@ export function InputBox(): React.JSX.Element {
   const voicePressRef = useRef(0)
 
   const handleVoiceStart = useCallback(async () => {
-    if (!activeSessionId || isDisabled || voiceState !== 'idle') return
+    if (!activeSessionId || isDisabled || harnessBlocked || voiceState !== 'idle') return
     const press = ++voicePressRef.current
     voiceHeldRef.current = true
     try {
@@ -736,7 +758,7 @@ export function InputBox(): React.JSX.Element {
     } catch (err) {
       window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
     }
-  }, [activeSessionId, isDisabled, voiceState, ensureSession, voiceLanguage])
+  }, [activeSessionId, isDisabled, harnessBlocked, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
     voiceHeldRef.current = false
@@ -756,6 +778,7 @@ export function InputBox(): React.JSX.Element {
   // Not wrapped in useCallback: deps include `text`, which changes on every
   // keystroke, so memoization gives no benefit. View is unmemoized too.
   const handleSend = async (): Promise<void> => {
+    if (harnessBlocked) return
     const action = resolveSendAction({
       text,
       attachedFiles,
@@ -1200,9 +1223,9 @@ export function InputBox(): React.JSX.Element {
             ? capabilities.queue
               ? 'Type to queue a message...'
               : 'Wait for this turn, or stop it to send another message'
-            : effectiveEngineId === 'codex'
-              ? 'Ask Codex anything'
-              : 'Ask Claude anything, / for commands'
+            : `Ask ${engineMeta(effectiveEngineId).label} anything${
+                capabilities.slashCommands ? ', / for commands' : ''
+              }`
 
   const textClassName =
     isVoiceActive && voiceInterimTranscript
@@ -1276,7 +1299,16 @@ export function InputBox(): React.JSX.Element {
       fileMentionIndex={fileMentionIndex}
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
-      models={pickerModels}
+      models={harnessBlocked ? [] : pickerModels}
+      modelNotice={
+        harnessBlocked
+          ? harnessReadiness === 'unavailable-here'
+            ? `${HARNESS_LABEL[effectiveEngineId]} is not available here`
+            : `Install ${HARNESS_LABEL[effectiveEngineId]} to choose a model`
+          : undefined
+      }
+      sendBlocked={harnessBlocked}
+      banner={harnessBlocked ? <HarnessInstallBanner engineId={effectiveEngineId} /> : null}
       selectedModel={
         effectiveEngineId === 'codex' &&
         !codexModelIsExplicit(

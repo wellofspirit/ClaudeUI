@@ -17,6 +17,11 @@
  *  - the update commands (ADR-082 §6): the mode is saved beside the other keys,
  *    Update all installs the update set, Check now refreshes upstream, and the
  *    snapshot carries the updates view;
+ *  - the one-time upgrade sheet (ADR-082 §8): nothing is pending before the
+ *    boot evaluation, which answers silently when there is nothing to offer;
+ *    the candidates are the used, missing, managed, installable harnesses
+ *    without a usable System install; the answer persists beside unknown
+ *    keys, and only an admin connection may give it;
  *  - invalidations and install progress go out as sync events;
  *  - no result carries an `ok` key (the transports' envelope marker).
  */
@@ -26,7 +31,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 const appendAuditLog = vi.hoisted(() => vi.fn())
-vi.mock('../../../core/services/db', () => ({ appendAuditLog }))
+const sessionCountsByEngine = vi.hoisted(() => vi.fn((): Record<string, number> => ({})))
+vi.mock('../../../core/services/db', () => ({ appendAuditLog, sessionCountsByEngine }))
 
 import type {
   DetectedInstall,
@@ -48,11 +54,13 @@ import {
 import {
   HARNESS_CHANNELS,
   InstallRequests,
+  evaluateUpgradePrompt,
   harnessCommands,
   startHarnessEvents,
   validateHarnessSelection,
   type HarnessCommandDeps
 } from '../../../core/ipc/harness-commands'
+import { resetUpgradePromptForTests } from '../../../core/harness/upgrade-prompt'
 import {
   harnessDetectionPath,
   saveDetectionCache
@@ -92,6 +100,9 @@ beforeEach(() => {
   fs.rmSync(harnessesConfigPath(), { force: true })
   fs.rmSync(harnessDetectionPath(), { force: true })
   appendAuditLog.mockClear()
+  sessionCountsByEngine.mockReset()
+  sessionCountsByEngine.mockImplementation(() => ({}))
+  resetUpgradePromptForTests()
   invalidateHarness()
 })
 
@@ -199,7 +210,11 @@ describe('capabilities (ADR-082 §7)', () => {
       'harness:detect': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:set-update-mode': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:update-all': expect.objectContaining({ capability: 'admin', kind: 'command' }),
-      'harness:check-updates': expect.objectContaining({ capability: 'admin', kind: 'command' })
+      'harness:check-updates': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'harness:answer-upgrade-prompt': expect.objectContaining({
+        capability: 'admin',
+        kind: 'command'
+      })
     })
     expect(registry.channels('remote')).toEqual([...HARNESS_CHANNELS].sort())
     expect(registry.channels('desktop')).toEqual([...HARNESS_CHANNELS].sort())
@@ -225,13 +240,15 @@ describe('capabilities (ADR-082 §7)', () => {
       'harness:detect',
       'harness:set-update-mode',
       'harness:update-all',
-      'harness:check-updates'
+      'harness:check-updates',
+      'harness:answer-upgrade-prompt'
     ]) {
       await expect(registry.dispatch(channel, 'remote', args, base)).rejects.toThrow(
         /Permission denied/
       )
     }
     expect(install).not.toHaveBeenCalled()
+    expect(fs.existsSync(harnessesConfigPath())).toBe(false)
     // The reads are free on the base set.
     await expect(registry.dispatch('harness:state', 'remote', [], base)).resolves.toBeTruthy()
 
@@ -251,7 +268,8 @@ describe('capabilities (ADR-082 §7)', () => {
     'harness:detect',
     'harness:set-update-mode',
     'harness:update-all',
-    'harness:check-updates'
+    'harness:check-updates',
+    'harness:answer-upgrade-prompt'
   ])('pins %s: registering it as `config` throws', (channel) => {
     const registry = new CommandRegistry()
     const cmd = commands().find((c) => c.channel === channel)!
@@ -692,6 +710,134 @@ describe('updates', () => {
     const updates = fakeUpdates()
     await call(registryOf(commands({ updates })), 'harness:check-updates')
     expect(updates.check).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the upgrade prompt (ADR-082 §8)', () => {
+  const PI = harnessManifest('pi')
+
+  async function prompt(
+    deps: HarnessCommandDeps = {}
+  ): Promise<HarnessStateSnapshot['upgradePrompt']> {
+    const snapshot = (await call(
+      registryOf(commands(deps)),
+      'harness:state'
+    )) as HarnessStateSnapshot
+    return snapshot.upgradePrompt
+  }
+
+  function savedConfig(): Record<string, unknown> {
+    return JSON.parse(fs.readFileSync(harnessesConfigPath(), 'utf-8')) as Record<string, unknown>
+  }
+
+  it('offers nothing before the boot evaluation, whatever the candidates', async () => {
+    sessionCountsByEngine.mockReturnValue({ opencode: 3 })
+    expect(await prompt()).toEqual({ pending: false, candidates: [] })
+    expect(sessionCountsByEngine).not.toHaveBeenCalled()
+    expect(fs.existsSync(harnessesConfigPath())).toBe(false)
+  })
+
+  it('offers each used, missing, managed harness; not Claude, an installed one or a System choice', async () => {
+    // pi is installed, so it runs; Codex is on System; Claude is bundled.
+    fakeHarnessInstall(store, 'pi', PI.tested)
+    writeSelections({ codex: { source: 'system' } })
+    sessionCountsByEngine.mockReturnValue({ claude: 50, opencode: 14, pi: 3, codex: 2 })
+    const emit = vi.fn()
+    const stop = startHarnessEvents(emit)
+    try {
+      evaluateUpgradePrompt()
+    } finally {
+      stop()
+    }
+    expect(await prompt()).toEqual({
+      pending: true,
+      candidates: [{ id: 'opencode', sessions: 14 }]
+    })
+    // Pending is not answered: nothing written, and clients were nudged.
+    expect(savedConfig().upgradePrompt).toBeUndefined()
+    expect(emit).toHaveBeenCalledWith('harness:changed', [{ id: 'opencode' }])
+  })
+
+  it('does not offer a harness whose detected System install is usable, and so answers silently', async () => {
+    saveDetectionCache([
+      {
+        id: 'opencode',
+        detectedAt: '2026-09-30T00:00:00.000Z',
+        installs: [nativeInstall('opencode', OPENCODE.tested)]
+      }
+    ])
+    sessionCountsByEngine.mockReturnValue({ opencode: 5 })
+    evaluateUpgradePrompt()
+    expect(savedConfig().upgradePrompt).toBe('answered')
+    expect(await prompt()).toEqual({ pending: false, candidates: [] })
+  })
+
+  it('answers silently when this profile used nothing to offer, keeping every other key', async () => {
+    fs.mkdirSync(path.dirname(harnessesConfigPath()), { recursive: true })
+    fs.writeFileSync(
+      harnessesConfigPath(),
+      JSON.stringify({ future: 1, updates: 'auto', selections: { pi: { source: 'system' } } })
+    )
+    sessionCountsByEngine.mockReturnValue({ claude: 12 })
+    const emit = vi.fn()
+    const stop = startHarnessEvents(emit)
+    try {
+      evaluateUpgradePrompt()
+    } finally {
+      stop()
+    }
+    expect(savedConfig()).toEqual({
+      future: 1,
+      updates: 'auto',
+      selections: { pi: { source: 'system' } },
+      upgradePrompt: 'answered'
+    })
+    expect(emit.mock.calls).toEqual(
+      ['opencode', 'pi', 'codex'].map((id) => ['harness:changed', [{ id }]])
+    )
+    // Answered stays answered: a harness used later is not offered by the sheet.
+    sessionCountsByEngine.mockReturnValue({ opencode: 1 })
+    expect(await prompt()).toEqual({ pending: false, candidates: [] })
+  })
+
+  it('leaves the prompt unanswered when the sessions cannot be counted', async () => {
+    sessionCountsByEngine.mockImplementation(() => {
+      throw new Error('database is locked')
+    })
+    evaluateUpgradePrompt()
+    expect(fs.existsSync(harnessesConfigPath())).toBe(false)
+    expect(await prompt()).toEqual({ pending: false, candidates: [] })
+    // The next read counts again.
+    sessionCountsByEngine.mockReturnValue({ pi: 2 })
+    expect(await prompt()).toEqual({ pending: true, candidates: [{ id: 'pi', sessions: 2 }] })
+  })
+
+  it('recomputes the candidates on every read while unanswered', async () => {
+    sessionCountsByEngine.mockReturnValue({ opencode: 1, pi: 1 })
+    evaluateUpgradePrompt()
+    expect((await prompt()).candidates.map((c) => c.id)).toEqual(['opencode', 'pi'])
+    fakeHarnessInstall(store, 'opencode', OPENCODE.tested)
+    invalidateHarness('opencode')
+    expect(await prompt()).toEqual({ pending: true, candidates: [{ id: 'pi', sessions: 1 }] })
+  })
+
+  it('harness:answer-upgrade-prompt records the answer beside unknown keys, for an admin connection', async () => {
+    fs.mkdirSync(path.dirname(harnessesConfigPath()), { recursive: true })
+    fs.writeFileSync(harnessesConfigPath(), JSON.stringify({ future: 1, selections: {} }))
+    sessionCountsByEngine.mockReturnValue({ codex: 4 })
+    evaluateUpgradePrompt()
+    expect((await prompt()).pending).toBe(true)
+
+    const registry = registryOf()
+    const admin = makeRemoteConnection('webauthn', 'phone', FULL_REMOTE_GRANTS)
+    await expect(
+      registry.dispatch('harness:answer-upgrade-prompt', 'remote', [], admin)
+    ).resolves.toEqual({ pending: false, candidates: [] })
+    expect(savedConfig()).toEqual({ future: 1, selections: {}, upgradePrompt: 'answered' })
+    expect(appendAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'harness:answer-upgrade-prompt', capability: 'admin' })
+    )
+    expect(await prompt()).toEqual({ pending: false, candidates: [] })
   })
 })
 

@@ -1,10 +1,11 @@
 # ADR-082: Harnesses run from ClaudeUI's managed copy or the system install, ClaudeUI downloads and updates its copies, and the installer stops shipping opencode, pi and Codex
 
-**Status:** Accepted (2026-09-30, arc 2 landed; proposed 2026-09-28). The design is owner-ruled
-from mockups `8bf84c23` (design 1, the Harnesses rows) and `04c3853c` (the sidebar update button).
-Implementation is arcs 2 and 3 of the 3.6 line, after
-[ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8, unbundling) is in progress: the
-engines are unbundled (S7a, "As built" in §8); the upgrade sheet and the download offers are S7b.
+**Status:** Accepted (2026-09-30, arcs 2 and 3 landed; proposed 2026-09-28). The design is
+owner-ruled from mockups `8bf84c23` (design 1, the Harnesses rows), `04c3853c` (the sidebar update
+button) and `b51cb3df` (the upgrade sheet and the download offers). Implementation is arcs 2 and 3
+of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
+unbundling) is complete: the engines are unbundled (S7a) and ClaudeUI offers them (S7b), both
+"As built" in §8.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -369,6 +370,84 @@ As built (arc 3, S7a; the upgrade sheet and the per-session download offers are 
 - Documentation. pi's version-exact docs are read from the upstream checkout
   `vendor/pi-src/packages/coding-agent/docs/` at the tested tag (CLAUDE.md's rule for engine
   sources), no longer from the vendored payload.
+
+As built (arc 3, S7b; mockup `b51cb3df`):
+
+- Installable. `harnessInstallable` (`src/core/harness/installable.ts`) says whether ClaudeUI can
+  install its own copy on this host: opencode and pi when the manifest has a release for the
+  host's platform key, Codex on a host with reviewed digests, Claude Code never. The state
+  snapshot carries it per harness (`HarnessStateEntry.installable`), and `ensure-harness.mjs`
+  skips a harness it says no to.
+- The upgrade sheet's candidates (`src/core/harness/upgrade-prompt.ts`). A harness is offered
+  when it is not Claude Code, this profile has at least one `session_meta` row for it, nothing
+  runs for it, its selection is ClaudeUI's copy, detection found no usable System install, and it
+  is installable here. A System selection that cannot run is left to the composer banner. The
+  first evaluation runs after the boot detection (or at once when detection is off), so a usable
+  System install found at boot is not offered; when it finds nothing to offer, it marks the prompt
+  answered without showing anything, so a profile that used none never sees the sheet. Until the
+  prompt is answered, the candidates are recomputed on every `harness:state` read (one
+  `session_meta` count per read); a failed count offers nothing that read and does not answer.
+- The answer is `upgradePrompt: "answered"` at the top level of `harnesses.json`, written
+  read-modify-write like the rest (unknown keys survive). `harness:answer-upgrade-prompt` records
+  it: `admin`, pinned, on both transports, and audited like the other writes. The snapshot's
+  `upgradePrompt` is `{ pending, candidates }`; the evaluation and the answer nudge clients with
+  `harness:changed`.
+- The sheet (`HarnessUpgradeSheet`, mounted once in `SessionView`) shows while `pending` holds,
+  on the desktop and on a web connection that holds `admin`; a refusal hides it for that client
+  without answering. Rows (logo, label, the version the install fetches, "N sessions") start
+  unchecked; Install is disabled until one is checked and then reads "Install N". "Not now"
+  answers without installing; Install starts `harness:install` for each checked harness (the
+  version its selection names) and answers; the progress continues in the sidebar footer's
+  button, the Installed page's pill and the composer banner. Escape only closes it for this run, and it returns on the next launch. No
+  download sizes anywhere: the manifests do not record them, and the pill shows the bytes as they
+  arrive.
+- One reading of whether a harness runs (`harnessReadiness`, `harness-view.ts`): `ready`,
+  `missing` (ClaudeUI's copy selected, installable here), `system-unusable` (a System selection
+  that cannot run, installable here), `unavailable-here` (not installable, or an environment
+  override that cannot run) and `unknown` (no snapshot yet, which every caller treats as before).
+- The harness picker lists every harness, Codex included (it was hidden when it had no models): a
+  `missing` or `system-unusable` harness carries a "Not installed" chip and can be picked; an
+  `unavailable-here` one is disabled, titled "Not available on this computer". The mobile sheet
+  follows the same rule.
+- New sessions. `createNewSession` keeps a remembered harness that does not run selected, with no
+  model seeded (an empty catalog resolves to a phantom default) and no stale-default error; the
+  opencode→claude fallback applies only to an opencode that runs (or is `unknown`) and has no
+  usable model, and an `unavailable-here` harness falls back to Claude Code. Switching a session
+  to a harness that does not run does the same. When the harness starts to run, the composer
+  reloads the models (discovery answers nothing for a harness that does not run, and main caches
+  only non-empty answers) and `seedUnsetModel` gives the session the model a new one would get.
+- The composer banner (`HarnessInstallBanner`) sits above the input while the session's harness
+  does not run and no process runs for it: offer (Install and Settings…, which opens Settings ›
+  Harnesses › Installed), installing (the shared progress, Cancel), failed (the reason, Retry),
+  system-unusable (the resolver's reason, "Use ClaudeUI's copy": the selection becomes ClaudeUI's
+  Tested copy, then it installs), a connection without `admin` ("Ask an admin to install it from
+  Settings › Harnesses › Installed", no button) and unavailable-here (the reason, no button). A
+  selected version that is installed yet cannot run (Codex without its code-mode host) gets its
+  reason, not an Install the installer would treat as already satisfied.
+  Meanwhile Send, Enter and voice are off and the model picker reads "Install <label> to choose a
+  model". The placeholder names the session's harness ("Ask pi anything"), with ", / for
+  commands" where the harness has slash commands.
+- A session that never spawned shows its harness's logo in the sidebar: its in-memory row takes
+  the engine from `sessionEngines` instead of reading as Claude Code.
+- Settings. The dispatch panes' and the opencode, pi and Codex configuration panes' not-installed
+  rows offer "Install <version>" for a `missing` harness to an admin connection, through the same
+  install path. Dispatch into Claude Code gates on any of opencode, pi or Codex being installed and
+  says "No harness that can call Claude is installed (opencode, pi or Codex)." The Codex
+  configuration pane re-reads when Codex starts to run.
+- One not-installed row per Configuration page. The opencode, pi and Codex pages say "<Label> is
+  not installed" once, in their first section (Session behaviour; Model behaviour for Codex),
+  with the install link; their later sections render nothing while the harness is not installed
+  (an empty root keeps each section's `data-testid`, `data-state="not-installed"`). A Codex that
+  runs but whose `config.toml` cannot be read still says so in every section. Sections on other
+  pages (Models, Auto mode, Dispatch) keep their own row.
+- Installs outside the update flow show on the sidebar footer's update button (§6), so a sheet
+  install is visible outside Settings. Any harness install in flight makes it spin, with a
+  tooltip naming the harness, its version and its progress; one that finishes shows the same
+  check that fades; a failure turns it amber. Its panel lists these installs under the update
+  rows, each with its progress and a Cancel, a check once installed, or the failure's reason and
+  a dismiss. An install that is an available update, or one the current or last run tried, stays
+  an update row (`isUpdateInstall`); update behaviour is otherwise unchanged. What finished is
+  kept per client (`completedInstalls`) until the check has faded and the panel is shut.
 
 ## Consequences
 

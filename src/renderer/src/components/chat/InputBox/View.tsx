@@ -94,6 +94,15 @@ export interface InputBoxViewProps {
   // Controls
   models: ModelDisplay[]
   selectedModel: ModelDisplay
+  /**
+   * Replaces the model picker with this line while the session's harness does
+   * not run (ADR-082 §8): "Install opencode to choose a model".
+   */
+  modelNotice?: string
+  /** Send (and Enter) stay off while the session's harness does not run. */
+  sendBlocked?: boolean
+  /** Shown above the input: the harness install banner, or nothing. */
+  banner?: React.ReactNode
   selectedEngineId: EngineId
   engineLocked: boolean
   showEnginePicker: boolean
@@ -514,6 +523,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
       className="shrink-0"
     >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
+        {props.banner}
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'
@@ -604,7 +614,16 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               {isMobile ? (
                 <MobileConfigSheet
                   models={props.models}
-                  selectedModel={props.selectedModel}
+                  selectedModel={
+                    props.modelNotice
+                      ? {
+                          ...props.selectedModel,
+                          value: '',
+                          displayName: props.modelNotice,
+                          shortName: props.modelNotice
+                        }
+                      : props.selectedModel
+                  }
                   selectedEngineId={props.selectedEngineId}
                   engineLocked={props.engineLocked}
                   showModePicker={props.showModePicker ?? false}
@@ -645,13 +664,21 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                       onSelectEngine={props.onSelectEngine}
                     />
                   )}
-                  {(props.showModelPicker ?? true) && (
-                    <ModelPicker
-                      models={props.models}
-                      selectedModel={props.selectedModel}
-                      onSelectModel={props.onSelectModel}
-                    />
-                  )}
+                  {(props.showModelPicker ?? true) &&
+                    (props.modelNotice ? (
+                      <span
+                        data-testid="InputBox.modelNotice"
+                        className="h-7 px-2 flex items-center text-[11px] text-text-muted truncate"
+                      >
+                        {props.modelNotice}
+                      </span>
+                    ) : (
+                      <ModelPicker
+                        models={props.models}
+                        selectedModel={props.selectedModel}
+                        onSelectModel={props.onSelectModel}
+                      />
+                    ))}
                   {(props.showThinkingPicker ?? true) && (
                     <ThinkingPicker
                       thinkingMode={props.thinkingMode}
@@ -715,7 +742,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               <button
                 data-testid="InputBox.send"
                 onClick={onSend}
-                disabled={(!text.trim() && attachedFiles.length === 0) || isDisabled}
+                disabled={
+                  (!text.trim() && attachedFiles.length === 0) || isDisabled || !!props.sendBlocked
+                }
                 title={isRunning ? 'Queue message' : 'Send message'}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
               >

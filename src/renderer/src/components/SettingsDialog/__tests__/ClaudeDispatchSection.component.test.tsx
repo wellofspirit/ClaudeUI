@@ -2,10 +2,10 @@
  * Layer 2: Component tests for ClaudeDispatchSection (ADR-033 M2-C — Claude-side twin).
  *
  * Mirrors OpencodeDispatchSection.component.test.tsx. Claude itself is always
- * installed, but dispatch INTO Claude can only be called FROM opencode, so
- * (ADR-033 M4-A) this section gates on the same opencode-installed probe as
- * the opencode twin — hence the gated-states tests below, unlike the earlier
- * M2-C revision of this file.
+ * installed, but dispatch INTO Claude can only be called FROM another harness,
+ * so (ADR-033 M4-A) this section gates on any of opencode, pi or Codex being
+ * installed (ADR-082 §8 unbundled all three) — hence the gated-states tests
+ * below, unlike the earlier M2-C revision of this file.
  *
  * ADR-065 split the pane into TWO group bodies over one config read — "Dispatch
  * into" (`ClaudeDispatchSection`) and "Limits" (`ClaudeDispatchSection.limits`)
@@ -14,7 +14,8 @@
  * id it asserts is the id that row carried before the split.
  *
  * Tested flows:
- *   1. Gated states: loading (probes pending) and not-installed (no opencode)
+ *   1. Gated states: loading (probes pending), not-installed (no caller), and
+ *      open when any one caller is installed
  *   2. Load renders the current dispatch config (select value + chip states),
  *      filtered to Claude models only (opencode models excluded)
  *   3. Editing the default model saves the FULL merged EngineConfig —
@@ -150,14 +151,25 @@ describe('ClaudeDispatchSection — gated states', () => {
     expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
   })
 
-  it('shows the not-installed message (no controls) when opencode is absent — no possible caller', async () => {
+  it('shows the not-installed message (no controls) when no caller is installed — no possible caller', async () => {
     installApiStub({ engineIsInstalled: vi.fn(async () => false) })
     render(<ClaudeDispatchSection />)
     await waitFor(() =>
-      expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('not installed')
+      expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain(
+        'No harness that can call Claude is installed (opencode, pi or Codex).'
+      )
     )
     expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
     expect(screen.queryAllByTestId('ClaudeDispatchSection.allowedModel')).toHaveLength(0)
+  })
+
+  it('opens when pi alone can call Claude (opencode and Codex absent)', async () => {
+    installApiStub({ engineIsInstalled: vi.fn(async (id: string) => id === 'pi') })
+    render(<ClaudeDispatchSection />)
+    expect(await screen.findByTestId('ClaudeDispatchSection.defaultModel')).toBeTruthy()
+    expect(screen.getByTestId('ClaudeDispatchSection').textContent).not.toContain(
+      'No harness that can call Claude'
+    )
   })
 })
 

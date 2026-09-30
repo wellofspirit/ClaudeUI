@@ -7,7 +7,9 @@ import type {
 } from '../../../../../shared/harness-types'
 import {
   autoLatestWarning,
+  installPanelRows,
   openUpdateFailures,
+  otherInstalls,
   updateButtonState,
   updatePanelRows,
   updateResultKey,
@@ -36,6 +38,7 @@ function pi(patch: Partial<HarnessStateEntry> = {}): HarnessStateEntry {
     },
     system: { detectedAt: null, installs: [], choice: { kind: 'fallback', reason: 'none' } },
     managed: [{ version: '0.87.4', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }],
+    installable: true,
     ...patch
   }
 }
@@ -367,7 +370,7 @@ describe('updateButtonState', () => {
     expect(updateButtonState({ ...idle, updates: updates({ mode: 'auto' }) })).toBe('hidden')
   })
 
-  it('spins while a run is in flight, this client asked for one, or an update is installing', () => {
+  it('spins while a run is in flight, this client asked for one, or any install runs', () => {
     const running = updates({ status: { running: true, lastRunAt: RUN, results: [] } })
     expect(updateButtonState({ ...idle, updates: running })).toBe('running')
     expect(updateButtonState({ ...idle, updates: updates(), pending: true })).toBe('running')
@@ -375,9 +378,28 @@ describe('updateButtonState', () => {
     expect(updateButtonState({ ...idle, updates: updates(), installs: [installing] })).toBe(
       'running'
     )
-    // An install that is not an available update (a manual pick) does not.
-    const other: HarnessInstallProgress = { id: 'pi', version: '0.87.2', phase: 'downloading' }
-    expect(updateButtonState({ ...idle, updates: updates(), installs: [other] })).toBe('available')
+    // Since S7b an install that is not an update (the upgrade sheet's) spins too.
+    const other: HarnessInstallProgress = { id: 'codex', version: '0.156.0', phase: 'downloading' }
+    expect(
+      updateButtonState({ ...idle, updates: updates({ available: [] }), installs: [other] })
+    ).toBe('running')
+  })
+
+  it('is amber for a failed install outside the update flow, not for an update’s own', () => {
+    const failed: HarnessInstallProgress = {
+      id: 'codex',
+      version: '0.156.0',
+      phase: 'failed',
+      reason: 'digest mismatch'
+    }
+    expect(
+      updateButtonState({ ...idle, updates: updates({ available: [] }), installs: [failed] })
+    ).toBe('failed')
+    // The update's failure is the run's result's business (and dismissable there).
+    const updateFailed: HarnessInstallProgress = { ...failed, id: 'pi', version: '0.87.4' }
+    expect(updateButtonState({ ...idle, updates: updates(), installs: [updateFailed] })).toBe(
+      'available'
+    )
   })
 
   it('is amber while a failure is not dismissed, then falls back to what else is true', () => {
@@ -463,5 +485,31 @@ describe('autoLatestWarning', () => {
     expect(autoLatestWarning(opencode('tested'), 'auto')).toBe(false)
     expect(autoLatestWarning(opencode('1.18.40'), 'auto')).toBe(false)
     expect(autoLatestWarning(opencode('latest', 'system'), 'auto')).toBe(false)
+  })
+})
+
+describe('installPanelRows (S7b)', () => {
+  it('lists installs outside the update flow, in flight, failed and finished, in harness order', () => {
+    const view = updates()
+    const rowsOf = installPanelRows(
+      view,
+      [
+        { id: 'codex', version: '0.156.0', phase: 'downloading', receivedBytes: 5 },
+        { id: 'pi', version: '0.87.4', phase: 'downloading' },
+        { id: 'opencode', version: '1.18.32', phase: 'failed', reason: 'no network' }
+      ],
+      [
+        { id: 'claude', version: '9.9.9' },
+        { id: 'codex', version: '0.156.0' }
+      ]
+    )
+    expect(rowsOf.map((r) => [r.id, r.version, r.state])).toEqual([
+      ['claude', '9.9.9', 'installed'],
+      ['opencode', '1.18.32', 'failed'],
+      ['codex', '0.156.0', 'installing']
+    ])
+    expect(rowsOf[1].reason).toBe('no network')
+    // pi 0.87.4 is an available update: it is an update row, not an install row.
+    expect(otherInstalls(view, [{ id: 'pi', version: '0.87.4' }])).toEqual([])
   })
 })

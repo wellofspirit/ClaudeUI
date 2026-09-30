@@ -5,10 +5,11 @@
  * snapshot and one install list instead of each subscribing and re-reading on
  * its own.
  *
- * The sidebar button keeps the store subscribed for as long as the sidebar is
- * mounted, so what describes one visit to the Installed page (its errors, the
- * upstream versions it fetched, a detection error) is reset when the page
- * closes (`useHarnessPageVisit`), not only when the last subscriber leaves.
+ * The sidebar button and the app-level upgrade sheet (S7b) keep the store
+ * subscribed for as long as the app is mounted, so what describes one visit to
+ * the Installed page (its errors, the upstream versions it fetched, a
+ * detection error) is reset when the page closes (`useHarnessPageVisit`), not
+ * only when the last subscriber leaves.
  *
  * ## Where the truth is
  *
@@ -39,7 +40,7 @@ import type {
   HarnessVersionsResult
 } from '../../../../shared/harness-types'
 import { ipcErrorMessage, isInvokeTimeout, isPermissionDenied } from '../../utils/ipc-error'
-import { installKey } from './harness-view'
+import { harnessReadiness, installKey, installNeeded, type HarnessReadiness } from './harness-view'
 
 /** `harness:changed` arrives once per harness a detection touched; one read answers them all. */
 export const CHANGED_DEBOUNCE_MS = 150
@@ -71,6 +72,17 @@ export interface HarnessStoreState {
   updateError: string | null
   /** Update failures this client dismissed (`updateResultKey`). */
   dismissedUpdates: readonly string[]
+  /**
+   * The upgrade sheet is closed for this run of this client: answered here,
+   * put away with Escape (it returns next launch), or refused for want of
+   * `admin` (it is not for this connection).
+   */
+  upgradeClosed: boolean
+  /**
+   * Installs this client saw finish since the footer button's check last
+   * faded (S7b): the button's `done` state and the panel's installed rows.
+   */
+  completedInstalls: readonly { id: HarnessId; version: string }[]
 }
 
 const INITIAL: HarnessStoreState = {
@@ -85,7 +97,9 @@ const INITIAL: HarnessStoreState = {
   updatePending: false,
   checkPending: false,
   updateError: null,
-  dismissedUpdates: []
+  dismissedUpdates: [],
+  upgradeClosed: false,
+  completedInstalls: []
 }
 
 /** What describes one visit to the Installed page; reset when it closes. */
@@ -261,6 +275,9 @@ class HarnessStore {
       return
     }
     if (progress.phase === 'done') {
+      // Only one this client saw in flight: a replayed `done` for an install
+      // long finished is not news.
+      if (this.state.installs.some((p) => installKey(p) === key)) this.completed(progress)
       this.removeInstall(key)
       this.scheduleRefresh()
       return
@@ -335,6 +352,7 @@ class HarnessStore {
       const result = await window.api.installHarness(id, version)
       const key = installKey(result)
       if (result.status === 'installed') {
+        this.completed(result)
         this.removeInstall(key)
         void this.refresh()
       } else if (this.cancelled.has(key)) {
@@ -370,6 +388,22 @@ class HarnessStore {
     } finally {
       this.scheduleRefresh()
     }
+  }
+
+  private completed(install: { id: HarnessId; version: string }): void {
+    const key = installKey(install)
+    if (this.state.completedInstalls.some((c) => installKey(c) === key)) return
+    this.set({
+      completedInstalls: [
+        ...this.state.completedInstalls,
+        { id: install.id, version: install.version }
+      ]
+    })
+  }
+
+  /** The footer button's check faded (or its panel closed after): forget what finished. */
+  clearCompletedInstalls = (): void => {
+    if (this.state.completedInstalls.length > 0) this.set({ completedInstalls: [] })
   }
 
   dismiss = (id: HarnessId, version: string): void => {
@@ -455,6 +489,53 @@ class HarnessStore {
     }
   }
 
+  /**
+   * The upgrade sheet's two buttons (ADR-082 §8): start an install of each
+   * checked harness (the version its selection names, `installNeeded`), then
+   * record the answer, so the sheet never comes back. "Not now" is an empty
+   * list. The sheet closes at once; progress continues in the install pill and
+   * the composer banner. A refusal (no `admin`) hides it for this client
+   * without answering: it is not for this connection.
+   */
+  answerUpgradePrompt = async (install: readonly HarnessId[]): Promise<void> => {
+    this.set({ upgradeClosed: true })
+    const snapshot = this.state.snapshot
+    for (const id of install) {
+      const entry = snapshot?.harnesses[id]
+      const need = entry ? installNeeded(entry) : null
+      if (need) void this.install(id, need.request)
+    }
+    try {
+      await window.api.answerHarnessUpgradePrompt()
+    } catch (error) {
+      if (!isPermissionDenied(error) && !isInvokeTimeout(error)) {
+        this.set({ loadError: ipcErrorMessage(error) })
+      }
+    } finally {
+      this.scheduleRefresh()
+    }
+  }
+
+  /**
+   * "Use ClaudeUI's copy" for a System selection that cannot run: switch the
+   * harness to ClaudeUI's Tested copy, then install it when the store lacks it.
+   */
+  useManagedCopy = async (id: HarnessId): Promise<void> => {
+    const saved = await this.setSelection(id, { source: 'managed', version: 'tested' })
+    if (!saved) return
+    const entry = this.state.snapshot?.harnesses[id]
+    const need = entry ? installNeeded(entry) : null
+    if (need && entry?.installable) await this.install(id, need.request)
+  }
+
+  /** Escape: put the sheet away for this run without answering; it returns next launch. */
+  closeUpgradeSheet = (): void => {
+    if (!this.state.upgradeClosed) this.set({ upgradeClosed: true })
+  }
+
+  /** Whether `id` can run, as the last snapshot says (`harnessReadiness`). */
+  readiness = (id: HarnessId): HarnessReadiness => harnessReadiness(this.state.snapshot, id)
+
   /** Put an update failure away (this client only); a retry that fails again shows again. */
   dismissUpdate = (key: string): void => {
     if (this.state.dismissedUpdates.includes(key)) return
@@ -496,4 +577,13 @@ export function useHarnessStore(): HarnessStoreState {
 /** Mark a mounted Installed page as a visit (`HarnessStore.beginVisit`). */
 export function useHarnessPageVisit(): void {
   useEffect(() => harnessStore.beginVisit(), [])
+}
+
+/** `harnessReadiness` for one harness, live. Subscribes the store (and so starts its feed). */
+export function useHarnessReadiness(id: HarnessId): HarnessReadiness {
+  const snapshot = useSyncExternalStore(
+    harnessStore.subscribe,
+    () => harnessStore.getState().snapshot
+  )
+  return harnessReadiness(snapshot, id)
 }

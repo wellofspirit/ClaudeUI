@@ -59,3 +59,15 @@ export function useOpencodeInstalled(): boolean | null {
 export function usePiInstalled(): boolean | null {
   return useEngineInstalled('pi')
 }
+
+/**
+ * Is any harness that can CALL Claude installed (opencode, pi or Codex:
+ * `DISPATCH_TARGETS` in `cross-engine-dispatcher.ts`)? Dispatch into Claude
+ * has nothing to configure without one. `null` until every probe that could
+ * still say yes has answered.
+ */
+export function useClaudeDispatchCallerInstalled(): boolean | null {
+  const answers = [useEngineInstalled('opencode'), usePiInstalled(), useEngineInstalled('codex')]
+  if (answers.includes(true)) return true
+  return answers.includes(null) ? null : false
+}

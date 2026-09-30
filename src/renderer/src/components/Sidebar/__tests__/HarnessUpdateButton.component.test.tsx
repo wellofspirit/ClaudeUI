@@ -3,7 +3,9 @@
  * hidden / count badge / spinner / a check that fades after five seconds /
  * amber on a failure, the panel it opens, Update all, the read-only mode of a
  * connection without `admin`, and its place in the footer (left of Remote
- * Access, holding the footer's `ml-auto`). Against a mocked `window.api` and
+ * Access, holding the footer's `ml-auto`). Since ADR-082 S7b it also carries
+ * every other harness install (the upgrade sheet's): spinner, check, amber,
+ * and install rows in the panel. Against a mocked `window.api` and
  * hand-fired sync events.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -67,6 +69,7 @@ const api = {
   updateHarnesses: vi.fn(),
   checkHarnessUpdates: vi.fn(),
   setHarnessUpdateMode: vi.fn(),
+  cancelHarnessInstall: vi.fn(),
   getRemoteStatus: vi.fn(async () => null),
   onRemoteStatus: vi.fn(() => () => {})
 }
@@ -223,6 +226,118 @@ describe('states', () => {
     fireEvent.click(within(pi).getByTestId('HarnessUpdatePanel.dismiss'))
     // Dismissed: pi is still an update, so the count shows again (Ask me).
     expect(button()).toHaveAttribute('data-state', 'available')
+  })
+})
+
+// ── Installs outside the update flow (ADR-082 §8, S7b) ─────────────
+
+function fire(channel: string, ...args: unknown[]): void {
+  act(() => {
+    for (const cb of syncHandlers.get(channel) ?? []) cb(...args)
+  })
+}
+
+describe('other installs (the upgrade sheet’s, S7b)', () => {
+  const codex = (patch: Record<string, unknown> = {}) => ({
+    id: 'codex',
+    version: '0.156.0',
+    phase: 'downloading',
+    receivedBytes: 18 * 1024 * 1024,
+    totalBytes: 210 * 1024 * 1024,
+    ...patch
+  })
+  const installRows = (): HTMLElement[] => screen.getAllByTestId('HarnessUpdatePanel.install')
+
+  it('spins while a harness that is not an update installs, then shows the fading check', async () => {
+    await mounted(updates({ available: [] }))
+    expect(screen.queryByTestId('HarnessUpdateButton')).toBeNull()
+    fire('harness:install-progress', codex())
+    expect(button()).toHaveAttribute('data-state', 'running')
+    expect(button()).toHaveAttribute(
+      'title',
+      'Installing Codex 0.156.0 · Downloading 18.0 MB of 210.0 MB'
+    )
+    fireEvent.click(button())
+    const row = installRows()[0]
+    expect(row).toHaveAttribute('data-id', 'codex@0.156.0')
+    expect(row).toHaveAttribute('data-state', 'installing')
+    expect(within(row).getByTestId('HarnessUpdatePanel.installProgress')).toHaveTextContent(
+      'Downloading 18.0 MB of 210.0 MB'
+    )
+    expect(screen.getByTestId('HarnessUpdatePanel')).toHaveTextContent('Installing harnesses')
+    expect(screen.getByTestId('HarnessUpdatePanel')).toHaveAttribute(
+      'aria-label',
+      'Installing harnesses'
+    )
+    // The note about running sessions keeping their version is about updates.
+    expect(screen.queryByTestId('HarnessUpdatePanel.note')).toBeNull()
+    // Cancel from the panel reaches the host.
+    api.cancelHarnessInstall.mockResolvedValue({
+      status: 'cancelled',
+      id: 'codex',
+      version: '0.156.0'
+    })
+    fireEvent.click(within(row).getByTestId('HarnessUpdatePanel.cancel'))
+    await act(async () => {})
+    expect(api.cancelHarnessInstall).toHaveBeenCalledWith('codex', '0.156.0')
+  })
+
+  it('finishes with the check, which fades, and the panel says it installed', async () => {
+    await mounted(updates({ available: [] }))
+    fire('harness:install-progress', codex())
+    vi.useFakeTimers()
+    fire('harness:install-progress', codex({ phase: 'done' }))
+    expect(button()).toHaveAttribute('data-state', 'done')
+    expect(button()).toHaveAttribute('title', 'Codex 0.156.0 installed')
+    fireEvent.click(button())
+    expect(installRows()[0]).toHaveAttribute('data-state', 'installed')
+    fireEvent.click(button())
+    act(() => vi.advanceTimersByTime(DONE_VISIBLE_MS))
+    expect(button().className).toContain('opacity-0')
+    act(() => vi.advanceTimersByTime(DONE_FADE_MS))
+    expect(screen.queryByTestId('HarnessUpdateButton')).toBeNull()
+    // What finished is forgotten once the check has gone.
+    expect(harnessStore.getState().completedInstalls).toEqual([])
+  })
+
+  it('is amber after a failed install, with the reason in the panel, until dismissed', async () => {
+    await mounted(updates({ available: [] }))
+    fire('harness:install-progress', codex())
+    fire(
+      'harness:install-progress',
+      codex({
+        phase: 'failed',
+        reason: "the download's SHA-256 does not match the reviewed digest"
+      })
+    )
+    expect(button()).toHaveAttribute('data-state', 'failed')
+    expect(button()).toHaveAttribute('title', '1 harness install failed')
+    fireEvent.click(button())
+    const row = installRows()[0]
+    expect(row).toHaveAttribute('data-state', 'failed')
+    expect(within(row).getByTestId('HarnessUpdatePanel.installReason')).toHaveTextContent(
+      "the download's SHA-256 does not match the reviewed digest"
+    )
+    fireEvent.click(within(row).getByTestId('HarnessUpdatePanel.dismissInstall'))
+    expect(screen.queryAllByTestId('HarnessUpdatePanel.install')).toHaveLength(0)
+    // Dismissed: no longer amber; with the panel shut there is nothing to show.
+    expect(button()).not.toHaveAttribute('data-state', 'failed')
+    fireEvent.click(button())
+    expect(screen.queryByTestId('HarnessUpdateButton')).toBeNull()
+  })
+
+  it('an update’s own install stays an update row, not a second install row', async () => {
+    await mounted(updates())
+    fire('harness:install-progress', {
+      id: 'pi',
+      version: '0.87.4',
+      phase: 'downloading',
+      receivedBytes: 1
+    })
+    expect(button()).toHaveAttribute('data-state', 'running')
+    fireEvent.click(button())
+    expect(rows().find((r) => r.dataset.id === 'pi')).toHaveAttribute('data-state', 'installing')
+    expect(screen.queryAllByTestId('HarnessUpdatePanel.install')).toHaveLength(0)
   })
 })
 

@@ -47,6 +47,7 @@ import {
 } from './settings-controls'
 import { RawJsonField } from './OpencodeSchemaForm'
 import { useOpencodeInstalled } from './use-engine-installed'
+import { NotInstalledRow } from './HarnessInstallLink'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { OpencodeAgentSummary, RawConfigPatch } from '../../../../shared/types'
 
@@ -553,10 +554,18 @@ function StringListRow({
 function PaneShell({
   testid,
   api,
+  secondary = false,
   children
 }: {
   testid: string
   api: OpencodeNativeConfigLeaf
+  /**
+   * A later section of its Configuration page. While the harness is not
+   * installed it renders nothing (an empty root, for its testid): the page's
+   * first section says so once, with the install link (ADR-082 §8, S7b),
+   * instead of one identical row per section.
+   */
+  secondary?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
   const installed = useOpencodeInstalled()
@@ -565,11 +574,13 @@ function PaneShell({
     return <SettingRow testid={testid} description="Loading…" />
   }
   if (!installed) {
+    if (secondary) return <div data-testid={testid} data-state="not-installed" />
     return (
-      <SettingRow
+      <NotInstalledRow
         testid={testid}
-        dimmed
-        description="opencode is not installed. This edits opencode's own config file."
+        harness="opencode"
+        lead="opencode is not installed."
+        rest="This edits opencode's own config file."
       />
     )
   }
@@ -646,7 +657,7 @@ export function OpencodeSessionBehaviorSection(): React.JSX.Element {
 export function OpencodeToolOutputSection(): React.JSX.Element {
   const api = useOpencodeNativeConfigLeaf()
   return (
-    <PaneShell testid="OpencodeToolOutputSection" api={api}>
+    <PaneShell testid="OpencodeToolOutputSection" api={api} secondary>
       <NumberRow
         api={api}
         path={['tool_output', 'max_lines']}
@@ -675,7 +686,7 @@ export function OpencodeAttachmentsSection(): React.JSX.Element {
   const heightPath: LeafPath = ['attachment', 'image', 'max_height']
   const dimsSet = api.read(widthPath) !== undefined || api.read(heightPath) !== undefined
   return (
-    <PaneShell testid="OpencodeAttachmentsSection" api={api}>
+    <PaneShell testid="OpencodeAttachmentsSection" api={api} secondary>
       <AbsentDefaultToggleRow
         api={api}
         path={['attachment', 'image', 'auto_resize']}
@@ -762,7 +773,7 @@ export function OpencodeWorkspaceSection(): React.JSX.Element {
   const current = api.read(agentPath)
 
   return (
-    <PaneShell testid="OpencodeWorkspaceSection" api={api}>
+    <PaneShell testid="OpencodeWorkspaceSection" api={api} secondary>
       <StringListRow
         api={api}
         path={['instructions']}
@@ -912,7 +923,7 @@ export function OpencodeToolsSection(): React.JSX.Element {
   const overridden = OPENCODE_BUILTIN_TOOLS.filter((id) => toolsObj[id] !== undefined)
 
   return (
-    <PaneShell testid="OpencodeToolsSection" api={api}>
+    <PaneShell testid="OpencodeToolsSection" api={api} secondary>
       <StackedRow
         configKey="tools"
         label="Built-in tools"
@@ -979,7 +990,7 @@ export function OpencodeDiagnosticsSection(): React.JSX.Element {
   const level = api.read(logPath)
 
   return (
-    <PaneShell testid="OpencodeDiagnosticsSection" api={api}>
+    <PaneShell testid="OpencodeDiagnosticsSection" api={api} secondary>
       <LeafRow
         configKey={pathId(logPath)}
         label="Log level"

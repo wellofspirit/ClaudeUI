@@ -279,7 +279,12 @@ describe('MobileConfigSheet — engine submenu', () => {
     fireEvent.click(screen.getByTestId('MobileConfigSheet.engine'))
 
     const options = screen.getAllByTestId('MobileConfigSheet.engineOption')
-    expect(options.map((o) => o.getAttribute('data-value'))).toEqual(['claude', 'opencode', 'pi'])
+    expect(options.map((o) => o.getAttribute('data-value'))).toEqual([
+      'claude',
+      'opencode',
+      'pi',
+      'codex'
+    ])
 
     const piOption = options.find((o) => o.getAttribute('data-value') === 'pi')!
     fireEvent.click(piOption)

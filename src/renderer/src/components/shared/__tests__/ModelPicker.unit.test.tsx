@@ -170,7 +170,7 @@ describe('EnginePicker', () => {
     fireEvent.click(screen.getByTestId('EnginePicker.trigger'))
     expect(
       screen.getAllByTestId('EnginePicker.option').map((option) => option.dataset.engine)
-    ).toEqual(['claude', 'opencode', 'pi'])
+    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
     const piOption = screen
       .getAllByTestId('EnginePicker.option')
       .find((option) => option.dataset.engine === 'pi')

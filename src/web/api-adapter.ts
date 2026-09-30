@@ -343,6 +343,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('harness:update-all') as ReturnType<ClaudeAPI['updateHarnesses']>,
     checkHarnessUpdates: () =>
       connection.invoke('harness:check-updates') as ReturnType<ClaudeAPI['checkHarnessUpdates']>,
+    answerHarnessUpgradePrompt: () =>
+      connection.invoke('harness:answer-upgrade-prompt') as ReturnType<
+        ClaudeAPI['answerHarnessUpgradePrompt']
+      >,
     getPiBinaryPath: () =>
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>

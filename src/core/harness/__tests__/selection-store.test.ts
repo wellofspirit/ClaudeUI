@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * `~/.claude/ui/harnesses.json` (ADR-082 §2, §6): reads never throw and fall back
+ * `~/.claude/ui/harnesses.json` (ADR-082 §2, §6, §8): reads never throw and fall back
  * to the defaults; saves keep what this version does not understand.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -13,7 +13,8 @@ import {
   harnessSelection,
   harnessUpdateMode,
   loadHarnessesConfig,
-  saveHarnessesConfig
+  saveHarnessesConfig,
+  upgradePromptAnswered
 } from '../selection-store'
 
 let tmp: string
@@ -171,6 +172,44 @@ describe('the update mode (ADR-082 §6)', () => {
   it('refuses an invalid mode instead of writing it', () => {
     expect(() => saveHarnessesConfig({ updates: 'always' as 'auto' }, file)).toThrow(
       /Invalid harness update mode/
+    )
+    expect(fs.existsSync(file)).toBe(false)
+  })
+})
+
+describe('the upgrade prompt answer (ADR-082 §8)', () => {
+  it('is unanswered until saved, and reads nothing but "answered" as answered', () => {
+    expect(upgradePromptAnswered(loadHarnessesConfig(file))).toBe(false)
+    write(JSON.stringify({ upgradePrompt: 'maybe' }))
+    expect(upgradePromptAnswered(loadHarnessesConfig(file))).toBe(false)
+    expect(loadHarnessesConfig(file)).toEqual({})
+  })
+
+  it('persists the answer beside the selections, the mode and unknown keys, and they keep it', () => {
+    write(
+      JSON.stringify({
+        future: { nested: true },
+        updates: 'auto',
+        selections: { pi: { source: 'system' }, later: { source: 'managed' } }
+      })
+    )
+    saveHarnessesConfig({ upgradePrompt: 'answered' }, file)
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toEqual({
+      future: { nested: true },
+      updates: 'auto',
+      selections: { pi: { source: 'system' }, later: { source: 'managed' } },
+      upgradePrompt: 'answered'
+    })
+    expect(upgradePromptAnswered(loadHarnessesConfig(file))).toBe(true)
+    // Later saves of the other keys keep it.
+    saveHarnessesConfig({ selections: { opencode: { source: 'system' } } }, file)
+    saveHarnessesConfig({ updates: 'ask' }, file)
+    expect(loadHarnessesConfig(file)).toMatchObject({ upgradePrompt: 'answered', updates: 'ask' })
+  })
+
+  it('refuses any other value instead of writing it', () => {
+    expect(() => saveHarnessesConfig({ upgradePrompt: 'later' as 'answered' }, file)).toThrow(
+      /Invalid upgrade prompt state/
     )
     expect(fs.existsSync(file)).toBe(false)
   })

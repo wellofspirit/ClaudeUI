@@ -45,6 +45,8 @@ import {
   CodexToolsSection
 } from '../CodexConfigPanes'
 import { resetCodexConfigStore } from '../use-codex-config'
+import { harnessStore } from '../harness-store'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
 
 const FILE = '/home/u/.codex/config.toml'
 
@@ -532,6 +534,46 @@ describe('the shared config object', () => {
     )
     await renderPane(<CodexToolsSection />)
     expect(byId('CodexConfigPane.status', 'unavailable').textContent).toContain('not installed')
+  })
+
+  it('says Codex is not installed ONCE for the whole page, with one install link (ADR-082 S7b)', async () => {
+    harnessStore.resetForTests()
+    const api = (window as unknown as { api: Record<string, unknown> }).api
+    api.harnessState = vi.fn(async () => harnessSnapshot(['codex']))
+    api.readCodexConfig = vi.fn(async (): Promise<CodexConfigRead> => ({
+      config: null,
+      rules: { path: '', rules: 0, skipped: 0, syncedAt: null, upToDate: false },
+      mcp: { inherited: [], skipped: [] },
+      error: 'Codex is not installed'
+    }))
+    try {
+      await renderPane(
+        <>
+          <CodexModelBehaviorSection />
+          <CodexContextSection />
+          <CodexInstructionsSection />
+          <CodexSandboxSection />
+          <CodexShellEnvSection />
+          <CodexToolsSection />
+          <CodexAgentsSection />
+          <CodexMcpSection />
+          <CodexHistorySection />
+          <CodexManagedSection />
+          <CodexRawConfigSection />
+        </>
+      )
+      await waitFor(() => expect(screen.getAllByTestId('HarnessInstallLink')).toHaveLength(1))
+      expect(screen.getAllByTestId('CodexConfigPane.status')).toHaveLength(1)
+      expect(byId('CodexConfigPane.status', 'not-installed').textContent).toContain(
+        'Codex is not installed. Install 0.156.0'
+      )
+      expect(screen.getByTestId('CodexRawConfigSection')).toHaveAttribute(
+        'data-state',
+        'not-installed'
+      )
+    } finally {
+      harnessStore.resetForTests()
+    }
   })
 })
 

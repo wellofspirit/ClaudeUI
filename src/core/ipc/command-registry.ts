@@ -576,7 +576,11 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // upstream.
   'harness:set-update-mode': 'admin',
   'harness:update-all': 'admin',
-  'harness:check-updates': 'admin'
+  'harness:check-updates': 'admin',
+  // The one-time upgrade sheet's answer (ADR-082 §8): shown only to an admin
+  // connection, which installs from the same click. Relabelled `config`, any
+  // connection could dismiss the offer for the host's operator.
+  'harness:answer-upgrade-prompt': 'admin'
 }
 
 // ---------------------------------------------------------------------------
