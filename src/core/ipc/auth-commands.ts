@@ -510,6 +510,19 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       })
     },
     {
+      // ADR-082 §8 (S7d) — a route whose engine kept a key of its own (an
+      // automatic delivery never replaces one) takes the stored key instead,
+      // after the same confirm as switching on. The keys stay host-side.
+      channel: 'shared-provider:use-stored-key',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, harness: ConfigurableHarnessId) => {
+        if (harness !== 'pi' && harness !== 'opencode')
+          throw new Error(`Unknown engine: ${String(harness)}`)
+        await sharedProviderService.useStoredKey(id, harness)
+      })
+    },
+    {
       channel: 'shared-provider:sync',
       capability: 'config',
       kind: 'command',

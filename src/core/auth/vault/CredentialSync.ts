@@ -161,6 +161,12 @@ export interface CodexFeedTarget {
   readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null>
   /** Remove this vendor's native credential and invalidate the target's auth cache. */
   removeVendorAuth(vendorId: string): Promise<void>
+  /**
+   * The same removal as a direct file edit, for while the harness does not run
+   * (ADR-082 §8, S7d) — opencode's, whose `removeVendorAuth` goes through its
+   * server. Absent (pi, whose removal is a file edit already), `removeVendorAuth`.
+   */
+  removeVendorAuthDirect?(vendorId: string): Promise<void>
 }
 
 export interface CodexEnabledRoutes {
@@ -206,6 +212,13 @@ export interface CredentialSyncDeps {
    * apart there is nothing to name.
    */
   onCredentialStored?: (accountId: string | undefined) => void
+  /**
+   * Whether an engine's harness runs (ADR-082 §8, "As built (S7d)"). One that
+   * does not is neither fed, nor watched, nor read for a credential to adopt;
+   * {@link CredentialSync.harnessArrived} catches it up. The boot seam wires
+   * `harnessWritable`; absent, both run.
+   */
+  harnessRuns?: (engine: EngineKey) => boolean
 }
 
 /**
@@ -251,7 +264,17 @@ export interface CodexInjectionToken {
   vaultAccountId: string
 }
 
-type EngineKey = 'pi' | 'opencode'
+export type EngineKey = 'pi' | 'opencode'
+
+/** What one engine store is fed from a vault credential. */
+function feedInput(cred: VaultCredential): CodexCredentialInput {
+  return {
+    access: cred.access,
+    refresh: cred.refresh,
+    expires: cred.expires,
+    accountId: cred.accountId
+  }
+}
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -307,6 +330,7 @@ export class CredentialSync {
   private activeKey: string = LEGACY_ACCOUNT_KEY
   private onActiveAccountChanged: () => void | Promise<void>
   private onCredentialStored: (accountId: string | undefined) => void
+  private harnessRuns: (engine: EngineKey) => boolean
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
@@ -329,6 +353,7 @@ export class CredentialSync {
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
     this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
     this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
+    this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
   }
 
   /**
@@ -347,6 +372,7 @@ export class CredentialSync {
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
     onCredentialStored?: (accountId: string | undefined) => void
+    harnessRuns?: (engine: EngineKey) => boolean
   }): void {
     if (targets.pi) this.piTarget = targets.pi
     if (targets.opencode) this.opencodeTarget = targets.opencode
@@ -356,6 +382,7 @@ export class CredentialSync {
     }
     if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
     if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
+    if (targets.harnessRuns) this.harnessRuns = targets.harnessRuns
   }
 
   /**
@@ -514,11 +541,13 @@ export class CredentialSync {
   /** Read both engines' Codex entries (best-effort) and return the one with the strictly-largest expiry, or null if neither has one. */
   private async readNewestEngineEntry(includeDisabled = false): Promise<CodexEntrySnapshot | null> {
     const routes = this.routes()
+    // A harness that does not run is not adopted from (ADR-082 §8, S7d); a
+    // legacy-vault recovery still reads it — it may be the only copy left.
+    const reads = (engine: EngineKey): boolean =>
+      includeDisabled || (routes[engine] && this.harnessRuns(engine))
     const snapshots = await Promise.all([
-      includeDisabled || routes.pi
-        ? this.safeReadEntry('pi', this.piTarget, PI_CODEX_VENDOR_ID)
-        : null,
-      includeDisabled || routes.opencode
+      reads('pi') ? this.safeReadEntry('pi', this.piTarget, PI_CODEX_VENDOR_ID) : null,
+      reads('opencode')
         ? this.safeReadEntry('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
         : null
     ])
@@ -891,12 +920,7 @@ export class CredentialSync {
 
   /** Write `cred` into BOTH engine stores. Each write is independent/best-effort — a failure in one never aborts the other. */
   async feedAll(cred: VaultCredential): Promise<{ pi: boolean; opencode: boolean }> {
-    const input: CodexCredentialInput = {
-      access: cred.access,
-      refresh: cred.refresh,
-      expires: cred.expires,
-      accountId: cred.accountId
-    }
+    const input = feedInput(cred)
     const [pi, opencode] = await Promise.all([
       this.feedOne('pi', this.piTarget, PI_CODEX_VENDOR_ID, input),
       this.feedOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID, input)
@@ -913,6 +937,10 @@ export class CredentialSync {
   ): Promise<boolean> {
     if (!this.routes()[label]) {
       logger.info('CredentialSync', `feedAll: ${label} route disabled — skipping`)
+      return false
+    }
+    if (!this.harnessRuns(label)) {
+      logger.info('CredentialSync', `feedAll: ${label} not installed — skipping`)
       return false
     }
     if (!target) {
@@ -990,6 +1018,27 @@ export class CredentialSync {
     }
     if (!entry) return false
     return entry.refresh !== cred.refresh && entry.expires > cred.expires
+  }
+
+  /**
+   * `engine`'s harness runs now, after a time it did not (ADR-082 §8, "As built
+   * (S7d)"): feed it the ACTIVE credential once (which arms its watcher), or
+   * take a disabled route's copy of it back. Only that engine: the other's
+   * store is not rewritten. Never throws.
+   */
+  async harnessArrived(engine: EngineKey): Promise<void> {
+    if (!this.harnessRuns(engine)) return
+    const target = engine === 'pi' ? this.piTarget : this.opencodeTarget
+    const vendorId = engine === 'pi' ? PI_CODEX_VENDOR_ID : OPENCODE_CODEX_VENDOR_ID
+    try {
+      const cred = await this.vault.load()
+      if (cred && this.routes()[engine]) {
+        const delivered = await this.feedOne(engine, target, vendorId, feedInput(cred))
+        logger.info('CredentialSync', `harnessArrived: ${engine} fed=${delivered}`)
+      } else if (cred) await this.removeManagedCopy(engine, target, vendorId, cred.refresh)
+    } catch (err) {
+      logger.warn('CredentialSync', `harnessArrived(${engine}) failed: ${errMessage(err)}`)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1226,6 +1275,8 @@ export class CredentialSync {
    */
   private startWatcher(engine: EngineKey, target: CodexFeedTarget | undefined): void {
     if (!target || this.watchers.has(engine)) return
+    // Not armed while the harness does not run; its arrival arms it.
+    if (!this.harnessRuns(engine)) return
 
     let filePath: string
     try {
@@ -1307,7 +1358,7 @@ export class CredentialSync {
    */
   private async handleExternalChange(engine: EngineKey): Promise<void> {
     const generation = this.lifecycleGeneration
-    if (!this.routes()[engine]) return
+    if (!this.routes()[engine] || !this.harnessRuns(engine)) return
     const target = engine === 'pi' ? this.piTarget : this.opencodeTarget
     if (!target) return
     const vendorId = engine === 'pi' ? PI_CODEX_VENDOR_ID : OPENCODE_CODEX_VENDOR_ID
@@ -1472,7 +1523,12 @@ export class CredentialSync {
   ): Promise<void> {
     if (!target) return
     try {
-      await target.removeVendorAuth(vendorId)
+      // At once, whether or not the harness runs (ADR-082 §8, S7d): a harness
+      // that does not run is edited as a file (`removeVendorAuthDirect`, where
+      // its normal removal needs its process); pi's removal is a file edit anyway.
+      if (!this.harnessRuns(label) && target.removeVendorAuthDirect)
+        await target.removeVendorAuthDirect(vendorId)
+      else await target.removeVendorAuth(vendorId)
     } catch (err) {
       logger.warn('CredentialSync', `removeVendorAuth(${label}) failed: ${errMessage(err)}`)
       throw err

@@ -1823,6 +1823,8 @@ interface SharedProviderAPI {
    */
   setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
   syncSharedProvider(id: string): Promise<void>
+  /** Replace the key a route's engine kept of its own with the stored one (ADR-082 §8, S7d). */
+  useSharedProviderStoredKey(id: string, harness: ConfigurableHarnessId): Promise<void>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(
     id: string,

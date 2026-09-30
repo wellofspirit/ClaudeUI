@@ -70,6 +70,12 @@ export interface ProviderEngineFacts {
   /** A shared route's last delivery failure (`SharedProviderStatus`), for the engine row. */
   error?: string
   /**
+   * An ENABLED shared route whose engine kept a key of its own — an automatic
+   * delivery never replaces one (ADR-082 §8, S7d). `error` says so; the row
+   * offers "Use the stored key".
+   */
+  ownKeyKept?: true
+  /**
    * An ENABLED shared route: whether the engine's own store actually holds the
    * credential now (`SharedProviderStatus.routes[r].delivered`). A route with no
    * error can still be undelivered — the file was changed outside ClaudeUI.

@@ -18,6 +18,12 @@ export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
   feedOauthCredential(vendorId: string, credential: CodexCredentialInput): Promise<void>
   removeVendorAuth(vendorId: string): Promise<void>
+  /**
+   * Delete a vendor's entry from auth.json as a file edit, without opencode's
+   * server — used while opencode does not run (`OpencodeAuthProvider`).
+   * Absent, a removal always takes the server path.
+   */
+  removeVendorAuthDirect?(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
 }
 
@@ -177,8 +183,16 @@ export class OpencodeSharedProviderAdapter {
     this.invalidateModelCache()
   }
 
-  async removeCredential(definition: SharedProviderDefinition): Promise<void> {
-    await this.authTarget.removeVendorAuth(opencodeProviderId(definition))
+  /**
+   * Take this definition's key out of opencode's auth store: through its server
+   * while opencode runs (which recycles the live processes), as a direct file
+   * edit while it does not (ADR-082 §8, S7d) — no process to spawn or recycle.
+   */
+  async removeCredential(definition: SharedProviderDefinition, running = true): Promise<void> {
+    const vendorId = opencodeProviderId(definition)
+    if (!running && this.authTarget.removeVendorAuthDirect)
+      await this.authTarget.removeVendorAuthDirect(vendorId)
+    else await this.authTarget.removeVendorAuth(vendorId)
     this.invalidateModelCache()
   }
 

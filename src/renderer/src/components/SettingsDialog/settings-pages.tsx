@@ -72,11 +72,6 @@ export interface SettingsGroup {
     testid: string
     /** `window` CustomEvent name dispatched on click. Unique per action. */
     event: string
-    /**
-     * The harnesses what it opens can serve: not drawn while none of them runs
-     * (ADR-082 §8, `actionShown`).
-     */
-    harnesses?: readonly EngineId[]
     disabled?: boolean
     title?: string
   }
@@ -577,14 +572,15 @@ export const PAGES: SettingsPage[] = [
         id: 'providers',
         label: 'API providers',
         note: 'Keys and self-hosted endpoints. Sign-in subscriptions are listed above.',
+        // An API provider reaches opencode or pi, nothing else: with neither
+        // running, nothing can use one, so the whole group — header, note, rows
+        // and its "+ Add provider" — is hidden and out of search (ADR-082 §8).
+        harnesses: ['opencode', 'pi'],
         action: {
           label: '+ Add provider',
           testid: 'ProviderList.add',
           // Listened for by `ProviderList`, which owns the Add sheet's state.
-          event: 'settings:add-provider',
-          // An API provider reaches opencode or pi, nothing else: with neither
-          // running the Add sheet would have nothing to offer.
-          harnesses: ['opencode', 'pi']
+          event: 'settings:add-provider'
         },
         items: itemsOf('shared-providers', ['sharedProviders'])
       },
@@ -1143,12 +1139,6 @@ export function segmentOptions(
     )
   }
   return out
-}
-
-/** Whether a group's header action is drawn: not while none of its harnesses runs. */
-export function actionShown(group: SettingsGroup, runs: EngineRuns = EVERY_ENGINE_RUNS): boolean {
-  const action = group.action
-  return !!action && (!action.harnesses || action.harnesses.some((engine) => runs(engine)))
 }
 
 /**

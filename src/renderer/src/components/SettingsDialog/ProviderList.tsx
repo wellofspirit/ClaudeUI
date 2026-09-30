@@ -101,6 +101,25 @@ function failedEngine(entry: ProviderEntry, runs: EngineRuns): EngineId | undefi
   return ENGINE_ORDER.find((engine) => runs(engine) && entry.engines[engine]?.error)
 }
 
+/**
+ * The row's delivery pill: a failure in the danger tone, a key the engine kept
+ * of its own on purpose (ADR-082 §8, S7d) in the warning tone the sheet uses.
+ */
+function DeliveryPill({
+  entry,
+  engine
+}: {
+  entry: ProviderEntry
+  engine: EngineId
+}): React.JSX.Element {
+  const kept = entry.engines[engine]?.ownKeyKept === true
+  return (
+    <Pill tone={kept ? 'warn' : 'bad'} testid={`${LIST}.deliveryFailed`} dataId={engine}>
+      {kept ? `Own key kept in ${engine}` : `Not delivered to ${engine}`}
+    </Pill>
+  )
+}
+
 export function ProviderList(): React.JSX.Element {
   /** null until the first read resolves — the card shows one loading row. */
   const stored = useSessionStore((s) => s.providerRegistry)
@@ -308,13 +327,7 @@ export function ProviderList(): React.JSX.Element {
                     </Pill>
                   )}
                 {failedEngine(entry, runs) && (
-                  <Pill
-                    tone="bad"
-                    testid={`${LIST}.deliveryFailed`}
-                    dataId={failedEngine(entry, runs)}
-                  >
-                    Not delivered to {failedEngine(entry, runs)}
-                  </Pill>
+                  <DeliveryPill entry={entry} engine={failedEngine(entry, runs)!} />
                 )}
               </>
             }
@@ -350,7 +363,7 @@ export function ProviderList(): React.JSX.Element {
                 title={entry.disabled ? 'Turn on' : 'Turn off'}
                 disabled={switching !== null}
                 onClick={() =>
-                  ownKeysReplacedOnSwitchOn(entry).length > 0
+                  ownKeysReplacedOnSwitchOn(entry, runs).length > 0
                     ? setConfirmOn(entry.id)
                     : void toggleProvider(entry)
                 }
@@ -377,7 +390,7 @@ export function ProviderList(): React.JSX.Element {
               indent
               description={
                 <span className="text-warning">
-                  {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
+                  {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry, runs))}
                 </span>
               }
             >

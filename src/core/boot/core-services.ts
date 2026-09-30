@@ -66,6 +66,8 @@ import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
 import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
+import { harnessWritable } from '../harness/resolve'
+import { watchHarnessArrivals } from '../harness/arrivals'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -248,7 +250,12 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     onCredentialStored: (accountId) =>
       emitEvent('provider:auth-resolved', [
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
-      ])
+      ]),
+    // Nothing is fed into a harness that does not run, and a removal from one
+    // is a direct file edit (ADR-082 §8, S7d); the arrival wiring below catches
+    // it up. Here, not in the desktop registrar, so the headless server
+    // honours it too.
+    harnessRuns: harnessWritable
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
@@ -334,6 +341,26 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       )
     }
   })()
+
+  // A harness that ARRIVES — pi or opencode goes from not running to running:
+  // an install, a selection change, a finished detection — gets what ClaudeUI
+  // held back while it could not run (ADR-082 §8, S7d): every shared provider's
+  // current route, then the ChatGPT credential.
+  // Only that harness is written. Before the boot sync below, so a detection
+  // that finishes during it is not missed; the two share the service's queue.
+  watchHarnessArrivals(['pi', 'opencode'], (id) => {
+    void (async () => {
+      try {
+        await sharedProviderService.harnessArrived(id)
+      } catch (err) {
+        logger.warn(
+          'main',
+          `delivering shared providers to ${id} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      await credentialSync.harnessArrived(id)
+    })()
+  })
 
   // Reconcile central credentials first, then materialize all shared-provider
   // routes. Both are best-effort and must never block app startup.

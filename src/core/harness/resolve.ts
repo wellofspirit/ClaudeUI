@@ -525,6 +525,17 @@ export function harnessAvailable(id: HarnessId): boolean {
   return true
 }
 
+/**
+ * May ClaudeUI write into `id`'s own files — shared API keys, provider blocks,
+ * the ChatGPT feed, default models, and removals of any of them? Only while it
+ * runs (ADR-082 §8, "As built (S7d)"): a harness that is not installed is not
+ * written into, and gets the current state when it arrives. ClaudeUI's own
+ * records (the vault, the definitions, `engines/*.json`) are saved either way.
+ */
+export function harnessWritable(id: HarnessId): boolean {
+  return harnessAvailable(id)
+}
+
 /** The `codex-code-mode-host` the resolved `codex` will run, or null. */
 export function codexCodeModeHostPath(): string | null {
   return entry('codex').codexHost

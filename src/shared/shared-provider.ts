@@ -188,6 +188,11 @@ export interface SharedProviderStatus {
       modelCount?: number
       error?: string
       /**
+       * The engine kept a key of its own for this route's vendor: an automatic
+       * delivery never replaces one (ADR-082 §8, S7d). `error` carries the words.
+       */
+      ownKeyKept?: true
+      /**
        * Set only when the route is enabled and surfaces zero models. Distinct
        * from `error`, which means an operation FAILED — a diagnosis is a healthy
        * route with a configuration reason for being empty.

@@ -8,7 +8,6 @@ import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
-  actionShown,
   bucketSearchHits,
   engineFor,
   itemsFor,
@@ -401,9 +400,13 @@ export function SettingsDialogView({
   }, [activePage])
 
   // A deep link (or a rail click routed through the container) asked for a
-  // group: scroll it under the pane's top edge.
+  // group: scroll it under the pane's top edge — ONCE per nonce bump. The
+  // effect also re-runs when the scroll-spy moves `activeGroup`; answering
+  // that would snap every newly marked group to the top while the user scrolls.
+  const handledNonce = useRef(0)
   useEffect(() => {
-    if (scrollNonce === 0 || !activeGroup || searching) return
+    if (scrollNonce === handledNonce.current || !activeGroup || searching) return
+    handledNonce.current = scrollNonce
     scrollToGroup(activeGroup)
   }, [scrollNonce, activeGroup, searching, scrollToGroup])
 
@@ -780,7 +783,7 @@ export function SettingsDialogView({
                           </span>
                         )}
                         {storage && <StorageTag file={storage} />}
-                        {group.action && actionShown(group, runs) && (
+                        {group.action && (
                           <Button
                             testid="SettingsGroup.action"
                             dataId={group.id}

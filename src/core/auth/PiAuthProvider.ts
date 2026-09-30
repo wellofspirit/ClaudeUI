@@ -233,11 +233,12 @@ export class PiAuthProvider implements EngineAuthProvider {
   /** Delete a provider's entry from auth.json entirely. Preserves every other entry. */
   async removeVendorAuth(vendorId: string): Promise<void> {
     const file = readAuthFileForWrite()
+    // Nothing to remove: nothing is written, so a pi that is not installed
+    // never gains an auth.json (or ~/.pi) from a removal (ADR-082 §8, S7d).
+    if (!(vendorId in file)) return
     // A removal destroys a credential ClaudeUI cannot restore, so it always
     // leaves a trace: the vendor id and the call site, never the key.
-    if (vendorId in file) {
-      logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
-    }
+    logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
     delete file[vendorId]
     writeAuthFile(file)
     invalidatePiModelCache()

@@ -694,6 +694,19 @@ describe('harnesses that do not run', () => {
     ).toEqual(['concurrency'])
   })
 
+  it('API providers is hidden, and out of search, while neither opencode nor pi runs', () => {
+    const ids = (runs: EngineRuns): string[] =>
+      visibleGroups(pageOf('models'), undefined, runs).map((g) => g.id)
+    expect(ids(except('pi'))).toContain('providers')
+    expect(ids(except('opencode'))).toContain('providers')
+    expect(ids(except('opencode', 'pi'))).not.toContain('providers')
+    expect(ids(except('opencode', 'pi'))).toContain('subscriptions')
+    const inProviders = (runs: EngineRuns): boolean =>
+      searchSettings('provider', runs).some((h) => h.group.id === 'providers')
+    expect(inProviders(except('pi'))).toBe(true)
+    expect(inProviders(except('opencode', 'pi'))).toBe(false)
+  })
+
   it('search skips a page that cannot open, and segments and groups that are hidden', () => {
     const runs = except('pi')
     const hits = searchSettings('model', runs)

@@ -561,6 +561,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-curation',
       'shared-provider:set-disabled',
       'shared-provider:sync',
+      'shared-provider:use-stored-key',
       'shared-provider:disconnect',
       'shared-provider:set-default'
     ])
@@ -1759,6 +1760,8 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'shared-provider:set-key',
   'shared-provider:set-route',
   'shared-provider:sync',
+  // ADR-082 §8 (S7d) — a kept own key replaced by the stored one, host-side.
+  'shared-provider:use-stored-key',
   'vendor-auth:list-keys',
   'vendor-auth:list-options',
   'vendor-auth:oauth-authorize',

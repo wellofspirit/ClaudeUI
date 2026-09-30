@@ -85,6 +85,7 @@ import {
 } from './settings-controls'
 import { EnginePill, factsCount } from './provider-pills'
 import { useEngineRuns } from './harness-store'
+import type { EngineRuns } from './harness-view'
 import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
@@ -220,11 +221,19 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * would replace (ADR-074 slice 10): a route on in its settings, into an engine
  * that holds a credential of its own. The switch asks first — here and on the
  * list — and the service checks the keys themselves.
+ *
+ * A harness that does not run is never named (ADR-082 §8, S7d): nothing is
+ * written into it, so switching on replaces nothing there, and when it arrives
+ * the delivery keeps a key of its own instead of asking.
  */
-export function ownKeysReplacedOnSwitchOn(entry: ProviderEntry): ('opencode' | 'pi')[] {
+export function ownKeysReplacedOnSwitchOn(
+  entry: ProviderEntry,
+  runs: EngineRuns
+): ('opencode' | 'pi')[] {
   if (!entry.disabled) return []
   return (['opencode', 'pi'] as const).filter(
-    (engine) => entry.engines[engine]?.routeOn && entry.engines[engine]?.ownCredential
+    (engine) =>
+      runs(engine) && entry.engines[engine]?.routeOn && entry.engines[engine]?.ownCredential
   )
 }
 
@@ -944,6 +953,10 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
     // Turning a catalog route on while the engine holds its OWN credential for
     // the vendor replaces that credential — confirmed in place, as a conflict is.
     const confirmingEnable = confirming === `enable-${engine}`
+    // An automatic delivery kept a key the engine holds of its own (ADR-082 §8,
+    // S7d): the user can take the stored one instead, confirmed in place.
+    const ownKeyKept = on && facts?.ownKeyKept === true
+    const confirmingStored = confirming === `use-stored-${engine}`
     /** The route's own setting — `on`, or what it returns to while the provider is off. */
     const routeOn = on || facts?.routeOn === true
     // Enabled, keyed, no error — and still not in the engine's store: the file
@@ -957,12 +970,14 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
       status = facts?.routeOn
         ? `Off while ${entry.name} is off — back on with it.`
         : `Off, and stays off when ${entry.name} is switched on.`
-    } else if (confirmingEnable) {
+    } else if (confirmingEnable || confirmingStored) {
       status = (
         <span className="text-warning">
           {label}’s own key for {entry.name} will be replaced by the stored one.
         </span>
       )
+    } else if (ownKeyKept) {
+      status = <span className="text-warning">{facts?.error}</span>
     } else if (!on) {
       status =
         entry.credential === 'api-key'
@@ -991,7 +1006,42 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
         leading={<EnginePill engine={engine} on={on} testid={`${SHEET}.deliveryPill`} />}
         description={status}
       >
-        {on && (facts?.error || undelivered) && (
+        {ownKeyKept && !confirmingStored && (
+          <Button
+            variant="link"
+            testid={`${SHEET}.useStoredKey`}
+            dataId={engine}
+            disabled={busy}
+            onClick={() => setConfirming(`use-stored-${engine}`)}
+          >
+            Use the stored key
+          </Button>
+        )}
+        {confirmingStored && (
+          <>
+            <Button
+              variant="primary"
+              testid={`${SHEET}.useStoredConfirm`}
+              dataId={engine}
+              disabled={busy}
+              onClick={() => {
+                setConfirming(null)
+                void run(() => window.api.useSharedProviderStoredKey(entry.id, engine))
+              }}
+            >
+              Replace it
+            </Button>
+            <Button
+              variant="link"
+              testid={`${SHEET}.useStoredCancel`}
+              dataId={engine}
+              onClick={() => setConfirming(null)}
+            >
+              Cancel
+            </Button>
+          </>
+        )}
+        {on && !ownKeyKept && (facts?.error || undelivered) && (
           <Button
             variant="link"
             testid={`${SHEET}.retry`}
@@ -1581,7 +1631,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                   aria-label={entry.name}
                   disabled={busy}
                   onClick={() =>
-                    ownKeysReplacedOnSwitchOn(entry).length > 0
+                    ownKeysReplacedOnSwitchOn(entry, runs).length > 0
                       ? setConfirming('switch-on')
                       : switchProvider(false)
                   }
@@ -1651,7 +1701,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
             testid={`${SHEET}.switchOnConfirm`}
             description={
               <span className="text-warning">
-                {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
+                {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry, runs))}
               </span>
             }
           >
@@ -1698,8 +1748,10 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
             label={isApiShared ? 'Harnesses' : 'Enabled for'}
             trailing={
               // The vault re-delivers this definition to every enabled engine, so
-              // only a shared row has anything to sync.
-              isShared ? (
+              // only a shared row has anything to sync — and only while opencode
+              // or pi, the harnesses it syncs to, runs (ADR-082 §8). Claude's
+              // row and Codex's are not synced.
+              isShared && (runs('opencode') || runs('pi')) ? (
                 <Button
                   variant="link"
                   testid={`${SHEET}.sync`}

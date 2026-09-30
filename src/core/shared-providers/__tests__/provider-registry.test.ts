@@ -1129,6 +1129,30 @@ describe('catalog definitions and key sharing (ADR-074 §6–7)', () => {
     expect(byId(snapshot, 'openrouter').engines.opencode?.error).toBeUndefined()
   })
 
+  it('carries a route that kept its own key onto its engine facts (ADR-082 §8, S7d)', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [openrouter],
+        statuses: [
+          {
+            ...catalogStatus(true),
+            routes: {
+              pi: {
+                enabled: true,
+                delivered: true,
+                error: 'pi has its own key for OpenRouter; it was kept.',
+                ownKeyKept: true
+              },
+              opencode: { enabled: true, delivered: true }
+            }
+          }
+        ]
+      })
+    )
+    expect(byId(snapshot, 'openrouter').engines.pi?.ownKeyKept).toBe(true)
+    expect(byId(snapshot, 'openrouter').engines.opencode?.ownKeyKept).toBeUndefined()
+  })
+
   it('marks BOTH native rows of a key conflict, with the hints and nothing else', () => {
     const snapshot = buildProviderRegistry(
       sources({

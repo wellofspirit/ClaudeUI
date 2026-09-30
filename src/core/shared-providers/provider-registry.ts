@@ -370,6 +370,7 @@ function sharedEntry(
       }),
       ...(native ? { native: true } : {}),
       ...(error ? { error } : {}),
+      ...(status?.routes[harness].ownKeyKept ? { ownKeyKept: true as const } : {}),
       ...(status ? { delivered: status.routes[harness].delivered } : {})
     }
   }

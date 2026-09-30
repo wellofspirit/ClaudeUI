@@ -218,6 +218,13 @@ composer." while the last pick wins.
   ownership rules and clears engine defaults pointing at it, keeping key, routes, curation and defaults;
   on restores them, refusing to replace a key an engine was given meanwhile unless confirmed. A key
   stranded by an interrupted switch-off is reclaimed by the next sync only while it equals the vault key.
+- **A harness that is not installed** is given no key and not asked about; removals of ClaudeUI's own
+  entries still happen at once (opencode's key as a direct file edit), a catalog route's removal
+  takes out only ClaudeUI's key (the vault's, or the one it last delivered) and never an engine's
+  own, and an automatic sync never replaces an
+  engine's own key — told from ClaudeUI's earlier ones by fingerprint, with "Use the stored key" to
+  replace it — see [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built
+  (arc 3, S7d)".
 
 ## Consequences
 

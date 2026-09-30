@@ -8,7 +8,6 @@ import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
-  actionShown,
   bucketSearchHits,
   engineFor,
   itemsFor,
@@ -251,13 +250,10 @@ function GroupHeader({
   group,
   engine,
   options,
-  showAction,
   onSelectEngine
 }: {
   group: SettingsGroup
   engine: EngineId | undefined
-  /** Whether the header action is drawn (`actionShown`). */
-  showAction: boolean
   /** Empty when the group follows a sibling's segment (`engineFrom`). */
   options: SegmentOption[]
   onSelectEngine: (engine: EngineId) => void
@@ -292,7 +288,7 @@ function GroupHeader({
         </span>
       )}
       {storage && <StorageTag file={storage} />}
-      {group.action && showAction && (
+      {group.action && (
         <Button
           testid="SettingsMobileView.groupAction"
           dataId={group.id}
@@ -550,7 +546,6 @@ export function SettingsMobileView({
           group={group}
           engine={engine}
           options={options}
-          showAction={actionShown(group, runs)}
           onSelectEngine={(next) => onSelectEngine(key, next)}
         />
         <GroupCard items={itemsFor(group, engine, runs)} render={renderItem} />

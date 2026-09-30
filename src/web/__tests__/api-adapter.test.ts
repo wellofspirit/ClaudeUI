@@ -570,6 +570,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: ['openrouter-work', false, true]
   },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
+  {
+    method: 'useSharedProviderStoredKey',
+    channel: 'shared-provider:use-stored-key',
+    args: ['openrouter', 'pi']
+  },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
   {
     method: 'setSharedProviderDefaultModel',

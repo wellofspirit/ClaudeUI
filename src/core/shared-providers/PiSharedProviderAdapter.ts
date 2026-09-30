@@ -209,6 +209,8 @@ export class PiSharedProviderAdapter {
     // ChatGPT (kind:'subscription') legitimately targets built-in 'openai-codex'
     // and is NOT a collision, so it still removes as before.
     if (isPiBuiltinCollision(definition)) return
+    // A file edit: needs no pi process, and creates nothing when the entry (or
+    // the file) is absent (`PiAuthProvider.removeVendorAuth`).
     await this.deps.auth.removeVendorAuth(nativeProviderId(definition))
   }
 

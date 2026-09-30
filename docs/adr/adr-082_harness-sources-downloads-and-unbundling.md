@@ -4,8 +4,8 @@
 owner-ruled from mockups `8bf84c23` (design 1, the Harnesses rows), `04c3853c` (the sidebar update
 button) and `b51cb3df` (the upgrade sheet and the download offers). Implementation is arcs 2 and 3
 of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
-unbundling) is complete: the engines are unbundled (S7a) and ClaudeUI offers them (S7b), both
-"As built" in §8.
+unbundling) is complete: the engines are unbundled (S7a) and ClaudeUI offers them (S7b), and
+writes no key into one that is not installed (S7d), all "As built" in §8.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -455,12 +455,24 @@ As built (arc 3, S7b; mockup `b51cb3df`):
     same title; the Claude target is greyed while no caller (opencode, pi, Codex) runs, titled "No
     harness that can call Claude is installed · install one from Harnesses › Installed". A selected
     target that cannot be chosen shows the first one that can; with none, both groups are hidden.
-  - Models & providers: the provider list has no chip or delivery-failure pill for a harness that
+  - Models & providers: the API providers group (header, note, rows and "+ Add provider") is
+    hidden, and out of search, while neither opencode nor pi runs — nothing else can use an API
+    provider — by the group's `harnesses: ['opencode', 'pi']`, the one rule above (owner,
+    2026-10-01; this replaced a gate on the header action alone, `actionShown`, which is gone).
+    The provider list has no chip or delivery-failure pill for a harness that
     does not run, and no "not installed" row; the provider sheet has no engine row, delivery row,
     default-model row, curation or model-setup row (opencode models, pi models, pi overrides) or
     model editor for it, and no key conflict or "use it for both" between opencode and pi while
     either does not run; the ChatGPT card has no pill for it, and with no pill at all no
-    "Harnesses" label (Manage stays). The Add provider sheet reads no catalog from it. A custom
+    "Harnesses" label (Manage stays). With none of Codex, opencode and pi running, the
+    ChatGPT card draws no Harnesses box at all: Manage sits beside "+ Add account" (owner,
+    2026-10-01). The card's copy names only the harnesses that run: the signed-out subtitle and
+    sign-in line ("used by …", "Sign in once; … use the same account"; nothing named when none
+    runs), and removing the last account says "disconnected from every harness" only while one
+    runs. Its Options fold holds one option, Codex's per-session pinning, so it waits for Codex
+    to run (and for a second account, as before); the option's "pi and opencode always follow the
+    active account" names only those that run. The sheet's "Sync now" is offered only while
+    opencode or pi, the harnesses it syncs to, runs. The Add provider sheet reads no catalog from it. A custom
     endpoint and a second key go to opencode and pi only: their "Enable for" / "Harnesses" chips
     leave out one that does not run (a new endpoint is saved with no route to it; an existing
     one's saved route is kept); with neither running, the Add sheet offers no custom endpoint, the
@@ -478,6 +490,96 @@ As built (arc 3, S7b; mockup `b51cb3df`):
   a dismiss. An install that is an available update, or one the current or last run tried, stays
   an update row (`isUpdateInstall`); update behaviour is otherwise unchanged. What finished is
   kept per client (`completedInstalls`) until the check has faded and the panel is shut.
+
+As built (arc 3, S7d; resolved question 11): no key is written into a harness that does not run.
+
+- One predicate, `harnessWritable(id)` (`resolve.ts`, today `harnessAvailable`), injected as
+  `harnessRuns` into `SharedProviderService` (composition root `shared-providers/index.ts`) and
+  `CredentialSync` (`configure` at the boot seam, `core-services.ts`, so the headless server
+  honours it too). While pi or opencode cannot run, every WRITE into its own files is skipped with
+  one info line ("<route> not installed — skipping …") and is not a route error: shared API keys
+  (`vendRouteCredential`), provider blocks (`applyRoute` for a route that is on), opencode's
+  default model (its own `opencode.json`; pi's default is ClaudeUI's `engines/pi.json` and is
+  still written), and the ChatGPT feed (`feedOne`). ClaudeUI's own records — vault, definitions,
+  curation in `engines/*.json` — are saved as before. `syncChatgpt` does not blame a route whose
+  feed was skipped for not running.
+- REMOVALS are not writes of a key (orchestrator ruling, 2026-10-01), and every one happens at
+  once, whether or not the harness runs. Each deletes only ClaudeUI's own entry where it is there,
+  and never creates a file or directory:
+
+  | Removal                                              | Harness runs                                                         | Harness does not run                               |
+  | ---------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------- |
+  | pi `auth.json` key (shared provider, ChatGPT)        | file edit                                                            | the same file edit                                 |
+  | pi `models.json` block                               | file edit                                                            | the same file edit                                 |
+  | opencode config-file block (`removeDefinitionRoute`) | file edit                                                            | the same file edit                                 |
+  | opencode key (shared provider, ChatGPT)              | through its server (`removeVendorAuth`, recycles the live processes) | direct `auth.json` edit (`removeVendorAuthDirect`) |
+  | default model ClaudeUI set in `opencode.json`        | file edit                                                            | the same file edit                                 |
+
+  `PiAuthProvider.removeVendorAuth` returns before writing when the vendor has no entry (it used
+  to rewrite, and so create, `auth.json`); the two block removals write only after matching
+  ClaudeUI's own block, which needs the file; `OpencodeAuthProvider.removeVendorAuthDirect` sits
+  beside `feedOauthCredential`, the other direct write, and keeps its read-modify-write
+  discipline: an unreadable file is refused (backed up once, then it throws) rather than
+  overwritten, every other vendor entry and unknown field survives, and an absent file or entry
+  writes nothing. With opencode not running there is no server whose in-memory provider map
+  could go stale, and none is spawned for a file edit. The shared-provider service
+  (`removeRouteCredential`, which reclaim and disconnect go through) and CredentialSync's
+  `removeOne` pick the path by `harnessRuns`. So a removed key or a disconnected ChatGPT copy is
+  gone at once, and nothing — the boot adoption scan, CredentialSync's reconcile-on-start — can
+  adopt it back later.
+
+  A CATALOG route's key is taken out only while the slot holds ClaudeUI's key (orchestrator
+  ruling, 2026-10-01, after the real-app check found a switch-off deleting an opencode's own key
+  under a route that was on while opencode was missing): the vault key, or the key matching the
+  slot's delivered fingerprint (`holdsOurKey`). Any other credential there — the user's own key,
+  a sign-in — stays, and only the fingerprint is forgotten. This holds for every such removal
+  (switch-off, route off, remove provider, disconnect, the reclaim of a stranded key), for pi and
+  opencode alike, running or not, through one check in `removeRouteCredential`; the callers take
+  the vault key out only after it, since the check reads it. A custom definition's native id is
+  ClaudeUI's own, so its entry always goes. Removing a provider also clears its model list from
+  ClaudeUI's `engines/<engine>.json` allowlists, except for a catalog vendor an engine still holds
+  a credential for, whose list now curates that engine's own provider.
+
+  ChatGPT is not a catalog route: `disconnectChatgpt` (and the last account's removal) still takes
+  both engines' ChatGPT entry out unconditionally, as before S7d; only the start-time clean-up of
+  a disabled route's copy (`removeManagedCopy`) matches the entry's refresh token against the
+  vault's.
+
+- CredentialSync neither arms the fs watcher for a harness that does not run nor reads its store
+  at boot for a credential to adopt; a legacy-vault recovery still reads it, since it may hold the
+  only copy.
+- Arrival (`harness/arrivals.ts`, `watchHarnessArrivals`, subscribed at boot before the boot
+  sync): the resolver's `onHarnessChanged` fires on every invalidation, so each harness's last
+  availability is kept and only a not-running → running transition counts — an install, a
+  selection change, or the boot detection finding a System install. On arrival,
+  `SharedProviderService.harnessArrived(route)` syncs every definition to that route alone; then `CredentialSync.harnessArrived(engine)` feeds that engine
+  the active ChatGPT credential once and arms its watcher (or takes a disabled route's copy
+  back). The other harness is not rewritten, so pi arriving does not recycle a running opencode.
+- Delivered-key fingerprints (`shared-providers/delivered-keys.ts`,
+  `~/.claude/ui/delivered-key-fingerprints.json`): each successful delivery records the SHA-256
+  of the key — never the key — per harness slot (harness + the vendor id its auth store uses;
+  keyed by slot rather than by definition so a definition removed and re-added, or a recorded
+  removal applied by vendor id, lands on the same record); a removal forgets it. A harness "holds
+  its own key" when it holds a credential for the vendor that is neither the vault key nor the
+  fingerprinted one, so a key replaced while the harness was away is ClaudeUI's and is delivered
+  on arrival. Migration: a slot with no fingerprint (every slot of an install from before the
+  file) has only the vault key as ClaudeUI's — the rule before — and the first delivery after the
+  upgrade (the boot sync re-delivers every slot that holds the vault key) records it.
+- An automatic delivery — the boot sync, Retry (`syncProvider`), an arrival — never replaces a
+  harness's own key: such a catalog route (`keepsOwnKey`: a vault key exists and the engine holds
+  its own) is skipped and reports "<route> has its own key for <provider>; it was kept." as its
+  route error with `ownKeyKept` (status and registry facts); the list shows "Own key kept in
+  <route>" in the warning tone (a failed delivery stays "Not delivered to <route>" in the danger
+  tone), and the sheet's route shows the reason with a **Use the stored key** action that
+  replaces it after the same confirm as switching on ("<route>’s own key for <provider> will be
+  replaced by the stored one.") — `shared-provider:use-stored-key` (`config`, both transports,
+  like every shared-provider write), which delivers that one route with `keepOwnKeys: false`.
+  Other explicit actions still replace: switching on (after its own-key confirm), adopting,
+  Replace key (`setApiKey`), turning a route on. A custom provider's native id is ClaudeUI's own
+  and has no such key.
+- Switching a provider on (`setDisabled`, `ownCredentialRoutes`) and its confirm
+  (`ownKeysReplacedOnSwitchOn(entry, runs)` in the sheet and the list) ignore a harness that does
+  not run: nothing is replaced there, and its arrival keeps any own key instead of asking.
 
 ## Consequences
 
@@ -526,6 +628,12 @@ As built (arc 3, S7b; mockup `b51cb3df`):
     greyed and routes to it land on Harnesses › Installed), search does not return it, and its
     parts on other pages are hidden, except the dispatch target, which is greyed in its segment.
     §8 "As built (arc 3, S7b)" describes it.
+11. While pi or opencode is not installed, ClaudeUI does not write a key into it (owner, 2026-10-01):
+    not a shared key, not the ChatGPT credential, not a provider block or default model; its routes
+    are recorded, and it gets the current state when it arrives, without silently replacing a key
+    it holds of its own. Deleting ClaudeUI's own entries is not writing a key: it happens at once,
+    as a file edit where the harness's own removal would need its process. Switching a provider on does not name a harness that does not run among the keys it would
+    replace. §8 "As built (arc 3, S7d)" describes it.
 
 ## Rejected alternatives
 

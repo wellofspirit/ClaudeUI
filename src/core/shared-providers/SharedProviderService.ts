@@ -23,6 +23,7 @@ import {
 } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
 import { keyHint, type NativeApiKeyReader } from './native-api-keys'
+import { memoryDeliveredKeyFingerprints, type DeliveredKeyFingerprints } from './delivered-keys'
 
 type Route = ConfigurableHarnessId
 const routes: Route[] = ['pi', 'opencode']
@@ -82,6 +83,20 @@ export interface SharedProviderServiceDeps {
   nativeKeys?: NativeKeyAdoptionDeps
   /** The slice-5 allowlist writer (`models:set-provider-allowlist`'s). Injected for tests. */
   writeModelAllowlist?: (engine: Route, providerId: string, models: string[] | null) => void
+  /**
+   * Whether a harness runs (ADR-082 §8, "As built (S7d)"). No key or provider
+   * block is written into one that does not: its routes are only recorded, and
+   * {@link SharedProviderService.harnessArrived} delivers them. The composition
+   * root passes `harnessWritable`; absent, every harness runs.
+   */
+  harnessRuns?: (route: Route) => boolean
+  /**
+   * Fingerprints of the key last delivered into each harness slot, so an
+   * automatic delivery tells ClaudeUI's own earlier key from the user's.
+   * Production wires `~/.claude/ui/delivered-key-fingerprints.json`; absent,
+   * in memory.
+   */
+  deliveredKeys?: DeliveredKeyFingerprints
 }
 
 /** Serializes shared-provider RMW across definitions, vault credentials, and native routes. */
@@ -89,15 +104,21 @@ export class SharedProviderService {
   private readonly repository: Repository
   private readonly defaults: SharedProviderDefaultTargets
   private readonly routeErrors = new Map<string, Partial<Record<Route, string>>>()
+  /** Routes whose engine kept its own key; their error says so (cleared with it). */
+  private readonly keptOwnKeys = new Map<string, Set<Route>>()
   private readonly writeModelAllowlist: NonNullable<
     SharedProviderServiceDeps['writeModelAllowlist']
   >
   private mutation = Promise.resolve()
+  private readonly harnessRuns: (route: Route) => boolean
+  private readonly deliveredKeys: DeliveredKeyFingerprints
 
   constructor(private readonly deps: SharedProviderServiceDeps) {
     this.repository = deps.repository ?? new SharedProviderRepository()
     this.defaults = deps.defaults ?? productionDefaultTargets()
     this.writeModelAllowlist = deps.writeModelAllowlist ?? setProviderModelAllowlist
+    this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
+    this.deliveredKeys = deps.deliveredKeys ?? memoryDeliveredKeyFingerprints()
   }
 
   listDefinitions(): SharedProviderDefinition[] {
@@ -213,20 +234,24 @@ export class SharedProviderService {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)
       if (id === 'chatgpt') throw new Error('ChatGPT cannot be removed')
+      // Removals happen at once whether or not a harness runs: they delete
+      // ClaudeUI's own entries (ADR-082 §8, S7d).
       this.deps.pi.removeDefinition(definition)
       this.deps.opencode.removeDefinitionRoute(definition)
       // Switched off, a catalog provider already took its key back from every
       // engine: what an engine holds for the vendor now is not ours to delete —
       // unless it IS ours, stranded by an interrupted switch-off.
       const live = deliveredDefinition(definition)
+      // The keys before the vault: a catalog route's key goes only while it is
+      // ClaudeUI's, which is compared with the vault key (`removeRouteCredential`).
       await this.reclaimStrandedKeys(definition)
-      await Promise.all([
-        ...this.credentialRoutes(live).map((route) => this.removeRouteCredential(live, route)),
-        this.deps.vault.removeCredential(id)
-      ])
+      for (const route of this.credentialRoutes(live)) await this.removeRouteCredential(live, route)
+      await this.deps.vault.removeCredential(id)
       for (const route of routes) this.clearOwnedDefault(live, route)
+      await this.clearModelLists(definition)
       this.repository.remove(id)
       this.routeErrors.delete(id)
+      this.keptOwnKeys.delete(id)
     })
   }
 
@@ -335,7 +360,8 @@ export class SharedProviderService {
             }; switching it on replaces ${own.length > 1 ? 'them' : 'it'} with the stored one.`
           )
         this.repository.save(definition)
-        await this.syncDefinition(definition)
+        // The user switched it on, having been asked about any key it replaces.
+        await this.syncDefinition(definition, { keepOwnKeys: false })
         // A linked list reaches the engines with their routes (ADR-074 §3).
         if (definition.curation?.linked) this.projectCuration(definition)
         return
@@ -411,6 +437,46 @@ export class SharedProviderService {
     })
   }
 
+  /**
+   * `route`'s harness runs now, after a time it did not (ADR-082 §8, "As built
+   * (S7d)"): deliver every definition's current state to that route alone — the other harness is not touched, so a
+   * running opencode is not recycled by pi arriving. An automatic delivery: a
+   * key the harness holds of its own is kept and the route says so. The
+   * ChatGPT credential is CredentialSync's to feed (`harnessArrived` there).
+   */
+  async harnessArrived(route: Route): Promise<void> {
+    await this.enqueue(async () => {
+      if (!this.harnessRuns(route)) return
+      const failures: unknown[] = []
+      for (const definition of this.listDefinitions()) {
+        try {
+          await this.syncDefinition(definition, { only: route })
+        } catch (error) {
+          failures.push(error)
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(failures, `Failed to deliver shared providers to ${route}`)
+    })
+  }
+
+  /**
+   * Replace the credential `route`'s engine holds of its own with the stored key
+   * — the user's answer to a route that kept its own key (ADR-082 §8, S7d),
+   * after the same confirm as switching on.
+   */
+  async useStoredKey(id: string, route: Route): Promise<void> {
+    await this.enqueue(async () => {
+      if (route !== 'pi' && route !== 'opencode')
+        throw new Error(`Unknown engine: ${String(route)}`)
+      const definition = this.requireDefinition(id)
+      if (!deliveredDefinition(definition).routes[route].enabled)
+        throw new Error(`${definition.name} is not delivered to ${route}`)
+      if (!this.harnessRuns(route)) throw new Error(`${route} is not installed`)
+      await this.syncDefinition(definition, { only: route, keepOwnKeys: false })
+    })
+  }
+
   async disconnectProvider(id: string): Promise<void> {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)
@@ -425,17 +491,21 @@ export class SharedProviderService {
         return
       }
       const owned = new Set(this.credentialRoutes(deliveredDefinition(definition)))
+      // The engines' keys first: a catalog route's key goes only while it is
+      // ClaudeUI's, which is compared with the vault key (`removeRouteCredential`).
       const results = await Promise.allSettled([
-        this.deps.vault.removeCredential(id),
-        owned.has('pi') ? this.deps.pi.removeCredential(definition) : Promise.resolve(),
-        owned.has('opencode') ? this.deps.opencode.removeCredential(definition) : Promise.resolve()
+        owned.has('pi') ? this.removeRouteCredential(definition, 'pi') : Promise.resolve(),
+        owned.has('opencode')
+          ? this.removeRouteCredential(definition, 'opencode')
+          : Promise.resolve()
       ])
+      const central = await Promise.allSettled([this.deps.vault.removeCredential(id)])
       const failures: unknown[] = []
-      const centralFailure = results[0].status === 'rejected' ? results[0].reason : undefined
+      const centralFailure = central[0].status === 'rejected' ? central[0].reason : undefined
       if (centralFailure) failures.push(centralFailure)
       for (const [route, result] of [
-        ['pi', results[1]],
-        ['opencode', results[2]]
+        ['pi', results[0]],
+        ['opencode', results[1]]
       ] as const) {
         if (result.status === 'fulfilled' && !centralFailure) this.clearError(id, route)
         else {
@@ -485,12 +555,28 @@ export class SharedProviderService {
       : definition.models
   }
 
-  private async syncDefinition(definition: SharedProviderDefinition): Promise<void> {
+  /**
+   * Bring the engines in line with `definition`: every route, or `only` one.
+   *
+   * `keepOwnKeys` (the default) is an AUTOMATIC delivery — the boot sync, Retry,
+   * a harness arriving: a catalog route whose engine holds a credential of its
+   * own for the vendor, not the vault key, keeps it and reports why, because
+   * nobody asked the user (a route switched on while its harness did not run
+   * never had the switch's own-key check). An explicit action that already
+   * asked, or needs no asking (switching on, adopting), passes false.
+   */
+  private async syncDefinition(
+    definition: SharedProviderDefinition,
+    { only, keepOwnKeys = true }: { only?: Route; keepOwnKeys?: boolean } = {}
+  ): Promise<void> {
+    const targets = only ? [only] : routes
     if (definition.id === 'chatgpt') {
-      await this.syncChatgpt(definition)
-      if (!routes.some((route) => definition.routes[route].defaultModel)) return
+      // An arrival feeds its one harness through CredentialSync; feeding both
+      // here would rewrite the other harness's store for nothing.
+      if (!only) await this.syncChatgpt(definition)
+      if (!targets.some((route) => definition.routes[route].defaultModel)) return
       const withModels = await this.withCatalogModels(definition)
-      for (const route of routes) {
+      for (const route of targets) {
         this.applyDefault(
           withModels,
           route,
@@ -505,12 +591,31 @@ export class SharedProviderService {
     // engines, as it does a single route that is off.
     const live = deliveredDefinition(definition)
     const failures: unknown[] = []
-    for (const route of routes) {
+    for (const route of targets) {
       let failed = false
+      /** An own key kept: reported on the route, not thrown — nothing failed. */
+      let kept = false
       try {
+        // Writes skip a harness that does not run (`applyRoute`, the vend);
+        // removals of ClaudeUI's own entries do not.
         this.applyRoute(live, live, route)
-        if (live.routes[route].enabled) await this.vendRouteCredential(live, route)
-        else if (live.kind !== 'catalog') {
+        if (live.routes[route].enabled) {
+          // A harness that does not run gets it on arrival.
+          if (this.runs(route, `delivering ${definition.id}`)) {
+            if (keepOwnKeys && (await this.keepsOwnKey(live, route))) {
+              kept = true
+              this.recordError(definition.id, route, ownKeyKept(live, route))
+              this.keptOwnKeys.set(
+                definition.id,
+                new Set([...(this.keptOwnKeys.get(definition.id) ?? []), route])
+              )
+              logger.info(
+                'SharedProviders',
+                `${route} holds its own key for ${definition.id} — kept, not replaced`
+              )
+            } else await this.vendRouteCredential(live, route)
+          }
+        } else if (live.kind !== 'catalog') {
           // A provider switched off is synced at every boot, and removing from
           // opencode starts its server: remove only a credential that is there.
           if (!definition.disabled || (await this.routeHasCredential(live, route)))
@@ -533,7 +638,7 @@ export class SharedProviderService {
         this.recordError(definition.id, route, error)
         failures.push(error)
       }
-      if (!failed) this.clearError(definition.id, route)
+      if (!failed && !kept) this.clearError(definition.id, route)
     }
     if (failures.length)
       throw new AggregateError(failures, `Failed to sync shared provider ${definition.id}`)
@@ -569,7 +674,8 @@ export class SharedProviderService {
       const delivered = await this.deps.credentialSync.feedAll(credential)
       for (const route of routes) {
         if (!definition.routes[route].enabled) continue
-        if (delivered[route]) this.clearError(definition.id, route)
+        // CredentialSync skipped it: nothing failed, it is fed on arrival.
+        if (delivered[route] || !this.harnessRuns(route)) this.clearError(definition.id, route)
         else this.recordError(definition.id, route, 'Credential delivery failed')
       }
     } catch (error) {
@@ -585,6 +691,10 @@ export class SharedProviderService {
     route: Route
   ): void {
     if (definition.id === 'chatgpt') return
+    // A route that is off REMOVES the block (a file edit, done at once); one
+    // that is on writes it, which waits for the harness.
+    if (definition.routes[route].enabled && !this.runs(route, `the ${definition.id} definition`))
+      return
     const previouslyManaged = previous?.routes[route].enabled === true
     if (route === 'pi')
       this.deps.pi.applyDefinition(definition, previouslyManaged, previous ?? definition)
@@ -601,6 +711,8 @@ export class SharedProviderService {
     applied: Route[]
   ): void {
     for (const route of applied.reverse()) {
+      // Nothing was applied to a harness that does not run.
+      if (!this.harnessRuns(route)) continue
       try {
         if (previous?.routes[route].enabled) this.applyRoute(previous, previous, route)
         else if (route === 'pi') this.deps.pi.removeDefinition(definition)
@@ -610,17 +722,42 @@ export class SharedProviderService {
       }
     }
   }
+  /** Take `definition` out of `route`'s engine — at once, whether or not it runs. */
   private async removeRoute(definition: SharedProviderDefinition, route: Route): Promise<void> {
     if (route === 'pi') this.deps.pi.removeDefinition(definition)
     else this.deps.opencode.removeDefinitionRoute(definition)
     await this.removeRouteCredential(definition, route)
   }
+  /**
+   * Take a route's key out of its engine — at once, whether or not the harness
+   * runs (ADR-082 §8, S7d): pi's is a file edit either way; opencode's goes
+   * through its server while it runs and is a direct file edit while it does
+   * not.
+   *
+   * A catalog route's slot is a vendor the engine knows, so it may hold the
+   * user's own key or sign-in: only ClaudeUI's key — the vault key, or the one
+   * last delivered there ({@link holdsOurKey}) — is taken out. Any other is
+   * left where it is, and the slot's fingerprint forgotten. Callers remove the
+   * vault key AFTER this, since the comparison reads it. A custom definition's
+   * native id is ClaudeUI's own: its entry always goes.
+   */
   private async removeRouteCredential(
     definition: SharedProviderDefinition,
     route: Route
   ): Promise<void> {
+    const vendorId = routeNativeId(definition, route)
+    if (definition.kind === 'catalog' && !(await this.holdsOurKey(definition, route))) {
+      this.deliveredKeys.forget(route, vendorId)
+      if (await this.routeHasCredential(definition, route))
+        logger.info(
+          'SharedProviders',
+          `${route}: the ${vendorId} credential there is not ClaudeUI's — left in place`
+        )
+      return
+    }
     if (route === 'pi') await this.deps.pi.removeCredential(definition)
-    else await this.deps.opencode.removeCredential(definition)
+    else await this.deps.opencode.removeCredential(definition, this.harnessRuns('opencode'))
+    this.deliveredKeys.forget(route, vendorId)
   }
   private async vendRouteCredential(
     definition: SharedProviderDefinition,
@@ -629,8 +766,10 @@ export class SharedProviderService {
     const credential = await this.deps.vault.loadCredential(definition.id)
     if (!credential || !definition.routes[route].enabled) return
     if (credential.type !== 'api_key') return
+    if (!this.runs(route, `the ${definition.id} key`)) return
     if (route === 'pi') await this.deps.pi.vendApiKey(definition, credential.key)
     else await this.deps.opencode.vendApiKey(definition, credential.key)
+    this.deliveredKeys.record(route, routeNativeId(definition, route), credential.key)
   }
 
   private applyDefault(
@@ -643,11 +782,13 @@ export class SharedProviderService {
         ? this.deps.pi.resolveDefaultModel(definition)
         : this.deps.opencode.resolveDefaultModel(definition)
     if (!resolved) return this.clearOwnedDefault(previous, route)
+    if (!this.defaultWritable(route)) return
     const value =
       typeof resolved === 'string' ? resolved : `${resolved.providerId}/${resolved.modelId}`
     if (route === 'pi') this.defaults.setPiDefault(value)
     else this.defaults.setOpencodeDefault(value)
   }
+  /** Clear a default this definition set — ClaudeUI's own value, cleared at once. */
   private clearOwnedDefault(definition: SharedProviderDefinition, route: Route): void {
     const resolved =
       route === 'pi'
@@ -678,6 +819,7 @@ export class SharedProviderService {
     error?: string
   ): Promise<SharedProviderStatus['routes'][Route]> {
     const enabled = definition.routes[route].enabled
+    const kept = enabled && this.keptOwnKeys.get(definition.id)?.has(route) === true
     // A catalog definition lists no models — each engine's own catalog does — so
     // `definition.models` has nothing to count, and a zero there would diagnose
     // every enabled catalog route as empty. The registry counts it from the
@@ -686,7 +828,8 @@ export class SharedProviderService {
       return {
         enabled,
         delivered: enabled && configured && credential,
-        ...(error ? { error } : {})
+        ...(error ? { error } : {}),
+        ...(kept ? { ownKeyKept: true as const } : {})
       }
     }
     const modelCount = models.filter(
@@ -699,6 +842,7 @@ export class SharedProviderService {
       delivered: enabled && configured && credential,
       modelCount,
       ...(error ? { error } : {}),
+      ...(kept ? { ownKeyKept: true as const } : {}),
       // Only diagnose a route that is switched on and empty. A disabled route is
       // empty by intent, and an errored one already says what went wrong — adding
       // a cause there would compete with the actual failure.
@@ -765,16 +909,30 @@ export class SharedProviderService {
   }
 
   /**
+   * The engine's plain API key for this route's vendor is ClaudeUI's: the vault
+   * key, or the key ClaudeUI last delivered into that slot (its fingerprint). A
+   * slot with no fingerprint — an install from before them — has only the
+   * vault key as ClaudeUI's. False for an OAuth sign-in, or no reader wired.
+   */
+  private async holdsOurKey(definition: SharedProviderDefinition, route: Route): Promise<boolean> {
+    const vendorId = routeNativeId(definition, route)
+    const held = this.deps.nativeKeys?.[route].readApiKey(vendorId)
+    if (!held) return false
+    if (this.deliveredKeys.matches(route, vendorId, held)) return true
+    return this.holdsVaultKey(definition, route)
+  }
+
+  /**
    * A catalog provider that is OFF, on a route that is on in its settings: the
-   * engine still holding the VAULT key means a switch-off was interrupted before
-   * it took the key back. Take it now. Any other key there is the user's own.
+   * engine still holding ClaudeUI's key means a switch-off was interrupted
+   * before it took the key back. Take it now; any other key there is the
+   * user's own and stays (`removeRouteCredential` checks).
    */
   private async reclaimStrandedKey(
     definition: SharedProviderDefinition,
     route: Route
   ): Promise<void> {
-    if (await this.holdsVaultKey(definition, route))
-      await this.removeRouteCredential(definition, route)
+    await this.removeRouteCredential(definition, route)
   }
 
   private async reclaimStrandedKeys(definition: SharedProviderDefinition): Promise<void> {
@@ -794,10 +952,56 @@ export class SharedProviderService {
     const own: Route[] = []
     for (const route of routes) {
       if (!definition.routes[route].enabled) continue
-      if (!(await this.routeHasCredential(definition, route))) continue
-      if (!(await this.holdsVaultKey(definition, route))) own.push(route)
+      // A harness that does not run is not written into, so switching on
+      // replaces nothing there; its arrival keeps an own key (`keepsOwnKey`).
+      if (!this.harnessRuns(route)) continue
+      if (await this.holdsOwnKey(definition, route)) own.push(route)
     }
     return own
+  }
+
+  /**
+   * The engine holds a credential for this route's vendor that is neither the
+   * vault key nor the key ClaudeUI last delivered there (a key replaced while
+   * the harness was away is still ClaudeUI's). A slot with no fingerprint yet —
+   * an install from before them — has only the vault key as ClaudeUI's.
+   */
+  private async holdsOwnKey(definition: SharedProviderDefinition, route: Route): Promise<boolean> {
+    return (
+      (await this.routeHasCredential(definition, route)) &&
+      !(await this.holdsOurKey(definition, route))
+    )
+  }
+
+  /**
+   * An automatic delivery of this catalog route would replace a credential the
+   * engine holds of its own: there is a vault key to deliver, and the engine
+   * holds something else for the vendor. A custom definition's native id is
+   * ClaudeUI's own, so it has no such key.
+   */
+  private async keepsOwnKey(definition: SharedProviderDefinition, route: Route): Promise<boolean> {
+    if (definition.kind !== 'catalog') return false
+    const stored = await this.deps.vault.loadCredential(definition.id)
+    if (stored?.type !== 'api_key') return false
+    return this.holdsOwnKey(definition, route)
+  }
+
+  /**
+   * Whether `route`'s harness runs, so its own files may be written. One that
+   * does not is skipped with one line; nothing failed, so no route error.
+   */
+  private runs(route: Route, what: string): boolean {
+    if (this.harnessRuns(route)) return true
+    logger.info('SharedProviders', `${route} not installed — skipping ${what}`)
+    return false
+  }
+
+  /**
+   * pi's default model is ClaudeUI's own record (`engines/pi.json`), written
+   * whether or not pi runs; opencode's is its own config file.
+   */
+  private defaultWritable(route: Route): boolean {
+    return route === 'pi' || this.harnessRuns(route)
   }
 
   /**
@@ -827,6 +1031,20 @@ export class SharedProviderService {
           `${other.name} already uses ${route}'s "${nativeId}". Leave ${route} unticked here, or turn ${route} off for ${other.name}.`
         )
       }
+    }
+  }
+
+  /**
+   * A removed provider's model list in each engine's allowlist (ClaudeUI's own
+   * `engines/<engine>.json`, harness installed or not) goes with it. A catalog
+   * vendor the engine still holds a credential for — the user's own, which a
+   * removal leaves — keeps its list: it curates that engine's own provider now.
+   */
+  private async clearModelLists(definition: SharedProviderDefinition): Promise<void> {
+    for (const route of routes) {
+      if (definition.kind === 'catalog' && (await this.routeHasCredential(definition, route)))
+        continue
+      this.writeModelAllowlist(route, routeNativeId(definition, route), null)
     }
   }
 
@@ -872,10 +1090,11 @@ export class SharedProviderService {
   ): Promise<NativeKeyCandidate[]> {
     const native = this.deps.nativeKeys
     if (!native) return []
-    const inPi = new Set(native.pi.listApiKeyVendorIds())
-    const shared = native.opencode
-      .listApiKeyVendorIds()
-      .filter((id) => inPi.has(id) && isProviderId(id) && !this.claimsVendor(id))
+    const plain = this.listPlainApiKeyVendorIds()
+    const inPi = new Set(plain.pi)
+    const shared = plain.opencode.filter(
+      (id) => inPi.has(id) && isProviderId(id) && !this.claimsVendor(id)
+    )
     if (shared.length === 0) return []
     const loaded = await native.loadCatalogs(preloaded ? { skipOpencode: true } : undefined)
     const catalogs = preloaded ? { ...loaded, opencode: preloaded.opencode } : loaded
@@ -1014,7 +1233,9 @@ export class SharedProviderService {
         'SharedProviders',
         `adopted the ${id} API key into the vault (${keep ? `kept ${keep}'s` : 'identical in both engines'})`
       )
-      await this.syncDefinition(definition)
+      // Adopting is the user's (or, at boot, an identical key): the key the
+      // engines are given is the one they already hold, or the one chosen.
+      await this.syncDefinition(definition, { keepOwnKeys: false })
     })
   }
 
@@ -1045,6 +1266,7 @@ export class SharedProviderService {
     return result
   }
   private recordError(id: string, route: Route, error: unknown): void {
+    this.keptOwnKeys.get(id)?.delete(route)
     this.routeErrors.set(id, {
       ...this.routeErrors.get(id),
       [route]: error instanceof Error ? error.message : String(error)
@@ -1054,7 +1276,16 @@ export class SharedProviderService {
     const errors = { ...this.routeErrors.get(id) }
     delete errors[route]
     this.routeErrors.set(id, errors)
+    this.keptOwnKeys.get(id)?.delete(route)
   }
+}
+/**
+ * The route's reason when an automatic delivery kept an engine's own key
+ * (ADR-082 §8, S7d): the sheet shows it beside "Use the stored key", and the
+ * list reads "Not delivered to". Exported for the renderer's match.
+ */
+export function ownKeyKept(definition: SharedProviderDefinition, route: Route): string {
+  return `${route} has its own key for ${definition.name}; it was kept.`
 }
 /** The native provider id a definition's route delivers to on that engine. */
 function routeNativeId(definition: SharedProviderDefinition, route: Route): string {

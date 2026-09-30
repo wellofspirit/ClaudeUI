@@ -308,6 +308,33 @@ describe('the rail accordion', () => {
     expect(byId('SettingsDialog.railSub', 'git-panel')).toHaveAttribute('data-active', 'true')
   })
 
+  it('a deep link scrolls once; a scroll-spy change after it does not scroll', () => {
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push((this as HTMLElement).dataset.id ?? '')
+    }
+    try {
+      const { rerender } = renderView({
+        activePage: 'appearance',
+        activeGroup: 'git-panel',
+        scrollNonce: 1
+      })
+      expect(scrolled).toEqual(['git-panel'])
+      // The spy marks the next group as the user scrolls on: same nonce.
+      rerender({ activeGroup: 'diff', scrollNonce: 1 })
+      rerender({ activeGroup: 'theme', scrollNonce: 1 })
+      expect(scrolled).toEqual(['git-panel'])
+      // The next deep link scrolls again.
+      rerender({ activeGroup: 'diff', scrollNonce: 2 })
+      expect(scrolled).toEqual(['git-panel', 'diff'])
+    } finally {
+      // jsdom has none of its own: put back exactly what was there.
+      if (original) Element.prototype.scrollIntoView = original
+      else delete (Element.prototype as Partial<Element>).scrollIntoView
+    }
+  })
+
   it('marks the sub-entry the pane is on as the current LOCATION', () => {
     renderView({ activePage: 'appearance', activeGroup: 'diff' })
     expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('aria-current', 'location')
@@ -849,10 +876,13 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     expect(within(railItem('opencode')).getByTestId('SettingsDialog.railChevron')).toBeTruthy()
   })
 
-  it('+ Add provider is not offered while neither opencode nor pi runs', async () => {
+  it('API providers — header, note, rows and + Add provider — is hidden while neither opencode nor pi runs', async () => {
+    const groups = (): (string | undefined)[] =>
+      screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)
     harnesses(['opencode'])
     renderView({ activePage: 'models' })
     await settle()
+    expect(groups()).toContain('providers')
     expect(screen.getByTestId('SettingsGroup.action')).toHaveTextContent('+ Add provider')
 
     cleanup()
@@ -860,7 +890,11 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     harnesses(['opencode', 'pi'])
     renderView({ activePage: 'models' })
     await settle()
+    expect(groups()).not.toContain('providers')
     expect(screen.queryByTestId('SettingsGroup.action')).toBeNull()
+    expect(document.body.textContent).not.toMatch(/API providers|Keys and self-hosted endpoints/)
+    // The subscriptions stay: Claude Code still signs in with one.
+    expect(groups()).toContain('subscriptions')
   })
 
   it('lights the rail item up live once the harness runs', async () => {

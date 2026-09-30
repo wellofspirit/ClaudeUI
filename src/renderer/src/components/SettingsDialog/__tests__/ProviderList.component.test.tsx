@@ -426,6 +426,33 @@ describe('API provider rows (ADR-074 §7, mockup D)', () => {
     expect(within(row('openrouter')).getByTestId('ProviderList.deliveryFailed')).toHaveTextContent(
       'Not delivered to pi'
     )
+    expect(within(row('openrouter')).getByTestId('ProviderList.deliveryFailed')).toHaveAttribute(
+      'data-tone',
+      'bad'
+    )
+  })
+
+  it('a key the engine kept of its own is a warning, not a failure (ADR-082 §8, S7d)', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...catalog,
+          engines: {
+            ...catalog.engines,
+            pi: {
+              enabled: true,
+              error: 'pi has its own key for OpenRouter; it was kept.',
+              ownKeyKept: true
+            }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await renderList()
+    const pill = within(row('openrouter')).getByTestId('ProviderList.deliveryFailed')
+    expect(pill).toHaveTextContent('Own key kept in pi')
+    expect(pill).toHaveAttribute('data-tone', 'warn')
   })
 
   it('follows an adopted native row to the shared definition it became', async () => {
