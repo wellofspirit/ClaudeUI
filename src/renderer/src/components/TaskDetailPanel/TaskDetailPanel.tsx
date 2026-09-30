@@ -16,6 +16,7 @@ export function TaskDetailPanel({
   const taskPanelOpen = useActiveSession((s) => s.rightPanel === 'task')
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
@@ -25,7 +26,8 @@ export function TaskDetailPanel({
 
   const entries = useMemo<TaskEntryDescriptor[]>(() => {
     return openedTaskToolUseIds.map((toolUseId) => {
-      const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
+      // A nested agent's spawn, or a subagent's Bash, lives in its parent's bucket.
+      const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId, subagentMessages)
       if (!taskBlock) return { toolUseId, kind: 'missing' as const }
       // A Bash cli.js moved to the background is a background shell too: its
       // tool_result is only the hand-off text, not the command's output.
@@ -41,7 +43,14 @@ export function TaskDetailPanel({
       if (isBackgroundBash) return { toolUseId, kind: 'bash-background' as const }
       return { toolUseId, kind: 'task' as const }
     })
-  }, [openedTaskToolUseIds, messages, isHistorical, activeTasks, taskNotifications])
+  }, [
+    openedTaskToolUseIds,
+    messages,
+    subagentMessages,
+    isHistorical,
+    activeTasks,
+    taskNotifications
+  ])
 
   const handleToggle = useCallback(
     (toolUseId: string) => {

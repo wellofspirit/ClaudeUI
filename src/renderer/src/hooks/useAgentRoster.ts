@@ -1,26 +1,46 @@
 /**
- * Every agent and background shell this session has spawned, in transcript
- * order (ADR-073).
+ * Every agent this session has spawned, at every depth, and the background
+ * shells that are running now (ADR-073, §7).
  *
- * Built from the `task` ToolView kind rather than from Claude's `activeTasks`,
- * so it is engine-neutral by construction: all four engines normalize their
- * spawn tools to that kind (Claude `Task`/`Agent`, opencode `task`, pi
- * `subagent`, Codex `collab:spawnAgent`, and `dispatch_agent` on every engine).
- * Claude contributes exact lifecycle events; the others fall through to
- * ADR-040's legacy heuristic inside `deriveTaskState`, exactly as the cards do.
+ * Agents come from the `task` ToolView kind rather than from Claude's
+ * `activeTasks`, so they are engine-neutral by construction: all four engines
+ * normalize their spawn tools to that kind (Claude `Task`/`Agent`, opencode
+ * `task`, pi `subagent`, Codex `collab:spawnAgent`, and `dispatch_agent` on
+ * every engine). Claude contributes exact lifecycle events; the others fall
+ * through to ADR-040's legacy heuristic inside `deriveTaskState`, exactly as
+ * the cards do.
  *
- * Scanning the transcript is the expensive part, so it is memoized on the
- * message list alone — a `task_progress` tick every few seconds, times N
- * running agents, must not re-walk a long session. The live join happens in a
- * second, cheap pass.
+ * A nested agent's spawn call lives in its parent's bucket
+ * (`subagentMessages[<parent origin id>]`), so the scan walks the main
+ * transcript and then, depth-first, the bucket of every agent it finds. Each
+ * child row follows its parent, in the parent's spawn order.
+ *
+ * Shells are the opposite: they come from the live lifecycle records, and only
+ * while they run (§7, "the shell rule").
+ *
+ * Scanning is the expensive part, so it is memoized per message array — one
+ * walk per bucket, shared by every surface. A streaming delta in one agent's
+ * bucket re-walks that bucket alone (the reducer replaces only the array it
+ * touched). Assembling the tree from the cached buckets, and the live join,
+ * are cheap passes that may run every time.
  */
 import { useMemo } from 'react'
-import type { ChatMessage, ContentBlock, EngineId, TaskNotification } from '../../../shared/types'
+import type {
+  ActiveTask,
+  ChatMessage,
+  ContentBlock,
+  EngineId,
+  TaskNotification
+} from '../../../shared/types'
 import type { ToolView } from '../../../shared/tool-kinds'
 import { useActiveSession } from '../stores/session-store'
 import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps'
-import { deriveTaskState, latestNotification } from '../components/chat/task-state'
-import { backgroundBashTaskId } from '../../../shared/claude-background-bash'
+import {
+  bashMovedToBackground,
+  deriveTaskState,
+  latestNotification
+} from '../components/chat/task-state'
+import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type TaskView = Extract<ToolView, { kind: 'task' }>
@@ -34,6 +54,10 @@ export interface AgentRosterRow {
   /** The type/model chip beside the name; absent when it would repeat `name`. */
   badge?: string
   description: string
+  /** 0 for a spawn in the main transcript; one more per agent it is nested in. Shells are 0. */
+  depth: number
+  /** The origin id of the agent whose transcript holds the spawn call; absent at depth 0. */
+  parentToolUseId?: string
   isRunning: boolean
   isError: boolean
   /** Ended by a stop rather than finishing — see `deriveTaskState`. */
@@ -48,13 +72,19 @@ export interface AgentRosterRow {
 }
 
 export interface AgentRoster {
+  /** Every agent at every depth, depth-first: each row is followed by its descendants. */
   agents: AgentRosterRow[]
+  /** Background shells that are running, plus a finished one whose entry is still open. */
   shells: AgentRosterRow[]
-  /** Running agents AND shells — what the pill and tab count. */
+  /** Running agents (every depth) plus running shells — what the pill and tab show. */
   runningCount: number
+  runningAgentCount: number
+  runningShellCount: number
+  /** Agents at every depth. Shells are not counted: a finished one is not listed. */
   totalCount: number
 }
 
+/** One spawn call as a bucket walk sees it — no position in the tree yet. */
 export interface ScannedEntry {
   toolUseId: string
   kind: 'agent' | 'shell'
@@ -66,12 +96,33 @@ export interface ScannedEntry {
   isBackground: boolean
 }
 
-const EMPTY: AgentRoster = { agents: [], shells: [], runningCount: 0, totalCount: 0 }
+/** A scanned entry placed in the tree. */
+export interface RosterEntry extends ScannedEntry {
+  depth: number
+  parentToolUseId?: string
+}
+
+type Buckets = Readonly<Record<string, ChatMessage[]>>
+
+const EMPTY: AgentRoster = {
+  agents: [],
+  shells: [],
+  runningCount: 0,
+  runningAgentCount: 0,
+  runningShellCount: 0,
+  totalCount: 0
+}
 
 /**
- * The transcript walk, shared across every mounted surface. The pill, the tab
- * and the panel all call the hook, and a `useMemo` inside it is per component —
- * so without this a streaming delta would walk the transcript three times. The
+ * Bucket walks performed so far. Read by the cache test only: it is how a test
+ * proves that a new array for one bucket re-walks that bucket and no other.
+ */
+export const rosterScanStats = { walks: 0 }
+
+/**
+ * The bucket walk, shared across every mounted surface. The pill, the tab and
+ * the panel all call the hook, and a `useMemo` inside it is per component — so
+ * without this a streaming delta would walk the transcript three times. The
  * cache is keyed by the message array's identity (the store replaces it on
  * every change), so it invalidates exactly when the walk would have re-run.
  */
@@ -86,78 +137,149 @@ export function scanTranscriptCached(messages: ChatMessage[], engineId: EngineId
 }
 
 /**
- * One pass over the transcript: every task/background-shell tool_use block, and
- * which tool_use ids already have a result. tool_use blocks live on assistant
- * messages; tool_result blocks live on synthetic user messages (the same split
- * `findTaskBlocks` documents).
+ * One pass over one message list (the main transcript, or one agent's bucket):
+ * every agent spawn call in it, and which of them already have a result.
+ * tool_use blocks live on assistant messages; tool_result blocks live on
+ * synthetic user messages in the main transcript and on the calling message in
+ * a bucket (the same split `findTaskBlocks` documents).
  *
- * A background shell is one started with `run_in_background`, or, on Claude, a
- * command cli.js moved to the background later ("Send to background", a
- * timeout, a message that arrived while it ran). The move shows in the
- * command's tool_result, so the scan stays independent of the live maps; the
- * row appears once that result lands, about a second after the flip. Unlike the
- * tool card, a reopened session keeps these rows: the roster lists what the
- * session spawned, and `deriveTaskState` never shows a historical row as
- * running.
+ * Agents only: a shell is listed from its lifecycle record, not from the
+ * transcript (see {@link listShells}).
  */
 function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEntry[] {
+  rosterScanStats.walks++
   const map = engineToolMap(engineId)
   const spawns: ToolUseBlock[] = []
   const results = new Map<string, boolean>() // toolUseId → isError
-  // Claude commands started in the foreground: the only tool_results worth
-  // matching, since the scan re-runs on every transcript change.
-  const foreground = new Set<string>()
-  const moved = new Set<string>()
 
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'tool_use' && msg.role === 'assistant') {
-        const kind = map.kindOf(block.toolName)
-        if (kind === 'task' || (kind === 'command' && block.toolInput?.run_in_background)) {
-          spawns.push(block)
-        } else if (kind === 'command' && engineId === 'claude') {
-          foreground.add(block.toolUseId)
-          spawns.push(block)
-        }
+        if (map.kindOf(block.toolName) === 'task') spawns.push(block)
       } else if (block.type === 'tool_result') {
         results.set(block.toolUseId, !!block.isError)
-        if (foreground.has(block.toolUseId) && backgroundBashTaskId(block.toolResult)) {
-          moved.add(block.toolUseId)
-        }
       }
     }
   }
 
-  const shown = spawns.filter((b) => !foreground.has(b.toolUseId) || moved.has(b.toolUseId))
-  return shown.map((block) => {
-    const kind = map.kindOf(block.toolName)
-    const isAgent = kind === 'task'
-    const view = isAgent
-      ? (map.normalize('task', block.toolInput, undefined, block.toolName) as TaskView)
-      : null
-    const command = String(block.toolInput?.command ?? '')
-    const name = isAgent
-      ? view?.name || view?.subagent || map.displayName(block.toolName)
-      : command.split(/\s+/)[0] || 'shell'
-    const badge = isAgent && view?.subagent !== name ? view?.subagent : undefined
-
+  return spawns.map((block) => {
+    const view = map.normalize('task', block.toolInput, undefined, block.toolName) as TaskView
+    const name = view?.name || view?.subagent || map.displayName(block.toolName)
+    const badge = view?.subagent !== name ? view?.subagent : undefined
     return {
       toolUseId: block.toolUseId,
-      kind: isAgent ? ('agent' as const) : ('shell' as const),
+      kind: 'agent' as const,
       name,
       ...(badge ? { badge } : {}),
-      description: isAgent ? view?.description || view?.prompt || '' : command,
+      description: view?.description || view?.prompt || '',
       hasResult: results.has(block.toolUseId),
       resultIsError: results.get(block.toolUseId) ?? false,
-      // A shell in this list is background by definition; an agent says so via
-      // its view (and, since 2.1.219, usually does not — hence the lifecycle).
-      isBackground: isAgent ? !!view?.background : true
+      // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
+      isBackground: !!view?.background
     }
   })
 }
 
+/**
+ * The agent tree, depth-first: the main transcript's spawns in order, each
+ * followed by the spawns in its own bucket, recursively. A call is placed once
+ * (the visited set), so a malformed bucket that repeats or contains its own
+ * spawn cannot loop.
+ */
+export function scanAgentTree(
+  messages: ChatMessage[],
+  subagentMessages: Buckets,
+  engineId: EngineId
+): RosterEntry[] {
+  const out: RosterEntry[] = []
+  const placed = new Set<string>()
+  const walk = (entries: ScannedEntry[], depth: number, parent?: string): void => {
+    for (const entry of entries) {
+      if (placed.has(entry.toolUseId)) continue
+      placed.add(entry.toolUseId)
+      out.push({ ...entry, depth, ...(parent ? { parentToolUseId: parent } : {}) })
+      const bucket = subagentMessages[entry.toolUseId]
+      if (bucket?.length) {
+        walk(scanTranscriptCached(bucket, engineId), depth + 1, entry.toolUseId)
+      }
+    }
+  }
+  walk(scanTranscriptCached(messages, engineId), 0)
+  return out
+}
+
+/**
+ * The background shells to list (ADR-073 §7, "the shell rule"): a live
+ * `local_bash` record whose `isBackgrounded` is true, at any depth. That flag
+ * is exactly "running in the background" — `run_in_background`, or a command
+ * moved there later — because a foreground Bash registers `false` whatever its
+ * depth (cli.js 2.1.280, S0 probe). Only Claude reports shell lifecycles, so
+ * only Claude lists shells, and a reopened session lists none.
+ *
+ * The one exception keeps a finished shell while its entry is open in the
+ * panel (§6: clicking its row again is how the entry is put away). Its record
+ * is gone by then, so it is recognized the way the panel recognizes a
+ * background Bash: a terminal event, plus `run_in_background` or the
+ * moved-to-background result.
+ */
+function listShells(opts: {
+  isHistorical: boolean
+  activeTasks: Record<string, ActiveTask>
+  openedIds: readonly string[]
+  notifications: TaskNotification[]
+  messages: ChatMessage[]
+  subagentMessages: Buckets
+}): ScannedEntry[] {
+  if (opts.isHistorical) return []
+  const shell = (toolUseId: string, block: ToolUseBlock, hasResult: boolean, isError: boolean) => {
+    const command = String(block.toolInput?.command ?? '')
+    return {
+      toolUseId,
+      kind: 'shell' as const,
+      name: command.split(/\s+/)[0] || 'shell',
+      description: command,
+      hasResult,
+      resultIsError: isError,
+      isBackground: true
+    }
+  }
+
+  const out: ScannedEntry[] = []
+  for (const [toolUseId, record] of Object.entries(opts.activeTasks)) {
+    if (record.taskType !== 'local_bash' || record.isBackgrounded !== true) continue
+    const { taskBlock, resultBlock } = findTaskBlocks(
+      opts.messages,
+      toolUseId,
+      opts.subagentMessages
+    )
+    if (!taskBlock) continue
+    out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError))
+  }
+
+  for (const toolUseId of opts.openedIds) {
+    if (opts.activeTasks[toolUseId]) continue
+    const notification = latestNotification(opts.notifications, toolUseId)
+    if (!notification) continue
+    const { taskBlock, resultBlock } = findTaskBlocks(
+      opts.messages,
+      toolUseId,
+      opts.subagentMessages
+    )
+    if (taskBlock?.toolName !== 'Bash') continue
+    const background =
+      !!taskBlock.toolInput?.run_in_background ||
+      bashMovedToBackground({
+        isHistorical: false,
+        notification,
+        resultText: resultBlock?.toolResult
+      })
+    if (background) out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError))
+  }
+  return out
+}
+
 function toRow(
-  entry: ScannedEntry,
+  entry: RosterEntry,
   opts: {
     isHistorical: boolean
     activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
@@ -186,6 +308,8 @@ function toRow(
     name: entry.name,
     ...(entry.badge ? { badge: entry.badge } : {}),
     description: entry.description,
+    depth: entry.depth,
+    ...(entry.parentToolUseId ? { parentToolUseId: entry.parentToolUseId } : {}),
     isRunning,
     isError,
     isStopped,
@@ -207,36 +331,97 @@ function toRow(
   }
 }
 
+/**
+ * Rows for the tree, top-down, with one engine-neutral rule (ADR-073 §7): a
+ * nested row that no lifecycle event describes — no record, no terminal event
+ * — cannot outlive its parent. Once the parent is not running, neither is it,
+ * and without a result it settles as `isLoaded` (neutral), not as finished: a
+ * row nothing reported on must not claim it completed.
+ *
+ * That row is running only by ADR-040's legacy heuristic (no result yet), and
+ * on some engines the result never comes: a refused Codex v2 grandchild's
+ * `started` card, or a pi/opencode child aborted mid-call. A row WITH a record
+ * is never touched — a Claude agent that runs on after its parent went idle is
+ * exactly what §7 exists to show. The tree is depth-first, so a parent's final
+ * state is known before its children are settled.
+ */
+function settleOrphans(
+  tree: RosterEntry[],
+  row: (entry: RosterEntry) => AgentRosterRow,
+  opts: { activeTasks: Record<string, unknown>; notifications: TaskNotification[] }
+): AgentRosterRow[] {
+  const running = new Map<string, boolean>()
+  return tree.map((entry) => {
+    let r = row(entry)
+    if (
+      r.isRunning &&
+      entry.parentToolUseId !== undefined &&
+      running.get(entry.parentToolUseId) === false &&
+      !opts.activeTasks[entry.toolUseId] &&
+      !latestNotification(opts.notifications, entry.toolUseId)
+    ) {
+      r = { ...r, isRunning: false, isStopped: false, isLoaded: !entry.hasResult }
+    }
+    running.set(entry.toolUseId, r.isRunning)
+    return r
+  })
+}
+
+const NO_BUCKETS: Buckets = {}
+const NO_IDS: readonly string[] = []
+
 export function useAgentRoster(): AgentRoster {
   const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
   const engineId = useActiveSession((s) => s.status.engineId)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const isHistorical = useActiveSession((s) => s.isHistorical)
 
-  // The transcript walk — deliberately NOT dependent on the live maps, and
-  // shared with the other surfaces through scanTranscriptCached.
-  const scanned = useMemo(
-    () => (messages ? scanTranscriptCached(messages, engineId ?? 'claude') : []),
-    [messages, engineId]
+  // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
+  // is shared with the other surfaces through scanTranscriptCached.
+  const tree = useMemo(
+    () =>
+      messages ? scanAgentTree(messages, subagentMessages ?? NO_BUCKETS, engineId ?? 'claude') : [],
+    [messages, subagentMessages, engineId]
+  )
+
+  const shells = useMemo(
+    () =>
+      messages
+        ? listShells({
+            isHistorical: !!isHistorical,
+            activeTasks: activeTasks ?? {},
+            openedIds: openedTaskToolUseIds ?? NO_IDS,
+            notifications: taskNotifications ?? [],
+            messages,
+            subagentMessages: subagentMessages ?? NO_BUCKETS
+          })
+        : [],
+    [messages, subagentMessages, activeTasks, openedTaskToolUseIds, taskNotifications, isHistorical]
   )
 
   return useMemo(() => {
-    if (scanned.length === 0) return EMPTY
-    const rows = scanned.map((entry) =>
-      toRow(entry, {
-        isHistorical: !!isHistorical,
-        activeTasks: activeTasks ?? {},
-        notifications: taskNotifications ?? [],
-        progress: taskProgressMap ?? {}
-      })
-    )
-    return {
-      agents: rows.filter((r) => r.kind === 'agent'),
-      shells: rows.filter((r) => r.kind === 'shell'),
-      runningCount: rows.filter((r) => r.isRunning).length,
-      totalCount: rows.length
+    if (tree.length === 0 && shells.length === 0) return EMPTY
+    const opts = {
+      isHistorical: !!isHistorical,
+      activeTasks: activeTasks ?? {},
+      notifications: taskNotifications ?? [],
+      progress: taskProgressMap ?? {}
     }
-  }, [scanned, activeTasks, taskNotifications, taskProgressMap, isHistorical])
+    const agents = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
+    const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
+    const runningAgentCount = agents.filter((r) => r.isRunning).length
+    const runningShellCount = shellRows.filter((r) => r.isRunning).length
+    return {
+      agents,
+      shells: shellRows,
+      runningCount: runningAgentCount + runningShellCount,
+      runningAgentCount,
+      runningShellCount,
+      totalCount: agents.length
+    }
+  }, [tree, shells, activeTasks, taskNotifications, taskProgressMap, isHistorical])
 }

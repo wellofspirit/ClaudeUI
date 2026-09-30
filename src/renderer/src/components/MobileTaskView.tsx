@@ -17,11 +17,12 @@ export function MobileTaskView(): React.JSX.Element {
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
 
   const title = ((): string => {
     if (openedTaskToolUseIds.length === 0) return 'Task'
     if (openedTaskToolUseIds.length > 1) return 'Tasks'
-    const { taskBlock } = findTaskBlocks(messages, openedTaskToolUseIds[0])
+    const { taskBlock } = findTaskBlocks(messages, openedTaskToolUseIds[0], subagentMessages)
     const input = taskBlock?.toolInput || {}
     const description = String(input.description || input.prompt || input.command || '')
     return description || 'Task'

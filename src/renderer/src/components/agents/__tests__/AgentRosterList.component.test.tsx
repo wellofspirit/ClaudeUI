@@ -1,6 +1,7 @@
 /**
  * Layer 2: the roster list (ADR-073) — foldable sections, the Running filter
- * (the default), and what a row reports.
+ * (the default), what a row reports, and (§7) the agent tree: indent, guides,
+ * context ancestors under Running, and Stop only where there is a record.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
@@ -9,6 +10,7 @@ import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { AgentRosterList } from '../AgentRosterList'
 import type { AgentRoster, AgentRosterRow } from '../../../hooks/useAgentRoster'
+import type { ActiveTask } from '../../../../../shared/types'
 
 const ROUTE = 'route-roster-list'
 
@@ -21,6 +23,7 @@ function row(over: Partial<AgentRosterRow> & { toolUseId: string }): AgentRoster
     isError: false,
     isStopped: false,
     isLoaded: false,
+    depth: 0,
     runIndex: 1,
     ...over
   }
@@ -29,12 +32,15 @@ function row(over: Partial<AgentRosterRow> & { toolUseId: string }): AgentRoster
 function roster(over: Partial<AgentRoster> = {}): AgentRoster {
   const agents = over.agents ?? []
   const shells = over.shells ?? []
-  const all = [...agents, ...shells]
+  const runningAgentCount = agents.filter((r) => r.isRunning).length
+  const runningShellCount = shells.filter((r) => r.isRunning).length
   return {
     agents,
     shells,
-    runningCount: over.runningCount ?? all.filter((r) => r.isRunning).length,
-    totalCount: over.totalCount ?? all.length
+    runningCount: over.runningCount ?? runningAgentCount + runningShellCount,
+    runningAgentCount,
+    runningShellCount,
+    totalCount: over.totalCount ?? agents.length
   }
 }
 
@@ -232,5 +238,133 @@ describe('AgentRosterList', () => {
     const badges = screen.getAllByTestId('AgentRow.resumed')
     expect(badges).toHaveLength(1)
     expect(badges[0].textContent).toContain('×2')
+  })
+
+  describe('the agent tree (§7)', () => {
+    const ids = (): (string | null)[] =>
+      screen.getAllByTestId('AgentRow').map((r) => r.getAttribute('data-tool-use-id'))
+    const context = (): (string | null)[] =>
+      screen
+        .getAllByTestId('AgentRow')
+        .filter((r) => r.getAttribute('data-context') === 'true')
+        .map((r) => r.getAttribute('data-tool-use-id'))
+
+    it('keeps a finished parent of a running child under Running, as uncounted context', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'lead' }),
+            row({ toolUseId: 'impl', depth: 1, parentToolUseId: 'lead', isRunning: true }),
+            row({ toolUseId: 'other' })
+          ]
+        })
+      )
+      expect(ids()).toEqual(['lead', 'impl'])
+      expect(context()).toEqual(['lead'])
+      // The heading counts the running row only.
+      expect(
+        screen.getByTestId('AgentRoster.section.Agents.toggle').textContent?.trim().endsWith('1')
+      ).toBe(true)
+      const [lead, impl] = screen.getAllByTestId('AgentRow')
+      expect(lead.className).toContain('opacity-55')
+      expect(impl.getAttribute('data-depth')).toBe('1')
+      expect(impl.getAttribute('data-context')).toBeNull()
+      expect(lead.querySelector('[data-testid="AgentRow.stop"]')).toBeNull()
+    })
+
+    it('keeps the whole ancestor chain of a depth-3 running row', async () => {
+      const { onOpen } = await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'd0' }),
+            row({ toolUseId: 'd1', depth: 1, parentToolUseId: 'd0' }),
+            row({ toolUseId: 'd1-sibling', depth: 1, parentToolUseId: 'd0' }),
+            row({ toolUseId: 'd2', depth: 2, parentToolUseId: 'd1' }),
+            row({ toolUseId: 'd3', depth: 3, parentToolUseId: 'd2', isRunning: true })
+          ]
+        })
+      )
+      expect(ids()).toEqual(['d0', 'd1', 'd2', 'd3'])
+      expect(context()).toEqual(['d0', 'd1', 'd2'])
+      expect(screen.getByTestId('AgentRoster').textContent).toContain('1 running')
+
+      fireEvent.click(screen.getAllByTestId('AgentRow')[0])
+      expect(onOpen).toHaveBeenCalledWith('d0')
+    })
+
+    it('does not mark an open ancestor as context', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'lead' }),
+            row({ toolUseId: 'impl', depth: 1, parentToolUseId: 'lead', isRunning: true })
+          ]
+        }),
+        vi.fn(),
+        ['lead']
+      )
+      expect(context()).toEqual([])
+    })
+
+    it('shows every row under All, with no context rows', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'lead' }),
+            row({ toolUseId: 'impl', depth: 1, parentToolUseId: 'lead', isRunning: true })
+          ]
+        })
+      )
+      fireEvent.click(screen.getByTestId('AgentRoster.filter.all'))
+      expect(ids()).toEqual(['lead', 'impl'])
+      expect(context()).toEqual([])
+    })
+
+    it('indents 14px per level and draws an elbow for nested rows only', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'a', isRunning: true }),
+            row({ toolUseId: 'b', depth: 1, parentToolUseId: 'a', isRunning: true }),
+            row({ toolUseId: 'c', depth: 2, parentToolUseId: 'b', isRunning: true })
+          ]
+        })
+      )
+      const [a, b, c] = screen.getAllByTestId('AgentRow')
+      expect(a.style.paddingLeft).toBe('')
+      expect(b.style.paddingLeft).toBe('24px')
+      expect(c.style.paddingLeft).toBe('38px')
+      expect(screen.getAllByTestId('AgentRow.elbow')).toHaveLength(2)
+    })
+  })
+
+  describe('Stop on a nested row', () => {
+    const setActiveTasks = (activeTasks: Record<string, ActiveTask>): void =>
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], activeTasks } }
+      }))
+    const nested = (): AgentRoster =>
+      roster({
+        agents: [
+          row({ toolUseId: 'lead', isRunning: true }),
+          row({ toolUseId: 'child', depth: 1, parentToolUseId: 'lead', isRunning: true })
+        ]
+      })
+
+    it('is not offered without a lifecycle record, which would interrupt the main turn', async () => {
+      // Running by the legacy heuristic alone (no task_started for it).
+      await renderList(nested())
+      const stops = screen
+        .getAllByTestId('AgentRow')
+        .map((r) => !!r.querySelector('[data-testid="AgentRow.stop"]'))
+      // A top-level row keeps its Stop as before; the nested one has none.
+      expect(stops).toEqual([true, false])
+    })
+
+    it('is offered once the nested agent has a lifecycle record', async () => {
+      setActiveTasks({ child: { taskId: 'a2', taskType: 'local_agent' } })
+      await renderList(nested())
+      expect(screen.getAllByTestId('AgentRow.stop')).toHaveLength(2)
+    })
   })
 })
