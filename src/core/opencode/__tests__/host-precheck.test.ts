@@ -5,6 +5,7 @@ import { compileClaudeRulesToOpencode } from '../permission-compiler'
 import type { OpencodePermissionRule } from '../permission-compiler'
 import { buildRuleset } from '../permission-ruleset'
 import { matchesUserAskRule } from '../wildcard'
+import { denyAskHit } from '../../permissions/shell-rules'
 import type { PendingApproval } from '../../../shared/types'
 
 // Synthetic rules only.
@@ -72,6 +73,66 @@ describe('hostPrecheck (ADR-085 S2)', () => {
     it('an empty command string falls back to the patterns too', () => {
       const approval = bash('', ['rm -rf dist'])
       expect(hostPrecheck(approval, ctxWith())).toEqual({ kind: 'deny', rule: 'Bash(rm -rf:*)' })
+    })
+  })
+
+  describe('1b: a user deny rule by glob (the narrow denies the server gets as asks)', () => {
+    const edit = (path: string): PendingApproval => ({
+      requestId: 'per_e',
+      toolUseId: 'c_e',
+      toolName: 'edit',
+      input: { filePath: path },
+      patterns: [path]
+    })
+    const denyEdit = (opts: Parameters<typeof ctxWith>[0] = {}) =>
+      ctxWith({ deny: [...DENY, 'Edit(secrets/**)'], ...opts })
+
+    it('an edit a user Edit deny covers → deny, named by the compiled rule', () => {
+      expect(hostPrecheck(edit('secrets/key.pem'), denyEdit())).toEqual({
+        kind: 'deny',
+        rule: 'edit(secrets/**)'
+      })
+      expect(hostPrecheck(edit('src/a.ts'), denyEdit())).toEqual({ kind: 'continue' })
+    })
+
+    it('a webfetch a user WebFetch deny covers → deny', () => {
+      const fetch: PendingApproval = {
+        requestId: 'per_w',
+        toolUseId: 'c_w',
+        toolName: 'webfetch',
+        input: { url: 'https://evil.example/x' },
+        patterns: ['https://evil.example/x']
+      }
+      const ctx = ctxWith({ deny: ['WebFetch(domain:evil.example)'] })
+      expect(hostPrecheck(fetch, ctx)).toMatchObject({ kind: 'deny' })
+    })
+
+    it('comes before the ask rules, the session allows and plan mode', () => {
+      const allows = new OpencodeSessionAllows()
+      allows.add('edit', ['*'])
+      const ctx = denyEdit({ ask: ['Edit(secrets/**)'], allows, mode: 'plan' })
+      expect(hostPrecheck(edit('secrets/key.pem'), ctx)).toEqual({
+        kind: 'deny',
+        rule: 'edit(secrets/**)'
+      })
+    })
+
+    it('a child ask too, before the parent’s allow answers it', () => {
+      const childEdit = {
+        ...edit('secrets/key.pem'),
+        subagent: { sessionId: 's', parentToolUseId: 't' }
+      }
+      const ctx = {
+        ...denyEdit(),
+        parentRuleset: [{ permission: '*', pattern: '*', action: 'allow' as const }],
+        childGatedCategories: ['bash', 'edit', 'webfetch']
+      }
+      expect(hostPrecheck(childEdit, ctx)).toEqual({ kind: 'deny', rule: 'edit(secrets/**)' })
+    })
+
+    it('a later user allow for the same pattern does not outrank the deny (deny tier is last)', () => {
+      const ctx = denyEdit({ allow: ['Edit(secrets/public/**)'] })
+      expect(hostPrecheck(edit('secrets/public/a.txt'), ctx)).toMatchObject({ kind: 'deny' })
     })
   })
 
@@ -158,8 +219,17 @@ describe('hostPrecheck (ADR-085 S2)', () => {
   describe('continue', () => {
     it('when nothing applies', () => {
       expect(hostPrecheck(bash('git status'), ctxWith())).toEqual({ kind: 'continue' })
-      // A mention is not a program position: `echo rm -rf` is no deny hit.
-      expect(hostPrecheck(bash('echo rm -rf'), ctxWith())).toEqual({ kind: 'continue' })
+    })
+
+    it('a mention is no §1 deny hit, but rung 1b keeps the broad glob’s over-refusal', () => {
+      // §1: `echo rm -rf` has no `rm` in a program position.
+      expect(denyAskHit('echo rm -rf', { deny: DENY, ask: [] })).toBeUndefined()
+      // The broad glob `* rm -rf*` matches it — the server's deny before the
+      // glob was sent as an ask (ADR-085's accepted over-refusal), now the host's.
+      expect(hostPrecheck(bash('echo rm -rf'), ctxWith())).toEqual({
+        kind: 'deny',
+        rule: 'bash(* rm -rf*)'
+      })
     })
 
     it('a non-shell ask with no patterns and no allows', () => {

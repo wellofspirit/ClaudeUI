@@ -8,6 +8,7 @@ import {
   evaluateOpencodeAsk,
   lastMatchingRule,
   matchesUserAskRule,
+  userDenyRule,
   wildcardMatch
 } from './wildcard'
 
@@ -42,7 +43,7 @@ import {
  * judge path).
  */
 export type HostPrecheckVerdict =
-  /** §1 deny hit → refuse with the rule. */
+  /** §1 deny hit, or a user deny rule by glob (rung 1b) → refuse with the rule. */
   | { kind: 'deny'; rule: string }
   /** Plan mode refuses a mutating ask (edit, task `general`, a shell command that is not plan-read-only) — ADR-085 ruling 7. */
   | { kind: 'plan-refuse' }
@@ -62,7 +63,7 @@ export interface HostPrecheckContext {
   mode: string
   /** The user's merged Claude rules; `allow` is read only in plan mode. */
   rules: { deny: readonly string[]; ask: readonly string[]; allow?: readonly string[] }
-  /** The compiled user-origin opencode rules (G9's provenance set — `userOriginRules()`). */
+  /** The compiled user-origin opencode rules (G9's provenance set, and rung 1b's denies — `userOriginRules()`). */
   userRules: readonly OpencodePermissionRule[]
   sessionAllows: OpencodeSessionAllows
   platform?: NodeJS.Platform
@@ -151,6 +152,11 @@ function planScope(ctx: HostPrecheckContext): PlanReadOnlyScope | undefined {
   }
 }
 
+/** A compiled rule as the refusal names it: `permission(pattern)`. */
+function compiledRuleText(rule: OpencodePermissionRule): string {
+  return `${rule.permission}(${rule.pattern})`
+}
+
 /**
  * Rung 6: the parent's ruleset over a child ask. `undefined` = it asks (fall
  * through to `continue`).
@@ -166,8 +172,7 @@ function parentVerdict(
   const patterns = approval.patterns && approval.patterns.length > 0 ? approval.patterns : ['*']
   for (const pattern of patterns) {
     const rule = lastMatchingRule(approval.toolName, pattern, rules, platform)
-    if (rule?.action === 'deny')
-      return { kind: 'deny', rule: `${rule.permission}(${rule.pattern})` }
+    if (rule?.action === 'deny') return { kind: 'deny', rule: compiledRuleText(rule) }
   }
   // Unreachable (a `deny` verdict has a deny rule behind it); fail toward the human.
   return { kind: 'user-ask' }
@@ -177,6 +182,14 @@ function parentVerdict(
  * Decide one permission ask host-side, in order:
  *
  *  1. the robust §1 deny match (shell asks with a command) → `deny`;
+ *  1b. a user deny rule by glob over the ask's patterns (`userDenyRule`, any
+ *     category, own and child asks) → `deny`, named by its compiled
+ *     `permission(pattern)`. The session sends a narrow bash/edit/webfetch
+ *     deny to the server as an `ask` (`permission-ruleset.ts`
+ *     `opencodeWireRuleset` — opencode's `DeniedError` dumps the ruleset into
+ *     the model's context), so this rung is where those rules deny: exactly
+ *     the calls the server's deny used to refuse, the broad globs'
+ *     over-refusals included;
  *  2. plan mode only: a mutating ask ({@link planModeRefusesAsk}) →
  *     `plan-refuse`, REGARDLESS of the user's ask rules, session allows and
  *     allow rules (ruling 7; pi's ladder has the same rung after its deny
@@ -198,8 +211,8 @@ function parentVerdict(
  *     ruleset over the ask's patterns
  *     (`evaluateOpencodeAsk`) — every pattern allowed → `parent-allow`; any
  *     pattern denied → `deny` with the last matching deny rule's
- *     `permission(pattern)` text (belt and braces: the user's non-Bash denies
- *     are copied into the child session server-side already); else fall
+ *     `permission(pattern)` text (belt and braces: rung 1b already refused
+ *     what a user deny rule covers); else fall
  *     through. Auto mode is covered by construction: the parent's auto
  *     ruleset carries no user allow (`withoutAllowRules`) and its base asks
  *     for bash/edit/webfetch/MCP, so a child's gated ask evaluates to `ask`
@@ -224,6 +237,8 @@ export function hostPrecheck(
     // `UNANALYSABLE_COMMAND` comes back as an ask: the human decides.
     const hit = command !== undefined ? denyAskHit(command, ctx.rules) : undefined
     if (hit?.tier === 'deny') return { kind: 'deny', rule: hit.rule }
+    const denyRule = userDenyRule(ctx.userRules, approval.toolName, approval.patterns, ctx.platform)
+    if (denyRule) return { kind: 'deny', rule: compiledRuleText(denyRule) }
     const plan = ctx.mode === 'plan'
     if (plan && planModeRefusesAsk(approval, command, planScope(ctx))) {
       return { kind: 'plan-refuse' }

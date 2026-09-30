@@ -6,8 +6,18 @@
  * ask with: worktree-relative, `\` on Windows, absolute only across drives.
  */
 import { describe, it, expect } from 'vitest'
-import { buildAutoModeRuleset, buildRuleset } from '../permission-ruleset'
-import { evaluateOpencodeRules } from '../wildcard'
+import {
+  buildAutoModeRuleset,
+  buildRuleset,
+  opencodeWireRuleset,
+  type PermissionRule
+} from '../permission-ruleset'
+import {
+  evaluateOpencodeAsk,
+  evaluateOpencodeRules,
+  userDenyRule,
+  wildcardMatch
+} from '../wildcard'
 import { compileClaudeRulesToOpencode, withoutAllowRules } from '../permission-compiler'
 import { agentControlEditPatterns, isAgentControlPath } from '../../automode/agent-control-paths'
 import type { ClaudePermissions } from '../../../shared/types'
@@ -186,5 +196,115 @@ describe('buildAutoModeRuleset', () => {
       expect(evaluateOpencodeRules('bash', 'ls', auto, platform)).toBe('ask')
       expect(evaluateOpencodeRules('read', 'src/a.ts', auto, platform)).toBe('allow')
     }
+  })
+})
+
+describe('opencodeWireRuleset — no DeniedError dump (ADR-085 follow-up)', () => {
+  const HOST = ['bash', 'edit', 'webfetch']
+  const r = (permission: string, pattern: string, action: PermissionRule['action']) => ({
+    permission,
+    pattern,
+    action
+  })
+
+  /**
+   * opencode's `disabled()` (`vendor/opencode-src/packages/opencode/src/permission/index.ts`):
+   * a tool is hidden when the LAST rule whose permission matches it has pattern `*` and denies.
+   */
+  const hidden = (tool: string, rules: readonly PermissionRule[]): boolean => {
+    const rule = rules.findLast((x) => wildcardMatch(tool, x.permission, 'linux'))
+    return rule?.pattern === '*' && rule.action === 'deny'
+  }
+
+  it('narrow host-decided denies become asks in place; whole-category denies move last, in order', () => {
+    const input = [
+      r('*', '*', 'allow'),
+      r('bash', 'git push --force*', 'deny'),
+      r('webfetch', '*', 'deny'),
+      r('edit', 'secrets/**', 'deny'),
+      r('read', '.env', 'deny'),
+      r('bash', '* git push --force*', 'deny'),
+      r('srv_*', '*', 'deny'),
+      r('task', 'general', 'ask')
+    ]
+    const before = structuredClone(input)
+    expect(opencodeWireRuleset(input, HOST)).toEqual([
+      r('*', '*', 'allow'),
+      r('bash', 'git push --force*', 'ask'),
+      r('edit', 'secrets/**', 'ask'),
+      r('read', '.env', 'deny'),
+      r('bash', '* git push --force*', 'ask'),
+      r('task', 'general', 'ask'),
+      r('webfetch', '*', 'deny'),
+      r('srv_*', '*', 'deny')
+    ])
+    expect(input).toEqual(before)
+  })
+
+  describe('the server plus the host refuse exactly what the session ruleset denies', () => {
+    const user = compileClaudeRulesToOpencode(
+      perms({
+        allow: ['Bash(git:*)', 'Read'],
+        deny: [
+          'Bash(git push --force:*)',
+          'Edit(secrets/**)',
+          'WebFetch(domain:evil.example)',
+          'Read(.env)'
+        ],
+        ask: ['Bash(docker run:*)']
+      })
+    )
+    const session = [...buildRuleset('default'), ...user, r('claudeui_dispatch_agent', '*', 'ask')]
+    const wire = opencodeWireRuleset(session, HOST)
+
+    it('the wire carries no deny in a host-decided category, and keeps the read deny', () => {
+      expect(wire.filter((x) => x.action === 'deny' && HOST.includes(x.permission))).toEqual([])
+      const readDenies = user.filter((x) => x.permission === 'read' && x.action === 'deny')
+      expect(readDenies.length).toBeGreaterThan(0)
+      for (const rule of readDenies) expect(wire).toContainEqual(rule)
+    })
+
+    it.each([
+      ['bash', 'git push origin main --force'],
+      ['bash', 'sudo git push --force'],
+      ['bash', 'git status'],
+      ['bash', 'docker run alpine'],
+      ['bash', 'hostname'],
+      ['edit', 'secrets/key.pem'],
+      ['edit', 'src/a.ts'],
+      ['webfetch', 'https://evil.example/x'],
+      ['webfetch', 'https://ok.example/x']
+    ])('%s %s', (permission, pattern) => {
+      const expected = evaluateOpencodeAsk(session, permission, [pattern], 'linux')
+      const server = evaluateOpencodeAsk(wire, permission, [pattern], 'linux')
+      const host = userDenyRule(user, permission, [pattern], 'linux')
+      if (expected === 'deny') {
+        // The server asks, so the host sees it — and refuses it with the rule.
+        expect(server).toBe('ask')
+        expect(host?.action).toBe('deny')
+      } else {
+        expect(server).toBe(expected)
+        expect(host).toBeUndefined()
+      }
+    })
+
+    it('a read the user denies is still denied server-side', () => {
+      expect(evaluateOpencodeAsk(wire, 'read', ['.env'], 'linux')).toBe('deny')
+    })
+  })
+
+  it('a whole-category deny hides the tool even when a narrower deny/ask of the same category follows it', () => {
+    const user = compileClaudeRulesToOpencode(
+      perms({ deny: ['Bash', 'Bash(rm -rf:*)', 'mcp__srv', 'Task'] })
+    )
+    const session = [...buildRuleset('default'), ...user, r('task', 'general', 'ask')]
+    // Why the move matters: in place, the last bash rule is a broad glob, so
+    // bash stays visible and `bash * deny` answers every call with the dump;
+    // the backstop's `task general` ask likewise un-hides the task tool.
+    expect(hidden('bash', session)).toBe(false)
+    expect(hidden('task', session)).toBe(false)
+    const wire = opencodeWireRuleset(session, HOST)
+    for (const tool of ['bash', 'srv_lookup', 'task']) expect(hidden(tool, wire)).toBe(true)
+    expect(hidden('edit', wire)).toBe(false)
   })
 })

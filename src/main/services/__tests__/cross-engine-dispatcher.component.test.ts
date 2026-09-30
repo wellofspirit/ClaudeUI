@@ -9007,9 +9007,12 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
         action: 'deny'
       })
       const bash = rules.filter((r) => r.permission === 'bash')
+      // The deny's globs arrive as asks: the host refuses them
+      // (`opencodeTargetRefusal`), so the server never dumps the ruleset.
       for (const glob of broadBashGlobs('git push --force:*')) {
-        expect(bash).toContainEqual({ permission: 'bash', pattern: glob, action: 'deny' })
+        expect(bash).toContainEqual({ permission: 'bash', pattern: glob, action: 'ask' })
       }
+      expect(bash.some((r) => r.action === 'deny')).toBe(false)
       expect(bash).toContainEqual({ permission: 'bash', pattern: 'docker run*', action: 'ask' })
       // Never the user's allow tier or additional directories.
       expect(rules.some((r) => r.pattern === 'git*')).toBe(false)
@@ -9138,6 +9141,36 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
         'reject',
         `Denied by permission rule: ${FORCE_DENY}`
       )
+      completeTurn(stream)
+      await pending
+    })
+
+    it('(c2) an edit ask a narrow user Edit deny covers is refused host-side (the server got an ask)', async () => {
+      const { dispatcher, client, stream } = makeHarness({
+        loadUserRules: () => userRules({ deny: ['Edit(secrets/**)'] })
+      })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_oc_edit_deny', autonomyMode: 'acceptEdits' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await tick()
+      const rules = client.patchSession.mock.calls[0]![1].permission!
+      expect(rules).toContainEqual({ permission: 'edit', pattern: 'secrets/**', action: 'ask' })
+      expect(rules.some((r) => r.permission === 'edit' && r.action === 'deny')).toBe(false)
+
+      stream.push('permission.asked', {
+        id: 'perm-edit-deny',
+        sessionID: 'oc-sess-1',
+        permission: 'edit',
+        patterns: ['secrets/key.pem'],
+        metadata: { filepath: 'secrets/key.pem' }
+      })
+      await tick()
+      expect(client.replyPermission).toHaveBeenCalledWith(
+        'perm-edit-deny',
+        'reject',
+        'Denied by permission rule: edit(secrets/**)'
+      )
+      expect(approvals(ctx)).toHaveLength(0)
       completeTurn(stream)
       await pending
     })
@@ -9317,9 +9350,10 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
         const rules = client.patchSession.mock.calls[0]![1].permission!
         expect(rules.at(-1)).toEqual(RECURSION_DENY)
         expect(rules.at(-2)).toEqual({ permission: 'task', pattern: 'mybuilder', action: 'ask' })
-        // After the compiled user deny/ask rules.
+        // After the compiled user deny/ask rules (the narrow deny arrives as
+        // an ask — `opencodeWireRuleset`).
         const lastUserRule = rules.findLastIndex(
-          (r) => r.permission === 'bash' && r.action === 'deny'
+          (r) => r.permission === 'bash' && r.pattern.includes('git push --force')
         )
         expect(lastUserRule).toBeGreaterThan(-1)
         expect(lastUserRule).toBeLessThan(rules.length - 2)

@@ -115,6 +115,30 @@ export function matchesUserAskRule(
 }
 
 /**
+ * The user DENY rule an ask resolves to, or `undefined`: the first of the
+ * ask's patterns (absent/empty → `['*']`) whose last matching user-origin rule
+ * denies. The host's replay of the server-side deny that
+ * `permission-ruleset.ts` `opencodeWireRuleset` sends as an `ask` (ADR-085
+ * follow-up) — the compiler emits allow → ask → deny, so a matching deny is
+ * always the user tier's last match, and the rules the session appends after
+ * that tier (the subagent backstop, the dispatch ask) are other permissions.
+ */
+export function userDenyRule(
+  rules: readonly OpencodePermissionRule[],
+  permission: string,
+  patterns: readonly string[] | undefined,
+  platform: NodeJS.Platform = process.platform
+): OpencodePermissionRule | undefined {
+  if (rules.length === 0) return undefined
+  const list = patterns && patterns.length > 0 ? patterns : ['*']
+  for (const pattern of list) {
+    const rule = lastMatchingRule(permission, pattern, rules, platform)
+    if (rule?.action === 'deny') return rule
+  }
+  return undefined
+}
+
+/**
  * opencode's per-ask verdict over a ruleset (`permission/index.ts` `ask()`):
  * evaluate every pattern (absent/empty → `['*']`); any `deny` → `'deny'`; all
  * `allow` → `'allow'`; else `'ask'`. A pattern no rule matches counts as

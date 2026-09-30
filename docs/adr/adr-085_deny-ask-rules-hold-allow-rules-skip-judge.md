@@ -1,6 +1,8 @@
 # ADR-085: The user's deny and ask rules hold in every mode on every engine, subagents follow the parent, plan mode wins, and narrow allow rules skip the auto-mode judge
 
-**Status:** Accepted (2026-09-30). Built on branch `harnesses` in the 3.6 line, five slices (S1–S5).
+**Status:** Accepted (2026-09-30). Built on branch `harnesses` in the 3.6 line, five slices (S1–S5),
+plus a follow-up that keeps opencode's `DeniedError` rule dump out of the model's context (§3 "No
+server-side rule dump").
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §3 (the "strip every
 allow rule" deviation is retired for narrow rules — §4 here), [ADR-022](adr-022_opencode-permission-mapping.md)
 (the compiled ruleset, session approvals, subagents, plan mode), [ADR-033](adr-033_cross-engine-dispatch.md)
@@ -194,6 +196,26 @@ Bash(git push --force:*)`, where before they ran with no card. Glob-word rules k
   strip) and a refused spawn does not count in the agent roster.
 - **Ruleset hygiene.** `applyPermissionMode` skips the PATCH when the ruleset is unchanged for this
   opencode session (growth is now bounded by mode switches, not turns).
+- **No server-side rule dump (follow-up).** opencode's server-side deny is `DeniedError`, whose message
+  JSON-dumps every session rule for the call's permission into the tool result the model reads
+  (`vendor/opencode-src/packages/core/src/v1/permission.ts`); with the broad globs and one appended
+  copy per mode visited that was 707 rules, ~50 KB, the user's own rules included, for one denied
+  `git push`. So the ruleset PATCHed onto an opencode session (own sessions and dispatch targets) is
+  the host's ruleset through `opencodeWireRuleset` (`permission-ruleset.ts`): a NARROW deny (pattern
+  ≠ `*`) in `bash`/`edit`/`webfetch` is sent as `ask`, in place, so it still outranks every allow; a
+  WHOLE-CATEGORY deny (pattern `*`, any category) is moved to the end so opencode's `disabled()`
+  hides that tool — in place, a later narrow ask of the same category (another deny rule's globs, the
+  backstop's `task:<name>`) kept the tool visible and let the whole-category deny answer each call with
+  the dump. The host refuses the converted asks: `hostPrecheck` rung 1b (`userDenyRule` — the user's
+  compiled rules by glob over the ask's patterns, own and child asks) and the dispatcher's
+  `opencodeTargetRefusal` (the target ruleset by glob), with the compiled rule
+  (`Denied by permission rule: edit(secrets/**)`) when §1 did not name the Claude rule first — the
+  same calls the server's deny refused, the broad globs' over-refusals included (`echo rm -rf` under
+  `Bash(rm -rf:*)`), now with the denial chip. Only those three categories: they are the ones whose every ask reaches the host,
+  a task child's through its static spawn-time asks; a child copies only the parent's DENY rules, so
+  narrow `read`/`glob`/`grep`/`list`/`websearch`/`task` denies stay server-side (their dump holds that
+  one category's rules). The host keeps its own ruleset (`lastPatchedRuleset`, the dispatcher's
+  `entry.permission`), unconverted.
 - **Plan wording.** opencode and Codex have no `exit_plan` tool, so their plan refusal reads "Plan mode
   is read-only — present the plan and ask the user to leave plan mode to proceed"; pi keeps
   `exit_plan`.
@@ -307,8 +329,10 @@ more type Get-Content gc grep rg Select-String sls`), resolved against the effec
   `Bash(bun run test:*)`) and unchanged for broad rules that a deny/ask carves into. The judge still
   sees every launcher, every out-of-scope write and every read the user's `Read` rules deny.
 - Non-auto opencode: a broader allow no longer beats a narrower deny/ask (S2 verifier F1 closed);
-  reordered denies are card-less (opencode's `DeniedError` fires before any event), where the exact
-  forms were already card-less — a renderer follow-up could render the tool result as a denial chip.
+  a bash/edit/webfetch deny is refused host-side with the denial chip, exact and reordered forms alike
+  (§3 "No server-side rule dump"). A host refusal rejects the ask, and opencode bare-rejects the
+  session's other pending asks with it (`permission/index.ts` `reply`); `continue_loop_on_deny` keeps
+  the turn going, so a parallel sibling call fails and the model re-issues it.
 - Plan mode refuses more than before on opencode (non-plan-safe commands with no allow rule used to
   show a card) and pi (ask rules and session allows no longer card a mutating call); every model the
   verifiers drove refused to mutate in plan mode on its own, so the refusal is rarely the model's
@@ -341,21 +365,27 @@ read l; do $l; done`, `echo <b64> | base64 -d | sh`, `rg --pre <prog>`, `make -f
 
 **opencode server side (§2, §3)**
 
-- Server-side denies are card-less (review S9); broad globs follow the rule's word order and do not
-  broaden program families (`rm` ↔ `Remove-Item`) or long-form cluster synonyms — the host §1
-  covers whatever asks.
+- The remaining server-side denies (narrow `read`/`glob`/`grep`/`list`/`websearch`/`task` rules) are
+  card-less (review S9) and still dump that category's rules. Broad globs follow the rule's word
+  order and do not broaden program families (`rm` ↔ `Remove-Item`) or long-form cluster synonyms —
+  the host §1 covers whatever asks.
 - MCP server-level deny/ask `s_*` over-matches a built-in key when a server is named `external`,
   `doom`, `plan`, `workflow` or `apply`.
 - Removed USER deny rules still bind task children until the server restarts (PATCH appends; a child
-  copies every deny). Mode switches still append one ruleset per mode visited.
+  copies every deny) — now only the whole-category ones and the narrow non-bash/edit/webfetch ones.
+  Mode switches still append one ruleset per mode visited (no model-context cost since the dump
+  follow-up; the stored ruleset and each ask's evaluation still grow).
+- A subagent spawned through the `task:<name>` backstop (an agent the spawn-time scan could not give
+  static asks) runs its allowed bash/edit/webfetch unasked, so it no longer inherits the user's narrow
+  denies in those categories either — the user's ask rules already did not reach it; the spawn itself
+  is the human's or the judge's decision.
 - A mid-turn default → plan switch does not reach the in-flight turn: the server keeps the ruleset its
   `runLoop` snapshotted until the next prompt; the host rung only sees what asks.
-- **opencode's `DeniedError` dumps the WHOLE appended ruleset into the model's context** (vendor,
-  pre-existing; measured live during the S5 verification: 707 entries, ~50 KB, the user's own rules
-  included, on one server-side denial). ADR-085 §3 stopped the per-turn growth but every mode switch
-  still appends one ruleset copy, and the dump leaks the user's rule text to the model. Raised with
-  the owner as a follow-up (a host-side trim of the tool result, or an upstream change). "The user
-  rejected permission…" duplicates the denial strip.
+- ~~opencode's `DeniedError` dumps the WHOLE appended ruleset into the model's context~~ (measured
+  live during the S5 verification: 707 entries, ~50 KB, the user's own rules included) — resolved by
+  §3 "No server-side rule dump" for bash/edit/webfetch and whole-category denies. The host refusal's
+  "The user rejected permission … with the following feedback: Denied by permission rule: …"
+  duplicates the denial strip.
 - A non-auto session allow on `edit *` / `webfetch *` is whole-category for that chat unless a user
   ask rule matches (old server-side UX; ADR-084's agent-control exception is auto-only).
 - `webfetch`/`websearch`/`task`/MCP allow rules still beat the plan base on opencode (only
@@ -470,3 +500,11 @@ child's `whoami` carded with the `ApprovalCardView.*` testids and allowed by `Ap
 a plan-mode `explore` child refused `Blocked · mode` with the no-exit-tool wording (the own-session
 plan write was not exercised: the model refused to attempt it; the same host rung is the S3b live
 result). Profile files byte-identical before and after; the opencode and pi processes released.
+
+Dump follow-up (live, free opencode models, scratch-repo rules `allow Bash(git:*) Edit`, `deny
+Bash(git push --force:*) Edit(secrets/**) WebFetch`): a force-push in default and auto mode and an
+`explore` child's force-push in auto were refused host-side with the denial chip and a 140-character
+tool result (no rule dump; zero judge calls); an accept-edits write to `secrets/new.txt` was refused
+the same way (132 characters) while `notes.txt` was written; the stored ruleset carried no narrow
+bash/edit/webfetch deny across four mode switches (211 → 994 rules) and `webfetch` deny `*` stayed
+last.

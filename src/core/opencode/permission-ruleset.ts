@@ -166,6 +166,60 @@ export function buildRuleset(mode: string): PermissionRule[] {
 }
 
 /**
+ * The ruleset as PATCHed onto an opencode session — never evaluated host-side
+ * (the host keeps the ruleset it built, and the user's rules as compiled).
+ *
+ * ## Why
+ *
+ * opencode's server-side deny is `PermissionV1.DeniedError`, whose message
+ * JSON-dumps every session rule whose permission matches the call's into the
+ * tool result the model reads
+ * (`vendor/opencode-src/packages/core/src/v1/permission.ts` `DeniedError`,
+ * thrown in `packages/opencode/src/permission/index.ts` `ask`). With the broad
+ * Bash globs (`broad-bash-globs.ts`, up to 240 per deny/ask rule) and one
+ * appended copy per mode visited (PATCH appends), one denied `git push` put
+ * 707 rules, ~50 KB — the user's own rules included — into the model's
+ * context. So the session's own server never denies a call it could show:
+ *
+ * - a NARROW deny (pattern ≠ `*`) in a `hostDecided` category is sent as
+ *   `ask`. Every such ask reaches the host — own-session asks always, a task
+ *   child's through its spawn-time static asks — and the host pre-check
+ *   refuses it with the rule (`host-precheck.ts` rung 1b; the dispatcher's
+ *   `opencodeTargetRefusal`). The ask still sits where the deny sat, after
+ *   every allow, so no allow outranks it server-side.
+ * - a WHOLE-CATEGORY deny (pattern `*`, any category) stays a deny and moves
+ *   to the end, keeping its order among the others. Last for its permission,
+ *   it is what opencode's `disabled()` reads, so the tool is hidden from the
+ *   model and never called (`permission/index.ts` `disabled`: the last rule
+ *   whose permission matches, if its pattern is `*` and it denies). Left in
+ *   place, a later narrow `bash` ask (from another deny rule) would keep bash
+ *   visible and the whole-category deny would answer every call with the full
+ *   dump. Moving a deny-everything rule later only tightens: the rules it
+ *   passes (the backstop's `task:<name>` asks, the dispatch ask) could only
+ *   have turned it into an ask.
+ *
+ * Narrow denies in other categories (`read`, `glob`, `grep`, `list`,
+ * `websearch`, `task`, …) stay server-side: a task child copies only the
+ * parent session's DENY rules (`agent/subagent-permissions.ts`), and those
+ * categories carry no static child ask, so an ask there would let a child run
+ * what the user denied. Their dump holds only that category's rules.
+ */
+export function opencodeWireRuleset(
+  rules: readonly PermissionRule[],
+  hostDecided: readonly string[]
+): PermissionRule[] {
+  const kept: PermissionRule[] = []
+  const wholeCategoryDenies: PermissionRule[] = []
+  for (const rule of rules) {
+    if (rule.action !== 'deny') kept.push(rule)
+    else if (rule.pattern === '*') wholeCategoryDenies.push(rule)
+    else if (hostDecided.includes(rule.permission)) kept.push({ ...rule, action: 'ask' })
+    else kept.push(rule)
+  }
+  return [...kept, ...wholeCategoryDenies]
+}
+
+/**
  * ClaudeUI's own hosted MCP server name on opencode (`opencode-hosted-tools.ts`,
  * `OpencodeServerManager.ts` — its tools are `claudeui_<tool>`).
  */

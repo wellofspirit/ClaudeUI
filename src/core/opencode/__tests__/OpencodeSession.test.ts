@@ -1292,11 +1292,12 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs[0]).toEqual(ALLOW_ALL)
     // …then the compiled user rules are appended (so they override the base).
     expect(rs).toContainEqual({ permission: 'bash', pattern: 'git diff*', action: 'allow' })
-    // deny wins over the base ruleset for `edit` under last-match-wins — it's
-    // second-to-last because the dispatch_agent ask rule (a DIFFERENT
-    // permission namespace, so it never conflicts with this one) is always
-    // appended last of all (ADR-033 M2).
-    expect(rs[rs.length - 2]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    // the deny outranks the base ruleset for `edit` under last-match-wins,
+    // sent as an ask the host refuses (`opencodeWireRuleset` — no DeniedError
+    // dump) — it's second-to-last because the dispatch_agent ask rule (a
+    // DIFFERENT permission namespace, so it never conflicts with this one) is
+    // always appended last of all (ADR-033 M2).
+    expect(rs[rs.length - 2]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'ask' })
     expect(rs[rs.length - 1]).toEqual(DISPATCH_ASK_RULE)
     // all three scopes are consulted.
     expect(mockLoadClaudePermissions).toHaveBeenCalledWith('user', expect.any(String))
@@ -3345,7 +3346,9 @@ describe('OpencodeSession — notifySettingsChanged', () => {
   it('recompiles the live ruleset from the CHANGED settings on disk', async () => {
     const session = makeSession(undefined, 'default')
     await session.run('hi')
-    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(false)
+    const rmRule = (r: { permission: string; pattern: string }) =>
+      r.permission === 'bash' && r.pattern.startsWith('rm')
+    expect(lastRuleset().some(rmRule)).toBe(false)
 
     // The user adds a deny rule in the permissions dialog.
     mockLoadClaudePermissions.mockReturnValue({
@@ -3359,7 +3362,7 @@ describe('OpencodeSession — notifySettingsChanged', () => {
     await session.notifySettingsChanged()
 
     expect(mockPatchSession).toHaveBeenCalledTimes(1)
-    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(true)
+    expect(lastRuleset().some(rmRule)).toBe(true)
     session.dispose()
   })
 
@@ -6655,6 +6658,51 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
     })
   })
 
+  describe('1b. a narrow edit deny reaches the server as an ask and is refused host-side', () => {
+    const EDIT_DENY = 'Edit(secrets/**)'
+    const EDIT_DENIED = 'Denied by permission rule: edit(secrets/**)'
+    const editAsk = (id: string, path: string): OpencodeEvent =>
+      ({
+        id: `ev_${id}`,
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          permission: 'edit',
+          patterns: [path],
+          metadata: { filepath: path },
+          tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+        }
+      }) as OpencodeEvent
+    const patchedEditRules = () =>
+      (
+        mockPatchSession.mock.calls.at(-1)![1] as {
+          permission: Array<{ permission: string; pattern: string; action: string }>
+        }
+      ).permission.filter((r) => r.permission === 'edit' && r.pattern === 'secrets/**')
+
+    it.each(['acceptEdits', 'full'])(
+      '%s: no server-side deny, refused with no card or judge',
+      async (mode) => {
+        if (mode === 'full') enableAuto()
+        withRules({ deny: [EDIT_DENY] })
+        mockJudge.mockResolvedValue('<block>no</block>')
+        const push = makeFeed()
+        const { session, win } = await start(mode)
+        // One per settings scope (the mock serves every scope the same rules).
+        expect(patchedEditRules().length).toBeGreaterThan(0)
+        expect(patchedEditRules().every((r) => r.action === 'ask')).toBe(true)
+        push(editAsk('per_e1', 'secrets/key.pem'))
+        await vi.waitFor(() =>
+          expect(mockReplyPermission).toHaveBeenCalledWith('per_e1', 'reject', EDIT_DENIED)
+        )
+        expect(cards(win)).toHaveLength(0)
+        expect(mockJudge).not.toHaveBeenCalled()
+        session.dispose()
+      }
+    )
+  })
+
   it('2. an ask rule the glob misses still raises the card (default mode), no reply', async () => {
     withRules({ ask: ['Bash(docker run:*)'] })
     const push = makeFeed()
@@ -7581,7 +7629,9 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
         const task = { permission: 'task', pattern: 'mybuilder', action: 'ask' }
         expect(rules.at(-1)).toEqual(DISPATCH_ASK)
         expect(rules.at(-2)).toEqual(task)
-        const lastUserRule = rules.map((r) => r.action).lastIndexOf('deny')
+        const lastUserRule = rules.findLastIndex(
+          (r) => r.permission === 'bash' && r.pattern.includes('rm -rf')
+        )
         expect(lastUserRule).toBeGreaterThan(-1)
         expect(lastUserRule).toBeLessThan(rules.length - 2)
         expect(rules.filter((r) => r.permission === 'task').map((r) => r.pattern)).toEqual([

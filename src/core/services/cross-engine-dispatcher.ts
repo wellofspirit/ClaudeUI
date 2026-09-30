@@ -45,7 +45,11 @@ import type { OpencodeAgentInfo } from '../opencode/OpencodeClient'
 // importing it here would form a require-cycle. permission-ruleset.ts holds
 // the same buildRuleset/PermissionRule, re-exported from OpencodeSession.ts
 // for any other existing importer.
-import { buildRuleset, CLAUDEUI_MCP_SERVER } from '../opencode/permission-ruleset'
+import {
+  buildRuleset,
+  CLAUDEUI_MCP_SERVER,
+  opencodeWireRuleset
+} from '../opencode/permission-ruleset'
 import type { PermissionRule } from '../opencode/permission-ruleset'
 // Already in this module's graph through `pi/permission-engine.ts`, which
 // imports it (no new edge, no cycle).
@@ -3022,7 +3026,12 @@ export class CrossEngineDispatcher {
         ...(await this.opencodeTargetBackstop(rec.client)),
         { permission: 'claudeui_dispatch_agent*', pattern: '*', action: 'deny' }
       ]
-      await rec.client.patchSession(session.id, { permission: ruleset })
+      // Narrow bash/edit/webfetch denies go to the server as asks, refused
+      // host-side (`opencodeTargetRefusal`) — opencode's DeniedError dumps the
+      // ruleset into the target model's context (`opencodeWireRuleset`).
+      await rec.client.patchSession(session.id, {
+        permission: opencodeWireRuleset(ruleset, CHILD_GATED_CATEGORIES)
+      })
 
       const entry: OpencodeTargetEntry = {
         kind: 'opencode',
@@ -3485,6 +3494,10 @@ export class CrossEngineDispatcher {
    * 1. A shell (`bash`) ask a user DENY rule hits (the §1 matcher, over the
    *    statement's `metadata.command`, else its patterns) — refused with the
    *    rule (the more specific reason, so it comes first).
+   * 1b. An ask the target's ruleset denies by glob, own or child — the
+   *    narrow bash/edit/webfetch denies the server was sent as asks
+   *    (`opencodeWireRuleset`), refused with the rule as the server's deny
+   *    would have refused them.
    * 2. Plan mode (ruling 7): `planModeRefusesAsk` — any `edit`,
    *    `task:general`, a bash command `isPlanReadOnlyCommand` cannot vouch for
    *    or one with no command text. The plan ruleset ASKS for all three (a
@@ -3520,6 +3533,10 @@ export class CrossEngineDispatcher {
         )
         return `Denied by permission rule: ${hit.rule}`
       }
+    }
+    if (evaluateOpencodeAsk(entry.permission, permission, patterns) === 'deny') {
+      logger.info('CrossEngineDispatcher', `opencode target: permission rule deny ${permission}`)
+      return targetDenyReason(entry.permission, permission, patterns)
     }
     if (
       entry.ctx.autonomyMode === 'plan' &&

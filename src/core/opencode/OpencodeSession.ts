@@ -125,7 +125,12 @@ import {
 // cross-engine-dispatcher.ts can depend on it without importing THIS module
 // (which would cycle back now that this file imports crossEngineDispatcher
 // above). Re-exported here for back-compat with any other existing importer.
-import { buildAutoModeRuleset, buildRuleset, CLAUDEUI_MCP_SERVER } from './permission-ruleset'
+import {
+  buildAutoModeRuleset,
+  buildRuleset,
+  CLAUDEUI_MCP_SERVER,
+  opencodeWireRuleset
+} from './permission-ruleset'
 import { editClearsAgentControl } from './agent-control-gate'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../pi/permission-engine'
@@ -1949,7 +1954,14 @@ export class OpencodeSession extends BaseSession {
       return
     }
     try {
-      await this.client.patchSession(sessionId, { permission: ruleset })
+      // The server gets no narrow bash/edit/webfetch deny — each is an ask the
+      // host pre-check refuses (rung 1b), because opencode's DeniedError dumps
+      // the ruleset into the model's context — and its whole-category denies
+      // last, so they hide the tool (`opencodeWireRuleset`). The host keeps
+      // `ruleset` itself: `parentRuleset` and the unchanged-key check read it.
+      await this.client.patchSession(sessionId, {
+        permission: opencodeWireRuleset(ruleset, CHILD_GATED_CATEGORIES)
+      })
       this.lastPatchedRuleset = { sessionId, rules: ruleset, key }
     } catch (err) {
       // FAIL CLOSED. This patch is the ONLY thing standing between the user's
