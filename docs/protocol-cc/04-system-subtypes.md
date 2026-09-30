@@ -48,6 +48,8 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `permission_allowed`      | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
 | `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
+| `session_title_changed`   | Session has / gets a user-set name (2.1.285)     | Title subscription (§4.29)       |
+| `per_turn_effort_changed` | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -1037,6 +1039,7 @@ The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subt
 | `api_metrics`          | Per-turn TTFT + output-tokens/sec line (distinct from top-level `api_metrics` message)     |
 | `local_command_output` | Output from a local slash command (e.g. `/usage`)                                          |
 | `files_persisted`      | Attachment-file persistence results                                                        |
+| `session_metadata`     | 2.1.285: `metadata.artifacts` from the same `notifyMetadataChanged` path as `task_summary` |
 
 If one of these is observed on stdout in a future CLI version, promote it to a numbered section.
 
@@ -1079,3 +1082,61 @@ on a resume whose transcript already carries both signals**, never mid-turn.
 ignores it — `handleSystemMessage` is an if-chain over known subtypes and
 `SystemMessage['subtype']` admits `string`, so an unhandled subtype is a no-op
 rather than an error.
+
+---
+
+## 4.29 `session_title_changed`
+
+**Added in 2.1.285.** The session's user-set name, for a host that displays it.
+
+```json
+{
+  "type": "system",
+  "subtype": "session_title_changed",
+  "title": "…",
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+The schema (`@internal`) says a headless session sends it **at startup when the
+session already has a name**, then after every change to the name. That includes a
+`rename_session` the host itself sent, but not an AI-generated title. A cleared
+name is not sent. A name another process writes into the transcript arrives only
+when this process next reads its transcript tail, after about 32 KB of its own
+writes or at a compaction. `title` is sanitised (control, bidi and zero-width
+characters become spaces, trimmed, at most 200 code points) and can carry a
+uniqueness suffix.
+
+**Gate.** Ungated. The emitter subscribes during stream-json session setup and
+fires once immediately, so on a resume of a named session it can arrive **before**
+`system/init`. Probed on 2.1.285: a stream-json spawn with `--name probe-title` and no
+prompt writes `session_title_changed` as its first stdout line. That is harmless to ClaudeUI, which reads init independently of
+the session-id latch (§4.2), but a consumer that treats "first system message" as
+init would break.
+
+**Consumer note.** Not consumed. ClaudeUI names sessions itself, and unknown
+subtypes are no-ops (§4.28).
+
+## 4.30 `per_turn_effort_changed`
+
+**Added in 2.1.285.** `@internal`. Sent once, when the conversation stops sending
+effort per turn because the server refused its per-turn effort message or a
+`role:"system"` message. From the retried request on, an effort change rewrites the
+cached prefix for every model, until a later `system/init` says otherwise.
+
+```json
+{
+  "type": "system",
+  "subtype": "per_turn_effort_changed",
+  "per_turn_effort_active": false,
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+`per_turn_effort_active` is always `false`; a change back to `true` is reported
+only by `system/init`. Relevant to models whose catalog entry carries the
+`per_turn_effort` capability (Sonnet 5.5 among them, 13 §13.5).
+
+**Consumer note.** Not consumed; unknown subtypes are no-ops.

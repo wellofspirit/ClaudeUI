@@ -865,6 +865,15 @@ Re-diffed at **2.1.268**: no additions and no removals to the top-level flag set
 `--force-remove-worktree` and a dozen others, but none reach `--help` — they are
 subcommand options and tool-description text, not CLI flags.)
 
+Re-diffed at **2.1.285**: two additions, no removals (70 → 72 long flags in
+`--help`; the bundle's `new Option("--…")` set went 80 → 82, also additions only,
+so every hidden flag listed above is still present). Neither is wired into ClaudeUI:
+
+- `--client-data-url <url>` — URL for a signed configuration document; cli.js exits
+  if it cannot load it or the document does not cover the selected model.
+- `--desktop` — open in the Claude Desktop app instead of the terminal (with
+  `--continue` or `--resume <id>` to pick the session).
+
 | Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires a non-interactive session + `--output-format=stream-json`. ClaudeUI always passes it (see §2.1); patch/subagent-streaming still supplies the `stream_event` token deltas. |

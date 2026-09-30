@@ -389,7 +389,7 @@ StringPointer offsets are **relative to the data buffer start** (`data_start = m
 | 0–3  | `DISABLE_DEFAULT_ENV_FILES`, `DISABLE_AUTOLOAD_BUNFIG`, `DISABLE_AUTOLOAD_TSCONFIG`, `DISABLE_AUTOLOAD_PACKAGE_JSON` — behavioural; **must be preserved**.                                                                                  |
 | 4–10 | `SOURCE_TEXT_CONTIGUOUS`, `HAS_SOURCE_HASHES`, `HAS_BUILTIN_BYTECODE`, `HAS_BYTECODE_STRING_TABLE`, `HAS_STARTUP_MODULE_COUNT`, `HAS_MODULE_INFO_STRING_TABLE`, `CROSS_COMPILED_BYTECODE` — each declares a trailing record we do not emit. |
 
-The 2.1.261 binary ships `flags = 0x3ff`. Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
+The 2.1.261 binary ships `flags = 0x3ff`. The 2.1.285 binary (Bun 1.4.3) ships `0x1bff`: bits 11 and 12 are new and not identified in the table above. They are dropped with the rest, and the `0xf` output loads and runs (`--version`, the voice probe and the live patch harness all pass). Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
 
 ### Per-platform container wrappers
 
