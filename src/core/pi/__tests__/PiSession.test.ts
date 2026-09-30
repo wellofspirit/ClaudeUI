@@ -379,8 +379,11 @@ vi.mock('node:os', () => ({ homedir: mockHomedir, tmpdir: () => '/tmp' }))
 // Hermetic gating tests: never touch the dev machine's real ~/.claude/settings.json.
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
-  saveClaudePermissions: mockSaveClaudePermissions
+  saveClaudePermissions: mockSaveClaudePermissions,
+  // ADR-085 §4: the user's `autoMode.classifyAllShell` (off unless a test says so).
+  loadClaudeAutoModeFlags: () => mockAutoModeFlags.value
 }))
+const mockAutoModeFlags = vi.hoisted(() => ({ value: { classifyAllShell: false } }))
 // Engine config drives auto mode (phase 4) — and model-discovery's model
 // allowlist. Mocked so both are hermetic.
 vi.mock('../../services/ui-config', () => ({
@@ -2742,12 +2745,15 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
-  // ── User ALLOW rules must not bypass the classifier (cli.js §3 step 2) ─────
-  // Live evidence: with `Bash(git:*)` allowed, no git command ever reached the
-  // judge, and an agent evaded the static `git push --force` deny by reordering
-  // arguments. Under auto mode the allow tier is filtered out of what the engine
-  // decides on (`withoutAllowRules`), so those actions fall through to the
-  // acceptEdits base's 'ask' → the judge. Deny/ask precedence is untouched.
+  // ── User ALLOW rules in auto mode (ADR-083 §3 → ADR-085 §4) ────────────────
+  // Live evidence (ADR-083): with `Bash(git:*)` allowed, no git command ever
+  // reached the judge, and an agent evaded the static `git push --force` deny
+  // by reordering arguments. Under auto mode the allow tier is still filtered
+  // out of what the ENGINE decides on (`withoutAllowRules`), so every allowed
+  // action asks; since ADR-085 the HOST decides: a usable allow rule skips the
+  // judge (cli.js parity + safety checks), and a rule a deny/ask rule carves
+  // into — `Bash(git:*)` beside a `git push --force` deny — goes to the judge.
+  // The reordered force-push itself is refused by the §1 deny matcher.
 
   /** Only `project` scope carries rules; user/local are empty (merge is 3-scope). */
   function withUserRules(rules: Partial<{ allow: string[]; ask: string[]; deny: string[] }>): void {
@@ -2764,24 +2770,201 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     )
   }
 
-  it('auto mode: a user-ALLOWED bash action goes to the JUDGE, not straight through', async () => {
+  it('auto mode: an allow rule a deny rule carves into sends the action to the JUDGE, not straight through', async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>yes</block><reason>rewrites pushed history</reason>']
-    withUserRules({ allow: ['Bash(git:*)'] })
+    withUserRules({ allow: ['Bash(git:*)'], deny: ['Bash(git push --force:*)'] })
     const win = new MockWindow()
     const session = await autoSession('rid-auto-allow-filtered', win)
 
-    // The exact evasion seen live: the static deny is written `git push --force`,
-    // the agent reorders the flag, and `Bash(git:*)` used to wave it through.
-    expect(await gate('call_al1', 'bash', { command: 'git push origin main --force' })).toEqual({
+    // `Bash(git:*)` is broader than the deny, so it is not usable: every git
+    // command the deny does not hit is judged, as before ADR-085.
+    expect(await gate('call_al1', 'bash', { command: 'git rebase main' })).toEqual({
       behavior: 'deny',
       reason: 'Auto mode blocked: rewrites pushed history'
     })
     expect(judgeCalls).toHaveLength(1)
     // Not a downgrade to a human interruption either — the allow rule still
-    // means "don't ask me", it just no longer means "skip the monitor".
+    // means "don't ask me", it just does not mean "skip the monitor" here.
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
+  })
+
+  describe('ADR-085 §4 — a usable allow rule skips the judge', () => {
+    const reviews = (win: MockWindow) =>
+      sentPayloads(win, 'session:tool-review') as {
+        toolUseId: string
+        review: Record<string, unknown>
+      }[]
+
+    it('bash under Bash(git:*) with no deny/ask: allow, the rule on the card and the info line, NO judge', async () => {
+      enableAutoMode()
+      withUserRules({ allow: ['Bash(git:*)'] })
+      vi.mocked(logger.info).mockClear()
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-git', win)
+
+      expect(await gate('call_s5a', 'bash', { command: 'git commit -m wip' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(judgeCalls).toHaveLength(0)
+      expect(mockRecordJudgeUsage).not.toHaveBeenCalled()
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'call_s5a',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'call_s5a',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved',
+            rationale: 'Allowed by your permission rule Bash(git:*)'
+          }
+        }
+      ])
+      expect(logger.info).toHaveBeenCalledWith(
+        'PiSession',
+        'auto-mode allow (stage=rule) bash — Bash(git:*)'
+      )
+      session.dispose()
+    })
+
+    it('a destructive git subcommand needs a rule that names it: `git reset --hard` under Bash(git:*) → judge, under Bash(git reset:*) → allow', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      withUserRules({ allow: ['Bash(git:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-git-reset', win)
+      expect(await gate('call_s5r1', 'bash', { command: 'git reset --hard' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(judgeCalls).toHaveLength(1)
+      expect(
+        reviews(win).some((r) =>
+          String(r.review.rationale ?? '').startsWith('Allowed by your permission rule')
+        )
+      ).toBe(false)
+      session.dispose()
+
+      withUserRules({ allow: ['Bash(git reset:*)'] })
+      const win2 = new MockWindow()
+      const named = await autoSession('rid-s5-git-reset-named', win2)
+      expect(await gate('call_s5r2', 'bash', { command: 'git reset --hard' })).toEqual({
+        behavior: 'allow'
+      })
+      // Still the one judge call from above: the named rule skipped it.
+      expect(judgeCalls).toHaveLength(1)
+      expect(reviews(win2).map((r) => r.review.rationale)).toEqual([
+        'Allowed by your permission rule Bash(git reset:*)'
+      ])
+      named.dispose()
+    })
+
+    it('a skip does not reset the denial caps (no recordAllow)', async () => {
+      enableAutoMode()
+      withUserRules({ allow: ['Bash(git commit:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-caps', win)
+      const recordAllow = vi.spyOn(
+        (session as unknown as { autoDenials: { recordAllow: () => void } }).autoDenials,
+        'recordAllow'
+      )
+      await gate('call_s5c', 'bash', { command: 'git commit -m wip' })
+      expect(recordAllow).not.toHaveBeenCalled()
+      session.dispose()
+    })
+
+    it('mcp__srv__tool under mcp__srv: allow, NO judge', async () => {
+      enableAutoMode()
+      withUserRules({ allow: ['mcp__srv'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-mcp', win)
+
+      expect(await gate('call_s5m', 'mcp__srv__tool', { q: 1 })).toEqual({ behavior: 'allow' })
+      expect(judgeCalls).toHaveLength(0)
+      expect(reviews(win).map((r) => r.review.rationale)).toEqual([
+        'Allowed by your permission rule mcp__srv'
+      ])
+      session.dispose()
+    })
+
+    it('a rule that does not name what a launcher runs → the JUDGE', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      withUserRules({ allow: ['Bash(npm:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-launcher', win)
+
+      await gate('call_s5l', 'bash', { command: 'npm exec -- git push --force' })
+      expect(judgeCalls).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('a write outside the workspace → the JUDGE', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      withUserRules({ allow: ['Bash(rm:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-write', win)
+
+      await gate('call_s5w', 'bash', { command: 'rm -rf ../elsewhere' })
+      expect(judgeCalls).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('a workdir (which pi’s bash does not have) → the JUDGE', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      withUserRules({ allow: ['Bash(git commit:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-workdir', win)
+
+      await gate('call_s5d', 'bash', { command: 'git commit -m wip', workdir: 'src' })
+      expect(judgeCalls).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('classifyAllShell in the user settings → the JUDGE', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      withUserRules({ allow: ['Bash(git commit:*)'] })
+      mockAutoModeFlags.value = { classifyAllShell: true }
+      try {
+        const win = new MockWindow()
+        const session = await autoSession('rid-s5-cas', win)
+        await gate('call_s5x', 'bash', { command: 'git commit -m wip' })
+        expect(judgeCalls).toHaveLength(1)
+        session.dispose()
+      } finally {
+        mockAutoModeFlags.value = { classifyAllShell: false }
+      }
+    })
+
+    it('a G9 ask rule still wins: the human, ZERO judge calls, no skip', async () => {
+      enableAutoMode()
+      withUserRules({ allow: ['Bash(git commit:*)'], ask: ['Bash(git commit --amend:*)'] })
+      const win = new MockWindow()
+      const session = await autoSession('rid-s5-g9', win)
+
+      void gate('call_s5g', 'bash', { command: 'git commit --amend -m x' })
+      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+      expect(judgeCalls).toHaveLength(0)
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
+
+    it('not in auto mode the gate is not reached (the ladder decides as before)', async () => {
+      mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+      withUserRules({ allow: ['mcp__srv'] })
+      const win = new MockWindow()
+      const session = new PiSession('rid-s5-nonauto', win as never, '/cwd', {})
+      await session.setPermissionMode('default')
+      await session.run('hi')
+      expect(await gate('call_s5n', 'mcp__srv__tool', {})).toEqual({ behavior: 'allow' })
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
   })
 
   it('auto mode: a user ASK rule still reaches the human with ZERO judge calls alongside an allow', async () => {

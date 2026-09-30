@@ -168,8 +168,11 @@ vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeF
 // empty rules; individual tests override mockLoadClaudePermissions.
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
-  saveClaudePermissions: mockSaveClaudePermissions
+  saveClaudePermissions: mockSaveClaudePermissions,
+  // ADR-085 §4: the user's `autoMode.classifyAllShell` (off unless a test says so).
+  loadClaudeAutoModeFlags: () => mockAutoModeFlags.value
 }))
+const mockAutoModeFlags = vi.hoisted(() => ({ value: { classifyAllShell: false } }))
 
 // Engine config drives auto-mode (full); mock so tests control it hermetically.
 vi.mock('../../services/ui-config', () => ({
@@ -263,7 +266,10 @@ import {
 } from '../../../test/helpers/fake-judge'
 import { closeDb, getUsageEventByMessageId } from '../../services/db'
 import { logger } from '../../services/logger'
-import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
+import {
+  ALLOW_RULE_REVIEW_RATIONALE_PREFIX,
+  READ_ONLY_REVIEW_RATIONALE
+} from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
 import { evaluateOpencodeRules } from '../wildcard'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
@@ -7658,6 +7664,345 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
         expect(mockPatchSession).toHaveBeenCalledTimes(3)
         session.dispose()
       })
+    })
+  })
+
+  // ── ADR-085 S5 — in auto mode a usable allow rule skips the judge ─────────
+  // The auto ruleset still strips every allow (`withoutAllowRules`), so the
+  // call asks and the HOST decides after the read-only bypass: skip (cli.js
+  // parity + safety checks) or judge. Rules are synthetic.
+
+  describe('ADR-085 S5 — a usable allow rule skips the judge', () => {
+    const reviews = (
+      win: MockWindow
+    ): Array<{ toolUseId: string; review: Record<string, unknown> }> =>
+      sent(win, 'session:tool-review') as Array<{
+        toolUseId: string
+        review: Record<string, unknown>
+      }>
+    const infoLines = (spy: ReturnType<typeof vi.spyOn>): string[] =>
+      spy.mock.calls.map((c) => String(c[1]))
+    const recordAllowSpy = (session: OpencodeSession): ReturnType<typeof vi.spyOn> =>
+      vi.spyOn(
+        (session as unknown as { autoDenials: { recordAllow: () => void } }).autoDenials,
+        'recordAllow'
+      )
+
+    it('a shell ask under Bash(git:*) with no deny: `once`, the rule on the card and the info line, NO judge', async () => {
+      enableAuto()
+      withRules({ allow: ['Bash(git:*)'] })
+      mockJudge.mockResolvedValue('<block>yes</block>')
+      const info = vi.spyOn(logger, 'info')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      const recordAllow = recordAllowSpy(session)
+
+      push(bashPart('c_s5a', 'git commit -m wip'))
+      push(bashAsk('per_s5a', 'git commit -m wip', { callID: 'c_s5a' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5a', 'once'))
+      await settle()
+
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(mockRecordJudgeUsage).not.toHaveBeenCalled()
+      expect(recordAllow).not.toHaveBeenCalled()
+      expect(cards(win)).toHaveLength(0)
+      expect(repliesFor('per_s5a')).toEqual([['per_s5a', 'once']])
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'c_s5a',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'c_s5a',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved',
+            rationale: `${ALLOW_RULE_REVIEW_RATIONALE_PREFIX}Bash(git:*)`
+          }
+        }
+      ])
+      // The rule, never the command.
+      expect(infoLines(info)).toContain('auto-mode allow (stage=rule) bash — Bash(git:*)')
+      expect(infoLines(info).some((l) => l.includes('wip'))).toBe(false)
+      info.mockRestore()
+      session.dispose()
+    })
+
+    it('with a deny rule carving into it, the same command goes to the JUDGE (as before ADR-085)', async () => {
+      enableAuto()
+      withRules({ allow: ['Bash(git:*)'], deny: [FORCE_DENY] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+
+      push(bashPart('c_s5b', 'git commit -m wip'))
+      push(bashAsk('per_s5b', 'git commit -m wip', { callID: 'c_s5b' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5b', 'once'))
+
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      expect(
+        reviews(win)
+          .map((r) => String(r.review.rationale ?? ''))
+          .some((t) => t.startsWith(ALLOW_RULE_REVIEW_RATIONALE_PREFIX))
+      ).toBe(false)
+      session.dispose()
+    })
+
+    it.each<[string, boolean]>([
+      ['Bash(git:*)', false],
+      ['Bash(git reset:*)', true]
+    ])(
+      '`git reset --hard` under %s: skips only when the rule names the subcommand (skip=%s)',
+      async (rule, skips) => {
+        enableAuto()
+        withRules({ allow: [rule] })
+        mockJudge.mockResolvedValue('<block>no</block>')
+        const push = makeFeed()
+        const { session, win } = await start('full')
+
+        push(bashPart('c_s5r', 'git reset --hard'))
+        push(bashAsk('per_s5r', 'git reset --hard', { callID: 'c_s5r' }))
+        await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5r', 'once'))
+        await settle()
+
+        expect(mockJudge).toHaveBeenCalledTimes(skips ? 0 : 1)
+        expect(
+          reviews(win)
+            .map((r) => String(r.review.rationale ?? ''))
+            .includes(`${ALLOW_RULE_REVIEW_RATIONALE_PREFIX}${rule}`)
+        ).toBe(skips)
+        session.dispose()
+      }
+    )
+
+    it('a webfetch ask under WebFetch(domain:example.com) skips; another host goes to the judge', async () => {
+      enableAuto()
+      withRules({ allow: ['WebFetch(domain:example.com)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      const webfetchAsk = (id: string, url: string): OpencodeEvent =>
+        ({
+          id: `ev_${id}`,
+          type: 'permission.asked',
+          properties: {
+            sessionID: SES,
+            id,
+            permission: 'webfetch',
+            patterns: [url],
+            always: ['*'],
+            metadata: { url, format: 'markdown' },
+            tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+          }
+        }) as OpencodeEvent
+
+      push(webfetchAsk('per_s5w', 'https://docs.example.com/page'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5w', 'once'))
+      expect(mockJudge).not.toHaveBeenCalled()
+
+      push(webfetchAsk('per_s5w2', 'https://example.org/page'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5w2', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      expect(cards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('an MCP key ask under mcp__<server>__* for a known server skips; its review waits for the tool part', async () => {
+      enableAuto()
+      __setToolInputWaitMsForTests(2000)
+      mockMcpStatus.mockResolvedValue({ lsphub: { status: 'connected' } })
+      withRules({ allow: ['mcp__lsphub__*'] })
+      mockJudge.mockResolvedValue('<block>yes</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+
+      // opencode's MCP ask: the key, `patterns: ["*"]`, `metadata: {}` (session/tools.ts:408).
+      push({
+        id: 'ev_mcp_s5',
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id: 'per_mcp_s5',
+          permission: 'lsphub_find_refs',
+          patterns: ['*'],
+          always: ['*'],
+          metadata: {},
+          tool: { callID: 'c_mcp_s5', messageID: 'msg_c_mcp_s5' }
+        }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mcp_s5', 'once'))
+      expect(mockJudge).not.toHaveBeenCalled()
+      // No tool_use on the wire yet: the reducer would drop the block, so it is held.
+      expect(reviews(win)).toEqual([])
+
+      push({
+        id: 'ev_mcp_s5_part',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_c_mcp_s5',
+            messageID: 'msg_c_mcp_s5',
+            type: 'tool',
+            tool: 'lsphub_find_refs',
+            callID: 'c_mcp_s5',
+            state: { status: 'running', input: { symbol: 'x' } }
+          }
+        }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(reviews(win)).toHaveLength(1))
+      expect(reviews(win)[0].review.rationale).toBe(
+        `${ALLOW_RULE_REVIEW_RATIONALE_PREFIX}mcp__lsphub__*`
+      )
+      session.dispose()
+    })
+
+    it('an MCP key whose server is not known, or is ambiguous, goes to the judge', async () => {
+      enableAuto()
+      mockMcpStatus.mockResolvedValue({ a: { status: 'connected' }, a_b: { status: 'connected' } })
+      withRules({ allow: ['mcp__a_b', 'mcp__a'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session } = await start('full')
+      const mcpAsk = (id: string, key: string): OpencodeEvent =>
+        ({
+          id: `ev_${id}`,
+          type: 'permission.asked',
+          properties: {
+            sessionID: SES,
+            id,
+            permission: key,
+            patterns: ['*'],
+            always: ['*'],
+            metadata: { q: 1 },
+            tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+          }
+        }) as OpencodeEvent
+
+      // `a_b_x`: server `a` (tool `b_x`) or server `a_b` (tool `x`)?
+      push(mcpAsk('per_amb', 'a_b_x'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_amb', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      // One candidate: skipped.
+      push(mcpAsk('per_one', 'a_tool'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_one', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      session.dispose()
+    })
+
+    it("a child ask takes the skip with the PARENT's rules, the subagent on the info line", async () => {
+      enableAuto()
+      withRules({ allow: ['Bash(git:*)'] })
+      mockJudge.mockResolvedValue('<block>yes</block>')
+      const info = vi.spyOn(logger, 'info')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+      const CHILD = 'ses_child_s5'
+      push({
+        id: 'ev_task_s5',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_task_s5',
+            messageID: 'msg_task_s5',
+            type: 'tool',
+            tool: 'task',
+            callID: 'call_task_s5',
+            state: {
+              status: 'running',
+              input: { subagent_type: 'general', description: 'd', prompt: 'p' },
+              metadata: { sessionId: CHILD }
+            }
+          }
+        }
+      } as OpencodeEvent)
+      push(bashPart('c_s5c', 'git commit -m wip', CHILD))
+      push(bashAsk('per_s5c', 'git commit -m wip', { sessionID: CHILD, callID: 'c_s5c' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5c', 'once'))
+
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(cards(win)).toHaveLength(0)
+      expect(infoLines(info)).toContain(
+        'auto-mode allow (stage=rule) bash — Bash(git:*) (subagent general)'
+      )
+      info.mockRestore()
+      session.dispose()
+    })
+
+    it('an ask settled during the read-only wait gets no reply and no review', async () => {
+      enableAuto()
+      __setToolInputWaitMsForTests(5000)
+      withRules({ allow: ['Bash(git:*)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session, win } = await start('full')
+
+      push(bashAsk('per_s5r', 'git commit -m wip', { callID: 'c_s5r' }))
+      await settle()
+      push({
+        id: 'ev_replied_s5r',
+        type: 'permission.replied',
+        properties: { sessionID: SES, requestID: 'per_s5r', reply: 'reject' }
+      } as OpencodeEvent)
+      await vi.waitFor(() =>
+        expect(
+          win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-dismiss')
+        ).toBe(true)
+      )
+      push(bashPart('c_s5r', 'git commit -m wip'))
+      await settle()
+
+      expect(repliesFor('per_s5r')).toHaveLength(0)
+      expect(mockJudge).not.toHaveBeenCalled()
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
+
+    it('a launcher the rule does not name, or a write outside the workspace, goes to the judge', async () => {
+      enableAuto()
+      withRules({ allow: ['Bash(npm:*)', 'Bash(rm:*)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session } = await start('full')
+
+      push(bashPart('c_s5l', 'npm exec -- git push --force'))
+      push(bashAsk('per_s5l', 'npm exec -- git push --force', { callID: 'c_s5l' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5l', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+
+      push(bashPart('c_s5o', 'rm -rf ../elsewhere'))
+      push(bashAsk('per_s5o', 'rm -rf ../elsewhere', { callID: 'c_s5o' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5o', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(2)
+      session.dispose()
+    })
+
+    it('a write whose tool-part workdir leaves the workspace goes to the judge', async () => {
+      enableAuto()
+      withRules({ allow: ['Bash(rm:*)'] })
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeFeed()
+      const { session } = await start('full')
+
+      push({
+        id: 'ev_part_c_s5wd',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_c_s5wd',
+            messageID: 'msg_c_s5wd',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'c_s5wd',
+            state: { status: 'running', input: { command: 'rm -rf build', workdir: '/elsewhere' } }
+          }
+        }
+      } as OpencodeEvent)
+      push(bashAsk('per_s5wd', 'rm -rf build', { callID: 'c_s5wd' }))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_s5wd', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      session.dispose()
     })
   })
 })

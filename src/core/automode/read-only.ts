@@ -41,7 +41,9 @@
  *    command (ADR-085's matcher, `../permissions/shell-rules.ts`, the same one
  *    the pi and Codex ladders use, so the bypass and the ladder cannot
  *    disagree);
- * 4. path rules (scope, realpath, sensitive names, Read deny rules).
+ * 4. path rules (scope, realpath, sensitive names, Read deny rules) — also
+ *    offered per operand to ADR-085's auto-mode allow-rule skip
+ *    ({@link checkPathOperands}).
  *
  * Every refusal names the first rule that fired (`token:$`, `flag:rg --pre`,
  * `path:out-of-scope`, …) for the debug log, which is where the allowlist grows
@@ -57,6 +59,7 @@ import {
   refuse,
   Refusal,
   textHygiene,
+  type StrictToken,
   type Tok
 } from './shell-strict-lexer'
 import {
@@ -274,7 +277,7 @@ export const SENSITIVE_SAMPLES: readonly string[] = [
 ]
 
 /** Could this glob component match a secret-shaped name? */
-function matchesSecretSample(globComponent: string): boolean {
+export function matchesSecretSample(globComponent: string): boolean {
   return SENSITIVE_SAMPLES.some((sample) => wildcardMatch(sample, globComponent, 'win32'))
 }
 
@@ -282,6 +285,8 @@ function matchesSecretSample(globComponent: string): boolean {
 const DEVICE_RE = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i
 
 const GLOB_RE = /[*?[]/
+/** A glob component with no literal character (`*`, `**`, `?*`): it names no file of its own. */
+export const GLOB_ONLY_RE = /^[*?[\]]+$/
 
 /** git revision-ancestry suffixes (`HEAD~1`, `main^`, `HEAD~2..HEAD`) — the only
  *  place `~` and `^` are tolerated (8.3 short names and cmd's `^` escape are
@@ -298,6 +303,21 @@ interface PathOpts {
   revOk?: boolean
   /** One literal view only (`workdir` is not shell-parsed). */
   single?: boolean
+  /**
+   * ADR-085 §4, a write target the shell expands: a glob component carrying a
+   * literal character must not match a secret-shaped name (`.*`, `.gi*`,
+   * `.en?`). A glob-ONLY component (`*`, `**`) is exempt — bash's `*` never
+   * expands to a dotfile — unless {@link PathOpts.deleteTarget} and its parent
+   * is a scope root.
+   */
+  writeGlobs?: boolean
+  /**
+   * ADR-085 §4, a DELETE target: refuse one that resolves to — or contains — a
+   * scope root or the effective cwd (`rm -rf .`, `rm -rf <cwd>`), and, with
+   * {@link PathOpts.writeGlobs}, a glob-only LAST component whose parent does
+   * (`rm -rf *`, `rm -rf ./*`): a workspace wipe goes to the judge.
+   */
+  deleteTarget?: boolean
 }
 
 function isWithin(root: string, target: string, platform: NodeJS.Platform): boolean {
@@ -316,6 +336,15 @@ function rootOf(ctx: Pick<Ctx, 'roots' | 'platform'>, full: string): string | un
     if (!best || r.length > best.length) best = r
   }
   return best
+}
+
+/**
+ * Is `full` a scope root (the session cwd, an additional directory, or one's
+ * realpath), the effective cwd, or an ancestor of one? Deleting it wipes a
+ * workspace — `rm -rf .`, `rm -rf <cwd>`, `rm -rf ..` from a `workdir` below.
+ */
+function coversScopeRoot(ctx: Pick<Ctx, 'roots' | 'effCwd' | 'platform'>, full: string): boolean {
+  return [...ctx.roots, ctx.effCwd].some((r) => isWithin(full, r, ctx.platform))
 }
 
 function foldPath(ctx: Pick<Ctx, 'platform'>, s: string): string {
@@ -364,6 +393,49 @@ function checkResolved(p: NormalizedPath, ctx: Ctx, outReason: string): string {
   return root
 }
 
+/**
+ * Windows opens `.env.` as `.env`: a piece's components with trailing dots and
+ * spaces stripped. `strict` (the path rules) refuses a name that cannot be
+ * opened as written — dots only, a device; otherwise such a part is kept as is.
+ */
+function cleanComponents(piece: string, strict: boolean): string[] {
+  const cleaned: string[] = []
+  for (const part of piece.split(/[\\/]/)) {
+    if (part === '' || part === '.' || part === '..') {
+      cleaned.push(part)
+      continue
+    }
+    const stripped = part.replace(/[. ]+$/, '')
+    if (stripped === '') {
+      if (strict) refuse('path:dots')
+      cleaned.push(part)
+      continue
+    }
+    if (strict && DEVICE_RE.test(stripped)) refuse(`path:device ${stripped}`)
+    cleaned.push(stripped)
+  }
+  return cleaned
+}
+
+/**
+ * Resolve cleaned components against the effective cwd. PowerShell reads `/x`
+ * / `\x` as the ROOT of the current drive, where bash on Git for Windows reads
+ * `/d/x` as `D:\x`. Resolve the Windows view as PowerShell would, so a
+ * Git-Bash spelling must also be in scope there.
+ */
+function resolvePieceParts(
+  list: readonly string[],
+  isWin: boolean,
+  ctx: Pick<Ctx, 'platform' | 'effCwd'>
+): NormalizedPath {
+  let target = list.join('/')
+  if (isWin && ctx.platform === 'win32' && /^\/(?!\/)/.test(target)) {
+    const drive = /^[a-z]:/i.exec(ctx.effCwd)
+    target = `${drive ? drive[0] : ''}${target}`
+  }
+  return resolveTarget(ctx.effCwd, target, ctx.platform)
+}
+
 /** The path rules for one piece of one view. */
 function checkPiece(piece: string, isWin: boolean, ctx: Ctx, opts: PathOpts): void {
   if (piece === '') refuse('path:empty')
@@ -382,19 +454,7 @@ function checkPiece(piece: string, isWin: boolean, ctx: Ctx, opts: PathOpts): vo
   if (/^[A-Za-z]:(?![\\/])/.test(piece)) refuse('path:drive-relative')
   if (piece.slice(/^[A-Za-z]:/.test(piece) ? 2 : 0).includes(':')) refuse('path:colon')
 
-  // Windows opens `.env.` as `.env`: strip trailing dots/spaces per component.
-  const parts = piece.split(/[\\/]/)
-  const cleaned: string[] = []
-  for (const part of parts) {
-    if (part === '' || part === '.' || part === '..') {
-      cleaned.push(part)
-      continue
-    }
-    const stripped = part.replace(/[. ]+$/, '')
-    if (stripped === '') refuse('path:dots')
-    if (DEVICE_RE.test(stripped)) refuse(`path:device ${stripped}`)
-    cleaned.push(stripped)
-  }
+  const cleaned = cleanComponents(piece, true)
   if (opts.refuseSecretGlobs && hasGlob) {
     for (const part of cleaned) {
       if (GLOB_RE.test(part) && matchesSecretSample(part)) {
@@ -402,17 +462,8 @@ function checkPiece(piece: string, isWin: boolean, ctx: Ctx, opts: PathOpts): vo
       }
     }
   }
-  // PowerShell reads `/x` / `\x` as the ROOT of the current drive, where bash
-  // on Git for Windows reads `/d/x` as `D:\x`. Resolve the Windows view as
-  // PowerShell would, so a Git-Bash spelling must also be in scope there.
-  const resolveParts = (list: readonly string[]): NormalizedPath => {
-    let target = list.join('/')
-    if (isWin && ctx.platform === 'win32' && /^\/(?!\/)/.test(target)) {
-      const drive = /^[a-z]:/i.exec(ctx.effCwd)
-      target = `${drive ? drive[0] : ''}${target}`
-    }
-    return resolveTarget(ctx.effCwd, target, ctx.platform)
-  }
+  const resolveParts = (list: readonly string[]): NormalizedPath =>
+    resolvePieceParts(list, isWin, ctx)
   const resolved = resolveParts(cleaned)
   const root = checkResolved(resolved, ctx, 'path:out-of-scope')
   // The token's own components too (`a/.ssh/../b` never names `.ssh` once
@@ -430,12 +481,46 @@ function checkPiece(piece: string, isWin: boolean, ctx: Ctx, opts: PathOpts): vo
   for (const part of cleaned.slice(skip)) {
     if (isSensitiveComponent(part)) refuse(`path:sensitive ${part}`)
   }
+  if (opts.writeGlobs && hasGlob) checkWriteGlobs(cleaned, resolveParts, ctx, opts)
+  if (opts.deleteTarget && coversScopeRoot(ctx, resolved.full)) refuse('path:scope-root')
   // A glob is a pattern, not a file that exists: nothing to realpath.
   if (hasGlob) return
   const real = ctx.realpath(resolved.full)
   if (real === null) refuse('path:realpath-unknown')
   if (typeof real === 'string') {
-    checkResolved(normalizePath(real, ctx.platform), ctx, 'path:realpath-out-of-scope')
+    const realPath = normalizePath(real, ctx.platform)
+    checkResolved(realPath, ctx, 'path:realpath-out-of-scope')
+    if (opts.deleteTarget && coversScopeRoot(ctx, realPath.full)) refuse('path:scope-root')
+  }
+}
+
+/**
+ * {@link PathOpts.writeGlobs}: the glob components of one cleaned piece. A
+ * component with a literal character must not match a secret-shaped sample;
+ * a glob-only one passes, except as the LAST component of a delete target
+ * whose parent is (or contains) a scope root.
+ */
+function checkWriteGlobs(
+  cleaned: readonly string[],
+  resolveParts: (list: readonly string[]) => NormalizedPath,
+  ctx: Ctx,
+  opts: PathOpts
+): void {
+  // Only the LAST named component can wipe its parent: `*/node_modules` deletes
+  // one directory per child, not the root's contents.
+  let last = cleaned.length - 1
+  while (last > 0 && cleaned[last] === '') last--
+  for (let k = 0; k < cleaned.length; k++) {
+    const part = cleaned[k]
+    if (!GLOB_RE.test(part)) continue
+    if (!GLOB_ONLY_RE.test(part)) {
+      if (matchesSecretSample(part)) refuse(`path:pattern-may-match-sensitive ${part}`)
+      continue
+    }
+    if (!opts.deleteTarget || k !== last) continue
+    // The parent of `/*` is the root: `['']` would join to '' (the cwd).
+    const parent = k === 1 && cleaned[0] === '' ? ['', ''] : cleaned.slice(0, k)
+    if (coversScopeRoot(ctx, resolveParts(parent).full)) refuse('path:scope-root-glob')
   }
 }
 
@@ -459,6 +544,112 @@ function checkPath(tok: Tok, ctx: Ctx, opts: PathOpts = {}): void {
   }
   checkPiece(tok.posix, false, ctx, opts)
   for (const piece of winPieces(tok)) checkPiece(piece, true, ctx, opts)
+}
+
+/**
+ * The user's Read deny rule one piece hits, or `undefined`. Over-matching on
+ * purpose: the piece as written (`~/.ssh/id_rsa`, `%USERPROFILE%\.env` — text
+ * the path rules would refuse to resolve still names the file), the piece
+ * resolved against the effective cwd, and its realpath when known.
+ */
+function readDenyPieceHit(piece: string, isWin: boolean, ctx: Ctx): string | undefined {
+  if (piece === '') return undefined
+  const asWritten = readDenyHit(piece.replace(/\\/g, '/'), ctx)
+  if (asWritten) return asWritten
+  const resolved = resolvePieceParts(cleanComponents(piece, false), isWin, ctx)
+  const hit = readDenyHit(resolved.full, ctx)
+  if (hit || GLOB_RE.test(piece)) return hit
+  const real = ctx.realpath(resolved.full)
+  return typeof real === 'string'
+    ? readDenyHit(normalizePath(real, ctx.platform).full, ctx)
+    : undefined
+}
+
+/**
+ * ADR-085 §4 safety checks (b) and (c), for the auto-mode allow-rule skip
+ * (`allow-rule-skip.ts`): the path rules of this module over the PATH OPERANDS
+ * of one covered segment (the caller picks them per program). Tokens are
+ * {@link lexShellStrict}'s, checked in both views like every path here.
+ *
+ * - `'write'` — the full rules, globs allowed (`rm -rf dist/*`): scope (cwd +
+ *   additionalDirectories, `workdir` resolved and itself in scope, as
+ *   {@link readOnlyVerdict} does), sensitive components, the user's Read deny
+ *   rules, realpath. A glob component with a literal character must not match
+ *   a secret-shaped name (`.*`, `.gi*` → `path:pattern-may-match-sensitive`);
+ *   a glob-ONLY component is exempt (bash's `*` never expands to a dotfile,
+ *   and a glob inside the workspace is what a write-class allow rule is for).
+ *   With `delete`, a target that resolves to — or contains — a scope root or
+ *   the effective cwd refuses (`path:scope-root`), and so does a glob-only
+ *   last component whose parent does (`rm -rf *` → `path:scope-root-glob`;
+ *   a glob-only component deeper in the path, as in `<glob>/node_modules`,
+ *   passes).
+ *   `guard` is the caller's own rule, run on every piece (both views) once the
+ *   path rules pass it, with the effective cwd; a string it returns refuses.
+ * - `'read-deny'` — the user's `Read(...)` deny rules ONLY (resolve + realpath
+ *   + deny match; no scope, no sensitive-name check: an allow rule is the
+ *   user's consent to read outside the workspace, and cli.js applies Read
+ *   deny rules to Bash reads and nothing else). A `workdir` outside the scope
+ *   is fine here. A glob refuses (`glob`) whenever a Read deny rule exists —
+ *   whether a pattern can expand to a denied file is not decided here.
+ *
+ * No operand at all → ok. Never throws: an internal failure is `internal`.
+ */
+export function checkPathOperands(
+  tokens: readonly StrictToken[],
+  scope: ReadOnlyScope,
+  opts: {
+    workdir?: string
+    mode: 'write' | 'read-deny'
+    /** `'write'` only: the operands are DELETE targets. */
+    delete?: boolean
+    /** `'write'` only: the caller's rule per piece; a returned string is the refusal. */
+    guard?: (piece: string, effCwd: string) => string | undefined
+  }
+): { ok: true } | { ok: false; reason: string } {
+  try {
+    if (tokens.length === 0) return { ok: true }
+    const base = buildCtx(scope)
+    const workdir = opts.workdir === undefined ? {} : { workdir: opts.workdir }
+    if (opts.mode === 'write') {
+      const ctx: Ctx = { ...base, effCwd: effectiveCwd(workdir, base) }
+      const pathOpts: PathOpts = {
+        glob: true,
+        writeGlobs: true,
+        deleteTarget: opts.delete === true
+      }
+      for (const tok of tokens) {
+        checkPath(tok, ctx, pathOpts)
+        if (!opts.guard) continue
+        for (const piece of [tok.posix, ...winPieces(tok)]) {
+          const why = opts.guard(piece, ctx.effCwd)
+          if (why) refuse(why)
+        }
+      }
+      return { ok: true }
+    }
+    if (base.readDeny.length === 0) return { ok: true }
+    const session = base.roots[0]
+    const effCwd =
+      typeof opts.workdir === 'string' && opts.workdir !== ''
+        ? resolveTarget(session, opts.workdir, base.platform).full
+        : session
+    const ctx: Ctx = { ...base, effCwd }
+    for (const tok of tokens) {
+      const pieces: Array<[string, boolean]> = [
+        [tok.posix, false],
+        ...winPieces(tok).map((p): [string, boolean] => [p, true])
+      ]
+      if (pieces.some(([p]) => GLOB_RE.test(p))) return { ok: false, reason: 'glob' }
+      for (const [piece, isWin] of pieces) {
+        const hit = readDenyPieceHit(piece, isWin, ctx)
+        if (hit) return { ok: false, reason: hit }
+      }
+    }
+    return { ok: true }
+  } catch (err) {
+    if (err instanceof Refusal) return { ok: false, reason: err.reason }
+    return { ok: false, reason: 'internal' }
+  }
 }
 
 // ── 3. Command tables ─────────────────────────────────────────────────────────

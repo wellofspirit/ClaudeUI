@@ -58,8 +58,10 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
 import {
   compileClaudeRulesToOpencode,
+  isOpencodeBuiltinPermissionKey,
   opencodeMcpKey,
   persistAllowSuggestions,
+  sanitizeMcpName,
   withoutAllowRules,
   withoutMutatingAllowRules
 } from './permission-compiler'
@@ -85,12 +87,15 @@ import {
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
+  allowRuleReviewBlock,
   AutoModeDenialTracker,
   autoModeReviewBlock,
   formatAutoModeDenyReason,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
 import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
+import { allowRuleGate } from '../automode/allow-rule-gate'
+import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
 import {
   analyzeRedirects,
@@ -2317,6 +2322,126 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
+   * ADR-085 §4 — the allow-rule judge skip, run after the read-only bypass and
+   * before any judge is resolved. True when a user allow rule let the call
+   * skip the judge (replied `once`, card annotated) or the ask was settled
+   * meanwhile; false sends it on to the judge exactly as before.
+   *
+   * The engine ruleset stripped every allow rule in auto mode
+   * (`withoutAllowRules`), so an allowed call still asks and the host decides
+   * here, from `mergedUserPermissions()` (allow rules included, read fresh).
+   * The gate is synchronous, so no mode can change while it runs beyond what
+   * its own `autoModeActive()` reads.
+   */
+  private allowRuleBypass(approval: PendingApproval): boolean {
+    const target = this.allowRuleAction(approval)
+    if (!target) return false
+    const type = approval.subagent ? this.subagentTask(approval.subagent)?.type : undefined
+    const gate = allowRuleGate({
+      action: target.action,
+      toolName: approval.toolName,
+      cwd: this.cwd,
+      permissions: this.mergedUserPermissions(),
+      autoModeActive: () => this.isAutoMode(this.permissionMode),
+      logSource: 'OpencodeSession',
+      ...(target.mcpToolKey ? { mcpToolKey: target.mcpToolKey } : {}),
+      ...(type ? { subagent: type } : {})
+    })
+    if (!gate.allow) return false
+    // The ask may have been answered while the read-only path awaited: it is
+    // settled, so handled — the rule readOnlyBypass follows.
+    if (!this.pendingApprovals.has(approval.requestId)) {
+      logger.debug(
+        'OpencodeSession',
+        'auto-mode allow-rule skip: ask already settled — not replying'
+      )
+      return true
+    }
+    this.sendAllowRuleReview(approval.toolUseId, gate.rule)
+    this.autoReply(approval.requestId, 'once')
+    return true
+  }
+
+  /**
+   * The allow-rule review on the call's card. A shell ask only gets here once
+   * its tool part is known (readOnlyBypass waited), but an MCP / webfetch ask
+   * can precede its part, and the reducer DROPS a block whose `tool_use` is in
+   * no message yet — so, like sendDenial, hold it until the part's input
+   * arrives (≤ TOOL_INPUT_WAIT_MS). The reply is never delayed.
+   */
+  private sendAllowRuleReview(toolUseId: string | undefined, rule: string): void {
+    if (!toolUseId) return
+    const send = (): void => this.sendToolReview(toolUseId, { allowRule: rule })
+    if (this.hasToolPart(toolUseId)) {
+      send()
+      return
+    }
+    void this.waitForToolInput(toolUseId).then((outcome) => {
+      if (outcome === 'input' || (outcome === 'timeout' && this.hasToolPart(toolUseId))) send()
+    })
+  }
+
+  /**
+   * What the allow-rule skip checks for this ask, or `undefined` (no skip —
+   * the judge decides). Paths below are under
+   * `vendor/opencode-src/packages/opencode/src/`.
+   * - shell: the TOOL PART's input only (readOnlyBypass already waited for
+   *   it; the ask's `{command}` metadata would lose `workdir`);
+   * - `webfetch`: the url (`tool/webfetch.ts:39-47` asks with
+   *   `patterns: [params.url]`, `metadata: {url, …}`); `websearch`
+   *   (`tool/websearch.ts:119-124`, bare rules only); `skill`: its name
+   *   (`tool/skill.ts:27-32`, `patterns: [name]`);
+   * - an MCP key (`session/tools.ts:408` asks with
+   *   `permission: <sanitize(server)>_<sanitize(tool)>`, `patterns: ["*"]`,
+   *   `metadata: {}`; the sanitiser is `mcp/catalog.ts:117-119`): not a
+   *   built-in permission key, and exactly ONE known server (the S3 resolved
+   *   set) whose `sanitize(s)_` prefixes it — two (`a` and `a_b` over `a_b_x`,
+   *   or `a.b` and `a_b`) leave the call's server unknown, so no skip. The
+   *   rule's tool name is compared in the key's form (`mcpToolKey`);
+   * - `edit`, `task`, `doom_loop`, `read`, `external_directory`, anything
+   *   else: no skip.
+   */
+  private allowRuleAction(
+    approval: PendingApproval
+  ): { action: AllowSkipAction; mcpToolKey?: (ruleTool: string) => string } | undefined {
+    const category = approval.toolName
+    const patterns = approval.patterns ?? []
+    const str = (v: unknown): string | undefined =>
+      typeof v === 'string' && v !== '' ? v : undefined
+    if (isShellToolName(category)) {
+      const input = approval.toolUseId
+        ? findToolInput(this.accumulators, undefined, approval.toolUseId)
+        : undefined
+      const command = input?.command
+      if (!input || typeof command !== 'string') return undefined
+      const workdir = input.workdir
+      if (workdir !== undefined && workdir !== null && typeof workdir !== 'string') return undefined
+      const dir = str(workdir)
+      return { action: { kind: 'shell', command, ...(dir ? { workdir: dir } : {}) } }
+    }
+    switch (category) {
+      case 'webfetch': {
+        const url = str(approval.input?.url) ?? str(patterns[0])
+        return url ? { action: { kind: 'webfetch', url } } : undefined
+      }
+      case 'websearch':
+        return { action: { kind: 'websearch' } }
+      case 'skill': {
+        const name = str(patterns[0])
+        return name ? { action: { kind: 'skill', name } } : undefined
+      }
+    }
+    if (isOpencodeBuiltinPermissionKey(category) || !this.knownMcpServers) return undefined
+    const servers = this.knownMcpServers.filter((s) =>
+      category.startsWith(opencodeMcpKey(s).slice(0, -1))
+    )
+    if (servers.length !== 1) return undefined
+    const server = servers[0]
+    const tool = category.slice(opencodeMcpKey(server).length - 1)
+    return tool ? { action: { kind: 'mcp', server, tool }, mcpToolKey: sanitizeMcpName } : undefined
+  }
+
+  /**
    * The approval the judge sees, with the tool part's input when the ask
    * carried none — an MCP tool asks straight from its `execute` with
    * `metadata: {}` (`vendor/opencode-src/packages/opencode/src/session/tools.ts:408`)
@@ -2753,6 +2878,11 @@ export class OpencodeSession extends BaseSession {
     // (a static allow never resets the denial caps) and no usage row. Before
     // the judge is resolved, so it holds even when no judge model does.
     if (await this.readOnlyBypass(approval)) return
+    // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
+    // parity plus safety checks, allow-rule-skip.ts). Same bookkeeping as the
+    // read-only path: no recordAllow(), no usage row, no tool outcome. A child
+    // ask takes it too, with the PARENT's rules (ruling 4).
+    if (this.allowRuleBypass(approval)) return
     // An ask with no input yet (an MCP tool, ADR-085 §3) — give the judge the
     // tool part's real input, or the call settled meanwhile.
     const judged = await this.inputForJudge(approval)
@@ -2873,10 +3003,12 @@ export class OpencodeSession extends BaseSession {
    * `'read-only'` is the static path's fixed review (ADR-084 §1). It has no
    * round-trip to wait on, but needs none: that path only runs once it has
    * found the tool part in the accumulator, so the card already exists.
+   * `{ allowRule }` is the allow-rule skip's (ADR-085 §4), held until the
+   * tool part exists (sendAllowRuleReview).
    */
   private sendToolReview(
     toolUseId: string | undefined,
-    result: ClassifyResult | 'read-only'
+    result: ClassifyResult | 'read-only' | { allowRule: string }
   ): void {
     if (!toolUseId) return
     const reviewId = uuid()
@@ -2885,7 +3017,9 @@ export class OpencodeSession extends BaseSession {
       review:
         result === 'read-only'
           ? readOnlyReviewBlock(toolUseId, reviewId)
-          : autoModeReviewBlock(toolUseId, reviewId, result)
+          : 'allowRule' in result
+            ? allowRuleReviewBlock(toolUseId, reviewId, result.allowRule)
+            : autoModeReviewBlock(toolUseId, reviewId, result)
     })
   }
 

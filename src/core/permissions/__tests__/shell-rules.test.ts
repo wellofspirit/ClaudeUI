@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   allowCovers,
+  allowRuleShape,
   bashRuleWordAlternatives,
   canLaunchOtherPrograms,
   denyAskHit,
@@ -20,6 +21,8 @@ import {
   isClassifierBypassingRule,
   isLauncherShapedSegment,
   parseBashRule,
+  programPositions,
+  ruleNamesLaunchedProgram,
   SHELL_RULES_MAX_ANALYSED_LENGTH,
   UNANALYSABLE_COMMAND
 } from '../shell-rules'
@@ -1128,6 +1131,206 @@ describe('isLauncherShapedSegment', () => {
 
   it('never throws (answers launcher-shaped)', () => {
     expect(isLauncherShapedSegment(undefined as never)).toBe(true)
+  })
+})
+
+/**
+ * ADR-085 §4 safety check (a): a prefix allow rule of N words (program
+ * included) covers a launcher-shaped segment only when it names what the
+ * launcher runs. Each row: the segment's tokens, N, the answer.
+ */
+describe('ruleNamesLaunchedProgram', () => {
+  const split = (s: string): string[] => s.split(' ')
+
+  it.each<[string, number, boolean]>([
+    // Not launcher-shaped: the rule names the program itself.
+    ['git status', 1, true],
+    ['ls -la', 1, true],
+    // Runners with a named operand: the operand must be a word of the rule.
+    ['bun run test --watch', 3, true],
+    ['bun run test --watch', 2, false],
+    ['bun run test --watch', 1, false],
+    ['bun x foo', 1, false],
+    ['bun x foo', 3, true],
+    ['bun exec foo', 3, true],
+    ['npx prettier --write x', 2, true],
+    ['npx prettier --write x', 1, false],
+    ['bunx foo', 2, true],
+    ['pnpx foo', 2, true],
+    ['uvx ruff check', 2, true],
+    ['npm exec -- git push --force', 1, false],
+    ['npm exec -- git push --force', 2, false],
+    ['npm exec -- git push --force', 4, true],
+    ['npm x cowsay', 3, true],
+    ['pnpm dlx cowsay', 2, false],
+    ['pnpm dlx cowsay', 3, true],
+    ['yarn exec foo', 3, true],
+    ['deno run x.ts', 3, true],
+    ['deno run x.ts', 2, false],
+    ['uv run pytest', 2, false],
+    ['uv run pytest', 3, true],
+    ['uv tool run ruff', 3, false],
+    ['uv tool run ruff', 4, true],
+    ['pipx run black', 3, true],
+    // A value-taking option may hide the subcommand or the operand: every candidate must be named.
+    ['npm --prefix . exec -- git push', 1, false],
+    ['npm --prefix . exec -- git push', 5, false],
+    ['npm --prefix . exec -- git push', 6, true],
+    ['bun --cwd . x cowsay', 1, false],
+    ['npx --package foo bar', 3, false],
+    ['npx --package foo bar', 4, true],
+    // The named program is checked in turn.
+    ['npm exec -- git -c core.pager=x log', 4, false],
+    // A glob operand is no literal word of the rule.
+    ['npx pre* x', 3, false],
+    // Strings and stdin are never nameable.
+    ['bun -e code', 3, false],
+    ['bun run test -e code', 5, false],
+    ['node -e code', 3, false],
+    ['node -p 1', 3, false],
+    ['node -', 2, false],
+    ['deno eval code', 3, false],
+    ['python -c code', 3, false],
+    ['python -', 2, false],
+    ['python -i', 2, false],
+    ['python', 1, false],
+    ['perl -e code', 3, false],
+    ['ruby -e code', 3, false],
+    // Direct-exec wrappers: recurse on what they run.
+    ['sudo bun run test', 4, true],
+    ['sudo bun run test', 3, false],
+    ['sudo git status', 2, true],
+    ['sudo git status', 1, false],
+    ['sudo -u root git status', 4, true],
+    ['sudo -u root git status', 3, false],
+    ['env FOO=1 git status', 3, true],
+    ['env FOO=1 git status', 2, false],
+    ['nice -n 5 git status', 4, true],
+    ['timeout 5 git status', 3, true],
+    ['nohup git status', 2, true],
+    ['time git status', 2, true],
+    // A flag that may take the next word as its value: both candidates must be named.
+    ['stdbuf -oL git log', 3, false],
+    ['stdbuf -oL git log', 4, true],
+    ['command git status', 2, true],
+    ['builtin git status', 2, true],
+    ['busybox sh -c ls', 4, false],
+    ['sudo bun x foo', 3, false],
+    ['sudo bun x foo', 4, true],
+    // … but not when they run a shell or split a string.
+    ['sudo -s git status', 4, false],
+    ['doas -i git status', 4, false],
+    ['env -S git-push x', 4, false],
+    ['env --split-string=git x', 4, false],
+    // Never nameable: exec/eval/source/`.`, shells, and the rest.
+    ['exec git status', 3, false],
+    ['eval git status', 3, false],
+    ['source x.sh', 2, false],
+    ['. x.sh', 2, false],
+    ['sh -c ls', 3, false],
+    ['bash -c ls', 3, false],
+    ['pwsh -Command ls', 3, false],
+    ['cmd /c dir', 3, false],
+    ['xargs git status', 3, false],
+    ['watch git status', 3, false],
+    ['ssh host ls', 3, false],
+    ['su -c ls', 3, false],
+    ['chroot /x ls', 3, false],
+    ['docker run alpine', 3, false],
+    ['kubectl exec pod ls', 4, false],
+    ['git -c core.pager=x log', 3, false],
+    ['git config core.hooksPath x', 4, false],
+    ['git rebase -x make', 4, false],
+    ['git bisect run make', 4, false],
+    ['git submodule foreach ls', 4, false],
+    ['find . -exec rm x', 5, false],
+    ['sed s/x/y/e f', 3, false],
+    ['awk {system("ls")}', 2, false],
+    ['at now', 2, false],
+    ['parallel ls', 2, false],
+    ['iex ls', 2, false],
+    ['Start-Process git', 2, false],
+    // No words at all.
+    ['bun run test', 0, false]
+  ])('%s with %i rule words → %s', (segment, words, expected) => {
+    expect(ruleNamesLaunchedProgram(split(segment), words)).toBe(expected)
+  })
+
+  it('never throws (answers false)', () => {
+    expect(ruleNamesLaunchedProgram(undefined as never, 3)).toBe(false)
+  })
+
+  it('a long wrapper chain is bounded, not exponential', () => {
+    const tokens = [...'sudo -u sudo -u '.repeat(4000).trim().split(' '), 'git', 'status']
+    const t = performance.now()
+    expect(ruleNamesLaunchedProgram(tokens, tokens.length)).toBe(false)
+    expect(performance.now() - t).toBeLessThan(1000)
+  })
+
+  it('a runner flooded with value-taking options is bounded and answers false', () => {
+    const tokens = ['npm', ...'--a b '.repeat(10000).trim().split(' '), 'exec', 'x']
+    const t = performance.now()
+    expect(ruleNamesLaunchedProgram(tokens, tokens.length)).toBe(false)
+    expect(performance.now() - t).toBeLessThan(1000)
+  })
+})
+
+describe('allowCovers — strict, the S5 fields', () => {
+  it('carries the tokens, whether the first rule is exact, and every rule covering both readings', () => {
+    const cov = allowCovers('bun run test', ['Bash(bun:*)', 'Bash(bun run test)'], 'strict')
+    expect(cov?.segments).toHaveLength(1)
+    const [seg] = cov!.segments
+    expect(seg.rule).toBe('Bash(bun:*)')
+    expect(seg.exact).toBe(false)
+    expect(seg.rules).toEqual(['Bash(bun:*)', 'Bash(bun run test)'])
+    expect(seg.tokens?.map((t) => [t.posix, t.win])).toEqual([
+      ['bun', 'bun'],
+      ['run', 'run'],
+      ['test', 'test']
+    ])
+    expect(allowCovers('bun run test', ['Bash(bun run test)'], 'strict')?.segments[0].exact).toBe(
+      true
+    )
+  })
+
+  it('a rule covering only one reading is not in `rules`', () => {
+    // bash reads `te\st` as `test`, PowerShell keeps the backslash.
+    const cov = allowCovers('bun run te\\st', ['Bash(bun run test)', 'Bash(bun:*)'], 'strict')
+    expect(cov?.segments[0].rule).toBe('Bash(bun run test)')
+    expect(cov?.segments[0].rules).toEqual(['Bash(bun:*)'])
+  })
+
+  it('lenient mode carries none of them', () => {
+    const [seg] = allowCovers('git status', ['Bash(git:*)'], 'lenient')!.segments
+    expect(seg).toEqual({ segment: 'git status', rule: 'Bash(git:*)' })
+  })
+})
+
+describe('allowRuleShape', () => {
+  it.each<[string, { exact: boolean; words: number } | undefined]>([
+    ['Bash(bun run test:*)', { exact: false, words: 3 }],
+    ['Bash(bun run test *)', { exact: false, words: 3 }],
+    ['Bash(bun run test)', { exact: true, words: 3 }],
+    ['Bash(git:*)', { exact: false, words: 1 }],
+    ['Bash', undefined],
+    ['Bash(*)', undefined],
+    ['Bash(git*)', undefined],
+    ['WebFetch', undefined]
+  ])('%s → %j', (rule, expected) => {
+    expect(allowRuleShape(rule)).toEqual(expected)
+  })
+})
+
+describe('programPositions', () => {
+  it.each<[string, number[]]>([
+    ['rm -rf x', [0]],
+    ['sudo rm -rf x', [0, 1]],
+    ['timeout 5 rm x', [0, 2]],
+    ['FOO=1 rm x', [1]],
+    ['echo rm x', [0]],
+    ['git rm x', [0]]
+  ])('%s → %j', (segment, expected) => {
+    expect(programPositions(segment.split(' '))).toEqual(expected)
   })
 })
 

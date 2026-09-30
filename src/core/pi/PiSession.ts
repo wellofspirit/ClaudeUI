@@ -99,12 +99,15 @@ import {
   type JudgeTransport
 } from '../automode/classifier'
 import {
+  allowRuleReviewBlock,
   AutoModeDenialTracker,
   autoModeReviewBlock,
   formatAutoModeDenyReason,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
 import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
+import { allowRuleGate } from '../automode/allow-rule-gate'
+import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import {
   analyzeRedirects,
   captureGitConfigArmed,
@@ -140,6 +143,34 @@ function unknownHostedTool(toolName: string): PiHostedToolResult {
 // ---------------------------------------------------------------------------
 // Auto mode — what one classification round can conclude.
 // ---------------------------------------------------------------------------
+
+/**
+ * What ADR-085 §4's allow-rule skip checks for one pi tool call, or
+ * `undefined` (no skip — the judge decides): `bash` → its command (pi's bash
+ * has no `workdir`: an input carrying one — or a `cwd` — says the call runs
+ * somewhere this check cannot tell, as the read-only gate refuses it); an
+ * `mcp__<server>__<tool>` name → that server and tool (split at the FIRST `__`
+ * after the prefix; pi compares rule tool names as written). Every other pi
+ * tool (edit/write/read/find/ls/grep, the hosted tools, exit_plan, unknown):
+ * no skip.
+ */
+function allowRuleActionFor(
+  toolName: string,
+  input: Record<string, unknown>
+): AllowSkipAction | undefined {
+  if (toolName === 'bash') {
+    const has = (v: unknown): boolean => v !== undefined && v !== null && v !== ''
+    if (has(input.workdir) || has(input.cwd)) return undefined
+    return { kind: 'shell', command: typeof input.command === 'string' ? input.command : '' }
+  }
+  if (!toolName.startsWith('mcp__')) return undefined
+  const rest = toolName.slice('mcp__'.length)
+  const sep = rest.indexOf('__')
+  const server = sep < 0 ? rest : rest.slice(0, sep)
+  if (!server) return undefined
+  const tool = sep < 0 ? '' : rest.slice(sep + 2)
+  return { kind: 'mcp', server, ...(tool ? { tool } : {}) }
+}
 
 /**
  * `classifyAutoMode`'s result: either a decision to hand pi, or "ask the human"
@@ -2434,6 +2465,28 @@ export class PiSession extends BaseSession {
       return decided({ behavior: 'allow' })
     }
 
+    // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
+    // parity plus safety checks, allow-rule-skip.ts), also before the
+    // judge-model check. `currentRules()` in FULL: only the ladder's copy had
+    // its allow rules stripped (`withoutAllowRules`). Same bookkeeping as the
+    // read-only path: no recordAllow(), no usage row. The gate is synchronous,
+    // so no mode can change while it runs beyond its own `autoModeActive()`.
+    const action = allowRuleActionFor(toolName, input)
+    if (action) {
+      const gate = allowRuleGate({
+        action,
+        toolName,
+        cwd: this.cwd,
+        permissions: this.currentRules(),
+        autoModeActive: () => this.isAutoMode(this.permissionMode),
+        logSource: 'PiSession'
+      })
+      if (gate.allow) {
+        this.sendToolReview(toolCallId, { allowRule: gate.rule })
+        return decided({ behavior: 'allow' })
+      }
+    }
+
     // A configured judge model that no longer exists fails CLOSED — never judged
     // by a stand-in (see judgeModelUnavailable). Checked after the fast path so a
     // stale judge does not start prompting for reads.
@@ -2527,16 +2580,22 @@ export class PiSession extends BaseSession {
    * Only a real verdict reaches here — a fast-path allow returns before the
    * judge, an `unavailable` result and a denial cap both return ASK_HUMAN, and
    * the human's approval card carries its own reason — plus `'read-only'`, the
-   * static path's fixed review (ADR-084 §1).
+   * static path's fixed review (ADR-084 §1), and `{ allowRule }`, the
+   * allow-rule skip's (ADR-085 §4).
    */
-  private sendToolReview(toolCallId: string, result: ClassifyResult | 'read-only'): void {
+  private sendToolReview(
+    toolCallId: string,
+    result: ClassifyResult | 'read-only' | { allowRule: string }
+  ): void {
     const reviewId = uuid()
     this.send('session:tool-review', {
       toolUseId: toolCallId,
       review:
         result === 'read-only'
           ? readOnlyReviewBlock(toolCallId, reviewId)
-          : autoModeReviewBlock(toolCallId, reviewId, result)
+          : 'allowRule' in result
+            ? allowRuleReviewBlock(toolCallId, reviewId, result.allowRule)
+            : autoModeReviewBlock(toolCallId, reviewId, result)
     })
   }
 

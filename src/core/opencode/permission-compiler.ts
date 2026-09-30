@@ -160,9 +160,11 @@ export function translateSpecifierPatterns(
 
 /**
  * opencode's MCP name sanitiser, ported verbatim
- * (`vendor/opencode-src/packages/opencode/src/mcp/catalog.ts:117`).
+ * (`vendor/opencode-src/packages/opencode/src/mcp/catalog.ts:117`). Exported
+ * for the auto-mode allow-rule skip (ADR-085 §4), which compares a rule's
+ * tool name to an MCP ask's key in the key's form.
  */
-function sanitizeMcpName(value: string): string {
+export function sanitizeMcpName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_')
 }
 
@@ -221,6 +223,11 @@ const OPENCODE_BUILTIN_PERMISSION_KEYS: readonly string[] = [
   'list_mcp_resource_templates',
   'read_mcp_resource'
 ]
+
+/** Is this one of opencode's built-in permission keys (so never an MCP tool's key)? */
+export function isOpencodeBuiltinPermissionKey(key: string): boolean {
+  return OPENCODE_BUILTIN_PERMISSION_KEYS.includes(key)
+}
 
 /**
  * Parse an MCP rule's TOOL NAME (a specifier in parens is ignored):

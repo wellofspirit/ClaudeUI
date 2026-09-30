@@ -15,9 +15,10 @@
  *   asks, or goes to the judge, when it is not).
  * - **Is an allow rule usable at all?** ({@link isClassifierBypassingRule},
  *   {@link isCarvedOut}, {@link canLaunchOtherPrograms},
- *   {@link isLauncherShapedSegment}) — the predicates the auto-mode allow-skip
- *   (S5) and the Codex rule compiler use to refuse a rule that is broader than
- *   it looks.
+ *   {@link isLauncherShapedSegment}, {@link ruleNamesLaunchedProgram}) — the
+ *   predicates the auto-mode allow-skip (S5, `../automode/allow-rule-skip.ts`)
+ *   and the Codex rule compiler use to refuse a rule that is broader than it
+ *   looks.
  *
  * **This module is pure** and **never throws**: the command text and the rule
  * strings are the whole input, and an internal failure is answered with the
@@ -72,7 +73,7 @@
  * 4. the public questions.
  */
 
-import { lexShellStrict, parseRuleText } from '../automode/shell-strict-lexer'
+import { lexShellStrict, parseRuleText, type StrictToken } from '../automode/shell-strict-lexer'
 
 type Dialect = 'posix' | 'pwsh'
 
@@ -1051,31 +1052,45 @@ function programCandidates(values: readonly string[], progs: readonly string[]):
       for (let q = from; q < findPushedFrom; q++) work.push([findExec[q] + 1, true])
       if (from < findPushedFrom) findPushedFrom = from
     }
-    if (WRAPPERS.has(p)) {
-      // A flag may take a separate value (`-u root`), so after a flag the next
-      // bare word is a candidate AND so is the one after it.
-      let prevFlag = false
-      for (let j = k + 1; j < n; j++) {
-        const v = values[j]
-        if (isWrapperFlag(v)) {
-          prevFlag = !v.includes('=')
-          continue
-        }
-        if (ASSIGNMENT_RE.test(v) || NUMBER_RE.test(v)) {
-          prevFlag = false
-          continue
-        }
-        work.push([j, true])
-        if (!prevFlag) break
-        prevFlag = false
-      }
-    }
+    if (WRAPPERS.has(p)) for (const j of wrapperOperands(values, k)) work.push([j, true])
   }
   return {
     positions: [...positions].sort((a, b) => a - b),
     viaWrapper: [...viaWrapper].sort((a, b) => a - b),
     tails
   }
+}
+
+/**
+ * The indices after the wrapper at `k` that may be the program it runs: the
+ * first token that is not one of its flags, `K=V` assignments or numbers — and,
+ * since a flag may take a separate value (`-u root`), after a flag the next
+ * bare word is a candidate AND so is the one after it. With `dashDashEnds`
+ * (the allow side, {@link ruleNamesLaunchedProgram}) a `--` ends the options:
+ * the token after it is the one operand. The deny side keeps `--` a flag.
+ */
+function wrapperOperands(values: readonly string[], k: number, dashDashEnds = false): number[] {
+  const out: number[] = []
+  let prevFlag = false
+  for (let j = k + 1; j < values.length; j++) {
+    const v = values[j]
+    if (dashDashEnds && v === '--') {
+      if (j + 1 < values.length) out.push(j + 1)
+      break
+    }
+    if (isWrapperFlag(v)) {
+      prevFlag = !v.includes('=')
+      continue
+    }
+    if (ASSIGNMENT_RE.test(v) || NUMBER_RE.test(v)) {
+      prevFlag = false
+      continue
+    }
+    out.push(j)
+    if (!prevFlag) break
+    prevFlag = false
+  }
+  return out
 }
 
 /** Wrappers whose `-s` / `-i` (no operand needed) run a shell that reads stdin: `sudo -s <<EOF`. */
@@ -2411,7 +2426,25 @@ export function denyAskHit(
 
 export interface AllowCoverage {
   /** Every segment (bash reading), with the allow rule that covers it. */
-  segments: Array<{ segment: string; rule: string }>
+  segments: Array<{
+    segment: string
+    /** The first rule that covers the segment's bash reading. */
+    rule: string
+    /**
+     * `strict` mode only (ADR-085 S5's safety checks): the segment's tokens, in
+     * both readings, as ADR-084's lexer produced them.
+     */
+    tokens?: readonly StrictToken[]
+    /** `strict` mode only: `rule` is an exact rule (no `:*` / trailing ` *`). */
+    exact?: boolean
+    /**
+     * `strict` mode only: EVERY rule that covers both readings of the segment,
+     * in rule order — the allow-rule skip picks the one that names what a
+     * launcher runs, not merely the first (`Bash(bun:*)` listed before
+     * `Bash(bun run test:*)`). Empty when no single rule covers both readings.
+     */
+    rules?: string[]
+  }>
 }
 
 interface AllowEntry {
@@ -2553,19 +2586,36 @@ function strictCoverage(
   for (const seg of lexed.segments) {
     if (seg.tokens.length === 0) continue
     const posix = seg.tokens.map((t) => t.posix)
-    const rule = coveringRule(entries, posix)
-    if (
-      rule === undefined ||
-      coveringRule(
-        entries,
-        seg.tokens.map((t) => t.win)
-      ) === undefined
-    ) {
+    const win = seg.tokens.map((t) => t.win)
+    const first = entries.find((e) => entryCovers(e, posix))
+    if (first === undefined || coveringRule(entries, win) === undefined) {
       return undefined
     }
-    segments.push({ segment: posix.join(' '), rule })
+    segments.push({
+      segment: posix.join(' '),
+      rule: first.rule,
+      tokens: seg.tokens,
+      exact: !first.all && !first.prefix,
+      rules: entries.filter((e) => entryCovers(e, posix) && entryCovers(e, win)).map((e) => e.rule)
+    })
   }
   return segments.length > 0 ? { segments } : undefined
+}
+
+/**
+ * How an allow rule covers, as {@link allowCovers} reads it: `exact` (no `:*`
+ * / trailing ` *`) and `words` — how many words it pins, program included
+ * (`Bash(bun run test:*)` → 3). `undefined` for a rule allowCovers never uses
+ * (not a Bash rule, a glob word, no program) and for a bare `Bash`. Never throws.
+ */
+export function allowRuleShape(rule: string): { exact: boolean; words: number } | undefined {
+  try {
+    const entry = allowEntries([rule])[0]
+    if (!entry || entry.all) return undefined
+    return { exact: !entry.prefix, words: entry.words.length }
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -3272,4 +3322,198 @@ export function isLauncherShapedSegment(tokens: readonly string[]): boolean {
   } catch {
     return true
   }
+}
+
+// ── The allow-rule skip's launcher check (ADR-085 S5) ────────────────────────
+
+/**
+ * Wrappers that exec their operand directly, as an argv — so the rule names
+ * what they run exactly when it reaches the operand. Left out on purpose (a
+ * segment led by one of them never names what it runs): the shells;
+ * `exec`, `eval`, `source`, `.`, PowerShell `&` (spec: false); `watch`, `wsl`,
+ * `start`, `start-process`, `saps` (they hand a joined command LINE to a
+ * shell); `xargs` (its stdin appends arguments the words do not show —
+ * `-c alias.x=…` to a `git`); `taskset` (a bare mask operand the position
+ * scan would take for the program); and the operand wrappers (`ssh`, `su`,
+ * `chroot`, `flock`, `script`, `runas`), whose tail is a command string.
+ */
+const DIRECT_EXEC_WRAPPERS: ReadonlySet<string> = new Set([
+  'sudo',
+  'doas',
+  'pkexec',
+  'env',
+  'nohup',
+  'time',
+  'nice',
+  'timeout',
+  'stdbuf',
+  'unbuffer',
+  'command',
+  'builtin',
+  'busybox',
+  'setsid',
+  'ionice',
+  'chrt',
+  'nsenter',
+  'unshare',
+  'strace',
+  'ltrace'
+])
+
+/** Package / script runners whose named operand is what they run: `npx prettier`, `bunx x`. */
+const DIRECT_RUNNERS: ReadonlySet<string> = new Set(['npx', 'bunx', 'pnpx', 'uvx'])
+
+/** Runners that run a named operand after a subcommand (`npm exec x`, `uv tool run x`). */
+const RUNNER_SUBCOMMANDS: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
+  npm: [['exec'], ['x'], ['dlx']],
+  pnpm: [['exec'], ['x'], ['dlx']],
+  yarn: [['exec'], ['x'], ['dlx']],
+  bun: [['x'], ['run'], ['exec']],
+  deno: [['run']],
+  uv: [['run'], ['tool', 'run']],
+  pipx: [['run']]
+}
+
+/** Subcommand positions a runner's global options can leave open before the check gives up (answers "launcher"). */
+const MAX_SUBCOMMAND_CANDIDATES = 16
+
+/** bun flags that run a STRING (`bun -e 'code'`): never nameable. */
+const BUN_STRING_FLAGS: readonly string[] = ['-e', '--eval', '-p', '--print']
+
+/**
+ * {@link isLauncherShapedSegment}, plus the subcommand runners with their
+ * subcommand found past global options that take a value: `npm --prefix .
+ * exec -- git push --force` and `bun --cwd . x …` hide their `exec` / `x`
+ * from a first-positional test (the option's VALUE is the first positional).
+ */
+function launcherShapedPastOptions(values: readonly string[]): boolean {
+  if (isLauncherShapedSegment(values)) return true
+  if (values.length === 0 || !RUNNER_SUBCOMMANDS[normalizeProgram(values[0])]) return false
+  const candidates = wrapperOperands(values, 0, true)
+  // Each candidate costs a scan of the rest: past a real option list's length, assume the worst.
+  if (candidates.length > MAX_SUBCOMMAND_CANDIDATES) return true
+  return candidates.some((c) => isLauncherShapedSegment([values[0], ...values.slice(c)]))
+}
+
+/**
+ * The operand indices a runner-shaped segment runs (every one the rule must
+ * name), `[]` when it runs a string or stdin (never nameable), `undefined`
+ * when the program is no runner.
+ */
+function runnerOperands(values: readonly string[], program: string): number[] | undefined {
+  if (DIRECT_RUNNERS.has(program)) return wrapperOperands(values, 0, true)
+  const subs = RUNNER_SUBCOMMANDS[program]
+  if (!subs) return undefined
+  if (program === 'bun' && hasFlag(values.slice(1), BUN_STRING_FLAGS)) return []
+  const candidates = wrapperOperands(values, 0, true)
+  if (candidates.length > MAX_SUBCOMMAND_CANDIDATES) return []
+  const out = new Set<number>()
+  for (const c of candidates) {
+    const word = values[c].toLowerCase()
+    // `deno eval 'code'` runs a string.
+    if (program === 'deno' && word === 'eval') return []
+    const sub = subs.find((s) => s.every((w, k) => values[c + k]?.toLowerCase() === w))
+    if (!sub) continue
+    for (const j of wrapperOperands(values, c + sub.length - 1, true)) out.add(j)
+  }
+  return [...out]
+}
+
+/** Recursion budget of one {@link ruleNamesLaunchedProgram} call: wrapper chains branch. */
+const NAMING_BUDGET = 256
+const NAMING_DEPTH = 8
+
+function namesUnsafe(
+  values: readonly string[],
+  count: number,
+  depth: number,
+  budget: { left: number }
+): boolean {
+  if (count <= 0 || depth > NAMING_DEPTH || --budget.left < 0) return false
+  if (!launcherShapedPastOptions(values)) return true
+  const program = normalizeProgram(values[0])
+  let operands: number[] | undefined
+  if (DIRECT_EXEC_WRAPPERS.has(program)) {
+    // `sudo -s` / `doas -i` run a shell over the joined words.
+    if (SHELL_FLAG_WRAPPERS.has(program) && wrapperRunsShell(values, 0)) return false
+    operands = wrapperOperands(values, 0, true)
+    // `env -S 'git -c k=v push'` splits a string into the command.
+    const head = values.slice(1, operands[0] ?? values.length)
+    if (
+      program === 'env' &&
+      head.some((v) => /^-[A-Za-z]*S/.test(v) || hasFlag([v], ['--split-string']))
+    ) {
+      return false
+    }
+  } else {
+    operands = runnerOperands(values, program)
+    if (operands === undefined) return false
+  }
+  // The operand is a literal word of the rule, not a glob someone expands.
+  if (operands.some((j) => /[*?]/.test(values[j]))) return false
+  return (
+    operands.length > 0 &&
+    operands.every((j) => namesUnsafe(values.slice(j), count - j, depth + 1, budget))
+  )
+}
+
+/**
+ * ADR-085 §4 safety check (a), for the auto-mode allow-rule skip: does a
+ * PREFIX allow rule of `ruleWordCount` words (program included; strict
+ * coverage guarantees they equal the segment's first `ruleWordCount` tokens)
+ * name every program this segment runs? A segment that is not launcher-shaped
+ * runs only its own program, which the rule names — true. Otherwise:
+ *
+ * - a direct-exec wrapper (`sudo`, `env`, `nice`, `timeout`, `nohup`, …;
+ *   see {@link DIRECT_EXEC_WRAPPERS} for the ones left out): every position
+ *   the wrapped program may sit at (past the wrapper's flags, `K=V`, numbers;
+ *   both candidates after a flag that may take a value) must lie inside the
+ *   rule, and the sub-segment from there must pass this test in turn
+ *   (`Bash(sudo bun run test:*)` over `sudo bun run test`);
+ * - a runner with a NAMED operand — `npx|bunx|pnpx|uvx <x>`, `npm|pnpm|yarn
+ *   exec|x|dlx <x>`, `bun x|run|exec <x>`, `deno run <x>`, `uv run <x>`,
+ *   `uv tool run <x>`, `pipx run <x>` (the subcommand also past value-taking
+ *   global options): the operand is a literal word of the rule and its
+ *   sub-segment passes in turn (`Bash(bun run test:*)` over `bun run test
+ *   --watch`, `Bash(npx prettier:*)`; not `Bash(bun:*)` over `bun x foo`, not
+ *   `Bash(uv run:*)` over `uv run pytest`);
+ * - everything else launcher-shaped — `bun -e`, `node -e/-p/-`, `deno eval`,
+ *   python `-c`/`-`/`-i`/bare, `perl -e`, `ruby -e`, the shells, `eval`,
+ *   `exec`, `docker … exec|run`, `git -c` and its code-running subcommands,
+ *   `find -exec`, an executing `sed` / `awk`, `ssh`, `su`, `chroot`, the
+ *   PowerShell launchers — never: false.
+ *
+ * The caller treats an EXACT rule that covers the whole segment as naming it
+ * (the user typed that command). Never throws (an internal failure answers
+ * `false`).
+ */
+export function ruleNamesLaunchedProgram(
+  tokens: readonly string[],
+  ruleWordCount: number
+): boolean {
+  try {
+    return namesUnsafe(tokens, ruleWordCount, 0, { left: NAMING_BUDGET })
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The program positions of one segment (unquoted token values), as the
+ * deny/ask matcher finds them: token 0 past `K=V` and shell keywords, and
+ * every position reached through a wrapper (`sudo rm …`, `timeout 5 rm …`) or
+ * `find -exec`. S5 runs its write-target and Read-deny checks at each. Never
+ * throws (an internal failure answers `[0]`).
+ */
+export function programPositions(tokens: readonly string[]): number[] {
+  try {
+    return programCandidates(tokens, tokens.map(normalizeProgram)).positions
+  } catch {
+    return tokens.length > 0 ? [0] : []
+  }
+}
+
+/** `/usr/bin/git`, `C:\Git\bin\git.exe`, `GIT` → `git` — the program-name normalisation every question here uses. */
+export function programName(token: string): string {
+  return normalizeProgram(token)
 }

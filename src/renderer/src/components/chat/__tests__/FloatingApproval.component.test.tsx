@@ -21,13 +21,13 @@
  * 4. Optionally updates sandbox exclusions and forwards permission suggestions
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
 import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
 import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
-import { FloatingApproval } from '../FloatingApproval'
+import { ApprovalCardView, FloatingApproval } from '../FloatingApproval'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let bridge: TestIpcBridge
@@ -417,6 +417,95 @@ describe('FloatingApproval rendered component', () => {
 
     expect(screen.getByText('Allow')).toBeInTheDocument()
     expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+
+  // ADR-027: structure first — every part of the card is addressable by testid.
+  it('stamps the card and its parts with ADR-027 testids', () => {
+    setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    const card = screen.getByTestId('ApprovalCardView')
+    expect(screen.getByTestId('FloatingApproval')).toContainElement(card)
+    expect(screen.getByTestId('ApprovalCardView.label')).toHaveTextContent('Permission')
+    expect(screen.getByTestId('ApprovalCardView.toolName')).toHaveTextContent('Bash')
+    expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('$ echo hello')
+    expect(screen.getByTestId('ApprovalCardView.deny')).toHaveTextContent('Deny')
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Allow')
+    // No producer shows "Allow for session"; no reason, no sandbox checkbox here.
+    expect(screen.queryByTestId('ApprovalCardView.allowForSession')).toBeNull()
+    expect(screen.queryByTestId('ApprovalCardView.reason')).toBeNull()
+    expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
+  })
+
+  it('every summary branch carries the same testid', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({ toolName: 'Edit', input: { file_path: '/src/a.ts' } })
+    )
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({ toolName: 'webfetch', input: { url: 'https://example.com' } })
+    )
+
+    render(<FloatingApproval />)
+
+    const summaries = screen.getAllByTestId('ApprovalCardView.summary')
+    expect(summaries).toHaveLength(2)
+    expect(summaries[0]).toHaveTextContent('/src/a.ts')
+    expect(summaries[1]).toHaveTextContent('https://example.com')
+  })
+
+  it('renders the decision reason when present, and the sandbox checkbox on an escape', () => {
+    setup({
+      toolName: 'Bash',
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      decisionReason: 'Auto mode blocked 3 actions in a row — asking you instead.'
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.reason')).toHaveTextContent(
+      'Auto mode blocked 3 actions in a row — asking you instead.'
+    )
+    expect(screen.getByTestId('ApprovalCardView.label')).toHaveTextContent('Sandbox Escape')
+    expect(screen.getByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).not.toBeChecked()
+  })
+
+  it('ApprovalCardView with showAllowForSession renders that button by testid', () => {
+    const onRespond = vi.fn()
+    render(
+      <ApprovalCardView
+        approval={makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })}
+        permissionMode="default"
+        alwaysAllow={false}
+        onAlwaysAllowChange={() => {}}
+        checkedSuggestions={[]}
+        onToggleSuggestion={() => {}}
+        onRespond={onRespond}
+        showAllowForSession
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('ApprovalCardView.allowForSession'))
+    expect(onRespond).toHaveBeenCalledWith('allowForSession')
+  })
+
+  it('clicking the testid-addressed Deny / Allow buttons responds', async () => {
+    const approval = setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ApprovalCardView.deny'))
+    })
+
+    expect(lastApprovalResponse).toMatchObject({
+      requestId: approval.requestId,
+      decision: 'deny'
+    })
   })
 
   // A Codex guardian override is bound to a tool_use already in the transcript,

@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
   bindsGciParameter,
+  checkPathOperands,
   GCI_PARAMETERS,
   isSensitiveComponent,
   SENSITIVE_SAMPLES,
@@ -25,6 +26,7 @@ import {
   type ReadOnlyScope,
   type ReadOnlyVerdict
 } from '../read-only'
+import { lexShellStrict, type StrictToken } from '../shell-strict-lexer'
 
 const CWD = 'D:\\work\\repo'
 const OUTSIDE_HOME = 'C:\\Users\\someone'
@@ -999,6 +1001,245 @@ describe('user rules', () => {
 
 // ── Purity ────────────────────────────────────────────────────────────────────
 
+// ── ADR-085 §4: the path rules per operand, for the allow-rule skip ──────────
+
+describe('checkPathOperands', () => {
+  /** The strict lexer's tokens of one segment. */
+  const toks = (text: string): StrictToken[] => {
+    const lexed = lexShellStrict(text)
+    if (!lexed.ok) throw new Error(lexed.reason)
+    return [...lexed.segments[0].tokens]
+  }
+
+  describe("'write' — the full rules, globs allowed", () => {
+    const write = (text: string, opts: { workdir?: string; scope?: ReadOnlyScope } = {}) =>
+      checkPathOperands(toks(text), opts.scope ?? winScope(), {
+        workdir: opts.workdir,
+        mode: 'write'
+      })
+
+    it.each<[string, string | true]>([
+      ['dist', true],
+      ['src\\a.ts', true],
+      ['dist/*', true],
+      ['*.log', true],
+      ['..', 'path:out-of-scope'],
+      ['..\\x', 'path:out-of-scope'],
+      ['C:/Windows', 'path:out-of-scope'],
+      // bash reads `C:\Windows` as `C:Windows`.
+      ['C:\\Windows', 'path:drive-relative'],
+      ['~', 'path:special ~^'],
+      ['.git', 'path:sensitive .git'],
+      ['.env', 'path:sensitive .env'],
+      ['.git/hooks', 'path:sensitive .git'],
+      ['a%b', 'path:special %'],
+      ['//server/share', 'path:unc']
+    ])('%s → %s', (text, expected) => {
+      expect(write(text)).toEqual(
+        expected === true ? { ok: true } : { ok: false, reason: expected }
+      )
+    })
+
+    it('no operand at all passes', () => {
+      expect(checkPathOperands([], winScope(), { mode: 'write' })).toEqual({ ok: true })
+    })
+
+    it('the workdir is honoured, and must itself be in scope', () => {
+      expect(write('x', { workdir: 'sub' })).toEqual({ ok: true })
+      expect(write('..\\x', { workdir: 'sub' })).toEqual({ ok: true })
+      expect(write('x', { workdir: 'C:\\elsewhere' })).toEqual({
+        ok: false,
+        reason: 'workdir path:out-of-scope'
+      })
+    })
+
+    it('additionalDirectories are in scope; a realpath that leaves it is not', () => {
+      const scope = winScope({ additionalDirectories: ['D:\\work\\shared'] })
+      expect(write('..\\shared\\x', { scope })).toEqual({ ok: true })
+      const escapes = winScope({
+        realpath: (p) => (p.endsWith('/link') ? 'C:/elsewhere' : undefined)
+      })
+      expect(write('link', { scope: escapes })).toEqual({
+        ok: false,
+        reason: 'path:realpath-out-of-scope'
+      })
+    })
+
+    it('a realpath that cannot be told, or throws, refuses', () => {
+      expect(write('x', { scope: winScope({ realpath: () => null }) })).toEqual({
+        ok: false,
+        reason: 'path:realpath-unknown'
+      })
+      const boom = (): never => {
+        throw new Error('boom')
+      }
+      expect(write('x', { scope: winScope({ realpath: boom }) })).toEqual({
+        ok: false,
+        reason: 'path:realpath-unknown'
+      })
+    })
+
+    it("the user's Read deny rules bind a write target too", () => {
+      const scope = winScope({ rules: { deny: ['Read(**/notes.txt)'] } })
+      expect(write('docs\\notes.txt', { scope })).toEqual({
+        ok: false,
+        reason: 'path:read-deny Read(**/notes.txt)'
+      })
+    })
+
+    it.each<[string, string | true]>([
+      // A glob component with a literal character must not match a secret name.
+      ['.*', 'path:pattern-may-match-sensitive .*'],
+      ['.gi*', 'path:pattern-may-match-sensitive .gi*'],
+      ['sub\\.ss?', 'path:pattern-may-match-sensitive .ss?'],
+      ['*.log', true],
+      ['build-?', true],
+      // A glob-only component is exempt when not deleting (bash's `*` skips dotfiles).
+      ['*', true],
+      ['*/', true]
+    ])('write glob %s → %s', (text, expected) => {
+      expect(write(text)).toEqual(
+        expected === true ? { ok: true } : { ok: false, reason: expected }
+      )
+    })
+  })
+
+  describe("'write' + delete — a scope root is never a delete target", () => {
+    const scope = winScope({ additionalDirectories: ['D:\\work\\extra'] })
+    const del = (text: string, workdir?: string) =>
+      checkPathOperands(toks(text), scope, { workdir, mode: 'write', delete: true })
+
+    it.each<[string, string | undefined, string | true]>([
+      ['.', undefined, 'path:scope-root'],
+      ['./', undefined, 'path:scope-root'],
+      ['sub\\..', undefined, 'path:scope-root'],
+      ['D:/work/repo', undefined, 'path:scope-root'],
+      ['D:/WORK/REPO/', undefined, 'path:scope-root'],
+      ['D:/work/extra', undefined, 'path:scope-root'],
+      // The effective cwd, and an ancestor of it that is still in scope.
+      ['.', 'sub', 'path:scope-root'],
+      ['..', 'sub\\deeper', 'path:scope-root'],
+      ['*', undefined, 'path:scope-root-glob'],
+      ['./*', undefined, 'path:scope-root-glob'],
+      // bash reads `.\*` as the literal name `.*`: still checked as a pattern (fail closed).
+      ['.\\*', undefined, 'path:pattern-may-match-sensitive .*'],
+      ['..\\*', 'sub', 'path:scope-root-glob'],
+      // Only a glob-only LAST component can wipe its parent.
+      ['*\\node_modules', undefined, true],
+      ['*/', undefined, 'path:scope-root-glob'],
+      ['sub', undefined, true],
+      ['dist\\*', undefined, true],
+      ['*.log', undefined, true]
+    ])('%s (workdir %s) → %s', (text, workdir, expected) => {
+      expect(del(text, workdir)).toEqual(
+        expected === true ? { ok: true } : { ok: false, reason: expected }
+      )
+    })
+
+    it('a realpath that lands on a scope root refuses', () => {
+      const linked = winScope({
+        realpath: (p) => (p.endsWith('/link') ? 'D:\\work\\repo' : undefined)
+      })
+      expect(checkPathOperands(toks('link'), linked, { mode: 'write', delete: true })).toEqual({
+        ok: false,
+        reason: 'path:scope-root'
+      })
+      expect(checkPathOperands(toks('link'), linked, { mode: 'write' })).toEqual({ ok: true })
+    })
+  })
+
+  it("'write' runs the guard on every piece, both views, with the effective cwd, after the path rules", () => {
+    const seen: Array<[string, string]> = []
+    const guard = (piece: string, effCwd: string): string | undefined => {
+      seen.push([piece, effCwd])
+      return piece.includes('stop') ? 'guard:stop' : undefined
+    }
+    expect(
+      checkPathOperands(toks('a\\b'), winScope(), { workdir: 'sub', mode: 'write', guard })
+    ).toEqual({ ok: true })
+    expect(seen).toEqual([
+      ['ab', 'd:/work/repo/sub'],
+      ['a\\b', 'd:/work/repo/sub']
+    ])
+    expect(checkPathOperands(toks('stop'), winScope(), { mode: 'write', guard })).toEqual({
+      ok: false,
+      reason: 'guard:stop'
+    })
+    // The path rules refuse first: the guard never sees an out-of-scope piece.
+    seen.length = 0
+    expect(checkPathOperands(toks('..\\stop'), winScope(), { mode: 'write', guard })).toEqual({
+      ok: false,
+      reason: 'path:out-of-scope'
+    })
+    expect(seen).toEqual([])
+  })
+
+  describe("'read-deny' — Read deny rules only", () => {
+    const read = (
+      text: string,
+      deny: string[],
+      opts: { workdir?: string; realpath?: ReadOnlyScope['realpath'] } = {}
+    ) =>
+      checkPathOperands(
+        toks(text),
+        winScope({ rules: { deny }, ...(opts.realpath ? { realpath: opts.realpath } : {}) }),
+        { workdir: opts.workdir, mode: 'read-deny' }
+      )
+
+    it('no Read deny rule: everything passes, in scope or not, sensitive or not', () => {
+      for (const text of ['.env', '..\\..\\x', 'C:\\Users\\someone\\.ssh\\id_rsa', '*']) {
+        expect(read(text, [])).toEqual({ ok: true })
+      }
+      expect(read('x', [], { workdir: 'C:\\elsewhere' })).toEqual({ ok: true })
+    })
+
+    it.each<[string, string, string | true]>([
+      ['.env', 'Read(.env)', 'Read(.env)'],
+      ['.env', 'Read(//**/.env)', 'Read(//**/.env)'],
+      // Windows opens `.env.` as `.env`.
+      ['.env.', 'Read(.env)', 'Read(.env)'],
+      ['..\\secrets\\k.pem', 'Read(**/*.pem)', 'Read(**/*.pem)'],
+      // Text the path rules would not even resolve still names the file.
+      ['~/.ssh/id_rsa', 'Read(~/.ssh/**)', 'Read(~/.ssh/**)'],
+      ['%USERPROFILE%\\.env', 'Read(.env)', 'Read(.env)'],
+      ['README.md', 'Read(.env)', true],
+      ['a:b', 'Read(.env)', true],
+      ['*.ts', 'Read(.env)', 'glob'],
+      ['.env', 'Read', 'Read']
+    ])('%s with %s → %s', (text, deny, expected) => {
+      expect(read(text, [deny])).toEqual(
+        expected === true ? { ok: true } : { ok: false, reason: expected }
+      )
+    })
+
+    it('resolved against the workdir, wherever it points', () => {
+      expect(read('x.pem', ['Read(//C:/elsewhere/**)'], { workdir: 'C:\\elsewhere' })).toEqual({
+        ok: false,
+        reason: 'Read(//C:/elsewhere/**)'
+      })
+    })
+
+    it('and against its realpath when known', () => {
+      const realpath = (p: string): string | undefined =>
+        p.endsWith('/link') ? 'D:/work/repo/.env' : undefined
+      expect(read('link', ['Read(.env)'], { realpath })).toEqual({
+        ok: false,
+        reason: 'Read(.env)'
+      })
+    })
+  })
+
+  it('never throws: an empty cwd refuses', () => {
+    expect(checkPathOperands(toks('x'), winScope({ cwd: '' }), { mode: 'write' })).toEqual({
+      ok: false,
+      reason: 'scope:no-cwd'
+    })
+    expect(
+      checkPathOperands(null as unknown as StrictToken[], winScope(), { mode: 'write' })
+    ).toEqual({ ok: false, reason: 'internal' })
+  })
+})
+
 describe('purity', () => {
   /** Source text with comments removed (the doc comments name the banned modules). */
   const read = (rel: string): string =>
@@ -1035,6 +1276,22 @@ describe('purity', () => {
     const shellRules = read('../permissions/shell-rules.ts')
     expect(importsOf(shellRules)).toEqual(['../automode/shell-strict-lexer'])
     expect(shellRules).not.toMatch(/process\.env|node:/)
+  })
+
+  it('allow-rule-skip.ts (ADR-085 §4) imports only these pure modules', () => {
+    const src = read('allow-rule-skip.ts')
+    expect(importsOf(src)).toEqual([
+      '../opencode/wildcard',
+      '../permissions/shell-rules',
+      './agent-control-paths',
+      './read-only',
+      './shell-strict-lexer'
+    ])
+    expect(src).not.toMatch(/node:fs|node:child_process|from 'fs'|child_process|process\.env/)
+    // The agent-control list is pure too: path arithmetic only, no filesystem.
+    const agentControl = read('agent-control-paths.ts')
+    expect(importsOf(agentControl)).toEqual(['node:path'])
+    expect(agentControl).not.toMatch(/node:fs|child_process|process\.env/)
   })
 })
 
