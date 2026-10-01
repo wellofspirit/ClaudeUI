@@ -1,6 +1,6 @@
 # ADR-074 — Provider surfaces v3: subscriptions vs API providers, one key and one model list per provider, pi curation that works
 
-**Status:** Implemented (2026-09-23, slices 1–10 — see § As built); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
+**Status:** Implemented (2026-09-23, slices 1–10 — see § As built; §12 amended 2026-10-01); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) § "Providers: one list" (one list becomes two groups; the Accounts group folds into Subscriptions; the Anthropic endpoint leaves Models & providers) · [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §2 as amended by F14 (accounts move from the Accounts group onto each subscription card; the workspace explainer row becomes a tooltip)
 **Relates to:** [ADR-009](adr-009_claude-settings-vs-uisettings.md) (which store a setting lives in), [ADR-027](adr-027_test-data-attributes.md) (testids), [ADR-035](adr-035_pi-engine-backend.md) (pi wire), [ADR-059](adr-059_no-silent-model-fallback.md) (the spawn gate and the orphan guard this keeps), [ADR-036](adr-036_unified-auth-vault.md) (the vault that now holds catalog keys)
 
@@ -225,6 +225,37 @@ composer." while the last pick wins.
   engine's own key — told from ClaudeUI's earlier ones by fingerprint, with "Use the stored key" to
   replace it — see [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built
   (arc 3, S7d)".
+
+### 12. A provider created in ClaudeUI is usable where a harness has its own key (owner ruling, 2026-10-01)
+
+"When I create an OpenRouter provider in ClaudeUI, I want it to be usable in opencode/pi." Amends §6
+and the Add sheet's candidate rule:
+
+- **The Add sheet offers every catalog provider ClaudeUI does not manage yet**, with every running
+  harness that offers it as a target, whether or not that harness holds its own key for the vendor
+  (an authenticated opencode entry, a keyed pi vendor). Such a harness carries a note — "pi has its
+  own key for OpenRouter". Only an id a shared definition already owns is left out. pi vendors are
+  named by opencode's catalog name, else their id title-cased.
+- **Creating asks before replacing an own key**, once, naming the harness(es): "pi already has its
+  own OpenRouter key. Overwrite it and manage the key from ClaudeUI?" **Overwrite and manage from
+  ClaudeUI** creates the provider for every picked harness and replaces that key with the stored one
+  (`shared-provider:set-key` with `replaceOwn` naming the harnesses asked about); ClaudeUI manages
+  the slot from then on (fingerprinted). **Keep pi’s own key** creates it for the other picked
+  harnesses, with that harness's route off and its key untouched. Leaving the sheet writes nothing.
+  Save asks the host who holds an own key before asking the user — read from the harnesses' auth
+  files, never a cached catalog — so the question names every such harness as of then; so do "Use
+  ClaudeUI’s … here instead" and switching a provider on. The confirmation is PER HARNESS: the service replaces an own key only in a harness
+  `replaceOwn` names; any other keeps its own key and says so (`ownKeyKept`, "Use the stored key"),
+  as an automatic delivery does — so Replace key on the Manage sheet no longer replaces one silently
+  either, and switching a provider on refuses an own key the confirm did not name.
+- **A harness's own credential is named for whose it is**: a native row that no ClaudeUI provider
+  claims reads "OpenRouter · pi’s own key" (`ownedBy`, `providerEntryTitle`; "· opencode’s own key",
+  "· pi’s own sign-in"), never the raw id. When a ClaudeUI provider for the same vendor exists but
+  is off (switched off, or its route to that harness off), that row's sheet offers **Use ClaudeUI’s
+  OpenRouter here instead**, which asks the same question and then turns the route on and the
+  provider on with `replaceOwn` naming the harnesses it asked about.
+
+See [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built (arc 3, S7f)".
 
 ## Consequences
 

@@ -1785,7 +1785,12 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
  * key material: the shared definitions, opencode's catalog and pi's vendor
  * entries reduce to names, counts, credential BADGES and per-engine chips.
  */
-const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
+const PROVIDER_REGISTRY_CHANNELS = [
+  'provider-registry:list',
+  // S7f — who holds an own key for a provider now, read from the harnesses'
+  // auth files host-side; harness ids only, no key material.
+  'shared-provider:own-key-holders'
+] as const
 
 /**
  * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.

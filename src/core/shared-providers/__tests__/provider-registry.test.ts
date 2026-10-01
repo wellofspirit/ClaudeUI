@@ -14,6 +14,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { buildProviderRegistry, type ProviderRegistrySources } from '../provider-registry'
+import { providerEntryTitle, vendorDisplayName } from '../../../shared/provider-registry'
 import type {
   SharedProviderDefinition,
   SharedProviderStatus
@@ -1320,5 +1321,95 @@ describe('catalog definitions and key sharing (ADR-074 §6–7)', () => {
     expect(byId(snapshot, 'opencode:openrouter').kindLabel).toBe('Catalog')
     expect(byId(snapshot, 'pi:groq').kindLabel).toBe('Catalog')
     expect(byId(snapshot, 'pi:spark').kindLabel).toBe('Custom pi provider')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A harness's own key, named (ADR-082 §8, S7f)
+// ---------------------------------------------------------------------------
+
+describe('a harness’s own credential is named, and says whose it is (S7f)', () => {
+  it('a pi vendor takes opencode’s catalog name — "OpenRouter · pi’s own key", never "openrouter"', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter', authState: 'unauthenticated' })
+        ],
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: { openrouter: [{ type: 'api', label: 'API key' }] }
+      })
+    )
+    const row = byId(snapshot, 'pi:openrouter')
+    expect(row.name).toBe('OpenRouter')
+    expect(row.ownedBy).toBe('pi')
+    expect(providerEntryTitle(row)).toBe('OpenRouter · pi’s own key')
+  })
+
+  it('without opencode’s catalog, a pi vendor is title-cased; a declared provider keeps its id', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: null,
+        piVendors: {
+          'amazon-bedrock': { authState: 'authenticated', billingType: 'apiKey' },
+          anthropic: { authState: 'authenticated', billingType: 'subscription' },
+          'my-endpoint': { authState: 'authenticated', billingType: 'apiKey' }
+        },
+        piAuthOptions: {
+          'amazon-bedrock': [{ type: 'api', label: 'API key' }],
+          anthropic: [{ type: 'oauth', label: 'Claude Pro / Max' }]
+        }
+      })
+    )
+    expect(providerEntryTitle(byId(snapshot, 'pi:amazon-bedrock'))).toBe(
+      'Amazon Bedrock · pi’s own key'
+    )
+    expect(providerEntryTitle(byId(snapshot, 'pi:anthropic'))).toBe('Anthropic · pi’s own sign-in')
+    const declared = byId(snapshot, 'pi:my-endpoint')
+    expect(declared.name).toBe('my-endpoint')
+    expect(declared.ownedBy).toBeUndefined()
+    expect(providerEntryTitle(declared)).toBe('my-endpoint')
+  })
+
+  it('an opencode key or sign-in is opencode’s own; a free provider is nobody’s', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', name: 'OpenRouter' }),
+          catalogEntry({ id: 'opencode', name: 'OpenCode Zen', authState: 'free' })
+        ],
+        opencodeCredentialKinds: { openrouter: 'api' }
+      })
+    )
+    expect(providerEntryTitle(byId(snapshot, 'opencode:openrouter'))).toBe(
+      'OpenRouter · opencode’s own key'
+    )
+    expect(byId(snapshot, 'opencode:opencode').ownedBy).toBeUndefined()
+    expect(providerEntryTitle(byId(snapshot, 'opencode:opencode'))).toBe('OpenCode Zen')
+  })
+
+  it('a row a ClaudeUI provider claims is not a harness’s own', () => {
+    const definition: SharedProviderDefinition = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      kind: 'catalog',
+      models: [],
+      managed: true,
+      routes: { pi: { enabled: true }, opencode: { enabled: false } }
+    }
+    const snapshot = buildProviderRegistry(
+      sources({
+        definitions: [definition],
+        piVendors: { openrouter: { authState: 'authenticated', billingType: 'apiKey' } },
+        piAuthOptions: { openrouter: [{ type: 'api', label: 'API key' }] }
+      })
+    )
+    expect(byId(snapshot, 'pi:openrouter')).toBeUndefined()
+    expect(byId(snapshot, 'openrouter').ownedBy).toBeUndefined()
+  })
+
+  it('vendorDisplayName: the catalog name wins; else every word of the id capitalised', () => {
+    expect(vendorDisplayName('openrouter', 'OpenRouter')).toBe('OpenRouter')
+    expect(vendorDisplayName('openrouter')).toBe('Openrouter')
+    expect(vendorDisplayName('google-vertex_ai')).toBe('Google Vertex Ai')
   })
 })

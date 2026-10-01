@@ -545,14 +545,23 @@ const api: ClaudeAPI = {
   removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
-  setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
+  // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
+  // wire only when it names one (S7f).
+  setSharedProviderApiKey: (id, key, replaceOwn) =>
+    unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
   adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
   setSharedProviderCuration: (id, curation) => unwrap('shared-provider:set-curation', id, curation),
   setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-    unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
+    unwrap(
+      'shared-provider:set-disabled',
+      id,
+      disabled,
+      ...(replaceOwn?.length ? [replaceOwn] : [])
+    ),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   useSharedProviderStoredKey: (id, harness) =>
     unwrap('shared-provider:use-stored-key', id, harness),
+  getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>
     unwrap('shared-provider:set-default', id, harness, modelId),

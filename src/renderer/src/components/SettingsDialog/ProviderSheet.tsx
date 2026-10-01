@@ -67,7 +67,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { engineMeta } from '../../../../shared/engine-meta'
-import type { ProviderCredential, ProviderEntry } from '../../../../shared/provider-registry'
+import {
+  providerEntryTitle,
+  type ProviderCredential,
+  type ProviderEntry
+} from '../../../../shared/provider-registry'
 import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
@@ -85,7 +89,13 @@ import {
 } from './settings-controls'
 import { EnginePill, factsCount } from './provider-pills'
 import { useEngineRuns } from './harness-store'
-import { chatgptDisconnectText, type EngineRuns } from './harness-view'
+import { chatgptDisconnectText } from './harness-view'
+import {
+  ownKeysReplacedOnSwitchOn,
+  ownKeysReplacedText,
+  switchOnReplacesNow
+} from './own-key-question'
+import { UseClaudeUiInstead } from './UseClaudeUiInstead'
 import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
@@ -216,32 +226,10 @@ export function nativeProviderId(entry: ProviderEntry): string {
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
-/**
- * The engines whose OWN key for the vendor switching this provider back on
- * would replace (ADR-074 slice 10): a route on in its settings, into an engine
- * that holds a credential of its own. The switch asks first — here and on the
- * list — and the service checks the keys themselves.
- *
- * A harness that does not run is never named (ADR-082 §8, S7d): nothing is
- * written into it, so switching on replaces nothing there, and when it arrives
- * the delivery keeps a key of its own instead of asking.
- */
-export function ownKeysReplacedOnSwitchOn(
-  entry: ProviderEntry,
-  runs: EngineRuns
-): ('opencode' | 'pi')[] {
-  if (!entry.disabled) return []
-  return (['opencode', 'pi'] as const).filter(
-    (engine) =>
-      runs(engine) && entry.engines[engine]?.routeOn && entry.engines[engine]?.ownCredential
-  )
-}
-
-/** "pi’s own key for OpenRouter will be replaced by the stored one." */
-export function ownKeysReplacedText(entry: ProviderEntry, engines: string[]): string {
-  const who = engines.map((engine) => `${engine}’s`).join(' and ')
-  return `${who} own key${engines.length > 1 ? 's' : ''} for ${entry.name} will be replaced by the stored one.`
-}
+// The own-key wording lives in one place (`own-key-question.ts`), with the
+// question the Add sheet and "Use ClaudeUI’s … here instead" ask; re-exported
+// for the list.
+export { ownKeysReplacedOnSwitchOn, ownKeysReplacedText }
 
 /**
  * One ENABLED-FOR row.
@@ -503,7 +491,8 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
    * happened — a switch-on can fail AFTER the flag cleared (a delivery), and a
    * stale "Off" would then misreport it.
    */
-  const switchProvider = (replaceOwn: boolean): void => {
+  /** `replaceOwn`: the harnesses whose own key the confirm named and the user agreed to replace. */
+  const switchProvider = (replaceOwn: ConfigurableHarnessId[]): void => {
     setBusy(true)
     setError(null)
     void (async () => {
@@ -517,6 +506,23 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
         setBusy(false)
       }
     })()
+  }
+
+  /** The harnesses the switch-on question names — read from the host when it opens. */
+  const [switchOnEngines, setSwitchOnEngines] = useState<ConfigurableHarnessId[]>([])
+  /**
+   * The header switch. Switching ON first asks the host who holds an own key
+   * now (S7f round 3), so the question names exactly who, and a key given to a
+   * harness since the sheet opened is asked about rather than refused.
+   */
+  const switchOnOrAsk = async (): Promise<void> => {
+    setBusy(true)
+    const engines = await switchOnReplacesNow(entry, runs)
+    setBusy(false)
+    if (engines.length === 0) return switchProvider([])
+    setError(null)
+    setSwitchOnEngines(engines)
+    setConfirming('switch-on')
   }
 
   /** Two-click confirm: arm on the first press, act on the second. */
@@ -971,11 +977,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
         ? `Off while ${entry.name} is off — back on with it.`
         : `Off, and stays off when ${entry.name} is switched on.`
     } else if (confirmingEnable || confirmingStored) {
-      status = (
-        <span className="text-warning">
-          {label}’s own key for {entry.name} will be replaced by the stored one.
-        </span>
-      )
+      status = <span className="text-warning">{ownKeysReplacedText(entry, [engine])}</span>
     } else if (ownKeyKept) {
       status = <span className="text-warning">{facts?.error}</span>
     } else if (!on) {
@@ -1619,7 +1621,9 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
       <SheetFrame
         testid={SHEET}
         dataId={entry.id}
-        title={entry.subscription ? `${entry.name} · harnesses & models` : entry.name}
+        title={
+          entry.subscription ? `${entry.name} · harnesses & models` : providerEntryTitle(entry)
+        }
         titleExtras={
           <>
             <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
@@ -1638,11 +1642,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                   aria-checked={!entry.disabled}
                   aria-label={entry.name}
                   disabled={busy}
-                  onClick={() =>
-                    ownKeysReplacedOnSwitchOn(entry, runs).length > 0
-                      ? setConfirming('switch-on')
-                      : switchProvider(false)
-                  }
+                  onClick={() => void switchOnOrAsk()}
                   className="cursor-default disabled:opacity-40"
                 >
                   <ToggleSwitch checked={!entry.disabled} />
@@ -1716,9 +1716,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
           <SettingRow
             testid={`${SHEET}.switchOnConfirm`}
             description={
-              <span className="text-warning">
-                {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry, runs))}
-              </span>
+              <span className="text-warning">{ownKeysReplacedText(entry, switchOnEngines)}</span>
             }
           >
             <Button
@@ -1727,7 +1725,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
               disabled={busy}
               onClick={() => {
                 setConfirming(null)
-                switchProvider(true)
+                switchProvider(switchOnEngines)
               }}
             >
               Replace it
@@ -1748,6 +1746,10 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
             />
           )
         )}
+
+        {/* A harness's own key, while a ClaudeUI provider for the same vendor
+            is off for that harness: offer it here instead (S7f). */}
+        {!isShared && <UseClaudeUiInstead entry={entry} busy={busy} run={run} />}
 
         {/* A subscription's credential IS its accounts, and they live on its
             Subscriptions card (ADR-074 §7) — the sheet is engines and models. */}

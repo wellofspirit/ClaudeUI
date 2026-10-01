@@ -8,6 +8,7 @@ import { curationForEngine } from '../../shared/provider-curation'
 import {
   deliveredDefinition,
   validateSharedProviderId,
+  validateVendorId,
   type ConfigurableHarnessId,
   type SharedProviderCuration,
   type SharedProviderDefinition,
@@ -340,10 +341,16 @@ export class SharedProviderService {
    *
    * While a catalog provider was off, an engine may have been given a key of its
    * own for the vendor: switching on would replace it, so that is refused unless
-   * `replaceOwn` says the user confirmed it (the keys are compared here, never
-   * sent anywhere).
+   * `replaceOwn` names that harness — the ones the user was asked about and
+   * agreed to (S7f round 2: per harness, so a question asked from a stale
+   * snapshot can never cover a harness it did not name). The keys are compared
+   * here, never sent anywhere.
    */
-  async setDisabled(id: string, disabled: boolean, replaceOwn = false): Promise<void> {
+  async setDisabled(
+    id: string,
+    disabled: boolean,
+    replaceOwn: readonly Route[] = []
+  ): Promise<void> {
     await this.enqueue(async () => {
       const previous = this.requireDefinition(id)
       if (previous.kind === 'subscription')
@@ -352,7 +359,9 @@ export class SharedProviderService {
       const definition = withDisabled(previous, disabled)
       if (!disabled) {
         this.assertNoNativeIdCollision(definition)
-        const own = replaceOwn ? [] : await this.ownCredentialRoutes(definition)
+        const own = (await this.ownCredentialRoutes(definition)).filter(
+          (route) => !replaceOwn.includes(route)
+        )
         if (own.length)
           throw new Error(
             `${own.join(' and ')} ${own.length > 1 ? 'have their own keys' : 'has its own key'} for ${
@@ -406,16 +415,69 @@ export class SharedProviderService {
     })
   }
 
-  async setApiKey(id: string, key: string): Promise<void> {
+  /**
+   * Store a provider's key and deliver it to each enabled route.
+   *
+   * A catalog route whose running harness holds a key of its OWN for the vendor
+   * is not replaced unless `replaceOwn` names that harness — the user agreed to
+   * overwrite it there (ADR-074, ADR-082 §8 "As built (S7f)"); the Add sheet
+   * asks before it creates. Every other such route keeps its own key and says
+   * so, exactly as an automatic delivery does, with "Use the stored key" to
+   * take this one instead; the key is still stored and reaches every route
+   * without an own key. Per harness, so a question asked from a stale snapshot
+   * never covers a harness it did not name. Which routes hold their own
+   * key is decided BEFORE the vault changes: a slot holding the previous vault
+   * key (an install from before fingerprints) is ClaudeUI's, not the user's.
+   */
+  async setApiKey(id: string, key: string, replaceOwn: readonly Route[] = []): Promise<void> {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)
       if (definition.kind === 'subscription')
         throw new Error('API keys are only supported for custom and catalog providers')
       if (!key) throw new Error('API key is required')
-      await this.deps.vault.saveCredential(id, { type: 'api_key', key })
       // Switched off, the key is only stored: switching on delivers it.
       const live = deliveredDefinition(definition)
-      await this.reconcileCustomCredentials(live, live)
+      const kept = (await this.ownCredentialRoutes(live)).filter(
+        (route) => !replaceOwn.includes(route)
+      )
+      await this.deps.vault.saveCredential(id, { type: 'api_key', key })
+      await this.reconcileCustomCredentials(live, live, kept)
+    })
+  }
+
+  /**
+   * The running harnesses that hold a credential of their OWN for a provider
+   * right now (S7f round 3) — what a question about replacing own keys must
+   * name. Read from each harness's auth file (`hasCredential`), never from a
+   * catalog: opencode's catalog is cached and misses a key written from
+   * outside. A harness that does not run is never named (S7d): nothing is
+   * written into it.
+   *
+   * `id` is a definition's id — each route then asks the switch-on's own rule
+   * (`holdsOwnKey`: neither the vault key nor the one ClaudeUI last delivered)
+   * for its native id — or, with no definition of that id, a vendor id: a
+   * catalog definition whose route lands on it answers by the same rule, and
+   * otherwise any credential there is the harness's own. A custom or
+   * subscription definition's slot is ClaudeUI's own, so it names none. Ids and
+   * engine names only: no key leaves.
+   */
+  async ownKeyHolders(id: string): Promise<Route[]> {
+    validateVendorId(id)
+    // Queued behind the writes, so it never answers from the middle of one.
+    return this.enqueue(async () => {
+      const definitions = this.repository.list()
+      const named = definitions.find((definition) => definition.id === id)
+      const holders: Route[] = []
+      for (const route of routes) {
+        if (!this.harnessRuns(route)) continue
+        const definition =
+          named ?? definitions.find((candidate) => routeNativeId(candidate, route) === id)
+        const holds = definition
+          ? definition.kind === 'catalog' && (await this.holdsOwnKey(definition, route))
+          : await this.routeHasCredential(vendorProbe(id), route)
+        if (holds) holders.push(route)
+      }
+      return holders
     })
   }
 
@@ -604,15 +666,7 @@ export class SharedProviderService {
           if (this.runs(route, `delivering ${definition.id}`)) {
             if (keepOwnKeys && (await this.keepsOwnKey(live, route))) {
               kept = true
-              this.recordError(definition.id, route, ownKeyKept(live, route))
-              this.keptOwnKeys.set(
-                definition.id,
-                new Set([...(this.keptOwnKeys.get(definition.id) ?? []), route])
-              )
-              logger.info(
-                'SharedProviders',
-                `${route} holds its own key for ${definition.id} — kept, not replaced`
-              )
+              this.markOwnKeyKept(live, route)
             } else await this.vendRouteCredential(live, route)
           }
         } else if (live.kind !== 'catalog') {
@@ -644,12 +698,22 @@ export class SharedProviderService {
       throw new AggregateError(failures, `Failed to sync shared provider ${definition.id}`)
   }
 
+  /**
+   * `keep` names enabled routes whose harness holds a key of its own that the
+   * user did not agree to replace (`setApiKey`): they are not delivered to, and
+   * say so.
+   */
   private async reconcileCustomCredentials(
     definition: SharedProviderDefinition,
-    previous: SharedProviderDefinition | null
+    previous: SharedProviderDefinition | null,
+    keep: readonly Route[] = []
   ): Promise<void> {
     const failures: unknown[] = []
     for (const route of routes) {
+      if (definition.routes[route].enabled && keep.includes(route)) {
+        this.markOwnKeyKept(definition, route)
+        continue
+      }
       try {
         if (definition.routes[route].enabled) await this.vendRouteCredential(definition, route)
         else if (definition.kind !== 'catalog' || previous?.routes[route].enabled)
@@ -987,6 +1051,22 @@ export class SharedProviderService {
   }
 
   /**
+   * `route` keeps the key its harness holds of its own: reported on the route
+   * (its error, `ownKeyKept`), never thrown — nothing failed.
+   */
+  private markOwnKeyKept(definition: SharedProviderDefinition, route: Route): void {
+    this.recordError(definition.id, route, ownKeyKept(definition, route))
+    this.keptOwnKeys.set(
+      definition.id,
+      new Set([...(this.keptOwnKeys.get(definition.id) ?? []), route])
+    )
+    logger.info(
+      'SharedProviders',
+      `${route} holds its own key for ${definition.id} — kept, not replaced`
+    )
+  }
+
+  /**
    * Whether `route`'s harness runs, so its own files may be written. One that
    * does not is skipped with one line; nothing failed, so no route error.
    */
@@ -1286,6 +1366,17 @@ export class SharedProviderService {
  */
 export function ownKeyKept(definition: SharedProviderDefinition, route: Route): string {
   return `${route} has its own key for ${definition.name}; it was kept.`
+}
+/** A catalog definition of `vendorId` that exists nowhere: what the adapters read its slot by. */
+function vendorProbe(vendorId: string): SharedProviderDefinition {
+  return {
+    id: vendorId,
+    name: vendorId,
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: true, providerId: vendorId }, opencode: { enabled: true } }
+  }
 }
 /** The native provider id a definition's route delivers to on that engine. */
 function routeNativeId(definition: SharedProviderDefinition, route: Route): string {

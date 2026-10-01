@@ -47,15 +47,16 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
-import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
+import type { ConfigurableHarnessId } from '../../../../shared/shared-provider'
+import {
+  providerEntryTitle,
+  type ProviderEntry,
+  type ProviderRegistrySnapshot
+} from '../../../../shared/provider-registry'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { diagnosisText } from './provider-diagnosis'
-import {
-  CredentialChip,
-  ProviderSheet,
-  ownKeysReplacedOnSwitchOn,
-  ownKeysReplacedText
-} from './ProviderSheet'
+import { CredentialChip, ProviderSheet } from './ProviderSheet'
+import { ownKeysReplacedText, switchOnReplacesNow } from './own-key-question'
 import { EnginePill, Pill, factsCount } from './provider-pills'
 import { isConflictDismissed } from './key-conflicts'
 import { ProviderAddSheet } from './ProviderAddSheet'
@@ -96,27 +97,49 @@ function describe(entry: ProviderEntry): string | undefined {
   return text || undefined
 }
 
-/** The first engine that runs whose shared delivery failed, for the row's danger pill. */
+/** The first engine that runs whose shared delivery FAILED, for the row's danger pill. */
 function failedEngine(entry: ProviderEntry, runs: EngineRuns): EngineId | undefined {
-  return ENGINE_ORDER.find((engine) => runs(engine) && entry.engines[engine]?.error)
+  return ENGINE_ORDER.find(
+    (engine) => runs(engine) && entry.engines[engine]?.error && !entry.engines[engine]?.ownKeyKept
+  )
 }
 
+/** Every engine that runs whose route kept a key of its own (ADR-082 §8, S7d). */
+function keptEngines(entry: ProviderEntry, runs: EngineRuns): EngineId[] {
+  return ENGINE_ORDER.filter((engine) => runs(engine) && entry.engines[engine]?.ownKeyKept)
+}
+
+const joinAnd = (values: readonly string[]): string =>
+  values.length > 1 ? `${values.slice(0, -1).join(', ')} and ${values.at(-1)}` : values[0]
+
 /**
- * The row's delivery pill: a failure in the danger tone, a key the engine kept
- * of its own on purpose (ADR-082 §8, S7d) in the warning tone the sheet uses.
+ * The row's delivery pills: a failure in the danger tone, and the keys engines
+ * kept of their own on purpose (ADR-082 §8, S7d) in the warning tone the sheet
+ * uses — every one of them named (S7f round 2), never just the first.
  */
-function DeliveryPill({
+function DeliveryPills({
   entry,
-  engine
+  runs
 }: {
   entry: ProviderEntry
-  engine: EngineId
-}): React.JSX.Element {
-  const kept = entry.engines[engine]?.ownKeyKept === true
+  runs: EngineRuns
+}): React.JSX.Element | null {
+  const failed = failedEngine(entry, runs)
+  const kept = keptEngines(entry, runs)
+  if (!failed && kept.length === 0) return null
   return (
-    <Pill tone={kept ? 'warn' : 'bad'} testid={`${LIST}.deliveryFailed`} dataId={engine}>
-      {kept ? `Own key kept in ${engine}` : `Not delivered to ${engine}`}
-    </Pill>
+    <>
+      {failed && (
+        <Pill tone="bad" testid={`${LIST}.deliveryFailed`} dataId={failed}>
+          {`Not delivered to ${failed}`}
+        </Pill>
+      )}
+      {kept.length > 0 && (
+        <Pill tone="warn" testid={`${LIST}.deliveryFailed`} dataId={kept.join(',')}>
+          {`Own key kept in ${joinAnd(kept)}`}
+        </Pill>
+      )}
+    </>
   )
 }
 
@@ -140,7 +163,10 @@ export function ProviderList(): React.JSX.Element {
   const [switching, setSwitching] = useState<string | null>(null)
   const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null)
   /** A row whose switch-on would replace an engine's own key, asking first. */
-  const [confirmOn, setConfirmOn] = useState<string | null>(null)
+  const [confirmOn, setConfirmOn] = useState<{
+    id: string
+    engines: ConfigurableHarnessId[]
+  } | null>(null)
   const [, setRenderTick] = useState(0)
   const runs = useEngineRuns()
 
@@ -227,7 +253,11 @@ export function ProviderList(): React.JSX.Element {
    * picker changes either way, and a failure — including a switch back on that
    * could not deliver — is said on the list, where the switch is.
    */
-  const toggleProvider = async (entry: ProviderEntry, replaceOwn = false): Promise<void> => {
+  const toggleProvider = async (
+    entry: ProviderEntry,
+    /** The harnesses whose own key the user agreed to replace — the ones the question named. */
+    replaceOwn: ConfigurableHarnessId[] = []
+  ): Promise<void> => {
     setSwitching(entry.id)
     setSwitchError(null)
     setConfirmOn(null)
@@ -240,6 +270,21 @@ export function ProviderList(): React.JSX.Element {
       await reload()
       setSwitching(null)
     }
+  }
+
+  /**
+   * The row switch. Switching ON first asks the host who holds an own key now
+   * (S7f round 3) — never the row as last read — so a key given to a harness
+   * meanwhile is asked about rather than refused, and the question names
+   * exactly who. Opening the question clears an earlier switch's error.
+   */
+  const switchRow = async (entry: ProviderEntry): Promise<void> => {
+    setSwitching(entry.id)
+    const engines = await switchOnReplacesNow(entry, runs)
+    setSwitching(null)
+    if (engines.length === 0) return toggleProvider(entry)
+    setSwitchError(null)
+    setConfirmOn({ id: entry.id, engines })
   }
 
   // Mounted from BOTH returns: the header action can fire before the first read
@@ -291,7 +336,8 @@ export function ProviderList(): React.JSX.Element {
           <SettingRow
             testid={`${LIST}.row`}
             dataId={entry.id}
-            label={entry.name}
+            // A harness's own credential says whose it is (S7f).
+            label={providerEntryTitle(entry)}
             // Switched off: kept, reaching no engine — its main column dimmed, and
             // saying so; the switch and Manage stay live.
             dimmed={entry.disabled === true}
@@ -326,9 +372,7 @@ export function ProviderList(): React.JSX.Element {
                       2 different keys
                     </Pill>
                   )}
-                {failedEngine(entry, runs) && (
-                  <DeliveryPill entry={entry} engine={failedEngine(entry, runs)!} />
-                )}
+                <DeliveryPills entry={entry} runs={runs} />
               </>
             }
             description={describe(entry)}
@@ -362,11 +406,7 @@ export function ProviderList(): React.JSX.Element {
                 aria-label={entry.name}
                 title={entry.disabled ? 'Turn on' : 'Turn off'}
                 disabled={switching !== null}
-                onClick={() =>
-                  ownKeysReplacedOnSwitchOn(entry, runs).length > 0
-                    ? setConfirmOn(entry.id)
-                    : void toggleProvider(entry)
-                }
+                onClick={() => void switchRow(entry)}
                 className="cursor-default disabled:opacity-40"
               >
                 <ToggleSwitch checked={!entry.disabled} />
@@ -383,14 +423,14 @@ export function ProviderList(): React.JSX.Element {
           </SettingRow>
           {/* Switching on would replace a key an engine holds of its own: asked
             in place, under the row, before anything is written. */}
-          {confirmOn === entry.id && (
+          {confirmOn?.id === entry.id && (
             <SettingRow
               testid={`${LIST}.switchOnConfirm`}
               dataId={entry.id}
               indent
               description={
                 <span className="text-warning">
-                  {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry, runs))}
+                  {ownKeysReplacedText(entry, confirmOn.engines)}
                 </span>
               }
             >
@@ -399,7 +439,7 @@ export function ProviderList(): React.JSX.Element {
                 testid={`${LIST}.switchOnReplace`}
                 dataId={entry.id}
                 disabled={switching !== null}
-                onClick={() => void toggleProvider(entry, true)}
+                onClick={() => void toggleProvider(entry, confirmOn.engines)}
               >
                 Replace it
               </Button>

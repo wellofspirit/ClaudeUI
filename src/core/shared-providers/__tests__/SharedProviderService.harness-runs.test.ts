@@ -515,7 +515,7 @@ describe('an automatic delivery never replaces a harness’s own key', () => {
     await expect(h.service.setDisabled('openrouter', false)).rejects.toThrow(
       /pi has its own key for OpenRouter/
     )
-    await h.service.setDisabled('openrouter', false, true)
+    await h.service.setDisabled('openrouter', false, ['pi'])
     expect(h.auth.pi.get('openrouter')).toBe(KEY)
   })
 })
@@ -537,5 +537,128 @@ describe('switching on does not ask about a harness that does not run', () => {
     h.running.pi = true
     await h.service.harnessArrived('pi')
     expect(h.auth.pi.get('openrouter')).toBe(OWN)
+  })
+})
+
+describe('a key set on create never silently replaces a harness’s own (ADR-082 §8, S7f)', () => {
+  const ownKey = 'pi has its own key for OpenRouter; it was kept.'
+
+  it('unconfirmed: pi keeps its own key and says so; the key is stored and reaches opencode', async () => {
+    const h = harness([chatgpt()], { pi: true, opencode: true })
+    h.auth.pi.set('openrouter', OWN)
+    await h.service.saveDefinition(catalog())
+    await h.service.setApiKey('openrouter', KEY)
+
+    expect(h.auth.pi.get('openrouter')).toBe(OWN)
+    expect(h.writes.pi).toEqual([])
+    expect(h.auth.opencode.get('openrouter')).toBe(KEY)
+    expect(h.vault.get('openrouter')).toEqual({ type: 'api_key', key: KEY })
+    expect((await h.status('openrouter')).pi).toMatchObject({ error: ownKey, ownKeyKept: true })
+    // …and "Use the stored key" is still the way to take it.
+    await h.service.useStoredKey('openrouter', 'pi')
+    expect(h.auth.pi.get('openrouter')).toBe(KEY)
+  })
+
+  it('confirmed (replaceOwn): pi’s own key is replaced and ClaudeUI manages the slot', async () => {
+    const h = harness([chatgpt()], { pi: true, opencode: true })
+    h.auth.pi.set('openrouter', OWN)
+    await h.service.saveDefinition(catalog())
+    await h.service.setApiKey('openrouter', KEY, ['pi'])
+
+    expect(h.auth.pi.get('openrouter')).toBe(KEY)
+    expect((await h.errors('openrouter')).pi).toBeUndefined()
+    // Fingerprinted as ClaudeUI's: a later switch-off takes it back.
+    await h.service.setDisabled('openrouter', true)
+    expect(h.auth.pi.has('openrouter')).toBe(false)
+  })
+
+  it('kept (pi’s route created off): pi’s own key is untouched, opencode gets the key', async () => {
+    const h = harness([chatgpt()], { pi: true, opencode: true })
+    h.auth.pi.set('openrouter', OWN)
+    await h.service.saveDefinition(catalog({ pi: false, opencode: true }))
+    await h.service.setApiKey('openrouter', KEY)
+
+    expect(h.auth.pi.get('openrouter')).toBe(OWN)
+    expect(h.writes.pi).toEqual([])
+    expect(h.auth.opencode.get('openrouter')).toBe(KEY)
+    expect(await h.errors('openrouter')).toEqual({ pi: undefined, opencode: undefined })
+  })
+
+  it('replaceOwn is per harness: one the question never named keeps its own key (stale snapshot)', async () => {
+    // The Add sheet's snapshot showed only pi's own key; opencode got one of its
+    // own outside ClaudeUI meanwhile. Overwrite named pi alone.
+    const h = harness([chatgpt()], { pi: true, opencode: true })
+    h.auth.pi.set('openrouter', OWN)
+    h.auth.opencode.set('openrouter', OWN)
+    await h.service.saveDefinition(catalog())
+    await h.service.setApiKey('openrouter', KEY, ['pi'])
+
+    expect(h.auth.pi.get('openrouter')).toBe(KEY)
+    expect(h.auth.opencode.get('openrouter')).toBe(OWN)
+    const status = await h.status('openrouter')
+    expect(status.pi.ownKeyKept).toBeUndefined()
+    expect(status.opencode).toMatchObject({
+      error: 'opencode has its own key for OpenRouter; it was kept.',
+      ownKeyKept: true
+    })
+  })
+
+  it('a switch-on confirmed for one harness refuses to replace another’s own key', async () => {
+    const h = harness([chatgpt(), catalog()], { pi: true, opencode: true })
+    await h.service.setApiKey('openrouter', KEY)
+    await h.service.setDisabled('openrouter', true)
+    h.auth.pi.set('openrouter', OWN)
+    h.auth.opencode.set('openrouter', OWN)
+    await expect(h.service.setDisabled('openrouter', false, ['pi'])).rejects.toThrow(
+      /opencode has its own key for OpenRouter/
+    )
+    expect(h.auth.pi.get('openrouter')).toBe(OWN)
+    expect(h.auth.opencode.get('openrouter')).toBe(OWN)
+    await h.service.setDisabled('openrouter', false, ['pi', 'opencode'])
+    expect(h.auth.pi.get('openrouter')).toBe(KEY)
+    expect(h.auth.opencode.get('openrouter')).toBe(KEY)
+  })
+
+  it('a slot holding the PREVIOUS vault key is ClaudeUI’s: a new key replaces it unasked', async () => {
+    // An install from before fingerprints: only the vault key says it is ours,
+    // so the slot is judged before the vault takes the new key.
+    const h = harness([chatgpt(), catalog()], { pi: true, opencode: true })
+    h.vault.set('openrouter', { type: 'api_key', key: KEY })
+    h.auth.pi.set('openrouter', KEY)
+    await h.service.setApiKey('openrouter', KEY_2)
+    expect(h.auth.pi.get('openrouter')).toBe(KEY_2)
+    expect((await h.errors('openrouter')).pi).toBeUndefined()
+  })
+})
+
+describe('who holds an own key right now, from the harnesses’ files (S7f round 3)', () => {
+  it('no definition yet: any credential a running harness holds for the vendor is its own', async () => {
+    const h = harness([chatgpt()], { pi: true, opencode: true })
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual([])
+    // Written into opencode's auth file from outside — no catalog involved.
+    h.auth.opencode.set('openrouter', OWN)
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual(['opencode'])
+    h.auth.pi.set('openrouter', OWN)
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual(['pi', 'opencode'])
+    // A harness that does not run is never named.
+    h.running.pi = false
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual(['opencode'])
+  })
+
+  it('with a definition: ClaudeUI’s key (vault or fingerprint) is not own; anything else is', async () => {
+    const h = harness([chatgpt(), catalog()], { pi: true, opencode: true })
+    await h.service.setApiKey('openrouter', KEY)
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual([])
+    await h.service.setDisabled('openrouter', true)
+    h.auth.opencode.set('openrouter', OWN)
+    expect(await h.service.ownKeyHolders('openrouter')).toEqual(['opencode'])
+  })
+
+  it('a custom endpoint’s slot is ClaudeUI’s own; a malformed id is refused', async () => {
+    const h = harness([chatgpt(), custom()], { pi: true, opencode: true })
+    h.auth.pi.set('spark', OWN)
+    expect(await h.service.ownKeyHolders('spark')).toEqual([])
+    for (const bad of ['', '../auth', 'open router', 'a/b', 42 as unknown as string])
+      await expect(h.service.ownKeyHolders(bad)).rejects.toThrow(/Invalid provider id/)
   })
 })

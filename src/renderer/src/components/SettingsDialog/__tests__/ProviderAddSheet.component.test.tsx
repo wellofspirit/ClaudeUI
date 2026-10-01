@@ -14,10 +14,10 @@
  * hard-stubs.
  *
  * The second thing pinned is the CANDIDATE rule: a row of this sheet is a
- * provider the user does NOT have. The registry snapshot the list renders is
- * the complement, so a configured opencode entry, a keyed pi vendor and an id
- * the shared vault owns must all be absent — offering them is how the old
- * picker ended up letting a user "add" something that was already there.
+ * provider ClaudeUI does not MANAGE yet (owner ruling 2026-10-01, S7f). An id
+ * the shared vault owns is absent; a harness that holds its own key for the
+ * vendor — an authenticated opencode entry, a keyed pi vendor — is still
+ * offered, says so, and creating asks before that key is replaced.
  *
  * Driven through `ProviderList`, like the Manage sheet's tests: opening from the
  * header's window event, re-reading the registry after a write and landing on
@@ -94,6 +94,11 @@ let definitions: SharedProviderDefinition[]
 let piOptions: Record<string, VendorAuthOption[]>
 let calls: Array<{ channel: string; args: unknown[] }>
 let registryReads: number
+/**
+ * `shared-provider:own-key-holders` — who holds an own key for a vendor in the
+ * harnesses' FILES right now (S7f round 3), by vendor id.
+ */
+let holders: Record<string, string[]>
 let writeText: ReturnType<typeof vi.fn>
 
 function stub(channel: string, answer: (...args: unknown[]) => unknown = () => undefined): void {
@@ -143,6 +148,8 @@ beforeEach(async () => {
     return snapshot
   })
   app.bridge.ipcMain.handle('session:get-opencode-providers', async () => catalog)
+  holders = {}
+  stub('shared-provider:own-key-holders', (id) => holders[id as string] ?? [])
   app.bridge.ipcMain.handle('shared-provider:list', async () => definitions)
   app.bridge.ipcMain.handle('pi:binary-path', async () => '/opt/pi/bin/pi')
   app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
@@ -250,12 +257,13 @@ describe('opening', () => {
 // ── The list step ────────────────────────────────────────────────────
 
 describe('the list', () => {
-  it('offers the UNCONFIGURED union, with a chip per engine that offers it', async () => {
+  it('offers everything ClaudeUI does not manage, with a chip per engine that offers it', async () => {
     await openAddSheet()
     // deepseek: both engines. groq: opencode only. radius: pi only (it is in pi's
     // option catalog and in no opencode one). openai: pi only — ChatGPT's
-    // ENABLED opencode route already delivers to opencode's `openai`.
-    expect(catalogIds()).toEqual(['deepseek', 'groq', 'openai', 'radius'])
+    // ENABLED opencode route already delivers to opencode's `openai`. openrouter
+    // (opencode holds its own key) and xai (pi does) are offered too (S7f).
+    expect(catalogIds()).toEqual(['deepseek', 'groq', 'openai', 'openrouter', 'radius', 'xai'])
 
     const chips = (id: string): (string | undefined)[] =>
       within(catalogRow(id))
@@ -267,13 +275,19 @@ describe('the list', () => {
     expect(chips('radius')).toEqual(['pi'])
   })
 
-  it('never offers something the user already has', async () => {
+  it('never offers an id ClaudeUI already manages', async () => {
     await openAddSheet()
-    // openrouter is authenticated in opencode; xai has a pi key (and a row);
     // openai-codex is the id ChatGPT's pi route owns.
-    expect(catalogIds()).not.toContain('openrouter')
-    expect(catalogIds()).not.toContain('xai')
     expect(catalogIds()).not.toContain('openai-codex')
+  })
+
+  it('offers a harness that holds its own key, and says so — by name, never raw id', async () => {
+    await openAddSheet()
+    expect(catalogRow('openrouter')).toHaveTextContent('opencode has its own key for OpenRouter')
+    // pi ships no display names: title-cased, not `xai`.
+    expect(catalogRow('xai')).toHaveTextContent('Xai')
+    expect(catalogRow('xai')).toHaveTextContent('pi has its own key for Xai')
+    expect(catalogRow('deepseek')).not.toHaveTextContent('own key')
   })
 
   it('filters on the search box, across both sections', async () => {
@@ -336,9 +350,10 @@ describe('the list', () => {
   it('reads no catalog from a harness that does not run (ADR-082 §8)', async () => {
     await harnessMissing(['pi'])
     await openAddSheet()
-    // groq and deepseek come from opencode; the pi-only ones (openai, radius)
-    // and pi's chip on deepseek are gone, and so is pi's own sign-in row.
-    expect(catalogIds()).toEqual(['deepseek', 'groq'])
+    // groq, deepseek and openrouter come from opencode; the pi-only ones
+    // (openai, radius, xai) and pi's chip on deepseek are gone, and so is pi's
+    // own sign-in row.
+    expect(catalogIds()).toEqual(['deepseek', 'groq', 'openrouter'])
     expect(
       within(catalogRow('deepseek'))
         .getAllByTestId('ProviderAddSheet.engineChip')
@@ -479,7 +494,7 @@ describe('the setup step', () => {
     await typeInto('ProviderAddSheet.keyInput', 'sk-radius')
     await click(screen.getByTestId('ProviderAddSheet.save'))
     expect(sent('shared-provider:save')).toEqual([
-      [catalogDefinition('radius', 'radius', { pi: true, opencode: false })]
+      [catalogDefinition('radius', 'Radius', { pi: true, opencode: false })]
     ])
     expect(sent('shared-provider:set-key')).toEqual([['radius', 'sk-radius']])
     expect(called('vendorAuthSetKey')).toEqual([])
@@ -639,5 +654,181 @@ describe('after a write', () => {
 
     expect(screen.getByTestId('ProviderAddSheet.error')).toHaveTextContent('vault is read-only')
     expect(screen.getByTestId('ProviderAddSheet')).toBeInTheDocument()
+  })
+})
+
+// ── A harness's own key (owner ruling 2026-10-01, S7f) ───────────────
+
+describe('a harness that holds its own key for the vendor', () => {
+  /** pi's own OpenRouter key: a native row of the list. */
+  const piOpenrouter: ProviderEntry = {
+    id: 'pi:openrouter',
+    name: 'OpenRouter',
+    origin: 'pi-native',
+    credential: 'api-key',
+    engines: { pi: { enabled: true, native: true } },
+    piKind: 'builtin',
+    ownedBy: 'pi'
+  }
+  const openrouter = (routes: { pi: boolean; opencode: boolean }): SharedProviderDefinition => ({
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    routes: { pi: { enabled: routes.pi }, opencode: { enabled: routes.opencode } }
+  })
+
+  beforeEach(() => {
+    snapshot = { entries: [chatgptRow, piXai, piOpenrouter], opencodeInstalled: true }
+    // opencode holds nothing for it here; pi holds its own key.
+    catalog = catalog.map((entry) =>
+      entry.id === 'openrouter' ? { ...entry, authState: 'unauthenticated' as const } : entry
+    )
+    piOptions = { ...piOptions, openrouter: [{ type: 'api', label: 'OpenRouter API key' }] }
+    holders = { openrouter: ['pi'] }
+  })
+
+  async function pickOpenrouterAndSave(): Promise<void> {
+    await openAddSheet()
+    await click(catalogRow('openrouter'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-or-new')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+  }
+
+  it('offers pi as a target for OpenRouter, with a note that pi has its own key', async () => {
+    await openAddSheet()
+    expect(
+      within(catalogRow('openrouter'))
+        .getAllByTestId('ProviderAddSheet.engineChip')
+        .map((el) => el.dataset.id)
+    ).toEqual(['opencode', 'pi'])
+    expect(catalogRow('openrouter')).toHaveTextContent('pi has its own key for OpenRouter')
+
+    await click(catalogRow('openrouter'))
+    expect(
+      screen.getAllByTestId('ProviderAddSheet.engines.chip').map((el) => el.dataset.id)
+    ).toEqual(['opencode', 'pi'])
+    expect(screen.getAllByTestId('ProviderAddSheet.ownKeyNote').map((el) => el.dataset.id)).toEqual(
+      ['pi']
+    )
+  })
+
+  it('asks before replacing pi’s own key, and writes nothing until answered', async () => {
+    await pickOpenrouterAndSave()
+    const confirm = screen.getByTestId('ProviderAddSheet.ownKeyConfirm')
+    expect(confirm).toHaveAttribute('data-id', 'pi')
+    expect(confirm).toHaveTextContent(
+      'pi already has its own OpenRouter key. Overwrite it and manage the key from ClaudeUI?'
+    )
+    expect(screen.getByTestId('ProviderAddSheet.ownKeyOverwrite')).toHaveTextContent(
+      'Overwrite and manage from ClaudeUI'
+    )
+    expect(screen.getByTestId('ProviderAddSheet.ownKeyKeep')).toHaveTextContent('Keep pi’s own key')
+    expect(sent('shared-provider:save')).toEqual([])
+    expect(sent('shared-provider:set-key')).toEqual([])
+  })
+
+  it('Overwrite creates it for both, and tells the vault to replace pi’s own key', async () => {
+    await pickOpenrouterAndSave()
+    await click(screen.getByTestId('ProviderAddSheet.ownKeyOverwrite'))
+    expect(sent('shared-provider:save')).toEqual([[openrouter({ pi: true, opencode: true })]])
+    // Per harness: only the one the question named.
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-or-new', ['pi']]])
+  })
+
+  it('Keep pi’s own key creates it with pi’s route off, and replaces nothing', async () => {
+    await pickOpenrouterAndSave()
+    await click(screen.getByTestId('ProviderAddSheet.ownKeyKeep'))
+    expect(sent('shared-provider:save')).toEqual([[openrouter({ pi: false, opencode: true })]])
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-or-new']])
+    expect(called('vendorAuthSetKey')).toEqual([])
+  })
+
+  it('Save asks the host who holds an own key: one written since the sheet opened is named', async () => {
+    await openAddSheet()
+    await click(catalogRow('openrouter'))
+    // A key written into opencode's auth file outside ClaudeUI after the sheet
+    // opened: the registry (opencode's cached catalog) does not show it, the
+    // files do.
+    holders = { openrouter: ['pi', 'opencode'] }
+    await typeInto('ProviderAddSheet.keyInput', 'sk-or-new')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    const confirm = screen.getByTestId('ProviderAddSheet.ownKeyConfirm')
+    expect(confirm).toHaveAttribute('data-id', 'opencode,pi')
+    expect(confirm).toHaveTextContent(
+      'opencode and pi already have their own OpenRouter keys. Overwrite them and manage the key from ClaudeUI?'
+    )
+    expect(screen.getAllByTestId('ProviderAddSheet.ownKeyNote').map((el) => el.dataset.id)).toEqual(
+      ['opencode', 'pi']
+    )
+    expect(sent('shared-provider:own-key-holders')).toEqual([['openrouter']])
+    await click(screen.getByTestId('ProviderAddSheet.ownKeyOverwrite'))
+    expect(sent('shared-provider:set-key')).toEqual([
+      ['openrouter', 'sk-or-new', ['opencode', 'pi']]
+    ])
+  })
+
+  it('Keep, with both named, creates both routes off and replaces nothing', async () => {
+    await openAddSheet()
+    await click(catalogRow('openrouter'))
+    holders = { openrouter: ['pi', 'opencode'] }
+    await typeInto('ProviderAddSheet.keyInput', 'sk-or-new')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    await click(screen.getByTestId('ProviderAddSheet.ownKeyKeep'))
+    expect(sent('shared-provider:save')).toEqual([[openrouter({ pi: false, opencode: false })]])
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-or-new']])
+  })
+
+  it('a key gone since the sheet opened is not asked about', async () => {
+    await openAddSheet()
+    await click(catalogRow('openrouter'))
+    holders = {}
+    await typeInto('ProviderAddSheet.keyInput', 'sk-or-new')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(screen.queryByTestId('ProviderAddSheet.ownKeyConfirm')).toBeNull()
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-or-new']])
+  })
+
+  it('leaving while asked writes nothing', async () => {
+    await pickOpenrouterAndSave()
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
+    expect(sent('shared-provider:save')).toEqual([])
+    expect(sent('shared-provider:set-key')).toEqual([])
+  })
+
+  it('asks nothing when pi is not picked', async () => {
+    await openAddSheet()
+    await click(catalogRow('openrouter'))
+    await click(
+      screen.getAllByTestId('ProviderAddSheet.engines.chip').find((el) => el.dataset.id === 'pi')!
+    )
+    await typeInto('ProviderAddSheet.keyInput', 'sk-or-new')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    expect(screen.queryByTestId('ProviderAddSheet.ownKeyConfirm')).toBeNull()
+    expect(sent('shared-provider:save')).toEqual([[openrouter({ pi: false, opencode: true })]])
+    expect(sent('shared-provider:set-key')).toEqual([['openrouter', 'sk-or-new']])
+  })
+
+  it('an id the vault cannot name: Keep writes only the other harness’s copy', async () => {
+    catalog = [...catalog, catalogEntry({ id: 'io.net', name: 'io.net' })]
+    piOptions = { ...piOptions, 'io.net': [{ type: 'api', label: 'io.net API key' }] }
+    snapshot = {
+      ...snapshot,
+      entries: [
+        ...snapshot.entries,
+        { ...piOpenrouter, id: 'pi:io.net', name: 'io.net' } satisfies ProviderEntry
+      ]
+    }
+    holders = { 'io.net': ['pi'] }
+    await openAddSheet()
+    await click(catalogRow('io.net'))
+    await typeInto('ProviderAddSheet.keyInput', 'sk-io')
+    await click(screen.getByTestId('ProviderAddSheet.save'))
+    await click(screen.getByTestId('ProviderAddSheet.ownKeyKeep'))
+    expect(called('vendorAuthSetKey')).toEqual([['opencode', 'io.net', 'sk-io']])
   })
 })

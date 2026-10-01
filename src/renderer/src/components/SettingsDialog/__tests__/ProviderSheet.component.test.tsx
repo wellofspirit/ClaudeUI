@@ -128,6 +128,12 @@ let definitions: SharedProviderDefinition[]
 /** Every `channel → args` the sheet sent, in order. */
 let calls: Array<{ channel: string; args: unknown[] }>
 let registryReads: number
+/**
+ * `shared-provider:own-key-holders` (S7f round 3): who holds an own key in the
+ * harnesses' files now, by id. Null = not answered, so the screens fall back to
+ * the registry's facts, as they do when the read fails.
+ */
+let holders: Record<string, string[]> | null
 /** `shared-provider:models` — what a per-route DEFAULT may be set to. */
 let sharedModels: Array<{ id: string; name?: string }>
 /** `session:get-opencode-providers` — read on demand by "Model overrides ›". */
@@ -208,6 +214,11 @@ beforeEach(async () => {
   stub('shared-provider:set-default')
   stub('shared-provider:sync')
   stub('shared-provider:use-stored-key')
+  holders = null
+  stub('shared-provider:own-key-holders', (id) => {
+    if (!holders) throw new Error('not answered')
+    return holders[id as string] ?? []
+  })
   stub('shared-provider:set-key')
   stub('shared-provider:disconnect')
   stub('provider-account:switch')
@@ -2022,7 +2033,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(toggle).toHaveAttribute('role', 'switch')
     expect(toggle).toHaveAccessibleName('OpenRouter (Work)')
     await click(toggle)
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', true, false]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', true]])
 
     const row = listRow('openrouter-work')
     expect(within(row).getByTestId('ProviderList.off')).toHaveTextContent('Off')
@@ -2039,8 +2050,8 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
 
     await click(within(row).getByTestId('ProviderList.onOff'))
     expect(sent('shared-provider:set-disabled')).toEqual([
-      ['openrouter-work', true, false],
-      ['openrouter-work', false, false]
+      ['openrouter-work', true],
+      ['openrouter-work', false]
     ])
     expect(within(listRow('openrouter-work')).getByTestId('ProviderList.credential')).toBeTruthy()
   })
@@ -2069,7 +2080,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(screen.queryByTestId('ProviderList.switchOnConfirm')).toBeNull()
     await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
     await click(screen.getByTestId('ProviderList.switchOnReplace'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, ['pi']]])
   })
 
   it('a failed switch is said on the list, where the switch is', async () => {
@@ -2085,6 +2096,52 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(screen.getByTestId('ProviderList.switchError')).toHaveTextContent(
       'opencode config is not writable'
     )
+  })
+
+  it('switch-on asks the host first: a key given meanwhile is asked about, not refused (S7f)', async () => {
+    // The list still says no harness holds a key of its own…
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    stub('shared-provider:set-disabled', () => {
+      throw new Error('pi has its own key for OpenRouter (Work); switching it on replaces it.')
+    })
+    render(<ProviderList />)
+    await screen.findAllByTestId('ProviderList.row')
+    // …a first try, with nobody holding one yet, failed and says so.
+    holders = { 'openrouter-work': [] }
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(screen.getByTestId('ProviderList.switchError')).toBeTruthy()
+
+    // pi's auth file now holds its own key: the switch asks, naming pi, and the
+    // stale error goes.
+    holders = { 'openrouter-work': ['pi'] }
+    stub('shared-provider:set-disabled')
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(screen.getByTestId('ProviderList.switchOnConfirm')).toHaveTextContent(
+      'pi’s own key for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    expect(screen.queryByTestId('ProviderList.switchError')).toBeNull()
+    // Only the first, refused try was sent so far.
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
+    await click(screen.getByTestId('ProviderList.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter-work', false],
+      ['openrouter-work', false, ['pi']]
+    ])
+  })
+
+  it('the sheet’s switch-on names who holds an own key now, not who did when it opened', async () => {
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    holders = { 'openrouter-work': ['opencode', 'pi'] }
+    await openSheet('openrouter-work')
+    await click(screen.getByTestId('ProviderSheet.onOff'))
+    expect(screen.getByTestId('ProviderSheet.switchOnConfirm')).toHaveTextContent(
+      'opencode’s and pi’s own keys for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    await click(screen.getByTestId('ProviderSheet.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter-work', false, ['opencode', 'pi']]
+    ])
   })
 
   it('the sheet header switches it; while off it says what is kept, and routes stay editable', async () => {
@@ -2114,7 +2171,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
 
     expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'false')
     await click(screen.getByTestId('ProviderSheet.onOff'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, false]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
     expect(screen.queryByTestId('ProviderSheet.offNotice')).toBeNull()
     expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'true')
   })
@@ -2139,7 +2196,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
       'opencode’s own key for OpenRouter (Work) will be replaced by the stored one.'
     )
     await click(screen.getByTestId('ProviderSheet.switchOnReplace'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, ['opencode']]])
   })
 
   describe('never names a harness that does not run (ADR-082 §8, S7d)', () => {
@@ -2186,7 +2243,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
       await screen.findAllByTestId('ProviderList.row')
       await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
       expect(screen.queryByTestId('ProviderList.switchOnConfirm')).toBeNull()
-      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, false]])
+      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
     })
 
     it('the sheet switches on without asking when only pi, which does not run, has a key', async () => {
@@ -2196,7 +2253,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
       await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
       await click(screen.getByTestId('ProviderSheet.onOff'))
       expect(screen.queryByTestId('ProviderSheet.switchOnConfirm')).toBeNull()
-      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, false]])
+      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
     })
   })
 
@@ -2267,5 +2324,183 @@ describe('a route that kept its own key (ADR-082 §8, S7d)', () => {
   it('a route that delivered as usual offers no such action', async () => {
     await openSheet('ollama-local')
     expect(screen.queryByTestId('ProviderSheet.useStoredKey')).toBeNull()
+  })
+})
+
+describe('a harness’s own key beside ClaudeUI’s provider for the vendor (S7f)', () => {
+  /** pi's own OpenRouter key — a native row, named for whose it is. */
+  const piOwn: ProviderEntry = {
+    id: 'pi:openrouter',
+    name: 'OpenRouter',
+    origin: 'pi-native',
+    credential: 'api-key',
+    engines: { pi: { enabled: true, native: true, providerId: 'openrouter' } },
+    piKind: 'builtin',
+    piBuiltinId: 'openrouter',
+    kindLabel: 'Catalog',
+    ownedBy: 'pi'
+  }
+  /** ClaudeUI's OpenRouter, switched off — the observed "duplicate". */
+  const sharedOff: ProviderEntry = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    origin: 'shared',
+    credential: 'api-key',
+    disabled: true,
+    kindLabel: 'Catalog',
+    engines: {
+      opencode: { enabled: false, routeOn: true },
+      pi: { enabled: false, routeOn: true, ownCredential: true }
+    }
+  }
+  const sharedOn: ProviderEntry = {
+    ...sharedOff,
+    disabled: undefined,
+    engines: {
+      opencode: { enabled: true, providerId: 'openrouter' },
+      pi: { enabled: true, providerId: 'openrouter' }
+    }
+  }
+  const definition = (over: Partial<SharedProviderDefinition> = {}): SharedProviderDefinition => ({
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    disabled: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } },
+    ...over
+  })
+
+  beforeEach(() => {
+    definitions = [chatgptDefinition, definition()]
+    snapshot = { entries: [sharedOff, piOwn], opencodeInstalled: true }
+    // Switched on, ClaudeUI's provider claims pi's slot: the native row goes.
+    stub('shared-provider:set-disabled', () => {
+      snapshot = { entries: [sharedOn], opencodeInstalled: true }
+    })
+  })
+
+  it('the native row is named for the provider and whose key it is — never the raw id', async () => {
+    const sheet = await openSheet('pi:openrouter')
+    const native = screen
+      .getAllByTestId('ProviderList.row')
+      .find((el) => el.dataset.id === 'pi:openrouter')!
+    expect(native).toHaveTextContent('OpenRouter · pi’s own key')
+    expect(native.textContent).not.toMatch(/\bopenrouter\b/)
+    expect(sheet).toHaveTextContent('OpenRouter · pi’s own key')
+  })
+
+  it('offers ClaudeUI’s OpenRouter instead, asks first, then switches it on with replaceOwn', async () => {
+    await openSheet('pi:openrouter')
+    const offer = await screen.findByTestId('ProviderSheet.useClaudeUi')
+    expect(offer).toHaveAttribute('data-id', 'openrouter')
+    expect(within(offer).getByTestId('ProviderSheet.useClaudeUiStart')).toHaveTextContent(
+      'Use ClaudeUI’s OpenRouter here instead'
+    )
+
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi already has its own OpenRouter key. Overwrite it and manage the key from ClaudeUI?'
+    )
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    // Its pi route is already on in its settings: switching it on is the whole act.
+    expect(sent('shared-provider:set-route')).toEqual([])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter', false, ['pi']]])
+    // The native row is gone; the sheet follows to ClaudeUI's provider.
+    await waitFor(() =>
+      expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'openrouter')
+    )
+  })
+
+  it('asks the host who holds an own key: one the list did not show is named too', async () => {
+    // The registry says only pi holds one; opencode's auth file has one too.
+    holders = { openrouter: ['pi', 'opencode'] }
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi and opencode already have their own OpenRouter keys. Overwrite them and manage the key from ClaudeUI?'
+    )
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter', false, ['pi', 'opencode']]
+    ])
+  })
+
+  it('Cancel writes nothing', async () => {
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiCancel'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUi')).toBeTruthy()
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    expect(sent('shared-provider:set-route')).toEqual([])
+  })
+
+  it('names every harness switching on replaces a key in', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...sharedOff,
+          engines: {
+            opencode: { enabled: false, routeOn: true, ownCredential: true },
+            pi: { enabled: false, routeOn: true, ownCredential: true }
+          }
+        },
+        piOwn
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi and opencode already have their own OpenRouter keys. Overwrite them and manage the key from ClaudeUI?'
+    )
+  })
+
+  it('a provider that is on, with its pi route off, turns that route on instead', async () => {
+    definitions = [
+      chatgptDefinition,
+      definition({
+        disabled: undefined,
+        routes: { pi: { enabled: false }, opencode: { enabled: true } }
+      })
+    ]
+    snapshot = {
+      entries: [
+        {
+          ...sharedOn,
+          engines: { ...sharedOn.engines, pi: { enabled: false, ownCredential: true } }
+        },
+        piOwn
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('pi:openrouter')
+    expect(await screen.findByTestId('ProviderSheet.useClaudeUi')).toHaveTextContent(
+      'ClaudeUI’s OpenRouter is off for pi'
+    )
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiStart'))
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    expect(sent('shared-provider:set-route')).toEqual([['openrouter', 'pi', true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+  })
+
+  it('offers nothing without a ClaudeUI provider for the vendor, or one with no stored key', async () => {
+    definitions = [chatgptDefinition]
+    snapshot = { entries: [piOwn], opencodeInstalled: true }
+    await openSheet('pi:openrouter')
+    // Let the definitions read land before asserting absence.
+    await waitFor(() => expect(registryReads).toBeGreaterThan(0))
+    await act(async () => {})
+    expect(screen.queryByTestId('ProviderSheet.useClaudeUi')).toBeNull()
+    cleanup()
+
+    definitions = [chatgptDefinition, definition()]
+    snapshot = { entries: [{ ...sharedOff, credential: 'none' }, piOwn], opencodeInstalled: true }
+    await openSheet('pi:openrouter')
+    await act(async () => {})
+    expect(screen.queryByTestId('ProviderSheet.useClaudeUi')).toBeNull()
   })
 })

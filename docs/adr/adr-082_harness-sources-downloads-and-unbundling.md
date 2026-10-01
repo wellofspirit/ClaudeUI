@@ -6,7 +6,8 @@ button) and `b51cb3df` (the upgrade sheet and the download offers). Implementati
 of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
 unbundling) is complete: the engines are unbundled (S7a) and ClaudeUI offers them (S7b), and
 writes no key into one that is not installed (S7d), and a ChatGPT disconnect takes out only the
-sign-ins ClaudeUI put into pi and opencode (S7e), all "As built" in §8.
+sign-ins ClaudeUI put into pi and opencode (S7e), and a provider created in ClaudeUI is usable in a
+harness that holds its own key (S7f), all "As built" in §8.
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the Engines rail
 group becomes Harnesses and gains a first page), [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
 (`CLAUDEUI_CLAUDE_CLI` gets a setting; "respawn follows the configured harness" extends to every
@@ -574,8 +575,8 @@ As built (arc 3, S7d; resolved question 11): no key is written into a harness th
   replaced by the stored one.") — `shared-provider:use-stored-key` (`config`, both transports,
   like every shared-provider write), which delivers that one route with `keepOwnKeys: false`.
   Other explicit actions still replace: switching on (after its own-key confirm), adopting,
-  Replace key (`setApiKey`), turning a route on. A custom provider's native id is ClaudeUI's own
-  and has no such key.
+  turning a route on (after its confirm). A key write (`setApiKey`) replaces one only when the user
+  confirmed it (S7f, below). A custom provider's native id is ClaudeUI's own and has no such key.
 - Switching a provider on (`setDisabled`, `ownCredentialRoutes`) and its confirm
   (`ownKeysReplacedOnSwitchOn(entry, runs)` in the sheet and the list) ignore a harness that does
   not run: nothing is replaced there, and its arrival keeps any own key instead of asking.
@@ -626,6 +627,58 @@ put in, and ClaudeUI does not sign itself back in from what stays.
 - The copy says it: the ChatGPT card's last-account removal and the sheet's armed Disconnect
   read "ClaudeUI’s ChatGPT sign-in is removed from <harnesses that run>; one made directly in
   <pi or opencode, those that run> stays." (`chatgptDisconnectText`, `harness-view.ts`).
+
+As built (arc 3, S7f; resolved question 14): a provider created in ClaudeUI is usable in opencode and
+pi even where the harness already holds its own key for the vendor
+([ADR-074](adr-074_provider-surfaces-v3.md) §12).
+
+- The Add sheet offers every catalog provider ClaudeUI does not manage yet, with every running
+  harness that offers it as a target; one holding its own key carries "<harness> has its own key
+  for <provider>". Creating with such a harness picked asks once (`own-key-question.ts`, the one
+  helper for the wording): "<harness> already has its own <provider> key. Overwrite it and manage
+  the key from ClaudeUI?" — **Overwrite and manage from ClaudeUI** sends `shared-provider:set-key`
+  with `replaceOwn: [<the harnesses asked about>]` (the explicit-action delivery, fingerprinted);
+  **Keep <harness>’s own key** creates the definition with that route off. Closing the sheet
+  cancels; nothing is written before the answer.
+- Every own-key question asks the host who holds an own key RIGHT NOW (S7f round 3, after the
+  real-app check found a key written into opencode's `auth.json` while the sheet was open missing
+  from the question: the registry's opencode rows come from a catalog cached until ClaudeUI itself
+  writes). `shared-provider:own-key-holders(id)` (`config` query, both transports; the id checked by
+  `validateVendorId`; harness ids only) answers `SharedProviderService.ownKeyHolders` from the
+  harnesses' auth files: the running harnesses (S7d) holding a credential for the provider that is
+  not ClaudeUI's — for a definition's id (or a vendor a catalog definition's route lands on) by the
+  switch-on rule `holdsOwnKey`, for a vendor with no definition any credential there; a custom or
+  subscription slot is ClaudeUI's own. The Add sheet's Save, "Use ClaudeUI’s … here instead", and
+  the list's and the sheet's switch-on all read it before asking, so a key given to a harness after
+  the screen was read is asked about rather than refused, and one removed meanwhile is not. A failed
+  read falls back to what the screen showed; the service still refuses an own key the question did
+  not name. Opening the list's switch-on question clears an earlier switch error. opencode's cached
+  catalog itself is not invalidated on an outside `auth.json` change, so the list's native rows
+  still lag until a ClaudeUI write (a live opencode server does not re-read the file either, so
+  dropping the cache alone would not refresh them).
+- `replaceOwn` is PER HARNESS (orchestrator ruling, S7f round 2, after a stale-snapshot Overwrite
+  named only pi while opencode also held a key): `SharedProviderService.setApiKey` (its
+  `replaceOwn` a list of harnesses, empty by default) decides which enabled catalog routes hold an own key
+  (`ownCredentialRoutes`, running harnesses only) BEFORE the vault takes the new key — so a slot
+  holding the previous vault key, from before fingerprints, stays ClaudeUI's — and keeps every one
+  `replaceOwn` does not name: the route reports `ownKeyKept` with "Use the stored key", as an
+  automatic delivery does, while the key is stored and reaches every other route.
+  `setDisabled(id, false, replaceOwn: Route[])` refuses (throws) while a harness it does not name
+  holds an own key; the list's and the sheet's switch-on confirms pass the harnesses they named.
+  The IPC handlers accept only a list of harness ids (`confirmedHarnesses`; anything else — `true`
+  included — is refused, never read as "all"), and the argument travels only when the list is
+  non-empty, on both transports.
+- The registry names a native row by the provider and whose credential it is: `ownedBy` on an
+  opencode key, sign-in or env-var key and on a pi built-in vendor's key or sign-in;
+  `providerEntryTitle` renders "OpenRouter · pi’s own key" on the list and the sheet. A pi vendor's
+  name is opencode's catalog name when known, else its id title-cased (`vendorDisplayName`); a pi
+  provider the user declared keeps its id. A native row whose vendor has a ClaudeUI catalog
+  provider that is off for that harness (switched off, or its route off) offers **Use ClaudeUI’s
+  <provider> here instead** (`UseClaudeUiInstead.tsx`): the same question, naming every harness the
+  switch-on replaces a key in, then the route on (if off) and the provider on with `replaceOwn`
+  naming exactly those.
+- The Providers list names every harness that kept its own key in one warning pill ("Own key kept
+  in opencode and pi"), beside a danger pill for a harness whose delivery failed.
 
 ## Consequences
 
@@ -692,6 +745,11 @@ put in, and ClaudeUI does not sign itself back in from what stays.
     there. So a sign-in made directly in pi or opencode survives a disconnect where that harness's
     ChatGPT is switched off; the disconnect note says so. Telling accounts apart with the switch on
     was rejected: the harness would then run on a different account than ClaudeUI shows.
+14. A provider created in ClaudeUI must be usable in opencode and pi (owner, 2026-10-01): "when I
+    create an OpenRouter provider in ClaudeUI, I want it to be usable in opencode/pi." A harness
+    that already holds its own key for the vendor is offered, and creating asks whether to
+    overwrite it and manage the key from ClaudeUI, or keep it (that route is then off). §8 "As
+    built (arc 3, S7f)" describes it.
 
 ## Rejected alternatives
 

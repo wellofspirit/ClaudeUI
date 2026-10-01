@@ -455,6 +455,43 @@ describe('API provider rows (ADR-074 §7, mockup D)', () => {
     expect(pill).toHaveAttribute('data-tone', 'warn')
   })
 
+  it('names EVERY harness that kept its own key, and a failure beside them (S7f)', async () => {
+    const kept = (engine: 'opencode' | 'pi') => ({
+      enabled: true,
+      error: `${engine} has its own key for OpenRouter; it was kept.`,
+      ownKeyKept: true as const
+    })
+    snapshot = {
+      entries: [{ ...catalog, engines: { opencode: kept('opencode'), pi: kept('pi') } }],
+      opencodeInstalled: true
+    }
+    await renderList()
+    const pills = within(row('openrouter')).getAllByTestId('ProviderList.deliveryFailed')
+    expect(pills.map((el) => [el.dataset.id, el.textContent])).toEqual([
+      ['opencode,pi', 'Own key kept in opencode and pi']
+    ])
+    cleanup()
+
+    snapshot = {
+      entries: [
+        {
+          ...catalog,
+          engines: { opencode: kept('opencode'), pi: { enabled: true, error: 'permission denied' } }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await renderList()
+    expect(
+      within(row('openrouter'))
+        .getAllByTestId('ProviderList.deliveryFailed')
+        .map((el) => [el.dataset.id, el.dataset.tone, el.textContent])
+    ).toEqual([
+      ['pi', 'bad', 'Not delivered to pi'],
+      ['opencode', 'warn', 'Own key kept in opencode']
+    ])
+  })
+
   it('follows an adopted native row to the shared definition it became', async () => {
     snapshot = { entries: [{ ...openrouter, adoptable: 'opencode' }], opencodeInstalled: true }
     app.bridge.ipcMain.handle('shared-provider:adopt-native', async () => {

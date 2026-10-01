@@ -207,3 +207,14 @@ const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
 export function validateSharedProviderId(id: string): void {
   if (!PROVIDER_ID.test(id)) throw new Error(`Invalid shared provider id: ${id}`)
 }
+
+/**
+ * A vendor id as a harness's auth file keys it — looser than a shared
+ * provider id: models.dev ids carry dots (`io.net`) and capitals, never a path
+ * separator or whitespace. Checked wherever one arrives over the wire.
+ */
+const VENDOR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+export function validateVendorId(id: unknown): asserts id is string {
+  if (typeof id !== 'string' || !VENDOR_ID.test(id)) throw new Error('Invalid provider id')
+}
