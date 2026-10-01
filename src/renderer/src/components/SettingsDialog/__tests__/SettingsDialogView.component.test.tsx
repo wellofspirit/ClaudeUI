@@ -335,6 +335,76 @@ describe('the rail accordion', () => {
     }
   })
 
+  describe('a deep link on a page still settling (S7f)', () => {
+    /** A ResizeObserver whose resizes the test fires — jsdom has none. */
+    class FakeObserver {
+      static all: FakeObserver[] = []
+      disconnected = false
+      constructor(private readonly callback: () => void) {
+        FakeObserver.all.push(this)
+      }
+      observe(): void {}
+      disconnect(): void {
+        this.disconnected = true
+      }
+      resize(): void {
+        if (!this.disconnected) this.callback()
+      }
+    }
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+
+    beforeEach(() => {
+      FakeObserver.all = []
+      scrolled.length = 0
+      vi.stubGlobal('ResizeObserver', FakeObserver)
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push((this as HTMLElement).dataset.id ?? '')
+      }
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      if (original) Element.prototype.scrollIntoView = original
+      else delete (Element.prototype as Partial<Element>).scrollIntoView
+    })
+
+    const pane = (): HTMLElement => screen.getByTestId('SettingsDialog.page').parentElement!
+    /** The page grows: every live observer reports it. */
+    const grow = (): void => FakeObserver.all.forEach((observer) => observer.resize())
+
+    it('keeps the group pinned while the page grows, until the user scrolls', () => {
+      renderView({ activePage: 'appearance', activeGroup: 'git-panel', scrollNonce: 1 })
+      expect(scrolled).toEqual(['git-panel'])
+      grow()
+      grow()
+      expect(scrolled).toEqual(['git-panel', 'git-panel', 'git-panel'])
+
+      fireEvent.wheel(pane())
+      grow()
+      expect(scrolled).toEqual(['git-panel', 'git-panel', 'git-panel'])
+    })
+
+    it('a scroll-spy mark after it neither scrolls nor re-pins', () => {
+      const { rerender } = renderView({
+        activePage: 'appearance',
+        activeGroup: 'git-panel',
+        scrollNonce: 1
+      })
+      fireEvent.wheel(pane())
+      rerender({ activeGroup: 'diff', scrollNonce: 1 })
+      grow()
+      expect(scrolled).toEqual(['git-panel'])
+    })
+
+    it('a link to the page’s FIRST group goes to the very top', () => {
+      renderView({ activePage: 'appearance', activeGroup: 'theme', scrollNonce: 1 })
+      pane().scrollTop = 63
+      grow()
+      expect(pane().scrollTop).toBe(0)
+      expect(scrolled).toEqual([])
+    })
+  })
+
   it('marks the sub-entry the pane is on as the current LOCATION', () => {
     renderView({ activePage: 'appearance', activeGroup: 'diff' })
     expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('aria-current', 'location')

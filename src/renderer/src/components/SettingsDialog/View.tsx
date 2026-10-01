@@ -24,6 +24,7 @@ import { groupKey } from './settings-target'
 import { useEngineRuns } from './harness-store'
 import { notInstalledTitle } from './harness-view'
 import { ChevronIcon } from '../shared/ChevronIcon'
+import { pinScroll, scrollGroupToTop } from './settings-scroll-pin'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -79,7 +80,9 @@ export const SPY_LINE_FRACTION = 0.45
 /**
  * How long after a programmatic scroll the spy stays quiet. `scrollIntoView` is
  * smooth-capable and fires a burst of scroll events on the way; letting the spy
- * answer them would re-mark the group the user scrolled AWAY from.
+ * answer them would re-mark the group the user scrolled AWAY from. It is also
+ * the deep-link pin's settle window: each resize of a still-loading page
+ * re-applies the scroll and extends it (`settings-scroll-pin.ts`, S7f).
  */
 const PROGRAMMATIC_SCROLL_MS = 700
 
@@ -300,6 +303,12 @@ export function SettingsDialogView({
   const groupRefs = useRef<Map<string, HTMLElement>>(new Map())
   /** `performance.now()` before which scroll events are ours, not the user's. */
   const programmaticUntil = useRef(0)
+  /** Lets go of the group the last deep link pinned (`settings-scroll-pin.ts`). */
+  const unpin = useRef<(() => void) | null>(null)
+  const releasePin = useCallback((): void => {
+    unpin.current?.()
+    unpin.current = null
+  }, [])
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
@@ -384,20 +393,45 @@ export function SettingsDialogView({
     [activePage, engineByGroup, runs]
   )
 
-  const scrollToGroup = useCallback((id: string) => {
-    // The scroll this starts must not be answered by the spy, or the clicked
-    // group loses the mark before the scroll has even finished.
-    programmaticUntil.current = performance.now() + PROGRAMMATIC_SCROLL_MS
-    // jsdom implements neither scrollIntoView nor layout, so guard rather than
-    // let a component test explode on a purely visual affordance.
-    groupRefs.current.get(id)?.scrollIntoView?.({ block: 'start' })
-  }, [])
+  /**
+   * Scroll a group under the pane's top edge — the first group to the very top
+   * — and keep it there while the page is still growing (a fresh open renders
+   * its sections as they load), until the user scrolls themselves.
+   */
+  const scrollToGroup = useCallback(
+    (id: string) => {
+      releasePin()
+      const pane = paneRef.current
+      if (!pane) return
+      const first = groups[0]?.id === id
+      unpin.current = pinScroll({
+        pane,
+        content: pane.firstElementChild ?? pane,
+        apply: () => scrollGroupToTop(pane, groupRefs.current.get(id), first),
+        settleMs: PROGRAMMATIC_SCROLL_MS,
+        // The scroll this starts must not be answered by the spy, or the clicked
+        // group loses the mark before the scroll has even finished.
+        onWindow: (until) => {
+          programmaticUntil.current = until
+        }
+      })
+    },
+    [groups, releasePin]
+  )
+
+  // A pin outlives nothing it was for: the dialog, the page, or the page
+  // itself (search replaces it).
+  useEffect(() => releasePin, [releasePin])
+  useEffect(() => {
+    if (searching) releasePin()
+  }, [searching, releasePin])
 
   // One scroll container serves every page, so switching page would otherwise
   // inherit the previous page's scrollTop — landing past the end of a short one.
   useEffect(() => {
+    releasePin()
     if (paneRef.current) paneRef.current.scrollTop = 0
-  }, [activePage])
+  }, [activePage, releasePin])
 
   // A deep link (or a rail click routed through the container) asked for a
   // group: scroll it under the pane's top edge — ONCE per nonce bump. The
