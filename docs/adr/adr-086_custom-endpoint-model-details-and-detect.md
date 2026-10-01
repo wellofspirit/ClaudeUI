@@ -9,7 +9,9 @@ custom models' capabilities; this ADR is how a user sets them)
 **Relates to:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (row vocabulary,
 the Add sheet), [ADR-027](adr-027_test-data-attributes.md) (testids),
 [ADR-036](adr-036_unified-auth-vault.md) (the vault key Detect uses when editing),
-[ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability grants that gate the probe)
+[ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability grants that gate the probe),
+[ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 (a harness that does not run is hidden
+and written nothing)
 
 ## Context
 
@@ -150,6 +152,11 @@ The result discriminates on `status` (`detected` | `failed`, with a failure reas
     a change is dropped, so one server's models are never imported into another endpoint.
   - The Import offer is computed live (served ids minus listed ids), so removing a served model
     offers it again.
+- **With ADR-082 §8 (merged first).** The form keeps harness-manager's rules: "Enable for" offers
+  only harnesses that run, a hidden harness's saved route is kept, and the copy says "harness". The
+  output warning measures only routes whose harness runs, because nothing is delivered into one that
+  does not; a saved opencode route with opencode not installed leaves pi's 16,384 default as the one
+  that counts. Guarded by a component test.
 - **Smaller choices.** Userinfo in a Base URL is refused rather than stripped. Duplicate served ids
   are dropped (the repository refuses them). A context under 4 tokens gets no suggestion (it would be
   0). "Set {n}" on a model Detect never saw badges **manual**, having no baseline to record a
