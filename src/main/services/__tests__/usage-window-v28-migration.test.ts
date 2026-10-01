@@ -65,18 +65,16 @@ function seedV27(db: Db): void {
 }
 
 describe('migration v28 — windows no reading showed usage in', () => {
-  it('is the latest migration', () => {
-    const db = new BetterSqlite3(':memory:') as unknown as Db
-    runMigrations(db)
-    // Bump alongside MIGRATIONS in db.ts — currently v28 (0% windows dropped).
-    expect(db.pragma('user_version', { simple: true })).toBe(28)
-  })
-
   it('drops them and keeps every window that showed any usage', () => {
     const db = new BetterSqlite3(':memory:') as unknown as Db
     seedV27(db)
 
-    runMigrations(db)
+    // Up to v28 only: the "is this the latest" assertion moved to the newest
+    // migration's own test (`usage-hub-v29-migration.test.ts`) when v29 landed.
+    runMigrations(
+      db,
+      MIGRATIONS.filter((m) => m.version <= 28)
+    )
 
     expect(db.pragma('user_version', { simple: true })).toBe(28)
     expect(

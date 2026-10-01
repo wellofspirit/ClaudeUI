@@ -544,7 +544,22 @@ function LimitsCell({
           )}
         </span>
       ))}
-      {creditLimit && <CreditMeter creditLimit={creditLimit} />}
+      {creditLimit && (
+        // The relayed tag beside it too, as beside every window meter: a credits
+        // plan has no window, so for a relayed one this is the only place the
+        // row can say which machine took the reading.
+        <span className="flex flex-wrap items-center gap-x-1.5 min-w-0">
+          <CreditMeter creditLimit={creditLimit} />
+          {relayedFrom !== null && (
+            // The credit's OWN source: the credits relay is separate from the
+            // window relay, so on a row with both they can differ.
+            <RelayedTag
+              source={limits.creditSource ?? relayedFrom}
+              observedAt={limits.creditObservedAt ?? limits.observedAt}
+            />
+          )}
+        </span>
+      )}
       {/* `credits plan` beside the allowance's meter says nothing the meter
           does not; a real balance or an unlimited one still does. */}
       {windows.length === 0 &&

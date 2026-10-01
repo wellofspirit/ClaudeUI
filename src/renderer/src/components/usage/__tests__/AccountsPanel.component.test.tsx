@@ -877,6 +877,48 @@ describe('AccountsPanel — a relayed reading', () => {
     expect(tags[0].textContent).not.toContain(PEER_ID.slice(0, 8))
   })
 
+  it('tags a relayed credit meter too — a credits plan has no window to carry the tag', () => {
+    // ADR-072 §4, amended 2026-10-01: a ChatGPT business workspace relays its
+    // allowance and no window, so without the tag beside the credit meter the
+    // row would not say which machine read it.
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[
+          relayed({
+            windows: [],
+            creditLimit: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null }
+          })
+        ]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.creditMeter')).toBeInTheDocument()
+    expect(screen.getByTestId('AccountsPanel.relayed')).toHaveTextContent('via studio-mac · 6m')
+  })
+
+  it('tags each meter with the machine that read IT when windows and credits came from two', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[
+          relayed({
+            creditLimit: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null },
+            creditSource: { deviceId: 'dev-laptop', deviceName: 'laptop' },
+            creditObservedAt: Date.now() - 2 * 60 * 60_000
+          })
+        ]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    const tags = screen.getAllByTestId('AccountsPanel.relayed')
+    expect(tags.map((t) => t.getAttribute('data-device-id'))).toEqual([PEER_ID, 'dev-laptop'])
+    expect(tags[0]).toHaveTextContent('via studio-mac · 6m')
+    expect(tags[1]).toHaveTextContent('via laptop · 2h')
+  })
+
   it('falls back to the id only when the hub no longer lists the device', () => {
     // What the relay itself writes when `remote_device` holds no row: the id IS
     // the name by then, so nothing on this side has to guess.

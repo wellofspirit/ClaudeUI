@@ -59,13 +59,16 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
   changed: ReturnType<typeof vi.fn>
   read: ReturnType<typeof vi.fn>
   persist: ReturnType<typeof vi.fn>
+  publishCredits: ReturnType<typeof vi.fn>
 } {
   const changed = vi.fn()
   const persist = vi.fn()
+  const publishCredits = vi.fn()
   const read = vi.fn(async () => new Map<string, GetAccountRateLimitsResponse>())
   return {
     changed,
     persist,
+    publishCredits,
     read: read as ReturnType<typeof vi.fn>,
     store: new ChatgptRateLimitStore({
       accounts: async () => [],
@@ -75,6 +78,7 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
       // DB-free — the real dep resolves the vault's account key and writes a
       // usage_window_sample.
       persist,
+      publishCredits,
       now: () => 1_700_000_000_000,
       ...over
     })
@@ -580,5 +584,78 @@ describe('member credit allowance (individualLimit)', () => {
   it('counts as something to say, so the bucket fallback can find it', () => {
     const bucket = noWindows({ individualLimit: allowance() })
     expect(pickRateLimitSnapshot(response(noWindows(), { codex: bucket }))).toBe(bucket)
+  })
+})
+
+/**
+ * The credits relay (ADR-072 §4, amended 2026-10-01): a credits plan has no
+ * window to sample, so its credits are handed on by themselves — the MERGED
+ * entry, because the hub replaces its row whole — dated by the last FULL read.
+ *
+ * Never by a push: a live turn's push is built from response headers with no
+ * allowance, and Codex copies the previous one forward
+ * (`codex-api/src/rate_limits.rs`, `core/src/state/session.rs`). Dated by the
+ * push, that copy would overwrite another machine's newer reading on the hub.
+ */
+describe('relaying credits', () => {
+  const allowance = { limit: '8000', used: '100', remainingPercent: 99, resetsAt: 1_735_693_200 }
+  const READ_AT = 1_700_000_000_000
+
+  it('hands on the merged entry, dated by the full read that established it', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record(
+      'acct-biz',
+      noWindows({
+        credits: { hasCredits: true, unlimited: false, balance: null },
+        individualLimit: allowance
+      }),
+      { planType: 'business' },
+      READ_AT
+    )
+    expect(publishCredits).toHaveBeenCalledWith(
+      'acct-biz',
+      expect.objectContaining({
+        planType: 'business',
+        credits: { unlimited: false, balance: null },
+        creditLimit: expect.objectContaining({ used: 100, limit: 8000 })
+      }),
+      READ_AT
+    )
+  })
+
+  it('a later push keeps the full read’s date — the allowance on it is that read’s copy', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }), {}, READ_AT)
+    publishCredits.mockClear()
+    // What Codex sends on a live turn: the previous allowance, copied forward.
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }))
+    limits.record('acct-biz', noWindows())
+    expect(publishCredits).toHaveBeenCalledTimes(2)
+    for (const call of publishCredits.mock.calls) expect(call[2]).toBe(READ_AT)
+  })
+
+  it('relays nothing from pushes alone — nothing here could date them', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }))
+    expect(publishCredits).not.toHaveBeenCalled()
+  })
+
+  it('a full read sweep dates the credits with its own instant', async () => {
+    const { store: limits, publishCredits } = store({
+      accounts: async () => [{ id: 'acct-biz' }],
+      read: (async () =>
+        new Map([
+          ['acct-biz', response(noWindows({ individualLimit: allowance }))]
+        ])) as unknown as ChatgptRateLimitDeps['read']
+    })
+    await limits.refresh()
+    // `now()` of the fixture deps.
+    expect(publishCredits).toHaveBeenCalledWith('acct-biz', expect.anything(), 1_700_000_000_000)
+  })
+
+  it('relays nothing for an account with neither', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-a', snapshot(), {}, READ_AT)
+    expect(publishCredits).not.toHaveBeenCalled()
   })
 })

@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AccountInfo, AccountUsage, ChatgptRateLimits } from '../../../shared/types'
 type RemoteLimitRow = import('../../../core/services/db').RemoteLimitRow
+type RemoteCreditRow = import('../../../core/services/db').RemoteCreditRow
 
 const {
   mockFetch,
@@ -37,6 +38,7 @@ const {
   mockUpdateAccountIdentity,
   mockResolveDirIdentity,
   mockListRemoteLimits,
+  mockListRemoteCredits,
   mockLatestAccountLabels,
   mockListRemoteDevices
 } = vi.hoisted(() => ({
@@ -54,6 +56,7 @@ const {
   mockUpdateAccountIdentity: vi.fn(),
   mockResolveDirIdentity: vi.fn(),
   mockListRemoteLimits: vi.fn(),
+  mockListRemoteCredits: vi.fn(),
   mockLatestAccountLabels: vi.fn(),
   mockListRemoteDevices: vi.fn()
 }))
@@ -78,6 +81,7 @@ vi.mock('../../../core/services/db', () => ({
   latestWindowSamples: mockLatestWindowSamples,
   updateAccountIdentity: mockUpdateAccountIdentity,
   listRemoteLimits: mockListRemoteLimits,
+  listRemoteCredits: mockListRemoteCredits,
   latestAccountLabels: mockLatestAccountLabels,
   listRemoteDevices: mockListRemoteDevices
 }))
@@ -194,6 +198,7 @@ beforeEach(async () => {
   mockResolveDirIdentity.mockResolvedValue({ error: 'unavailable', detail: 'not stubbed' })
   // No hub by default, so every case above reads exactly as it did pre-S5c.
   mockListRemoteLimits.mockReturnValue([])
+  mockListRemoteCredits.mockReturnValue([])
   mockLatestAccountLabels.mockReturnValue(new Map())
   mockListRemoteDevices.mockReturnValue([])
 })
@@ -977,6 +982,85 @@ describe('a relayed limit reading', () => {
   it('adds nothing at all when no machine has relayed anything', async () => {
     const limits = await readAccountLimits({})
     expect(limits.every((l) => l.source === 'local')).toBe(true)
+  })
+
+  /**
+   * The credits relay (ADR-072 §4, amended 2026-10-01). A ChatGPT business
+   * workspace reports no window, so before credits travelled the relay never
+   * mentioned it and this machine showed nothing for the account.
+   */
+  describe('with credits', () => {
+    const BUSINESS = 'chatgpt:ws-b:user-b'
+    function remoteCredit(over: Partial<RemoteCreditRow> = {}): RemoteCreditRow {
+      return {
+        accountKey: BUSINESS,
+        deviceId: PEER,
+        labelMasked: 'm•••@e•••.test',
+        vendorId: 'openai',
+        plan: 'business',
+        credits: { unlimited: false, balance: null },
+        allowance: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null },
+        observedAt: 1_700_000_200_000,
+        ...over
+      }
+    }
+
+    it('makes a row of an account that has credits and no window', async () => {
+      mockListRemoteCredits.mockReturnValue([remoteCredit()])
+
+      const relayed = (await readAccountLimits({})).find((l) => l.accountKey === BUSINESS)!
+
+      expect(relayed).toMatchObject({
+        vendorId: 'openai',
+        plan: 'business',
+        windows: [],
+        credits: { unlimited: false, balance: null },
+        creditLimit: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null },
+        label: 'm•••@e•••.test',
+        labelMasked: true,
+        observedAt: 1_700_000_200_000,
+        state: 'ok'
+      })
+      expect(relayed.source).toEqual({ deviceId: PEER, deviceName: PEER })
+    })
+
+    it('joins the credits to the same account’s windows, each keeping its own source', async () => {
+      // The two relays are separate: here the window came from one machine and
+      // the credits, later, from another.
+      mockListRemoteLimits.mockReturnValue([remoteLimit({ accountKey: BUSINESS })])
+      mockListRemoteCredits.mockReturnValue([remoteCredit({ deviceId: 'dev-other' })])
+
+      const rows = (await readAccountLimits({})).filter((l) => l.accountKey === BUSINESS)
+
+      expect(rows).toHaveLength(1)
+      expect(rows[0].windows.map((w) => w.kind)).toEqual(['7d'])
+      expect(rows[0].creditLimit).toMatchObject({ used: 100 })
+      // The row describes its WINDOWS…
+      expect(rows[0].observedAt).toBe(1_700_000_100_000)
+      expect(rows[0].source).toEqual({ deviceId: PEER, deviceName: PEER })
+      // …and the credit describes itself.
+      expect(rows[0].creditObservedAt).toBe(1_700_000_200_000)
+      expect(rows[0].creditSource).toEqual({ deviceId: 'dev-other', deviceName: 'dev-other' })
+    })
+
+    it('carries only the half the reading had', async () => {
+      mockListRemoteCredits.mockReturnValue([remoteCredit({ allowance: null })])
+      const relayed = (await readAccountLimits({})).find((l) => l.accountKey === BUSINESS)!
+      expect(relayed.credits).toEqual({ unlimited: false, balance: null })
+      expect(relayed.creditLimit).toBeUndefined()
+    })
+
+    it('never displaces a key this machine reads, nor relays the shared unknown key', async () => {
+      mockListRemoteCredits.mockReturnValue([
+        remoteCredit({ accountKey: ACTIVE_KEY }),
+        remoteCredit({ accountKey: 'unknown' })
+      ])
+      const limits = await readAccountLimits({})
+      expect(limits.filter((l) => l.accountKey === ACTIVE_KEY).map((l) => l.source)).toEqual([
+        'local'
+      ])
+      expect(limits.some((l) => l.accountKey === 'unknown')).toBe(false)
+    })
   })
 })
 

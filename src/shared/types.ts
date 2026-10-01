@@ -3210,8 +3210,20 @@ export interface AccountLimits {
   plan: string | null
   windows: AccountLimitWindow[]
   credits?: { unlimited: boolean; balance: string | null }
-  /** Local readings only: the hub relays sampled windows, and this is not one. */
+  /**
+   * Local, or relayed through the hub's credits relay (ADR-072 §4, amended
+   * 2026-10-01) for an account only another machine reads.
+   */
   creditLimit?: CreditLimit
+  /**
+   * For a RELAYED credit reading only: which machine took it, and when. The
+   * credits relay is separate from the window relay, so on a row that has both
+   * they can come from different machines at different times, and the tag beside
+   * each meter has to describe the reading it sits beside. {@link source} and
+   * {@link observedAt} describe the windows when there are any.
+   */
+  creditSource?: { deviceId: string; deviceName: string }
+  creditObservedAt?: number
   observedAt: number
   /**
    * Where the reading came from — ADR-072 relays readings from other machines.
