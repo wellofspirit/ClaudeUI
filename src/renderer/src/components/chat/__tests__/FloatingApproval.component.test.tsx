@@ -438,6 +438,24 @@ describe('FloatingApproval rendered component', () => {
     expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
   })
 
+  it("F4 (ADR-088): a pi child's card names the agent; an own-session card has no agent line", () => {
+    setup({
+      toolName: 'bash',
+      input: { command: 'npm run build' },
+      agent: { agentId: 'a-1', label: 'Tidy the build', subagentType: 'general-purpose' }
+    })
+    render(<FloatingApproval />)
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent(
+      'Agent Tidy the build (general-purpose)'
+    )
+  })
+
+  it('F4: no agent line without an agent', () => {
+    setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+    render(<FloatingApproval />)
+    expect(screen.queryByTestId('ApprovalCardView.agent')).toBeNull()
+  })
+
   it('every summary branch carries the same testid', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })

@@ -122,6 +122,31 @@ describe('loadPiAgentRegistry', () => {
     ])
   })
 
+  it('F7: a project definition replacing a BUILT-IN type is noted (file named) and listed as (project)', () => {
+    const root = mkdir(path.join(base, 'repo-f7'))
+    mkdir(path.join(root, '.git'))
+    const file = write(
+      path.join(root, '.pi', 'agents', 'gp.md'),
+      agentMd('name: general-purpose\ndescription: the repo version')
+    )
+    write(
+      path.join(root, '.pi', 'agents', 'mine.md'),
+      agentMd('name: mine\ndescription: a new type')
+    )
+    const reg = loadPiAgentRegistry({ cwd: root, userAgentsDir: emptyUserDir() })
+    expect(reg.resolve('general-purpose')).toMatchObject({
+      source: 'project',
+      overridesBuiltin: true
+    })
+    expect(reg.resolve('mine')?.overridesBuiltin).toBeUndefined()
+    expect(reg.diagnostics).toEqual([
+      `project agent ${file} overrides the built-in "general-purpose"`
+    ])
+    const listing = renderAgentListing(reg)
+    expect(listing).toContain('- general-purpose (project): the repo version')
+    expect(listing).toContain('- mine: a new type')
+  })
+
   it('a .git FILE marks the project root: no .pi/agents above it is read', () => {
     write(
       path.join(base, '.pi', 'agents', 'outside.md'),

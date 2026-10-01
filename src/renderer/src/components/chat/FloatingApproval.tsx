@@ -126,6 +126,14 @@ export function ApprovalCardView({
             {toolName}
           </span>
         </div>
+        {approval.agent && (
+          <p
+            data-testid="ApprovalCardView.agent"
+            className="text-[11px] text-text-secondary mb-2 leading-relaxed"
+          >
+            Agent {approval.agent.label} ({approval.agent.subagentType})
+          </p>
+        )}
         {approval.decisionReason && (
           <p
             data-testid="ApprovalCardView.reason"

@@ -6260,6 +6260,75 @@ describe('PiSession — host-run subagents (ADR-088)', () => {
     session.dispose()
   })
 
+  it('F3: an async failure of our woken delivery (runtime send_message error) undoes the wake; without one pending it is an ordinary error', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-f3', win)
+    settleParent()
+    const runtimeError = {
+      type: 'extension_error',
+      extensionPath: '<runtime>',
+      event: 'send_message',
+      error: 'boom'
+    } as PiEvent
+    mockRequest.mockImplementation((cmd: { type: string; message?: string }) => {
+      if (cmd.type === 'prompt' && String(cmd.message).startsWith('/cui-deliver ')) {
+        // The command was accepted; pi's async sendMessage then fails.
+        return Promise.resolve({ type: 'response', command: 'prompt', success: true }).then(
+          (resp) => {
+            queueMicrotask(() => lastEventHandler()(runtimeError))
+            return resp
+          }
+        )
+      }
+      return defaultRequestImpl(cmd)
+    })
+    session.deliverAgentMessage(payload())
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    expect(sentPayloads(win, 'session:error')).toEqual([])
+
+    lastEventHandler()(runtimeError)
+    expect(sentPayloads(win, 'session:error')).toEqual(['boom'])
+    expect(session.status.state).toBe('idle')
+    session.dispose()
+  })
+
+  it("F4: a child's approval card names the agent whose action it is", async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-f4', win)
+    const { result, child } = await launch(kids, 'call-f4')
+    const asked = child.opts.gateHandler({
+      toolCallId: 'f4-bash',
+      toolName: 'bash',
+      input: { command: 'npm run build' }
+    })
+    const card = await cardFor(win, 'f4-bash')
+    expect(card).toMatchObject({
+      agent: {
+        agentId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        label: 'Tidy the build',
+        subagentType: 'general-purpose'
+      }
+    })
+    // The session's own cards carry none.
+    const own = gate('own-f4', 'bash', { command: 'npm run build' })
+    expect('agent' in (await cardFor(win, 'own-f4'))).toBe(false)
+    session.resolveApproval(card.requestId, 'deny')
+    await asked
+    child.push({ type: 'agent_settled' })
+    await result
+    session.cancel()
+    await own
+  })
+
+  it('F9: run() refuses every /cui- command, not only /cui-deliver', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-f9', win as never, '/cwd', {})
+    await session.run('/cui-plan-exit')
+    expect(mockRequest).not.toHaveBeenCalled()
+    expect(sentPayloads(win, 'session:error')).toEqual(['That command is reserved for ClaudeUI.'])
+  })
+
   it('B10: a delivery to a session with no pi process sends nothing and spawns nothing', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-s3-b10', win as never, '/cwd', {})

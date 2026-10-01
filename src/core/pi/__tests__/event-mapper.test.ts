@@ -1620,3 +1620,21 @@ describe('mapPiEvent — a cui-deliver extension_error (ADR-088 S3 review M-2)',
     ).toEqual([{ kind: 'error', message: 'x' }])
   })
 })
+
+describe('mapPiEvent — a runtime send_message extension_error (ADR-088 review F3)', () => {
+  it('maps to send_message_error; any other runtime extension error stays an error', () => {
+    const state = createPiMapperState()
+    expect(
+      mapPiEvent(
+        { type: 'extension_error', extensionPath: '<runtime>', event: 'send_message', error: 'x' },
+        state
+      )
+    ).toEqual([{ kind: 'send_message_error', message: 'x' }])
+    expect(
+      mapPiEvent(
+        { type: 'extension_error', extensionPath: '<runtime>', event: 'tool_call', error: 'y' },
+        state
+      )
+    ).toEqual([{ kind: 'error', message: 'y' }])
+  })
+})

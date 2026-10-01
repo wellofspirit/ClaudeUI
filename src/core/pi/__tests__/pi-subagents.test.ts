@@ -185,6 +185,7 @@ function parentScope(depth: number): PiChildScope {
     definition: def,
     description: '',
     prompt: '',
+    label: 'parent',
     runner: () => null,
     outcomes: new Map(),
     denials: new AutoModeDenialTracker(),
@@ -1829,5 +1830,132 @@ describe('PiSubagentManager — S3b review round 1', () => {
     releaseSpawn()
     await starting
     await settle(fake.children[1])
+  })
+})
+
+describe('PiSubagentManager — Fable arc review', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+
+  it('F1: a grant minted in run 1 is not consumable in the resumed run 2 (no spawn, no gate call)', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const first = fake.children[0]
+    await promptedWith(first)
+    const input = { description: 'g', prompt: 'q' }
+    expect(await first.opts.gateHandler({ toolCallId: 'pre', toolName: 'agent', input })).toEqual({
+      behavior: 'allow'
+    })
+    // Stopped by an agent (resumable), never consumed.
+    expect(mgr.taskStop({ task_id: 'lead' }, null).content[0].text).toBe('Stopped agent lead.')
+    first.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+
+    await mgr.sendMessage({ to: 'lead', message: 'continue' }, null)
+    expect(fake.children).toHaveLength(2)
+    const second = fake.children[1]
+    const gateCalls = vi.mocked(host.gateChild).mock.calls.length
+    expect(
+      await second.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'pre' })
+    ).toEqual({
+      content: [{ type: 'text', text: 'hosted tool call was not approved through the tool gate' }],
+      isError: true
+    })
+    expect(fake.children).toHaveLength(2)
+    expect(vi.mocked(host.gateChild).mock.calls.length).toBe(gateCalls)
+    second.push({ type: 'agent_start' })
+    second.push(deliveredEvent(deliveriesOn(second)[0]))
+    second.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+  })
+
+  it('F2: a child stopped while it is still spawning gets no prompt and no abort, and ends stopped', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    let release: () => void = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    const mgr = new PiSubagentManager(host, {
+      spawn: async (o) => {
+        await held
+        return fake.spawn(o)
+      },
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', run_in_background: false },
+      'call-x',
+      null
+    )
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mgr.stop('call-x', 'user')).toBe(true)
+    release()
+    expect(await pending).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: 'Agent stopped by user.' }]
+    })
+    const types = fake.children[0].commands().map((c) => c.type)
+    expect(types).not.toContain('prompt')
+    expect(types).not.toContain('abort')
+  })
+
+  it('F5: a model-authored label is one line, without quotes or markup, at most 64 characters', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const description = `Fix "x" <b>now</b>\nsecond line ${'y'.repeat(80)}`
+    await mgr.run({ description, prompt: 'p' }, 'call-l', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const label = mgr.record(agentIdOf(fake.children[0]))!.label
+    expect(label.length).toBeLessThanOrEqual(64)
+    expect(label).not.toMatch(/["<>\n]/)
+    expect(delivered[0].title).toBe(`Agent "${label}" completed`)
+  })
+
+  it('F8: every launch rewrites the prompt file from the definition; an adopted record recovers its task', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const first = fake.children[0]
+    await settle(first)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const promptFile = path.join(root, agentIdOf(first), 'system-prompt.md')
+    fs.writeFileSync(promptFile, 'tampered', 'utf-8')
+    await mgr.sendMessage({ to: 'worker', message: 'again' }, null)
+    expect(fs.readFileSync(promptFile, 'utf-8')).toBe(
+      `${builtins().resolve('general-purpose')!.prompt}\n\n${PI_SUBAGENT_SUFFIX}`
+    )
+    const second = fake.children[1]
+    second.push({ type: 'agent_start' })
+    second.push(deliveredEvent(deliveriesOn(second)[0]))
+    second.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+
+    const id = '99999999-9999-4999-8999-999999999999'
+    mgr.adoptRecord({
+      agentId: id,
+      originToolUseId: 'old',
+      subagentType: 'general-purpose',
+      description: 'Old task',
+      prompt: 'THE ORIGINAL TASK',
+      status: 'completed'
+    })
+    expect(mgr.record(id)!.scope).toMatchObject({
+      prompt: 'THE ORIGINAL TASK',
+      description: 'Old task'
+    })
   })
 })

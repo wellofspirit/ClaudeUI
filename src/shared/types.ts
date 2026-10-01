@@ -498,6 +498,13 @@ export interface PendingApproval {
    * evaluates child asks against the parent's rules on this marker.
    */
   subagent?: { sessionId: string; parentToolUseId: string }
+  /**
+   * pi only (ADR-088): set on a host-run child's ask — WHICH agent proposes the
+   * action, so the card can say so (the label is the agent's name, else its
+   * task description, sanitized). An "allow for this session" on such a card
+   * still allows for the whole session, children included (Claude Code parity).
+   */
+  agent?: { agentId: string; label: string; subagentType: string }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string

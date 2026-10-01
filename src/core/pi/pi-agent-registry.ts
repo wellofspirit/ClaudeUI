@@ -36,6 +36,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import { logger } from '../services/logger'
 import { piAgentDir } from '../services/pi-session-list'
 
 export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -61,6 +62,12 @@ export interface PiAgentDefinition {
   background?: boolean
   /** False for Explore/Plan: they never get the `agent` tool. */
   canSpawn: boolean
+  /**
+   * A project `.pi/agents` file that replaced a BUILT-IN type (e.g. a repo's
+   * own `general-purpose`): the listing marks it `(project)` so the model
+   * and the user can tell (ADR-088 review F7).
+   */
+  overridesBuiltin?: boolean
 }
 
 export interface PiAgentRegistry {
@@ -421,7 +428,23 @@ export function loadPiAgentRegistry(opts: {
   const byName = new Map<string, PiAgentDefinition>()
   for (const def of BUILTIN_AGENTS) byName.set(normalizeAgentName(def.name), def)
   const put = (defs: PiAgentDefinition[]): void => {
-    for (const def of defs) byName.set(normalizeAgentName(def.name), def)
+    for (const def of defs) {
+      const key = normalizeAgentName(def.name)
+      const replaced = byName.get(key)
+      if (
+        def.source === 'project' &&
+        (replaced?.source === 'builtin' || replaced?.overridesBuiltin)
+      ) {
+        // A repo can redefine a built-in type under the same name. Allowed
+        // (the nearer definition wins), but said, with the file that did it.
+        const note = `project agent ${def.filePath ?? '(unknown file)'} overrides the built-in "${replaced.name}"`
+        diagnostics.push(note)
+        logger.info('PiAgentRegistry', note)
+        byName.set(key, { ...def, overridesBuiltin: true })
+        continue
+      }
+      byName.set(key, def)
+    }
   }
 
   // The same dir the retired M5b extension read, so existing definitions keep
@@ -497,7 +520,8 @@ export function renderAgentListing(
       def.description.length > DESCRIPTION_LISTING_MAX
         ? def.description.slice(0, DESCRIPTION_LISTING_MAX - 1) + '…'
         : def.description
-    return `- ${def.name}: ${desc} (Tools: ${toolsLabel(def)})`
+    const origin = def.overridesBuiltin ? ' (project)' : ''
+    return `- ${def.name}${origin}: ${desc} (Tools: ${toolsLabel(def)})`
   })
   const kept: string[] = []
   let len = 0

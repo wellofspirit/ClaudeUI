@@ -154,6 +154,13 @@ export type PiMapperOutput =
   | { kind: 'agent_delivery'; deliveryId: string }
   /** The bridge's `cui-deliver` handler refused a payload (pi reports it as an extension error; the ack still succeeds, P-S4). */
   | { kind: 'delivery_error'; message: string }
+  /**
+   * An extension's `pi.sendMessage` failed ASYNCHRONOUSLY: pi catches it and
+   * reports `extension_error` from `<runtime>` / `send_message`
+   * (agent-session.ts bindCore). Ours (a delivery) or another extension's —
+   * the consumer decides by whether a delivery of its own is pending.
+   */
+  | { kind: 'send_message_error'; message: string }
   | { kind: 'ignore' }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +505,10 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       // ran, and the host undoes what it set up for one (ADR-088 S3).
       if (extensionPath === 'command:cui-deliver')
         return [{ kind: 'delivery_error', message: error }]
+      const { event } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      if (extensionPath === '<runtime>' && event === 'send_message') {
+        return [{ kind: 'send_message_error', message: error }]
+      }
       return [{ kind: 'error', message: error }]
     }
 

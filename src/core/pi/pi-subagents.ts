@@ -56,7 +56,12 @@ import {
   type PiAgentDefinition,
   type PiAgentRegistry
 } from './pi-agent-registry'
-import { defaultSpawnPiChild, PiChildRunner, type SpawnPiChildFn } from './pi-child-runner'
+import {
+  defaultSpawnPiChild,
+  PiChildRunner,
+  type PiTurnOutcome,
+  type SpawnPiChildFn
+} from './pi-child-runner'
 import { piUsageEvent } from './usage-row'
 import { isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
@@ -116,6 +121,8 @@ export interface PiChildScope {
   definition: PiAgentDefinition
   description: string
   prompt: string
+  /** The agent's display label (sanitized; its approval cards name it — review F4). */
+  label: string
   runner: () => PiChildRunner | null
   /** The child's own ground-truth outcomes and denial caps (the judge's per-agent state). */
   outcomes: Map<string, ToolOutcome>
@@ -271,15 +278,17 @@ export interface PiAgentRecord {
   trajectory: Map<string, ChatMessage>
 }
 
+/**
+ * One RUN of an agent (per launch). Everything here dies with the run; the
+ * agent's lasting state (label, mode, run index, trajectory) is on `record`,
+ * and per-run gate state on the reused scope (`stopped`, `grants`) is reset at
+ * every run start and end (ADR-088 review F1).
+ */
 interface LiveChild {
   record: PiAgentRecord
   scope: PiChildScope
   runner: PiChildRunner | null
   parentToolUseId: string | null
-  label: string
-  /** A background run returned at launch and notifies its owner when it ends (ADR-088 S3). */
-  background: boolean
-  runIndex: number
   startedAt: number
   stopReason: PiStopReason | null
   /**
@@ -407,6 +416,12 @@ export function taskNotificationText(opts: {
 /** An attribute value for `<agent-message …>`: no quotes, angle brackets or line breaks. */
 const attr = (v: string): string => v.replace(/["<>\r\n]/g, ' ')
 
+/**
+ * An agent's label as delivered titles and summaries show it: a model-authored
+ * description can carry quotes, markup or line breaks (ADR-088 review F5).
+ */
+const cleanLabel = (v: string): string => attr(v).trim().slice(0, 64) || 'agent'
+
 /** The model-facing text of a `send_message` delivery (G3). The message is data inside it, never a prompt. */
 export function agentMessageText(opts: {
   fromLabel: string
@@ -464,7 +479,7 @@ export class PiSubagentManager {
   /** How many BACKGROUND children are live (all depths) — the parent's idle timer waits for them. */
   get liveBackgroundCount(): number {
     let n = 0
-    for (const entry of this.live.values()) if (entry.background) n++
+    for (const entry of this.live.values()) if (entry.record.background) n++
     return n
   }
 
@@ -535,18 +550,8 @@ export class PiSubagentManager {
     // ── Session dir + appended system prompt ──────────────────────────────
     const agentId = uuidv4()
     const dir = join(this.sessionsRoot, agentId)
+    // Written by launch() from the definition, at every run (F8).
     const promptFile = join(dir, 'system-prompt.md')
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
-      writeFileSync(promptFile, `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}`, {
-        encoding: 'utf-8',
-        mode: 0o600
-      })
-    } catch (err) {
-      return errorResult(
-        `Failed to start the agent: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
 
     // Model: the call's > the definition's > the parent's live model (Q9: any
     // model pi's set_model accepts; a refusal comes back as pi's message).
@@ -616,12 +621,8 @@ export class PiSubagentManager {
     entry.onDetach = null
     const end = first
     logger.info('PiSubagents', `agent ${agentId} ${end.status}`)
-    const text =
-      end.status === 'completed'
-        ? `${safeForegroundReport(end.report ?? '')}\n\n${continueLine(agentId, handle)}\n${usageBlock(end.usage)}`
-        : end.text
     return {
-      content: [{ type: 'text', text }],
+      content: [{ type: 'text', text: end.text }],
       ...(end.status === 'completed' ? {} : { isError: true }),
       details: {
         cuiAgent: {
@@ -678,14 +679,14 @@ export class PiSubagentManager {
       agentId: opts.agentId,
       originToolUseId: opts.originToolUseId,
       name: opts.name,
-      label: opts.label,
+      label: cleanLabel(opts.label),
       definition: opts.definition,
       subagentType: opts.subagentType,
       model: opts.model,
       depth: opts.depth,
       spawnerAgentId: opts.spawnerAgentId,
       spawnerToolUseId: opts.spawnerToolUseId,
-      spawnerLabel: opts.spawnerLabel,
+      spawnerLabel: opts.spawnerLabel === null ? null : cleanLabel(opts.spawnerLabel),
       canSpawn: opts.canSpawn,
       background: opts.background,
       runIndex: opts.runIndex ?? 0,
@@ -701,6 +702,7 @@ export class PiSubagentManager {
         definition: opts.definition ?? ({ name: opts.subagentType } as PiAgentDefinition),
         description: opts.description,
         prompt: opts.prompt,
+        label: cleanLabel(opts.label),
         runner: () => this.live.get(opts.originToolUseId)?.runner ?? null,
         outcomes: new Map(),
         denials: new AutoModeDenialTracker(),
@@ -728,6 +730,22 @@ export class PiSubagentManager {
       return { ok: false, error: `The agent type "${record.subagentType}" is no longer available.` }
     const toolUseId = record.originToolUseId
     const scope = record.scope
+    // F8: the prompt file always matches the definition the flags come from.
+    try {
+      mkdirSync(record.dir, { recursive: true, mode: 0o700 })
+      writeFileSync(record.promptFile, `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}`, {
+        encoding: 'utf-8',
+        mode: 0o600
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to start the agent: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+    // F1: a run starts with no grants. One minted in an earlier run (and never
+    // consumed) must not execute in this one with no gate call.
+    scope.grants.clear()
     scope.stopped = false
     record.runIndex += 1
     record.background = background
@@ -738,9 +756,6 @@ export class PiSubagentManager {
       scope,
       runner: null,
       parentToolUseId: record.spawnerToolUseId,
-      label: record.label,
-      background,
-      runIndex: record.runIndex,
       startedAt: this.now(),
       stopReason: null,
       closing: false,
@@ -819,14 +834,14 @@ export class PiSubagentManager {
       toolUseId,
       taskId: record.agentId,
       taskType: 'local_agent',
-      runIndex: entry.runIndex,
+      runIndex: record.runIndex,
       startedAt: entry.startedAt,
       // Q7: a foreground run says so, so its card can offer "Send to background".
       isBackgrounded: background
     })
     logger.info(
       'PiSubagents',
-      `agent ${record.agentId} run ${entry.runIndex} started (${definition.name}, depth ${record.depth}, model ${record.model}${background ? ', background' : ''}${start.kind === 'delivery' ? ', resumed' : ''})`
+      `agent ${record.agentId} run ${record.runIndex} started (${definition.name}, depth ${record.depth}, model ${record.model}${background ? ', background' : ''}${start.kind === 'delivery' ? ', resumed' : ''})`
     )
     return { ok: true, entry }
   }
@@ -870,14 +885,17 @@ export class PiSubagentManager {
       const stopped = new Promise<'stopped'>((resolve) => {
         entry.onStopped = () => resolve('stopped')
       })
-      // A stop that landed while the child was still starting.
-      if (entry.stopReason) void this.abort(entry)
+      // A stop that landed while the child was still starting (F2): nothing
+      // has been sent, so nothing is — no prompt, no abort; the run is stopped.
       // A resume starts from a HOST-BUILT message (never text through runTurn).
-      const first =
-        start.kind === 'prompt'
-          ? runner.runTurn(start.prompt)
-          : runner.resumeWithDelivery(start.payload)
-      let outcome = await Promise.race([first, stopped])
+      let outcome: PiTurnOutcome | 'stopped' = entry.stopReason
+        ? 'stopped'
+        : await Promise.race([
+            start.kind === 'prompt'
+              ? runner.runTurn(start.prompt)
+              : runner.resumeWithDelivery(start.payload),
+            stopped
+          ])
       while (
         outcome !== 'stopped' &&
         outcome.kind === 'ok' &&
@@ -915,7 +933,9 @@ export class PiSubagentManager {
         const report = (await runner.lastAssistantText()) ?? '(the agent returned no text)'
         end = {
           status: 'completed',
-          text: `${safeForegroundReport(report)}\n\n${usageBlock(usage)}`,
+          text:
+            `${safeForegroundReport(report)}\n\n` +
+            `${continueLine(record.agentId, record.name || record.agentId)}\n${usageBlock(usage)}`,
           report,
           usage
         }
@@ -934,6 +954,8 @@ export class PiSubagentManager {
       record.status = end.status
       // Only a run that actually ended stopped was stopped (review R1).
       record.stoppedBy = end.status === 'stopped' ? entry.stopReason : null
+      // F1: whatever the run was granted dies with it.
+      scope.grants.clear()
       // C10 ordering: the notification goes out BEFORE the hosted tool
       // returns (foreground) and before the model delivery (background), so
       // the reducer has dropped this `local_agent` before the turn that
@@ -945,7 +967,7 @@ export class PiSubagentManager {
         outputFile: '',
         summary: end.text.slice(0, 100),
         usage: end.usage,
-        runIndex: entry.runIndex
+        runIndex: record.runIndex
       })
       try {
         runner.flush()
@@ -955,7 +977,7 @@ export class PiSubagentManager {
       }
       scope.stopped = true
       this.live.delete(scope.toolUseId)
-      if (entry.background) this.host.backgroundWorkChanged()
+      if (record.background) this.host.backgroundWorkChanged()
     }
     return end
   }
@@ -970,7 +992,7 @@ export class PiSubagentManager {
    * then names the spawner, so the root can tell it never launched that id.
    */
   private async notify(entry: LiveChild, end: RunEnd): Promise<void> {
-    if (!entry.background || entry.stopReason === 'dispose') return
+    if (!entry.record.background || entry.stopReason === 'dispose') return
     const spawnerRunner = entry.parentToolUseId ? this.liveRunner(entry.parentToolUseId) : null
     const via =
       entry.parentToolUseId && !spawnerRunner
@@ -982,7 +1004,7 @@ export class PiSubagentManager {
         : end.status === 'failed'
           ? `failed: ${firstLine(end.report ?? '')}`
           : `was stopped${entry.stopReason === 'user' ? ' by the user' : ''}`
-    const summary = `Agent "${entry.label}" ${verb}${via}`
+    const summary = `Agent "${entry.record.label}" ${verb}${via}`
     const payload: PiAgentDelivery = {
       v: 1,
       deliveryId: uuidv4(),
@@ -996,14 +1018,14 @@ export class PiSubagentManager {
         usage: end.usage
       }),
       wake: end.status !== 'stopped',
-      title: `Agent "${entry.label}" ${end.status === 'stopped' ? 'was stopped' : end.status}`,
+      title: `Agent "${entry.record.label}" ${end.status === 'stopped' ? 'was stopped' : end.status}`,
       details: {
         agentId: entry.scope.agentId,
         toolUseId: entry.scope.toolUseId,
         status: end.status,
         usage: end.usage,
         summary,
-        runIndex: entry.runIndex,
+        runIndex: entry.record.runIndex,
         ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {})
       }
     }
@@ -1089,7 +1111,7 @@ export class PiSubagentManager {
         )
       }
       const live = this.live.get(caller.toolUseId)
-      if (!live || !live.background) {
+      if (!live || !live.record.background) {
         return errorResult(
           'You are running in the foreground; your final report is returned to the agent that launched you.'
         )
@@ -1212,16 +1234,15 @@ export class PiSubagentManager {
    */
   background(toolUseId: string): { success: boolean; error?: string } {
     const entry = this.live.get(toolUseId)
-    if (!entry || entry.background || entry.stopReason || entry.closing || !entry.onDetach) {
+    if (!entry || entry.record.background || entry.stopReason || entry.closing || !entry.onDetach) {
       return { success: false, error: 'No foreground agent is running for that card' }
     }
-    entry.background = true
     entry.record.background = true
     this.host.send('session:task-started', {
       toolUseId,
       taskId: entry.record.agentId,
       taskType: 'local_agent',
-      runIndex: entry.runIndex,
+      runIndex: entry.record.runIndex,
       startedAt: entry.startedAt,
       isBackgrounded: true
     })
@@ -1266,7 +1287,7 @@ export class PiSubagentManager {
       dir,
       promptFile: join(dir, 'system-prompt.md'),
       description: link.description ?? '',
-      prompt: '',
+      prompt: link.prompt ?? '',
       runIndex: 1,
       status,
       stoppedBy: link.stoppedBy ?? null
@@ -1290,7 +1311,9 @@ export class PiSubagentManager {
    */
   stopForeground(reason: 'interrupt'): void {
     for (const [id, entry] of [...this.live]) {
-      if (entry.parentToolUseId === null && !entry.background) this.stopWith(id, reason, true)
+      if (entry.parentToolUseId === null && !entry.record.background) {
+        this.stopWith(id, reason, true)
+      }
     }
   }
 
@@ -1309,11 +1332,13 @@ export class PiSubagentManager {
     // Descendants first: a grandchild's own run must not outlive its parent's.
     for (const [id, other] of [...this.live]) {
       if (other.parentToolUseId !== toolUseId) continue
-      if (foregroundOnly && other.background) continue
+      if (foregroundOnly && other.record.background) continue
       this.stopWith(id, reason, foregroundOnly)
     }
     entry.stopReason = reason
     entry.scope.stopped = true
+    // F1: no grant of a stopped run may execute (now or in a later run).
+    entry.scope.grants.clear()
     // Its open approval cards can no longer be usefully answered.
     this.host.retractChildGates(entry.scope)
     // Before the runner exists, `drive` aborts as soon as it has one.

@@ -57,7 +57,7 @@ import { piUsageEvent } from './usage-row'
 // owns their gating (decideToolCall, parametrized by the child scope).
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
-import { deliveryCommand, PI_DELIVER_COMMAND, type PiAgentDelivery } from './pi-delivery'
+import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -1247,10 +1247,12 @@ export class PiSession extends BaseSession {
   }
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
-    // The bridge's delivery command is ClaudeUI's alone (ADR-088 S3): a typed
-    // `/cui-deliver …` would mint a row marked as an agent's message. Refused
-    // before anything else, so nothing is sent and no state moves.
-    if (prompt !== null && prompt.trimStart().startsWith(PI_DELIVER_COMMAND)) {
+    // The bridge's commands are ClaudeUI's alone (ADR-088 S3): a typed
+    // `/cui-deliver …` would mint a row marked as an agent's message, and the
+    // plan commands are PiSession's own toggle channel (it sends them itself,
+    // not through run()). Every `/cui-` start is refused before anything else,
+    // so nothing is sent and no state moves.
+    if (prompt !== null && isReservedPiCommandText(prompt)) {
       this.send('session:error', 'That command is reserved for ClaudeUI.')
       // A queued copy is dropped after this one refusal (M-3): left queued, it
       // would be retried — and refused again — at every boundary.
@@ -1617,6 +1619,18 @@ export class PiSession extends BaseSession {
         // woken delivery must not leave the session reading "running".
         logger.warn('PiSession', 'pi refused an agent delivery (cui-deliver failed)')
         if (this.wakePending) this.undoWake()
+        break
+
+      case 'send_message_error':
+        // An extension's sendMessage failed asynchronously (review F3). While
+        // our woken delivery is pending it is that one: undo the wake. Any
+        // other extension's failure stays an ordinary error and undoes nothing.
+        if (this.wakePending) {
+          logger.warn('PiSession', 'a woken agent delivery failed inside pi')
+          this.undoWake()
+        } else {
+          this.send('session:error', output.message)
+        }
         break
 
       case 'ignore':
@@ -2071,6 +2085,16 @@ export class PiSession extends BaseSession {
         toolUseId: toolCallId,
         toolName,
         input,
+        // ADR-088 review F4: a child's card names the agent whose action it is.
+        ...(scope
+          ? {
+              agent: {
+                agentId: scope.agentId,
+                label: scope.label,
+                subagentType: scope.definition.name
+              }
+            }
+          : {}),
         ...(suggestions ? { suggestions } : {}),
         ...(decisionReason ? { decisionReason } : {})
       }

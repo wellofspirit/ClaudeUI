@@ -83,6 +83,8 @@ export interface PiAgentLinkRecord {
   subagentType: string
   name?: string
   description?: string
+  /** The `agent` call's own prompt (its tool_use input), for the judge's task header. */
+  prompt?: string
   model?: string
   background?: boolean
   /** The last task notification's status for that call, else the tool result's own. */
@@ -100,19 +102,33 @@ const STOP_REASONS = new Set(['user', 'agent', 'interrupt', 'dispose'])
  */
 export function collectAgentLinkRecords(entries: readonly PiSessionEntry[]): PiAgentLinkRecord[] {
   const byCall = new Map<string, PiAgentLinkRecord>()
+  /** Each `agent` call's own input, by call id (the call precedes its result). */
+  const callInput = new Map<string, Record<string, unknown>>()
   const s = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
   for (const e of entries) {
+    if (e.type === 'message' && e.message.role === 'assistant') {
+      for (const block of e.message.content) {
+        if (block.type === 'toolCall' && block.name === 'agent') {
+          callInput.set(block.id, (block.arguments ?? {}) as Record<string, unknown>)
+        }
+      }
+      continue
+    }
     if (e.type === 'message' && e.message.role === 'toolResult' && e.message.toolName === 'agent') {
       const cui = (e.message.details as { cuiAgent?: Record<string, unknown> } | undefined)
         ?.cuiAgent
       if (!cui || !isValidAgentId(cui.agentId) || typeof cui.subagentType !== 'string') continue
       const stoppedBy = s(cui.stoppedBy)
+      const args = callInput.get(e.message.toolCallId)
+      const description = s(cui.description) ?? s(args?.description)
+      const prompt = s(args?.prompt)
       byCall.set(e.message.toolCallId, {
         agentId: cui.agentId,
         originToolUseId: e.message.toolCallId,
         subagentType: cui.subagentType,
         ...(s(cui.name) ? { name: s(cui.name) } : {}),
-        ...(s(cui.description) ? { description: s(cui.description) } : {}),
+        ...(description ? { description } : {}),
+        ...(prompt ? { prompt } : {}),
         ...(s(cui.model) ? { model: s(cui.model) } : {}),
         background: cui.background === true,
         ...(s(cui.status) ? { status: s(cui.status) } : {}),

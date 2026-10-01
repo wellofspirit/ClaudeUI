@@ -637,7 +637,20 @@ export class PiChildRunner {
    * outputs accumulate this turn's token total; then the trajectory, the
    * `onToolResult` hook and the stream ({@link forwardPiChildStream}).
    */
-  private handleOutput(out: PiMapperOutput): void {
+  private handleOutput(output: PiMapperOutput): void {
+    let out = output
+    if (out.kind === 'send_message_error') {
+      // ADR-088 review F3: while one of our deliveries is pending this is its
+      // async failure — not the turn's. With exactly one pending it is that
+      // one (dropped, so the drive does not wait for it); otherwise it stays
+      // an ordinary extension error.
+      if (this.pendingDeliveries.size > 0) {
+        logger.warn(this.logTag, 'a pending agent delivery failed inside pi')
+        if (this.pendingDeliveries.size === 1) this.pendingDeliveries.clear()
+        return
+      }
+      out = { kind: 'error', message: out.message }
+    }
     if (out.kind === 'turn_start') {
       this.runActive = true
       return
@@ -773,6 +786,7 @@ export function forwardPiChildStream(
     case 'turn_start':
     case 'agent_delivery':
     case 'delivery_error':
+    case 'send_message_error':
     case 'bash_output':
     case 'ignore':
       break

@@ -490,6 +490,27 @@ describe('PiChildRunner deliveries (ADR-088 S3)', () => {
     expect(runner.pendingDeliveries.size).toBe(0)
   })
 
+  it('F3: a runtime send_message error while a delivery is pending drops it and does not end the turn; with none pending it is an ordinary error', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    const turn = runner.runTurn('x')
+    await runner.deliver(deliveryPayload('d-f3'))
+    const runtimeError = {
+      type: 'extension_error',
+      extensionPath: '<runtime>',
+      event: 'send_message',
+      error: 'boom'
+    }
+    child.push(runtimeError)
+    expect(runner.pendingDeliveries.size).toBe(0)
+    let settled: unknown
+    void turn.then((o) => (settled = o))
+    await tick()
+    expect(settled).toBeUndefined()
+    child.push(runtimeError)
+    await expect(turn).resolves.toEqual({ kind: 'error', message: 'boom' })
+  })
+
   it('awaitTurn sends no prompt and settles on the next agent_settled of a run pi started itself', async () => {
     const child = makeFakeChild()
     const runner = await PiChildRunner.start(runnerOpts(child))

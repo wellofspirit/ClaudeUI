@@ -6298,14 +6298,13 @@ export class CrossEngineDispatcher {
    *    park forever on a question.
    *  - default / acceptEdits: reads and searches allow; the rest asks, and the
    *    ask is forwarded to the caller.
-   *  - auto: the mode base allows HERE, because the decision was already made
-   *    natively — the thread runs `approvalsReviewer: 'auto_review'`, so the
-   *    only requests that reach this gate at all are the ones that subagent
-   *    escalated. This is the one place the target is laxer than
-   *    `CodexSession.gate`, which re-gates `auto` as `default` because an
-   *    interactive session HAS a human to escalate to. It is also why `auto`
-   *    never maps to `never`/bypass: the native reviewer, not nobody, is the
-   *    decider. A user ask rule still asks the caller's human.
+   *  - auto: gates as `default`, like `CodexSession.gate`. The thread runs
+   *    `approvalsReviewer: 'auto_review'`, so the native reviewer has already
+   *    approved everything it was willing to and the only requests that reach
+   *    this gate are the ones it ESCALATED — and escalations belong to the
+   *    caller's human, never to a silent mode-base allow. It is also why `auto`
+   *    never maps to `never`/bypass: the native reviewer, not nobody, decides
+   *    first. A user ask rule still asks the caller's human.
    *
    * `suggestions` ("always allow" checkboxes) are deliberately omitted, same as
    * the pi target: they would write allow rules to the shared permission

@@ -120,3 +120,40 @@ describe('collectAgentLinkRecords (ADR-088 S3b review R2)', () => {
     ])
   })
 })
+
+describe('collectAgentLinkRecords — the task (ADR-088 review F8)', () => {
+  it("recovers prompt and description from the parent's own agent call input", () => {
+    const call: PiSessionEntry = {
+      ...base(),
+      type: 'message',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'toolCall',
+            id: 'call-1',
+            name: 'agent',
+            arguments: { description: 'Scan the repo', prompt: 'THE TASK' }
+          }
+        ],
+        api: 'a',
+        provider: 'p',
+        model: 'm',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        stopReason: 'toolUse',
+        timestamp: 1
+      }
+    } as PiSessionEntry
+    const [link] = collectAgentLinkRecords([
+      call,
+      agentResult('call-1', { v: 1, agentId: A, subagentType: 'g', status: 'completed' })
+    ])
+    expect(link).toMatchObject({ prompt: 'THE TASK', description: 'Scan the repo' })
+  })
+})

@@ -126,8 +126,10 @@ before any path is built.
   mode re-read live, and `stillPending` false once the child is stopped or draining (→ deny "Agent
   stopped"). Everything else — judge model, transport, environment, review sender — is the parent's.
 - **Human:** `askHuman` on the parent's routing with the child's own call id; it renders as a
-  floating card (the nested block appears once the call is allowed). A reject records into the
-  child's outcomes.
+  floating card (the nested block appears once the call is allowed). The card names the agent
+  whose action it is (`PendingApproval.agent`: its label and type), so the user knows whose action
+  they approve; "allow for this session" on it still allows for the whole session, children
+  included (Claude Code parity). A reject records into the child's outcomes.
 - **Host-side spawn limits:** "cannot spawn" and the depth cap are enforced on the host, not only by
   withholding the tool: the bridge token sits in the child's env, so an approved shell command could
   POST `/tool-call` + `/hosted-tool` directly. The child gate denies `agent` for a scope that cannot
@@ -237,8 +239,20 @@ run_in_background !== false`. A background call returns once the child has start
 - **Stop and resume rules.** A run past its continuation (closing) cannot be stopped (the card's
   Stop reports a failure), and `stoppedBy` is recorded only for a run that actually ended stopped.
   An agent that may not launch agents can message running agents but not resume a finished one (a
-  resume launches a process, D4). A hosted call granted before a stop does not run after it. An
-  agent's D1 trajectory lives on its record, so a resumed run's judge sees its earlier actions.
+  resume launches a process, D4). An agent's D1 trajectory lives on its record, so a resumed
+  run's judge sees its earlier actions.
+- **Per-run state dies with the run.** A record's scope is reused across runs, but its `/hosted-tool`
+  grants and `stopped` flag are per run: cleared at every run start, at a stop and at the run's end,
+  so a call granted in one run can never execute in a later one, and a call granted before a stop
+  does not run after it. A child stopped while still spawning gets no prompt and no abort. Every
+  launch (a resume too) rewrites `system-prompt.md` from the definition its flags come from; a
+  rebuilt record recovers its task (prompt, description) from the parent's own `agent` call.
+- **Delivery failures.** pi reports a failed asynchronous `sendMessage` as an `extension_error`
+  from `<runtime>` / `send_message`. While one of our deliveries is pending it is that delivery's
+  failure: the session undoes a woken delivery's running state, a child drops the pending id
+  instead of failing its turn. Otherwise it stays an ordinary extension error.
+- **Labels.** An agent's label (its name, else its model-authored description) is one line without
+  quotes or markup, at most 64 characters, wherever titles and summaries show it.
 
 ## Consequences
 
@@ -290,6 +304,11 @@ owner routing, the stop and inactivity semantics, the history of notifications; 
 - A user stop of a background agent is durable only once its passive notice is in the parent's
   file: quitting or cancelling before the end of the parent's turn loses it, and a rebuilt record
   then reads the agent as resumable.
+- A project `.pi/agents` file may redefine a BUILT-IN type (e.g. `general-purpose`): allowed (the
+  nearer definition wins), logged with the file, and listed as `(project)`; a repo can thereby
+  change what the model gets under a built-in name.
+- `deletePiSession`'s "still referenced" prefilter is a substring match on the child ids, then a
+  parse: only a crafted cross-link in another session file can keep a child alive.
 - A steered message still undelivered at an interrupt stays in pi's queue until the next run (pi's
   `abort` keeps its queues, Fact S6).
 - A passive delivery (a stop notice) to a live spawner is appended at the end of its turn and wakes
