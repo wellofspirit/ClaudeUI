@@ -135,6 +135,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
+    getBlob: (blobId) => ipcRenderer.invoke('blob:get', blobId),
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
       ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
     loadBackgroundOutput: (projectKey, taskId, outputFile?) =>

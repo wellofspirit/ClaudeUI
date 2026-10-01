@@ -1,4 +1,4 @@
-import { isImageMediaType } from '../../shared/types'
+import { isImageMediaType, type AttachmentUpload } from '../../shared/types'
 import type { CollaborationMode } from './protocol/CollaborationMode'
 import type { AskForApproval } from './protocol/v2/AskForApproval'
 import type { ApprovalsReviewer } from './protocol/v2/ApprovalsReviewer'
@@ -20,7 +20,7 @@ import { codexSandboxPolicy } from './settings'
  */
 
 /** Inline image attachments on a prompt — Codex takes base64 PNG/JPEG/GIF/WebP only. */
-export type CodexAttachments = Array<{ mediaType: string; base64Data: string }>
+export type CodexAttachments = AttachmentUpload[]
 
 /** One row of {@link CODEX_TURN_POLICY}. */
 export interface CodexModePolicy {

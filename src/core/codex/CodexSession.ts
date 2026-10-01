@@ -809,7 +809,7 @@ export class CodexSession extends BaseSession {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
-          input: codexTurnInput(item.text, item.attachments)
+          input: codexTurnInput(item.text, this.queuedUploads(item))
         })
       } catch (error) {
         // An ambiguous timeout MAY have been delivered, so it is reconciled and
@@ -831,7 +831,7 @@ export class CodexSession extends BaseSession {
       return
     }
     try {
-      await this.run(item.text, item.attachments, clientUserMessageId)
+      await this.run(item.text, this.queuedUploads(item), clientUserMessageId)
     } catch {
       // `run()` already surfaced the failure (and disposed if it was fatal).
       return

@@ -15,6 +15,7 @@ import {
 import { scanCodexLineage } from '../codex/history'
 import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
+  AttachmentUpload,
   ClaudePermissions,
   EngineId,
   JudgeModelSupport,
@@ -33,6 +34,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
+import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
@@ -105,18 +107,24 @@ import { describeJudgeModels } from '../automode/judge-route'
  * the state of record, that difference would surface as a transcript whose ids
  * change under a client on every resync. One mint at the emitter is the fix; the
  * queue path already had stable `steer-<itemId>` ids and is unchanged.
+ *
+ * **Attachments split here (ADR-087).** The upload is interned ONCE, at the top:
+ * the engine still gets the bytes (`attachments`), while everything that is
+ * replicated — the user-message event, a queue item — carries only the refs, so
+ * a pasted screenshot never rides the ring or a snapshot.
  */
 export function sendPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  attachments?: AttachmentUpload[]
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  const refs = internAttachments(attachments)
   // Check before run() — if the session is already active this send queues.
   if (session.willQueue) {
-    session.enqueuePrompt(prompt, attachments)
+    session.enqueuePrompt(prompt, attachments, refs)
     return
   }
   const id = `msg-${crypto.randomUUID()}`
@@ -125,9 +133,26 @@ export function sendPrompt(
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id, timestamp: Date.now(), prompt, attachments }
+    { id, timestamp: Date.now(), prompt, ...(refs ? { attachments: refs } : {}) }
   ])
   if (session.engineId === 'codex') return session.run(prompt, attachments, id)
+}
+
+/** A blob id is a lowercase hex SHA-256 — anything else cannot name a blob. */
+const BLOB_ID_RE = /^[0-9a-f]{64}$/
+
+/**
+ * `blob:get` — the bytes behind a transcript `BlobRef` (ADR-087).
+ *
+ * `null` for a malformed id, an unknown one, and one the store's LRU has
+ * dropped: all three are "unavailable" to the client, never an error. The
+ * result deliberately has no `ok` key — preload/web `unwrap` would mistake an
+ * `{ok}` object for the transport envelope and hand the caller `undefined`.
+ */
+export function getBlob(blobId: unknown): { mediaType: string; base64Data: string } | null {
+  if (typeof blobId !== 'string' || !BLOB_ID_RE.test(blobId)) return null
+  const blob = blobStore.get(blobId)
+  return blob ? { mediaType: blob.mediaType, base64Data: blob.data.toString('base64') } : null
 }
 
 /**

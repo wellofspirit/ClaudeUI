@@ -43,6 +43,7 @@ import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
+import { blobStore } from './blob-store'
 
 /** `~/.pi/agent` — pi's own data root. */
 export function piAgentDir(): string {
@@ -364,9 +365,11 @@ function convertPiTextOrImageContent(
     if (b.type === 'text') {
       if (b.text) blocks.push({ type: 'text', text: b.text })
     } else if (isImageMediaType(b.mimeType)) {
-      blocks.push({ type: 'image', mediaType: b.mimeType, base64Data: b.data })
+      const ref = blobStore.put(b.mimeType, b.data)
+      if (ref) blocks.push({ type: 'image', mediaType: b.mimeType, ...ref })
     }
-    // Unrecognised mime types are dropped — see IMAGE_MEDIA_TYPES.
+    // Unrecognised mime types are dropped — see IMAGE_MEDIA_TYPES. So is a
+    // payload the blob store refuses (ADR-087).
   }
   return blocks
 }

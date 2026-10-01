@@ -9,9 +9,14 @@
  *     (`tool_result.images`, see `ToolResultImage`): Read on a .png, a
  *     screenshot tool, an MCP tool rendering something. This is what a tool
  *     card's thumbnail strip opens.
+ *
+ * Entries are blob REFS, not `data:` URIs (ADR-087): the transcript carries
+ * `{blobId, mediaType}` and the viewer fetches the bytes for the entry it is
+ * showing. Deriving a gallery therefore allocates nothing image-sized, which is
+ * what lets it re-run on every streaming partial without a cache.
  */
 
-import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../shared/types'
+import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
 import type { ViewerRasterImage } from './ImageViewerOverlay'
 
 export const ATTACHMENTS_TAB_ID = 'attachments'
@@ -20,7 +25,7 @@ export const ATTACHMENTS_TAB_LABEL = 'Attachments'
 export const TOOL_RESULTS_TAB_LABEL = 'Tool results'
 
 /** A gallery entry plus the identity a thumbnail uses to find its own index. */
-export interface GalleryEntry extends ViewerRasterImage {
+export type GalleryEntry = Extract<ViewerRasterImage, { blob: unknown }> & {
   key: string
   /**
    * Tool-results gallery only: the tool call that returned this image, and the
@@ -48,26 +53,6 @@ export function attachmentKey(messageId: string, indexWithinMessage: number): st
   return `${messageId}#${indexWithinMessage}`
 }
 
-/**
- * `data:` URIs are built once per block object and cached.
- *
- * The gallery is re-derived whenever the message array changes identity — which
- * during a streaming turn is every partial. Re-encoding a multi-MB base64 payload
- * into a fresh string on each of those would be a real allocation storm; user
- * message blocks are stable objects, so a WeakMap makes repeat derivations a
- * pointer lookup. (It also drops the entries automatically when a session is
- * evicted.)
- */
-const dataUriCache = new WeakMap<ImageBlock, string>()
-
-function imageSrc(block: ImageBlock): string {
-  const cached = dataUriCache.get(block)
-  if (cached !== undefined) return cached
-  const src = `data:${block.mediaType};base64,${block.base64Data}`
-  dataUriCache.set(block, src)
-  return src
-}
-
 /** The image blocks of one message, in content order — `MessageBubble`'s own filter. */
 export function imageBlocksOf(message: ChatMessage): ImageBlock[] {
   return message.content.filter((b): b is ImageBlock => b.type === 'image')
@@ -80,27 +65,12 @@ export function deriveAttachmentGallery(messages: ChatMessage[]): GalleryEntry[]
     imageBlocksOf(message).forEach((block, i) => {
       entries.push({
         key: attachmentKey(message.id, i),
-        src: imageSrc(block),
+        blob: { blobId: block.blobId, mediaType: block.mediaType },
         fileName: block.fileName
       })
     })
   }
   return entries
-}
-
-/**
- * `data:` URIs for tool-result images are cached per image object, for the same
- * reason as `dataUriCache` above — a streaming turn re-derives the galleries on
- * every partial, and a screenshot's base64 payload is megabytes.
- */
-const toolResultUriCache = new WeakMap<ToolResultImage, string>()
-
-function toolResultImageSrc(image: ToolResultImage): string {
-  const cached = toolResultUriCache.get(image)
-  if (cached !== undefined) return cached
-  const src = `data:${image.mediaType};base64,${image.base64Data}`
-  toolResultUriCache.set(image, src)
-  return src
 }
 
 /**
@@ -125,7 +95,7 @@ export function deriveToolResultGallery(messages: ChatMessage[]): GalleryEntry[]
       block.images.forEach((image, i) => {
         entries.push({
           key: toolResultKey(message.id, block.toolUseId, i),
-          src: toolResultImageSrc(image),
+          blob: { blobId: image.blobId, mediaType: image.mediaType },
           fileName: image.fileName,
           toolUseId: block.toolUseId,
           indexWithinResult: i

@@ -16,6 +16,7 @@ import { emptyCanonicalState } from '../../shared/sync/state'
 import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -1900,6 +1901,75 @@ describe('Codex held queue', () => {
     expect(session.getMessages().find((message) => message.role === 'user')).toEqual(
       expect.objectContaining({ replacesMessageId: `steer-${itemId}` })
     )
+  })
+
+  // ADR-087: the queue item that is BROADCAST carries refs; the engine is still
+  // handed the bytes the user uploaded.
+  describe('a queued item with an attachment', () => {
+    const UPLOAD = { mediaType: 'image/png', base64Data: 'QUJDREVGR0g=', fileName: 'shot.png' }
+    const DATA_URL = 'data:image/png;base64,QUJDREVGR0g='
+
+    it('steers the ORIGINAL upload bytes, and broadcasts only the ref', async () => {
+      const { session, request, notify, queues } = fixture()
+      await session.run('hello')
+      session.enqueuePrompt('look at this', [UPLOAD])
+      const itemId = queues().at(-1)![0].itemId
+      notify('item/completed', BOUNDARY)
+      await vi.waitFor(() => expect(steers(request)).toHaveLength(1))
+
+      expect(steers(request)[0]).toEqual({
+        threadId: 'root',
+        expectedTurnId: 'turn',
+        clientUserMessageId: `steer-${itemId}`,
+        input: [
+          { type: 'text', text: 'look at this', text_elements: [] },
+          { type: 'image', url: DATA_URL }
+        ]
+      })
+      await vi.waitFor(() =>
+        expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+      )
+      for (const broadcast of queues()) {
+        expect(broadcast[0].attachments).toEqual([
+          { mediaType: 'image/png', ...blobRefOf(UPLOAD.base64Data), fileName: 'shot.png' }
+        ])
+      }
+      expect(JSON.stringify(queues())).not.toContain(UPLOAD.base64Data)
+    })
+
+    it('starts the next turn with the ORIGINAL upload bytes when it is forwarded at idle', async () => {
+      const { session, request, notify, queues } = fixture()
+      await session.run('hello')
+      session.enqueuePrompt('look at this', [UPLOAD])
+      const itemId = queues().at(-1)![0].itemId
+      // No sub-turn boundary: the turn simply ends, so the item goes out as a
+      // fresh `turn/start` rather than a steer.
+      notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [] }
+      })
+      await vi.waitFor(() => expect(starts(request)).toHaveLength(2))
+
+      expect(steers(request)).toEqual([])
+      expect(starts(request)[1]).toEqual(
+        expect.objectContaining({
+          clientUserMessageId: `steer-${itemId}`,
+          input: [
+            { type: 'text', text: 'look at this', text_elements: [] },
+            { type: 'image', url: DATA_URL }
+          ]
+        })
+      )
+      await vi.waitFor(() =>
+        expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+      )
+      for (const broadcast of queues()) {
+        expect(broadcast[0].attachments).toEqual([
+          { mediaType: 'image/png', ...blobRefOf(UPLOAD.base64Data), fileName: 'shot.png' }
+        ])
+      }
+      expect(JSON.stringify(queues())).not.toContain(UPLOAD.base64Data)
+    })
   })
 
   it('steers duplicate texts under distinct ids and consumes them in order', async () => {
@@ -5221,7 +5291,7 @@ describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
     expect(results()[0]).toMatchObject({
       result: '',
       isError: false,
-      images: [{ mediaType: 'image/png', base64Data: PNG.toString('base64') }]
+      images: [{ mediaType: 'image/png', ...blobRefOf(PNG.toString('base64')) }]
     })
     // …and the canonical history agrees with what went out on the wire.
     const block = session

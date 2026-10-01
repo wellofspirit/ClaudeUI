@@ -10,8 +10,10 @@ import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
+  AttachmentUpload,
   ChatMessage,
   ContentBlock,
+  ImageMediaType,
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
@@ -40,6 +42,7 @@ import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
+import { internAttachments } from '../services/blob-store'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import {
   mapEvent,
@@ -643,37 +646,23 @@ export class OpencodeSession extends BaseSession {
    * the renderer's optimistic addUserMessage (session-store.ts): attachments
    * first (image/document blocks), then a trailing text block. Keeps
    * getMessages() / replay fidelity for image/PDF attachments sent via opencode.
+   * Like every ChatMessage, the blocks carry blob refs, not bytes (ADR-087).
    */
-  private buildUserContent(
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): ContentBlock[] {
+  private buildUserContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
     const content: ContentBlock[] = []
-    for (const att of attachments ?? []) {
+    for (const att of internAttachments(attachments) ?? []) {
+      const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
       if (att.mediaType === 'application/pdf') {
-        content.push({
-          type: 'document',
-          mediaType: 'application/pdf',
-          base64Data: att.base64Data,
-          fileName: att.fileName
-        })
+        content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
       } else {
-        content.push({
-          type: 'image',
-          mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-          base64Data: att.base64Data,
-          fileName: att.fileName
-        })
+        content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
       }
     }
     if (prompt) content.push({ type: 'text', text: prompt })
     return content
   }
 
-  async run(
-    prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void> {
+  async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
     this.clearInactivityTimer()
     // Reset the cancel flag so it only guards THIS run's connect window. cancel()
     // is also fired by the idle timeout; without this reset a session that
@@ -1145,10 +1134,7 @@ export class OpencodeSession extends BaseSession {
    * On BadRequest from runCommand, fall back to promptAsync so a name mismatch
    * never wedges the turn.
    */
-  private async sendPrompt(
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void> {
+  private async sendPrompt(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
     const parsed = parseModelString(this._model)
 
     // Build file parts once — they ride along with BOTH the runCommand and the

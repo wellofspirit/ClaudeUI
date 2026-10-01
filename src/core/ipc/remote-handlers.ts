@@ -58,6 +58,7 @@ import {
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   PermissionSuggestion,
   EngineId,
   PermissionScope,
@@ -117,6 +118,7 @@ import {
 import type { RegistrationResponseJSON } from '@simplewebauthn/server'
 import {
   sendPrompt,
+  getBlob,
   watchBackground,
   unwatchBackground,
   readBackgroundRange,
@@ -439,11 +441,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (
-      routingId: string,
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> | null
-    ) => sendPrompt(manager, routingId, prompt, opt(attachments))
+    handler: async (routingId: string, prompt: string, attachments?: AttachmentUpload[] | null) =>
+      sendPrompt(manager, routingId, prompt, opt(attachments))
   })
 
   handleRemote({
@@ -859,6 +858,17 @@ export function registerRemoteHandlers(
     handler: async (sessionId: string, projectKey: string, agentId: string) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
+  })
+
+  // The bytes behind a transcript BlobRef (ADR-087). An invoke on purpose, not
+  // an HTTP route like `/sent-file`: on an E2E origin the bytes stay inside the
+  // encrypted channel, exactly as they were when they rode the snapshot. `chat`
+  // because a `chat` grant already read them there.
+  handleRemote({
+    channel: 'blob:get',
+    capability: 'chat',
+    kind: 'query',
+    handler: async (blobId: string) => getBlob(blobId)
   })
 
   handleRemote({

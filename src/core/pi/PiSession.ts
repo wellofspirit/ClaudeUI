@@ -8,10 +8,12 @@ import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import type {
+  AttachmentUpload,
   AutoModeConfig,
   SharedAutoModeConfig,
   ChatMessage,
   ContentBlock,
+  ImageMediaType,
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
@@ -23,6 +25,7 @@ import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
+import { internAttachments } from '../services/blob-store'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { harnessUnavailableMessage } from '../harness/resolve'
@@ -206,8 +209,8 @@ const SIDE_QUESTION_TIMEOUT_MS = 60_000
  * `thinking`/`image`/`document`/`cli_command`/`api_error`/`compact_separator`
  * are dropped: thinking is pi's own internal reasoning (out of scope for a
  * side question about WHAT is happening, not WHY the model privately
- * reasoned it), image/document blocks would otherwise dump raw base64 into a
- * text prompt, and the rest are ClaudeUI meta-transcript entries with no
+ * reasoned it), image/document blocks would otherwise put opaque blob refs
+ * (ADR-087) into a text prompt, and the rest are ClaudeUI meta-transcript entries with no
  * conversational content. A message that reduces to nothing (e.g. a
  * tool-only turn whose blocks were all dropped) still gets a placeholder so
  * the line count/ordering stays intact.
@@ -1161,19 +1164,18 @@ export class PiSession extends BaseSession {
   /**
    * Build the ContentBlock[] for a locally-recorded user ChatMessage. pi has
    * no document/PDF input (unlike Claude/opencode) — non-image attachments
-   * are silently dropped, matching run()'s prompt-building rule.
+   * are silently dropped, matching run()'s prompt-building rule. Like every
+   * ChatMessage, the blocks carry blob refs, not bytes (ADR-087).
    */
-  private buildUserContent(
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): ContentBlock[] {
+  private buildUserContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
     const content: ContentBlock[] = []
-    for (const att of attachments ?? []) {
-      if (!att.mediaType.startsWith('image/')) continue // pi has no document input — PDFs silently dropped
+    const images = attachments?.filter((att) => att.mediaType.startsWith('image/')) // pi has no document input — PDFs silently dropped
+    for (const att of internAttachments(images) ?? []) {
       content.push({
         type: 'image',
-        mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: att.base64Data,
+        mediaType: att.mediaType as ImageMediaType,
+        blobId: att.blobId,
+        bytes: att.bytes,
         fileName: att.fileName
       })
     }
@@ -1181,10 +1183,7 @@ export class PiSession extends BaseSession {
     return content
   }
 
-  async run(
-    prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void> {
+  async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
     this.clearInactivityTimer()
     this._cancelled = false
 

@@ -9,7 +9,11 @@ import {
   seedingModelPicks
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
-import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
+import type {
+  AttachmentUpload,
+  FileAttachment,
+  VoiceState as VoiceStateType
+} from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
@@ -630,10 +634,7 @@ export function InputBox(): React.JSX.Element {
   }
 
   const doSend = useCallback(
-    async (
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => {
+    async (prompt: string, attachments?: AttachmentUpload[]) => {
       if (!activeSessionId) return
       if (!sdkActive) {
         assertModelResolved(activeSessionId)

@@ -103,6 +103,7 @@ export function getSdkExecutableOpts(): Record<string, unknown> {
   }
 }
 import type {
+  AttachmentUpload,
   ChatMessage,
   McpServerConfig,
   SessionStatus,
@@ -585,7 +586,7 @@ export class ClaudeSession extends BaseSession {
    */
   async run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     wireUuid?: string
   ): Promise<void> {
     this.clearInactivityTimer()
@@ -2288,7 +2289,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * how `command_lifecycle` and `cancel_async_message` name it.
    */
   protected override onPromptQueued(item: QueuedItem): void {
-    void this.run(item.text, item.attachments, item.itemId)
+    void this.run(item.text, this.queuedUploads(item), item.itemId)
   }
 
   /**

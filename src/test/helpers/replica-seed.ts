@@ -53,7 +53,8 @@ import type {
   MeteringSnapshot,
   SlashCommandInfo,
   FileDiff,
-  ToolResultImage
+  ToolResultImage,
+  AttachmentRef
 } from '../../shared/types'
 
 let seq = 0
@@ -268,7 +269,7 @@ export const seed = {
       id?: string
       timestamp?: number
       prompt?: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+      attachments?: AttachmentRef[]
     }
   ) => emitSync('session:user-message', [routingId, data]),
 

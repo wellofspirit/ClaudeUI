@@ -175,6 +175,39 @@ comes from, not what it contains, so the web client works unmodified. The
 `session:created` addition does not change it either — the fields it carries are
 snapshot fields that already existed.
 
+### Image and document payloads are refs (ADR-087)
+
+Not a row, because it is not one channel's payload: it is every place a transcript can
+hold an image. `session:tool-result` and `session:subagent-tool-result` (`images[]`),
+`session:user-message` and `session:queue-changed` (`attachments[]`), and the `image` /
+`document` content blocks inside `session:message`, the subagent message channels and every
+history load carry a `BlobRef` `{blobId, bytes}` where they used to carry `base64Data`. The
+`blobId` is the SHA-256 of the decoded bytes, so one screenshot arriving from a live event, a
+transcript re-read and a subagent file is one entry in the host's in-memory, LRU-bounded
+`BlobStore`. This is the shrinking half of the rule above — a payload can lose what a client
+can fetch for itself — and it is what makes the ring's entry-count bound a real one: before,
+5000 entries could each carry a megabyte, and a snapshot (all of canonical state) carried every
+image in every session.
+
+The producers intern, not the reducer: the shared tool-result decoder, each engine's mapper,
+the history readers and `sendPrompt` hand the store the bytes and put the ref on the event. The
+reducer only moves ids, and no non-test file under `core/shared/sync/` may name `base64Data`
+(`no-inline-bytes.unit.test.ts`). `base64Data` survives on an UPLOAD — `AttachmentUpload`, the
+`session:send` argument an engine needs — which is an invoke argument and never ringed; a queued
+prompt keeps its upload beside the item inside `SessionQueue`, and the broadcast item carries
+refs only.
+
+The fetch is **`blob:get`**, a `chat` query returning `{mediaType, base64Data} | null`. It is an
+invoke on the WebSocket/IPC lane and deliberately NOT an HTTP route like `/sent-file`: on an E2E
+origin the bytes stay inside the encrypted channel, as they were inside the snapshot, and a
+screenshot of the operator's screen is conversation content rather than a deliberately delivered
+artifact. `null` is a legal answer (an LRU-evicted or unknown id) that clients render as "image
+unavailable"; the client-side cache remembers it for 60 s, not forever, because the host re-interns
+a blob whenever a transcript containing it is read again. A fetch that FAILS (socket down, timeout)
+is not "unavailable" — nothing was learned about the blob — so the image stays in its loading
+state and is retried with backoff (2 s doubling to 30 s) for as long as it is on screen. See
+[security.md](security.md) for the capability reasoning.
+
 ## The table
 
 | Channel                          | Class                   | Ring | Canonical | Delta | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |

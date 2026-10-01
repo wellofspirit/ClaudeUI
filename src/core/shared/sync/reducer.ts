@@ -27,8 +27,10 @@
  */
 
 import type {
+  AttachmentRef,
   ChatMessage,
   ContentBlock,
+  ImageMediaType,
   SessionStatus,
   PendingApproval,
   TodoItem,
@@ -210,27 +212,18 @@ function appendToCall(
  * Build the ContentBlock[] for a user message: attachments first, then the text
  * block. Duplicated from the renderer store (which will adopt the reducer in 4c)
  * so both replicas render an attachment-carrying prompt identically.
+ *
+ * The attachments are blob REFS (ADR-087): this branch only ever moves an id
+ * and a size, never bytes, so neither the ring nor the snapshot can carry one.
  */
-function buildUserContentBlocks(
-  text: string,
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-): ContentBlock[] {
+function buildUserContentBlocks(text: string, attachments?: AttachmentRef[]): ContentBlock[] {
   const content: ContentBlock[] = []
   for (const att of attachments ?? []) {
+    const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
     if (att.mediaType === 'application/pdf') {
-      content.push({
-        type: 'document',
-        mediaType: 'application/pdf',
-        base64Data: att.base64Data,
-        fileName: att.fileName
-      })
+      content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
     } else {
-      content.push({
-        type: 'image',
-        mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: att.base64Data,
-        fileName: att.fileName
-      })
+      content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
     }
   }
   if (text) content.push({ type: 'text', text })
@@ -709,7 +702,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         id?: string
         timestamp?: number
         prompt?: string
-        attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+        attachments?: AttachmentRef[]
       }>(event, 1)
       if (!state.sessions[routingId]) return state
       // Identity comes from the EVENT as of phase 4b (`handlers-core.sendPrompt`

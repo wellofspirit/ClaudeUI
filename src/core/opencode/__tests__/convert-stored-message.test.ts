@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import { convertStoredMessage, storedCompactionMessages } from '../event-mapper'
 import type { StoredMessage } from '../protocol/types'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 function msg(
   role: 'user' | 'assistant' | 'system',
@@ -197,7 +198,7 @@ describe('convertStoredMessage — user attachment file parts', () => {
     )
     expect(r).not.toBeNull()
     expect(r!.content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA', fileName: 'shot.png' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA'), fileName: 'shot.png' },
       { type: 'text', text: 'look' }
     ])
   })
@@ -206,7 +207,7 @@ describe('convertStoredMessage — user attachment file parts', () => {
     const r = convertStoredMessage(
       msg('user', [{ type: 'file', mime: 'image/webp', url: 'data:image/webp;base64,BBBB' }])
     )
-    expect(r!.content).toEqual([{ type: 'image', mediaType: 'image/webp', base64Data: 'BBBB' }])
+    expect(r!.content).toEqual([{ type: 'image', mediaType: 'image/webp', ...blobRefOf('BBBB') }])
   })
 
   it('maps a data-URI pdf file part to a document block', () => {
@@ -224,7 +225,7 @@ describe('convertStoredMessage — user attachment file parts', () => {
       {
         type: 'document',
         mediaType: 'application/pdf',
-        base64Data: 'PDFDATA',
+        ...blobRefOf('PDFDATA'),
         fileName: 'spec.pdf'
       }
     ])
@@ -309,8 +310,8 @@ describe('convertStoredMessage — user attachment file parts', () => {
       ])
     )
     expect(r!.content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'ONE', fileName: '1.png' },
-      { type: 'image', mediaType: 'image/gif', base64Data: 'TWO', fileName: '2.gif' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('ONE'), fileName: '1.png' },
+      { type: 'image', mediaType: 'image/gif', ...blobRefOf('TWO'), fileName: '2.gif' },
       { type: 'text', text: 'both' }
     ])
   })
@@ -357,7 +358,7 @@ describe('convertStoredMessage — tool-result images', () => {
       toolUseId: 'call-img',
       toolResult: 'Image read successfully',
       isError: false,
-      images: [{ mediaType: 'image/png', base64Data: 'SHOT', fileName: 'x.png' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('SHOT'), fileName: 'x.png' }]
     })
   })
 
@@ -385,8 +386,8 @@ describe('convertStoredMessage — tool-result images', () => {
     const result = r!.content.find((b) => b.type === 'tool_result')
     expect(result).toMatchObject({
       images: [
-        { mediaType: 'image/png', base64Data: 'ONE' },
-        { mediaType: 'image/webp', base64Data: 'TWO' }
+        { mediaType: 'image/png', ...blobRefOf('ONE') },
+        { mediaType: 'image/webp', ...blobRefOf('TWO') }
       ]
     })
   })

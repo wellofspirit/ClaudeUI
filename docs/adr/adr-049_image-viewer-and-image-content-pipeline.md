@@ -1,6 +1,6 @@
 # ADR-049 — Image viewer overlay and the engine-neutral image-content pipeline
 
-**Status:** Accepted (2026-08-04)
+**Status:** Accepted (2026-08-04) — Decisions 3 and 5 **amended by [ADR-087](adr-087_transcript-blobs-off-the-ring-and-host-eviction.md)**: a transcript image carries a `{blobId, bytes}` ref instead of inline `base64Data`, resolved through `blob:get` and a client blob cache (which replaces the `data:`-URI `WeakMap`s below). The viewer, galleries and tabs are unchanged.
 **Relates to:** ADR-018 (engine-neutral model), ADR-027 (test ids), ADR-048 (mobile surface pattern — deliberately NOT followed here, see Decision 1)
 
 Shipped in `bfe380a` (viewer), `3834cb2` (attachment rehydration), `da4b984`

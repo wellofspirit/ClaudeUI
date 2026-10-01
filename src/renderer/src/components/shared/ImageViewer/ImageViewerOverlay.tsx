@@ -39,6 +39,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useContextMenu } from '../../../hooks/useContextMenu'
+import { useBlobSrc } from '../../../hooks/useBlobSrc'
+import { resolveBlobSrc } from '../../../lib/blob-cache'
 import {
   rasterToPngBlob,
   svgToPngBlob,
@@ -66,12 +68,15 @@ import {
   type ViewerTransform
 } from './transform'
 
-/** A raster image — anything an `<img src>` accepts. */
-export interface ViewerRasterImage {
-  /** A `data:` URI for attachments, an authenticated URL for sent files. */
-  src: string
-  fileName?: string
-}
+/**
+ * A raster image: either a ready `src` (an authenticated URL for sent files) or
+ * a transcript blob ref the viewer resolves itself (ADR-087) — attachments and
+ * tool-result images are fetched on demand, so the gallery cannot hand over a
+ * `data:` URI it does not have.
+ */
+export type ViewerRasterImage =
+  | { src: string; fileName?: string }
+  | { blob: { blobId: string; mediaType: string }; fileName?: string }
 
 /** Inline vector content — sanitized SVG markup rendered as DOM, not an `<img>`. */
 export interface ViewerSvgImage {
@@ -206,6 +211,19 @@ export function ImageViewerOverlay({
   const current = images[index]
   const currentSvg = current && isSvgImage(current) ? current : null
 
+  // The CURRENT entry's bytes, when it is a blob ref; null until they land.
+  const currentBlob = current && 'blob' in current ? current.blob : null
+  const { src: blobSrc, state: blobState } = useBlobSrc(currentBlob)
+  const currentSrc = current && 'src' in current ? current.src : blobSrc
+
+  // Best-effort prefetch of the neighbours, so paging lands on a resolved image.
+  useEffect(() => {
+    for (const neighbour of [images[index - 1], images[index + 1]]) {
+      if (neighbour && 'blob' in neighbour)
+        void resolveBlobSrc(neighbour.blob.blobId, neighbour.blob.mediaType)
+    }
+  }, [images, index])
+
   // ── Geometry helpers (all ref reads — stable identities) ──────────────────
 
   const viewportSize = useCallback((): Size => {
@@ -238,11 +256,16 @@ export function ImageViewerOverlay({
     return { x: clientX - (rect.left + rect.width / 2), y: clientY - (rect.top + rect.height / 2) }
   }, [])
 
+  // A blob entry still being fetched has no fitted size to zoom against: a zoom
+  // now would clamp against zero and land the image already magnified.
+  const showingContent = currentSvg !== null || currentSrc !== null
+
   const applyZoom = useCallback(
     (anchor: Point, factor: number): void => {
+      if (!showingContent) return
       setTransform((t) => clampPan(zoomAt(t, anchor, factor), viewportSize(), fittedSize()))
     },
-    [fittedSize, viewportSize]
+    [fittedSize, viewportSize, showingContent]
   )
 
   // ── Viewport measurement (inline SVG only) ───────────────────────────────
@@ -317,13 +340,15 @@ export function ImageViewerOverlay({
     closeContextMenu()
     const entry = images[index]
     if (!entry) return
-    const blob = isSvgImage(entry)
-      ? svgToPngBlob(entry.svgHtml, themeCanvasBackground())
-      : rasterToPngBlob(entry.src)
+    let blob: Promise<Blob | null>
+    if (isSvgImage(entry)) blob = svgToPngBlob(entry.svgHtml, themeCanvasBackground())
+    // A blob entry still being fetched has nothing to copy yet.
+    else if (currentSrc) blob = rasterToPngBlob(currentSrc)
+    else return
     writeClipboardImage(blob).catch((err) => {
       console.error('Failed to copy image to clipboard:', err)
     })
-  }, [images, index, closeContextMenu])
+  }, [images, index, currentSrc, closeContextMenu])
 
   /** Exactly one newline before the closing fence, and nothing after it. */
   const copyMarkdown = useCallback((): void => {
@@ -690,20 +715,31 @@ export function ImageViewerOverlay({
               boxSizing: 'border-box'
             }}
           />
-        ) : (
+        ) : currentSrc ? (
           <img
             ref={(el) => {
               contentRef.current = el
             }}
             data-testid="ImageViewerOverlay.image"
             data-id={String(index)}
-            src={current.src}
+            src={currentSrc}
             alt={current.fileName ?? 'Image'}
             draggable={false}
             onDragStart={(e) => e.preventDefault()}
             className="max-w-full max-h-full object-contain"
             style={contentTransform}
           />
+        ) : (
+          // Not a gesture target: `contentRef` stays unset, so pan/zoom have
+          // nothing to measure and a tap on it neither zooms nor closes.
+          <div
+            data-testid="ImageViewerOverlay.placeholder"
+            data-id={String(index)}
+            data-state={blobState}
+            className={`text-[12px] text-white/60 ${blobState === 'missing' ? '' : 'animate-pulse'}`}
+          >
+            {blobState === 'missing' ? 'Image unavailable' : 'Loading image…'}
+          </div>
         )}
 
         {showNav && (

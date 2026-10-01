@@ -137,6 +137,9 @@ describe('queue-changed drives the card and the consumed synthesis', () => {
     expect(sessionA.queuedItems.map((i) => i.text)).toEqual(['also update tests'])
   })
 
+  // A queued item carries blob refs (ADR-087); the synthesized message keeps them as refs.
+  const REF = { blobId: 'd'.repeat(64), bytes: 3 }
+
   it('carries attachments from the item into the synthesized message', () => {
     render(<EventHarness />)
 
@@ -149,7 +152,7 @@ describe('queue-changed drives the card and the consumed synthesis', () => {
             itemId: 'q1',
             text: 'look at this',
             state: 'consumed',
-            attachments: [{ mediaType: 'image/png', base64Data: 'AAA', fileName: 'shot.png' }]
+            attachments: [{ mediaType: 'image/png', ...REF, fileName: 'shot.png' }]
           }
         ]
       })
@@ -157,7 +160,7 @@ describe('queue-changed drives the card and the consumed synthesis', () => {
 
     const messages = useSessionStore.getState().sessions['session-a'].messages
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAA', fileName: 'shot.png' },
+      { type: 'image', mediaType: 'image/png', ...REF, fileName: 'shot.png' },
       { type: 'text', text: 'look at this' }
     ])
   })

@@ -22,6 +22,7 @@ import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { useImageGallery } from '../shared/ImageViewer'
+import { BlobImage } from '../shared/BlobImage'
 import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
 import { openProviderSettings } from '../SettingsDialog/settings-target'
 
@@ -313,10 +314,12 @@ export const MessageBubble = memo(function MessageBubble({
                     galleryEnabled ? 'cursor-zoom-in' : 'cursor-default'
                   }`}
                 >
-                  <img
-                    src={`data:${block.mediaType};base64,${block.base64Data}`}
+                  <BlobImage
+                    blobId={block.blobId}
+                    mediaType={block.mediaType}
                     alt={block.fileName || 'Attached'}
                     className="max-w-[200px] max-h-[200px] rounded-lg object-contain"
+                    placeholderSize={120}
                   />
                 </button>
               ))}

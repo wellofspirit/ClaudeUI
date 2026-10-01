@@ -16,6 +16,7 @@ import type {
   PiToolResultMessage,
   PiUserMessage
 } from '../pi-protocol'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 function assistantMsg(overrides: Partial<PiAssistantMessage> = {}): PiAssistantMessage {
   return {
@@ -1480,7 +1481,7 @@ describe('mapPiEvent — toolResult images', () => {
         toolUseId: 'call_img',
         result: 'Image read',
         isError: false,
-        images: [{ mediaType: 'image/png', base64Data: 'LIVEIMG' }]
+        images: [{ mediaType: 'image/png', ...blobRefOf('LIVEIMG') }]
       }
     ])
   })

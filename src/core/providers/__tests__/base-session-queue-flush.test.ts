@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { EngineId, QueuedItem } from '../../../shared/types'
+import type { AttachmentUpload, EngineId, QueuedItem } from '../../../shared/types'
 import type { ResolvedCapabilities } from '../../../shared/model-capabilities'
 
 const { emitted } = vi.hoisted(() => ({
@@ -35,6 +35,7 @@ vi.mock('../../services/logger', () => ({
 }))
 
 import { BaseSession } from '../BaseSession'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 type Deferred = { promise: Promise<void>; resolve: () => void }
 function deferred(): Deferred {
@@ -45,31 +46,43 @@ function deferred(): Deferred {
   return { promise, resolve }
 }
 
-/**
- * Probe session whose forward is scripted per attempt: each entry decides
- * whether the item is acknowledged (delivered) and hands back a gate the test
- * settles by hand, so a boundary can be fired while a forward is in flight.
- */
-class ProbeSession extends BaseSession {
+/** The abstract surface of a session with nothing behind it. */
+abstract class StubSession extends BaseSession {
   readonly engineId: EngineId = 'opencode'
   readonly capabilities = {} as ResolvedCapabilities
   readonly willQueue = false
 
-  /** One entry per forward attempt, oldest first. */
-  readonly attempts: Array<{ item: QueuedItem; gate: Deferred }> = []
-  /** Attempt index -> deliver the item on that attempt. Default: refuse. */
-  deliverOn = new Set<number>()
-
   getSessionId(): string | null {
     return null
   }
-  async run(): Promise<void> {}
+  async run(
+    _prompt: string | null,
+    _attachments?: AttachmentUpload[],
+    _clientUserMessageId?: string
+  ): Promise<void> {}
   async interrupt(): Promise<void> {}
   cancel(): void {}
   resolveApproval(): void {}
   async setModel(): Promise<void> {}
   async setPermissionMode(): Promise<void> {}
   dispose(): void {}
+
+  /** Public seam for the protected boundary entry point. */
+  boundary(): Promise<void> {
+    return this.flushQueuedItems()
+  }
+}
+
+/**
+ * Probe session whose forward is scripted per attempt: each entry decides
+ * whether the item is acknowledged (delivered) and hands back a gate the test
+ * settles by hand, so a boundary can be fired while a forward is in flight.
+ */
+class ProbeSession extends StubSession {
+  /** One entry per forward attempt, oldest first. */
+  readonly attempts: Array<{ item: QueuedItem; gate: Deferred }> = []
+  /** Attempt index -> deliver the item on that attempt. Default: refuse. */
+  deliverOn = new Set<number>()
 
   protected override async forwardQueuedItem(item: QueuedItem): Promise<void> {
     const index = this.attempts.length
@@ -80,11 +93,6 @@ class ProbeSession extends BaseSession {
     // that refused leaves the item `queued`, which is how the flush reads
     // "nothing landed".
     if (this.deliverOn.has(index)) this.onPromptDelivered(item.text)
-  }
-
-  /** Public seam for the protected boundary entry point. */
-  boundary(): Promise<void> {
-    return this.flushQueuedItems()
   }
 }
 
@@ -191,5 +199,50 @@ describe('BaseSession.flushQueuedItems — boundary serialization', () => {
     await s.boundary()
     await s.boundary()
     expect(s.attempts).toHaveLength(0)
+  })
+})
+
+/**
+ * The default drain (opencode and pi) hands the engine the bytes the user
+ * uploaded, while the item that is broadcast carries refs only (ADR-087).
+ */
+class RunProbeSession extends StubSession {
+  readonly runs: Array<{ prompt: string | null; attachments?: AttachmentUpload[] }> = []
+
+  override async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    this.runs.push({ prompt, attachments })
+  }
+}
+
+describe('BaseSession.forwardQueuedItem — attachments', () => {
+  const UPLOAD: AttachmentUpload = {
+    mediaType: 'image/png',
+    base64Data: 'QUJDREVGR0g=',
+    fileName: 'shot.png'
+  }
+
+  it('runs the original upload bytes, and broadcasts the ref only', async () => {
+    const s = new RunProbeSession('rid', { isDestroyed: () => false } as never, '/repo')
+    s.enqueuePrompt('look at this', [UPLOAD])
+
+    const queued = (): string[] =>
+      emitted
+        .filter((e) => e.channel === 'session:queue-changed')
+        .map((e) => JSON.stringify(e.args))
+    expect(queued().length).toBeGreaterThan(0)
+    expect(s.queuedItems[0].attachments).toEqual([
+      { mediaType: 'image/png', ...blobRefOf(UPLOAD.base64Data), fileName: 'shot.png' }
+    ])
+
+    await s.boundary()
+    expect(s.runs).toEqual([{ prompt: 'look at this', attachments: [UPLOAD] }])
+    // Every broadcast so far — the enqueue, plus anything the drain emitted
+    // (the probe's run() never acks delivery, so there is no consumed one here)
+    // — carries the ref and never the bytes.
+    expect(queued().length).toBeGreaterThanOrEqual(1)
+    for (const payload of queued()) {
+      expect(payload).not.toContain(UPLOAD.base64Data)
+      expect(payload).toContain(blobRefOf(UPLOAD.base64Data).blobId)
+    }
   })
 })
