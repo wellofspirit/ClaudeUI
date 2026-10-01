@@ -16,7 +16,8 @@ import type {
   SDKMessage,
   McpServerConfig
 } from './types'
-import { locateBunClaude } from './locate'
+import { nativeLaunch, withLaunch, type HarnessLaunch } from '../harness/launch'
+import { locateBunClaude, locateClaudeLaunch } from './locate'
 import { buildArgs, buildSpawnEnv, splitMcpServers } from './args'
 import { getHostTokenSource, type HostTokenSession } from './host-token'
 import { NdjsonReader, NdjsonWriter } from './protocol'
@@ -76,22 +77,47 @@ export class MessageQueue {
   }
 }
 
+/**
+ * The launch this query spawns (ADR-082 §2):
+ *   `executable` given     exactly that command, with `executableArgs` before
+ *                          anything else (an embedder's own launcher);
+ *   `pathToClaudeCodeExecutable` given
+ *                          that path as a native executable;
+ *   neither                the harness resolver's launch for Claude Code.
+ * `executableArgs` without `executable` go before the launch's own args.
+ */
+function claudeLaunch(options: QueryOptions): HarnessLaunch {
+  const extra = options.executableArgs ?? []
+  if (options.executable !== undefined) return { command: options.executable, args: extra }
+  const base =
+    options.pathToClaudeCodeExecutable !== undefined
+      ? nativeLaunch(options.pathToClaudeCodeExecutable)
+      : locateClaudeLaunch()
+  return extra.length ? { ...base, args: [...extra, ...base.args] } : base
+}
+
 export function query(input: QueryInput): QueryHandle {
   const callerOptions: QueryOptions = input.options ?? {}
-  // Default executable is the rebundled Bun binary; `pathToClaudeCodeExecutable`
-  // lets tests/alt-runtimes override. When `standaloneExecutable` (default for
-  // the Bun binary pipeline) is true, the executable is self-contained and we
-  // don't inject its path as an argv entry.
-  const bunClaude = callerOptions.pathToClaudeCodeExecutable ?? locateBunClaude()
+  // When `standaloneExecutable` (default for the Bun binary pipeline) is true,
+  // the executable is self-contained and we don't inject a script path as an
+  // argv entry; the legacy Node pipeline passes `[node, cli.js, ...]`.
   const standalone = callerOptions.standaloneExecutable ?? true
-  const executable = callerOptions.executable ?? bunClaude
-  const executableArgs = callerOptions.executableArgs ?? []
+  const scriptArg = standalone
+    ? []
+    : [callerOptions.pathToClaudeCodeExecutable ?? locateBunClaude()]
 
-  const args = [...executableArgs, ...(standalone ? [] : [bunClaude]), ...buildArgs(callerOptions)]
   // Env overlay for the CLI child ONLY — keeps any temporary env changes from
-  // poisoning Electron's GPU/renderer children. Throws before anything is
+  // poisoning Electron's GPU/renderer children. The launch's own env (a
+  // Node-script harness's) lies over the caller's. Throws before anything is
   // spawned when multi-account is on and the active account has no token.
-  const { env, hostToken } = buildSpawnEnv({ ...process.env, ...(callerOptions.env ?? {}) })
+  const launch = withLaunch(
+    claudeLaunch(callerOptions),
+    [...scriptArg, ...buildArgs(callerOptions)],
+    { ...process.env, ...(callerOptions.env ?? {}) }
+  )
+  const executable = launch.command
+  const args = launch.args
+  const { env, hostToken } = buildSpawnEnv(launch.env ?? {})
 
   // A host-token spawn (multi-account): this process runs on the active
   // account's token, which the app keeps fresh. Its record — the dir it was

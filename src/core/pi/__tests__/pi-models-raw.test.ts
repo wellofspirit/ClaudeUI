@@ -331,8 +331,9 @@ describe('patchPiModelsRaw — built-in vendor guard', () => {
   })
 
   it('ALLOWS the documented modelOverrides leaf write under a built-in id', () => {
-    // vendor/pi-cli/docs/models.md "Per-model Overrides" — this is precisely what
-    // pi tells users to write, so the guard must not swallow it.
+    // vendor/pi-src/packages/coding-agent/docs/models.md "Per-model Overrides" —
+    // this is precisely what pi tells users to write, so the guard must not
+    // swallow it.
     patchPiModelsRaw([
       {
         path: ['providers', 'openai', 'modelOverrides', 'gpt-5.6-sol', 'contextWindow'],

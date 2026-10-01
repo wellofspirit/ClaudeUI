@@ -46,7 +46,7 @@ describe('"New sessions start on"', () => {
     expect(row).toHaveAttribute('data-id', 'newSessionModel')
     expect(row).toHaveTextContent('New sessions start on')
     expect(row).toHaveTextContent(
-      "Per engine. The composer's model picker always changes the session you are in."
+      "Per harness. The composer's model picker always changes the session you are in."
     )
     expect(option('last-picked')).toHaveAttribute('aria-pressed', 'true')
     expect(option('configured-default')).toHaveTextContent('The default below')

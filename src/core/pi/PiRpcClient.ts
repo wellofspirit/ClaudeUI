@@ -1,6 +1,7 @@
 /**
  * PiRpcClient — owns a single `pi --mode rpc` child process and speaks its
- * JSONL wire protocol (see docs/protocol-pi/README.md + vendor/pi-cli/docs/rpc.md).
+ * JSONL wire protocol (see docs/protocol-pi/README.md +
+ * vendor/pi-src/packages/coding-agent/docs/rpc.md).
  *
  * Framing rules (verified — README.md "Transport"): split stdout on `\n` ONLY,
  * strip a trailing `\r`, never use Node `readline` (it also splits on
@@ -18,6 +19,7 @@ import { v4 as uuid } from 'uuid'
 import type { PiEvent, PiRpcCommand, PiRpcResponse } from './pi-protocol'
 import { logger } from '../services/logger'
 import { killProcessTree } from '../services/process-tree'
+import { toLaunch, withLaunch, type HarnessLaunch } from '../harness/launch'
 
 export interface PiRpcClientOptions {
   cwd: string
@@ -42,20 +44,29 @@ export class PiRpcClient {
     (code: number | null, signal: NodeJS.Signals | null) => void
   > = []
   private exited = false
+  private readonly launch: HarnessLaunch
 
+  /**
+   * `launch` is how to start pi (`locatePiLaunch()`): a native executable, or
+   * `<node> <cli.js>` for an npm install (ADR-082 §2). A bare path is a native
+   * launch.
+   */
   constructor(
-    private readonly binPath: string,
+    launch: HarnessLaunch | string,
     private readonly opts: PiRpcClientOptions
-  ) {}
+  ) {
+    this.launch = toLaunch(launch)
+  }
 
   /** Spawn the child process and wire stdout/stderr framing. Resolves once the process has spawned. */
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       let proc: ChildProcess
       try {
-        proc = spawn(this.binPath, this.opts.args, {
+        const spec = withLaunch(this.launch, this.opts.args, { ...process.env, ...this.opts.env })
+        proc = spawn(spec.command, spec.args, {
           cwd: this.opts.cwd,
-          env: { ...process.env, ...this.opts.env },
+          env: spec.env,
           stdio: ['pipe', 'pipe', 'pipe']
         })
       } catch (err) {

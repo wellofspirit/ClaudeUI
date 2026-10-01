@@ -65,6 +65,10 @@ import type {
   FileAttachment,
   ChatgptRateLimits
 } from '../../../shared/types'
+// The harness snapshot (ADR-082 §8): whether a new session's harness runs.
+// `harness-store` imports nothing from this module, so there is no cycle.
+import { harnessStore } from '../components/SettingsDialog/harness-store'
+import { harnessCanRun } from '../components/SettingsDialog/harness-view'
 /**
  * The replica owns every SEALED slice of this store (see `sealed-fields.ts`).
  *
@@ -435,6 +439,49 @@ export function seedingModelPicks(state: {
   return state.settings.newSessionModel === 'configured-default'
     ? NO_SEEDING_PICKS
     : state.lastSelectedModelByEngine
+}
+
+/**
+ * The model a session on `engineId` starts with: the user's last pick on that
+ * engine while it is still offered (unless they chose the configured default,
+ * `seedingModelPicks`), else the engine default. `model: null` means the
+ * CONFIGURED default names a model this engine no longer offers; `stale` is
+ * that name, to report rather than substitute (ADR-059). Shared by
+ * `createNewSession` and `seedUnsetModel`, so a session seeded late (its
+ * harness was installed after it was created, ADR-082 §8) gets the model a
+ * new one would.
+ */
+function pickSeedModel(
+  state: SessionState,
+  engineId: EngineId
+): { model: string | null; stale: string | null; sticky: string | undefined } {
+  const defaults = engineDefaultModels(state)
+  // The user's last pick on THIS engine wins over the engine default — the
+  // model twin of `lastSelectedEngineId` — unless the user chose the
+  // configured default instead (`newSessionModel`). Only when it is still offered:
+  // stickiness is a heuristic, so a stale entry falls through quietly (the
+  // configured-default error rule below still applies underneath it).
+  const sticky = seedingModelPicks(state)[engineId]
+  const stickyAvailable =
+    !!sticky &&
+    state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
+  // `null` = the user's CONFIGURED default named a model this engine no longer
+  // offers. Seed the picker's unset state and say so, rather than substituting
+  // a model whose capabilities differ from the one the user asked for.
+  let model = stickyAvailable
+    ? (sticky as string)
+    : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+  if (engineId === 'codex' && sticky) {
+    const hasCatalog = state.availableModels.some((m) => m.engineId === 'codex')
+    model = hasCatalog && !stickyAvailable ? null : sticky
+  }
+  const stale =
+    model === null
+      ? engineId === 'codex' && sticky
+        ? sticky
+        : configuredDefaultModelOf(engineId, defaults, state.availableModels)
+      : null
+  return { model, stale, sticky }
 }
 
 export interface AppSettings {
@@ -1462,6 +1509,12 @@ export interface SessionState {
   setLastSelectedEngineId: (engineId: EngineId) => void
   /** Switch the active fresh session's engine and seed its effective default model. */
   setSelectedEngine: (engineId: EngineId) => void
+  /**
+   * Give a session that has not spawned, and holds no model because its
+   * harness was not installed when it was created (ADR-082 §8), the model a
+   * new session would get, now that the harness runs. A no-op otherwise.
+   */
+  seedUnsetModel: (routingId: string) => void
   /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
@@ -1880,38 +1933,28 @@ export const useSessionStore = create<SessionState>((set) => ({
       // Validate the remembered engine against what is ACTUALLY usable right now.
       // `availableModels` reflects post-discovery, provider-filtered reality. If the
       // remembered engine is opencode but it has no usable model — its provider was
-      // disabled, discovery hasn't run yet, or opencode is unavailable — seeding it
-      // would show a Claude model in the picker while routing send to a phantom
-      // opencode model (the desync regression). Fall back to claude in that case.
+      // disabled or discovery hasn't run yet — seeding it would show a Claude model
+      // in the picker while routing send to a phantom opencode model (the desync
+      // regression). Fall back to claude in that case.
+      //
+      // A harness that is not installed is different (ADR-082 §8): it stays
+      // selected, with NO model seeded — the engine default for an empty catalog
+      // is a phantom value — and the composer offers to install it. Only a
+      // harness this computer cannot run at all falls back to claude. Before the
+      // harness snapshot has loaded (`unknown`) everything behaves as it did.
       let engineId = state.lastSelectedEngineId
+      if (harnessStore.readiness(engineId) === 'unavailable-here') engineId = 'claude'
+      const harnessRuns = harnessCanRun(harnessStore.readiness(engineId))
       const defaults = engineDefaultModels(state)
-      // The user's last pick on THIS engine wins over the engine default — the
-      // model twin of `lastSelectedEngineId` — unless the user chose the
-      // configured default instead (`newSessionModel`). Only when it is still offered:
-      // stickiness is a heuristic, so a stale entry falls through quietly (the
-      // configured-default error rule below still applies underneath it).
-      const sticky = seedingModelPicks(state)[engineId]
-      const stickyAvailable =
-        !!sticky &&
-        state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
-      // `null` = the user's CONFIGURED default named a model this engine no longer
-      // offers. Seed the picker's unset state and say so, rather than substituting
-      // a model whose capabilities differ from the one the user asked for.
-      let defaultModel = stickyAvailable
-        ? (sticky as string)
-        : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
-      if (engineId === 'codex' && sticky) {
-        const hasCatalog = state.availableModels.some((model) => model.engineId === 'codex')
-        defaultModel = hasCatalog && !stickyAvailable ? null : sticky
-      }
-      const staleDefault =
-        defaultModel === null
-          ? engineId === 'codex' && sticky
-            ? sticky
-            : configuredDefaultModelOf(engineId, defaults, state.availableModels)
-          : null
+      const seed = harnessRuns
+        ? pickSeedModel(state, engineId)
+        : { model: null, stale: null, sticky: undefined }
+      const sticky = seed.sticky
+      let defaultModel = seed.model
+      const staleDefault = seed.stale
       if (
         engineId === 'opencode' &&
+        harnessRuns &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
       ) {
         // Distinct from the stale-default case above: opencode has NO usable model
@@ -2032,7 +2075,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       return
     if (session.selectedEngineId === engineId) return
     const defaults = engineDefaultModels(state)
-    const resolved = resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+    // A harness that cannot run is picked with no model (ADR-082 §8): its empty
+    // catalog would resolve to a phantom default, and a "configured default is
+    // gone" error would name the wrong problem. The composer offers the install.
+    const harnessRuns = harnessCanRun(harnessStore.readiness(engineId))
+    const resolved = harnessRuns
+      ? resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      : ''
     // A stale CONFIGURED default leaves the picker unset (and says why) instead of
     // handing the new engine a substitute model — same rule as `createNewSession`.
     const model = resolved ?? ''
@@ -2079,6 +2128,41 @@ export const useSessionStore = create<SessionState>((set) => ({
         configuredDefaultModelOf(engineId, defaults, state.availableModels)
       )
     }
+    patchLocalApp({ sessionEngines })
+    saveSessionConfig(state, { sessionEngines })
+  },
+
+  seedUnsetModel: (routingId) => {
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
+    if (!session || session.selectedModel) return
+    if (session.sdkActive || session.status.sessionId || session.isHistorical) return
+    const engineId = session.selectedEngineId
+    if (!harnessCanRun(harnessStore.readiness(engineId))) return
+    const { model, stale, sticky } = pickSeedModel(state, engineId)
+    if (model === null) {
+      if (stale !== null) reportStaleDefaultModel(routingId, engineId, stale)
+      return
+    }
+    const defaults = engineDefaultModels(state)
+    const modelInfo = state.availableModels.find(
+      (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
+    )
+    const sessionEngines = {
+      ...state.sessionEngines,
+      [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+    }
+    patchLocalSession(routingId, {
+      selectedModel: model,
+      ...(engineId === 'codex'
+        ? { codexModelExplicit: !!sticky || defaults.codexDefaultModelConfigured }
+        : {}),
+      status: {
+        ...session.status,
+        engineId,
+        capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
+      }
+    })
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
   },

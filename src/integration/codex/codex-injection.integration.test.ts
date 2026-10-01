@@ -8,14 +8,20 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexClient, CodexInjectionError } from '../../core/codex/CodexClient'
 import { codexAuthHook, type CodexAuthSource } from '../../core/codex/codex-auth-hook'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
-import { codexIntegrationEnabled } from './integration-host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexIntegrationEnabled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import {
   startFixtureProvider,
   writeFixtureCodexHome,
@@ -45,7 +51,7 @@ import {
  * unwrapped and the isolation is the fixture's own: a replacement environment (no
  * real `USERPROFILE`/`HOME`, a temp `CODEX_HOME`), a config whose only provider is
  * the localhost fixture, and every network feature off. Windows x64 and Linux
- * x64/arm64 are pinned and shipped (`scripts/codex-digests.json`), so this suite
+ * x64/arm64 are pinned and shipped (`src/shared/harness-manifests/codex.json`), so this suite
  * runs on every reviewed host (`integration-host.ts`).
  */
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
@@ -143,6 +149,7 @@ afterEach(async () => {
       }
     } finally {
       setHostPaths(null)
+      releaseFixtureCodex()
       if (directory) rmSync(directory, { recursive: true, force: true })
       directory = undefined
     }
@@ -167,10 +174,7 @@ interface Fixture {
 }
 
 async function setupFixture(): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -180,17 +184,18 @@ async function setupFixture(): Promise<Fixture> {
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
   // Both members: the locator refuses a `codex` without its code-mode host
   // beside it (protocol-codex/README.md), whatever the model in use.
   const exe = process.platform === 'win32' ? '.exe' : ''
-  copyFileSync(installed, join(directory, 'vendor/codex-cli', `codex${exe}`))
+  copyFileSync(installed, join(directory, FIXTURE_CODEX_DIR, `codex${exe}`))
   copyFileSync(
-    resolve('vendor/codex-cli', `codex-code-mode-host${exe}`),
-    join(directory, 'vendor/codex-cli', `codex-code-mode-host${exe}`)
+    storeCodexPath(`codex-code-mode-host${exe}`),
+    join(directory, FIXTURE_CODEX_DIR, `codex-code-mode-host${exe}`)
   )
   setHostPaths({ getAppPath: () => directory! })
+  useFixtureCodex(directory!)
   // The SHARED fixture in `chatgpt` mode (`fixture-provider.ts`): the binary's
   // own backend calls (`chatgpt_base_url` — rate limits, profile, models) are
   // answered 404 and recorded in `backend` instead of hitting chatgpt.com, where

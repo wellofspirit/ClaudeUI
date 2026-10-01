@@ -244,7 +244,8 @@ vi.mock('../../core/pi/model-discovery', () => ({
 }))
 vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
 }))
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {

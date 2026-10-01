@@ -406,7 +406,7 @@ export function ModelCuration({
     adapters.length > 1 ? (
       <div
         role="tablist"
-        aria-label="Models in the picker, per engine"
+        aria-label="Models in the picker, per harness"
         data-testid={`${testid}.curationTabs`}
         className="flex gap-0.5 px-2 border-b border-border/55"
       >

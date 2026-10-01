@@ -471,9 +471,9 @@ export class OpencodeSession extends BaseSession {
     const { providerID, modelID } = parseModelString(this._model)
     const base = resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
-    // ANDed with the honest runtime check — always true for opencode (Claude
-    // is ClaudeUI's bundled default engine), kept explicit rather than
-    // hardcoded so the semantics stay identical to the Claude side.
+    // ANDed with the honest runtime check: some target (Claude Code, pi or
+    // Codex) is available. No longer a given since ADR-082 made Claude Code a
+    // selectable harness that can resolve to nothing.
     return {
       ...base,
       crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode')

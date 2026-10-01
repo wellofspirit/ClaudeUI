@@ -12,6 +12,8 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { resolveOpencodeAuthJsonPath } from '../opencode/auth-store'
 import { PI_API_KEY_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { discoverPiModels } from '../pi/model-discovery'
+import { harnessWritable } from '../harness/resolve'
+import { deliveredKeyFingerprints } from './delivered-keys'
 import { authJsonApiKeyReader } from './native-api-keys'
 import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
 import { PiSharedProviderAdapter } from './PiSharedProviderAdapter'
@@ -38,6 +40,11 @@ export const sharedProviderService = new SharedProviderService({
   opencode: new OpencodeSharedProviderAdapter({ authTarget: opencodeAuthProvider }),
   credentialSync,
   getChatgptModels,
+  // No key is written into a harness that does not run; removals happen at once
+  // (ADR-082 §8, S7d). The fingerprints tell ClaudeUI's earlier keys from the
+  // user's.
+  harnessRuns: harnessWritable,
+  deliveredKeys: deliveredKeyFingerprints(),
   // ADR-074 §6 adoption: plain API-key entries in each engine's own auth.json
   // (`api` on opencode, `api_key` on pi). opencode's catalog costs a server
   // spawn, so the service asks for it only once a vendor holds a key in both.

@@ -325,22 +325,22 @@ export function LinkedModelCuration({
     <SettingRow
       testid={`${testid}.curationLinkRow`}
       layout="stacked"
-      description="Which engines use this list"
+      description="Which harnesses use this list"
     >
       <ChoiceCards
         testid={`${testid}.curationLink`}
-        ariaLabel="Which engines use this list"
+        ariaLabel="Which harnesses use this list"
         value={linked ? 'one' : 'separate'}
         options={[
           {
             value: 'one',
-            label: 'One list for all engines',
+            label: 'One list for all harnesses',
             description: 'opencode and pi offer the same models.'
           },
           {
             value: 'separate',
-            label: 'Separate per engine',
-            description: 'Each engine keeps its own list.'
+            label: 'Separate per harness',
+            description: 'Each harness keeps its own list.'
           }
         ]}
         onChange={chooseLink}
@@ -371,7 +371,7 @@ export function LinkedModelCuration({
           label: `Both combined (${count(combined)})`,
           description: unionAll
             ? 'One side shows all models, so the combined list is all models.'
-            : 'Nothing either engine shows today is removed.'
+            : 'Nothing either harness shows today is removed.'
         }
       ]
       return (
@@ -459,7 +459,7 @@ export function LinkedModelCuration({
           testid={`${testid}.models`}
           dataId="empty"
           label={`No models from ${providerName}`}
-          description={emptyText ?? 'Neither engine reports a model for this provider.'}
+          description={emptyText ?? 'Neither harness reports a model for this provider.'}
         />
       </>
     )

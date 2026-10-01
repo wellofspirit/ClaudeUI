@@ -19,7 +19,7 @@ const DEFAULT_MAX_TOKENS = 16_384
 /**
  * The `apiKey` written into a keyless custom provider's models.json entry
  * (ADR-074 §4). pi omits a provider with no usable credential from
- * `get_available_models` (`vendor/pi-cli/pi/docs/models.md`: "The dummy key
+ * `get_available_models` (`vendor/pi-src/packages/coding-agent/docs/models.md`: "The dummy key
  * makes the model available"), so a self-hosted endpoint added with the key
  * left blank would never reach pi's picker without one.
  *
@@ -209,6 +209,8 @@ export class PiSharedProviderAdapter {
     // ChatGPT (kind:'subscription') legitimately targets built-in 'openai-codex'
     // and is NOT a collision, so it still removes as before.
     if (isPiBuiltinCollision(definition)) return
+    // A file edit: needs no pi process, and creates nothing when the entry (or
+    // the file) is absent (`PiAuthProvider.removeVendorAuth`).
     await this.deps.auth.removeVendorAuth(nativeProviderId(definition))
   }
 

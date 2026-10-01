@@ -91,7 +91,15 @@ vi.mock('../../../core/pi/model-discovery', () => ({
 
 vi.mock('../../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
+}))
+
+// `engine:is-installed` is the harness resolver's answer (ADR-082), tested in
+// src/core/harness; here only the routing matters, off the real vendor/ tree.
+vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
+  engineInstalled: vi.fn(() => false)
 }))
 
 vi.mock('../../../core/auth/vault/CredentialSync', () => ({
@@ -300,6 +308,7 @@ import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -552,6 +561,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-curation',
       'shared-provider:set-disabled',
       'shared-provider:sync',
+      'shared-provider:use-stored-key',
       'shared-provider:disconnect',
       'shared-provider:set-default'
     ])
@@ -1030,16 +1040,22 @@ describe('registerRemoteHandlers', () => {
       expect(res).toEqual({ enabled: false, accounts: [] })
     })
 
-    it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
+    it('engine:is-installed asks the harness resolver for every engine, claude included', async () => {
+      vi.mocked(engineInstalled).mockImplementation((id) => id === 'pi')
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)
-      ).toBe(true)
+      ).toBe(false)
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)
       ).toBe(false)
       expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(
-        false
+        true
       )
+      expect(vi.mocked(engineInstalled).mock.calls.map(([id]) => id)).toStrictEqual([
+        'claude',
+        'opencode',
+        'pi'
+      ])
     })
 
     it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {
@@ -1744,6 +1760,8 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'shared-provider:set-key',
   'shared-provider:set-route',
   'shared-provider:sync',
+  // ADR-082 §8 (S7d) — a kept own key replaced by the stored one, host-side.
+  'shared-provider:use-stored-key',
   'vendor-auth:list-keys',
   'vendor-auth:list-options',
   'vendor-auth:oauth-authorize',
@@ -1767,7 +1785,12 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
  * key material: the shared definitions, opencode's catalog and pi's vendor
  * entries reduce to names, counts, credential BADGES and per-engine chips.
  */
-const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
+const PROVIDER_REGISTRY_CHANNELS = [
+  'provider-registry:list',
+  // S7f — who holds an own key for a provider now, read from the harnesses'
+  // auth files host-side; harness ids only, no key material.
+  'shared-provider:own-key-holders'
+] as const
 
 /**
  * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
@@ -1898,6 +1921,38 @@ const USAGE_HUB_CHANNELS = [
   'usage-hub:forget'
 ] as const
 
+/**
+ * The harness manager (ADR-082 arc 2). Restated rather than imported from
+ * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
+ * reads are `config`; the eight writes `admin` (§7), which a base connection
+ * never holds: four for sources and installs, three for updates (§6), and the
+ * upgrade sheet's answer (§8).
+ */
+const HARNESS_CHANNELS = [
+  'harness:state',
+  'harness:versions',
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates',
+  'harness:answer-upgrade-prompt'
+] as const
+
+/** The part of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
+const HARNESS_ADMIN_CHANNELS = [
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates',
+  'harness:answer-upgrade-prompt'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1976,7 +2031,10 @@ describe('remote surface parity (phase 1 port)', () => {
         // the combined dashboard and the settings group that configures it are
         // not desktop-only — and no shape among them can return the device
         // secret, which is why a write-only `set-secret` command is safe here.
-        ...USAGE_HUB_CHANNELS
+        ...USAGE_HUB_CHANNELS,
+        // ADR-082 arc 2: the Installed page is on every device (reads are
+        // `config`); installing, re-sourcing and detecting are `admin`.
+        ...HARNESS_CHANNELS
       ].sort()
     )
   })
@@ -2147,7 +2205,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
       // deliberately absent — it declares `config` and IS reachable at connect,
       // which is what makes the button able to explain itself.
-      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const)
+      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
+      // ADR-082 §7: the harness manager's writes. The two reads are `config`.
+      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -2319,12 +2379,13 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // FOUR sanctioned widenings, each deliberate and each behind a ceremony:
-    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), the
-    // `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with the
-    // two LAN-channel verbs — which is also when the namespace joined the pin
-    // table, `admin` having shrunk to exactly these two families), and the IDE
-    // mint (ADR-064).
+    // FIVE sanctioned widenings, each deliberate and each behind a proven
+    // identity: the terminal set (ADR-052 decision 6), the passkey set
+    // (decision 1), the `authcfg:*` settings namespace (ADR-054 §6, extended by
+    // ADR-056 with the two LAN-channel verbs — which is also when the namespace
+    // joined the pin table, `admin` having shrunk to exactly these two
+    // families), the IDE mint (ADR-064), and the harness manager's writes
+    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -2337,7 +2398,8 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
       // remote, and reachable only behind the toggle + a step-up. Same shape as
       // the terminal set above.
-      ...IDE_GATED_CHANNELS
+      ...IDE_GATED_CHANNELS,
+      ...HARNESS_ADMIN_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

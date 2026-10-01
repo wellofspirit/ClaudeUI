@@ -58,7 +58,7 @@ function cred(over: Partial<VaultCredential> & { ws?: string } = {}): VaultCrede
 }
 
 /** A spy feed target whose auth file never exists, so no fs.watch is armed. */
-function fakeTarget(): {
+function fakeTarget(holding: CodexEntrySnapshot | null = null): {
   target: CodexFeedTarget
   feed: ReturnType<typeof vi.fn>
   remove: ReturnType<typeof vi.fn>
@@ -69,7 +69,7 @@ function fakeTarget(): {
     target: {
       authFilePath: () => join(testHome, 'no-such-dir', 'auth.json'),
       feedOauthCredential: feed,
-      readOauthEntry: vi.fn(async (): Promise<CodexEntrySnapshot | null> => null),
+      readOauthEntry: vi.fn(async (): Promise<CodexEntrySnapshot | null> => holding),
       removeVendorAuth: remove
     },
     feed,
@@ -214,8 +214,9 @@ describe('CredentialSync.removeAccount', () => {
   it('removing the LAST account removes both engine copies', async () => {
     const vault = new AuthVault()
     const only = await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
-    const pi = fakeTarget()
-    const opencode = fakeTarget()
+    // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
+    const pi = fakeTarget(cred())
+    const opencode = fakeTarget(cred())
     const onActiveAccountChanged = vi.fn()
     const sync = new CredentialSync({ vault, onActiveAccountChanged })
     sync.configure({ pi: pi.target, opencode: opencode.target })

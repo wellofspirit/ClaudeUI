@@ -27,9 +27,11 @@
 # `node_modules`, `vendor`, `.cache`, `out`, `dist` and `.git` itself stay out,
 # without a hand-maintained exclusion list that could drift from `.gitignore`.
 #
-# `/work/node_modules`, `/work/vendor`, the bun install cache and the Electron
-# cache are per-arch NAMED VOLUMES, so the (slow) first `bun install` and the
-# (large) Codex download are paid once per architecture. They survive `docker rm`;
+# `/work/node_modules`, `/work/vendor`, ClaudeUI's managed harness store
+# (`/root/.claude/ui/harnesses`, where `bun install`'s postinstall puts the pinned
+# Codex, ADR-082 §8), the bun install cache and the Electron cache are per-arch
+# NAMED VOLUMES, so the (slow) first `bun install` and the (large) Codex download
+# are paid once per architecture. They survive `docker rm`;
 # `docker volume rm claudeui-codex-linux-<arch>-*` resets them.
 #
 # The container runs with seccomp and AppArmor unconfined and `SYS_ADMIN`,
@@ -115,6 +117,7 @@ run=(docker run --platform "$platform"
   -v "$repo:/src:ro"
   -v "$volume-node-modules:/work/node_modules"
   -v "$volume-vendor:/work/vendor"
+  -v "$volume-harnesses:/root/.claude/ui/harnesses"
   -v "$volume-bun-cache:/root/.bun/install/cache"
   -v "$volume-electron-cache:/root/.cache/electron"
   -w /work)

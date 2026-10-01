@@ -102,7 +102,10 @@ vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 // files and both engines' catalogs; nothing here judges, and its import graph
 // needs the real `node:fs` this file mocks away.
 vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: vi.fn() }))
-vi.mock('../pi-locate', () => ({ locatePiBinary: () => '/fake/pi', piBinaryAvailable: () => true }))
+vi.mock('../pi-locate', () => ({
+  locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
+  piBinaryAvailable: () => true
+}))
 vi.mock('../model-discovery', async () => {
   const actual = await vi.importActual<typeof import('../model-discovery')>('../model-discovery')
   return { ...actual, getPiModelCatalog: vi.fn().mockResolvedValue([]) }

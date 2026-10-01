@@ -24,7 +24,7 @@
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real `openai-codex` credential in
  * ~/.pi/agent/auth.json (read-only — this file never writes to it). Uses the
- * REAL vendored pi binary and makes REAL model API calls against a small/cheap
+ * REAL installed pi binary and makes REAL model API calls against a small/cheap
  * model (gpt-5.6-luna — already verified end-to-end in
  * pi-bridge.integration.test.ts and docs/protocol-pi/README.md's M0 auth
  * notes). Same shared-refresh-token caveat as that file applies here.

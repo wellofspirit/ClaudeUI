@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it("is version 7 (ADR-033 slice H added 'codex' to dispatch_agent's engine enum)", () => {
-    expect(PI_BRIDGE_VERSION).toBe('7')
+  it('is version 8 (ADR-082 added the Electron-as-Node cleanup)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('8')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -1026,5 +1026,47 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — plan mode (M5a, executed in-process)', 
       const { events } = runExtension()
       expect(events.has('session_start')).toBe(false)
     })
+  })
+})
+
+describe('Electron-as-Node cleanup (ADR-082 §2)', () => {
+  const KEYS = ['ELECTRON_RUN_AS_NODE', 'CLAUDEUI_PI_ELECTRON_NODE'] as const
+
+  /** Run the factory with the two variables set as given, returning them afterwards. */
+  function envAfterLoad(vars: Record<(typeof KEYS)[number], string | undefined>): {
+    runAsNode: string | undefined
+    marker: string | undefined
+  } {
+    const prev = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]))
+    try {
+      for (const k of KEYS) {
+        if (vars[k] === undefined) delete process.env[k]
+        else process.env[k] = vars[k]
+      }
+      // The bridge's own gates all unset: the cleanup must not depend on them.
+      withEnv({}, () => runExtension())
+      return {
+        runAsNode: process.env.ELECTRON_RUN_AS_NODE,
+        marker: process.env.CLAUDEUI_PI_ELECTRON_NODE
+      }
+    } finally {
+      for (const k of KEYS) {
+        if (prev[k] === undefined) delete process.env[k]
+        else process.env[k] = prev[k]
+      }
+    }
+  }
+
+  it("drops ELECTRON_RUN_AS_NODE at load when ClaudeUI's marker is set, and keeps the marker", () => {
+    expect(envAfterLoad({ ELECTRON_RUN_AS_NODE: '1', CLAUDEUI_PI_ELECTRON_NODE: '1' })).toEqual({
+      runAsNode: undefined,
+      marker: '1'
+    })
+  })
+
+  it('leaves ELECTRON_RUN_AS_NODE alone without the marker (not ours to remove)', () => {
+    expect(
+      envAfterLoad({ ELECTRON_RUN_AS_NODE: '1', CLAUDEUI_PI_ELECTRON_NODE: undefined })
+    ).toEqual({ runAsNode: '1', marker: undefined })
   })
 })

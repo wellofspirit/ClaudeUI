@@ -169,6 +169,9 @@ describe('catalog definitions', () => {
   it('disabling pi removes only pi’s key', async () => {
     const { service, credentials, pi, opencode } = setup([chatgpt(), catalog()])
     credentials.set('openrouter', { type: 'api_key', key: KEY_A })
+    // What the engines hold is ClaudeUI's key — the only kind a removal takes out.
+    writeAuth(piAuth, { openrouter: { type: 'api_key', key: KEY_A } })
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
     await service.setRouteEnabled('openrouter', 'pi', false)
     expect(pi.removeCredential).toHaveBeenCalledTimes(1)
     expect(opencode.removeCredential).not.toHaveBeenCalled()
@@ -187,6 +190,8 @@ describe('catalog definitions', () => {
   it('removeDefinition clears the vault and both engines', async () => {
     const { service, records, credentials, pi, opencode } = setup([chatgpt(), catalog()])
     credentials.set('openrouter', { type: 'api_key', key: KEY_A })
+    writeAuth(piAuth, { openrouter: { type: 'api_key', key: KEY_A } })
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
     await service.removeDefinition('openrouter')
     expect(pi.removeCredential).toHaveBeenCalledTimes(1)
     expect(opencode.removeCredential).toHaveBeenCalledTimes(1)

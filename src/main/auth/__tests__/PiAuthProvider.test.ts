@@ -281,6 +281,21 @@ describe('PiAuthProvider.removeVendorAuth', () => {
     expect(readAuthJsonRaw()).toEqual({ openai: { type: 'api_key', key: 'sk-openai-test' } })
   })
 
+  it('creates nothing when there is no auth.json — pi may not be installed (ADR-082 §8, S7d)', async () => {
+    const provider = new PiAuthProvider()
+    await expect(provider.removeVendorAuth('openrouter')).resolves.toBeUndefined()
+    expect(existsSync(join(testHome, '.pi'))).toBe(false)
+  })
+
+  it('leaves the file untouched when the vendor has no entry', async () => {
+    writeAuthJson({ openai: { type: 'api_key', key: 'sk-openai-test' } })
+    const before = statSync(authJsonPath()).mtimeMs
+    const raw = readFileSync(authJsonPath(), 'utf-8')
+    await new PiAuthProvider().removeVendorAuth('anthropic')
+    expect(readFileSync(authJsonPath(), 'utf-8')).toBe(raw)
+    expect(statSync(authJsonPath()).mtimeMs).toBe(before)
+  })
+
   it('invalidates the pi model cache after a removal', async () => {
     writeAuthJson({ anthropic: { type: 'api_key', key: 'sk-ant-test' } })
     const provider = new PiAuthProvider()

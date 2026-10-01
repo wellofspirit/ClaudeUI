@@ -111,10 +111,11 @@ describe('AuthVault', () => {
     const vault = new AuthVault()
     await vault.saveCredential('custom', { type: 'api_key', key: 'keep' })
     await vault.save({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
     const native = (): CodexFeedTarget => ({
       authFilePath: () => join(testHome, 'native-auth.json'),
       feedOauthCredential: vi.fn(async () => {}),
-      readOauthEntry: vi.fn(async () => null),
+      readOauthEntry: vi.fn(async () => ({ access: 'a', refresh: 'r', expires: 1 })),
       removeVendorAuth: vi.fn(async () => {})
     })
     const pi = native()

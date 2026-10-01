@@ -638,13 +638,15 @@ describe('ChatGPT', () => {
     )
   })
 
-  it('removing the LAST account says ChatGPT is disconnected from every engine', async () => {
+  it('removing the LAST account says ClaudeUI’s sign-in leaves every harness, a direct one stays', async () => {
     withChatgpt({ accounts: { ...twoChatgpt, list: [twoChatgpt.list[0]] } })
     await renderSection()
     await click(byId(account('acc-1'), 'SubscriptionsSection.more', 'acc-1'))
     await click(menuItem(account('acc-1'), 'remove'))
     const confirm = within(account('acc-1')).getByTestId('SubscriptionsSection.confirm')
-    expect(confirm).toHaveTextContent('ChatGPT is then disconnected from every engine.')
+    expect(confirm).toHaveTextContent(
+      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
+    )
     expect(confirm).not.toHaveTextContent('Another account')
   })
 
@@ -724,7 +726,7 @@ describe('ChatGPT', () => {
     await click(within(card('chatgpt')).getByTestId('SubscriptionsSection.manage'))
     const sheet = await screen.findByTestId('ProviderSheet')
     expect(sheet).toHaveAttribute('data-id', 'chatgpt')
-    expect(sheet).toHaveTextContent('ChatGPT · engines & models')
+    expect(sheet).toHaveTextContent('ChatGPT · harnesses & models')
     expect(
       within(sheet)
         .getAllByTestId('ProviderSheet.group')
@@ -736,7 +738,7 @@ describe('ChatGPT', () => {
     await renderSection()
     const gpt = card('chatgpt')
     expect(within(gpt).getByTestId('SubscriptionsSection.optionsSummary')).toHaveTextContent(
-      'All engines follow the active account'
+      'All harnesses follow the active account'
     )
     const toggle = within(gpt).getByTestId('SubscriptionsSection.perSessionToggle')
     expect(toggle).toHaveAccessibleName('Pin an account per Codex session')

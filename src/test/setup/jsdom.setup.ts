@@ -26,6 +26,12 @@ mkdirSync(TEST_HOME, { recursive: true })
 process.env.USERPROFILE = TEST_HOME
 process.env.HOME = TEST_HOME
 
+// No background harness detection (ADR-082 §3) in a test process: a boot
+// test's `startCoreServices` would otherwise probe every Claude Code,
+// opencode, pi and Codex on this machine's PATH a few seconds later. Tests of
+// the scheduler build their own (`createDetectionScheduler`).
+process.env.CLAUDEUI_DISABLE_HARNESS_DETECTION = '1'
+
 // Redirect logger.ts's file output before anything in the test module graph
 // can import it — otherwise every test run appends fixture noise to the real
 // ~/.claude/ui/logs. `??=` lets an outer invocation still redirect explicitly.

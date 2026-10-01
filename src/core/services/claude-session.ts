@@ -68,6 +68,7 @@ import { locateBunClaude } from '../sdk'
 // barrel with a factory that lists only `query`, and `capabilities` is read on
 // every status emission.
 import { harnessHasPatch } from '../sdk/harness'
+import { harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 
 export { getCliVersion } from '../sdk'
 
@@ -88,17 +89,15 @@ export function getCliJsPath(): string {
 const RETRACTION_UUID_PREFIX_LEN = 24
 
 /**
- * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
- * it runs natively, carries all of Anthropic's bundled assets (ripgrep,
- * native addons, helper scripts), and does not need `ELECTRON_RUN_AS_NODE`
- * or a `NODE_PATH` injection.
+ * SDK options for the CLI spawn. They name no executable: `query()` spawns the
+ * harness resolver's launch for Claude Code (`locateClaudeLaunch`, ADR-082 §2),
+ * so a launch with leading args or its own env reaches every caller that
+ * spreads these. The bundled binary is our rebundled Bun build; it runs
+ * natively, carries all of Anthropic's bundled assets (ripgrep, native addons,
+ * helper scripts), and needs no `ELECTRON_RUN_AS_NODE` or `NODE_PATH`.
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
-  const bunClaude = locateBunClaude()
   return {
-    pathToClaudeCodeExecutable: bunClaude,
-    executable: bunClaude,
-    executableArgs: [],
     standaloneExecutable: true,
     env: {}
   }
@@ -201,8 +200,8 @@ export class ClaudeSession extends BaseSession {
   get capabilities(): ResolvedCapabilities {
     const base = resolveClaudeCapabilities(this.model, this.resolvedModelId)
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
-    // but the HONEST per-session value also requires the opencode binary to
-    // actually be vendored — otherwise there is no possible dispatch target.
+    // but the HONEST per-session value also requires an opencode binary the
+    // harness resolver can run — otherwise there is no possible dispatch target.
     // Voice likewise: the voice server is our cli.js patch, so an unpatched
     // Claude Code binary (CLAUDEUI_CLAUDE_CLI) has nothing to talk to.
     return {
@@ -709,14 +708,20 @@ export class ClaudeSession extends BaseSession {
 
     try {
       const execOpts = getSdkExecutableOpts()
-      const cliPath = execOpts.pathToClaudeCodeExecutable as string | undefined
-      if (cliPath) {
-        const cliExists = fs.existsSync(cliPath)
-        logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
-        if (!cliExists) {
-          this.send('session:error', `CLI not found at: ${cliPath}`)
-          return
-        }
+      const cliPath = locateBunClaude()
+      const cliExists = fs.existsSync(cliPath)
+      logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
+      if (!cliExists) {
+        // The resolver's reason when it found nothing (a System or bundled
+        // copy that could not be used); otherwise the file vanished after it
+        // was resolved.
+        this.send(
+          'session:error',
+          resolveHarness('claude').path === null
+            ? harnessUnavailableMessage('claude')
+            : `CLI not found at: ${cliPath}`
+        )
+        return
       }
       // Load MCP servers from config files and pass explicitly via mcpServers.
       // This supplements the SDK's own settingSources config loading. Plugin MCP
@@ -769,7 +774,7 @@ export class ClaudeSession extends BaseSession {
       // does NOT ride the auto-allowed `mcp__claude-ui__` prefix — it goes
       // through canUseTool like an ordinary tool. Gated on the named
       // crossEngineDispatchAvailable('claude') capability (ADR-030/M4-A) —
-      // same underlying check (opencode binary vendored) as before, but now
+      // same underlying check (an opencode binary resolves) as before, but now
       // routed through the honest capability helper instead of a raw proxy.
       const collabServer = crossEngineDispatchAvailable('claude')
         ? createCollabServer({

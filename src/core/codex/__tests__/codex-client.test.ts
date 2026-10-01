@@ -32,10 +32,15 @@ import { CodexClient, CodexInjectionError } from '../CodexClient'
 import { getLogDir, logger } from '../../services/logger'
 import type { CodexAuthHook } from '../codex-auth-hook'
 import type { InitializeParams } from '../protocol/InitializeParams'
+import { harnessManifest } from '../../harness/manifests'
+import { compareVersions } from '../../harness/store'
+
+/** What `codex --version` prints for the version this release tests. */
+const TESTED_VERSION_LINE = `codex-cli ${harnessManifest('codex').tested}\n`
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), locate: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../codex-locate', () => ({ locateCodexBinary: mocks.locate }))
+vi.mock('../codex-locate', () => ({ locateCodexLaunch: mocks.locate }))
 class Child extends EventEmitter {
   pid = 45678
   stdin = new PassThrough()
@@ -69,7 +74,7 @@ function frame(value: unknown): void {
 async function start(options: Partial<CodexClientOptions> = {}): Promise<void> {
   client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect, ...options })
   const promise = client.start(init)
-  version.stdout.write('codex-cli 0.156.0\n')
+  version.stdout.write(TESTED_VERSION_LINE)
   version.emit('close', 0)
   await ticks()
   expect(writes[0]).toMatchObject({ id: 0, method: 'initialize' })
@@ -107,7 +112,7 @@ beforeEach(() => {
   // by the caller-label guards below.
   debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
   app.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())))
-  mocks.locate.mockReturnValue('/vendor/codex')
+  mocks.locate.mockReturnValue({ command: '/vendor/codex', args: [] })
   mocks.spawn.mockReset().mockImplementation((command, args) => {
     if (command === 'taskkill') return new Child()
     return args[0] === '--version' ? version : app
@@ -210,7 +215,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'write-error' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     expect(writes).toEqual([{ id: 0, method: 'initialize', params: init }])
@@ -269,7 +274,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'process-exited' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     app.emit('exit', 0)
@@ -511,7 +516,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'spawn-failed' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     app.emit('error', new Error('private-path'))
@@ -586,7 +591,7 @@ describe('ChatGPT token injection', () => {
     typed = new CodexClient({ cwd: '/isolated', onDisconnect: disconnect })
     const started = typed.start(init, auth)
     void started.catch(() => {})
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     frame({ id: 0, result: initialized })
@@ -927,7 +932,7 @@ describe('first app-server on a Codex home with no state database', () => {
     // unhandled rejection in a test that never awaited it.
     ready.catch(() => {})
     const probe = versions[versions.length - 1]
-    probe.stdout.write('codex-cli 0.156.0\n')
+    probe.stdout.write(TESTED_VERSION_LINE)
     probe.emit('close', 0)
     return { client, ready }
   }
@@ -1134,5 +1139,120 @@ describe('caller label on every app-server spawn', () => {
     expect(error.label).toBe('unlabelled')
     expect(JSON.stringify(warn.mock.calls)).not.toContain('someone')
     expect(JSON.stringify(debug.mock.calls)).not.toContain('someone')
+  })
+})
+
+/**
+ * ADR-082 §3 (owner, 2026-09-30): a Codex in `[floor, ceiling)` runs, the tested
+ * version silently and any other as untested; below the floor or at or past the
+ * ceiling it is refused before the app-server spawns.
+ */
+describe('version gate', () => {
+  const { tested, floor, ceiling } = harnessManifest('codex')
+  const [major, minor, patch] = tested.split('.').map(Number)
+  const newer = `${major}.${minor}.${patch + 1}`
+
+  async function startWith(line: string): Promise<void> {
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const promise = client.start(init)
+    version.stdout.write(line)
+    version.emit('close', 0)
+    await ticks()
+    frame({ id: 0, result: initialized })
+    await promise
+  }
+
+  async function refused(line: string, code: string): Promise<void> {
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const promise = client.start(init)
+    const rejection = expect(promise).rejects.toMatchObject({ code })
+    version.stdout.write(line)
+    version.emit('close', 0)
+    await rejection
+    expect(writes).toEqual([])
+    // Never got as far as the app-server.
+    expect(mocks.spawn.mock.calls.map((call) => call[1])).toEqual([['--version']])
+  }
+
+  it('accepts a newer untested version and says so at info', async () => {
+    expect(compareVersions(newer, ceiling)).toBeLessThan(0)
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    await startWith(`codex-cli ${newer}\n`)
+    expect(writes[1]).toEqual({ method: 'initialized' })
+    expect(info).toHaveBeenCalledWith(
+      'CodexAppServerClient',
+      expect.stringContaining(`Codex ${newer} is untested`)
+    )
+  })
+
+  it('accepts the tested version without an untested line', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    await startWith(TESTED_VERSION_LINE)
+    expect(info).not.toHaveBeenCalled()
+  })
+
+  it('refuses a version older than the floor', async () => {
+    const [fMajor, fMinor] = floor.split('.').map(Number)
+    const older = fMinor > 0 ? `${fMajor}.${fMinor - 1}.0` : `${fMajor - 1}.0.0`
+    await refused(`codex-cli ${older}\n`, 'version-too-old')
+    expect(warn).toHaveBeenCalledWith(
+      'CodexAppServerClient',
+      expect.stringContaining(`older than ${floor}`)
+    )
+  })
+
+  it.each([ceiling, `${ceiling}-alpha.1`, '7.0.0'])(
+    'refuses %s, at or past the ceiling',
+    async (v) => {
+      await refused(`codex-cli ${v}\n`, 'version-incompatible')
+    }
+  )
+
+  it.each(['codex-cli local\n', `codex ${tested}\n`, `codex-cli ${tested} extra\n`])(
+    'keeps refusing unparseable output %j',
+    async (line) => {
+      await refused(line, 'version-check-failed')
+    }
+  )
+})
+
+/** Both Codex children are spawned from the resolved launch (ADR-082 §2). */
+describe('launch', () => {
+  it('spawns a native launch exactly as before', async () => {
+    await start({ env: { HOME: '/isolated' } })
+    const env = { HOME: '/isolated', CODEX_HOME: join('/isolated', '.codex') }
+    expect(mocks.spawn.mock.calls.map((call) => [call[0], call[1], call[2].env])).toEqual([
+      ['/vendor/codex', ['--version'], env],
+      ['/vendor/codex', ['app-server', '--listen', 'stdio://'], env]
+    ])
+  })
+
+  it('prepends a node-script launch and lays its env over the child env', async () => {
+    mocks.locate.mockReturnValue({
+      command: '/usr/bin/node',
+      args: ['/pkg/cli.js'],
+      env: { LAUNCH_MARKER: '1' }
+    })
+    mocks.spawn.mockImplementation((command, args: string[]) => {
+      if (command === 'taskkill') return new Child()
+      return args.includes('--version') ? version : app
+    })
+    await start({ env: { HOME: '/isolated' } })
+    const env = {
+      HOME: '/isolated',
+      CODEX_HOME: join('/isolated', '.codex'),
+      LAUNCH_MARKER: '1'
+    }
+    expect(mocks.spawn.mock.calls.map((call) => [call[0], call[1], call[2].env])).toEqual([
+      ['/usr/bin/node', ['/pkg/cli.js', '--version'], env],
+      ['/usr/bin/node', ['/pkg/cli.js', 'app-server', '--listen', 'stdio://'], env]
+    ])
+  })
+
+  it('refuses with binary-unavailable when nothing resolved', async () => {
+    mocks.locate.mockReturnValue(null)
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    await expect(client.start(init)).rejects.toMatchObject({ code: 'binary-unavailable' })
+    expect(mocks.spawn).not.toHaveBeenCalled()
   })
 })

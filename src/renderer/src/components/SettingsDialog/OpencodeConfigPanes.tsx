@@ -46,7 +46,6 @@ import {
   SettingsToggle
 } from './settings-controls'
 import { RawJsonField } from './OpencodeSchemaForm'
-import { useOpencodeInstalled } from './use-engine-installed'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { OpencodeAgentSummary, RawConfigPatch } from '../../../../shared/types'
 
@@ -543,12 +542,14 @@ function StringListRow({
   )
 }
 
-// ── Pane shell (install gate) ────────────────────────────────────────────────
+// ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * Loading and not-installed are ONE description-only row each (ADR-065), and
- * there is no footer: the group card already carries `opencode.jsonc` and the
- * "Next server start" note.
+ * Loading is ONE description-only row (ADR-065), and there is no footer: the
+ * group card already carries `opencode.jsonc` and the "Next server start" note.
+ *
+ * Nothing here asks whether opencode is installed: the opencode page cannot be
+ * opened while it is not (ADR-082 §8), and the file is ClaudeUI's own read.
  */
 function PaneShell({
   testid,
@@ -559,19 +560,8 @@ function PaneShell({
   api: OpencodeNativeConfigLeaf
   children: React.ReactNode
 }): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-
-  if (installed === null || api.config === null) {
+  if (api.config === null) {
     return <SettingRow testid={testid} description="Loading…" />
-  }
-  if (!installed) {
-    return (
-      <SettingRow
-        testid={testid}
-        dimmed
-        description="opencode is not installed. This edits opencode's own config file."
-      />
-    )
   }
   return (
     <div data-testid={testid} className="divide-y divide-border/55">
@@ -1032,7 +1022,7 @@ const MANAGED_KEYS: ManagedKey[] = [
     configKey: 'autoupdate',
     label: 'Self-update',
     forcedOn: false,
-    why: 'The vendored fork binary must never self-update over our patches.'
+    why: 'ClaudeUI installs and updates its own opencode; a self-update would replace it under a running session.'
   },
   {
     configKey: 'share',

@@ -1814,6 +1814,19 @@ export function allSessionMeta(): Record<string, SessionMeta> {
 }
 
 /**
+ * How many sessions this profile has per `engine_id`, as stored (the harness
+ * upgrade sheet's "N sessions", ADR-082 §8). Engines with none are absent.
+ */
+export function sessionCountsByEngine(db: Db = getDb()): Record<string, number> {
+  const rows = db
+    .prepare('SELECT engine_id, COUNT(*) AS n FROM session_meta GROUP BY engine_id')
+    .all() as Array<{ engine_id: string; n: number }>
+  const counts: Record<string, number> = {}
+  for (const row of rows) counts[row.engine_id] = Number(row.n)
+  return counts
+}
+
+/**
  * Carry session metadata from oldId to newId (used on session rekey).
  * If oldId has no entry, a default 'claude' entry is written for newId.
  */

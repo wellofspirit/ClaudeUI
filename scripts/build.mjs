@@ -100,45 +100,23 @@ const ensureCli = (update) => [
     ]
   }
 ]
-const ensureOpencode = (update) => [
+// opencode, pi and Codex install into ClaudeUI's managed store through the
+// app's own installer (`scripts/ensure-harness.mjs`, ADR-082 §8), which is
+// TypeScript: bun runs it. A host without a reviewed Codex release exits 0 with
+// a skip line; real failures exit non-zero and stop the target. No build target
+// runs these: packages no longer carry opencode, pi or Codex, and development
+// gets them from `postinstall`.
+const ensureHarness = (id, update) => [
   {
-    label: 'ensure-opencode',
-    steps: [['node', ['scripts/ensure-opencode.mjs', ...Q, ...(update ? ['--force'] : [])]]]
-  }
-]
-const ensurePi = (update) => [
-  {
-    label: 'ensure-pi',
-    steps: [['node', ['scripts/ensure-pi.mjs', ...Q, ...(update ? ['--force'] : [])]]]
-  }
-]
-
-// ensure-codex.mjs rejects unknown flags and prints a single result line either
-// way, so it takes no --quiet. A host without a reviewed digest manifest (today:
-// everything but macOS arm64, Windows x64 and Linux x64/arm64) exits 0 with a
-// skip line; real failures still exit non-zero and stop the build like any other
-// step.
-const ensureCodex = (update) => [
-  {
-    label: 'ensure-codex',
-    steps: [['node', ['scripts/ensure-codex.mjs', ...(update ? ['--force'] : [])]]]
+    label: `ensure-${id}`,
+    steps: [['bun', [`scripts/ensure-${id}.mjs`, ...Q, ...(update ? ['--force'] : [])]]]
   }
 ]
 
 const TARGETS = {
-  build: [
-    ...typecheck,
-    ...ensureCli(false),
-    ...ensureOpencode(false),
-    ...ensurePi(false),
-    ...ensureCodex(false),
-    ...electronViteBuild
-  ],
+  build: [...typecheck, ...ensureCli(false), ...electronViteBuild],
   'build:mac': [
     ...ensureCli(false),
-    ...ensureOpencode(false),
-    ...ensurePi(false),
-    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -171,9 +149,6 @@ const TARGETS = {
   'build:win': [
     ...typecheck,
     ...ensureCli(false),
-    ...ensureOpencode(false),
-    ...ensurePi(false),
-    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -183,9 +158,6 @@ const TARGETS = {
   ],
   'build:linux': [
     ...ensureCli(false),
-    ...ensureOpencode(false),
-    ...ensurePi(false),
-    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -196,9 +168,6 @@ const TARGETS = {
   'build:unpack': [
     ...typecheck,
     ...ensureCli(false),
-    ...ensureOpencode(false),
-    ...ensurePi(false),
-    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -209,12 +178,12 @@ const TARGETS = {
   'build:web': [...webBuild],
   'ensure-cli': [...ensureCli(false)],
   'update-cli': [...ensureCli(true)],
-  'ensure-opencode': [...ensureOpencode(false)],
-  'update-opencode': [...ensureOpencode(true)],
-  'ensure-pi': [...ensurePi(false)],
-  'update-pi': [...ensurePi(true)],
-  'ensure-codex': [...ensureCodex(false)],
-  'update-codex': [...ensureCodex(true)]
+  'ensure-opencode': [...ensureHarness('opencode', false)],
+  'update-opencode': [...ensureHarness('opencode', true)],
+  'ensure-pi': [...ensureHarness('pi', false)],
+  'update-pi': [...ensureHarness('pi', true)],
+  'ensure-codex': [...ensureHarness('codex', false)],
+  'update-codex': [...ensureHarness('codex', true)]
 }
 
 const stages = TARGETS[target]

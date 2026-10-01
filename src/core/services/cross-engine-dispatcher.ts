@@ -84,7 +84,8 @@ import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
-import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
+import { locatePiLaunch } from '../pi/pi-locate'
+import { harnessUnavailableMessage } from '../harness/resolve'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
@@ -109,7 +110,7 @@ import {
   type CodexThreadConnection,
   type CodexThreadOwner
 } from '../codex/CodexHost'
-import { codexBinaryAvailable } from '../codex/codex-locate'
+import { harnessAvailable } from '../harness/resolve'
 import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
@@ -133,7 +134,7 @@ import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
-import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
+import { query as sdkQuery, sendProgress } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
   CanUseTool,
@@ -176,44 +177,40 @@ import type {
 } from '../../shared/types'
 
 /**
+ * Which engines a session on each engine can dispatch into: every OTHER engine
+ * (ADR-033's same-engine guard, `dispatchInner`), plus Codex into Codex, which
+ * ADR-069 §7 lifts the guard for (a target is one more thread on the caller's
+ * host).
+ */
+const DISPATCH_TARGETS: Readonly<Record<EngineId, readonly EngineId[]>> = {
+  claude: ['opencode', 'pi', 'codex'],
+  opencode: ['claude', 'pi', 'codex'],
+  pi: ['claude', 'opencode', 'codex'],
+  codex: ['claude', 'opencode', 'pi', 'codex']
+}
+
+/**
  * Whether cross-engine dispatch is a real, honest capability for `engineId`
- * (ADR-030 + ADR-033 M4-A): "this engine can host the dispatch tool AND at
- * least one OTHER installed engine can be a target." Lives here (not in
- * shared/model-capabilities.ts, which must stay renderer-safe / import-free
- * of main-process-only modules) — both ClaudeSession.ts and OpencodeSession.ts
- * already import THIS module (for `crossEngineDispatcher`/`disposeFor`), so
- * adding one more named export here forms no new import edge, let alone a
- * cycle.
- *  - 'claude' hosts the tool for opencode-originated dispatches into Claude;
- *    the only other engine is opencode, so honesty requires the opencode
- *    binary actually being vendored/available.
- *  - 'opencode' hosts the tool for Claude-originated dispatches into opencode;
- *    the only other engine is Claude, which is ClaudeUI's bundled default
- *    engine — always present, so always true.
- *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
- *    dispatches into pi — gates on the vendored pi binary actually being
- *    present, mirroring the 'claude' branch's opencode-binary check.
- *  - 'codex' (slice E) hosts the tool for Codex-originated dispatches into
- *    claude/opencode/pi. Claude is one of those three and is ClaudeUI's
- *    bundled default engine, so — same reasoning as the 'opencode' branch —
- *    a Codex session always has somewhere to dispatch to; the other two
- *    binaries being absent only narrows the useful target list, which the
- *    dispatcher's own per-request guards report.
+ * (ADR-030 + ADR-033 M4-A): "a session on this engine hosts the dispatch tool
+ * AND at least one engine it can dispatch into is available." Lives here (not
+ * in shared/model-capabilities.ts, which must stay renderer-safe / import-free
+ * of main-process-only modules) — every session class already imports THIS
+ * module (for `crossEngineDispatcher`/`disposeFor`), so the export forms no new
+ * import edge, let alone a cycle.
  *
- * Slice H makes CODEX a target as well, so the 'claude' branch is no longer a
- * one-engine question: a Claude session can dispatch into opencode, pi OR
- * codex, and ANY of the three being installed makes the tool honest. (The pi
- * disjunct also closes a gap left when M4c made pi a target without widening
- * this branch — a machine with the pi binary but no opencode one hid
- * dispatch_agent from Claude sessions that could in fact use it.)
+ * One rule for every engine since ADR-082: ANY target being available makes
+ * the tool honest; the ones that are not only narrow the useful list, which
+ * the dispatcher's own per-request guards report. Before it, the opencode and
+ * Codex branches answered `true` because Claude Code was always bundled, and
+ * pi's asked about pi itself. Neither holds any more: a harness is chosen,
+ * installed and removed while the app runs, and a Claude Code selection can
+ * resolve to nothing. Callers read this when a session's capabilities are
+ * computed, so a session spawned after a harness change sees the new answer.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
-  if (engineId === 'claude')
-    return (
-      opencodeServerManager.isBinaryAvailable() || piBinaryAvailable() || codexBinaryAvailable()
-    )
-  if (engineId === 'pi') return piBinaryAvailable()
-  return true
+  // `harnessAvailable` is cached by the resolver: this runs on every
+  // ClaudeSession status emit and must do no filesystem work.
+  return DISPATCH_TARGETS[engineId].some((target) => harnessAvailable(target))
 }
 
 /**
@@ -734,7 +731,7 @@ const CODEX_TIMEOUT_AFTERMATH =
  * ZERO, deliberately — the comparison is strict. Two reasons it can afford to
  * be, and one reason it must be:
  *  - SAME CLOCK. The opencode server is ALWAYS a local child of this process
- *    (`OpencodeServerManager` spawns the vendored binary and talks to it over
+ *    (`OpencodeServerManager` spawns the resolved binary and talks to it over
  *    127.0.0.1), so both timestamps come from the same host clock and cannot
  *    genuinely disagree.
  *  - STRICT ORDERING. `turnStartedAt` is taken BEFORE the `prompt_async` POST;
@@ -1984,9 +1981,9 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
  * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
  * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
  * it — claude-session.ts imports THIS module (for the collab server /
- * disposeFor wiring), so importing back would form a require-cycle. The
- * duplicated shape is 5 fields wide and changes only if the Bun-binary spawn
- * pipeline itself changes (ADR-006).
+ * disposeFor wiring), so importing back would form a require-cycle. Like it,
+ * this names no executable: `query()` spawns the resolver's Claude Code launch
+ * (ADR-082 §2).
  */
 async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<QueryHandle> {
   const engineCfg = loadEngineConfig('claude')
@@ -1994,13 +1991,9 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
   // After the spawn prep: it is what sets an endpoint profile, which decides
   // whether this spawn carries a host token at all.
   await ensureHostTokenFresh()
-  const bunClaude = locateBunClaude()
   return sdkQuery({
     prompt: opts.prompt as AsyncIterable<never>,
     options: {
-      pathToClaudeCodeExecutable: bunClaude,
-      executable: bunClaude,
-      executableArgs: [],
       standaloneExecutable: true,
       env: {},
       cwd: opts.cwd,
@@ -2055,7 +2048,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
  * function (rather than inlined into `defaultSpawnPiTarget`) so the
  * recursion-guard property is DIRECTLY unit-testable without mocking
- * PiRpcClient/PiBridgeHost/locatePiBinary: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
+ * PiRpcClient/PiBridgeHost/locatePiLaunch: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
  * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
  * `defaultSpawnPiTarget`'s doc comment for the full rationale.
  *
@@ -2082,13 +2075,8 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
 }
 
 async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPrimitives> {
-  const bin = locatePiBinary()
-  if (!bin) {
-    throw new Error(
-      'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-        `(vendor/pi-cli/pi${process.platform === 'win32' ? '.exe' : ''} is missing).`
-    )
-  }
+  const launch = locatePiLaunch()
+  if (!launch) throw new Error(harnessUnavailableMessage('pi'))
   const bridgeHost = new PiBridgeHost(opts.gateHandler)
   let bridge: { url: string; token: string }
   try {
@@ -2097,7 +2085,7 @@ async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPr
     throw err instanceof Error ? err : new Error(String(err))
   }
   const bridgePath = writeBridgeExtension()
-  const client = new PiRpcClient(bin, {
+  const client = new PiRpcClient(launch, {
     cwd: opts.cwd,
     args: ['--mode', 'rpc', '--no-session', '-e', bridgePath],
     env: buildPiTargetChildEnv(bridge)

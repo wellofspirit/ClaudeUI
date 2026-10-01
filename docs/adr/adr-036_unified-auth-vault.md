@@ -1,6 +1,7 @@
 # ADR-036: Unified auth vault — ClaudeUI drives Codex OAuth once, feeds pi + opencode
 
 **Status:** Amended by ADR-037 and by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (N accounts per provider; Codex as a third consumer fed by token injection, not by file); extended by ADR-057 (the vault's Codex OAuth completes from a remote browser by paste-back — the host still holds the PKCE verifier and performs the exchange)
+**Amended by:** [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built (arc 3, S7d)" — the feed, the watch and reconcile-on-start skip a harness that is not installed, which is fed once when it arrives; a disconnect takes the copy out of a harness that is not installed at once, as a file edit, so nothing can adopt it back; and §8 "As built (arc 3, S7e)" — a ChatGPT disconnect (or the last account's removal) takes an engine's entry out only when it is ClaudeUI's copy (its refresh token is one of the vault's accounts', or one ClaudeUI fed that engine before, recognised by a fingerprint history), so a sign-in made directly in pi or opencode stays, and a disconnect marker in the vault stops reconcile-on-start from bootstrapping the vault from that kept sign-in until the user signs in through ClaudeUI again
 **Date:** 2026-07-21
 **Relates to:** ADR-021 (neutral auth), ADR-014 (Claude OAuth over cli.js — the deliberately-different
 precedent), ADR-019 (opencode backend), ADR-035 (pi backend), ADR-030 (capability honesty)
@@ -47,7 +48,10 @@ Codex credential, feeding both engines' native stores.
   refresh token themselves. Belt-and-braces for the cases the timer can't cover: (1) **reconcile on
   start** adopts the newest of {vault, pi store, opencode store} before scheduling — and bootstraps an
   empty vault from an existing engine credential, so a user's pre-existing (e.g. terminal-`/login` or
-  transplanted) token is picked up and kept fresh with no new login; (2) an **fs-watch** on both
+  transplanted) token is picked up and kept fresh with no new login (not after the user
+  disconnected ChatGPT in ClaudeUI: the vault's disconnect marker stops it until the next sign-in
+  through ClaudeUI, and the disconnect removes only ClaudeUI's own engine copies — ADR-082 §8
+  "As built (arc 3, S7e)"); (2) an **fs-watch** on both
   stores adopts an engine-initiated rotation (strictly-newer expiry, different refresh token) and
   re-feeds the sibling, with refresh-token equality as the loop guard against the vault's own writes.
   A revoked refresh token (HTTP 400 `invalid_grant` / 4xx) sets `needsReauth` and halts; 5xx/429/

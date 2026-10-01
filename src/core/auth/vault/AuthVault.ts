@@ -61,6 +61,14 @@ interface VaultFileV3 {
   v: 3
   credentials: Record<string, VaultApiKeyRecord>
   accounts: Record<string, VaultAccountList>
+  /**
+   * Providers the user disconnected in ClaudeUI (ADR-036 amendment, ADR-082 §8
+   * "As built (S7e)") — a flag, never token material. While a provider is
+   * listed and holds no account, `CredentialSync` does not sign ClaudeUI back in
+   * from a sign-in an engine kept. Written only while non-empty, so a vault
+   * that never disconnected keeps its old shape.
+   */
+  disconnected?: string[]
 }
 
 export interface AuthVaultDeps {
@@ -280,6 +288,26 @@ export class AuthVault {
     entry.list = entry.list.map((account) => (account.id === id ? updated : account))
     this.write(state)
   }
+  /** Whether the user disconnected `providerId` in ClaudeUI and has not signed in since. */
+  async isDisconnected(providerId: string): Promise<boolean> {
+    validateSharedProviderId(providerId)
+    return this.readAll().disconnected?.includes(providerId) === true
+  }
+
+  /**
+   * Record, or clear, that the user disconnected `providerId` in ClaudeUI. It is
+   * ClaudeUI's own state and lives beside the accounts it speaks about, so it
+   * survives the provider's accounts being emptied (see {@link writeOrClear}).
+   */
+  async setDisconnected(providerId: string, disconnected: boolean): Promise<void> {
+    validateSharedProviderId(providerId)
+    const state = this.readAll()
+    const others = (state.disconnected ?? []).filter((id) => id !== providerId)
+    const next = disconnected ? [...others, providerId] : others
+    if (next.length > 0) state.disconnected = next
+    else delete state.disconnected
+    await this.writeOrClear(state)
+  }
   async clear(): Promise<void> {
     try {
       fs.unlinkSync(vaultPath())
@@ -442,9 +470,13 @@ export class AuthVault {
     }
     return emptyVault()
   }
-  /** Persist, or unlink once the vault holds nothing at all (the pre-v3 rule). */
+  /** Persist, or unlink once the vault holds nothing at all (the pre-v3 rule; a disconnect marker is something). */
   private async writeOrClear(state: VaultFileV3): Promise<void> {
-    if (Object.keys(state.credentials).length === 0 && Object.keys(state.accounts).length === 0) {
+    if (
+      Object.keys(state.credentials).length === 0 &&
+      Object.keys(state.accounts).length === 0 &&
+      !state.disconnected?.length
+    ) {
       await this.clear()
       return
     }
@@ -547,7 +579,24 @@ function parseV3(value: object): VaultFileV3 {
       }
     }
   }
+  const disconnected = (value as { disconnected?: unknown }).disconnected
+  if (Array.isArray(disconnected)) {
+    const ids = disconnected.filter(
+      (id, index): id is string =>
+        typeof id === 'string' && isProviderId(id) && disconnected.indexOf(id) === index
+    )
+    if (ids.length > 0) file.disconnected = ids
+  }
   return file
+}
+
+function isProviderId(id: string): boolean {
+  try {
+    validateSharedProviderId(id)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function parseAccountList(value: unknown): VaultAccountList {

@@ -8,7 +8,7 @@
  * CLAUDEUI_PI_SUBAGENTS=1 and CLAUDEUI_PI_AGENTS_DIR pointing at a fixture
  * agent def), provably registers `subagent` as a callable tool and a real
  * model's real tool call against it spawns a REAL child `pi` process (the
- * SAME vendored binary) that runs a real model turn of its own and reports
+ * SAME installed binary) that runs a real model turn of its own and reports
  * back. Mirrors pi-hosted-tools.integration.test.ts's identical
  * "unit tests mock the seam, this file proves the seam is real" rationale —
  * pi-subagent-source.test.ts already covers the extension's own logic
@@ -18,12 +18,12 @@
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real `openai-codex` credential in
  * ~/.pi/agent/auth.json (read-only — this file never writes to it). Uses the
- * REAL vendored pi binary and makes REAL model API calls against a small/
+ * REAL installed pi binary and makes REAL model API calls against a small/
  * cheap model (gpt-5.6-luna — already verified end-to-end in
  * pi-bridge.integration.test.ts / pi-hosted-tools.integration.test.ts). Same
  * shared-refresh-token caveat as those files applies here. The CHILD process
  * (spawned by the extension itself, not by this test) inherits whatever
- * model/auth the vendored binary resolves from ~/.pi/agent/settings.json —
+ * model/auth the installed binary resolves from ~/.pi/agent/settings.json —
  * CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is deliberately set below so the child
  * uses the SAME cheap model as the parent, rather than whatever default the
  * dev machine's settings.json happens to have.

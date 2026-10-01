@@ -12,7 +12,8 @@ import {
   type ThinkingMode
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
-import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import { engineMeta } from '../../../../shared/engine-meta'
+import { HARNESS_IDS } from '../../../../shared/harness-types'
 import { modelLabel } from '../chat/InputBox/utils'
 import {
   accountDisplayName,
@@ -20,6 +21,12 @@ import {
   signInProviderFor,
   type ProviderAuthView
 } from '../../utils/sign-in-provider'
+import { useHarnessStore } from '../SettingsDialog/harness-store'
+import {
+  NOT_AVAILABLE_HERE,
+  harnessPickerMark,
+  harnessReadiness
+} from '../SettingsDialog/harness-view'
 import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
 import { useAnchoredMenu } from './use-anchored-menu'
@@ -136,9 +143,11 @@ export function EnginePicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
   const selected = engineMeta(selectedEngineId)
-  const codexAvailable = useSessionStore((state) =>
-    state.availableModels.some((model) => model.engineId === 'codex')
-  )
+  // Every harness is listed (ADR-082 §8): one that is not installed carries a
+  // chip and picking it selects it (the composer then offers the install); one
+  // this computer cannot run is disabled. Before the harness snapshot loads
+  // nothing is marked.
+  const harnessSnapshot = useHarnessStore().snapshot
 
   return (
     <div className="relative" ref={ref} data-testid="EnginePicker">
@@ -147,8 +156,8 @@ export function EnginePicker({
         disabled={locked}
         title={
           locked
-            ? 'Engine cannot change after session initialization or for historical sessions'
-            : 'Engine'
+            ? 'Harness cannot change after session initialization or for historical sessions'
+            : 'Harness'
         }
         data-testid="EnginePicker.trigger"
         onClick={(e) => {
@@ -171,29 +180,43 @@ export function EnginePicker({
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-36 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {Object.values(ENGINE_META)
-            .filter((meta) => meta.id !== 'codex' || codexAvailable)
-            .map((meta) => (
+        <div className="absolute bottom-full mb-1 left-0 w-48 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          {HARNESS_IDS.map(engineMeta).map((meta) => {
+            const mark = harnessPickerMark(harnessReadiness(harnessSnapshot, meta.id))
+            const disabled = mark === 'disabled'
+            return (
               <button
                 key={meta.id}
                 type="button"
                 data-testid="EnginePicker.option"
                 data-engine={meta.id}
+                data-mark={mark}
+                disabled={disabled}
+                title={disabled ? NOT_AVAILABLE_HERE : undefined}
                 onClick={() => {
                   onSelectEngine(meta.id)
                   setOpen(false)
                 }}
-                className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
+                className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                   meta.id === selectedEngineId
                     ? 'text-text-primary bg-bg-hover'
                     : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
                 }`}
               >
                 <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
-                {meta.label}
+                <span className="truncate">{meta.label}</span>
+                {mark === 'not-installed' && (
+                  <span
+                    data-testid="EnginePicker.notInstalled"
+                    data-engine={meta.id}
+                    className="ml-auto shrink-0 rounded-full border border-border px-1.5 text-[9.5px] leading-[14px] text-text-muted whitespace-nowrap"
+                  >
+                    Not installed
+                  </span>
+                )}
               </button>
-            ))}
+            )
+          })}
         </div>
       )}
     </div>

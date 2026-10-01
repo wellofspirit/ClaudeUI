@@ -15,7 +15,7 @@ import type { EngineModelGroup, ModelInfo } from '../../shared/types'
 import { ModelUnavailableError } from '../../shared/model-errors'
 import type { EffortLevel } from '../../shared/model-capabilities'
 import { PiRpcClient } from './PiRpcClient'
-import { locatePiBinary, piBinaryAvailable } from './pi-locate'
+import { locatePiLaunch, piBinaryAvailable } from './pi-locate'
 import type { PiGetAvailableModelsData, PiModel } from './pi-protocol'
 import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
@@ -52,10 +52,10 @@ async function fetchPiModelCatalog(): Promise<PiModel[]> {
     // Binary-missing is already cheap (no spawn) and can flip when pi is
     // installed — don't negative-cache it, just re-check.
     if (!piBinaryAvailable()) return []
-    const bin = locatePiBinary()
-    if (!bin) return []
+    const launch = locatePiLaunch()
+    if (!launch) return []
 
-    const client = new PiRpcClient(bin, {
+    const client = new PiRpcClient(launch, {
       cwd: homedir(),
       args: ['--mode', 'rpc', '--no-session']
     })

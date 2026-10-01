@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterAll, afterEach, expect, it, vi } from 'vitest'
 import { CodexClient } from '../../core/codex/CodexClient'
@@ -33,7 +33,13 @@ import {
   writeFixtureCodexHome,
   type FixtureConfigOptions
 } from './fixture-provider'
-import { codexIntegrationEnabled } from './integration-host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexIntegrationEnabled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 
 /**
  * F17 — the Codex DESKTOP APP's own entries in the user's `~/.codex` never reach
@@ -197,6 +203,7 @@ afterEach(async () => {
       }
     } finally {
       setHostPaths(null)
+      releaseFixtureCodex()
       if (directory) rmSync(directory, { recursive: true, force: true })
       directory = undefined
     }
@@ -344,10 +351,7 @@ interface Fixture {
 async function setupFixture(
   options: { features?: FixtureConfigOptions['features']; desktop?: boolean } = {}
 ): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -357,11 +361,12 @@ async function setupFixture(
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
   const exe = process.platform === 'win32' ? '.exe' : ''
-  copyFileSync(installed, join(directory, 'vendor/codex-cli', `codex${exe}`))
+  copyFileSync(installed, join(directory, FIXTURE_CODEX_DIR, `codex${exe}`))
   setHostPaths({ getAppPath: () => directory! })
+  useFixtureCodex(directory!)
   const requests: Record<string, unknown>[] = []
   const errors: string[] = []
   const fixture = await startFixtureProvider({

@@ -25,7 +25,8 @@ import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
-import { locatePiBinary } from './pi-locate'
+import { harnessUnavailableMessage } from '../harness/resolve'
+import { locatePiLaunch } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import {
   mapPiEvent,
@@ -282,16 +283,15 @@ export class PiSession extends BaseSession {
   /**
    * ADR-030/ADR-033 M4-A: the STATIC PI_ENGINE_CAPABILITIES.crossEngineDispatch
    * flag is true (M4b shipped), but the HONEST per-session value additionally
-   * requires crossEngineDispatchAvailable('pi') — currently always true for
-   * the non-'claude' branch (pi-as-source only needs SOME target, and Claude
-   * is always installed), but ANDed here so a future tightening of that
-   * helper takes effect for pi automatically. ANDed at this GETTER (not
-   * baked into every `_capabilities` assignment site — the constructor's
-   * sync+async assignments, resolveCapsForModel, adoptEngineModel, setModel —
-   * since unlike OpencodeSession's single resolveCapsForModel() choke point,
-   * PiSession has several; one computed getter is the DRY single point of
-   * truth, mirroring ClaudeSession's identical live-getter pattern instead of
-   * opencode's "bake into every producer" pattern).
+   * requires crossEngineDispatchAvailable('pi') — some target (Claude Code,
+   * opencode or Codex) being available, which ADR-082 made a live question.
+   * ANDed at this GETTER (not baked into every `_capabilities` assignment
+   * site — the constructor's sync+async assignments, resolveCapsForModel,
+   * adoptEngineModel, setModel — since unlike OpencodeSession's single
+   * resolveCapsForModel() choke point, PiSession has several; one computed
+   * getter is the DRY single point of truth, mirroring ClaudeSession's
+   * identical live-getter pattern instead of opencode's "bake into every
+   * producer" pattern).
    */
   get capabilities(): ResolvedCapabilities {
     return {
@@ -689,8 +689,9 @@ export class PiSession extends BaseSession {
    * (`CLAUDEUI_PI_SKILL_DIRS`, `path.delimiter`-joined — the extension just
    * splits it, no fs access there; see pi-bridge-source.ts). Claude skills are
    * SKILL.md dirs under `~/.claude/skills/*` and `<cwd>/.claude/skills/*` — the
-   * same agentskills convention pi itself uses (vendor/pi-cli/docs/skills.md's
-   * "Using Skills from Other Harnesses" documents exactly this
+   * same agentskills convention pi itself uses
+   * (vendor/pi-src/packages/coding-agent/docs/skills.md's "Using Skills from
+   * Other Harnesses" documents exactly this
    * `["~/.claude/skills", "../.claude/skills"]`-style settings array).
    *
    * Returns `{}` (key entirely ABSENT, not an empty-string value) when neither
@@ -710,15 +711,8 @@ export class PiSession extends BaseSession {
   }
 
   private async doStart(): Promise<void> {
-    const bin = locatePiBinary()
-    if (!bin) {
-      throw new Error(
-        'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-          '(vendor/pi-cli/pi' +
-          (process.platform === 'win32' ? '.exe' : '') +
-          ' is missing).'
-      )
-    }
+    const launch = locatePiLaunch()
+    if (!launch) throw new Error(harnessUnavailableMessage('pi'))
 
     // Approval bridge (M2a): a fresh loopback host + version-keyed extension
     // file per spawn (docs/protocol-pi/README.md "Extensions"; pi-bridge-
@@ -780,7 +774,7 @@ export class PiSession extends BaseSession {
         args.push('--session', resolvedPath ?? this.resumeSessionId)
       }
 
-      client = new PiRpcClient(bin, {
+      client = new PiRpcClient(launch, {
         cwd: this.cwd,
         args,
         env: {
@@ -1032,7 +1026,7 @@ export class PiSession extends BaseSession {
     }
 
     // Slash commands + skills (M2b): get_commands lists extension commands,
-    // prompt templates, and skill:* entries (vendor/pi-cli/docs/rpc.md
+    // prompt templates, and skill:* entries (vendor/pi-src/packages/coding-agent/docs/rpc.md
     // "get_commands"). Once per spawn, best-effort — a failure here must
     // never block the session (discovery is optional, mirrors
     // OpencodeSession.eagerConnect's identical treatment of
@@ -1677,7 +1671,7 @@ export class PiSession extends BaseSession {
    *   3. Spawn a brand-new, fully isolated `pi --mode rpc --no-session
    *      --no-tools --no-extensions --no-skills --no-context-files
    *      --no-prompt-templates` process — the spawn shape model-discovery.ts's
-   *      `fetchPiModelCatalog` uses (locatePiBinary, no `-e` bridge/subagent
+   *      `fetchPiModelCatalog` uses (locatePiLaunch, no `-e` bridge/subagent
    *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS the isolation
    *      flags below.
    *      TOOL EXECUTION DISABLED AT THE PROCESS LEVEL: `--no-tools` (pi
@@ -1735,8 +1729,8 @@ export class PiSession extends BaseSession {
   async askSideQuestion(question: string): Promise<string | null> {
     if (!this.client || !this.piSessionId) return null
 
-    const bin = locatePiBinary()
-    if (!bin) return null
+    const launch = locatePiLaunch()
+    if (!launch) return null
 
     const prompt = buildSideQuestionPrompt(this.buildTranscriptContext(), question)
     // `--no-tools` (pi usage.md:211 — "Disable all tools"; probed: accepted
@@ -1749,7 +1743,7 @@ export class PiSession extends BaseSession {
     // The `--no-*` discovery flags close the repo-writable input paths (see the
     // doc comment's "DISCOVERY DISABLED" note). All probed accepted together in
     // `--mode rpc` against the vendored pi.
-    const client = new PiRpcClient(bin, {
+    const client = new PiRpcClient(launch, {
       cwd: this.cwd,
       args: [
         '--mode',

@@ -243,6 +243,7 @@ const sharedProviderSpies = vi.hoisted(() => ({
   removeDefinition: vi.fn(async () => {}),
   setRouteEnabled: vi.fn(async () => {}),
   setApiKey: vi.fn(async () => {}),
+  ownKeyHolders: vi.fn(async (): Promise<string[]> => []),
   syncProvider: vi.fn(async () => {}),
   disconnectProvider: vi.fn(async () => {}),
   setRouteDefaultModel: vi.fn(async () => {})
@@ -870,6 +871,34 @@ describe('session.ipc', () => {
       expect(sharedProviderSpies.saveDefinition).toHaveBeenCalledWith(definition)
       expect(sharedProviderSpies.setRouteEnabled).toHaveBeenCalledWith('local', 'pi', false)
       expect(sharedProviderSpies.disconnectProvider).toHaveBeenCalledWith('local')
+      // No `replaceOwn` replaces nothing.
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', [])
+    })
+
+    it('set-key takes replaceOwn as a LIST of harnesses, never a blanket yes (S7f)', async () => {
+      sharedProviderSpies.setApiKey.mockClear()
+      await harness.callSafe('shared-provider:set-key', 'local', 'secret', ['pi'])
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', ['pi'])
+      for (const bad of [true, 'pi', ['pi', 'codex']]) {
+        await expect(
+          harness.callSafe('shared-provider:set-key', 'local', 'secret', bad)
+        ).rejects.toThrow(/replaceOwn/)
+      }
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledTimes(1)
+    })
+
+    it('own-key-holders answers the service’s list, and refuses a malformed vendor id (S7f)', async () => {
+      sharedProviderSpies.ownKeyHolders.mockClear()
+      sharedProviderSpies.ownKeyHolders.mockResolvedValueOnce(['opencode'])
+      await expect(harness.callSafe('shared-provider:own-key-holders', 'io.net')).resolves.toEqual([
+        'opencode'
+      ])
+      for (const bad of ['', '../auth.json', 'open router', ['openrouter'], null]) {
+        await expect(harness.callSafe('shared-provider:own-key-holders', bad)).rejects.toThrow(
+          /Invalid provider id/
+        )
+      }
+      expect(sharedProviderSpies.ownKeyHolders).toHaveBeenCalledTimes(1)
     })
   })
 
