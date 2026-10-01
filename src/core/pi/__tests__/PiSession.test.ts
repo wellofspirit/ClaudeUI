@@ -11,6 +11,7 @@ import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
+import type { DispatchContext } from '../../services/cross-engine-dispatcher'
 import type { ChatMessage, QueuedItem, StatusLineData } from '../../../shared/types'
 
 /**
@@ -4492,10 +4493,13 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
         fromEngine: 'pi',
         fromRoutingId: 'rid-dispatch-1',
         cwd: '/cwd',
-        autonomyMode: 'acceptEdits',
         toolUseId: 'call_dispatch_1'
       })
     )
+    // Live accessors (ADR-087), not snapshots.
+    const dispatchCtx = mockDispatch.mock.calls[0][1] as DispatchContext
+    expect(dispatchCtx.getAutonomyMode()).toBe('acceptEdits')
+    expect(dispatchCtx.getMessages()).toBe(session.getMessages())
     expect(result.content[0].text).toBe(
       'The answer is 42.\n\n[dispatch session_id: oc-sess-1 — pass it as session_id to continue this agent]'
     )

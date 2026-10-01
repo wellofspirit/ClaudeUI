@@ -55,9 +55,23 @@ vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
   collectClaudeMcpForOpencode: mockCollectClaudeMcp
 }))
+// ADR-087 — the target judge's ground truth and the shared trust lists stay
+// hermetic: no git subprocess, never the dev's own `~/.claude/ui/automode.json`.
+vi.mock('../../../core/automode/ground-truth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/automode/ground-truth')>()),
+  captureGitRemotes: vi.fn(async () => []),
+  captureRepoVisibility: vi.fn(async () => 'unknown'),
+  captureGitStatus: vi.fn(async () => null),
+  captureGitConfigArmed: vi.fn(async () => [])
+}))
+vi.mock('../../../core/services/ui-config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/ui-config')>()),
+  loadSharedAutoModeConfig: vi.fn(() => ({}))
+}))
 
 import {
   CrossEngineDispatcher,
+  DISPATCH_PROMPT_PREAMBLE,
   DISPATCH_WATCHDOG_INTERVAL_MS,
   XENG_REQUEST_PREFIX,
   crossEngineDispatchAvailable,
@@ -81,9 +95,12 @@ import type {
   AttachCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
 import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
+import { codexTurnPolicy } from '../../../core/codex/codex-turn-policy'
+import type { SessionJudgeOptions } from '../../../core/automode/session-judge'
+import type { JudgeRequest } from '../../../core/automode/classifier'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { BillingType, EngineConfig, EngineId } from '../../../shared/types'
+import type { BillingType, ChatMessage, EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
@@ -299,22 +316,69 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
   return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
 }
 
-function makeCtx(overrides: Partial<DispatchContext> = {}): DispatchContext & {
+/**
+ * `autonomyMode` is a CONVENIENCE override (the ~50 call sites stay readable):
+ * it becomes `getAutonomyMode: () => mode`. Pass `getAutonomyMode` itself for a
+ * live switch (ADR-087).
+ */
+function makeCtx(
+  overrides: Partial<DispatchContext> & { autonomyMode?: string } = {}
+): DispatchContext & {
   emit: ReturnType<typeof vi.fn>
   addDispatchedCost: ReturnType<typeof vi.fn>
 } {
+  const { autonomyMode = 'default', ...rest } = overrides
   return {
     fromEngine: 'claude',
     fromRoutingId: 'routing-1',
     cwd: '/tmp/xeng-project',
-    autonomyMode: 'default',
+    getAutonomyMode: () => autonomyMode,
+    getMessages: () => [],
     emit: vi.fn(),
     addDispatchedCost: vi.fn(),
-    ...overrides
+    ...rest
   } as DispatchContext & {
     emit: ReturnType<typeof vi.fn>
     addDispatchedCost: ReturnType<typeof vi.fn>
   }
+}
+
+/**
+ * A scripted judge transport for ADR-087's target judge, injected through
+ * `DispatcherDeps.makeJudgeTransport` (no mocked modules). Each reply is
+ * consumed by one judge call (one call per judgement in `twoStageMode: 'fast'`):
+ * a string is the completion, an Error is a transport failure, a function is
+ * awaited (a held judge). Unscripted calls allow.
+ */
+function makeScriptedJudge(): {
+  make: ReturnType<
+    typeof vi.fn<(opts: SessionJudgeOptions) => (req: JudgeRequest) => Promise<string>>
+  >
+  opts: SessionJudgeOptions[]
+  requests: JudgeRequest[]
+  replies: Array<string | Error | (() => Promise<string>)>
+} {
+  const opts: SessionJudgeOptions[] = []
+  const requests: JudgeRequest[] = []
+  const replies: Array<string | Error | (() => Promise<string>)> = []
+  const make = vi.fn((o: SessionJudgeOptions) => {
+    opts.push(o)
+    return async (req: JudgeRequest): Promise<string> => {
+      requests.push(req)
+      const next = replies.shift()
+      if (next instanceof Error) throw next
+      if (typeof next === 'function') return next()
+      return next ?? '<block>no</block>'
+    }
+  })
+  return { make, opts, requests, replies }
+}
+
+/** A promise whose resolution a test controls (a judge held mid-flight). */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((r) => (resolve = r))
+  return { promise, resolve }
 }
 
 function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
@@ -1955,14 +2019,17 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
  * hazard documented on `ClaudeTargetEntry`); a thrown assertion here catches
  * a regression immediately instead of silently killing a fake process.
  */
-function makeFakeClaudeTarget(): {
+function makeFakeClaudeTarget(opts: { rejectAuto?: boolean } = {}): {
   spawnClaudeQuery: SpawnClaudeQueryFn
   spawnCalls: ClaudeQuerySpawnOpts[]
   push: (msg: Partial<SDKMessage> & { type: string }) => void
   lastCanUseTool: () => ClaudeQuerySpawnOpts['canUseTool'] | undefined
   lastAbortController: () => AbortController | undefined
+  /** Every `set_permission_mode` the dispatcher sent (ADR-087 live mode). */
+  setModeCalls: string[]
 } {
   const spawnCalls: ClaudeQuerySpawnOpts[] = []
+  const setModeCalls: string[] = []
   const queue: SDKMessage[] = []
   let waiting: ((r: IteratorResult<SDKMessage>) => void) | null = null
 
@@ -1979,7 +2046,17 @@ function makeFakeClaudeTarget(): {
       )
     }
   }
-  const handle = { [Symbol.asyncIterator]: () => iterator } as unknown as QueryHandle
+  const handle = {
+    [Symbol.asyncIterator]: () => iterator,
+    // cli.js answers a rejected `auto` with a control_response error, which
+    // QueryHandle.setPermissionMode throws (docs/protocol-cc, ADR-087 F3).
+    setPermissionMode: vi.fn(async (mode: string) => {
+      setModeCalls.push(mode)
+      if (opts.rejectAuto && mode === 'auto') {
+        throw new Error('set_permission_mode:auto rejected — gate not enabled')
+      }
+    })
+  } as unknown as QueryHandle
 
   const spawnClaudeQuery = vi.fn<SpawnClaudeQueryFn>(async (opts) => {
     spawnCalls.push(opts)
@@ -2000,7 +2077,8 @@ function makeFakeClaudeTarget(): {
       }
     },
     lastCanUseTool: () => spawnCalls.at(-1)?.canUseTool,
-    lastAbortController: () => spawnCalls.at(-1)?.abortController
+    lastAbortController: () => spawnCalls.at(-1)?.abortController,
+    setModeCalls
   }
 }
 
@@ -2205,8 +2283,10 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('autonomy-mode inheritance', () => {
+    // ADR-087: an auto parent's Claude target runs cli.js `auto` (its own
+    // judge), never bypass; only a bypass parent still spawns bypass + skip.
     it.each([
-      ['auto', 'bypassPermissions', true],
+      ['auto', 'auto', false],
       ['bypassPermissions', 'bypassPermissions', true],
       ['plan', 'default', false],
       ['default', 'default', false],
@@ -2232,6 +2312,161 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
         expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(expectedSkip)
       }
     )
+
+    it('R2: a `full` parent spawns the Claude target in cli.js `auto` (never the invalid mode `full`)', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', autonomyMode: 'full' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await pending
+      expect(target.spawnCalls[0].permissionMode).toBe('auto')
+      expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(false)
+    })
+
+    it('T9: the pushed prompt carries DISPATCH_PROMPT_PREAMBLE, so cli.js’s judge never reads it as the user’s words', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'tidy the build dir' },
+        makeCtx({ fromEngine: 'opencode', autonomyMode: 'auto' })
+      )
+      await tick()
+      const first = await target.spawnCalls[0].prompt[Symbol.asyncIterator]().next()
+      const message = (first.value as { message: { content: string } }).message
+      expect(message.content).toBe(DISPATCH_PROMPT_PREAMBLE + 'tidy the build dir')
+      expect(target.spawnCalls[0].permissionMode).toBe('auto')
+      expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(false)
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await pending
+    })
+
+    async function liveClaude(rejectAuto = false) {
+      const target = makeFakeClaudeTarget({ rejectAuto })
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      let mode = 'default'
+      const ctx = makeCtx({ fromEngine: 'opencode', getAutonomyMode: () => mode })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const turn = async (prompt: string): Promise<void> => {
+        const next = dispatcher.dispatch(
+          { engine: 'claude', prompt, sessionId: 'claude-sess-1' },
+          ctx
+        )
+        await tick()
+        target.push(resultMsg())
+        expect((await next).isError).toBeUndefined()
+      }
+      return { target, ctx, turn, setMode: (m: string) => (mode = m) }
+    }
+
+    it('T11: a continuation after the parent switched default → auto applies auto ONCE; the same mode again sends nothing', async () => {
+      const live = await liveClaude()
+      expect(live.target.spawnCalls[0].permissionMode).toBe('default')
+      live.setMode('auto')
+      await live.turn('two')
+      expect(live.target.setModeCalls).toEqual(['auto'])
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['auto'])
+      expect(live.target.spawnCalls).toHaveLength(1)
+    })
+
+    it('F9: spawn bookkeeping — an auto-spawned target continuing in auto sends NO set_permission_mode', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: 'auto' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg())
+      await second
+      expect(target.setModeCalls).toEqual([])
+    })
+
+    it('F9: spawn bookkeeping — a bypass-spawned target continuing in bypass sends NO set_permission_mode', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: 'bypassPermissions' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg())
+      await second
+      expect(target.setModeCalls).toEqual([])
+    })
+
+    it('T11: a rejected auto falls back to default with ONE warning, and is not retried', async () => {
+      const live = await liveClaude(true)
+      live.setMode('auto')
+      await live.turn('two')
+      expect(live.target.setModeCalls).toEqual(['auto', 'default'])
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['auto', 'default'])
+      const warnings = live.ctx.emit.mock.calls.filter((c) => c[0] === 'session:warning')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0][1]).toContain('auto mode was rejected')
+    })
+
+    it('a mid-turn switch reaches the process at the target’s next tool ask', async () => {
+      const live = await liveClaude()
+      const pending = live.target.spawnCalls[0]
+      live.setMode('acceptEdits')
+      const ask = pending.canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal,
+        toolUseId: 'toolu_inner'
+      } as never)
+      await tick()
+      expect(live.target.setModeCalls).toEqual(['acceptEdits'])
+      // The ask in hand still goes to the human (it was produced under the old mode).
+      expect(live.ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+      void ask
+    })
+
+    it('a bypass parent switching a non-bypass process applies default (the skip flag is spawn-only)', async () => {
+      const live = await liveClaude()
+      live.setMode('acceptEdits')
+      await live.turn('two')
+      live.setMode('bypassPermissions')
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['acceptEdits', 'default'])
+    })
   })
 
   describe('timeout / abort', () => {
@@ -4996,11 +5231,19 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
-  it("'auto' (full) autonomy auto-allows a mutating tool with NO forwarded approval — decide() short-circuits before any human round-trip", async () => {
+  // ADR-087: an auto parent's pi target is JUDGED (see the ADR-087 block
+  // below); only with pi's own judge switched off does auto keep the
+  // historical allow-all base.
+  it("T8: 'auto' with pi's autoMode.enabled false auto-allows a mutating tool with NO forwarded approval and no judge call", async () => {
     const target = makeFakePiTarget()
+    const makeJudgeTransport = vi.fn()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { enabled: false }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport
     })
     const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5013,6 +5256,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     })
     expect(decision).toEqual({ behavior: 'allow' })
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    expect(makeJudgeTransport).not.toHaveBeenCalled()
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -5211,39 +5455,82 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     await pending
   })
 
-  it('the autonomy mode is FIXED at target creation — a continuation with a DIFFERENT autonomyMode does not change the gate', async () => {
+  it('T10: the gate reads the parent’s mode LIVE — default → auto: the next edit is judged and allowed, no human', async () => {
     const target = makeFakePiTarget()
+    const judge = makeScriptedJudge()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { twoStageMode: 'fast' as const }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport: judge.make
     })
-    const first = dispatcher.dispatch(
-      { engine: 'pi', prompt: 'one' },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
-    )
+    let mode = 'default'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+
+    void target.gateHandler()({
+      toolCallId: 'pi-edit-1',
+      toolName: 'edit',
+      input: { path: 'src/a.ts' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+
+    mode = 'auto'
+    // Under the judged auto base (acceptEdits) a plain edit is allowed outright;
+    // a bash command asks and is judged.
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'pi-edit-2',
+        toolName: 'edit',
+        input: { path: 'src/b.ts' }
+      })
+    ).toEqual({ behavior: 'allow' })
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'pi-bash-1',
+        toolName: 'bash',
+        input: { command: 'rm -rf build' }
+      })
+    ).toEqual({ behavior: 'allow' })
+    expect(judge.requests).toHaveLength(1)
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
-    const firstResult = await first
+    await pending
+  })
 
-    // Continuation arrives with a DIFFERENT (conservative) autonomyMode.
-    const second = dispatcher.dispatch(
-      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
-    )
+  it('T10: created under auto, switched to default — the next bash asks the human with zero judge calls', async () => {
+    const target = makeFakePiTarget()
+    const judge = makeScriptedJudge()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { twoStageMode: 'fast' as const }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport: judge.make
+    })
+    let mode = 'auto'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-
-    // The SAME gate closure (bound to 'auto', fixed at creation) still auto-allows.
-    const decision = await target.gateHandler()({
-      toolCallId: 'pi-call-2',
+    mode = 'default'
+    void target.gateHandler()({
+      toolCallId: 'pi-bash-1',
       toolName: 'bash',
-      input: { command: 'x' }
+      input: { command: 'rm -rf build' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
-
-    target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    await tick()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+    expect(judge.requests).toHaveLength(0)
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
-    await second
+    await pending
   })
 })
 
@@ -6817,7 +7104,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     ['acceptEdits', 'untrusted', 'workspace-write', 'user'],
     ['auto', 'on-request', 'workspace-write', 'auto_review']
   ])(
-    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — all three on thread/start, none per turn",
+    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — on thread/start, and again on every turn/start (ADR-087)",
     async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
       const target = makeFakeCodexTarget()
       const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
@@ -6837,12 +7124,12 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
         allowProviderModelFallback: false,
         historyMode: 'paginated'
       })
-      // The per-turn request carries NO policy at all — the thread baseline is
-      // the single place the envelope lives.
+      // ADR-087 — the per-turn request re-sends the policy for the parent's
+      // LIVE mode, the same `codexTurnPolicy` CodexSession sends.
       const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
-      expect(turnStart.params.approvalPolicy).toBeUndefined()
-      expect(turnStart.params.sandboxPolicy).toBeUndefined()
-      expect(turnStart.params.approvalsReviewer).toBeUndefined()
+      expect(turnStart.params).toMatchObject(codexTurnPolicy(mode))
+      expect(turnStart.params.approvalPolicy).toBe(approvalPolicy)
+      expect(turnStart.params.approvalsReviewer).toBe(approvalsReviewer)
     }
   )
 
@@ -6905,24 +7192,29 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     expect(target.client.claim.mock.calls).toEqual([[CODEX_THREAD_ID]])
   })
 
-  it('the envelope is fixed at creation — a continuation with a DIFFERENT autonomyMode neither re-policies the thread nor moves the gate', async () => {
+  it('T12: the parent’s LIVE mode re-policies the thread at the next turn/start, and the gate decides by it', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
-    const first = dispatcher.dispatch(
-      { engine: 'codex', prompt: 'one' },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
-    )
+    let mode = 'auto'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
     await tick()
     target.completeTurn()
     const firstResult = await first
 
+    mode = 'plan'
     const second = dispatcher.dispatch(
       { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'plan' })
+      ctx
     )
     await tick()
-    // Still the 'auto' envelope on the wire, and still the 'auto' gate.
+    // One thread; the second turn carries the plan policy.
     expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    const turnStarts = target.requests.filter((entry) => entry.method === 'turn/start')
+    expect(turnStarts).toHaveLength(2)
+    expect(turnStarts[0].params).toMatchObject(codexTurnPolicy('auto'))
+    expect(turnStarts[1].params).toMatchObject(codexTurnPolicy('plan'))
+    // …and the gate decides by the mode that turn runs under: plan refuses.
     const decision = await target.serverRequest('item/commandExecution/requestApproval', {
       threadId: CODEX_THREAD_ID,
       turnId: target.currentTurnId(),
@@ -6930,9 +7222,49 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
       command: '/bin/zsh -lc "rm -rf x"',
       cwd: '/tmp/xeng-project'
     })
-    expect(decision).toEqual({ decision: 'accept' })
+    expect(decision).toEqual({ decision: 'decline' })
     target.completeTurn()
     await second
+  })
+
+  it('R2: a `full` parent runs the thread under the `auto` policy (full is normalised to auto)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'full' })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+    expect(target.threadStartParams()).toMatchObject({ approvalsReviewer: 'auto_review' })
+    const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
+    expect(turnStart.params).toMatchObject(codexTurnPolicy('auto'))
+  })
+
+  it('a mid-turn switch does not move the gate before the next turn/start (the gate decides by the turn’s snapshot)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    let mode = 'default'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    // bypassPermissions' mode base would ACCEPT this command; the turn's
+    // snapshot (`default`) asks — so a live-mode gate would fail this test.
+    mode = 'bypassPermissions'
+    const decisionPromise = target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      itemId: 'item-cmd-1',
+      command: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+    await tick()
+    // Still the default gate: the human is asked, nothing auto-accepted.
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+    void decisionPromise
+    dispatcher.disposeFor('routing-1')
+    await pending
   })
 })
 
@@ -7091,14 +7423,17 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
     await pending
   })
 
-  it("auto mode ACCEPTS what the native reviewer escalated without asking — 'auto_review' already decided", async () => {
+  // ADR-087 review R1: `auto` gates as `default` (the interactive
+  // `CodexSession.gate()` rule) — what reaches the gate under `auto_review` is
+  // what the guardian ESCALATED, and escalations belong to the human.
+  it('R1: auto mode ASKS the human for what the native reviewer escalated — never a silent accept', async () => {
     const { target, ctx, pending } = await startTarget('auto')
-    const decision = await target.serverRequest(
+    void target.serverRequest(
       'item/commandExecution/requestApproval',
       commandRequest('/bin/zsh -lc "rm -rf x"')
     )
-    expect(decision).toEqual({ decision: 'accept' })
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
     target.completeTurn()
     await pending
   })
@@ -9590,14 +9925,19 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
   })
 
   describe('(e) pi target', () => {
+    // A scripted judge that ALLOWS (ADR-087): without G9 an auto-mode ask rule
+    // would be judged and allowed instead of reaching the human.
+    const piJudge = makeScriptedJudge()
     async function start(mode: string) {
       const target = makeFakePiTarget()
       const { dispatcher } = makeHarness({
         loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+          autoMode: { twoStageMode: 'fast' as const }
         })),
         spawnPiTarget: target.spawnPiTarget,
-        loadUserRules: () => RULES
+        loadUserRules: () => RULES,
+        makeJudgeTransport: piJudge.make
       })
       const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode })
       const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -9626,14 +9966,16 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
     })
 
     it('an ask rule under auto is forwarded (the ask rung precedes the mode base)', async () => {
+      const before = piJudge.requests.length
       const { target, ctx, finish } = await start('auto')
       void target.gateHandler()({
         toolCallId: 'pi-call-a',
         toolName: 'bash',
         input: { command: 'docker --context x run alpine' }
       })
-      await tick()
+      for (let i = 0; i < 8; i++) await tick()
       expect(approvals(ctx)).toHaveLength(1)
+      expect(piJudge.requests.length).toBe(before)
       await finish()
     })
 
@@ -9720,13 +10062,16 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await pending
     })
 
-    it('without a matching rule auto still allows (the native reviewer decided)', async () => {
-      const { target, pending } = await start('auto')
-      const decision = await target.serverRequest(
+    // ADR-087 review R1: an escalation reaching the gate under `auto` gates as
+    // `default` — with no matching rule, the human decides (was: accepted).
+    it('without a matching rule auto gates as default — the escalation asks the human', async () => {
+      const { target, ctx, pending } = await start('auto')
+      void target.serverRequest(
         'item/commandExecution/requestApproval',
         commandRequest('/bin/zsh -lc "ls"')
       )
-      expect(decision).toEqual({ decision: 'accept' })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
       target.completeTurn()
       await pending
     })
@@ -9788,6 +10133,503 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await tick()
       expect(approvals(ctx)).toHaveLength(1)
       await finish()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-087 — dispatch targets inherit auto mode, live, and are JUDGED: pi and
+// opencode targets by ClaudeUI's own judge (the shared pipeline, scripted here
+// through `makeJudgeTransport`), Claude/Codex targets by their engines' own.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — ADR-087: judged dispatch targets', () => {
+  /** Enough turns of the event loop for the pipeline's awaits to settle. */
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await tick()
+  }
+  const approvals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+    ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').map((c) => c[1])
+  const reviews = (
+    ctx: ReturnType<typeof makeCtx>
+  ): Array<{ toolUseId: string; review: Record<string, unknown> }> =>
+    ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:tool-review')
+      .map((c) => c[1] as { toolUseId: string; review: Record<string, unknown> })
+  const PARENT: ChatMessage[] = [
+    {
+      id: 'parent-1',
+      role: 'user',
+      content: [{ type: 'text', text: 'please clean the build output' }],
+      timestamp: 0
+    }
+  ]
+
+  function judgedConfig(autoMode: EngineConfig['autoMode'] = {}) {
+    return (id: string): EngineConfig => ({
+      dispatch: { defaultModel: id === 'pi' ? 'openai-codex/gpt-5.6-luna' : 'openai/gpt-5' },
+      autoMode: { twoStageMode: 'fast', ...autoMode }
+    })
+  }
+
+  describe('opencode target', () => {
+    async function start(
+      opts: { rules?: MergedClaudeRules; autoMode?: EngineConfig['autoMode']; prompt?: string } = {}
+    ) {
+      const judge = makeScriptedJudge()
+      const h = makeHarness({
+        loadEngineConfig: judgedConfig(opts.autoMode),
+        loadUserRules: () => opts.rules ?? userRules(),
+        makeJudgeTransport: judge.make
+      })
+      holdTurn(h.client)
+      let mode = 'auto'
+      const ctx = makeCtx({
+        toolUseId: 'toolu_oc_auto',
+        getAutonomyMode: () => mode,
+        getMessages: () => PARENT
+      })
+      const pending = h.dispatcher.dispatch(
+        { engine: 'opencode', prompt: opts.prompt ?? 'remove the build dir' },
+        ctx
+      )
+      await tick()
+      const ask = (props: Record<string, unknown>): void =>
+        h.stream.push('permission.asked', { sessionID: 'oc-sess-1', ...props })
+      const finish = async (): Promise<void> => {
+        completeTurn(h.stream)
+        await pending
+      }
+      return { ...h, judge, ctx, ask, finish, setMode: (m: string) => (mode = m) }
+    }
+    const RM = {
+      id: 'perm-rm',
+      permission: 'bash',
+      patterns: ['rm -rf build'],
+      metadata: { command: 'rm -rf build' },
+      tool: { messageID: 'msg-1', callID: 'call-rm' }
+    }
+
+    it('T1/T14: a bash ask is judged once — parent transcript + the target’s own earlier call, the dispatch subagent header — allow → once + an approved review on the nested tool block', async () => {
+      const t = await start()
+      // An earlier call of the TARGET's own, on its trajectory.
+      t.stream.push('message.updated', {
+        sessionID: 'oc-sess-1',
+        info: { id: 'msg-0', role: 'assistant' }
+      })
+      t.stream.push('message.part.updated', {
+        sessionID: 'oc-sess-1',
+        part: {
+          id: 'part-0',
+          messageID: 'msg-0',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-ls',
+          state: { status: 'completed', input: { command: 'ls build' }, output: 'a.o' }
+        }
+      })
+      await tick()
+      t.ask(RM)
+      await flush()
+
+      expect(t.judge.requests).toHaveLength(1)
+      const user = t.judge.requests[0].user
+      expect(user).toContain('User: please clean the build output')
+      expect(user).toContain('ls build')
+      // The dispatch prompt is the subagent's task, never a `User:` line.
+      expect(user).not.toMatch(/User:[^\n]*remove the build dir/)
+      expect(user).toContain('"dispatch:opencode" subagent')
+      expect(user).toContain('remove the build dir')
+
+      expect(t.client.replyPermission).toHaveBeenCalledWith('perm-rm', 'once')
+      expect(approvals(t.ctx)).toHaveLength(0)
+      const [review] = reviews(t.ctx)
+      expect(review.toolUseId).toBe('call-rm')
+      expect(review.review).toMatchObject({ reviewer: 'auto-mode', decision: 'approved' })
+
+      // T14 — usage attribution: the TARGET engine, the DISPATCHING routing id.
+      const [o] = t.judge.opts
+      expect(o.engine).toBe('opencode')
+      expect(o.routingId).toBe('routing-1')
+      expect(o.sessionId()).toBe('oc-sess-1')
+      expect(o.modelValue()).toBe('openai/gpt-5')
+      await t.finish()
+    })
+
+    it('T14: modelValue is the target engine’s autoMode.judgeModel when one is set', async () => {
+      const t = await start({ autoMode: { judgeModel: 'anthropic/judge-model' } })
+      t.ask(RM)
+      await flush()
+      expect(t.judge.opts[0].modelValue()).toBe('anthropic/judge-model')
+      await t.finish()
+    })
+
+    it('T2: a block rejects with the judge’s reason and a denied review', async () => {
+      const t = await start()
+      t.judge.replies.push('<block>yes</block><reason>wipes the build</reason>')
+      t.ask(RM)
+      await flush()
+      expect(t.client.replyPermission).toHaveBeenCalledWith(
+        'perm-rm',
+        'reject',
+        'Auto mode blocked: wipes the build'
+      )
+      expect(reviews(t.ctx)[0].review).toMatchObject({ decision: 'denied' })
+      expect(approvals(t.ctx)).toHaveLength(0)
+      await t.finish()
+    })
+
+    it('T3: an unavailable judge forwards the ask to the human, no reply', async () => {
+      const t = await start()
+      t.judge.replies.push(new Error('HTTP 503'))
+      t.ask(RM)
+      await flush()
+      expect(approvals(t.ctx)).toEqual([
+        expect.objectContaining({
+          requestId: `${XENG_REQUEST_PREFIX}perm-rm`,
+          toolUseId: 'call-rm'
+        })
+      ])
+      expect(t.client.replyPermission).not.toHaveBeenCalled()
+      // The judge WAS consulted — the human got the ask because it failed.
+      expect(t.judge.requests).toHaveLength(1)
+      await t.finish()
+    })
+
+    it('F2: a user DENY rule hit is refused with the rule — zero judge calls, no card (refusal rungs precede the auto branch)', async () => {
+      const t = await start({ rules: userRules({ deny: ['Bash(git push --force:*)'] }) })
+      t.ask({
+        id: 'perm-force',
+        permission: 'bash',
+        patterns: ['git push origin main --force'],
+        metadata: { command: 'git push origin main --force' },
+        tool: { messageID: 'msg-1', callID: 'call-force' }
+      })
+      await flush()
+      expect(t.client.replyPermission).toHaveBeenCalledWith(
+        'perm-force',
+        'reject',
+        'Denied by permission rule: Bash(git push --force:*)'
+      )
+      expect(t.judge.requests).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(0)
+      await t.finish()
+    })
+
+    it('F5: G9 shell half — a reordered form only the shell matcher sees (`ls;git push`) reaches the human, zero judge calls', async () => {
+      const t = await start({ rules: userRules({ ask: ['Bash(git push:*)'] }) })
+      t.ask({
+        id: 'perm-chain',
+        permission: 'bash',
+        patterns: ['ls;git push'],
+        metadata: { command: 'ls;git push' },
+        tool: { messageID: 'msg-1', callID: 'call-chain' }
+      })
+      await flush()
+      expect(t.judge.requests).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(1)
+      await t.finish()
+    })
+
+    it('F5: G9 non-shell half — a WebFetch ask rule (only the compiled-rule matcher sees it) reaches the human, zero judge calls', async () => {
+      const t = await start({ rules: userRules({ ask: ['WebFetch(domain:example.com)'] }) })
+      t.ask({
+        id: 'perm-fetch',
+        permission: 'webfetch',
+        patterns: ['https://example.com/x'],
+        metadata: { url: 'https://example.com/x' },
+        tool: { messageID: 'msg-1', callID: 'call-fetch' }
+      })
+      await flush()
+      expect(t.judge.requests).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(1)
+      await t.finish()
+    })
+
+    it('F8: a target USER-role message (the dispatch prompt as the target saw it) never becomes a `User:` line for the judge', async () => {
+      const t = await start({ prompt: 'remove the build dir' })
+      t.stream.push('message.updated', {
+        sessionID: 'oc-sess-1',
+        info: { id: 'msg-u', role: 'user' }
+      })
+      t.stream.push('message.part.updated', {
+        sessionID: 'oc-sess-1',
+        part: { id: 'part-u', messageID: 'msg-u', type: 'text', text: 'remove the build dir' }
+      })
+      await tick()
+      t.ask(RM)
+      await flush()
+      expect(t.judge.requests[0].user).not.toMatch(/User:[^\n]*remove the build dir/)
+      await t.finish()
+    })
+
+    it('T4: a target CHILD’s bash ask is judged too, allow → once', async () => {
+      const t = await start()
+      t.stream.push('message.part.updated', {
+        sessionID: 'oc-sess-1',
+        part: {
+          id: 'part-task-1',
+          messageID: 'msg-1',
+          type: 'tool',
+          tool: 'task',
+          callID: 'call-task-1',
+          state: { status: 'running', input: {}, metadata: { sessionId: 'oc-child-1' } }
+        }
+      })
+      await tick()
+      t.ask({
+        id: 'perm-child',
+        sessionID: 'oc-child-1',
+        permission: 'bash',
+        patterns: ['npm test'],
+        metadata: { command: 'npm test' },
+        tool: { messageID: 'msg-c', callID: 'call-child-test' }
+      })
+      await flush()
+      expect(t.judge.requests).toHaveLength(1)
+      expect(t.client.replyPermission).toHaveBeenCalledWith('perm-child', 'once')
+      expect(approvals(t.ctx)).toHaveLength(0)
+      await t.finish()
+    })
+
+    it('T5: a user ask rule sends the call to the human with ZERO judge calls', async () => {
+      const t = await start({ rules: userRules({ ask: ['Bash(git push:*)'] }) })
+      t.ask({
+        id: 'perm-push',
+        permission: 'bash',
+        patterns: ['git push origin main'],
+        metadata: { command: 'git push origin main' },
+        tool: { messageID: 'msg-1', callID: 'call-push' }
+      })
+      await flush()
+      expect(t.judge.requests).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(1)
+      expect(t.client.replyPermission).not.toHaveBeenCalled()
+      await t.finish()
+    })
+
+    it('T6: an edit clear of agent-control paths is allowed with zero judge calls; one on .claude/settings.json is judged', async () => {
+      const t = await start()
+      t.ask({
+        id: 'perm-edit-ok',
+        permission: 'edit',
+        patterns: ['src/a.ts'],
+        metadata: { filepath: '/tmp/xeng-project/src/a.ts' },
+        tool: { messageID: 'msg-1', callID: 'call-edit-ok' }
+      })
+      await flush()
+      expect(t.client.replyPermission).toHaveBeenCalledWith('perm-edit-ok', 'once')
+      expect(t.judge.requests).toHaveLength(0)
+
+      t.ask({
+        id: 'perm-edit-ctl',
+        permission: 'edit',
+        patterns: ['.claude/settings.json'],
+        metadata: { filepath: '/tmp/xeng-project/.claude/settings.json' },
+        tool: { messageID: 'msg-1', callID: 'call-edit-ctl' }
+      })
+      await flush()
+      expect(t.judge.requests).toHaveLength(1)
+      expect(t.client.replyPermission).toHaveBeenCalledWith('perm-edit-ctl', 'once')
+      await t.finish()
+    })
+
+    it('a parent no longer in auto forwards the next ask to the human (live mode)', async () => {
+      const t = await start()
+      t.setMode('default')
+      t.ask(RM)
+      await flush()
+      expect(t.judge.requests).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(1)
+      await t.finish()
+    })
+
+    it('T15: a stop while the ask is being judged replies nothing and shows no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      t.ask(RM)
+      await flush()
+      expect(t.judge.requests).toHaveLength(1)
+      expect(t.dispatcher.stopDispatch('toolu_oc_auto')).toBe(true)
+      await flush()
+      held.resolve('<block>no</block>')
+      await flush()
+      expect(t.client.replyPermission.mock.calls.filter((c) => c[0] === 'perm-rm')).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(reviews(t.ctx)).toHaveLength(0)
+    })
+
+    it('F7: a dispose while the ask is being judged replies nothing and shows no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      t.ask(RM)
+      await flush()
+      expect(t.judge.requests).toHaveLength(1)
+      t.dispatcher.disposeFor('routing-1')
+      held.resolve('<block>no</block>')
+      await flush()
+      expect(t.client.replyPermission.mock.calls.filter((c) => c[0] === 'perm-rm')).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(reviews(t.ctx)).toHaveLength(0)
+    })
+
+    it('T16: permission.replied during judgement (the cascade) → no reply, no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      t.ask(RM)
+      await flush()
+      t.stream.push('permission.replied', { sessionID: 'oc-sess-1', requestID: 'perm-rm' })
+      await flush()
+      held.resolve('<block>no</block>')
+      await flush()
+      expect(t.client.replyPermission).not.toHaveBeenCalled()
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(reviews(t.ctx)).toHaveLength(0)
+      await t.finish()
+    })
+  })
+
+  describe('pi target', () => {
+    async function start(autoMode: EngineConfig['autoMode'] = {}) {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: judgedConfig(autoMode),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make
+      })
+      let mode = 'auto'
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        toolUseId: 'toolu_pi_auto',
+        getAutonomyMode: () => mode,
+        getMessages: () => PARENT
+      })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'remove the build dir' }, ctx)
+      await tick()
+      const gate = (toolCallId: string, toolName: string, input: Record<string, unknown>) =>
+        target.gateHandler()({ toolCallId, toolName, input })
+      const finish = async (): Promise<void> => {
+        target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+        target.pushEvent(PI_AGENT_SETTLED)
+        await pending
+      }
+      return { target, judge, dispatcher, ctx, gate, finish, setMode: (m: string) => (mode = m) }
+    }
+
+    it('T7: bash is judged from the acceptEdits base — allow, then block; read needs no judge; the review binds to the pi call id', async () => {
+      const t = await start()
+      expect(await t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(t.judge.requests).toHaveLength(1)
+      expect(t.judge.requests[0].user).toContain('"dispatch:pi" subagent')
+      expect(t.judge.requests[0].user).toContain('User: please clean the build output')
+      expect(reviews(t.ctx)[0]).toMatchObject({
+        toolUseId: 'pi-call-1',
+        review: { reviewer: 'auto-mode', decision: 'approved' }
+      })
+
+      t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+      expect(await t.gate('pi-call-2', 'bash', { command: 'rm -rf y' })).toEqual({
+        behavior: 'deny',
+        reason: 'Auto mode blocked: destroys data'
+      })
+
+      expect(await t.gate('pi-call-3', 'read', { path: 'a.txt' })).toEqual({ behavior: 'allow' })
+      expect(t.judge.requests).toHaveLength(2)
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(t.judge.opts[0]).toMatchObject({ engine: 'pi', routingId: 'routing-1' })
+      expect(t.judge.opts[0].sessionId()).toBe('pi-target-1')
+      expect(t.judge.opts[0].modelValue()).toBe('openai-codex/gpt-5.6-luna')
+      await t.finish()
+    })
+
+    it('T7: the target’s own earlier call is on the judge’s transcript (D1 trajectory)', async () => {
+      const t = await start()
+      t.target.pushEvent(
+        piAssistantMessageEnd({
+          toolUse: { id: 'pi-earlier', name: 'bash', input: { command: 'ls build' } }
+        })
+      )
+      await tick()
+      await t.gate('pi-call-1', 'bash', { command: 'rm -rf build' })
+      const user = t.judge.requests[0].user
+      expect(user).toContain('ls build')
+      expect(user).not.toMatch(/User:[^\n]*remove the build dir/)
+      await t.finish()
+    })
+
+    it('T13 (G10): the parent leaves auto while the judge runs → the verdict is discarded and the ask goes to the human', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      t.setMode('default')
+      held.resolve('<block>no</block>')
+      await flush()
+      expect(approvals(t.ctx)).toEqual([
+        expect.objectContaining({ toolUseId: 'pi-call-1', toolName: 'bash' })
+      ])
+      expect(reviews(t.ctx)).toHaveLength(0)
+      void decision
+      await t.finish()
+    })
+
+    it('T15: a stop while the ask is judged denies it as stopped, with no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+      held.resolve('<block>no</block>')
+      expect(await decision).toEqual({ behavior: 'deny', reason: 'Dispatch stopped' })
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(reviews(t.ctx)).toHaveLength(0)
+      t.target.pushEvent(PI_AGENT_SETTLED)
+    })
+
+    it('F10: a stop during the transport await whose outcome would be human (transport fails) → deny as stopped, no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise.then(() => Promise.reject(new Error('HTTP 503'))))
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+      held.resolve('')
+      expect(await decision).toEqual({ behavior: 'deny', reason: 'Dispatch stopped' })
+      expect(approvals(t.ctx)).toHaveLength(0)
+      t.target.pushEvent(PI_AGENT_SETTLED)
+    })
+
+    it('a user ask rule (G9) reaches the human with zero judge calls', async () => {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: judgedConfig(),
+        loadUserRules: () => userRules({ ask: ['Bash(git push:*)'] }),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await tick()
+      void target.gateHandler()({
+        toolCallId: 'pi-push',
+        toolName: 'bash',
+        input: { command: 'git push origin main' }
+      })
+      await flush()
+      expect(judge.requests).toHaveLength(0)
+      expect(approvals(ctx)).toHaveLength(1)
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await pending
     })
   })
 })

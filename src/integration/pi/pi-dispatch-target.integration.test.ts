@@ -118,7 +118,8 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         fromEngine: 'claude',
         fromRoutingId: ROUTING_ID,
         cwd: tmpDir,
-        autonomyMode: 'default',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
         emit: () => {}
       }
 

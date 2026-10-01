@@ -3331,7 +3331,9 @@ export class CodexSession extends BaseSession {
       // The user's OWN autonomy choice, un-narrowed: `gate()`'s auto→default
       // mapping governs what this client asks about, not what the dispatched
       // agent is allowed to do (the human just approved this dispatch anyway).
-      autonomyMode: this.permissionMode,
+      // Read live (ADR-087): the target follows this session's mode switches.
+      getAutonomyMode: () => this.permissionMode,
+      getMessages: () => this.messageHistory,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),

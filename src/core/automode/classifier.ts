@@ -307,12 +307,17 @@ export function renderAction(action: ClassifierAction): string {
 }
 
 /**
- * The header line above the rendered action. A subagent's call (ADR-085 S4)
- * says which subagent proposed it and the parent `task` that spawned it — the
- * task fields JSON-rendered (absent ones omitted; the prompt clipped at
+ * The header line above the rendered action. A subagent's call says which
+ * subagent proposed it and the task that spawned it — the task fields
+ * JSON-rendered (absent ones omitted; the prompt clipped at
  * {@link MAX_SUBAGENT_PROMPT_CHARS}, then `…`) — and asks the judge to read it
- * as the assistant's own action against the same user intent: the judge sees
- * only the PARENT transcript, whose `task` line is the child's mandate.
+ * as the assistant's own action against the same user intent. Two callers:
+ * - an opencode task CHILD (ADR-085 S4): the judge sees only the PARENT
+ *   transcript, whose `task` line is the child's mandate;
+ * - a dispatch TARGET (ADR-087, type `dispatch:<engine>`, the latest dispatch
+ *   prompt as the task): the judge sees the PARENT transcript followed by the
+ *   target's own assistant trajectory (its user-role messages removed), so the
+ *   parent's human turns stay the only `User:` lines.
  * Exactly one line; the system prompt is untouched (byte-stability, ADR-081 §4).
  */
 function actionHeader(action: ClassifierAction): string {

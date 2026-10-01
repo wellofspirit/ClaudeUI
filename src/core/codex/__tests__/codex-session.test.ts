@@ -2520,7 +2520,8 @@ describe('Codex cross-engine dispatch', () => {
         fromEngine: 'codex',
         fromRoutingId: 'temporary',
         cwd: '/isolated',
-        autonomyMode: 'acceptEdits',
+        getAutonomyMode: expect.any(Function),
+        getMessages: expect.any(Function),
         toolUseId: 'codex:["root","turn","dispatch-1"]',
         extra: expect.objectContaining({ signal: expect.any(AbortSignal) })
       })
@@ -2617,10 +2618,16 @@ describe('Codex cross-engine dispatch', () => {
     await expect(result).resolves.toMatchObject({ success: true })
     // The MODE still travels to the target verbatim — the card is ClaudeUI's
     // gate, not a downgrade of the user's autonomy choice.
-    expect(dispatcher.dispatch).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ autonomyMode: 'auto' })
-    )
+    const dispatchCtx = dispatcher.dispatch.mock.calls[0][1] as {
+      getAutonomyMode: () => string
+      getMessages: () => unknown[]
+    }
+    expect(dispatchCtx.getAutonomyMode()).toBe('auto')
+    // Live accessors (ADR-087): a later switch is visible through the SAME
+    // context, and the transcript is the session's live history.
+    await f.session.setPermissionMode('plan')
+    expect(dispatchCtx.getAutonomyMode()).toBe('plan')
+    expect(dispatchCtx.getMessages()).toBe(f.session.getMessages())
   })
 
   it('refuses a malformed call without a card and without dispatching', async () => {

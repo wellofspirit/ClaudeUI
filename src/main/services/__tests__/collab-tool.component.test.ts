@@ -59,6 +59,7 @@ function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerCont
     getRoutingId: () => 'routing-1',
     cwd: '/tmp/project',
     getAutonomyMode: () => 'acceptEdits',
+    getMessages: () => [],
     emit: vi.fn(),
     addDispatchedCost: vi.fn(),
     ...overrides
@@ -111,7 +112,9 @@ describe('createCollabServer', () => {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
         cwd: '/tmp/project',
-        autonomyMode: 'acceptEdits',
+        // The accessors themselves, read live by the dispatcher (ADR-087).
+        getAutonomyMode: ctx.getAutonomyMode,
+        getMessages: ctx.getMessages,
         emit: ctx.emit,
         addDispatchedCost: ctx.addDispatchedCost,
         extra
@@ -182,14 +185,14 @@ describe('createCollabServer', () => {
     mode = 'plan'
     await server.tools[0].handler({ engine: 'opencode', prompt: 'b' }, makeExtra())
 
-    expect(dispatchSpy.mock.calls[0][1]).toMatchObject({
-      fromRoutingId: 'temp-uuid',
-      autonomyMode: 'default'
-    })
-    expect(dispatchSpy.mock.calls[1][1]).toMatchObject({
-      fromRoutingId: 'stable-session-uuid',
-      autonomyMode: 'plan'
-    })
+    expect(dispatchSpy.mock.calls[0][1]).toMatchObject({ fromRoutingId: 'temp-uuid' })
+    expect(dispatchSpy.mock.calls[1][1]).toMatchObject({ fromRoutingId: 'stable-session-uuid' })
+    // The mode is an accessor the dispatcher reads at every decision point
+    // (ADR-087), so even the FIRST dispatch's context now sees the switch.
+    expect(dispatchSpy.mock.calls[0][1].getAutonomyMode()).toBe('plan')
+    expect(dispatchSpy.mock.calls[1][1].getAutonomyMode()).toBe('plan')
+    mode = 'acceptEdits'
+    expect(dispatchSpy.mock.calls[1][1].getAutonomyMode()).toBe('acceptEdits')
   })
 
   it('threads ctx.addDispatchedCost through to the dispatcher context (ADR-033 Slice C)', async () => {
@@ -273,7 +276,9 @@ describe('createCollabServer', () => {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
         cwd: '/tmp/project',
-        autonomyMode: 'acceptEdits',
+        // The accessors themselves, read live by the dispatcher (ADR-087).
+        getAutonomyMode: ctx.getAutonomyMode,
+        getMessages: ctx.getMessages,
         emit: ctx.emit,
         addDispatchedCost: ctx.addDispatchedCost,
         extra

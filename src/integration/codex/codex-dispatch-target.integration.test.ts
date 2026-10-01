@@ -359,7 +359,8 @@ it.runIf(enabled)(
       fromEngine: 'claude',
       fromRoutingId: ROUTING_ID,
       cwd: fixture.cwd,
-      autonomyMode: 'default',
+      getAutonomyMode: () => 'default',
+      getMessages: () => [],
       emit: (channel, data) => emitted.push({ channel, data }),
       toolUseId: 'toolu_dispatch_integration'
     }
@@ -437,7 +438,8 @@ it.runIf(enabled)(
       fromEngine: 'claude',
       fromRoutingId: ROUTING_ID,
       cwd: fixture.cwd,
-      autonomyMode: 'default',
+      getAutonomyMode: () => 'default',
+      getMessages: () => [],
       emit: () => {},
       toolUseId: 'toolu_dispatch_stop'
     }

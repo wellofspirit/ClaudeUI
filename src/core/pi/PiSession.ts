@@ -94,25 +94,16 @@ import {
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
-import {
-  classify,
-  formatUnparseableJudgeReply,
-  formatVerdictLine,
-  isAutoModeFastPathAllowed,
-  type ClassifyResult,
-  type EnvironmentInfo,
-  type JudgeTransport
-} from '../automode/classifier'
+import type { ClassifyResult, EnvironmentInfo, JudgeTransport } from '../automode/classifier'
 import {
   allowRuleReviewBlock,
   AutoModeDenialTracker,
   autoModeReviewBlock,
-  formatAutoModeDenyReason,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
-import { allowRuleGate } from '../automode/allow-rule-gate'
+import { effectiveShellCwd } from '../automode/read-only-gate'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
+import { runJudgePipeline } from '../automode/judge-pipeline'
 import {
   analyzeRedirects,
   captureGitConfigArmed,
@@ -592,7 +583,7 @@ export class PiSession extends BaseSession {
   }
 
   /** Public accessor for cross-engine dispatch (ADR-033) — used by
-   *  handleDispatchAgent (M4b) to build DispatchContext.autonomyMode, mirroring
+   *  handleDispatchAgent (M4b) to build DispatchContext.getAutonomyMode, mirroring
    *  OpencodeSession's identical accessor's call site (createOpencodeHostedToolsServer). */
   getAutonomyMode(): string {
     return this.permissionMode
@@ -2400,8 +2391,8 @@ export class PiSession extends BaseSession {
    * {@link askHuman}); only the denial caps set it, because "auto mode gave up
    * on this action" is not otherwise visible to the user.
    *
-   * Mirrors OpencodeSession.handleAutoModeApproval step for step; the one place
-   * pi does better is G9.
+   * G9 is pi's own (the one place pi does better than opencode); every step
+   * after it is the shared {@link runJudgePipeline} (ADR-087).
    */
   private async classifyAutoMode(
     payload: PiToolCallPayload,
@@ -2424,139 +2415,64 @@ export class PiSession extends BaseSession {
       return ASK_HUMAN
     }
 
-    // Fast path — read-only/safe categories never need the judge.
+    // Everything after G9 is the shared pipeline (automode/judge-pipeline.ts,
+    // ADR-087), with pi's hooks. Notes specific to pi:
     //
     // G8, ANSWERED FOR pi (plan §7 Q2): pi's ask path does NOT fire for
-    // read/grep/find/ls under auto mode, so this check is defense in depth
-    // rather than a hot path. Verified by reading the evaluator rather than
-    // inheriting opencode's argument: with auto mode active the base is
-    // `acceptEdits` (see gateToolCallInner), whose `modeBaseDecision` allows
-    // fileRead and search outright; the only other route to 'ask' for those
-    // kinds is a user ask rule, which G9 above has already sent to the human.
-    // Note also that the shared allowlist speaks opencode's category vocabulary
-    // (`glob`/`list`), so pi's `find`/`ls` would not match it anyway — left
-    // alone deliberately: widening a SHARED allow set to cover a path that
-    // cannot be reached would be risk with no benefit.
-    if (isAutoModeFastPathAllowed(toolName)) return decided({ behavior: 'allow' })
-
-    // ADR-084 §1 — a plainly read-only shell command in the workspace needs no
-    // judge: allowed with a fixed review on the card, no recordAllow() (a
-    // static allow never resets the denial caps) and no usage row. Before the
-    // judge-model check, so it holds even when no judge model resolves. pi's
-    // `bash` has no `workdir` — it runs in the session cwd — so the gate
-    // refuses an input that carries one. `currentRules()` is the ruleset the
-    // permission engine just decided with, deny rules included.
-    const readOnly = await readOnlyGate({
-      action: { toolName, input },
-      cwd: this.cwd,
-      permissions: this.currentRules(),
-      autoModeActive: () => this.isAutoMode(this.permissionMode),
-      honoursWorkdir: false,
-      logSource: 'PiSession'
-    })
-    if (readOnly.allow) {
-      this.sendToolReview(toolCallId, 'read-only')
-      return decided({ behavior: 'allow' })
-    }
-
-    // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
-    // parity plus safety checks, allow-rule-skip.ts), also before the
-    // judge-model check. `currentRules()` in FULL: only the ladder's copy had
-    // its allow rules stripped (`withoutAllowRules`). Same bookkeeping as the
-    // read-only path: no recordAllow(), no usage row. The gate is synchronous,
-    // so no mode can change while it runs beyond its own `autoModeActive()`.
-    const action = allowRuleActionFor(toolName, input)
-    if (action) {
-      const gate = allowRuleGate({
-        action,
-        toolName,
+    // read/grep/find/ls under auto mode, so the pipeline's category fast path
+    // is defense in depth rather than a hot path. Verified by reading the
+    // evaluator rather than inheriting opencode's argument: with auto mode
+    // active the base is `acceptEdits` (see gateToolCallInner), whose
+    // `modeBaseDecision` allows fileRead and search outright; the only other
+    // route to 'ask' for those kinds is a user ask rule, which G9 above has
+    // already sent to the human. Note also that the shared allowlist speaks
+    // opencode's category vocabulary (`glob`/`list`), so pi's `find`/`ls` would
+    // not match it anyway — left alone deliberately: widening a SHARED allow set
+    // to cover a path that cannot be reached would be risk with no benefit.
+    //
+    // ADR-084 §1 read-only gate: pi's `bash` has no `workdir` — it runs in the
+    // session cwd — so the gate refuses an input that carries one
+    // (`honoursWorkdir: false`). `currentRules()` is the ruleset the permission
+    // engine just decided with, deny rules included; the ADR-085 §4 allow-rule
+    // gate reads it in FULL (only the ladder's copy had its allow rules
+    // stripped by `withoutAllowRules`).
+    const outcome = await runJudgePipeline(
+      { toolUseId: toolCallId, toolName, input },
+      {
+        logSource: 'PiSession',
         cwd: this.cwd,
-        permissions: this.currentRules(),
+        currentMode: () => this.permissionMode,
         autoModeActive: () => this.isAutoMode(this.permissionMode),
-        logSource: 'PiSession'
-      })
-      if (gate.allow) {
-        this.sendToolReview(toolCallId, { allowRule: gate.rule })
+        permissions: () => this.currentRules(),
+        honoursWorkdir: false,
+        allowRuleAction: allowRuleActionFor,
+        // A configured judge model that no longer exists fails CLOSED — never
+        // judged by a stand-in (see judgeModelUnavailable).
+        judgeAvailable: async () => !(await this.judgeModelUnavailable()),
+        judgeTransport: () => this.judgeTransport(),
+        messages: () => this.messageHistory,
+        environment: () => this.classifierEnvironment(),
+        captureActionMeta: (name, args) => this.captureActionMeta(name, args),
+        outcomes: () =>
+          this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
+        recordOutcome: (id, result) => this.recordToolOutcome(id, result),
+        denials: this.autoDenials,
+        twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
+        sendReview: (id, review) => this.sendToolReview(id, review)
+      }
+    )
+    switch (outcome.kind) {
+      case 'allow':
         return decided({ behavior: 'allow' })
-      }
-    }
-
-    // A configured judge model that no longer exists fails CLOSED — never judged
-    // by a stand-in (see judgeModelUnavailable). Checked after the fast path so a
-    // stale judge does not start prompting for reads.
-    if (await this.judgeModelUnavailable()) return ASK_HUMAN
-
-    try {
-      // Ground truth. actionMeta FIRST: it is what resolves repo visibility,
-      // and classifierEnvironment picks the resolved value up on this same
-      // call rather than one approval later.
-      const actionMeta = await this.captureActionMeta(toolName, input)
-      const environment = await this.classifierEnvironment()
-      const result = await classify(
-        {
-          messages: this.messageHistory,
-          action: { toolName, input },
-          environment,
-          ...(actionMeta ? { actionMeta } : {}),
-          ...(this.toolOutcomes.size ? { outcomes: Object.fromEntries(this.toolOutcomes) } : {}),
-          twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
-        },
-        this.judgeTransport()
-      )
-
-      // G10 — the judge call is async and the user can switch autonomy mode
-      // while it is in flight (ref §3 step 5 / cli.js's
-      // `mode_changed_while_queued`). Re-read the CURRENT mode: if auto mode is
-      // no longer active the verdict is stale authority, so discard it and ask.
-      if (!this.isAutoMode(this.permissionMode)) {
-        logger.info(
-          'PiSession',
-          `auto-mode verdict discarded — permission mode changed to "${this.permissionMode}" while the judge ran`
-        )
+      case 'deny':
+        return decided({ behavior: 'deny', reason: outcome.reason })
+      case 'human':
+        return outcome.reason ? { kind: 'human', reason: outcome.reason } : ASK_HUMAN
+      case 'settled':
+        // Unreachable for pi: no `stillPending` hook is passed (pi's gate is a
+        // single awaited HTTP request — nothing answers the call elsewhere
+        // while it is judged). Kept fail-safe: ask the human.
         return ASK_HUMAN
-      }
-
-      const verdictLine = formatVerdictLine(result, toolName)
-      if (result.stage === 'error') {
-        // stage=error means no verdict was obtained — a WARN with the
-        // transport's own message, because a bare `stage=error` line is
-        // undiagnosable (it is how the pi 0.84.3 new_session model reset hid
-        // for a whole release).
-        logger.warn('PiSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
-      } else {
-        logger.info('PiSession', verdictLine)
-      }
-      // Set only on a fail-closed unparseable verdict — the one block whose
-      // reason says nothing about WHY the judge's answer was unreadable.
-      if (result.raw !== undefined) {
-        logger.debug('PiSession', formatUnparseableJudgeReply(result))
-      }
-
-      if (result.unavailable) return ASK_HUMAN
-
-      if (result.block) {
-        // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
-        // blocks → hand control to the human, carrying the cap's own sentence as
-        // the approval card's decisionReason.
-        const capped = this.autoDenials.recordBlock(result.category)
-        if (capped) return { kind: 'human', reason: capped }
-        // Annotate the blocked call so a re-attempt is judged as a retry of
-        // something THIS monitor denied (post-block consent inheritance), not
-        // as a fresh proposal.
-        this.recordToolOutcome(toolCallId, 'automode-blocked')
-        this.sendToolReview(toolCallId, result)
-        return decided({ behavior: 'deny', reason: formatAutoModeDenyReason(result) })
-      }
-
-      this.autoDenials.recordAllow()
-      this.sendToolReview(toolCallId, result)
-      return decided({ behavior: 'allow' })
-    } catch (err) {
-      logger.warn(
-        'PiSession',
-        `auto-mode classify failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-      return ASK_HUMAN
     }
   }
 
@@ -2675,7 +2591,7 @@ export class PiSession extends BaseSession {
    * side initiates — the dispatcher's own engine guard rejects 'pi' as
    * `req.engine` here. Mirrors collab-tool.ts's Claude-side
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
-   * autonomyMode/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
+   * getAutonomyMode/getMessages/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
    * directly. Result text formatting (the `[dispatch session_id: …]` success
    * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
@@ -2726,7 +2642,10 @@ export class PiSession extends BaseSession {
       fromEngine: 'pi',
       fromRoutingId: this.routingId,
       cwd: this.cwd,
-      autonomyMode: this.getAutonomyMode(),
+      // Live (ADR-087): the target follows this session's mode switches, and
+      // the judge of a pi/opencode target reads this transcript.
+      getAutonomyMode: () => this.getAutonomyMode(),
+      getMessages: () => this.messageHistory,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),
