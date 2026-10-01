@@ -433,6 +433,47 @@ describe('recomputeUsageWindows', () => {
     }
   })
 
+  /**
+   * ADR-071 §7, amended 2026-10-01. A meter at 0% has not started its window,
+   * so the end it reports is provisional: ChatGPT answers "a week from now" for
+   * an idle weekly limit, a different instant on every reading, and each one
+   * used to become a window of its own.
+   */
+  it('materializes no window from readings that show no usage, however the end drifts', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      for (const hour of [0, 1, 2]) {
+        const at = END + hour * HOUR
+        db.recordWindowSample(sample(CHATGPT_A, at, 0, at + SEVEN_DAYS, '7d', 10_080))
+      }
+
+      expect(ledger.recomputeUsageWindows(END + 3 * HOUR)).toBe(0)
+      expect(db.listUsageWindows({ accountKey: CHATGPT_A })).toEqual([])
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('materializes the window the first reading above 0% names, counting the 0% ones at its end', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      const end = END + SEVEN_DAYS
+      // Usage has begun but still rounds to 0%: the end has stopped moving.
+      db.recordWindowSample(sample(CHATGPT_A, END, 0, end, '7d', 10_080))
+      db.recordWindowSample(sample(CHATGPT_A, END + HOUR, 0, end, '7d', 10_080))
+      expect(ledger.recomputeUsageWindows(END + HOUR)).toBe(0)
+
+      db.recordWindowSample(sample(CHATGPT_A, END + 2 * HOUR, 1, end, '7d', 10_080))
+      expect(ledger.recomputeUsageWindows(END + 2 * HOUR)).toBe(1)
+
+      expect(db.listUsageWindows({ accountKey: CHATGPT_A })).toMatchObject([
+        { canonicalEnd: end, peakPercent: 1, sampleCount: 3 }
+      ])
+    } finally {
+      db.closeDb()
+    }
+  })
+
   it('ignores the shared `unknown` account key', async () => {
     const { db, ledger } = await fresh()
     try {

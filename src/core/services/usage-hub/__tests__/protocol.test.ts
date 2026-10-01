@@ -32,6 +32,7 @@ import {
   decodePullAccountsResponse,
   decodeResyncResponse,
   decodeSchemaTooNew,
+  encodeCreditReading,
   encodeEvent,
   encodePatchDevice,
   encodePullAccountsQuery,
@@ -86,7 +87,12 @@ const REPLAYS: Array<[string, (parsed: Record<string, unknown>) => unknown]> = [
   ['events-response.json', decodePushEventsResponse],
   [
     'limits-push-request.json',
-    (p) => encodePushLimits({ deviceId: p.deviceId as string, readings: p.readings as unknown[] })
+    (p) =>
+      encodePushLimits({
+        deviceId: p.deviceId as string,
+        readings: p.readings as unknown[],
+        credits: p.credits as unknown[]
+      })
   ],
   ['limits-push-response.json', decodePushLimitsResponse],
   [
@@ -374,5 +380,69 @@ describe('decoding is defensive', () => {
     expect(decodeSchemaTooNew({ hubSchemaVersion: 1 })).toEqual({ hubSchemaVersion: 1 })
     expect(decodeSchemaTooNew({})).toBeNull()
     expect(decodeSchemaTooNew('nope')).toBeNull()
+  })
+})
+
+/**
+ * Credits on the limits routes are ADDITIVE under version 2 (ADR-072 §8, amended
+ * 2026-10-01): neither side may break the other by knowing about them.
+ */
+describe('credits on the limits routes', () => {
+  const allowance = { used: 100.25, limit: 8000, remainingPercent: 99, resetsAt: null }
+  const credit = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    accountKey: 'chatgpt:ws-1:user-1',
+    accountLabel: null,
+    vendorId: 'openai',
+    plan: 'business',
+    credits: { unlimited: false, balance: null },
+    allowance,
+    observedAt: 1,
+    ...over
+  })
+
+  it('leaves the key out of a push with no credits, so it is the bytes an older client sends', () => {
+    const push = encodePushLimits({ deviceId: 'device-a', readings: [], credits: [] })
+    expect(Object.keys(push)).toEqual(['schemaVersion', 'deviceId', 'readings'])
+    expect(Object.keys(encodePushLimits({ deviceId: 'device-a', readings: [] }))).toEqual([
+      'schemaVersion',
+      'deviceId',
+      'readings'
+    ])
+  })
+
+  it('reads a hub that predates credits as holding none', () => {
+    expect(decodePullLimitsResponse({ epoch: 3, readings: [] })).toEqual({
+      epoch: 3,
+      readings: [],
+      credits: []
+    })
+  })
+
+  it('refuses a reading with no account, or with nothing to say', () => {
+    expect(() => encodeCreditReading(credit({ accountKey: 'unknown' }))).toThrow(ProtocolError)
+    expect(() => encodeCreditReading(credit({ credits: null, allowance: null }))).toThrow(
+      ProtocolError
+    )
+  })
+
+  it('drops an allowance with half its numbers rather than reading a zero into it', () => {
+    expect(
+      encodeCreditReading(credit({ allowance: { ...allowance, used: 'n/a' } })).allowance
+    ).toBe(null)
+    expect(encodeCreditReading(credit({ allowance: { ...allowance, limit: -1 } })).allowance).toBe(
+      null
+    )
+    expect(
+      encodeCreditReading(credit({ allowance: { ...allowance, remainingPercent: 140 } })).allowance
+    ).toEqual({ ...allowance, remainingPercent: 100 })
+  })
+
+  it('skips a relayed reading that has nothing to show', () => {
+    const decoded = decodePullLimitsResponse({
+      epoch: 1,
+      readings: [],
+      credits: [{ deviceId: 'd', accountKey: 'k', credits: null, allowance: null }, 'junk']
+    })
+    expect(decoded.credits).toEqual([])
   })
 })

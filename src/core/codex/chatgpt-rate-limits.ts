@@ -19,15 +19,22 @@
  * rows all speak the vault's vocabulary.
  */
 import { homedir } from 'node:os'
-import type { ChatgptAccountLimits, ChatgptRateLimits, RateWindow } from '../../shared/types'
+import type {
+  ChatgptAccountLimits,
+  ChatgptRateLimits,
+  CreditLimit,
+  RateWindow
+} from '../../shared/types'
 import { CodexService } from './CodexService'
 import { codexBinaryAvailable } from './codex-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateLimitsResponse'
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { RateLimitWindow } from './protocol/v2/RateLimitWindow'
+import type { SpendControlLimitSnapshot } from './protocol/v2/SpendControlLimitSnapshot'
 import { emitEvent } from '../services/sync-host'
 import { recordLimitSamples, type LimitSampleWindow } from '../services/window-samples'
+import { publishCreditReading } from '../services/credit-readings'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { windowKindsForReading } from '../../shared/window-kind'
 
@@ -65,6 +72,47 @@ export function rateWindow(window: RateLimitWindow | null | undefined): RateWind
   }
 }
 
+/** A non-negative decimal amount, or null — `Number('')` is 0, which is not an amount. */
+function creditAmount(raw: string | null | undefined): number | null {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (text === '') return null
+  const value = Number(text)
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/**
+ * A member's credit allowance from the wire's `individualLimit`, or null.
+ *
+ * The amounts are decimal STRINGS on the wire (the backend's own fields, passed
+ * through `backend-client/src/client.rs` `map_individual_limit` untouched).
+ * One that does not parse, or is negative, drops the whole allowance — a bar
+ * with half its numbers is a claim nobody made — which is also what Codex's
+ * `/status` does (`tui/src/status/rate_limits.rs`, `format_credit_amount`).
+ *
+ * `resetsAt` is unix SECONDS like every other reset on this wire; a
+ * non-positive one is no statement and travels as null.
+ */
+export function creditLimit(
+  limit: SpendControlLimitSnapshot | null | undefined
+): CreditLimit | null {
+  if (!limit) return null
+  const used = creditAmount(limit.used)
+  const total = creditAmount(limit.limit)
+  const remaining = limit.remainingPercent
+  if (used === null || total === null) return null
+  if (typeof remaining !== 'number' || !Number.isFinite(remaining)) return null
+  const seconds = limit.resetsAt
+  return {
+    used,
+    limit: total,
+    remainingPercent: Math.max(0, Math.min(100, remaining)),
+    resetsAt:
+      typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0
+        ? new Date(seconds * 1000).toISOString()
+        : null
+  }
+}
+
 /**
  * One observed window as the sample writer takes it, under the kind the whole
  * reading resolved it to (S3c) — the DURATION's kind, never the slot's, and
@@ -82,7 +130,11 @@ function sampleWindow(kind: string, window: RateWindow): LimitSampleWindow {
 /** Does this snapshot say anything at all about what the account can spend? */
 function saysSomething(snapshot: RateLimitSnapshot | undefined): boolean {
   return (
-    !!snapshot && (!!snapshot.primary || !!snapshot.secondary || !!snapshot.credits?.hasCredits)
+    !!snapshot &&
+    (!!snapshot.primary ||
+      !!snapshot.secondary ||
+      !!snapshot.credits?.hasCredits ||
+      !!snapshot.individualLimit)
   )
 }
 
@@ -134,12 +186,34 @@ export interface ChatgptRateLimitDeps {
    * it also keeps this class's unit tests free of a database.
    */
   persist: (vaultAccountId: string, windows: LimitSampleWindow[]) => void
+  /**
+   * Relay the account's credits (ADR-072 §4, amended 2026-10-01). Takes the
+   * MERGED entry, not the snapshot: the hub replaces its row whole, so what it is
+   * sent has to be the account's current state, and a sparse push that left the
+   * allowance out must not relay an allowance of nothing.
+   *
+   * `observedAt` is when the credits were last READ in full, never when a push
+   * arrived — see `ChatgptRateLimitStore.creditsReadAt`. Injected for the same
+   * reason `persist` is.
+   */
+  publishCredits: (vaultAccountId: string, entry: ChatgptAccountLimits, observedAt: number) => void
   now: () => number
 }
 
 export class ChatgptRateLimitStore {
   private limits: ChatgptRateLimits = {}
   private inFlight: Promise<void> | null = null
+  /**
+   * When each account's credits were last READ IN FULL (`account/rateLimits/read`).
+   *
+   * A live turn's push never carries a freshly read allowance: Codex builds it
+   * from response headers with `individual_limit: None` and copies the previous
+   * one forward (`codex-api/src/rate_limits.rs`, `core/src/state/session.rs`). So
+   * the allowance on a push is as old as the last full read, and relaying it
+   * stamped with the push's instant would let it overwrite another machine's
+   * genuinely newer reading on the hub, whose rule is newest-wins.
+   */
+  private creditsReadAt = new Map<string, number>()
 
   constructor(private readonly deps: ChatgptRateLimitDeps) {}
 
@@ -158,7 +232,9 @@ export class ChatgptRateLimitStore {
   record(
     vaultAccountId: string,
     snapshot: RateLimitSnapshot,
-    identity: { email?: string; planType?: string } = {}
+    identity: { email?: string; planType?: string } = {},
+    /** Set by a FULL read only: the instant the credits on this snapshot were read. */
+    readAt?: number
   ): void {
     const previous = this.limits[vaultAccountId]
     const observedPrimary = rateWindow(snapshot.primary)
@@ -170,6 +246,10 @@ export class ChatgptRateLimitStore {
     const credits = snapshot.credits?.hasCredits
       ? { unlimited: snapshot.credits.unlimited, balance: snapshot.credits.balance }
       : previous?.credits
+    // And again for the allowance: a push that does not carry it says nothing
+    // about it (Codex's own session state keeps the prior one the same way,
+    // `core/src/state/session.rs`).
+    const allowance = creditLimit(snapshot.individualLimit) ?? previous?.creditLimit
     const entry: ChatgptAccountLimits = {
       ...((identity.email ?? previous?.email) ? { email: identity.email ?? previous?.email } : {}),
       ...((identity.planType ?? snapshot.planType ?? previous?.planType)
@@ -178,6 +258,7 @@ export class ChatgptRateLimitStore {
       primary,
       secondary,
       ...(credits ? { credits } : {}),
+      ...(allowance ? { creditLimit: allowance } : {}),
       fetchedAt: this.deps.now()
     }
     this.limits[vaultAccountId] = entry
@@ -194,6 +275,17 @@ export class ChatgptRateLimitStore {
     if (observedPrimary) observed.push(sampleWindow(kinds.primary, observedPrimary))
     if (observedSecondary) observed.push(sampleWindow(kinds.secondary, observedSecondary))
     if (observed.length) this.deps.persist(vaultAccountId, observed)
+    // A credits plan has no window to sample; its credits travel on their own,
+    // dated by the full read that established them (see `creditsReadAt`). Until
+    // one has happened this process has nothing it can honestly date, so nothing
+    // is relayed: a push alone is never the source.
+    if (readAt !== undefined && (snapshot.credits?.hasCredits || snapshot.individualLimit)) {
+      this.creditsReadAt.set(vaultAccountId, readAt)
+    }
+    const readCreditsAt = this.creditsReadAt.get(vaultAccountId)
+    if ((entry.credits || entry.creditLimit) && readCreditsAt !== undefined) {
+      this.deps.publishCredits(vaultAccountId, entry, readCreditsAt)
+    }
 
     this.deps.changed()
   }
@@ -201,6 +293,9 @@ export class ChatgptRateLimitStore {
   /** Drop everything the vault no longer holds, so a removed account's bars go. */
   private prune(ids: ReadonlySet<string>): void {
     for (const id of Object.keys(this.limits)) if (!ids.has(id)) delete this.limits[id]
+    for (const id of [...this.creditsReadAt.keys()]) {
+      if (!ids.has(id)) this.creditsReadAt.delete(id)
+    }
   }
 
   /**
@@ -228,10 +323,15 @@ export class ChatgptRateLimitStore {
     for (const account of accounts) {
       const response = responses.get(account.id)
       if (!response) continue
-      this.record(account.id, pickRateLimitSnapshot(response), {
-        ...(account.email ? { email: account.email } : {}),
-        ...(account.planType ? { planType: account.planType } : {})
-      })
+      this.record(
+        account.id,
+        pickRateLimitSnapshot(response),
+        {
+          ...(account.email ? { email: account.email } : {}),
+          ...(account.planType ? { planType: account.planType } : {})
+        },
+        this.deps.now()
+      )
     }
     this.deps.changed()
   }
@@ -273,6 +373,9 @@ export const chatgptRateLimits = new ChatgptRateLimitStore({
   persist: (vaultAccountId, windows) => {
     void persistChatgptSamples(vaultAccountId, windows)
   },
+  publishCredits: (vaultAccountId, entry, observedAt) => {
+    void publishChatgptCredits(vaultAccountId, entry, observedAt)
+  },
   now: () => Date.now()
 })
 
@@ -303,6 +406,36 @@ async function persistChatgptSamples(
       vendorId: 'openai',
       plan: chatgptRateLimits.snapshot()[vaultAccountId]?.planType ?? null,
       windows
+    })
+  } catch {
+    /* advisory */
+  }
+}
+
+/**
+ * Relay one account's credits under ADR-071 §3's account key (ADR-072 §4,
+ * amended 2026-10-01).
+ *
+ * Keyed from the vault like a sample, and for the same reason it is not inside
+ * `record()`. Best-effort, and an account nobody could key is not relayed:
+ * `publishCreditReading` refuses `unknown`, where it would be indistinguishable
+ * from every other account's.
+ */
+async function publishChatgptCredits(
+  vaultAccountId: string,
+  entry: ChatgptAccountLimits,
+  observedAt: number
+): Promise<void> {
+  try {
+    const { accountKey, accountLabel } = await credentialSync.accountIdentity(vaultAccountId)
+    publishCreditReading({
+      accountKey,
+      accountLabel: accountLabel ?? entry.email ?? null,
+      vendorId: 'openai',
+      plan: entry.planType ?? null,
+      credits: entry.credits ?? null,
+      allowance: entry.creditLimit ?? null,
+      observedAt
     })
   } catch {
     /* advisory */

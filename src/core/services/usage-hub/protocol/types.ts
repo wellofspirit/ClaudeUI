@@ -220,8 +220,58 @@ export interface HubLimitReading {
   observedAt: number
 }
 
+/**
+ * What a credits-based plan has, as the vendor states it — a ChatGPT workspace's
+ * `credits`. `balance` is the vendor's own text, usually WITHHELD from a
+ * workspace member (null), which is "this is a credits plan", not "nothing left".
+ */
+export interface HubCredits {
+  unlimited: boolean
+  balance: string | null
+}
+
+/**
+ * A member's allowance under a workspace's spend controls — ChatGPT's
+ * `individualLimit`, shown as "Monthly credit limit". Amounts are credits as
+ * numbers; `remainingPercent` is 0-100 and states what is LEFT, as the vendor
+ * does. `resetsAt` is ISO 8601, or null when the vendor stated none.
+ */
+export interface HubCreditAllowance {
+  used: number
+  limit: number
+  remainingPercent: number
+  resetsAt: string | null
+}
+
+/**
+ * One account's credits, as a device observed them (ADR-072 §4, amended
+ * 2026-10-01).
+ *
+ * ONE PER ACCOUNT, not per window: a credits plan reports no rate windows at all,
+ * so a {@link HubLimitReading} cannot carry it and the relay, built from window
+ * readings, never mentioned such an account. Never sampled and never a window: an
+ * allowance is a monthly state, and the hub keeps only the latest. At least one of
+ * `credits` and `allowance` is non-null, or there is nothing to say.
+ */
+export interface HubCreditReading {
+  accountKey: string
+  accountLabel: string | null
+  vendorId: string
+  plan: string | null
+  credits: HubCredits | null
+  allowance: HubCreditAllowance | null
+  observedAt: number
+}
+
 export interface PushLimitsRequest extends HubRequestEnvelope {
   readings: HubLimitReading[]
+  /**
+   * OPTIONAL and additive under version 2 (ADR-072 §8, amended 2026-10-01). A push
+   * with no credits leaves the key out, so it is byte-identical to one from a
+   * client that predates them; a hub that predates them ignores the key. At most
+   * {@link MAX_READINGS_PER_PUSH} entries.
+   */
+  credits?: HubCreditReading[]
 }
 
 export interface PushLimitsResponse extends HubEpochEnvelope {
@@ -379,8 +429,28 @@ export interface RemoteLimitReading {
   accountLabel?: string | null
 }
 
+/** The latest {@link HubCreditReading} per account, as the relay answers it. */
+export interface RemoteCreditReading {
+  deviceId: string
+  accountKey: string
+  /** Masked by the hub for a device caller, by the {@link RemoteLimitReading} rule. */
+  labelMasked: string | null
+  vendorId: string
+  plan: string | null
+  credits: HubCredits | null
+  allowance: HubCreditAllowance | null
+  observedAt: number
+  /** OWNER ONLY, and absent for a device caller — the {@link RemoteLimitReading} rule. */
+  accountLabel?: string | null
+}
+
 export interface PullLimitsResponse extends HubEpochEnvelope {
   readings: RemoteLimitReading[]
+  /**
+   * The latest credits per account. A hub that predates them sends no key, which
+   * decodes as empty: "this hub holds no credits", which is true.
+   */
+  credits: RemoteCreditReading[]
 }
 
 // ---------------------------------------------------------------------------

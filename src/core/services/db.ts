@@ -1349,6 +1349,53 @@ export const MIGRATIONS: Migration[] = [
         UPDATE usage_hub_config SET cursor_rowid = 0;
       `)
     }
+  },
+  {
+    // ADR-071 §7, amended 2026-10-01: a reading at 0% names no window. A plan
+    // meter at 0% has not started its window, so its reset is provisional —
+    // ChatGPT answers "a week from now" for an idle weekly limit, a different
+    // instant on every reading — and every such reading had materialised a
+    // window of its own. `peak_percent` only ever grows, so 0 is exactly "no
+    // reading ever showed usage": the set the rule would never have created, and
+    // judged without the samples retention may already have pruned.
+    //
+    // Only the LOCAL ledger. `remote_usage_window` is the hub's, and the hub's
+    // own migration (claudeui-usage-hub `0005`) deletes them there and raises the
+    // epoch, which truncates this cache on the next pull.
+    version: 28,
+    up(db) {
+      db.exec(`DELETE FROM usage_window WHERE peak_percent = 0`)
+    }
+  },
+  {
+    // ADR-072 §4, amended 2026-10-01: the sixth `remote_*` table, the hub's
+    // credits relay. A credits plan (a ChatGPT business workspace) reports no
+    // rate window, so `remote_limits` — keyed by window kind — never held it and
+    // another machine showed nothing for the account. One row per ACCOUNT, the
+    // latest whichever machine saw it, like `remote_limits` but keyed without a
+    // window. Each half is NULL as a whole when the reading did not carry it:
+    // `credits_unlimited` for the credits, `allowance_used` for the allowance.
+    // Cached like every other relayed fact, so the combined view still shows it
+    // offline and straight after a restart (ADR-072 §3).
+    version: 29,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_credits (
+          account_key                 TEXT PRIMARY KEY,
+          device_id                   TEXT NOT NULL,
+          label_masked                TEXT,
+          vendor_id                   TEXT NOT NULL,
+          plan                        TEXT,
+          credits_unlimited           INTEGER,
+          credits_balance             TEXT,
+          allowance_used              REAL,
+          allowance_limit             REAL,
+          allowance_remaining_percent REAL,
+          allowance_resets_at         TEXT,
+          observed_at                 INTEGER NOT NULL DEFAULT 0
+        );
+      `)
+    }
   }
 ]
 
@@ -4315,6 +4362,7 @@ export function deleteHubConfig(): void {
     db.prepare('DELETE FROM remote_usage_bucket').run()
     db.prepare('DELETE FROM remote_usage_window').run()
     db.prepare('DELETE FROM remote_limits').run()
+    db.prepare('DELETE FROM remote_credits').run()
     db.prepare('DELETE FROM remote_device').run()
     db.prepare('DELETE FROM remote_account').run()
     db.prepare('COMMIT').run()
@@ -4338,6 +4386,7 @@ export function truncateHubRemoteTables(): void {
     db.prepare('DELETE FROM remote_usage_bucket').run()
     db.prepare('DELETE FROM remote_usage_window').run()
     db.prepare('DELETE FROM remote_limits').run()
+    db.prepare('DELETE FROM remote_credits').run()
     // The device list and the account list are both pulled whole on every pass,
     // so dropping them costs one request each and keeps "forget the cache"
     // meaning all of it.
@@ -4605,6 +4654,120 @@ export function getRemoteUsageWindows(
  * §4's relay is: a machine where an account is not active shows the reading
  * another machine already paid a refresh grant for.
  */
+/**
+ * One account's credits as the hub relayed them (ADR-072 §4, amended
+ * 2026-10-01). Either half is null when the reading did not carry it.
+ */
+export interface RemoteCreditRow {
+  accountKey: string
+  deviceId: string
+  /** Masked by the hub, as {@link RemoteLimitRow.labelMasked} is. */
+  labelMasked: string | null
+  vendorId: string
+  plan: string | null
+  credits: { unlimited: boolean; balance: string | null } | null
+  allowance: {
+    used: number
+    limit: number
+    remainingPercent: number
+    resetsAt: string | null
+  } | null
+  observedAt: number
+}
+
+/**
+ * Store the hub's latest credits per account. Keyed by the account alone, and an
+ * OLDER reading than the stored one moves nothing, as {@link upsertRemoteLimits}.
+ */
+export function upsertRemoteCredits(rows: ReadonlyArray<RemoteCreditRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_credits (
+       account_key, device_id, label_masked, vendor_id, plan,
+       credits_unlimited, credits_balance,
+       allowance_used, allowance_limit, allowance_remaining_percent, allowance_resets_at,
+       observed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_key) DO UPDATE SET
+       device_id                   = excluded.device_id,
+       label_masked                = excluded.label_masked,
+       vendor_id                   = excluded.vendor_id,
+       plan                        = excluded.plan,
+       credits_unlimited           = excluded.credits_unlimited,
+       credits_balance             = excluded.credits_balance,
+       allowance_used              = excluded.allowance_used,
+       allowance_limit             = excluded.allowance_limit,
+       allowance_remaining_percent = excluded.allowance_remaining_percent,
+       allowance_resets_at         = excluded.allowance_resets_at,
+       observed_at                 = excluded.observed_at
+     WHERE excluded.observed_at >= remote_credits.observed_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const row of rows) {
+      stmt.run(
+        row.accountKey,
+        row.deviceId,
+        row.labelMasked,
+        row.vendorId,
+        row.plan,
+        row.credits === null ? null : row.credits.unlimited ? 1 : 0,
+        row.credits?.balance ?? null,
+        row.allowance?.used ?? null,
+        row.allowance?.limit ?? null,
+        row.allowance?.remainingPercent ?? null,
+        row.allowance?.resetsAt ?? null,
+        row.observedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+export function listRemoteCredits(): RemoteCreditRow[] {
+  const rows = getDb()
+    .prepare(`SELECT * FROM remote_credits ORDER BY account_key ASC`)
+    .all() as Array<{
+    account_key: string
+    device_id: string
+    label_masked: string | null
+    vendor_id: string
+    plan: string | null
+    credits_unlimited: number | null
+    credits_balance: string | null
+    allowance_used: number | null
+    allowance_limit: number | null
+    allowance_remaining_percent: number | null
+    allowance_resets_at: string | null
+    observed_at: number
+  }>
+  return rows.map((row) => ({
+    accountKey: row.account_key,
+    deviceId: row.device_id,
+    labelMasked: row.label_masked,
+    vendorId: row.vendor_id,
+    plan: row.plan,
+    credits:
+      row.credits_unlimited === null
+        ? null
+        : { unlimited: row.credits_unlimited === 1, balance: row.credits_balance },
+    allowance:
+      row.allowance_used === null
+        ? null
+        : {
+            used: row.allowance_used,
+            limit: row.allowance_limit ?? 0,
+            remainingPercent: row.allowance_remaining_percent ?? 0,
+            resetsAt: row.allowance_resets_at
+          },
+    observedAt: row.observed_at
+  }))
+}
+
 export function listRemoteLimits(): RemoteLimitRow[] {
   const db = getDb()
   const rows = db

@@ -348,6 +348,55 @@ describe('UsagePanel — ChatGPT credits', () => {
     )
   })
 
+  /**
+   * A member's monthly allowance (Codex `individualLimit`) is the number a
+   * credits plan is acted on, so it gets a bar - and the bare "Credits
+   * available" beside it would only repeat that the workspace has credits.
+   */
+  it('draws the member allowance as a bar with its amounts', () => {
+    store.chatgptLimits = account({
+      credits: { unlimited: false, balance: null },
+      creditLimit: { used: 8000, limit: 25000, remainingPercent: 68, resetsAt: null }
+    })
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    const bar = within(block()).getByTestId('UsagePanel.chatgptCreditLimit')
+    expect(within(bar).getByText('Monthly credits')).toBeInTheDocument()
+    // The bar counts USED, like every other bar in the panel.
+    expect(within(bar).getByText('32%')).toBeInTheDocument()
+    expect(bar).toHaveTextContent('8,000 of 25,000 credits used')
+    expect(bar).not.toHaveTextContent('left')
+    expect(bar).not.toHaveTextContent('resets')
+    expect(within(block()).queryByTestId('UsagePanel.chatgptCredits')).toBeNull()
+    expect(within(block()).queryByText('No usage data for this account')).toBeNull()
+  })
+
+  it('names the reset date of the allowance', () => {
+    const at = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000)
+    store.chatgptLimits = account({
+      creditLimit: { used: 1, limit: 2, remainingPercent: 50, resetsAt: at.toISOString() }
+    })
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    const months = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')
+    expect(within(block()).getByTestId('UsagePanel.chatgptCreditLimit')).toHaveTextContent(
+      `resets ${months[at.getMonth()]} ${at.getDate()}`
+    )
+  })
+
+  it('keeps a real balance beside the allowance', () => {
+    store.chatgptLimits = account({
+      credits: { unlimited: false, balance: '42.50' },
+      creditLimit: { used: 8000, limit: 25000, remainingPercent: 68, resetsAt: null }
+    })
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    expect(within(block()).getByTestId('UsagePanel.chatgptCreditLimit')).toBeInTheDocument()
+    expect(within(block()).getByTestId('UsagePanel.chatgptCredits').textContent).toBe(
+      'Credits: 42.50'
+    )
+  })
+
   it('keeps the no-data line only when there is neither a window nor a credit', () => {
     store.chatgptLimits = account({})
     render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)

@@ -27,6 +27,7 @@ import {
   closeDb,
   getHubConfigRow,
   getRemoteUsageBucketsSince,
+  listRemoteCredits,
   insertUsageEvents,
   listRemoteAccounts,
   resetUsageEventWrittenListeners,
@@ -37,6 +38,7 @@ import { configureHub, setHubSecret } from '../../core/services/usage-hub/config
 import { UsageHubClient } from '../../core/services/usage-hub/client'
 import { buildUsageDashboard } from '../../core/services/usage-dashboard'
 import { recordLimitSamples, resetWindowSampleDedup } from '../../core/services/window-samples'
+import { publishCreditReading, resetCreditReadings } from '../../core/services/credit-readings'
 
 const CLIENT_ID = 'fixture-client-id'
 const CLIENT_SECRET = 'fixture-client-secret'
@@ -54,6 +56,7 @@ interface HubStore {
   events: Array<{ messageId: string; deviceId: string; accountKey: string }>
   buckets: Array<{ deviceId: string; hourUtc: number; requestCount: number }>
   readings: Array<{ accountKey: string; windowKind: string; accountLabel: string | null }>
+  credits: Array<{ accountKey: string; deviceId: string; allowance: { used: number } | null }>
   devices: Array<{
     deviceId: string
     deviceName: string
@@ -279,6 +282,7 @@ beforeEach(() => {
   closeDb()
   resetUsageEventWrittenListeners()
   resetWindowSampleDedup()
+  resetCreditReadings()
 })
 
 afterEach(async () => {
@@ -362,6 +366,54 @@ describe('the client and the fake hub agree on the wire', () => {
       const body = (await relay.json()) as { readings: Array<{ labelMasked: string | null }> }
       expect(body.readings[0].labelMasked).not.toContain('someone@example.com')
       expect(body.readings[0].labelMasked).toContain('•')
+    })
+  })
+
+  /**
+   * The credits relay (ADR-072 §4, amended 2026-10-01): a ChatGPT business
+   * workspace has no window, so its credits travel on their own — pushed with
+   * the limits, and pulled back from the peer that read them.
+   */
+  it('pushes a credit reading, and pulls a peer’s back into the cache', async () => {
+    const peer = {
+      deviceId: 'peer-device',
+      accountKey: 'chatgpt:ws-peer:user-peer',
+      accountLabel: 'peer@example.com',
+      vendorId: 'openai',
+      plan: 'business',
+      credits: { unlimited: false, balance: null },
+      allowance: { used: 640, limit: 8000, remainingPercent: 92, resetsAt: null },
+      observedAt: Date.now() - 60_000
+    }
+    const hub = await startFakeHub(['--seed', JSON.stringify({ credits: [peer] })])
+    enable(hub)
+    await withClient(async (client) => {
+      client.start()
+      await client.syncNow()
+      publishCreditReading({
+        accountKey: 'chatgpt:ws-1:user-1',
+        accountLabel: 'member@example.com',
+        vendorId: 'openai',
+        plan: 'business',
+        credits: { unlimited: false, balance: null },
+        allowance: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null },
+        observedAt: Date.now()
+      })
+      await client.syncNow()
+
+      const store = await readStore(hub)
+      expect(
+        store.credits.map((credit) => [credit.accountKey, credit.allowance?.used]).sort()
+      ).toEqual([
+        ['chatgpt:ws-1:user-1', 100],
+        ['chatgpt:ws-peer:user-peer', 640]
+      ])
+
+      // Pulled back: the peer's, masked, and never this machine's own.
+      const cached = listRemoteCredits()
+      expect(cached.map((credit) => credit.accountKey)).toEqual(['chatgpt:ws-peer:user-peer'])
+      expect(cached[0]?.allowance).toMatchObject({ used: 640, remainingPercent: 92 })
+      expect(cached[0]?.labelMasked).not.toContain('peer@example.com')
     })
   })
 

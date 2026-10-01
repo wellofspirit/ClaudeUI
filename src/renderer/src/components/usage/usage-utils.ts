@@ -1,4 +1,9 @@
-import type { DashboardRange, TokenCounts, UsageHubState } from '../../../../shared/types'
+import type {
+  CreditLimit,
+  DashboardRange,
+  TokenCounts,
+  UsageHubState
+} from '../../../../shared/types'
 import { isShortWindow } from '../../../../shared/window-kind'
 
 /** Model color palette — match by substring */
@@ -98,24 +103,25 @@ export function formatTime(ts: number): string {
   return `${hour}:${String(m).padStart(2, '0')} ${ampm}`
 }
 
+const MONTH_NAMES = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec'
+]
+
 /** Format a date as "Mon DD" */
 export function formatShortDate(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00')
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec'
-  ]
-  return `${months[d.getMonth()]} ${d.getDate()}`
+  return `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`
 }
 
 /**
@@ -320,6 +326,44 @@ export function formatReset(
  */
 export function formatHourLabel(hourUtc: number): string {
   return `${String(new Date(hourUtc).getHours()).padStart(2, '0')}:00`
+}
+
+/**
+ * A credit amount as a person reads it: whole credits, thousands grouped —
+ * `25,000`. Rounded the way Codex's own `/status` rounds it, so the two never
+ * disagree about the same allowance. Hand-rolled for the reason this file's
+ * clock is: the dashboard is English by design, and `Intl` would bring a locale.
+ */
+export function formatCreditAmount(amount: number): string {
+  return String(Math.round(amount)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/** How much of a credit allowance is spent, 0-100 — the backend states what is LEFT. */
+export function creditLimitUsedPercent(limit: CreditLimit): number {
+  return 100 - limit.remainingPercent
+}
+
+/**
+ * `8,000 of 25,000 credits used` — the amounts only. The percent is already on
+ * the meter beside it, and a second percent counting the other way (ChatGPT
+ * states what is LEFT) would be one fact told twice in opposite directions.
+ */
+export function formatCreditLimitSummary(limit: CreditLimit): string {
+  return `${formatCreditAmount(limit.used)} of ${formatCreditAmount(limit.limit)} credits used`
+}
+
+/**
+ * When a credit allowance comes back. It is a monthly reset — a weekday and a
+ * clock (`formatReset`) would name a day weeks away as if it were this week's —
+ * so it is a date, `Nov 1`, until the last day, where the countdown is the fact.
+ */
+export function formatResetDate(resetsAt: string | null | undefined, now = Date.now()): string {
+  if (!resetsAt) return '—'
+  const at = Date.parse(resetsAt)
+  if (!Number.isFinite(at)) return '—'
+  if (at - now < 24 * 60 * 60 * 1000) return formatResetRelative(resetsAt, now)
+  const d = new Date(at)
+  return `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`
 }
 
 /** Format duration in ms as human-readable */

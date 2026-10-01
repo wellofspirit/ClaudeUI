@@ -93,7 +93,7 @@
  *
  * "All machines" cannot be looked at on a machine that is the only machine. The
  * flag takes a JSON object — inline, or a path to a file holding one — of
- * `{ devices, buckets, windows, readings }`, each an array of exactly the shape
+ * `{ devices, buckets, windows, readings, credits }`, each an array of exactly the shape
  * the corresponding route ANSWERS with, and stores it as if that device had
  * pushed it. Every field is optional and anything missing takes the same default
  * an ingested row would.
@@ -190,6 +190,26 @@ interface StoredReading {
   observedAt: number
 }
 
+/**
+ * One account's credits, latest whichever machine saw it (ADR-072 §4, amended
+ * 2026-10-01). Restated rather than imported, like every shape here.
+ */
+interface StoredCredit {
+  deviceId: string
+  accountKey: string
+  accountLabel: string | null
+  vendorId: string
+  plan: string | null
+  credits: { unlimited: boolean; balance: string | null } | null
+  allowance: {
+    used: number
+    limit: number
+    remainingPercent: number
+    resetsAt: string | null
+  } | null
+  observedAt: number
+}
+
 interface StoredDevice {
   deviceId: string
   deviceName: string
@@ -253,6 +273,8 @@ const options = {
 const events = new Map<string, StoredEvent>()
 const buckets = new Map<string, StoredBucket>()
 const readings = new Map<string, StoredReading>()
+/** Keyed by account alone: credits are not per window. */
+const credits = new Map<string, StoredCredit>()
 const devices = new Map<string, StoredDevice>()
 const accounts = new Map<string, StoredAccount>()
 let nextRev = 1
@@ -418,6 +440,7 @@ interface SeedFile {
   buckets?: Array<Partial<StoredBucket> & { deviceId: string; hourUtc: number }>
   windows?: Array<Record<string, unknown> & { deviceId: string }>
   readings?: Array<Partial<StoredReading> & { accountKey: string; windowKind: string }>
+  credits?: Array<Partial<StoredCredit> & { accountKey: string }>
 }
 
 /** Another machine's window-value rows, kept exactly as `GET /v1/windows` answers them. */
@@ -514,6 +537,21 @@ function applySeed(seed: SeedFile): void {
     readings.set(JSON.stringify([reading.accountKey, reading.windowKind]), reading)
     registerAccount(reading.accountKey, reading.vendorId, reading.accountLabel, reading.observedAt)
   }
+
+  for (const given of seed.credits ?? []) {
+    const credit: StoredCredit = {
+      deviceId: given.deviceId ?? '',
+      accountKey: given.accountKey,
+      accountLabel: given.accountLabel ?? null,
+      vendorId: given.vendorId ?? 'openai',
+      plan: given.plan ?? null,
+      credits: given.credits ?? null,
+      allowance: given.allowance ?? null,
+      observedAt: given.observedAt ?? Date.now()
+    }
+    credits.set(credit.accountKey, credit)
+    registerAccount(credit.accountKey, credit.vendorId, credit.accountLabel, credit.observedAt)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +644,7 @@ async function handle(request: Request): Promise<Response> {
       events: [...events.values()],
       buckets: [...buckets.values()],
       readings: [...readings.values()],
+      credits: [...credits.values()],
       devices: [...devices.values()],
       accounts: [...accounts.values()]
     })
@@ -724,6 +763,25 @@ async function handle(request: Request): Promise<Response> {
       if (existing && existing.observedAt > reading.observedAt) continue
       readings.set(key, { ...reading, deviceId })
     }
+    // OPTIONAL: a client that predates credits sends no key. A reading with
+    // neither half has nothing to say and is skipped, as the hub skips it.
+    for (const credit of (body as { credits?: StoredCredit[] }).credits ?? []) {
+      if (!credit?.accountKey || credit.accountKey === 'unknown') continue
+      if (!credit.credits && !credit.allowance) continue
+      registerAccount(credit.accountKey, credit.vendorId, credit.accountLabel, credit.observedAt)
+      const existing = credits.get(credit.accountKey)
+      if (existing && existing.observedAt > credit.observedAt) continue
+      credits.set(credit.accountKey, {
+        deviceId,
+        accountKey: credit.accountKey,
+        accountLabel: credit.accountLabel ?? null,
+        vendorId: credit.vendorId,
+        plan: credit.plan ?? null,
+        credits: credit.credits ?? null,
+        allowance: credit.allowance ?? null,
+        observedAt: credit.observedAt
+      })
+    }
     return json({ accepted, epoch })
   }
 
@@ -799,7 +857,20 @@ async function handle(request: Request): Promise<Response> {
       // there cannot be read as "the hub knows no label for this account".
       ...(caller === 'owner' ? { accountLabel: reading.accountLabel } : {})
     }))
-    return json({ epoch, readings: page })
+    const creditPage = [...credits.values()]
+      .sort((one, other) => (one.accountKey < other.accountKey ? -1 : 1))
+      .map((credit) => ({
+        deviceId: credit.deviceId,
+        accountKey: credit.accountKey,
+        labelMasked: maskLabel(credit.accountLabel),
+        vendorId: credit.vendorId,
+        plan: credit.plan,
+        credits: credit.credits,
+        allowance: credit.allowance,
+        observedAt: credit.observedAt,
+        ...(caller === 'owner' ? { accountLabel: credit.accountLabel } : {})
+      }))
+    return json({ epoch, readings: page, credits: creditPage })
   }
 
   // The names behind the account keys every other read carries, for both

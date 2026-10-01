@@ -4,7 +4,11 @@ import {
   PROVIDER_SERIES_COLORS,
   buildProviderColorMap,
   buildSeriesColorMap,
+  creditLimitUsedPercent,
+  formatCreditAmount,
+  formatCreditLimitSummary,
   formatReset,
+  formatResetDate,
   formatResetRelative,
   meterSeverity,
   formatTokenCount,
@@ -400,5 +404,48 @@ describe('buildSeriesColorMap', () => {
     expect(map.size).toBe(2)
     expect(map.get('a')).toBe(PROVIDER_SERIES_COLORS[0])
     expect(map.get('b')).toBe(PROVIDER_SERIES_COLORS[1])
+  })
+})
+
+/**
+ * A business workspace member's monthly credit allowance (Codex `individualLimit`).
+ * The backend states what is LEFT; every meter here counts what is USED, so the
+ * flip happens in exactly one place and the summary carries both.
+ */
+describe('credit allowance formatting', () => {
+  const limit = { used: 8000, limit: 25000, remainingPercent: 68, resetsAt: null }
+
+  it('groups thousands and rounds to whole credits', () => {
+    expect(formatCreditAmount(25000)).toBe('25,000')
+    expect(formatCreditAmount(1234567.6)).toBe('1,234,568')
+    expect(formatCreditAmount(999)).toBe('999')
+    expect(formatCreditAmount(0)).toBe('0')
+  })
+
+  it('turns the stated remaining percent into a used one', () => {
+    expect(creditLimitUsedPercent(limit)).toBe(32)
+  })
+
+  it('states the amounts and leaves the percent to the meter', () => {
+    expect(formatCreditLimitSummary(limit)).toBe('8,000 of 25,000 credits used')
+  })
+})
+
+describe('formatResetDate', () => {
+  const now = Date.parse('2026-10-01T12:00:00.000Z')
+
+  it('names the date for a reset weeks away, not a weekday that reads as this week', () => {
+    // Built from LOCAL parts so the expectation holds in any timezone.
+    const at = new Date(2026, 10, 1, 0, 0, 0)
+    expect(formatResetDate(at.toISOString(), now)).toBe('Nov 1')
+  })
+
+  it('counts down inside the last day', () => {
+    expect(formatResetDate('2026-10-01T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('draws a dash rather than a guess when there is no reset to show', () => {
+    expect(formatResetDate(null, now)).toBe('—')
+    expect(formatResetDate('not a date', now)).toBe('—')
   })
 })

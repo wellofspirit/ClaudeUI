@@ -386,6 +386,59 @@ describe('AccountsPanel — reading state', () => {
     expect(screen.getByTestId('AccountsPanel.account')).toHaveTextContent(expected)
   })
 
+  /**
+   * A member's monthly allowance (Codex `individualLimit`) is one more meter on
+   * the row, with its amounts drawn at every width - "how many have I spent" is
+   * what a credits plan's row is read for.
+   */
+  it('draws the member allowance as a meter with its amounts', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [],
+            credits: { unlimited: false, balance: null },
+            creditLimit: { used: 8000, limit: 25000, remainingPercent: 68, resetsAt: null }
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+    const meter = screen.getByTestId('AccountsPanel.creditMeter')
+    expect(meter).toHaveAttribute('data-severity', 'ok')
+    expect(meter).toHaveTextContent('32%')
+    expect(within(meter).getByTestId('AccountsPanel.creditMeter.amount')).toHaveTextContent(
+      '8,000/25,000'
+    )
+    expect(within(meter).queryByTestId('AccountsPanel.creditMeter.reset')).toBeNull()
+    expect(meter.getAttribute('title')).toBe(
+      'Monthly credit limit · 32% used · 8,000 of 25,000 credits used'
+    )
+    // "credits plan" would only repeat what the meter already shows.
+    const row = screen.getByTestId('AccountsPanel.account')
+    expect(row).not.toHaveTextContent('credits plan')
+    expect(row).not.toHaveTextContent('no rate window')
+  })
+
+  it('grades a nearly spent allowance like any other meter', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [],
+            creditLimit: { used: 24000, limit: 25000, remainingPercent: 4, resetsAt: null }
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.creditMeter')).toHaveAttribute('data-severity', 'crit')
+  })
+
   it('says "no rate window" for an account the limits read does not cover', () => {
     const data = makeDashboard({
       providers: [
@@ -822,6 +875,48 @@ describe('AccountsPanel — a relayed reading', () => {
     // The NAME, on a `local` payload whose machine list is empty (R2).
     expect(tags[0]).toHaveTextContent('via studio-mac · 6m')
     expect(tags[0].textContent).not.toContain(PEER_ID.slice(0, 8))
+  })
+
+  it('tags a relayed credit meter too — a credits plan has no window to carry the tag', () => {
+    // ADR-072 §4, amended 2026-10-01: a ChatGPT business workspace relays its
+    // allowance and no window, so without the tag beside the credit meter the
+    // row would not say which machine read it.
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[
+          relayed({
+            windows: [],
+            creditLimit: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null }
+          })
+        ]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.creditMeter')).toBeInTheDocument()
+    expect(screen.getByTestId('AccountsPanel.relayed')).toHaveTextContent('via studio-mac · 6m')
+  })
+
+  it('tags each meter with the machine that read IT when windows and credits came from two', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard({ providers: [] })}
+        limits={[
+          relayed({
+            creditLimit: { used: 100, limit: 8000, remainingPercent: 99, resetsAt: null },
+            creditSource: { deviceId: 'dev-laptop', deviceName: 'laptop' },
+            creditObservedAt: Date.now() - 2 * 60 * 60_000
+          })
+        ]}
+        blockUsage={emptyBlockUsage()}
+        providerColors={COLORS}
+      />
+    )
+    const tags = screen.getAllByTestId('AccountsPanel.relayed')
+    expect(tags.map((t) => t.getAttribute('data-device-id'))).toEqual([PEER_ID, 'dev-laptop'])
+    expect(tags[0]).toHaveTextContent('via studio-mac · 6m')
+    expect(tags[1]).toHaveTextContent('via laptop · 2h')
   })
 
   it('falls back to the id only when the hub no longer lists the device', () => {
