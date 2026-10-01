@@ -85,7 +85,11 @@ describe('piToolKind', () => {
     expect(piToolKind('exit_plan')).toBe('plan')
   })
 
-  it('maps subagent (the SECOND extension, pi-subagent-source.ts, M5b) to the SAME "task" kind as dispatch_agent', () => {
+  it('maps the agent tool (bridge v9, ADR-088) to the "task" kind', () => {
+    expect(piToolKind('agent')).toBe('task')
+  })
+
+  it('maps subagent (legacy M5b transcripts, pi upstream example) to the SAME "task" kind as dispatch_agent', () => {
     expect(piToolKind('subagent')).toBe('task')
     expect(piToolKind('subagent')).toBe(piToolKind('dispatch_agent'))
   })
@@ -1010,10 +1014,12 @@ describe('EMPTY_RULES — frozen (A9)', () => {
 })
 
 describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
-  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent', () => {
+  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent and agent (ADR-088)', () => {
     expect([...PI_HOSTED_TOOL_NAMES].sort()).toEqual(
-      ['create_mockup', 'dispatch_agent', 'render_mermaid', 'show_mockup'].sort()
+      ['agent', 'create_mockup', 'dispatch_agent', 'render_mermaid', 'show_mockup'].sort()
     )
+    // `agent` gets a one-shot grant like dispatch_agent, never auto-allow.
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('agent')).toBe(false)
     for (const name of PI_AUTO_ALLOW_HOSTED_TOOLS) {
       expect(PI_HOSTED_TOOL_NAMES.has(name)).toBe(true)
     }

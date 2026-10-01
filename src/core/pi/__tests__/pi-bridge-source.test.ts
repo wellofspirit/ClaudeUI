@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 8 (ADR-082 added the Electron-as-Node cleanup)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('8')
+  it('is version 9 (ADR-088 added the agent tool)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('9')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -248,7 +248,9 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_SKILL_DIRS',
   'CLAUDEUI_PI_HOSTED_TOOLS',
   'CLAUDEUI_PI_DISPATCH_ENABLED',
-  'CLAUDEUI_PI_PLAN_TOOLS'
+  'CLAUDEUI_PI_PLAN_TOOLS',
+  'CLAUDEUI_PI_AGENT_TOOL',
+  'CLAUDEUI_PI_AGENT_LISTING'
 ] as const
 
 type BridgeEnvVar = (typeof BRIDGE_ENV_VARS)[number]
@@ -432,6 +434,103 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         })
       }
     )
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('registers agent ONLY under CLAUDEUI_PI_AGENT_TOOL=1 with bridge creds, independently of CLAUDEUI_PI_HOSTED_TOOLS', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['agent'])
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, () => {
+      expect(runExtension().tools.has('agent')).toBe(false)
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '' }, () => {
+      expect(runExtension().tools.has('agent')).toBe(false)
+    })
+    withEnv(
+      {
+        CLAUDEUI_PI_AGENT_TOOL: '1',
+        CLAUDEUI_PI_BRIDGE_URL: undefined,
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'tok'
+      },
+      () => {
+        expect(runExtension().tools.size).toBe(0)
+      }
+    )
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_AGENT_TOOL: '1' }, () => {
+      expect([...runExtension().tools.keys()].sort()).toEqual([
+        'agent',
+        'create_mockup',
+        'render_mermaid',
+        'show_mockup'
+      ])
+    })
+  })
+
+  it('describes the agent types from CLAUDEUI_PI_AGENT_LISTING; no run_in_background parameter', () => {
+    withEnv(
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_AGENT_TOOL: '1',
+        CLAUDEUI_PI_AGENT_LISTING: '- Explore: reads (Tools: read)'
+      },
+      () => {
+        const agent = runExtension().tools.get('agent')!
+        expect(agent.description).toContain('The call waits until the agent finishes')
+        expect(agent.description).toMatch(
+          /Available agent types:\n- Explore: reads \(Tools: read\)$/
+        )
+        expect(agent.parameters).toEqual({
+          type: 'object',
+          properties: {
+            description: { type: 'string', description: expect.any(String) },
+            prompt: { type: 'string', description: expect.any(String) },
+            subagent_type: { type: 'string', description: expect.any(String) },
+            model: { type: 'string', description: expect.any(String) },
+            name: { type: 'string', description: expect.any(String) }
+          },
+          required: ['description', 'prompt']
+        })
+      }
+    )
+  })
+
+  it('agent.execute() POSTs toolName "agent" to /hosted-tool and fails closed on a network error', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'report' }] })
+      } as Response
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, async () => {
+      const agent = runExtension().tools.get('agent')!
+      const result = await agent.execute('call-a', { description: 'd', prompt: 'p' })
+      expect(calls[0].url).toBe('http://127.0.0.1:9/hosted-tool')
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        toolName: 'agent',
+        input: { description: 'd', prompt: 'p' },
+        toolCallId: 'call-a'
+      })
+      expect(result).toEqual({ content: [{ type: 'text', text: 'report' }] })
+
+      globalThis.fetch = (async () => {
+        throw new TypeError('fetch failed')
+      }) as typeof fetch
+      expect(await agent.execute('call-b', { description: 'd', prompt: 'p' })).toEqual({
+        content: [{ type: 'text', text: 'ClaudeUI hosted-tool service unreachable (TypeError)' }],
+        isError: true
+      })
+    })
   })
 })
 

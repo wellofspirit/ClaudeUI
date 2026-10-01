@@ -320,7 +320,13 @@ describe('renderAgentListing', () => {
       path.join(userDir, 'r.md'),
       agentMd('name: reviewer\ndescription: Reviews diffs.\ndisallowedTools: write, edit')
     )
+    write(
+      path.join(userDir, 'refuse.md'),
+      agentMd('name: refuser\ndescription: No tools.\ntools: []')
+    )
     const reg = loadPiAgentRegistry({ cwd: mkdir(path.join(base, 'p')), userAgentsDir: userDir })
+    // A refuse-to-spawn agent is not listed, but still resolves (for its explicit refusal).
+    expect(reg.resolve('refuser')?.tools).toEqual([])
     expect(renderAgentListing(reg).split('\n')).toEqual([
       '- general-purpose: A general agent for researching complex questions, searching code and carrying out multi-step tasks. (Tools: All tools)',
       expect.stringMatching(/^- Explore: .+ \(Tools: read, bash, grep, find, ls\)$/),

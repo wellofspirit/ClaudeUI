@@ -2085,7 +2085,10 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
-    CLAUDEUI_PI_SKILL_DIRS: ''
+    CLAUDEUI_PI_SKILL_DIRS: '',
+    // ADR-088: a dispatch target never gets the host-run `agent` tool (same
+    // leak argument as the three above).
+    CLAUDEUI_PI_AGENT_TOOL: ''
   }
 }
 

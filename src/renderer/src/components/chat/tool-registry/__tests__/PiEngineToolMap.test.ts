@@ -34,8 +34,9 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
-    // In-pi subagents (M5b) — the SECOND extension's bare-name registration,
-    // reusing the SAME 'task' kind as dispatch_agent.
+    // Host-run subagents (ADR-088) — the bridge's `agent` tool.
+    ['agent', 'task'],
+    // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
@@ -320,6 +321,35 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
   })
 
+  it('task: the agent tool ({description, prompt, subagent_type?, name?, model?}, ADR-088)', () => {
+    expect(
+      PiEngineToolMap.normalize('task', {
+        description: 'Find the gate',
+        prompt: 'Look for X',
+        subagent_type: 'Explore',
+        model: 'openai-codex/gpt-5.6-luna'
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Find the gate',
+      prompt: 'Look for X',
+      subagent: 'Explore',
+      name: 'Explore',
+      model: 'openai-codex/gpt-5.6-luna'
+    })
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', name: 'scout' })
+    ).toEqual({
+      kind: 'task',
+      description: 'd',
+      prompt: 'p',
+      subagent: 'general-purpose',
+      name: 'scout'
+    })
+    // Without description it is not the agent shape (the generic fallback stays).
+    expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
+  })
+
   it('task: subagent single mode ({agent, task}) -> "Subagent: <agent>" / subagent field is the bare agent name', () => {
     const view = PiEngineToolMap.normalize('task', { agent: 'echoer', task: 'say hi' })
     expect(view).toEqual({
@@ -388,5 +418,6 @@ describe('PiEngineToolMap.displayName', () => {
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
+    expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
   })
 })

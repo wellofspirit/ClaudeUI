@@ -424,9 +424,18 @@ export function loadPiAgentRegistry(opts: {
     for (const def of defs) byName.set(normalizeAgentName(def.name), def)
   }
 
-  // The same dir the retired M5b extension read, so existing definitions keep working.
-  const userDir = opts.userAgentsDir ?? path.join(piAgentDir(), 'agents')
-  put(scanAgentDir(userDir, 'user', diagnostics))
+  // The same dir the retired M5b extension read, so existing definitions keep
+  // working. Resolving it cannot fail in practice; it is guarded anyway
+  // because loading must never throw.
+  let userDir = opts.userAgentsDir
+  if (userDir === undefined) {
+    try {
+      userDir = path.join(piAgentDir(), 'agents')
+    } catch {
+      diagnostics.push('user agents dir: unavailable')
+    }
+  }
+  if (userDir !== undefined) put(scanAgentDir(userDir, 'user', diagnostics))
   for (const dir of projectAgentDirs(opts.cwd)) put(scanAgentDir(dir, 'project', diagnostics))
 
   const builtinOrder = BUILTIN_AGENTS.map((d) => d.name)
@@ -466,17 +475,24 @@ function toolsLabel(def: PiAgentDefinition): string {
   return tools.length > 0 ? tools.join(', ') : 'none'
 }
 
+function launchable(defs: PiAgentDefinition[]): PiAgentDefinition[] {
+  return defs.filter((def) => def.tools === 'inherit' || def.tools.length > 0)
+}
+
 /**
  * The agent types for the `agent` tool's description: one line per agent,
  * `- <name>: <description> (Tools: <list | All tools>)`, each description
  * capped at 300 chars and the whole listing at `maxChars` (it travels in an
- * env var), ending with `…and N more` when cut.
+ * env var), ending with `…and N more` when cut. A refuse-to-spawn agent
+ * (`tools: []`) is omitted: listing a type that can never launch only teaches
+ * the model a failing call (`resolve` still finds it, so the refusal error
+ * stays explicit).
  */
 export function renderAgentListing(
   reg: PiAgentRegistry,
   maxChars: number = DEFAULT_AGENT_LISTING_MAX_CHARS
 ): string {
-  const lines = reg.list().map((def) => {
+  const lines = launchable(reg.list()).map((def) => {
     const desc =
       def.description.length > DESCRIPTION_LISTING_MAX
         ? def.description.slice(0, DESCRIPTION_LISTING_MAX - 1) + '…'

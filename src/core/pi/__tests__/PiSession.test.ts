@@ -13,6 +13,9 @@ import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 import type { DispatchContext } from '../../services/cross-engine-dispatcher'
 import type { ChatMessage, QueuedItem, StatusLineData } from '../../../shared/types'
+import type { PiChildSpawnOpts, SpawnPiChildFn } from '../pi-child-runner'
+import type { PiRpcClient as PiRpcClientType } from '../PiRpcClient'
+import type { PiBridgeHost as PiBridgeHostType } from '../PiBridgeHost'
 
 /**
  * A stub window that is also a CLIENT (SyncCore phase 4c).
@@ -65,7 +68,6 @@ const {
   mockBridgeHostDispose,
   MockPiBridgeHost,
   mockWriteBridgeExtension,
-  mockWriteSubagentExtension,
   bridgeCaptured,
   mockLoadClaudePermissions,
   mockSaveClaudePermissions,
@@ -186,10 +188,6 @@ const {
     return { start: mockBridgeHostStart, dispose: mockBridgeHostDispose }
   })
   const mockWriteBridgeExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
-  // In-pi subagents (M5b) — writeSubagentExtension is a SECOND export of the
-  // same '../PiBridgeHost' module, mocked alongside writeBridgeExtension so
-  // doStart() never does real fs I/O in this unit test.
-  const mockWriteSubagentExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-subagent.ts')
 
   // Hosted tools (M4a): mermaid/mockup are MOCKED (per the kickoff spec) —
   // the real tool handlers do real fs I/O (mockup-tool.ts writes under
@@ -259,7 +257,6 @@ const {
     mockBridgeHostDispose,
     MockPiBridgeHost,
     mockWriteBridgeExtension,
-    mockWriteSubagentExtension,
     bridgeCaptured,
     mockLoadClaudePermissions: vi.fn().mockReturnValue({
       allow: [],
@@ -354,8 +351,7 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 }))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
-  writeBridgeExtension: mockWriteBridgeExtension,
-  writeSubagentExtension: mockWriteSubagentExtension
+  writeBridgeExtension: mockWriteBridgeExtension
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: {
@@ -368,7 +364,10 @@ vi.mock('../../auth/PiAuthProvider', () => ({
 // identity, so every path "exists" as itself and no test touches the real disk.
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
-  realpathSync: Object.assign((p: string) => p, { native: (p: string) => p })
+  realpathSync: Object.assign((p: string) => p, { native: (p: string) => p }),
+  // Host-run subagents (ADR-088): a child's session dir + appended prompt file.
+  mkdirSync: vi.fn(),
+  writeFileSync: vi.fn()
 }))
 // ADR-084 §2's git config capture — `null` (cannot verify) by default, so the
 // read-only bypass never clears a git command and no gitConfigArmed meta line
@@ -401,6 +400,8 @@ vi.mock('../../services/ui-config', () => ({
 }))
 
 import { PiSession } from '../PiSession'
+import { PLAN_MODE_DENY_REASON } from '../permission-engine'
+import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 import {
@@ -532,7 +533,6 @@ beforeEach(() => {
   mockBridgeHostDispose.mockClear()
   MockPiBridgeHost.mockClear()
   mockWriteBridgeExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
-  mockWriteSubagentExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-subagent.ts')
   bridgeCaptured.handler = null
   bridgeCaptured.hostedToolHandler = null
   bridgeCaptured.onAbandoned = null
@@ -666,29 +666,23 @@ describe('PiSession.run — sends a prompt', () => {
     // crossEngineDispatchAvailable('pi') defaults to true in this mock (see
     // the vi.hoisted comment) — dedicated tests below cover the "off" paths.
     // Plan mode (M5a): CLAUDEUI_PI_PLAN_TOOLS is '1' by default too — `plan`
-    // is a static-true engine capability, same as hostedMcp above. In-pi
-    // subagents (M5b): a SECOND -e <subagent file>, plus its own two env vars
-    // — `subagents` is likewise a static-true engine capability.
+    // is a static-true engine capability, same as hostedMcp above. Host-run
+    // subagents (ADR-088): the bridge's own `agent` tool + the agent-type
+    // listing — `subagents` is likewise a static-true engine capability, and
+    // there is no second -e any more (the M5b extension is retired).
     expect(MockPiRpcClient).toHaveBeenCalledWith(
       { command: '/fake/pi', args: [] },
       {
         cwd: '/cwd',
-        args: [
-          '--mode',
-          'rpc',
-          '-e',
-          '/fake/tmp/claudeui-bridge.ts',
-          '-e',
-          '/fake/tmp/claudeui-subagent.ts'
-        ],
+        args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
         env: {
           CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_PLAN_TOOLS: '1',
-          CLAUDEUI_PI_SUBAGENTS: '1',
-          CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'anthropic/claude-sonnet-4-6'
+          CLAUDEUI_PI_AGENT_TOOL: '1',
+          CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: ')
         }
       }
     )
@@ -4979,317 +4973,671 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
   })
 })
 
-describe('PiSession — in-pi subagents (M5b) — env gating at spawn', () => {
-  it('sets CLAUDEUI_PI_SUBAGENTS=1 + CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL and adds a SECOND -e flag by default (subagents is a static-true engine capability)', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagents-env-1', win as never, '/cwd', {
-      model: 'openai-codex/gpt-5.6-luna'
-    })
-    await session.run('hi')
-    const opts = lastSpawnOpts()
-    expect(opts.args).toEqual([
-      '--mode',
-      'rpc',
-      '-e',
-      '/fake/tmp/claudeui-bridge.ts',
-      '-e',
-      '/fake/tmp/claudeui-subagent.ts'
-    ])
-    expect(opts.env.CLAUDEUI_PI_SUBAGENTS).toBe('1')
-    expect(opts.env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('openai-codex/gpt-5.6-luna')
-    expect(mockWriteSubagentExtension).toHaveBeenCalledTimes(1)
-  })
+// ---------------------------------------------------------------------------
+// Host-run subagents (ADR-088) — the parent side: the bridge env, the Q1 spawn
+// rung, the child gate (live mode, D3 narrowing, the judge with D1 context),
+// child streaming that never enters the parent transcript, usage rows, Stop,
+// interrupt/cancel/abandonment. Children are a fake SpawnPiChildFn injected
+// through the constructor's test seam (NOT the PiRpcClient module mock).
+// The manager's own behaviour (args, env, lifecycle events, recursion, the
+// concurrency cap) is unit-tested in pi-subagents.test.ts.
+// ---------------------------------------------------------------------------
 
-  it('CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is a spawn-time snapshot — a later setModel() does not retarget the already-spawned extension', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagents-env-2', win as never, '/cwd', {
-      model: 'anthropic/claude-sonnet-4-6'
-    })
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe(
-      'anthropic/claude-sonnet-4-6'
-    )
+interface FakeChildProc {
+  opts: PiChildSpawnOpts
+  env: NodeJS.ProcessEnv
+  push: (ev: Record<string, unknown>) => void
+  client: { request: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }
+  commands: () => Array<Record<string, unknown>>
+}
 
-    await session.setModel('openai-codex/gpt-5.6-luna')
-    // Same (already-spawned) process — no second PiRpcClient construction,
-    // so the env captured at spawn time is untouched.
-    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe(
-      'anthropic/claude-sonnet-4-6'
-    )
-  })
-})
-
-describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () => {
-  /** A single valid cuiSubagent tool_execution_update event, mirroring exactly what pi-subagent-source.ts's onUpdate() call produces. */
-  function subagentUpdateEvent(
-    toolCallId: string,
-    agentOverrides: Record<string, unknown> = {}
-  ): PiEvent {
-    return {
-      type: 'tool_execution_update',
-      toolCallId,
-      toolName: 'subagent',
-      args: {},
-      partialResult: {
-        content: [{ type: 'text', text: '[echoer] running' }],
-        details: {
-          cuiSubagent: {
-            v: 1,
-            agents: [
-              {
-                agent: 'echoer',
-                model: 'anthropic/claude-haiku-4-5',
-                status: 'running',
-                newMessages: [{ role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
-                ...agentOverrides
-              }
-            ]
+function makeFakeChildren(): { spawn: SpawnPiChildFn; children: FakeChildProc[] } {
+  const children: FakeChildProc[] = []
+  const spawn: SpawnPiChildFn = async (opts) => {
+    const handlers: Array<(ev: Record<string, unknown>) => void> = []
+    const exits: Array<() => void> = []
+    const n = children.length + 1
+    const client = {
+      request: vi.fn(async (cmd: Record<string, unknown>) => {
+        if (cmd.type === 'get_state') {
+          return {
+            type: 'response',
+            command: 'get_state',
+            success: true,
+            data: { sessionId: `child-${n}` }
           }
         }
+        if (cmd.type === 'get_last_assistant_text') {
+          return {
+            type: 'response',
+            command: 'get_last_assistant_text',
+            success: true,
+            data: { text: `child report ${n}` }
+          }
+        }
+        return { type: 'response', command: String(cmd.type), success: true }
+      }),
+      onEvent: vi.fn((cb: (ev: Record<string, unknown>) => void) => {
+        handlers.push(cb)
+        return () => {}
+      }),
+      onExit: vi.fn((cb: () => void) => {
+        exits.push(cb)
+        return () => {}
+      }),
+      // Like PiRpcClient.dispose(): the killed process reports its exit.
+      dispose: vi.fn(() => {
+        for (const e of exits.splice(0)) e()
+      })
+    }
+    children.push({
+      opts,
+      env: opts.env!({ url: 'http://127.0.0.1:1', token: 'child-token' }),
+      push: (ev) => {
+        for (const h of handlers) h(ev)
+      },
+      client,
+      commands: () => client.request.mock.calls.map((c) => c[0] as Record<string, unknown>)
+    })
+    return {
+      client: client as unknown as PiRpcClientType,
+      bridgeHost: { dispose: vi.fn() } as unknown as PiBridgeHostType
+    }
+  }
+  return { spawn, children }
+}
+
+function childAssistantToolCall(id: string, name: string, args: Record<string, unknown>): PiEvent {
+  return {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id, name, arguments: args }],
+      api: 'openai-codex-responses',
+      provider: 'openai-codex',
+      model: 'gpt-5.6-luna',
+      usage: {
+        input: 40,
+        output: 2,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 }
+      },
+      stopReason: 'toolUse',
+      timestamp: Date.now()
+    }
+  } as unknown as PiEvent
+}
+
+describe('PiSession — host-run subagents (ADR-088)', () => {
+  const AGENT_INPUT = { description: 'Tidy the build', prompt: 'CHILD-TASK-PROMPT: fix the build' }
+
+  function enableAutoMode(): void {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+  }
+
+  async function parent(
+    routingId: string,
+    win: MockWindow,
+    mode = 'default'
+  ): Promise<{ session: PiSession; kids: ReturnType<typeof makeFakeChildren> }> {
+    const kids = makeFakeChildren()
+    const session = new PiSession(
+      routingId,
+      win as never,
+      '/cwd',
+      { model: 'openai-codex/gpt-5.6-luna', permissionMode: mode },
+      { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
+    )
+    await session.run('PARENT-INTENT: please tidy the build')
+    return { session, kids }
+  }
+
+  /** The parent's own `agent` call: its gate (must allow), then the hosted run, until the child is prompted. */
+  async function launch(
+    kids: ReturnType<typeof makeFakeChildren>,
+    callId: string,
+    input: Record<string, unknown> = AGENT_INPUT
+  ): Promise<{ result: Promise<unknown>; child: FakeChildProc }> {
+    const before = kids.children.length
+    const decision = await gate(callId, 'agent', input)
+    expect(decision).toEqual({ behavior: 'allow' })
+    const result = hostedTool('agent', input, callId)
+    await vi.waitFor(() => expect(kids.children.length).toBe(before + 1))
+    const child = kids.children[before]
+    await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
+    return { result, child }
+  }
+
+  it('T1: the parent spawn carries the agent tool + a listing of the built-ins, ONE -e, no M5b env', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-sub-t1', win)
+    const opts = lastSpawnOpts()
+    expect(opts.args.filter((a) => a === '-e')).toHaveLength(1)
+    expect(opts.env.CLAUDEUI_PI_AGENT_TOOL).toBe('1')
+    for (const name of ['general-purpose', 'Explore', 'Plan']) {
+      expect(opts.env.CLAUDEUI_PI_AGENT_LISTING).toContain(`- ${name}: `)
+    }
+    expect(Object.keys(opts.env).some((k) => k.startsWith('CLAUDEUI_PI_SUBAGENT'))).toBe(false)
+    expect(session.capabilities.backgroundTasks).toBe(true)
+    session.dispose()
+  })
+
+  it('T13: the parent agent call — default allows with no card, plan allows, auto is judged once', async () => {
+    for (const mode of ['default', 'plan']) {
+      const win = new MockWindow()
+      const { session } = await parent(`rid-sub-t13-${mode}`, win, mode)
+      expect(await gate('call-a', 'agent', AGENT_INPUT)).toEqual({ behavior: 'allow' })
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+      session.dispose()
+    }
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const { session } = await parent('rid-sub-t13-auto', win, 'auto')
+    expect(await gate('call-a', 'agent', AGENT_INPUT)).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('T4: a child call asks the human on the PARENT under default; after the parent switches to auto the next one is judged with the child header and D1 context', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t4', win)
+    const { result, child } = await launch(kids, 'call-agent-4')
+
+    // Default: a card on the parent routing, keyed by the CHILD's own call id.
+    const asked = child.opts.gateHandler({
+      toolCallId: 'child-bash-1',
+      toolName: 'bash',
+      input: { command: 'npm run build' }
+    })
+    await vi.waitFor(() =>
+      expect(
+        (sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>).some(
+          (a) => a.toolUseId === 'child-bash-1'
+        )
+      ).toBe(true)
+    )
+    const card = (
+      sentPayloads(win, 'session:approval-request') as Array<{
+        requestId: string
+        toolUseId: string
+      }>
+    ).find((a) => a.toolUseId === 'child-bash-1')!
+    session.resolveApproval(card.requestId, 'allow')
+    expect(await asked).toEqual({ behavior: 'allow' })
+    child.push(childAssistantToolCall('child-bash-1', 'bash', { command: 'npm run build' }))
+
+    // The parent switches to auto — the NEXT child call reads it live.
+    enableAutoMode()
+    await session.setPermissionMode('auto')
+    judgeScript.replies = ['<block>no</block>']
+    const judged = await child.opts.gateHandler({
+      toolCallId: 'child-bash-2',
+      toolName: 'bash',
+      input: { command: 'npm test' }
+    })
+    expect(judged).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    const shown = judgeCalls[0].user
+    expect(shown).toContain('"general-purpose" subagent')
+    expect(shown).toContain('User: PARENT-INTENT')
+    // The child's earlier call is in the trajectory…
+    expect(shown).toContain('npm run build')
+    // …and its agent-authored prompt is never rendered as a user turn.
+    expect(shown).not.toMatch(/User:[^\n]*CHILD-TASK-PROMPT/)
+    const reviews = sentPayloads(win, 'session:tool-review') as Array<{ toolUseId: string }>
+    expect(reviews.map((r) => r.toolUseId)).toContain('child-bash-2')
+
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it('T5: an Explore child under an AUTO parent is gated as plan — an edit is refused with the plan reason and zero judge calls', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t5', win, 'auto')
+    const { result, child } = await launch(kids, 'call-explore', {
+      ...AGENT_INPUT,
+      subagent_type: 'Explore'
+    })
+    expect(judgeCalls).toHaveLength(1)
+    const edit = await child.opts.gateHandler({
+      toolCallId: 'explore-edit',
+      toolName: 'edit',
+      input: { path: '/cwd/a.ts', edits: [{ oldText: 'a', newText: 'b' }] }
+    })
+    expect(edit).toEqual({ behavior: 'deny', reason: PLAN_MODE_DENY_REASON })
+    const read = await child.opts.gateHandler({
+      toolCallId: 'explore-read',
+      toolName: 'read',
+      input: { path: '/cwd/a.ts' }
+    })
+    expect(read).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it('T6/T7/T8: the child streams under the call id, never into the parent transcript; lifecycle events and a child usage row; the parent total is unchanged', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t6', win)
+    const transcriptBefore = session.getMessages().length
+    const costBefore = session.status.totalCostUsd
+    const { result, child } = await launch(kids, 'call-agent-6')
+
+    child.push({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    child.push({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'working' }
+    })
+    // A completed tool call mid-message publishes the whole message (the
+    // subagent-message lane).
+    child.push({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'toolcall_end',
+        contentIndex: 1,
+        toolCall: { type: 'toolCall', id: 'child-ls', name: 'ls', arguments: {} }
+      }
+    })
+    child.push(childAssistantToolCall('child-ls', 'ls', {}))
+    child.push({ type: 'agent_settled' })
+    const r = (await result) as { content: Array<{ text: string }>; isError?: boolean }
+
+    const opens = sentPayloads(win, 'session:item-open') as Array<{
+      target: { ownerToolUseId?: string }
+    }>
+    expect(opens.some((o) => o.target.ownerToolUseId === 'call-agent-6')).toBe(true)
+    // F10 — the subagent-message lane fired too, and neither lane entered the
+    // parent transcript (the judge and /btw read it).
+    expect(
+      (sentPayloads(win, 'session:subagent-message') as Array<{ toolUseId: string }>).some(
+        (m) => m.toolUseId === 'call-agent-6'
+      )
+    ).toBe(true)
+    expect(session.getMessages()).toHaveLength(transcriptBefore)
+
+    const started = sentPayloads(win, 'session:task-started') as Array<{
+      toolUseId: string
+      taskId: string
+      taskType: string
+    }>
+    expect(started).toEqual([
+      expect.objectContaining({ toolUseId: 'call-agent-6', taskType: 'local_agent' })
+    ])
+    const notes = sentPayloads(win, 'session:task-notification') as Array<{
+      status: string
+      taskId: string
+    }>
+    expect(notes).toEqual([
+      expect.objectContaining({ status: 'completed', taskId: started[0].taskId })
+    ])
+    expect(r.isError).toBeUndefined()
+    expect(r.content[0].text).toMatch(/^child report 1\n\n<usage>/)
+
+    const childRows = mockRecordUsageEvent.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((row) => row.origin === 'child')
+    expect(childRows).toEqual([
+      expect.objectContaining({
+        engineId: 'pi',
+        sessionId: started[0].taskId,
+        parentRoutingId: 'rid-sub-t6',
+        engineCostIsEquivalent: true
+      })
+    ])
+    expect(session.status.totalCostUsd).toBe(costBefore)
+    session.dispose()
+  })
+
+  it('T9: stopTask stops the running child — abort, "Agent stopped by user.", status stopped', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t9', win)
+    const { result, child } = await launch(kids, 'call-agent-9')
+    expect(await session.stopTask('call-agent-9')).toEqual({ success: true })
+    expect(child.commands().some((c) => c.type === 'abort')).toBe(true)
+    child.push({ type: 'agent_settled' })
+    const r = (await result) as { content: Array<{ text: string }>; isError?: boolean }
+    expect(r).toMatchObject({ isError: true, content: [{ text: 'Agent stopped by user.' }] })
+    const notes = sentPayloads(win, 'session:task-notification') as Array<{ status: string }>
+    expect(notes.map((n) => n.status)).toEqual(['stopped'])
+    expect(await session.stopTask('call-agent-9')).toEqual({
+      success: false,
+      error: 'No running agent for that card'
+    })
+    session.dispose()
+  })
+
+  it('T10: interrupt() stops an in-flight child; cancel() disposes one; an abandoned agent exchange stops its child', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t10', win)
+
+    const a = await launch(kids, 'call-int')
+    await session.interrupt()
+    expect(a.child.commands().some((c) => c.type === 'abort')).toBe(true)
+    a.child.push({ type: 'agent_settled' })
+    expect(await a.result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+
+    const b = await launch(kids, 'call-abandon')
+    bridgeCaptured.onAbandoned!({
+      route: 'hosted-tool',
+      toolCallId: 'call-abandon',
+      toolName: 'agent',
+      settled: false
+    })
+    expect(b.child.commands().some((c) => c.type === 'abort')).toBe(true)
+    b.child.push({ type: 'agent_settled' })
+    expect(await b.result).toMatchObject({ isError: true })
+
+    const c = await launch(kids, 'call-cancel')
+    session.cancel()
+    expect(c.child.client.dispose).toHaveBeenCalled()
+    expect(await c.result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+  })
+
+  it('T12: a child agent call allowed by its gate mints the CHILD grant; without one the child bridge fails closed', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-t12', win)
+    const { result, child } = await launch(kids, 'call-agent-12')
+    const input = { description: 'nested', prompt: 'go deeper' }
+
+    expect(
+      await child.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'grand-x' })
+    ).toEqual({
+      content: [{ type: 'text', text: 'hosted tool call was not approved through the tool gate' }],
+      isError: true
+    })
+    // The parent's own grants are not the child's.
+    expect(await gate('grand-y', 'agent', input)).toEqual({ behavior: 'allow' })
+    expect(
+      (await child.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'grand-y' }))
+        .isError
+    ).toBe(true)
+
+    expect(
+      await child.opts.gateHandler({ toolCallId: 'grand-z', toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    const grand = child.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'grand-z' })
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const gc = kids.children[1]
+    await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
+    const started = sentPayloads(win, 'session:task-started') as Array<{ toolUseId: string }>
+    expect(started.map((s) => s.toolUseId)).toEqual(['call-agent-12', 'grand-z'])
+    gc.push({ type: 'agent_settled' })
+    await grand
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+  /** The pending card a child call raised on the parent, by the child's call id. */
+  async function cardFor(win: MockWindow, toolUseId: string): Promise<{ requestId: string }> {
+    await vi.waitFor(() =>
+      expect(
+        (sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>).some(
+          (a) => a.toolUseId === toolUseId
+        )
+      ).toBe(true)
+    )
+    return (
+      sentPayloads(win, 'session:approval-request') as Array<{
+        requestId: string
+        toolUseId: string
+      }>
+    ).find((a) => a.toolUseId === toolUseId)!
+  }
+
+  it('R2: stopping a child retracts its pending card — approval-dismiss for its requestId, and the gate resolves deny', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-r2', win)
+    const { result, child } = await launch(kids, 'call-r2')
+    const asked = child.opts.gateHandler({
+      toolCallId: 'child-ask',
+      toolName: 'bash',
+      input: { command: 'npm run build' }
+    })
+    const card = await cardFor(win, 'child-ask')
+    expect(await session.stopTask('call-r2')).toEqual({ success: true })
+    expect(await asked).toEqual({ behavior: 'deny', reason: 'Agent stopped' })
+    expect(sentPayloads(win, 'session:approval-dismiss')).toContainEqual({
+      requestId: card.requestId
+    })
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it('F1: a stopped child — a call judged across the stop is denied with no card; a call after the stop is denied with zero judge calls', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-f1', win, 'auto')
+    const { result, child } = await launch(kids, 'call-f1')
+    expect(judgeCalls).toHaveLength(1)
+
+    let release!: () => void
+    judgeScript.hold = new Promise<void>((r) => {
+      release = r
+    })
+    judgeScript.replies = ['<block>no</block>']
+    const judged = child.opts.gateHandler({
+      toolCallId: 'child-judged',
+      toolName: 'bash',
+      input: { command: 'npm test' }
+    })
+    await vi.waitFor(() => expect(judgeCalls).toHaveLength(2))
+    expect(await session.stopTask('call-f1')).toEqual({ success: true })
+    release()
+    judgeScript.hold = null
+    expect(await judged).toEqual({ behavior: 'deny', reason: 'Agent stopped' })
+
+    const after = await child.opts.gateHandler({
+      toolCallId: 'child-after',
+      toolName: 'bash',
+      input: { command: 'npm test' }
+    })
+    expect(after).toEqual({ behavior: 'deny', reason: 'Agent stopped' })
+    expect(judgeCalls).toHaveLength(2)
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it('F2: a definition mode never widens at the gate — bypassPermissions under default still asks; auto under plan is refused as plan', async () => {
+    const base = (dir: string) => loadPiAgentRegistry({ cwd: dir, userAgentsDir: '/no-such-dir' })
+    const withDefs = (defs: PiAgentDefinition[]) => (dir: string) => {
+      const reg = base(dir)
+      return {
+        list: () => [...reg.list(), ...defs],
+        resolve: (t: string | undefined) => defs.find((d) => d.name === t) ?? reg.resolve(t),
+        diagnostics: []
       }
     }
-  }
-
-  it('an assistant newMessage -> session:subagent-message with a ChatMessage built via buildPiChatMessage, keyed by the outer toolUseId', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-msg-1', win as never, '/cwd', {})
-    await session.run('hi')
-
-    lastEventHandler()(subagentUpdateEvent('outer-call-1'))
-
-    const messages = sentPayloads(win, 'session:subagent-message') as Array<{
-      toolUseId: string
-      message: { role: string; content: Array<{ type: string; text?: string }> }
-    }>
-    expect(messages).toHaveLength(1)
-    expect(messages[0].toolUseId).toBe('outer-call-1')
-    expect(messages[0].message.role).toBe('assistant')
-    expect(messages[0].message.content).toEqual([{ type: 'text', text: 'hi' }])
-  })
-
-  it("a toolResult newMessage -> session:subagent-tool-result with {toolUseId, toolResultToolUseId, result, isError} — byte-matches forwardPiTargetMessage's shape", async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-msg-2', win as never, '/cwd', {})
-    await session.run('hi')
-
-    lastEventHandler()(
-      subagentUpdateEvent('outer-call-2', {
-        newMessages: [
-          {
-            role: 'toolResult',
-            toolCallId: 'child-tc-1',
-            toolName: 'read',
-            content: [{ type: 'text', text: 'file body' }],
-            isError: false
-          }
-        ]
-      })
-    )
-
-    const results = sentPayloads(win, 'session:subagent-tool-result') as Array<{
-      toolUseId: string
-      toolResultToolUseId: string
-      result: string
-      isError: boolean
-    }>
-    expect(results).toHaveLength(1)
-    expect(results[0]).toEqual({
-      toolUseId: 'outer-call-2',
-      toolResultToolUseId: 'child-tc-1',
-      result: 'file body',
-      isError: false
+    const gp = base('/cwd').resolve('general-purpose')!
+    const wide = (name: string, permissionMode: string): PiAgentDefinition => ({
+      ...gp,
+      name,
+      source: 'project',
+      permissionMode
     })
-  })
 
-  it('an ERRORING child toolResult -> isError:true propagates through', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-msg-3', win as never, '/cwd', {})
-    await session.run('hi')
-
-    lastEventHandler()(
-      subagentUpdateEvent('outer-call-3', {
-        newMessages: [
-          {
-            role: 'toolResult',
-            toolCallId: 'child-tc-2',
-            toolName: 'bash',
-            content: [{ type: 'text', text: 'boom' }],
-            isError: true
-          }
-        ]
-      })
-    )
-
-    const results = sentPayloads(win, 'session:subagent-tool-result') as Array<{ isError: boolean }>
-    expect(results[0].isError).toBe(true)
-  })
-
-  it('assistant text deltas are NOT re-streamed — no session:stream carries subagent content (message-granularity only)', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-msg-4', win as never, '/cwd', {})
-    await session.run('hi')
-
-    const streamsBefore = sentPayloads(win, 'session:stream').length
-    lastEventHandler()(subagentUpdateEvent('outer-call-4'))
-    expect(sentPayloads(win, 'session:stream').length).toBe(streamsBefore)
-  })
-
-  it('a malformed cuiSubagent payload (invalid status) never reaches session:subagent-message — the pure mapper already filtered it, PiSession never crashes', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-malformed', win as never, '/cwd', {})
-    await session.run('hi')
-
-    expect(() =>
-      lastEventHandler()({
-        type: 'tool_execution_update',
-        toolCallId: 'outer-call-5',
-        toolName: 'subagent',
-        args: {},
-        partialResult: {
-          content: [],
-          details: {
-            cuiSubagent: { v: 1, agents: [{ agent: 'x', status: 'bogus', newMessages: [] }] }
-          }
+    for (const [parentMode, defMode, call, expectCard] of [
+      [
+        'default',
+        'bypassPermissions',
+        { toolName: 'bash', input: { command: 'npm run build' } },
+        true
+      ],
+      ['plan', 'auto', { toolName: 'edit', input: { path: '/cwd/a.ts', edits: [] } }, false]
+    ] as const) {
+      const win = new MockWindow()
+      const kids = makeFakeChildren()
+      const session = new PiSession(
+        `rid-sub-f2-${parentMode}`,
+        win as never,
+        '/cwd',
+        { model: 'openai-codex/gpt-5.6-luna', permissionMode: parentMode },
+        {
+          spawnPiChild: kids.spawn,
+          subagentsRoot: '/fake/subagents',
+          loadAgentRegistry: withDefs([wide('widener', defMode)])
         }
+      )
+      await session.run('PARENT-INTENT: please tidy the build')
+      const { result, child } = await launch(kids, `call-f2-${parentMode}`, {
+        ...AGENT_INPUT,
+        subagent_type: 'widener'
       })
-    ).not.toThrow()
-    expect(sentPayloads(win, 'session:subagent-message')).toHaveLength(0)
-  })
-})
-
-describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
-  function doneCuiSubagent(toolCallId: string, agent: Record<string, unknown>): PiEvent {
-    return {
-      type: 'tool_execution_update',
-      toolCallId,
-      toolName: 'subagent',
-      args: {},
-      partialResult: { content: [], details: { cuiSubagent: { v: 1, agents: [agent] } } }
+      const decision = child.opts.gateHandler({
+        toolCallId: `f2-${parentMode}`,
+        toolName: call.toolName,
+        input: call.input
+      })
+      if (expectCard) {
+        const card = await cardFor(win, `f2-${parentMode}`)
+        session.resolveApproval(card.requestId, 'deny')
+        expect(await decision).toMatchObject({ behavior: 'deny' })
+      } else {
+        expect(await decision).toEqual({ behavior: 'deny', reason: PLAN_MODE_DENY_REASON })
+        expect(sentChannels(win)).not.toContain('session:approval-request')
+      }
+      child.push({ type: 'agent_settled' })
+      await result
+      session.dispose()
     }
-  }
-
-  it('records ONE recordUsageEvent row per agent on done, engineId "pi", tokens/cost from the payload, source "live"', async () => {
-    mockBuildPiAccountRef.mockReturnValue({
-      engineId: 'pi',
-      vendorId: 'anthropic',
-      billingType: 'apiKey',
-      authState: 'authenticated',
-      accountId: 'acct-echoer'
-    })
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-1', win as never, '/cwd', {})
-    await session.run('hi')
-    mockRecordUsageEvent.mockClear() // drop the parent turn's own usage row from run('hi')'s message_end, if any
-
-    lastEventHandler()(
-      doneCuiSubagent('outer-call-usage-1', {
-        agent: 'echoer',
-        model: 'anthropic/claude-haiku-4-5',
-        status: 'done',
-        newMessages: [],
-        usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.0123, turns: 3 }
-      })
-    )
-
-    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
-    expect(mockRecordUsageEvent).toHaveBeenCalledWith({
-      engineId: 'pi',
-      vendorId: 'anthropic',
-      accountId: 'acct-echoer',
-      accountUuid: null,
-      modelId: 'claude-haiku-4-5',
-      tokens: { input: 10, output: 5, cacheWrite: 2, cacheWrite1h: 0, cacheRead: 1 },
-      engineCostUsd: 0.0123,
-      sessionId: 'pi-sess-1',
-      messageId: 'subagent-outer-call-usage-1-echoer-0',
-      source: 'live',
-      // ADR-071 §1: a subagent row names the account it ran under and the
-      // session that spawned it.
-      accountKey: 'pi:anthropic:native',
-      accountLabel: 'anthropic',
-      billingType: 'apiKey',
-      origin: 'child',
-      parentRoutingId: 'rid-subagent-usage-1',
-      // pi reports a list price, not a charge (S1b).
-      engineCostIsEquivalent: true
-    })
   })
 
-  it("falls back to the PARENT session's model when the agent payload carries no model", async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-2', win as never, '/cwd', {
-      model: 'anthropic/claude-opus-4-8'
+  it("F5: a child's judge state is its own — blocks, a human reject and tool results land in the CHILD's outcomes/denials, never the parent's", async () => {
+    enableAutoMode()
+    // A user ask rule sends one child call to the human (G9) under auto.
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: [],
+      deny: [],
+      ask: ['Bash(curl:*)'],
+      additionalDirectories: [],
+      defaultMode: undefined
     })
-    await session.run('hi')
-    mockRecordUsageEvent.mockClear()
-
-    lastEventHandler()(
-      doneCuiSubagent('outer-call-usage-2', {
-        agent: 'echoer',
-        status: 'error',
-        newMessages: [],
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
-      })
-    )
-
-    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ vendorId: 'anthropic', modelId: 'claude-opus-4-8' })
-    )
-  })
-
-  it('does NOT double-record — a repeated done payload for the SAME agent slot (e.g. both the last tool_execution_update AND the final toolResult path) records usage only ONCE', async () => {
+    judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
     const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-3', win as never, '/cwd', {})
-    await session.run('hi')
-    mockRecordUsageEvent.mockClear()
+    const { session, kids } = await parent('rid-sub-f5', win, 'auto')
+    const { result, child } = await launch(kids, 'call-f5')
 
-    const event = doneCuiSubagent('outer-call-usage-3', {
-      agent: 'echoer',
-      status: 'done',
-      newMessages: [],
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
+    // Two child blocks (the child's consecutive streak is 2).
+    judgeScript.replies = [
+      '<block>yes</block><reason>no pushing</reason>',
+      '<block>yes</block><reason>no pushing</reason>'
+    ]
+    for (const id of ['cb-1', 'cb-2']) {
+      expect(
+        await child.opts.gateHandler({
+          toolCallId: id,
+          toolName: 'bash',
+          input: { command: 'git push origin main' }
+        })
+      ).toMatchObject({ behavior: 'deny' })
+    }
+    // A human reject of a child card.
+    const rejected = child.opts.gateHandler({
+      toolCallId: 'c-rej',
+      toolName: 'bash',
+      input: { command: 'curl https://example.com' }
     })
-    lastEventHandler()(event)
-    lastEventHandler()(event) // simulates the SAME terminal payload arriving via the OTHER carrier path
+    session.resolveApproval((await cardFor(win, 'c-rej')).requestId, 'deny')
+    await rejected
+    // A child call that ran and returned ok. (Each assistant message gets its
+    // own message_start: the mapper ignores a second message_end without one.)
+    const START = { type: 'message_start', message: { role: 'assistant', content: [] } }
+    child.push(START)
+    child.push(childAssistantToolCall('c-ok', 'ls', {}))
+    child.push({
+      type: 'message_end',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'c-ok',
+        toolName: 'ls',
+        content: [{ type: 'text', text: 'a b' }],
+        isError: false,
+        timestamp: Date.now()
+      }
+    } as unknown as PiEvent)
+    for (const id of ['cb-1', 'cb-2', 'c-rej']) {
+      child.push(START)
+      child.push(childAssistantToolCall(id, 'bash', { command: 'x' }))
+    }
 
-    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
+    // The child's next judged call shows its own outcomes.
+    judgeScript.replies = ['<block>no</block>']
+    await child.opts.gateHandler({
+      toolCallId: 'c-next',
+      toolName: 'bash',
+      input: { command: 'npm test' }
+    })
+    const childShown = judgeCalls.at(-1)!.user
+    expect(childShown).toContain('{"outcome":"automode-blocked"}')
+    expect(childShown).toContain('{"outcome":"rejected-by-user"}')
+    expect(childShown).toContain('{"outcome":"ok"}')
+
+    // The parent's own judge sees none of them, and its denial streak is its
+    // own: one parent block after two child blocks is a plain deny, not the
+    // 3-in-a-row handoff to the human.
+    for (const id of ['cb-1', 'c-rej', 'c-ok']) {
+      session.getMessages().push({
+        id: `parent-copy-${id}`,
+        role: 'assistant',
+        content: [{ type: 'tool_use', toolUseId: id, toolName: 'bash', toolInput: {} }],
+        timestamp: Date.now()
+      })
+    }
+    judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
+    const parentDecision = await gate('p-block', 'bash', { command: 'git push origin main' })
+    expect(parentDecision).toMatchObject({ behavior: 'deny' })
+    expect(judgeCalls.at(-1)!.user).not.toContain('"outcome"')
+    expect(
+      (sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>).some(
+        (a) => a.toolUseId === 'p-block'
+      )
+    ).toBe(false)
+
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
   })
 
-  it('a "running" status agent (not yet done/error) never records usage, even when a usage object is present', async () => {
+  it('F6: the parent process exiting disposes a running child', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-4', win as never, '/cwd', {})
-    await session.run('hi')
-    mockRecordUsageEvent.mockClear()
-
-    lastEventHandler()(
-      doneCuiSubagent('outer-call-usage-4', {
-        agent: 'echoer',
-        status: 'running',
-        newMessages: [],
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
-      })
-    )
-
-    expect(mockRecordUsageEvent).not.toHaveBeenCalled()
+    const { session, kids } = await parent('rid-sub-f6', win)
+    const { result, child } = await launch(kids, 'call-f6')
+    const exitCalls = mockOnExit.mock.calls
+    const parentExit = exitCalls[exitCalls.length - 1][0] as () => void
+    parentExit()
+    expect(child.client.dispose).toHaveBeenCalled()
+    expect(await result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+    session.dispose()
   })
 
-  it("does NOT touch the parent session's own totalCostUsd (subagent spend is its own accounting row, mirrors opencode's child-message attribution posture)", async () => {
+  it("F8: a child's own agent call under an AUTO parent is judged, not rung-allowed", async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-5', win as never, '/cwd', {})
-    await session.run('hi')
-    const costBefore = session.status.totalCostUsd
-
-    lastEventHandler()(
-      doneCuiSubagent('outer-call-usage-5', {
-        agent: 'echoer',
-        status: 'done',
-        newMessages: [],
-        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, cost: 5, turns: 1 }
+    const { session, kids } = await parent('rid-sub-f8', win, 'auto')
+    const { result, child } = await launch(kids, 'call-f8')
+    expect(judgeCalls).toHaveLength(1)
+    judgeScript.replies = ['<block>yes</block><reason>no nesting</reason>']
+    expect(
+      await child.opts.gateHandler({
+        toolCallId: 'f8-nested',
+        toolName: 'agent',
+        input: { description: 'd', prompt: 'deeper' }
       })
-    )
-
-    expect(session.status.totalCostUsd).toBe(costBefore)
+    ).toEqual({ behavior: 'deny', reason: 'Auto mode blocked: no nesting' })
+    expect(judgeCalls).toHaveLength(2)
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
   })
 })
 

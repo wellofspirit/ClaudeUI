@@ -1,37 +1,27 @@
 /**
- * pi in-pi subagent integration GUARD test (M5b).
+ * pi host-run subagent integration GUARD test (ADR-088).
  *
- * This is the proof for M5b: the ClaudeUI-owned subagent extension
- * (pi-subagent-source.ts) + the approval bridge (pi-bridge-source.ts), BOTH
- * spawned exactly the way PiSession.doStart() spawns them (real PiRpcClient,
- * real `-e <bridge file> -e <subagent file>`, real env vars — including
- * CLAUDEUI_PI_SUBAGENTS=1 and CLAUDEUI_PI_AGENTS_DIR pointing at a fixture
- * agent def), provably registers `subagent` as a callable tool and a real
- * model's real tool call against it spawns a REAL child `pi` process (the
- * SAME installed binary) that runs a real model turn of its own and reports
- * back. Mirrors pi-hosted-tools.integration.test.ts's identical
- * "unit tests mock the seam, this file proves the seam is real" rationale —
- * pi-subagent-source.test.ts already covers the extension's own logic
- * (discovery/delta-streaming/abort/cleanup) against a MOCKED child process;
- * this file is the one place that proves two REAL pi processes talk to each
- * other correctly.
+ * The proof that a host-run child is real: `PiSubagentManager` spawns a REAL
+ * `pi --mode rpc` child through the real `defaultSpawnPiChild` (real
+ * PiBridgeHost, the real bridge extension file, the real child flags —
+ * `--session-dir`/`--session-id`/`--append-system-prompt <file>`/`--tools` —
+ * and the real child env), the child runs a real model turn, its output
+ * streams under the spawning call id, the lifecycle events arrive in order,
+ * and the persisted child session file lands under the manager's root.
+ *
+ * A HOST-RUN SMOKE, not a full PiSession drive (the kickoff allows this when a
+ * full drive is impractical, and it is here): PiSession has no session-dir
+ * seam, so a real PiSession turn would write the PARENT's session into
+ * `~/.pi/agent/sessions` — which these tests never do. The parent half (the
+ * bridge registering `agent` under CLAUDEUI_PI_AGENT_TOOL, the spawn rung, the
+ * child gate and judge) is covered by pi-bridge-source.test.ts (the extension
+ * source executed in-process) and PiSession.test.ts against mocks; this file
+ * proves the child transport the mocks stand in for.
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real `openai-codex` credential in
- * ~/.pi/agent/auth.json (read-only — this file never writes to it). Uses the
- * REAL installed pi binary and makes REAL model API calls against a small/
- * cheap model (gpt-5.6-luna — already verified end-to-end in
- * pi-bridge.integration.test.ts / pi-hosted-tools.integration.test.ts). Same
- * shared-refresh-token caveat as those files applies here. The CHILD process
- * (spawned by the extension itself, not by this test) inherits whatever
- * model/auth the installed binary resolves from ~/.pi/agent/settings.json —
- * CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is deliberately set below so the child
- * uses the SAME cheap model as the parent, rather than whatever default the
- * dev machine's settings.json happens to have.
- *
- * ONE model turn (parent) + ONE child turn (subagent), per the kickoff spec —
- * kept minimal to bound cost/flakiness. Session files land under a tmp
- * `--session-dir`; generous timeouts (two real API calls + two process
- * spawns in sequence).
+ * ~/.pi/agent/auth.json (read-only — this file never writes to it). ONE child
+ * model turn against a small/cheap model; the child's session lands under a
+ * tmp root, never ~/.pi/agent/sessions.
  *
  * Run manually:
  *   PI_INTEGRATION_TESTS=1 bunx vitest run --project integration -t pi
@@ -40,19 +30,15 @@
 // @vitest-environment node
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { locatePiBinary } from '../../core/pi/pi-locate'
-import { PiRpcClient } from '../../core/pi/PiRpcClient'
-import {
-  PiBridgeHost,
-  writeBridgeExtension,
-  writeSubagentExtension
-} from '../../core/pi/PiBridgeHost'
+import { loadPiAgentRegistry } from '../../core/pi/pi-agent-registry'
+import { PiSubagentManager, type PiSubagentHost } from '../../core/pi/pi-subagents'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
-const MODEL = { provider: 'openai-codex', modelId: 'gpt-5.6-luna' }
+const MODEL = 'openai-codex/gpt-5.6-luna'
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
 function hasCodexCredentials(): boolean {
@@ -66,155 +52,81 @@ function hasCodexCredentials(): boolean {
   }
 }
 
-// Evaluated once at collection time so describe.skipIf can gate on it even
-// when PI_INTEGRATION_TESTS=1 is set — "skip gracefully", not a hard failure.
 const BINARY_MISSING = !locatePiBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
-/**
- * Fixture agent def — a trivial "echoer" that only ever needs `read` (an
- * agent-scope minimal enough to prove the wire without depending on any
- * other tool behaving correctly). Instructed to answer with a fixed,
- * greppable marker so the assertions below don't depend on model creativity.
- */
-const ECHOER_MD = `---
-name: echoer
-description: Echoes back the task with a fixed marker prefix
-tools: read
----
-You are a trivial test agent. When given a task, respond with EXACTLY:
-"ECHO: <the task text>" and nothing else. Do not call any tools. Do not add
-any other commentary, punctuation, or formatting.
-`
-
-/** Find every `tool_execution_update` for the `subagent` tool carrying a `cuiSubagent` details payload, in wire order (loose-typed — see pi-rpc.integration.test.ts's identical precedent for why this file doesn't fight PiEvent's discriminated union in test code). */
-function findSubagentUpdates(events: Record<string, unknown>[]): Array<Record<string, unknown>> {
-  return events.filter((ev) => {
-    if (ev.type !== 'tool_execution_update' || ev.toolName !== 'subagent') return false
-    const partialResult = ev.partialResult as { details?: { cuiSubagent?: unknown } } | undefined
-    return Boolean(partialResult?.details?.cuiSubagent)
-  })
-}
-
-/** Find the `subagent` toolResult message_end and return its text content. */
-function findSubagentToolResultText(events: Record<string, unknown>[]): string | null {
-  for (const ev of events) {
-    if (ev.type !== 'message_end') continue
-    const msg = ev.message as Record<string, unknown> | undefined
-    if (!msg || msg.role !== 'toolResult' || msg.toolName !== 'subagent') continue
-    const content = (msg.content as Array<{ type: string; text?: string }>) ?? []
-    return content
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text ?? '')
-      .join('')
-  }
-  return null
-}
-
 describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
-  'pi in-pi subagent integration (M5b)',
+  'pi host-run subagent integration (ADR-088)',
   () => {
-    let client: PiRpcClient
-    let bridgeHost: PiBridgeHost
-    let tmpDir: string
-    let agentsDir: string
-    const events: Record<string, unknown>[] = []
+    let cwd: string
+    let root: string
+    const sent: Array<[string, unknown]> = []
 
-    beforeAll(async () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-'))
-      agentsDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-agents-'))
-      writeFileSync(join(agentsDir, 'echoer.md'), ECHOER_MD, 'utf-8')
-
-      // Gate handler: real product code, always-allow (the 'task'-kind gating
-      // policy for `subagent` itself is unit-tested in permission-engine.test.ts
-      // — this integration test only proves the TRANSPORT + the extension's OWN
-      // child-spawn logic, not the approval policy).
-      const gateHandler = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
-      bridgeHost = new PiBridgeHost(gateHandler)
-      const { url, token } = await bridgeHost.start()
-      // Real product code — the SAME two file writers PiSession.doStart() calls.
-      const bridgePath = writeBridgeExtension()
-      const subagentPath = writeSubagentExtension()
-
-      const binary = locatePiBinary()!
-      client = new PiRpcClient(binary, {
-        cwd: tmpDir,
-        args: ['--mode', 'rpc', '-e', bridgePath, '-e', subagentPath, '--session-dir', tmpDir],
-        env: {
-          CLAUDEUI_PI_BRIDGE_URL: url,
-          CLAUDEUI_PI_BRIDGE_TOKEN: token,
-          // The exact env vars PiSession.doStart() sets when capabilities.subagents
-          // is true (M5b) — proves the real subagent extension registers under
-          // this real gating, not a synthetic one. CLAUDEUI_PI_AGENTS_DIR
-          // overrides the default `~/.pi/agent/agents` so this test never
-          // touches the dev machine's real agent definitions.
-          CLAUDEUI_PI_SUBAGENTS: '1',
-          CLAUDEUI_PI_AGENTS_DIR: agentsDir,
-          CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: `${MODEL.provider}/${MODEL.modelId}`
-        }
-      })
-      client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
-      await client.start()
-
-      const setModelResp = await client.request(
-        { type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId },
-        45_000
-      )
-      expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
-    }, 45_000)
-
-    afterAll(async () => {
-      client?.dispose()
-      bridgeHost?.dispose()
-      // Windows holds the cwd handle briefly after the parent (and any child)
-      // process exits — wait, with a bounded fallback, before touching the tmp
-      // dirs. Mirrors pi-hosted-tools.integration.test.ts's identical precedent.
-      await new Promise((resolve) => setTimeout(resolve, 1_000))
-      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-      if (agentsDir)
-        rmSync(agentsDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    beforeAll(() => {
+      cwd = mkdtempSync(join(tmpdir(), 'pi-subagent-cwd-'))
+      root = mkdtempSync(join(tmpdir(), 'pi-subagent-root-'))
     })
 
-    /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). Generous timeout: this turn spawns a SECOND real pi process that makes its OWN real model call. */
-    async function waitForTurnEnd(
-      fromIndex: number,
-      timeoutMs = 120_000
-    ): Promise<Record<string, unknown>[]> {
-      const deadline = Date.now() + timeoutMs
-      while (Date.now() < deadline) {
-        const slice = events.slice(fromIndex)
-        if (slice.some((ev) => ev.type === 'agent_settled')) return slice
-        await new Promise((resolve) => setTimeout(resolve, 300))
+    afterAll(async () => {
+      // Windows holds the cwd handle briefly after the child exits.
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      for (const dir of [cwd, root]) {
+        if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
       }
-      throw new Error(
-        `turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`
-      )
-    }
+    })
 
-    it("a real model turn calls subagent -> a real child pi process runs -> cuiSubagent updates arrive -> the final result contains the child's answer", async () => {
-      const fromIndex = events.length
-      const resp = await client.request({
-        type: 'prompt',
-        message:
-          "Call the subagent tool EXACTLY once with agent 'echoer' and task 'ping' -- no other tool calls, " +
-          'no explanation, just make the call and then report back exactly what it returned.'
+    it('a real Explore child runs one turn, streams under the call id, reports, and persists its session under the root', async () => {
+      const host: PiSubagentHost = {
+        routingId: 'rid-integration',
+        cwd,
+        currentModel: () => MODEL,
+        skillDirsEnv: () => ({}),
+        send: (channel, data) => {
+          sent.push([channel, data])
+        },
+        // Transport proof only: the gating policy is unit-tested.
+        gateChild: async () => ({ behavior: 'allow' }),
+        childAbandoned: () => {},
+        retractChildGates: () => {}
+      }
+      const manager = new PiSubagentManager(host, {
+        registry: loadPiAgentRegistry({ cwd, userAgentsDir: join(cwd, 'no-user-agents') }),
+        sessionsRoot: root
       })
-      expect(resp.success).toBe(true)
 
-      const turnEvents = await waitForTurnEnd(fromIndex, 120_000)
+      const result = await manager.run(
+        {
+          description: 'Echo a marker',
+          prompt: 'Do not call any tools. Reply with exactly: ECHO ping',
+          subagent_type: 'Explore'
+        },
+        'call-integration-1',
+        null
+      )
 
-      const subagentUpdates = findSubagentUpdates(turnEvents)
-      expect(
-        subagentUpdates.length,
-        `no tool_execution_update carried a cuiSubagent payload — events: ${JSON.stringify(turnEvents)}`
-      ).toBeGreaterThan(0)
+      expect(result.isError, JSON.stringify(result)).toBeUndefined()
+      expect(result.content[0].text).toMatch(/ECHO:?\s*ping/i)
+      expect(result.content[0].text).toMatch(/<usage>total_tokens: \d+/)
 
-      const toolResultText = findSubagentToolResultText(turnEvents)
-      expect(
-        toolResultText,
-        `subagent toolResult never arrived — events: ${JSON.stringify(turnEvents)}`
-      ).not.toBeNull()
-      expect(toolResultText).toMatch(/ECHO:\s*ping/i)
+      const channels = sent.map(([c]) => c)
+      const startIdx = channels.indexOf('session:task-started')
+      const noteIdx = channels.indexOf('session:task-notification')
+      expect(startIdx).toBeGreaterThanOrEqual(0)
+      expect(noteIdx).toBeGreaterThan(startIdx)
+      const streamed = sent.filter(
+        ([c, d]) =>
+          (c === 'session:item-seal' &&
+            (d as { ownerToolUseId?: string }).ownerToolUseId === 'call-integration-1') ||
+          (c === 'session:subagent-message' &&
+            (d as { toolUseId?: string }).toolUseId === 'call-integration-1')
+      )
+      expect(streamed.length).toBeGreaterThan(0)
+
+      const details = result.details as { cuiAgent: { agentId: string } }
+      const childDir = join(root, details.cuiAgent.agentId)
+      const files = readdirSync(childDir)
+      expect(files).toContain('system-prompt.md')
+      expect(files.some((f) => f.endsWith(`_${details.cuiAgent.agentId}.jsonl`))).toBe(true)
     }, 150_000)
   }
 )

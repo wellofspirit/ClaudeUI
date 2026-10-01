@@ -43,12 +43,14 @@
  * lifted kind (MessageBubble.renderToolBlock routes it to ExitPlanModeCard
  * before ever consulting displayName), engine-agnostic by design.
  *
- * M5b: in-pi subagents — a SECOND bare-name `pi.registerTool()` registration
- * (`subagent`, from the separate pi-subagent-source.ts extension, gated on
- * CLAUDEUI_PI_SUBAGENTS) also maps to 'task', reusing TaskCard alongside
- * dispatch_agent. Disambiguated by input shape in piNormalize's 'task' case:
- * dispatch_agent always carries `engine`; subagent carries `agent`+`task`
- * (single) or `tasks: [...]` (parallel) — never `engine`.
+ * ADR-088: host-run pi subagents — the bridge's `agent` tool (v9, gated on
+ * CLAUDEUI_PI_AGENT_TOOL) maps to 'task', reusing TaskCard alongside
+ * dispatch_agent. `subagent` (legacy M5b transcripts from the retired in-pi
+ * extension, and pi's upstream example extension) maps to 'task' too.
+ * piNormalize does not receive the tool name, so its 'task' case
+ * disambiguates by input shape: dispatch_agent always carries `engine`;
+ * `agent` carries `prompt`+`description` and none of `engine`/`agent`/`tasks`;
+ * subagent carries `agent`+`task` (single) or `tasks: [...]` (parallel).
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
@@ -98,12 +100,15 @@ function piKindOf(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
-    // In-pi subagents (M5b) — the subagent-discovery extension's OWN
-    // registered tool (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS).
-    // Reuses the SAME 'task' kind dispatch_agent does — TaskCard is
-    // engine-neutral and disambiguates by input shape (see piNormalize's
-    // 'task' case below). Mirrors permission-engine.ts's piToolKind IDENTICAL
-    // case (single-source guard test).
+    // Host-run pi subagents (ADR-088) — the bridge's own `agent` tool. Reuses
+    // the SAME 'task' kind dispatch_agent does — TaskCard is engine-neutral
+    // and disambiguates by input shape (see piNormalize's 'task' case below).
+    // Mirrors permission-engine.ts's piToolKind IDENTICAL case (single-source
+    // guard test).
+    case 'agent':
+      return 'task'
+    // `subagent`: legacy M5b transcripts and pi's upstream example subagent
+    // extension. Mirrors permission-engine.ts's piToolKind IDENTICAL case.
     case 'subagent':
       return 'task'
     default:
@@ -214,7 +219,31 @@ function piNormalize(
           subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
         }
       }
-      // In-pi subagents (M5b) — pi-subagent-source.ts's `subagent` tool.
+      // Host-run subagents (ADR-088) — the `agent` tool: { description,
+      // prompt, subagent_type?, name?, model? }. Keyed on the shape (prompt +
+      // description, none of engine/agent/tasks): piNormalize never sees the
+      // tool name. Checked BEFORE the legacy `subagent` shapes below.
+      if (
+        typeof inp.prompt === 'string' &&
+        typeof inp.description === 'string' &&
+        inp.agent === undefined &&
+        inp.tasks === undefined
+      ) {
+        const type =
+          typeof inp.subagent_type === 'string' && inp.subagent_type !== ''
+            ? inp.subagent_type
+            : undefined
+        const name = typeof inp.name === 'string' && inp.name !== '' ? inp.name : type
+        return {
+          kind: 'task',
+          description: inp.description,
+          prompt: inp.prompt,
+          subagent: type ?? 'general-purpose',
+          ...(name ? { name } : {}),
+          ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {})
+        }
+      }
+      // Legacy `subagent` tool (M5b transcripts; pi's upstream example).
       // Parallel form: { tasks: [{agent, task}, ...] }.
       if (Array.isArray(inp.tasks)) {
         const list = inp.tasks as Array<{ agent?: unknown; task?: unknown }>
@@ -283,6 +312,7 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   create_mockup: 'Mockup',
   show_mockup: 'Mockup',
   dispatch_agent: 'Dispatch',
+  agent: 'Agent',
   subagent: 'Subagent'
 }
 

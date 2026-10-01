@@ -74,8 +74,7 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 }))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: vi.fn(() => ({ start: vi.fn(), dispose: vi.fn() })),
-  writeBridgeExtension: vi.fn(),
-  writeSubagentExtension: vi.fn()
+  writeBridgeExtension: vi.fn()
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: {

@@ -1018,21 +1018,24 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     renderer already has the correct truncated view from the store's own
  *     optimistic seed) — mirrors ClaudeSession's identical "forks excluded"
  *     cost-seeding posture.
- *   - backgroundTasks, voice →
- *     unwired; each becomes a dedicated follow-up once its RPC surface is
- *     wired the same way OpencodeSession's were.
- *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
- *     (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS) registers a
- *     `subagent` pi.registerTool() that spawns one child `pi --mode json -p`
- *     process per user-level agent definition (`~/.pi/agent/agents/*.md`,
- *     port of pi's own shipped example) and streams its progress through the
- *     SAME `session:subagent-*`/TaskCard pipeline the cross-engine dispatch
- *     target uses (event-mapper.ts's `subagent_update` MapperOutput →
- *     PiSession.dispatchOutput). Flipped true only because that full path —
- *     tool visible → gated ('task' kind) → child spawned → streamed →
- *     result rendered — is genuinely wired, not because pi has any NATIVE
- *     subagent concept (it has none; this is entirely a ClaudeUI construct,
- *     same posture as hostedMcp/crossEngineDispatch above).
+ *   - backgroundTasks → true since ADR-088 S2: it is the gate
+ *     `handlers-core.stopTask` checks, and a host-run subagent's TaskCard has
+ *     a per-agent Stop (`PiSession.stopTask`). "Send to background" stays
+ *     inert: it also needs `activeTasks[id].isBackgrounded === false`, which
+ *     pi never sends. Background runs themselves arrive in S3.
+ *   - voice → unwired; a dedicated follow-up once its RPC surface is wired the
+ *     same way OpencodeSession's was.
+ *   - subagents → HOST-RUN (ADR-088, superseding M5b's in-pi extension): the
+ *     bridge's own `agent` tool (pi-bridge-source.ts v9, gated on
+ *     CLAUDEUI_PI_AGENT_TOOL) calls back over `/hosted-tool`, and PiSession's
+ *     `PiSubagentManager` spawns one `pi --mode rpc` child per call
+ *     (`PiChildRunner`) for any agent type in ClaudeUI's registry (built-ins,
+ *     `~/.pi/agent/agents/*.md`, project `.pi/agents/*.md`). Every child tool
+ *     call is gated by the parent session's live mode and judge, and the
+ *     child streams through the SAME `session:subagent-*`/TaskCard pipeline
+ *     the cross-engine dispatch target uses. pi has no NATIVE subagent
+ *     concept; this is entirely a ClaudeUI construct, same posture as
+ *     hostedMcp/crossEngineDispatch above.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
  *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
@@ -1048,7 +1051,7 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
 export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
   hostedMcp: true,
-  backgroundTasks: false,
+  backgroundTasks: true,
   subagents: true,
   plan: true,
   fork: true,
