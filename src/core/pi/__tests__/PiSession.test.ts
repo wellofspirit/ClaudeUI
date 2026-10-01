@@ -64,6 +64,7 @@ const {
   mockDiscoverPiModels,
   mockLoadPiSessionHistory,
   mockFindPiSessionFile,
+  mockLoadPiAgentLinks,
   mockRecordUsageEvent,
   mockBridgeHostStart,
   mockBridgeHostDispose,
@@ -253,6 +254,7 @@ const {
     mockDiscoverPiModels: vi.fn().mockResolvedValue([]),
     mockLoadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
     mockFindPiSessionFile: vi.fn().mockReturnValue(null),
+    mockLoadPiAgentLinks: vi.fn().mockReturnValue([]),
     mockRecordUsageEvent: vi.fn(),
     mockBridgeHostStart,
     mockBridgeHostDispose,
@@ -329,7 +331,8 @@ vi.mock('../model-discovery', async () => {
 })
 vi.mock('../../services/pi-session-list', () => ({
   loadPiSessionHistory: mockLoadPiSessionHistory,
-  findPiSessionFile: mockFindPiSessionFile
+  findPiSessionFile: mockFindPiSessionFile,
+  loadPiAgentLinks: mockLoadPiAgentLinks
 }))
 vi.mock('../../services/usage-recorder', () => ({
   recordUsageEvent: mockRecordUsageEvent
@@ -527,6 +530,7 @@ beforeEach(() => {
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
   mockLoadPiSessionHistory.mockReset().mockResolvedValue({ messages: [], statusLine: null })
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
+  mockLoadPiAgentLinks.mockReset().mockReturnValue([])
   mockRecordUsageEvent.mockClear()
   mockBridgeHostStart
     .mockClear()
@@ -683,7 +687,8 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_PLAN_TOOLS: '1',
           CLAUDEUI_PI_AGENT_TOOL: '1',
-          CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: ')
+          CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
+          CLAUDEUI_PI_SEND_MESSAGE: '1'
         }
       }
     )
@@ -6118,6 +6123,140 @@ describe('PiSession — host-run subagents (ADR-088)', () => {
     await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
     await new Promise((r) => setTimeout(r, 0))
     expect(session.status.state).toBe('idle')
+    session.dispose()
+  })
+
+  // ── ADR-088 S3b: messaging gates, Send to background, record rebuild ──────
+
+  it('S7: send_message is allowed with no card in default and plan, judged once in auto; task_stop is allowed in auto with zero judge calls', async () => {
+    for (const mode of ['default', 'plan']) {
+      const win = new MockWindow()
+      const { session } = await parent(`rid-s7-${mode}`, win, mode)
+      expect(await gate('sm-1', 'send_message', { to: 'x', message: 'm' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+      session.dispose()
+    }
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const { session } = await parent('rid-s7-auto', win, 'auto')
+    expect(await gate('sm-2', 'send_message', { to: 'x', message: 'm' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(judgeCalls).toHaveLength(1)
+    expect(await gate('ts-1', 'task_stop', { task_id: 'x' })).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('S7: both mint one-shot grants and fail closed without one', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-s7-grants', win)
+    expect(await hostedTool('send_message', { to: 'x', message: 'm' }, 'no-grant-1')).toMatchObject(
+      {
+        isError: true,
+        content: [{ text: 'hosted tool call was not approved through the tool gate' }]
+      }
+    )
+    expect(await hostedTool('task_stop', { task_id: 'x' }, 'no-grant-2')).toMatchObject({
+      isError: true,
+      content: [{ text: 'hosted tool call was not approved through the tool gate' }]
+    })
+    await gate('g-sm', 'send_message', { to: 'nobody', message: 'm' })
+    expect(
+      (await hostedTool('send_message', { to: 'nobody', message: 'm' }, 'g-sm')).content[0].text
+    ).toBe('No agent "nobody" in this session. Agents: (none)')
+    // One-shot: the same id again is refused.
+    expect(
+      (await hostedTool('send_message', { to: 'nobody', message: 'm' }, 'g-sm')).content[0].text
+    ).toBe('hosted tool call was not approved through the tool gate')
+    await gate('g-ts', 'task_stop', { task_id: 'nobody' })
+    expect((await hostedTool('task_stop', { task_id: 'nobody' }, 'g-ts')).content[0].text).toBe(
+      'No agent "nobody" in this session. Agents: (none)'
+    )
+    session.dispose()
+  })
+
+  it('G1 (session): backgroundTask on a foreground agent card returns the async text to the waiting call', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-g1', win)
+    const { result, child } = await launch(kids, 'call-g1')
+    expect(await session.backgroundTask('call-g1')).toEqual({ success: true })
+    expect(((await result) as { content: Array<{ text: string }> }).content[0].text).toMatch(
+      /^Async agent launched successfully\./
+    )
+    expect(await session.backgroundTask('call-g1')).toMatchObject({ success: false })
+    child.push({ type: 'agent_settled' })
+    session.dispose()
+  })
+
+  it('G2 (session): a resumed session rebuilds the depth-1 records, so send_message to an earlier id resumes it', async () => {
+    const id = '66666666-6666-4666-8666-666666666666'
+    mockLoadPiAgentLinks.mockReturnValue([
+      {
+        agentId: id,
+        originToolUseId: 'call-earlier',
+        subagentType: 'general-purpose',
+        name: 'earlier',
+        model: 'openai-codex/gpt-5.6-luna',
+        background: true,
+        status: 'completed',
+        stoppedBy: null
+      }
+    ])
+    const kids = makeFakeChildren()
+    const win = new MockWindow()
+    const session = new PiSession(
+      'rid-g2',
+      win as never,
+      '/cwd',
+      { model: 'openai-codex/gpt-5.6-luna', resumeSessionId: 'resume-g2' },
+      { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
+    )
+    await session.run('PARENT-INTENT: continue')
+    expect(mockLoadPiAgentLinks).toHaveBeenCalledWith('resume-g2')
+    await gate('sm-g2', 'send_message', { to: 'earlier', message: 'one more' })
+    expect(
+      (await hostedTool('send_message', { to: 'earlier', message: 'one more' }, 'sm-g2')).content[0]
+        .text
+    ).toBe('Resuming agent earlier. You will be notified when it completes.')
+    expect(kids.children).toHaveLength(1)
+    const args = kids.children[0].opts.args!
+    expect(args[args.indexOf('--session-id') + 1]).toBe(id)
+    session.dispose()
+  })
+
+  it('G2 (session, review R2): a rebuilt link stopped by the user is refused, with no spawn', async () => {
+    mockLoadPiAgentLinks.mockReturnValue([
+      {
+        agentId: '88888888-8888-4888-8888-888888888888',
+        originToolUseId: 'call-halted',
+        subagentType: 'general-purpose',
+        name: 'halted',
+        background: true,
+        status: 'stopped',
+        stoppedBy: 'user'
+      }
+    ])
+    const kids = makeFakeChildren()
+    const win = new MockWindow()
+    const session = new PiSession(
+      'rid-g2-stopped',
+      win as never,
+      '/cwd',
+      { model: 'openai-codex/gpt-5.6-luna', resumeSessionId: 'resume-g2-stopped' },
+      { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
+    )
+    await session.run('PARENT-INTENT: continue')
+    await gate('sm-g2s', 'send_message', { to: 'halted', message: 'go' })
+    const r = await hostedTool('send_message', { to: 'halted', message: 'go' }, 'sm-g2s')
+    expect(r.isError).toBe(true)
+    expect(r.content[0].text).toMatch(
+      /^Agent "halted" was stopped by the user and was not resumed\./
+    )
+    expect(kids.children).toHaveLength(0)
     session.dispose()
   })
 

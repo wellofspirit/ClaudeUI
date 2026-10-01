@@ -112,6 +112,12 @@ function piKindOf(toolName: string): ToolKind {
     // extension. Mirrors permission-engine.ts's piToolKind IDENTICAL case.
     case 'subagent':
       return 'task'
+    // ADR-088 S3b: the bridge's `send_message` / `task_stop` (Claude's
+    // SendMessage / TaskStop rows). Mirrors permission-engine.ts's piToolKind.
+    case 'send_message':
+      return 'detail'
+    case 'task_stop':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -290,6 +296,30 @@ function piNormalize(
         prompt: inp.prompt != null ? String(inp.prompt) : ''
       }
     }
+
+    // send_message (ADR-088 S3b): who and the preview as fields, the message
+    // itself as the text — the shape Claude's SendMessage row takes.
+    case 'detail': {
+      const fields: { label: string; value: string }[] = []
+      if (typeof inp.to === 'string' && inp.to !== '') fields.push({ label: 'to', value: inp.to })
+      if (typeof inp.summary === 'string' && inp.summary !== '') {
+        fields.push({ label: 'summary', value: inp.summary })
+      }
+      const text = typeof inp.message === 'string' ? inp.message : result?.toolResult
+      return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
+    }
+
+    // task_stop (ADR-088 S3b): the host's own answer once there is one — a
+    // refusal or "not running" must not read as a stop.
+    case 'note':
+      return {
+        kind: 'note',
+        icon: 'stop',
+        text:
+          result && result.toolResult
+            ? result.toolResult
+            : `Stopped agent ${typeof inp.task_id === 'string' ? inp.task_id : ''}`.trim()
+      }
 
     case 'mcp':
       return { kind: 'mcp', input: inp }

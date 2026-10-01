@@ -10,7 +10,8 @@ auto mode is no longer allow-all, and its mode is no longer fixed at creation).
 delegated work judged against the parent), [ADR-076](adr-076_claude-automode-verdict-on-the-wire.md)
 (cli.js's own verdicts), [ADR-023](adr-023_opencode-automode-classifier.md) (ClaudeUI's judge),
 [ADR-067](adr-067_codex-shared-permission-model.md) (the shared permission ladder),
-[ADR-069](adr-069_codex-host-per-home-and-account.md) (Codex targets are threads on the caller's host).
+[ADR-069](adr-069_codex-host-per-home-and-account.md) (Codex targets are threads on the caller's host),
+[ADR-088](adr-088_pi-subagents-host-run.md) (amends the transcript rule: `system` rows are skipped).
 
 ## Context
 
@@ -83,6 +84,13 @@ per pi/opencode target) supplies the target hooks.
   only `User:` lines (the only real authorisation); the child's own earlier calls tell the judge
   what it has already done. An opencode target's task children contribute nothing (their parts are
   not on the target's accumulators).
+- **Amended (ADR-088 S3, 2026-10-02):** `slimTranscript` skips every `role: 'system'` message, for
+  every engine, before its user branch: system rows are engine/host notes (compaction, API errors,
+  Codex guardian notices, and the agent messages ClaudeUI injects into a pi session — task
+  notifications and `send_message` deliveries, which are system rows), never a human turn. Before
+  this, a system row with a text block (Codex's guardian notice) rendered as a `User:` line when a
+  Codex session dispatched to a judged target. See [ADR-088](adr-088_pi-subagents-host-run.md)
+  "Background runs and messaging".
 - **The action** is headed as the `dispatch:<engine>` subagent's, with the target's model as the
   description and the LATEST dispatch prompt as its task (`classifier.ts` `actionHeader`).
 - **Model:** the TARGET engine's `autoMode.judgeModel`, else the target's model; a configured model

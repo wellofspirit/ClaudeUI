@@ -50,6 +50,8 @@ export interface PiAgentDeliveryDetails {
   from?: string
   fromId?: string
   to?: string
+  /** A stopped run: who stopped it (`user`, `agent`, `interrupt`) — the G7 record rebuild reads it. */
+  stoppedBy?: 'user' | 'agent' | 'interrupt' | 'dispose'
 }
 
 export interface PiAgentDelivery {

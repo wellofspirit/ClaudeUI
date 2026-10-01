@@ -150,6 +150,12 @@ export interface PiChildRunnerOpts {
   logTag?: string
   /** Clock for `lastActivityAt` (the watchdog's). */
   now?: () => number
+  /**
+   * The D1 trajectory to record into. A subagent passes its agent's own map so
+   * a resumed run's judge still sees the agent's earlier actions (ADR-088 S3b);
+   * absent = a fresh map for this runner.
+   */
+  trajectory?: Map<string, ChatMessage>
 }
 
 function zeroTurnTokens(): UsageTurnTokens {
@@ -217,7 +223,7 @@ export class PiChildRunner {
   runActive = false
   /** The child's own assistant messages for the judge (ADR-087 D1, see
    *  `recordTrajectoryMessage`). */
-  readonly trajectory = new Map<string, ChatMessage>()
+  readonly trajectory: Map<string, ChatMessage>
   /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
    *  turns (its `totalCostUsd` is the cumulative baseline `lastReportedTotalCostUsd`
    *  is diffed against; `currentMessageId` is message-scoped bookkeeping that
@@ -286,6 +292,7 @@ export class PiChildRunner {
     this.bridgeHost = primitives.bridgeHost
     this.now = opts.now ?? Date.now
     this.logTag = opts.logTag ?? 'PiChildRunner'
+    this.trajectory = opts.trajectory ?? new Map()
   }
 
   /**
@@ -410,6 +417,23 @@ export class PiChildRunner {
         message: `A prompt may not start with "${PI_RESERVED_COMMAND_PREFIX}".`
       })
     }
+    return this.sendTurn(prompt)
+  }
+
+  /**
+   * Start a turn with a HOST-BUILT agent message instead of a prompt (ADR-088
+   * S3b: `send_message` resuming a finished agent). The bridge command is built
+   * here from the structured payload — never accepted as text, so `runTurn`'s
+   * refusal of `/cui-` stays absolute for model-authored prompts. The command
+   * starts the run itself (probe P-S3: one `agent_settled`); the payload's id
+   * waits in `pendingDeliveries` like any delivery. Host code only.
+   */
+  resumeWithDelivery(payload: PiAgentDelivery): Promise<PiTurnOutcome> {
+    this.pendingDeliveries.add(payload.deliveryId)
+    return this.sendTurn(deliveryCommand(payload))
+  }
+
+  private sendTurn(prompt: string): Promise<PiTurnOutcome> {
     this.mapperState.startTimeMs = Date.now()
     this.mapperState.messageEnded = false
     // A fresh turn (first turn, or a continuation after a prior stop/timeout/

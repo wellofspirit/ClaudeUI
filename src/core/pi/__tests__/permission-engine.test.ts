@@ -1014,12 +1014,22 @@ describe('EMPTY_RULES — frozen (A9)', () => {
 })
 
 describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
-  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent and agent (ADR-088)', () => {
+  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent, agent, send_message and task_stop (ADR-088)', () => {
     expect([...PI_HOSTED_TOOL_NAMES].sort()).toEqual(
-      ['agent', 'create_mockup', 'dispatch_agent', 'render_mermaid', 'show_mockup'].sort()
+      [
+        'agent',
+        'create_mockup',
+        'dispatch_agent',
+        'render_mermaid',
+        'send_message',
+        'show_mockup',
+        'task_stop'
+      ].sort()
     )
-    // `agent` gets a one-shot grant like dispatch_agent, never auto-allow.
+    // `agent` (and S3b's two) get a one-shot grant like dispatch_agent, never auto-allow.
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('agent')).toBe(false)
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('send_message')).toBe(false)
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('task_stop')).toBe(false)
     for (const name of PI_AUTO_ALLOW_HOSTED_TOOLS) {
       expect(PI_HOSTED_TOOL_NAMES.has(name)).toBe(true)
     }

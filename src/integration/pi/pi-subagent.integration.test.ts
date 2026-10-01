@@ -1,7 +1,8 @@
 /**
  * pi host-run subagent integration GUARD test (ADR-088).
  *
- * The proof that a host-run child is real: `PiSubagentManager` spawns a REAL
+ * The proof that a host-run child is real (S3: in the background by default,
+ * notifying through a delivery, then resumed by send_message): `PiSubagentManager` spawns a REAL
  * `pi --mode rpc` child through the real `defaultSpawnPiChild` (real
  * PiBridgeHost, the real bridge extension file, the real child flags —
  * `--session-dir`/`--session-id`/`--append-system-prompt <file>`/`--tools` —
@@ -19,8 +20,8 @@
  * proves the child transport the mocks stand in for.
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real `openai-codex` credential in
- * ~/.pi/agent/auth.json (read-only — this file never writes to it). ONE child
- * model turn against a small/cheap model; the child's session lands under a
+ * ~/.pi/agent/auth.json (read-only — this file never writes to it). TWO child
+ * model turns (launch + resume) against a small/cheap model; the child's session lands under a
  * tmp root, never ~/.pi/agent/sessions.
  *
  * Run manually:
@@ -29,13 +30,14 @@
 
 // @vitest-environment node
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { locatePiBinary } from '../../core/pi/pi-locate'
 import { loadPiAgentRegistry } from '../../core/pi/pi-agent-registry'
 import { PiSubagentManager, type PiSubagentHost } from '../../core/pi/pi-subagents'
+import type { PiAgentDelivery } from '../../core/pi/pi-delivery'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const MODEL = 'openai-codex/gpt-5.6-luna'
@@ -75,7 +77,8 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       }
     })
 
-    it('a real Explore child runs one turn, streams under the call id, reports, and persists its session under the root', async () => {
+    it('a real background Explore child runs, streams under the call id, notifies the parent through a delivery, persists its session, and resumes on it via send_message', async () => {
+      const delivered: PiAgentDelivery[] = []
       const host: PiSubagentHost = {
         routingId: 'rid-integration',
         cwd,
@@ -88,7 +91,10 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         gateChild: async () => ({ behavior: 'allow' }),
         childAbandoned: () => {},
         retractChildGates: () => {},
-        deliverToSession: () => {},
+        // The parent here is the test: a root-owned notification lands in this list.
+        deliverToSession: (payload) => {
+          delivered.push(payload)
+        },
         backgroundWorkChanged: () => {}
       }
       const manager = new PiSubagentManager(host, {
@@ -96,20 +102,28 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         sessionsRoot: root
       })
 
+      // Background is the default (ADR-088 S3, D2): the call returns at once.
       const result = await manager.run(
         {
           description: 'Echo a marker',
           prompt: 'Do not call any tools. Reply with exactly: ECHO ping',
           subagent_type: 'Explore',
-          run_in_background: false
+          name: 'echoer'
         },
         'call-integration-1',
         null
       )
-
       expect(result.isError, JSON.stringify(result)).toBeUndefined()
-      expect(result.content[0].text).toMatch(/ECHO:?\s*ping/i)
-      expect(result.content[0].text).toMatch(/<usage>total_tokens: \d+/)
+      expect(result.content[0].text).toMatch(/^Async agent launched successfully\./)
+
+      // The completion arrives as a task-notification delivery to the root.
+      await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 120_000, interval: 250 })
+      expect(delivered[0]).toMatchObject({
+        kind: 'task-notification',
+        wake: true,
+        details: { toolUseId: 'call-integration-1', status: 'completed', runIndex: 1 }
+      })
+      expect(delivered[0].text).toMatch(/<result>[\s\S]*ECHO:?\s*ping/i)
 
       const channels = sent.map(([c]) => c)
       const startIdx = channels.indexOf('session:task-started')
@@ -130,6 +144,23 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       const files = readdirSync(childDir)
       expect(files).toContain('system-prompt.md')
       expect(files.some((f) => f.endsWith(`_${details.cuiAgent.agentId}.jsonl`))).toBe(true)
-    }, 150_000)
+
+      // A second turn: send_message resumes the finished agent on the SAME
+      // session file (one more small model turn), started by a host-built
+      // delivery, and it notifies again with runIndex 2.
+      const resumed = await manager.sendMessage(
+        { to: 'echoer', message: 'Do not call any tools. Reply with exactly: ECHO pong' },
+        null
+      )
+      expect(resumed.content[0].text).toBe(
+        'Resuming agent echoer. You will be notified when it completes.'
+      )
+      await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 120_000, interval: 250 })
+      expect(delivered[1].details).toMatchObject({ runIndex: 2, status: 'completed' })
+      expect(delivered[1].text).toMatch(/ECHO:?\s*pong/i)
+      expect(
+        readdirSync(childDir).filter((f) => f.endsWith(`_${details.cuiAgent.agentId}.jsonl`))
+      ).toHaveLength(1)
+    }, 300_000)
   }
 )

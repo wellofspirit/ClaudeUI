@@ -150,6 +150,12 @@ export function piToolKind(toolName: string): ToolKind {
     // Same 'task' kind; mirrored in PiEngineToolMap.kindOf.
     case 'subagent':
       return 'task'
+    // ADR-088 S3b: the bridge's `send_message` / `task_stop` — Claude's
+    // SendMessage / TaskStop row kinds. Mirrored in PiEngineToolMap.kindOf.
+    case 'send_message':
+      return 'detail'
+    case 'task_stop':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -197,7 +203,9 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'create_mockup',
   'show_mockup',
   'dispatch_agent',
-  'agent'
+  'agent',
+  'send_message',
+  'task_stop'
 ])
 
 // ---------------------------------------------------------------------------

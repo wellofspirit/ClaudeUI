@@ -48,7 +48,13 @@ import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
 import { blobStore } from './blob-store'
-import { childSessionFile, collectAgentIds, deleteChildSession } from '../pi/pi-subagent-store'
+import {
+  childSessionFile,
+  collectAgentIds,
+  collectAgentLinkRecords,
+  deleteChildSession,
+  type PiAgentLinkRecord
+} from '../pi/pi-subagent-store'
 
 /** `~/.pi/agent` — pi's own data root. */
 export function piAgentDir(): string {
@@ -480,6 +486,20 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
       `loadPiSessionHistory(${sessionId}) failed: ${err instanceof Error ? err.message : String(err)}`
     )
     return { messages: [], statusLine: null }
+  }
+}
+
+/**
+ * The depth-1 agent records a resumed PiSession rebuilds (ADR-088 S3b, G7),
+ * from the parent's active branch. Best-effort: [] on any failure.
+ */
+export function loadPiAgentLinks(sessionId: string): PiAgentLinkRecord[] {
+  try {
+    const filePath = findPiSessionFile(sessionId)
+    const parsed = filePath ? readPiSessionFile(filePath) : null
+    return parsed ? collectAgentLinkRecords(activeBranchEntries(parsed.entries)) : []
+  } catch {
+    return []
   }
 }
 

@@ -14,13 +14,14 @@
  * id is model-influenced data read back from disk, so it is validated as a
  * uuid v4 BEFORE it ever reaches a `path.join` (no traversal through it).
  *
- * A leaf (fs/os/path + pi-protocol types): pi-session-list.ts and
+ * A leaf (fs/os/path, pi-protocol types, pi-delivery): pi-session-list.ts and
  * pi-subagents.ts import it, never the other way round.
  */
 import { promises as fsp, readdirSync } from 'fs'
 import { homedir } from 'os'
 import path from 'path'
 import type { PiSessionEntry } from './pi-protocol'
+import { piAgentDeliveryDetails } from './pi-delivery'
 
 /** `~/.claude/ui/pi-subagents` (the same per-user `~/.claude/ui` root the vault and the bridge use). */
 export function piSubagentSessionsRoot(): string {
@@ -73,6 +74,64 @@ export function collectAgentIds(entries: readonly PiSessionEntry[]): PiAgentLink
     links.push({ toolUseId: e.message.toolCallId, agentId: cui.agentId })
   }
   return links
+}
+
+/** A depth-1 agent as the parent's history tells it (ADR-088 S3b, G7: the record rebuild). */
+export interface PiAgentLinkRecord {
+  agentId: string
+  originToolUseId: string
+  subagentType: string
+  name?: string
+  description?: string
+  model?: string
+  background?: boolean
+  /** The last task notification's status for that call, else the tool result's own. */
+  status?: string
+  stoppedBy?: 'user' | 'agent' | 'interrupt' | 'dispose' | null
+}
+
+const STOP_REASONS = new Set(['user', 'agent', 'interrupt', 'dispose'])
+
+/**
+ * The parent's own `agent` links with what a resume needs: the host-written
+ * `details.cuiAgent` of each toolResult, then the last task notification for
+ * that call (its `details`, never its text — pi-delivery.ts). Only the
+ * parent's entries: these are depth-1 agents (nested records are not rebuilt).
+ */
+export function collectAgentLinkRecords(entries: readonly PiSessionEntry[]): PiAgentLinkRecord[] {
+  const byCall = new Map<string, PiAgentLinkRecord>()
+  const s = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+  for (const e of entries) {
+    if (e.type === 'message' && e.message.role === 'toolResult' && e.message.toolName === 'agent') {
+      const cui = (e.message.details as { cuiAgent?: Record<string, unknown> } | undefined)
+        ?.cuiAgent
+      if (!cui || !isValidAgentId(cui.agentId) || typeof cui.subagentType !== 'string') continue
+      const stoppedBy = s(cui.stoppedBy)
+      byCall.set(e.message.toolCallId, {
+        agentId: cui.agentId,
+        originToolUseId: e.message.toolCallId,
+        subagentType: cui.subagentType,
+        ...(s(cui.name) ? { name: s(cui.name) } : {}),
+        ...(s(cui.description) ? { description: s(cui.description) } : {}),
+        ...(s(cui.model) ? { model: s(cui.model) } : {}),
+        background: cui.background === true,
+        ...(s(cui.status) ? { status: s(cui.status) } : {}),
+        stoppedBy:
+          stoppedBy && STOP_REASONS.has(stoppedBy)
+            ? (stoppedBy as PiAgentLinkRecord['stoppedBy'])
+            : null
+      })
+    } else if (e.type === 'custom_message') {
+      const d = piAgentDeliveryDetails(e.customType, e.details)
+      if (!d || d.kind !== 'task-notification') continue
+      const link = byCall.get(d.toolUseId)
+      if (!link || link.agentId !== d.agentId) continue
+      link.status = typeof d.status === 'string' ? d.status : link.status
+      link.stoppedBy =
+        typeof d.stoppedBy === 'string' && STOP_REASONS.has(d.stoppedBy) ? d.stoppedBy : null
+    }
+  }
+  return [...byCall.values()]
 }
 
 /**

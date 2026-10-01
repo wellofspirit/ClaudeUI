@@ -484,3 +484,45 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
     expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
   })
 })
+
+describe('PiEngineToolMap — send_message / task_stop rows (ADR-088 S3b)', () => {
+  it('kinds mirror permission-engine (detail / note)', () => {
+    expect(PiEngineToolMap.kindOf('send_message')).toBe('detail')
+    expect(PiEngineToolMap.kindOf('task_stop')).toBe('note')
+    expect(piToolKind('send_message')).toBe('detail')
+    expect(piToolKind('task_stop')).toBe('note')
+  })
+
+  it('send_message: to + summary as fields, the message as the text; task_stop: a stop note', () => {
+    expect(
+      PiEngineToolMap.normalize('detail', { to: 'scout', summary: 'check X', message: 'also X' })
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'scout' },
+        { label: 'summary', value: 'check X' }
+      ],
+      text: 'also X'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toEqual({
+      kind: 'note',
+      icon: 'stop',
+      text: 'Stopped agent scout'
+    })
+  })
+
+  it('task_stop: once the host answered, the row says what it said (a refusal is not a stop)', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'note',
+        { task_id: 'scout' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'Agent scout is not running.',
+          isError: true
+        }
+      )
+    ).toEqual({ kind: 'note', icon: 'stop', text: 'Agent scout is not running.' })
+  })
+})

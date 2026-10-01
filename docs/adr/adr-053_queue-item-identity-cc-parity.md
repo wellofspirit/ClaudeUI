@@ -1,7 +1,7 @@
 # ADR-053 — Queued messages: itemized identity in core, Claude-Code-parity take-back on every engine
 
 **Status:** Accepted (2026-08-13) — design; implemented in SyncCore phase 3 per `docs/architecture/sync-core.md` §Queue
-**Relates to:** ADR-030 (capability honesty — uniform events over per-engine transports), ADR-035 (pi steer), ADR-038 (event-driven lifecycle, applied to the queue), ADR-051 (the event model this rides on)
+**Relates to:** ADR-030 (capability honesty — uniform events over per-engine transports), ADR-035 (pi steer), ADR-038 (event-driven lifecycle, applied to the queue), ADR-051 (the event model this rides on), ADR-088 (agent deliveries into a pi session are NOT queue items: pi's own steer queue gives them boundary timing, and there is nothing to take back)
 **Amends:** ADR-024 (its queue/steer parity for opencode is redefined by the emulation below)
 
 ## Context

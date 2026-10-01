@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 10 (ADR-088 S3 added cui-deliver and run_in_background)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('10')
+  it('is version 11 (ADR-088 S3b added send_message and task_stop)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('11')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -261,7 +261,8 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_DISPATCH_ENABLED',
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
-  'CLAUDEUI_PI_AGENT_LISTING'
+  'CLAUDEUI_PI_AGENT_LISTING',
+  'CLAUDEUI_PI_SEND_MESSAGE'
 ] as const
 
 type BridgeEnvVar = (typeof BRIDGE_ENV_VARS)[number]
@@ -457,7 +458,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () =>
 
   it('registers agent ONLY under CLAUDEUI_PI_AGENT_TOOL=1 with bridge creds, independently of CLAUDEUI_PI_HOSTED_TOOLS', () => {
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, () => {
-      expect([...runExtension().tools.keys()]).toEqual(['agent'])
+      // task_stop rides in the agent block (bridge v11).
+      expect([...runExtension().tools.keys()]).toEqual(['agent', 'task_stop'])
     })
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, () => {
       expect(runExtension().tools.has('agent')).toBe(false)
@@ -480,7 +482,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () =>
         'agent',
         'create_mockup',
         'render_mermaid',
-        'show_mockup'
+        'show_mockup',
+        'task_stop'
       ])
     })
   })
@@ -547,6 +550,70 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () =>
         isError: true
       })
     })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, ADR-088 S3b)', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('send_message registers ONLY under CLAUDEUI_PI_SEND_MESSAGE=1 with bridge creds, independently of the agent tool', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SEND_MESSAGE: '1' }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['send_message'])
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SEND_MESSAGE: '' }, () => {
+      expect(runExtension().tools.has('send_message')).toBe(false)
+    })
+    withEnv({ CLAUDEUI_PI_SEND_MESSAGE: '1', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }, () => {
+      expect(runExtension().tools.size).toBe(0)
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1', CLAUDEUI_PI_SEND_MESSAGE: '1' }, () => {
+      expect([...runExtension().tools.keys()].sort()).toEqual([
+        'agent',
+        'send_message',
+        'task_stop'
+      ])
+    })
+  })
+
+  it('schemas are plain JSON schema; both execute() through /hosted-tool under their own names', async () => {
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'ok' }] })
+      } as Response
+    }) as typeof fetch
+    await withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1', CLAUDEUI_PI_SEND_MESSAGE: '1' },
+      async () => {
+        const { tools } = runExtension()
+        expect(tools.get('send_message')!.parameters).toEqual({
+          type: 'object',
+          properties: {
+            to: { type: 'string', description: expect.stringContaining("An agent's name or id") },
+            message: { type: 'string', description: expect.any(String) },
+            summary: { type: 'string', description: expect.any(String) }
+          },
+          required: ['to', 'message']
+        })
+        expect(tools.get('task_stop')!.parameters).toEqual({
+          type: 'object',
+          properties: { task_id: { type: 'string', description: expect.any(String) } },
+          required: ['task_id']
+        })
+        await tools.get('send_message')!.execute('c-sm', { to: 'a', message: 'm' })
+        await tools.get('task_stop')!.execute('c-ts', { task_id: 'a' })
+      }
+    )
+    expect(bodies).toEqual([
+      { toolName: 'send_message', input: { to: 'a', message: 'm' }, toolCallId: 'c-sm' },
+      { toolName: 'task_stop', input: { task_id: 'a' }, toolCallId: 'c-ts' }
+    ])
   })
 })
 

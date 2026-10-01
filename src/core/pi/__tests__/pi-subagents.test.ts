@@ -29,6 +29,7 @@ import {
   MAX_CONCURRENT_PI_SUBAGENTS,
   narrowMode,
   PI_SUBAGENT_SUFFIX,
+  agentMessageText,
   PiSubagentManager,
   type PiChildScope,
   type PiSubagentHost
@@ -221,6 +222,7 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_PLAN_TOOLS: '',
       CLAUDEUI_PI_AGENT_TOOL: '1',
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
+      CLAUDEUI_PI_SEND_MESSAGE: '1',
       CLAUDEUI_PI_SKILL_DIRS: '/s'
     })
     const cannot = buildPiSubagentChildEnv(
@@ -257,14 +259,21 @@ describe('buildPiSubagentChildArgs', () => {
         definition: def({ tools: ['read', 'agent'], disallowedTools: ['bash'], thinking: 'high' }),
         childCanSpawn: true
       }).slice(6)
-    ).toEqual(['--tools', 'read,agent', '--exclude-tools', 'bash', '--thinking', 'high'])
+    ).toEqual([
+      '--tools',
+      'read,agent,send_message,task_stop',
+      '--exclude-tools',
+      'bash',
+      '--thinking',
+      'high'
+    ])
     expect(
       buildPiSubagentChildArgs({
         ...base,
         definition: def({ tools: ['read', 'agent'] }),
         childCanSpawn: false
       }).slice(6)
-    ).toEqual(['--tools', 'read'])
+    ).toEqual(['--tools', 'read,send_message'])
   })
 })
 
@@ -378,7 +387,7 @@ describe('PiSubagentManager.run', () => {
     const byId = (id: string): FakeChild =>
       fake.children[['call-e', 'call-g', 'call-deep'].indexOf(id)]
     const explore = byId('call-e')
-    expect(explore.opts.args!.slice(6)).toEqual(['--tools', 'read,bash,grep,find,ls'])
+    expect(explore.opts.args!.slice(6)).toEqual(['--tools', 'read,bash,grep,find,ls,send_message'])
     expect(explore.env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     const general = byId('call-g')
     expect(general.env.CLAUDEUI_PI_AGENT_TOOL).toBe('1')
@@ -436,7 +445,8 @@ describe('PiSubagentManager.run', () => {
 
     const started = sent.find(([c]) => c === 'session:task-started')![1] as Record<string, unknown>
     expect(started).toMatchObject({ toolUseId: 'call-7', taskType: 'local_agent', runIndex: 1 })
-    expect(started.isBackgrounded).toBeUndefined()
+    // S3b (Q7): a foreground run says so, so its card can offer "Send to background".
+    expect(started.isBackgrounded).toBe(false)
     const progress = sent.find(([c]) => c === 'session:task-progress')![1]
     expect(progress).toMatchObject({
       toolUseId: 'call-7',
@@ -470,6 +480,7 @@ describe('PiSubagentManager.run', () => {
         agentId: started.taskId,
         subagentType: 'general-purpose',
         name: 'scout',
+        description: 'Find it',
         status: 'completed',
         model: 'openai-codex/parent-model'
       }
@@ -856,6 +867,7 @@ describe('PiSubagentManager — background runs (ADR-088 S3)', () => {
         agentId: started.taskId,
         subagentType: 'general-purpose',
         name: 'scout',
+        description: 'Scan',
         model: 'openai-codex/parent-model',
         background: true,
         status: 'async_launched'
@@ -1224,5 +1236,598 @@ describe('PiSubagentManager — reserved bridge commands (ADR-088 S3 review R3)'
       })
     }
     expect(fake.spawn).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-088 S3b — send_message, resume, names, task_stop, Send to background,
+// record rebuild
+// ---------------------------------------------------------------------------
+
+describe('PiSubagentManager — messaging (ADR-088 S3b)', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  /** A child's scope as its own hosted calls see it (via the parent gate mock). */
+  async function scopeOf(host: PiSubagentHost, child: FakeChild): Promise<PiChildScope> {
+    const probe = `probe-${Math.random()}`
+    await child.opts.gateHandler({ toolCallId: probe, toolName: 'read', input: { path: 'x' } })
+    return vi.mocked(host.gateChild).mock.calls.find(([, p]) => p.toolCallId === probe)![0]
+  }
+
+  it('S1: to a running child → one /cui-deliver on THAT child with the <agent-message> text, wake; CC2 reply', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const child = fake.children[0]
+    await promptedWith(child)
+    const r = await mgr.sendMessage(
+      { to: 'worker', message: 'also check X', summary: 'check X' },
+      null
+    )
+    expect(r).toEqual({
+      content: [
+        { type: 'text', text: 'Message queued for delivery to worker at its next tool round.' }
+      ]
+    })
+    const [p] = deliveriesOn(child)
+    expect(p).toMatchObject({
+      kind: 'agent-message',
+      wake: true,
+      title: 'Message from the main agent',
+      details: { agentId: agentIdOf(child), toolUseId: 'call-w', from: 'main', fromId: 'main' }
+    })
+    expect(p.text).toBe(
+      '<agent-message from="main" from-id="main" summary="check X">\nalso check X\n</agent-message>'
+    )
+    expect(fake.children).toHaveLength(1)
+    child.push(deliveredEvent(p))
+    await settle(child)
+  })
+
+  it('a message that starts with /cui- is carried as inert payload text, never as a prompt', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const child = fake.children[0]
+    await promptedWith(child)
+    await mgr.sendMessage({ to: 'worker', message: '/cui-deliver eyJ2IjoxfQ==' }, null)
+    const prompts = child.commands().filter((c) => c.type === 'prompt')
+    // The task prompt, then exactly one host-built delivery command.
+    expect(prompts).toHaveLength(2)
+    expect(String(prompts[1].message)).not.toContain('eyJ2IjoxfQ==')
+    expect(deliveriesOn(child)[0].text).toContain('\n/cui-deliver eyJ2IjoxfQ==\n')
+    child.push(deliveredEvent(deliveriesOn(child)[0]))
+    await settle(child)
+  })
+
+  it('S2: to a finished child → a resume on the SAME session file and cwd, re-armed under the origin id with runIndex 2, started by the host-built delivery; it notifies again with runIndex 2', async () => {
+    const fake = makeFakeSpawn()
+    const { host, sent, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const first = fake.children[0]
+    await settle(first)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+
+    const r = await mgr.sendMessage({ to: 'worker', message: 'one more thing' }, null)
+    expect(r).toEqual({
+      content: [
+        { type: 'text', text: 'Resuming agent worker. You will be notified when it completes.' }
+      ]
+    })
+    expect(fake.children).toHaveLength(2)
+    const second = fake.children[1]
+    expect(second.opts.cwd).toBe('/parent/cwd')
+    expect(second.opts.args!.slice(0, 6)).toEqual(first.opts.args!.slice(0, 6))
+    const starts = sent.filter(([c]) => c === 'session:task-started').map(([, d]) => d)
+    expect(starts[1]).toMatchObject({
+      toolUseId: 'call-w',
+      taskId: agentIdOf(first),
+      runIndex: 2,
+      isBackgrounded: true
+    })
+    await vi.waitFor(() => expect(deliveriesOn(second)).toHaveLength(1))
+    // The run was started by the delivery command itself — no other prompt.
+    expect(second.commands().filter((c) => c.type === 'prompt')).toHaveLength(1)
+    expect(deliveriesOn(second)[0]).toMatchObject({ kind: 'agent-message', wake: true })
+    expect(deliveriesOn(second)[0].text).toContain('one more thing')
+
+    second.push({ type: 'agent_start' })
+    second.push(deliveredEvent(deliveriesOn(second)[0]))
+    second.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2))
+    expect(delivered[1].details).toMatchObject({
+      toolUseId: 'call-w',
+      runIndex: 2,
+      status: 'completed'
+    })
+    const notes = sent.filter(([c]) => c === 'session:task-notification').map(([, d]) => d)
+    expect(notes.map((n) => (n as { runIndex: number }).runIndex)).toEqual([1, 2])
+  })
+
+  it('S3: to a user-stopped child → the CC2 refusal, no spawn', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    mgr.stop('call-w', 'user')
+    fake.children[0].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(await mgr.sendMessage({ to: 'worker', message: 'go on' }, null)).toEqual({
+      content: [
+        {
+          type: 'text',
+          text:
+            'Agent "worker" was stopped by the user and was not resumed. Treat its work as ' +
+            'cancelled; only start a new agent for it if the user explicitly asks.'
+        }
+      ],
+      isError: true
+    })
+    expect(fake.children).toHaveLength(1)
+  })
+
+  it('S4: a background child → main delivers to the session with wake; a foreground child is refused; main → main is refused', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'bg' }, 'call-bg', null)
+    const fg = mgr.run(
+      { description: 'd', prompt: 'p', name: 'fg', run_in_background: false },
+      'call-fg',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const [bgChild, fgChild] = fake.children
+    await promptedWith(fgChild)
+
+    const bgScope = await scopeOf(host, bgChild)
+    expect(await mgr.sendMessage({ to: 'main', message: 'found it' }, bgScope)).toEqual({
+      content: [{ type: 'text', text: "Message queued for the main conversation's next turn." }]
+    })
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({
+      kind: 'agent-message',
+      wake: true,
+      title: 'Message from bg',
+      details: { from: 'bg', to: 'main' }
+    })
+    expect(delivered[0].text).toContain('<agent-message from="bg" from-id="')
+
+    const fgScope = await scopeOf(host, fgChild)
+    expect((await mgr.sendMessage({ to: 'main', message: 'x' }, fgScope)).content[0].text).toBe(
+      'You are running in the foreground; your final report is returned to the agent that launched you.'
+    )
+    expect((await mgr.sendMessage({ to: 'main', message: 'x' }, null)).content[0].text).toBe(
+      'You are the main conversation — "main" addresses you. Send to a named agent instead.'
+    )
+    expect(delivered).toHaveLength(1)
+    await settle(fgChild)
+    await fg
+    await settle(bgChild)
+  })
+
+  it('S5: a child reaches a running sibling by name', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'alpha' }, 'call-a', null)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'beta' }, 'call-b', null)
+    const [a, b] = fake.children
+    await promptedWith(b)
+    const aScope = await scopeOf(host, a)
+    expect((await mgr.sendMessage({ to: 'beta', message: 'hi' }, aScope)).isError).toBeUndefined()
+    expect(deliveriesOn(b)).toHaveLength(1)
+    expect(deliveriesOn(b)[0]).toMatchObject({
+      title: 'Message from alpha',
+      details: { from: 'alpha' }
+    })
+    expect(deliveriesOn(a)).toHaveLength(0)
+    expect((await mgr.sendMessage({ to: 'alpha', message: 'me' }, aScope)).content[0].text).toBe(
+      'You cannot send a message to yourself.'
+    )
+    expect((await mgr.sendMessage({ to: 'nobody', message: 'x' }, null)).content[0].text).toBe(
+      'No agent "nobody" in this session. Agents: alpha, beta'
+    )
+    b.push(deliveredEvent(deliveriesOn(b)[0]))
+    await settle(a)
+    await settle(b)
+  })
+
+  it('S6: names — duplicate (any case), reserved, uuid-shaped, too long or malformed → error, no spawn', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'Scout' }, 'call-1', null)
+    const bad: Array<[string, string]> = [
+      ['scout', 'An agent named "scout" already exists in this session.'],
+      ['Main', 'agent "name" "Main" is reserved.'],
+      ['team-lead', 'agent "name" "team-lead" is reserved.'],
+      ['11111111-1111-4111-8111-111111111111', 'agent "name" may not look like an agent id.'],
+      ['x'.repeat(65), 'agent "name" must be 1 to 64 characters.'],
+      [
+        '-dash',
+        'agent "name" may use letters, digits, ".", "_" and "-", starting with a letter or digit.'
+      ]
+    ]
+    for (const [name, text] of bad) {
+      expect(await mgr.run({ description: 'd', prompt: 'p', name }, `c-${name}`, null)).toEqual({
+        content: [{ type: 'text', text }],
+        isError: true
+      })
+    }
+    expect(fake.children).toHaveLength(1)
+    await settle(fake.children[0])
+  })
+
+  it('K1: task_stop by name from the session stops the agent and its descendants, with a passive notification; a child may stop only its own descendants', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'other' }, 'call-O', null)
+    const [lead, other] = fake.children
+    await promptedWith(lead)
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    const grand = fake.children[2]
+
+    const otherScope = await scopeOf(host, other)
+    expect(mgr.taskStop({ task_id: 'grand' }, otherScope)).toEqual({
+      content: [{ type: 'text', text: 'You can only stop agents you launched.' }],
+      isError: true
+    })
+    const leadScope = await scopeOf(host, lead)
+    expect(mgr.taskStop({ task_id: 'other' }, leadScope).content[0].text).toBe(
+      'You can only stop agents you launched.'
+    )
+
+    expect(mgr.taskStop({ task_id: 'lead' }, null)).toEqual({
+      content: [{ type: 'text', text: 'Stopped agent lead.' }]
+    })
+    expect(grand.commands().some((c) => c.type === 'abort')).toBe(true)
+    expect(lead.commands().some((c) => c.type === 'abort')).toBe(true)
+    grand.push({ type: 'agent_settled' })
+    lead.push({ type: 'agent_settled' })
+    await vi.waitFor(() =>
+      expect(delivered.some((p) => p.details.toolUseId === 'call-L')).toBe(true)
+    )
+    const leadNote = delivered.find((p) => p.details.toolUseId === 'call-L')!
+    expect(leadNote).toMatchObject({
+      wake: false,
+      details: { status: 'stopped', stoppedBy: 'agent' }
+    })
+    expect(leadNote.text).toContain('<summary>Agent "lead" was stopped</summary>')
+    expect(mgr.taskStop({ task_id: 'lead' }, null).content[0].text).toBe(
+      'Agent lead is not running.'
+    )
+    await settle(other)
+  })
+
+  it('G1: Send to background — the waiting call returns the async text, task-started re-armed with the same runIndex and isBackgrounded: true; completion notifies', async () => {
+    const fake = makeFakeSpawn()
+    const { host, sent, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', name: 'slow', run_in_background: false },
+      'call-s',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    const child = fake.children[0]
+    await promptedWith(child)
+    const firstStart = sent.find(([c]) => c === 'session:task-started')![1] as Record<
+      string,
+      unknown
+    >
+    expect(firstStart.isBackgrounded).toBe(false)
+
+    expect(mgr.background('call-s')).toEqual({ success: true })
+    const r = await pending
+    expect(r.content[0].text).toMatch(/^Async agent launched successfully\./)
+    expect(r.details).toMatchObject({ cuiAgent: { background: true, status: 'async_launched' } })
+    const starts = sent.filter(([c]) => c === 'session:task-started').map(([, d]) => d)
+    expect(starts[1]).toMatchObject({
+      toolUseId: 'call-s',
+      runIndex: 1,
+      startedAt: firstStart.startedAt,
+      isBackgrounded: true
+    })
+    expect(mgr.liveBackgroundCount).toBe(1)
+    expect(mgr.background('call-s')).toMatchObject({ success: false })
+
+    await settle(child)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0]).toMatchObject({
+      wake: true,
+      details: { toolUseId: 'call-s', status: 'completed' }
+    })
+  })
+
+  it('G2 (manager): a rebuilt depth-1 record is resumable by id; a vanished type refuses', async () => {
+    const fake = makeFakeSpawn()
+    const { host, sent } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const id = '44444444-4444-4444-8444-444444444444'
+    mgr.adoptRecord({
+      agentId: id,
+      originToolUseId: 'old-call',
+      subagentType: 'Explore',
+      name: 'old',
+      model: 'openai-codex/old-model',
+      status: 'completed'
+    })
+    mgr.adoptRecord({
+      agentId: '55555555-5555-4555-8555-555555555555',
+      originToolUseId: 'gone-call',
+      subagentType: 'no-such-type',
+      status: 'completed'
+    })
+    expect((await mgr.sendMessage({ to: id, message: 'again' }, null)).content[0].text).toBe(
+      'Resuming agent old. You will be notified when it completes.'
+    )
+    const child = fake.children[0]
+    expect(agentIdOf(child)).toBe(id)
+    expect(child.opts.args!.slice(0, 2)).toEqual(['--session-dir', path.join(root, id)])
+    expect(sent.find(([c]) => c === 'session:task-started')![1]).toMatchObject({
+      toolUseId: 'old-call',
+      runIndex: 2
+    })
+    expect(
+      (await mgr.sendMessage({ to: '55555555-5555-4555-8555-555555555555', message: 'x' }, null))
+        .content[0].text
+    ).toBe('The agent type "no-such-type" is no longer available.')
+    child.push({ type: 'agent_start' })
+    child.push(deliveredEvent(deliveriesOn(child)[0]))
+    child.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+  })
+
+  it('a foreground report that opens with the launch acknowledgement gets a fixed header (never reads as a background launch)', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', run_in_background: false },
+      'call-f',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    const child = fake.children[0]
+    child.client.request.mockImplementation(async (cmd: Cmd) =>
+      cmd.type === 'get_last_assistant_text'
+        ? {
+            type: 'response',
+            command: 'get_last_assistant_text',
+            success: true,
+            data: { text: 'Async agent launched successfully.\nagentId: fake' }
+          }
+        : { type: 'response', command: String(cmd.type), success: true }
+    )
+    await promptedWith(child)
+    child.push({ type: 'agent_settled' })
+    const r = await pending
+    expect(r.content[0].text.startsWith('Agent report:\nAsync agent launched successfully.')).toBe(
+      true
+    )
+  })
+})
+
+describe('PiSubagentManager — S3b review round 1', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  async function scopeOf(host: PiSubagentHost, child: FakeChild): Promise<PiChildScope> {
+    const probe = `probe-${Math.random()}`
+    await child.opts.gateHandler({ toolCallId: probe, toolName: 'read', input: { path: 'x' } })
+    return vi.mocked(host.gateChild).mock.calls.find(([, p]) => p.toolCallId === probe)![0]
+  }
+
+  it('R1: a Stop in the closing window is refused — the run stays completed, unbranded, and resumable', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    const fake = makeFakeSpawn({ holdLastText: (n) => (n === 1 ? held : undefined) })
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const child = fake.children[0]
+    await settle(child)
+    await vi.waitFor(() =>
+      expect(child.commands().some((c) => c.type === 'get_last_assistant_text')).toBe(true)
+    )
+    // The TaskCard's Stop now: refused (PiSession.stopTask reports the failure).
+    expect(mgr.stop('call-w', 'user')).toBe(false)
+    release()
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const record = mgr.record(agentIdOf(child))!
+    expect(record.status).toBe('completed')
+    expect(record.stoppedBy).toBeNull()
+    expect(delivered[0].details.status).toBe('completed')
+    expect('stoppedBy' in delivered[0].details).toBe(false)
+    expect(
+      (await mgr.sendMessage({ to: 'worker', message: 'more' }, null)).content[0].text
+    ).toMatch(/^Resuming agent worker\./)
+    expect(fake.children).toHaveLength(2)
+  })
+
+  it('R2: a rebuilt record stopped by the user gets the CC2 refusal and no spawn', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const id = '77777777-7777-4777-8777-777777777777'
+    mgr.adoptRecord({
+      agentId: id,
+      originToolUseId: 'old-call',
+      subagentType: 'general-purpose',
+      name: 'halted',
+      status: 'stopped',
+      stoppedBy: 'user'
+    })
+    expect((await mgr.sendMessage({ to: 'halted', message: 'go' }, null)).content[0].text).toBe(
+      'Agent "halted" was stopped by the user and was not resumed. Treat its work as ' +
+        'cancelled; only start a new agent for it if the user explicitly asks.'
+    )
+    expect(fake.spawn).not.toHaveBeenCalled()
+  })
+
+  it('M1: a child stops its own descendant', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const grand = fake.children[1]
+    const leadScope = await scopeOf(host, lead)
+    expect(mgr.taskStop({ task_id: 'grand' }, leadScope)).toEqual({
+      content: [{ type: 'text', text: 'Stopped agent grand.' }]
+    })
+    expect(grand.commands().some((c) => c.type === 'abort')).toBe(true)
+    expect(lead.commands().some((c) => c.type === 'abort')).toBe(false)
+    grand.push({ type: 'agent_settled' })
+    await settle(lead)
+  })
+
+  it('M2: an agent that cannot launch agents may steer a running one but not resume a finished one', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'done' }, 'call-done', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await mgr.run({ description: 'd', prompt: 'p', name: 'live' }, 'call-live', null)
+    await mgr.run(
+      { description: 'd', prompt: 'p', name: 'explorer', subagent_type: 'Explore' },
+      'call-ex',
+      null
+    )
+    const [, live, explorer] = fake.children
+    await promptedWith(live)
+    const exScope = await scopeOf(host, explorer)
+    expect(exScope.canSpawn).toBe(false)
+    expect((await mgr.sendMessage({ to: 'live', message: 'hi' }, exScope)).isError).toBeUndefined()
+    expect(deliveriesOn(live)).toHaveLength(1)
+    expect(await mgr.sendMessage({ to: 'done', message: 'wake up' }, exScope)).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: 'This agent cannot launch agents; it can only message running agents.'
+        }
+      ],
+      isError: true
+    })
+    expect(fake.children).toHaveLength(3)
+    live.push(deliveredEvent(deliveriesOn(live)[0]))
+    await settle(live)
+    await settle(explorer)
+  })
+
+  it("M3: a resumed run's judge sees the agent's earlier assistant actions (the trajectory spans runs)", async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const first = fake.children[0]
+    await promptedWith(first)
+    first.push({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    first.push(usageEnd(1, 1))
+    first.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const earlier = [...mgr.record(agentIdOf(first))!.trajectory.values()]
+    expect(earlier).toHaveLength(1)
+
+    await mgr.sendMessage({ to: 'worker', message: 'again' }, null)
+    const second = fake.children[1]
+    const scope = await scopeOf(host, second)
+    expect([...scope.runner()!.trajectory.values()].map((m) => m.id)).toEqual([earlier[0].id])
+    second.push({ type: 'agent_start' })
+    second.push(deliveredEvent(deliveriesOn(second)[0]))
+    second.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+  })
+
+  it('M5: a resume by someone other than the owner says who will be notified', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'done' }, 'call-done', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await mgr.run({ description: 'd', prompt: 'p', name: 'other' }, 'call-o', null)
+    const otherScope = await scopeOf(host, fake.children[1])
+    expect((await mgr.sendMessage({ to: 'done', message: 'x' }, otherScope)).content[0].text).toBe(
+      'Resuming agent done. The main session will be notified when it completes.'
+    )
+  })
+
+  it('M9: attribute values lose quotes, angle brackets and line breaks', () => {
+    expect(
+      agentMessageText({ fromLabel: 'a"<b>\nc', fromId: 'id', summary: '<x>', message: 'm' })
+    ).toBe('<agent-message from="a  b  c" from-id="id" summary=" x ">\nm\n</agent-message>')
+  })
+
+  it('M10: a grant minted before a stop does not run after it; a target still starting says so', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    let releaseSpawn: () => void = () => {}
+    const spawnHeld = new Promise<void>((r) => (releaseSpawn = r))
+    let holdNext = false
+    const mgr = new PiSubagentManager(host, {
+      spawn: async (o) => {
+        if (holdNext) await spawnHeld
+        return fake.spawn(o)
+      },
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const input = { description: 'g', prompt: 'q' }
+    expect(await lead.opts.gateHandler({ toolCallId: 'pre', toolName: 'agent', input })).toEqual({
+      behavior: 'allow'
+    })
+    mgr.stop('call-L', 'user')
+    expect(
+      await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'pre' })
+    ).toEqual({ content: [{ type: 'text', text: 'Agent stopped.' }], isError: true })
+    expect(fake.children).toHaveLength(1)
+    lead.push({ type: 'agent_settled' })
+
+    holdNext = true
+    const starting = mgr.run({ description: 'd', prompt: 'p', name: 'slow' }, 'call-S', null)
+    await new Promise((r) => setTimeout(r, 10))
+    expect((await mgr.sendMessage({ to: 'slow', message: 'x' }, null)).content[0].text).toBe(
+      'Agent slow is starting; send the message again shortly.'
+    )
+    releaseSpawn()
+    await starting
+    await settle(fake.children[1])
   })
 })

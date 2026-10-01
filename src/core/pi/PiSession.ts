@@ -43,7 +43,11 @@ import type {
   PiRpcCommand
 } from './pi-protocol'
 import { getPiModelCatalog, discoverPiModels, effortLevelsFromModel } from './model-discovery'
-import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
+import {
+  findPiSessionFile,
+  loadPiAgentLinks,
+  loadPiSessionHistory
+} from '../services/pi-session-list'
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
@@ -826,10 +830,15 @@ export class PiSession extends BaseSession {
           // on whether this session's mode happens to be 'plan' right now
           // (that's a separate, later step — see the re-entry send below).
           ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
-          // Host-run subagents (ADR-088): the bridge's own `agent` tool and
-          // the agent types for its description. No second `-e`.
+          // Host-run subagents (ADR-088): the bridge's own `agent` (+
+          // `task_stop`) and `send_message` tools, and the agent types for
+          // the `agent` description. No second `-e`.
           ...(this.capabilities.subagents
-            ? { CLAUDEUI_PI_AGENT_TOOL: '1', CLAUDEUI_PI_AGENT_LISTING: this.subagents.listing() }
+            ? {
+                CLAUDEUI_PI_AGENT_TOOL: '1',
+                CLAUDEUI_PI_AGENT_LISTING: this.subagents.listing(),
+                CLAUDEUI_PI_SEND_MESSAGE: '1'
+              }
             : {}),
           ...this.computeSkillDirsEnv()
         }
@@ -1166,6 +1175,16 @@ export class PiSession extends BaseSession {
       // folds them idempotently per (toolUseId, runIndex).
       for (const notification of taskNotifications ?? []) {
         this.send('session:task-notification', notification)
+      }
+      // ADR-088 S3b (G7): the depth-1 agents of earlier runs, so send_message
+      // can address (and resume) them across an app restart.
+      try {
+        for (const link of loadPiAgentLinks(sessionId)) this.subagents.adoptRecord(link)
+      } catch (err) {
+        logger.warn(
+          'PiSession',
+          `agent record rebuild failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+        )
       }
 
       // Seed the durable cost base from pi's own tally so totalCostUsd
@@ -1955,7 +1974,20 @@ export class PiSession extends BaseSession {
     // kind under the `acceptEdits` base asks, and the judge decides.
     // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
     // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
-    if (toolName === 'agent' && !autoMode && verdict.source !== 'deny-rule') {
+    // `send_message` takes the same rung (ADR-088 S3b, Q6): a message that
+    // resumes or redirects an agent is delegation, judged like a spawn in auto.
+    // (As above, the deny-rule guard cannot fire yet: no rule row maps a
+    // Claude tool to the `detail`/`note` kinds these two tools carry.)
+    if (
+      (toolName === 'agent' || toolName === 'send_message') &&
+      !autoMode &&
+      verdict.source !== 'deny-rule'
+    ) {
+      return { behavior: 'allow' }
+    }
+    // `task_stop` only stops work: allowed in every mode, auto included, with
+    // no judge call (Q6). Who may stop whom is the manager's check.
+    if (toolName === 'task_stop' && verdict.source !== 'deny-rule') {
       return { behavior: 'allow' }
     }
 
@@ -2757,6 +2789,11 @@ export class PiSession extends BaseSession {
       // Host-run subagents (ADR-088): this session is the parent (depth 0).
       case 'agent':
         return this.subagents.run(input, toolCallId, null)
+      // ADR-088 S3b: messaging and stopping, as the session (caller null).
+      case 'send_message':
+        return this.subagents.sendMessage(input, null)
+      case 'task_stop':
+        return this.subagents.taskStop(input, null)
 
       default:
         return unknownHostedTool(toolName)
@@ -2852,10 +2889,20 @@ export class PiSession extends BaseSession {
   }
 
   /**
+   * ISession.backgroundTask — "Send to background" on a host-run subagent's
+   * TaskCard (ADR-088 S3b, Q7; `handlers-core.backgroundTask`, gated on
+   * `capabilities.backgroundTasks`): the waiting `agent` call returns the
+   * async-launched text now, and the run notifies when it ends.
+   */
+  async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    return this.subagents.background(toolUseId)
+  }
+
+  /**
    * ISession.stopTask — the per-agent Stop on a host-run subagent's TaskCard
    * (ADR-088; `handlers-core.stopTask`, gated on `capabilities.backgroundTasks`).
    * Stops that agent and its descendants; its run returns "Agent stopped by
-   * user." to the parent.
+   * user." to the parent. A run already past its end (closing) is not stopped.
    */
   async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
     return this.subagents.stop(toolUseId)

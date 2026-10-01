@@ -297,6 +297,47 @@ Probed for M5c fork/sideQuestion (2026-07-21, same binary):
   branch) and no equivalent of Claude's `side_question` control request — hence sideQuestion's
   transcript-fed ephemeral rather than an in-session query.
 
+Probed for ADR-088 S3 (2026-10-02, pi 0.87.1 managed-store binary, isolated `PI_CODING_AGENT_DIR`,
+`PI_OFFLINE=1`, no credentials; a scratch extension registering `cui-deliver` that base64-decodes its
+args and calls `pi.sendMessage`):
+
+- **P-S1** `prompt {message: '/cui-deliver <b64>'}` with `triggerTurn: false` at idle → `success:
+true`; `message_start`/`message_end` with `role: 'custom'` and our `customType`; `get_messages`
+  lists it as `custom`; the session file gains a `custom_message` entry (`display: true`).
+  `Buffer` is available inside an extension.
+- **P-S2** RPC `steer` sent at IDLE → `success: true`, then `get_state` shows `isStreaming: false`,
+  `pendingMessageCount: 1`: the message is stranded until the next prompt. Never inject with
+  `steer`/`follow_up`.
+- **P-S3** the same command with `triggerTurn: true` at idle runs a full turn (`agent_start` …
+  `agent_end`, `agent_settled`): one `agent_settled` per wake.
+- **P-S4** a handler that throws still answers `success: true` (pi emits an `extension_error` from
+  `command:cui-deliver`): the ack never confirms delivery, the `custom` message_end does.
+- **P-S5** `get_commands` lists `cui-deliver` with `sourceInfo.scope: 'temporary'` (filtered out of
+  ClaudeUI's slash menu with the other bridge commands).
+
+At source (`vendor/pi-src/packages/coding-agent/src/core/agent-session.ts`, `rpc-mode.ts`,
+`messages.ts`; `packages/agent/src/agent-loop.ts`):
+
+- **S1** RPC `prompt` is fire-and-forget inside pi; the response is written once the preflight ends,
+  so stdin commands are processed concurrently.
+- **S2** `prompt()` runs an extension command first, even mid-stream, and returns; a prompt arriving
+  while pi emits `agent_settled` is deferred until after it.
+- **S3** `sendCustomMessage`: streaming + trigger → `agent.steer`; idle + trigger → a new run
+  (deferred if settling); streaming + no trigger → appended at the END of the turn (the model does
+  not see it in that run); idle + no trigger → appended now.
+- **S4** a steered message is delivered after the current tool batch, before the next LLM call; the
+  run keeps going while steering messages remain.
+- **S5** `custom` messages reach the LLM as `user`-role messages and persist as `custom_message`
+  entries — the marking lives in the role and `customType`, not in what the model sees.
+- **S6** `abort()` does not clear the steer/follow-up queues: an undelivered steer survives an
+  interrupt and is polled at the next run.
+- **S7** `_runAgentPrompt` marks the run active synchronously before its first await, and the chain
+  `prompt` → command handler → `pi.sendMessage` → `sendCustomMessage` has no await before it when
+  the handler does not await: two back-to-back deliveries can never both start a run.
+- **S8** a user prompt has awaits before its `isStreaming` check, so a delivery that starts a run
+  inside that window makes the prompt fail "Agent is already processing"; once its ack is in, a
+  delivery steers it.
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next
