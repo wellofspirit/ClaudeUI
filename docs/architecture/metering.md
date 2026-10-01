@@ -150,7 +150,10 @@ literal sum of `api_cost_usd` with the unpriced turns counted rather than added.
 from `window_minutes` when the vendor stated one and from the kind's own name otherwise; a window whose
 length nothing states is sampled and never materialised, because with no interval there is no
 numerator. Windows seeded by v22 are open, and `unknown` is excluded from the seed and from every
-recompute.
+recompute. A sample group whose peak is 0% is not materialised either (ADR-071 §7, amended
+2026-10-01): a meter at 0% has not started its window, and ChatGPT reports "a week from now" for an
+idle weekly limit, a different instant on every reading. The first reading above 0% names the window,
+and migration v28 deleted the windows created before the rule (`peak_percent = 0`).
 
 A window closes 24 hours after its end, not at its end (`WINDOW_CLOSE_GRACE_MS`). A turn reaches the
 ledger later than it happened, so a window shut on the first pass past its end would drop every late
@@ -172,7 +175,10 @@ bias; nothing closes the claude.ai half.
 credentials for, not only the active one. The Claude provider reads the active account through
 `usage-fetcher.ts` and each stored account directory (ADR-015) through `fetchClaudeUsage`; the ChatGPT
 provider maps `ChatgptRateLimitStore`'s snapshot, resolving each vault account's identity through
-`CredentialSync.accountIdentity`. A provider that throws yields nothing rather than blanking the
+`CredentialSync.accountIdentity`. A ChatGPT credits plan (a business workspace) has no window: its
+reading carries `credits` (unlimited, and a balance usually withheld from a member) and `creditLimit`,
+the member's monthly allowance from Codex's `individualLimit` (used, limit, percent left, reset). The
+allowance is drawn as a meter, never sampled and never a window kind. A provider that throws yields nothing rather than blanking the
 others, and a per-account failure travels as `state` on that account.
 
 Inactive accounts are never refreshed on a timer. `refresh: false` answers from the last persisted
@@ -282,24 +288,35 @@ where it is stated; the migration that carried it also reset this machine's curs
 history already on disk is re-read under the new rule and the hub deduplicates what it already holds.
 
 `client.ts` runs the pass. A push sends batches of at most 500 events, advancing the cursor only after
-the hub has taken a batch, then the queued limit readings. An empty events array is a valid request
+the hub has taken a batch, then the queued limit readings with the newest credit reading per account
+beside them. Credit readings reach the client through `credit-readings.ts`, which the ChatGPT store
+publishes each account's merged credits to, dated by the last FULL read (`account/rateLimits/read`)
+and never by a live turn's push: Codex builds a push from response headers with no allowance and
+copies the previous one forward, so dating that copy by the push would let it overwrite another
+machine's newer reading on the hub, whose rule is newest-wins. Until a full read has happened in this
+process nothing is relayed, and a reading identical to the last published one (its instant included)
+is not published again. On a relayed row the credits carry their own source (`creditSource`,
+`creditObservedAt`), because the two relays are separate. An empty events array is a valid request
 and is how a machine announces itself: the hub learns a device exists only from that route, and the
 three device facts travel only on it, so the client sends one when it has never pushed or when the
 facts have changed since the marker in `meta` under `hub.announced`. A pull walks buckets paged by the
-hub's `rev`, then windows by their own `rev`, then the latest limit reading per account and kind, then
+hub's `rev`, then windows by their own `rev`, then the latest limit reading per account and kind and
+the latest credits per account, then
 the machine list, then the accounts list that names a key a bucket only keys. Every response carries
 the hub's `epoch`; the client takes it from the first response of a pass and holds it, drops every
 `remote_*` cache and re-pulls from zero when it differs from the stored one, and abandons the pass
 without writing anything when a later response in the same pass disagrees. Rows the hub attributes to
 the calling device are dropped on the way in, so no hour is counted twice.
 
-What a pull stores is five cache tables, added by migrations v26 and v27 beside `usage_hub_config`
-itself. `remote_usage_bucket` and `remote_usage_window` mirror their local twins with a `device_id`
+What a pull stores is six cache tables, added by migrations v26, v27 and v29 beside
+`usage_hub_config` itself. `remote_usage_bucket` and `remote_usage_window` mirror their local twins with a `device_id`
 that joins the primary key, because two machines legitimately hold the same hour or the same window
 and merging them there would be the double counting the whole design avoids. `remote_limits` keeps
 the latest reading per account key and window kind, so its `device_id` records who saw it rather than
 being part of the key. `remote_device` is the machine list, which is the only place a peer's name can
-come from, and `remote_account` is the account list. None of them has a foreign key into the local
+come from, and `remote_account` is the account list. `remote_credits` (v29) is the credits relay,
+one row per account, keyed without a window because a credits plan has none; `relayedLimits` joins it
+to the same account's windows, and an account with credits and no window becomes a row of its own. None of them has a foreign key into the local
 tables: a remote row is about an account this machine may never have held a credential for.
 
 Resync is the one repair, and it is a button rather than anything automatic. The client sends the
@@ -343,11 +360,11 @@ in the `schemaVersion` query parameter on a read, and every route may answer `42
 | Route                          | Caller        | What it does                                                                             |
 | ------------------------------ | ------------- | ---------------------------------------------------------------------------------------- |
 | `POST /v1/events`              | device        | Up to 500 rows, idempotent on `messageId`; an empty array announces the device           |
-| `POST /v1/limits`              | device        | Up to 500 limit readings, each with its window kind and stated length                    |
+| `POST /v1/limits`              | device        | Up to 500 limit readings with window kind and length, and an optional `credits` array    |
 | `POST /v1/devices/self/resync` | device        | Delete this device's rows from `since` forward, rebuild, raise `epoch`                   |
 | `GET /v1/buckets`              | device, owner | Hourly buckets paged by `rev`, excluding the caller's own, with an optional `from` bound |
 | `GET /v1/windows`              | device, owner | The hub's window ledger paged by `rev`, every row carrying the literal `deviceId: "hub"` |
-| `GET /v1/limits`               | device, owner | The latest reading per account key and window kind, with the device that observed it     |
+| `GET /v1/limits`               | device, owner | The latest reading per account and window kind, and the latest credits per account       |
 | `GET /v1/devices`              | device, owner | The machine list: id, name, OS family, app version, last push, retired                   |
 | `GET /v1/accounts`             | device, owner | One row per account the hub has heard of, with the newest label it was told              |
 | `GET /v1/hub`                  | owner         | The hub's status line: schema version, last recompute, retention, whether R2 is bound    |
