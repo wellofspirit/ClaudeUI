@@ -1060,6 +1060,48 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
     expect(result.text).toBe('target answer')
   })
 
+  // opencode's processor `halt` publishes session.error for a context overflow
+  // and then auto-compacts and keeps the turn going — not a failed turn.
+  it("a target's ContextOverflowError session.error does not settle the turn; its idle does", async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    stream.push('session.error', {
+      sessionID: 'oc-sess-1',
+      error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } }
+    })
+    await tick()
+    // The turn compacts and carries on, then ends normally.
+    stream.push('session.status', { sessionID: 'oc-sess-1', status: { type: 'busy' } })
+    completeTurn(stream)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('an unrecovered overflow (compaction.auto false: error, then idle) fails with the message', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({
+        text: 'partial',
+        info: { error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } } }
+      })
+    ])
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    stream.push('session.error', {
+      sessionID: 'oc-sess-1',
+      error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } }
+    })
+    completeTurn(stream)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('prompt is too long')
+    expect(result.sessionId).toBe('oc-sess-1')
+  })
+
   it('the post-abort session.idle opencode publishes for a STOPPED turn is a no-op (settle-once)', async () => {
     const { dispatcher, client, stream } = makeHarness()
     holdTurn(client)

@@ -344,11 +344,17 @@ function handleOwnEvent(
         // No buffering is needed: child transcript events are always processed after
         // this registration is in place. (opencode/packages/opencode/src/tool/task.ts
         // lines 178–259 are the authoritative reference.)
+        //
+        // Only a LIVE (non-terminal) task part registers. The dispatcher drops
+        // the entry when the part completes; a completed part republished later
+        // (compaction's prune stamps `state.time.compacted` on old tool parts
+        // and calls updatePart — session/compaction.ts) must not resurrect it,
+        // or clobber a resumed child's newer callID.
         if (partType === 'tool' && (part.tool as string) === 'task') {
           const childSessionId = (state?.metadata as Record<string, unknown> | undefined)
             ?.sessionId as string | undefined
           const callId = part.callID as string | undefined
-          if (childSessionId && callId) {
+          if (childSessionId && callId && isLiveToolState(state)) {
             childSessions.set(childSessionId, callId)
           }
         }
@@ -449,6 +455,12 @@ function handleOwnEvent(
       const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
       const name = err?.name
       const data = err?.data ?? {}
+      // Context overflow is NOT terminal: opencode's processor `halt`
+      // (session/processor.ts) publishes this error, flags needsCompaction and
+      // keeps the turn going (compact → replay). With `compaction.auto: false`
+      // it sets the session idle right after, so the turn still ends via
+      // session.idle either way — never via this event.
+      if (isContextOverflow(props.error)) return { kind: 'ignore' }
       if (name === 'ProviderAuthError') {
         const vendorId = data.providerID as string | undefined
         if (vendorId) {
@@ -584,6 +596,17 @@ function handleOwnEvent(
   }
 }
 
+/** A tool part that has not reached a terminal state — the only kind that may
+ *  register a task child (see the registration comment in handleOwnEvent). */
+function isLiveToolState(state: ToolPartState | undefined): boolean {
+  return state?.status !== 'completed' && state?.status !== 'error'
+}
+
+/** opencode's `ContextOverflowError` (core/src/v1/session.ts) on a session.error. */
+export function isContextOverflow(error: unknown): boolean {
+  return (error as { name?: unknown } | undefined)?.name === 'ContextOverflowError'
+}
+
 /**
  * Handle events from a known child session (spawned by the parent's `task` tool).
  *
@@ -657,12 +680,14 @@ function handleChildEvent(
         // own-session path registers a child, so its events route here under
         // ITS call id (a `subagent-message` bucket of its own, and its idle a
         // task-notification for that call) instead of being dropped as a
-        // foreign session. ADR-073 §7.
+        // foreign session. ADR-073 §7. Same live-part-only rule as the own
+        // path (a republished completed part must not resurrect the entry).
         if ((part.tool as string) === 'task') {
           const grandchildSessionId = (state?.metadata as Record<string, unknown> | undefined)
             ?.sessionId as string | undefined
           const callId = part.callID as string | undefined
-          if (grandchildSessionId && callId) childSessions.set(grandchildSessionId, callId)
+          if (grandchildSessionId && callId && isLiveToolState(state))
+            childSessions.set(grandchildSessionId, callId)
         }
       }
       acc.parts.set(partId, snap)
@@ -737,8 +762,10 @@ function handleChildEvent(
     case 'session.idle': {
       // CRITICAL GUARD: child session.idle → task-notification, NOT {kind:'result'}.
       // {kind:'result'} would flip isProcessing=false and end the parent turn early.
-      // The child's toolUseId is deleted from childSessions in the dispatcher after
-      // this notification is emitted (tidy cleanup).
+      // Terminal ONLY for a background task call: a foreground call's one
+      // terminal notification comes from the parent's task part (the
+      // dispatcher drops this one — see OpencodeSession.settleTaskChildren),
+      // because only that part knows whether the child failed.
       const notification: import('../../shared/types').TaskNotification = {
         taskId: childSessionId,
         toolUseId,
@@ -826,17 +853,12 @@ function handleChildEvent(
       return buildQuestionApproval(id, rawQuestions, tool?.callID)
     }
 
-    case 'session.error': {
-      // Child session error → task-notification with status:'failed'.
-      const notification: import('../../shared/types').TaskNotification = {
-        taskId: childSessionId,
-        toolUseId,
-        status: 'failed',
-        outputFile: '',
-        summary: ''
-      }
-      return { kind: 'task-notification', notification }
-    }
+    // A child's session.error is never terminal here. A ContextOverflowError
+    // is usually recovered (processor.ts `halt`: compact and continue); with
+    // `compaction.auto: false`, or for any other error, the child goes idle and
+    // the parent's task part fails with `Subagent failed (task_id: …): <msg>`
+    // (tool/task.ts runTask). That part is the one source of the call's
+    // outcome, so the event is dropped (falls to `default`).
 
     default:
       return { kind: 'ignore' }

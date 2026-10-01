@@ -24,7 +24,8 @@ import type {
   AskUserQuestion,
   StatusLineData,
   SkillInfo,
-  ModelCostEntry
+  ModelCostEntry,
+  TaskNotification
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import {
@@ -48,7 +49,7 @@ import {
   findToolInput,
   storedCompactionMessages
 } from './event-mapper'
-import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import type { MapperOutput, MessageAccumulator, PartSnapshot } from './event-mapper'
 import type { OpencodeStreamItem } from './event-mapper'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
@@ -230,6 +231,19 @@ interface PendingAsk {
   sweepable: boolean
 }
 
+/**
+ * An errored tool part that was aborted rather than failed — `stopped`, as
+ * Claude maps killed and Codex interrupted. Two opencode markers:
+ * - `metadata.interrupted` (+ error 'Tool execution aborted'): the processor
+ *   aborting an in-flight tool (session/processor.ts, ~602). Structural, so
+ *   preferred.
+ * - error 'Task cancelled': the task tool's cancelled child
+ *   (tool/task.ts:340), which sets no metadata — only the string identifies it.
+ */
+function wasAborted(snap: PartSnapshot): boolean {
+  return snap.state?.metadata?.interrupted === true || snap.state?.error === 'Task cancelled'
+}
+
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
 
@@ -359,9 +373,18 @@ export class OpencodeSession extends BaseSession {
   // Phase 8d — child session routing for the `task` tool.
   // Maps childSessionId → parentToolUseId (the task part's callID).
   // Populated by the event-mapper when it sees a task tool part with
-  // state.metadata.sessionId; entries are deleted after the child's
-  // session.idle (task-notification dispatch). Cleared in cancel()/dispose().
+  // state.metadata.sessionId. An entry lives as long as the PARENT's task call:
+  // it is removed when that task part reaches a terminal state
+  // (settleTaskChildren), NOT on the child's session.idle/session.error — a
+  // child keeps running after a ContextOverflowError (auto-compaction), and
+  // its later permission.asked must still route here. (A background call's
+  // entry ends at the child's idle instead.) Cleared in cancel().
   private childSessions = new Map<string, string>()
+  // Task callIDs whose part completed as a BACKGROUND task
+  // (`metadata.background`): the child keeps running, so its session.idle —
+  // not the part — carries that call's one terminal notification. Cleared in
+  // cancel().
+  private backgroundTaskCalls = new Set<string>()
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
   /** Memoized `~/.claude/ui/automode.json` — the engine-SHARED trust lists
@@ -1281,6 +1304,49 @@ export class OpencodeSession extends BaseSession {
     this.send('session:message', message)
   }
 
+  private sendTaskNotification(notification: TaskNotification): void {
+    this.sealStreamItems(notification.taskId)
+    this.send('session:task-notification', notification)
+  }
+
+  /**
+   * A tool call reached a terminal state. If it was a `task` call, this is the
+   * ONE source of that call's terminal notification, and its child mapping
+   * ends here. Only the part knows the outcome: a child's session.error may
+   * be a recovered context overflow, while the part fails with `Subagent
+   * failed (task_id: …): <msg>` exactly when the child ended on an error
+   * (opencode tool/task.ts runTask) — `failed`, unless the call was aborted
+   * (`stopped`, see wasAborted). The reason is the part's own error text,
+   * which reaches the TaskCard as the tool_result. A late child idle then
+   * finds no mapping and is ignored. Matching by VALUE keeps a resumed child (`task_id`) re-registered
+   * under a NEWER callID intact.
+   *
+   * A background task (`metadata.background`, opencode's experimental
+   * background subagents) completes its part while the child keeps running:
+   * its mapping stays, and the child's session.idle sends the notification.
+   */
+  private settleTaskChildren(
+    toolRes: { toolUseId: string; isError: boolean },
+    snap: PartSnapshot
+  ): void {
+    const callId = toolRes.toolUseId
+    if (snap.state?.metadata?.background === true) {
+      if ([...this.childSessions.values()].includes(callId)) this.backgroundTaskCalls.add(callId)
+      return
+    }
+    for (const [childSessionId, mappedCallId] of this.childSessions) {
+      if (mappedCallId !== callId) continue
+      this.sendTaskNotification({
+        taskId: childSessionId,
+        toolUseId: callId,
+        status: !toolRes.isError ? 'completed' : wasAborted(snap) ? 'stopped' : 'failed',
+        outputFile: '',
+        summary: ''
+      })
+      this.childSessions.delete(childSessionId)
+    }
+  }
+
   private dispatchMapperOutput(output: MapperOutput): void {
     switch (output.kind) {
       case 'stream':
@@ -1315,6 +1381,7 @@ export class OpencodeSession extends BaseSession {
                 // precisely what Transient Retry needs to see.
                 this.recordToolOutcome(toolRes.toolUseId, toolRes.isError ? 'error' : 'ok')
                 this.send('session:tool-result', toolRes)
+                this.settleTaskChildren(toolRes, snap)
               }
             }
           }
@@ -1484,6 +1551,9 @@ export class OpencodeSession extends BaseSession {
                   ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {}),
                   ...(toolRes.images ? { images: toolRes.images } : {})
                 })
+                // A child's own `task` call ended: its grandchild's mapping
+                // ends with it (same lifetime rule as the parent's calls).
+                this.settleTaskChildren(toolRes, snap)
               }
             }
           }
@@ -1491,16 +1561,20 @@ export class OpencodeSession extends BaseSession {
         break
       }
 
-      case 'task-notification':
-        this.sealStreamItems(output.notification.taskId)
-        this.send('session:task-notification', output.notification)
-        // Tidy: remove the completed/failed child mapping so its sessionId is no
-        // longer tracked (also prevents a future session with the same id from
-        // being misrouted if opencode reuses ids).
-        if (output.notification.toolUseId) {
-          this.childSessions.delete(output.notification.taskId)
+      case 'task-notification': {
+        // A child's session.idle: the child's streams are done either way, but
+        // the notification is terminal only for a background call — a
+        // foreground call's comes from its task part (settleTaskChildren), the
+        // only place that knows the outcome.
+        const { taskId, toolUseId } = output.notification
+        if (!toolUseId || !this.backgroundTaskCalls.delete(toolUseId)) {
+          this.sealStreamItems(taskId)
+          break
         }
+        if (this.childSessions.get(taskId) === toolUseId) this.childSessions.delete(taskId)
+        this.sendTaskNotification(output.notification)
         break
+      }
 
       case 'todos':
         // Feed the floating Todo widget via the existing session:plan channel,
@@ -1660,6 +1734,7 @@ export class OpencodeSession extends BaseSession {
       for (const settle of [...waiters]) settle('closed')
     }
     this.childSessions.clear()
+    this.backgroundTaskCalls.clear()
     // ADR-085 S4 — the next run() reconnects and re-PATCHes (F3's skip must
     // not trust a ruleset from before the teardown).
     this.lastPatchedRuleset = null

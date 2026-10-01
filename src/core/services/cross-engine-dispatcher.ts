@@ -76,7 +76,12 @@ import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stre
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
 // message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
 // for its own turns, instead of a second hand-rolled implementation.
-import { mapEvent, extractToolResult, buildChatMessage } from '../opencode/event-mapper'
+import {
+  mapEvent,
+  extractToolResult,
+  buildChatMessage,
+  isContextOverflow
+} from '../opencode/event-mapper'
 import type { MessageAccumulator, OpencodeStreamItem } from '../opencode/event-mapper'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
@@ -3350,6 +3355,12 @@ export class CrossEngineDispatcher {
       // tool's error text instead.
       const entry = this.targets.get(eventSessionId ?? '')
       if (!entry || entry.kind !== 'opencode') return
+      // A context overflow does not end the turn: opencode's processor `halt`
+      // (session/processor.ts) publishes it, auto-compacts and carries on. The
+      // turn ends via session.idle either way; with `compaction.auto: false`
+      // the overflow is stored on the assistant message's `info.error`, which
+      // the idle path already reports as a failure.
+      if (isContextOverflow(props.error)) return
       const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
       const name = err?.name
       const data = err?.data ?? {}

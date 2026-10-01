@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -369,7 +369,8 @@ was delivered and dropped.
   permissions allow it (`vendor/opencode-src/packages/opencode/src/tool/task.ts:104-117,145-149`;
   ClaudeUI exposes the setting). `handleChildEvent` now registers a child's own `task` call the way
   the own-session path does, so a grandchild's messages reach a bucket under its call id and its
-  `session.idle` becomes that call's task-notification.
+  `session.idle` becomes that call's task-notification. *(Superseded by §8: the terminal notification
+  now comes from the child's `task` part, and the grandchild's idle only seals its streams.)*
 - **pi:** ClaudeUI's child processes load no `-e` extension, so its own `subagent` tool cannot
   recurse. A user-installed extension discovered in the child could spawn one; its content stays
   inside that extension's tool result and is not shown. Such a row settles through the rule above.
@@ -377,6 +378,52 @@ was delivered and dropped.
   into the child's bucket, live and in history. A v2 `started` card never gets a result and settles
   as `isLoaded` through the rule above. A v1 spawn call returns at once, so its row reads "done"
   while the grandchild runs on natively. That is accepted: Codex refuses nesting and says so.
+
+### 8. An opencode run ends when its `task` part ends (amendment, 2026-10-01)
+
+In session `ses_f0ad4e70fffeKSjL66R1MCNhnz` a subagent ran past its model's context window. opencode
+treats `ContextOverflowError` as recoverable: the processor's `halt`
+(`vendor/opencode-fork-src/packages/opencode/src/session/processor.ts` ~620-631) sets
+`needsCompaction`, **publishes `session.error` anyway**, compacts, replays the prompt and carries on.
+ClaudeUI read that `session.error` as the end of the run. The card flipped to "failed" and
+`childSessions` dropped the child. After compaction the child's next `bash` raised `permission.asked`
+for a session ClaudeUI no longer knew, so the ask was ignored as foreign. The tool waited forever,
+the parent's `task` never returned, and the main session read "running" for 76 minutes until the
+user aborted. The owner's rulings of 2026-10-01:
+
+**`session.error` is not terminal.** It is a report, not a lifecycle event. For a child it is
+ignored, whatever its name. For the session itself, a `ContextOverflowError` is ignored (the turn
+ends via `session.idle` either way); other errors keep their banner. The same applies to a
+cross-engine dispatch target: its overflow no longer settles the dispatched turn. A turn that really
+died of an overflow (`compaction.auto: false`) is caught at idle by the existing check of the last
+assistant message's `info.error`.
+
+**The parent's `task` part is the one source of a run's terminal notification.** Only the part knows
+the outcome. opencode's task tool fails with `Subagent failed (task_id: …): <message>` exactly when
+the child ended on an error (`tool/task.ts` ~213-222), and completes when the child recovered. When the
+part reaches a terminal state (`settleTaskChildren`, for the session's own `task` calls and for a
+child's), ClaudeUI sends exactly one notification:
+
+- `completed`: the part completed.
+- `stopped`: the part errored because it was aborted, either `metadata.interrupted` (the processor
+  aborting an in-flight tool, `processor.ts` ~602) or the error `Task cancelled` (`task.ts:340`,
+  which sets no metadata). This matches Claude (`killed` → `stopped`) and Codex
+  (`interrupted`/`shutdown` → `stopped`).
+- `failed`: any other error.
+
+A child's `session.idle` now only seals the child's streams. The exception is a **background** call
+(`metadata.background`, opencode's experimental background subagents, which ClaudeUI does not
+enable). Its part completes while the child runs on, so the child's idle sends the notification.
+
+**The child mapping lives as long as the call.** A `childSessions` entry is removed when the call's
+part settles, matched by callID, so a child resumed with `task_id` under a newer call keeps its
+routing. A child is registered only from a live (pending or running) part. Compaction's prune
+republishes old completed tool parts, and that must not revive a removed entry or overwrite a newer
+callID.
+
+**The failure reason is shown.** A failed TaskCard with subagent output shows the tool result's
+error text in `TaskCard.failureSummary`. The result body still shows the subagent's output. Before,
+the reason was only visible when the subagent produced nothing.
 
 ## Consequences
 
@@ -397,3 +444,8 @@ was delivered and dropped.
 - §7 follow-ups, not addressed: a reopened nested agent that died mid-run reads "done", not
   "unfinished" (the `unfinished` fold covers only the main transcript's agents); and a reopened
   opencode session loads no child transcripts at all.
+- §8 depends on opencode wording in two places: the `Task cancelled` string, and the
+  `ContextOverflowError` name. Re-check both, and `processor.ts` `halt`, at every opencode bump. If
+  two calls ever mapped to the same child at once (a resume registered before the old part settled),
+  the older call would get no notification. The foreground flow can't produce that, because the
+  parent blocks on `task`.

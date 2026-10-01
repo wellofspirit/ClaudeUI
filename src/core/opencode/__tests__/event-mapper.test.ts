@@ -1483,6 +1483,32 @@ describe('mapEvent — Phase 8d: child-session registration (task tool part)', (
     expect(childSessions.size).toBe(0)
   })
 
+  it('does NOT re-register from a terminal task part (compaction prune republishes it)', () => {
+    // The dispatcher drops the entry when the part completes; a later
+    // republish of that completed part must not resurrect it — nor clobber a
+    // resumed child's newer callID.
+    const childSessions = new Map([[CHILD_SESSION_ID, 'call_task_newer']])
+    const ev = makeEvent('message.part.updated', {
+      sessionID: SESSION_ID,
+      part: {
+        id: 'p_task_done',
+        messageID: 'msg_parent_done',
+        type: 'tool',
+        tool: 'task',
+        callID: PARENT_CALL_ID,
+        state: {
+          status: 'completed',
+          input: { description: 'done' },
+          output: 'ok',
+          metadata: { sessionId: CHILD_SESSION_ID },
+          time: { start: 1, end: 2, compacted: 3 }
+        }
+      }
+    })
+    mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(childSessions.get(CHILD_SESSION_ID)).toBe('call_task_newer')
+  })
+
   it('does NOT register for non-task tool parts', () => {
     const childSessions = new Map<string, string>()
     const accumulators = new Map<string, MessageAccumulator>()
@@ -1761,20 +1787,31 @@ describe('mapEvent — Phase 8d: child session.idle → task-notification (NOT r
     }
   })
 
-  it('child session.error → task-notification with status=failed', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('session.error', {
-      sessionID: CHILD_SESSION_ID,
-      error: { name: 'UnknownError', data: { message: 'child crashed' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).not.toBe('result')
-    expect(out.kind).not.toBe('error') // child errors must not surface as parent errors
-    expect(out.kind).toBe('task-notification')
-    if (out.kind === 'task-notification') {
-      expect(out.notification.status).toBe('failed')
-      expect(out.notification.toolUseId).toBe(PARENT_CALL_ID)
+  // A child's session.error is never terminal and carries no outcome: an
+  // overflow is usually compacted away (processor.ts `halt`), and a real
+  // failure surfaces on the parent's task part (`Subagent failed …`).
+  it.each(['ContextOverflowError', 'UnknownError'])(
+    'child session.error (%s) → ignore, mapping kept',
+    (name) => {
+      const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+      const ev = makeEvent('session.error', {
+        sessionID: CHILD_SESSION_ID,
+        error: { name, data: { message: 'child trouble' } }
+      })
+      const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+      expect(out.kind).toBe('ignore')
+      expect(childSessions.get(CHILD_SESSION_ID)).toBe(PARENT_CALL_ID)
     }
+  )
+})
+
+describe('mapEvent — own-session ContextOverflowError', () => {
+  it('→ ignore, not a turn-ending error (the turn ends via session.idle)', () => {
+    const ev = makeEvent('session.error', {
+      sessionID: SESSION_ID,
+      error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } }
+    })
+    expect(mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
   })
 })
 

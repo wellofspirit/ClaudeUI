@@ -4201,7 +4201,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
   })
   afterEach(() => closeDb())
 
-  it('(i) child session.idle → session:task-notification, NOT session:result', async () => {
+  it('(i) child session.idle → NOT session:result; the task part completing → session:task-notification', async () => {
     mockCreateSession.mockResolvedValue({ id: PARENT_SES })
     mockSubscribeEvents.mockImplementation(
       streamOf([
@@ -4225,8 +4225,29 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
             }
           }
         } as OpencodeEvent,
-        // Child session.idle — must emit task-notification, not result
+        // Child session.idle — must NOT emit result (it ends no parent turn)
         { id: 'e2', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        // The parent's task part completes — the call's terminal notification
+        {
+          id: 'e2b',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task',
+              messageID: 'msg_parent',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
+              state: {
+                status: 'completed',
+                input: { description: 'subtask' },
+                output: 'done',
+                metadata: { sessionId: CHILD_SES }
+              }
+            }
+          }
+        } as OpencodeEvent,
         // Parent session.idle — ends the parent turn normally
         { id: 'e3', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
       ])
@@ -8054,5 +8075,289 @@ describe('ADR-085 S2 — host pre-check + session allows', () => {
       expect(mockJudge).toHaveBeenCalledTimes(1)
       session.dispose()
     })
+  })
+})
+
+// ── Task-call lifetime: a child's session.error is not terminal ──────────────
+// opencode's processor `halt` (session/processor.ts) publishes session.error for
+// a ContextOverflowError and then auto-compacts and keeps the session going, so
+// the child mapping must outlive that error (the real bug: the child's next
+// `permission.asked` was dropped as a foreign session and the parent `task`
+// hung forever). The mapping lives as long as the PARENT's task call, and that
+// task part is the one source of the call's terminal task-notification (a
+// background call's comes from the child's idle instead).
+describe('OpencodeSession — task call lifetime (child errors, overflow)', () => {
+  const PARENT_SES = 'ses_parent_life'
+  const CHILD_SES = 'ses_child_life'
+  const CALL_A = 'call_task_life_a'
+  const CALL_B = 'call_task_life_b'
+
+  beforeEach(() => {
+    setupMocks()
+    closeDb()
+  })
+  afterEach(() => closeDb())
+
+  let seq = 0
+  const ev = (type: string, properties: Record<string, unknown>): OpencodeEvent =>
+    ({ id: `life_${++seq}`, type, properties }) as OpencodeEvent
+
+  const taskPart = (
+    callId: string,
+    status: 'running' | 'completed' | 'error',
+    extra: Record<string, unknown> = {}
+  ): OpencodeEvent =>
+    ev('message.part.updated', {
+      sessionID: PARENT_SES,
+      part: {
+        id: `p_${callId}`,
+        messageID: `msg_${callId}`,
+        type: 'tool',
+        tool: 'task',
+        callID: callId,
+        state: {
+          status,
+          input: { description: 'subtask' },
+          metadata: { sessionId: CHILD_SES },
+          ...(status === 'completed' ? { output: 'child done' } : {}),
+          ...(status === 'error' ? { error: 'Subagent failed' } : {}),
+          ...extra
+        }
+      }
+    })
+
+  const childError = (name: string): OpencodeEvent =>
+    ev('session.error', { sessionID: CHILD_SES, error: { name, data: { message: name } } })
+
+  const childAsk = (id: string): OpencodeEvent =>
+    ev('permission.asked', {
+      sessionID: CHILD_SES,
+      id,
+      permission: 'bash',
+      patterns: ['ls'],
+      tool: { callID: `${id}_call` },
+      metadata: { command: 'ls' }
+    })
+
+  const idle = (sessionID: string): OpencodeEvent => ev('session.idle', { sessionID })
+
+  async function runStream(
+    events: OpencodeEvent[],
+    until: string = 'session:result'
+  ): Promise<{ calls: unknown[][]; session: OpencodeSession }> {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    mockSubscribeEvents.mockImplementation(streamOf(events))
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession(`r_life_${++seq}`, win, '/tmp', {
+      permissionMode: 'default'
+    })
+    await session.run('go')
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls as unknown[][]
+    await vi.waitFor(() => {
+      if (!calls.some((c) => c[0] === until)) throw new Error(`no ${until} yet`)
+    })
+    return { calls, session }
+  }
+
+  type Notif = { toolUseId: string; taskId: string; status: string }
+  const notifications = (calls: unknown[][]): Notif[] =>
+    calls.filter((c) => c[0] === 'session:task-notification').map((c) => c[2] as Notif)
+  const approvalIds = (calls: unknown[][]): string[] =>
+    calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .map((c) => (c[2] as { toolUseId: string }).toolUseId)
+
+  it("child ContextOverflowError keeps the mapping: the child's next permission.asked still surfaces", async () => {
+    const { calls, session } = await runStream(
+      [taskPart(CALL_A, 'running'), childError('ContextOverflowError'), childAsk('perm_after')],
+      'session:approval-request'
+    )
+    expect(approvalIds(calls)).toEqual(['perm_after_call'])
+    // The overflow produced no (failed) notification.
+    expect(notifications(calls)).toEqual([])
+    session.dispose()
+  })
+
+  it('recovered child overflow → one completed notification, at the task part', async () => {
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      childError('ContextOverflowError'),
+      idle(CHILD_SES),
+      taskPart(CALL_A, 'completed'),
+      idle(PARENT_SES)
+    ])
+    expect(notifications(calls)).toEqual([
+      expect.objectContaining({ toolUseId: CALL_A, taskId: CHILD_SES, status: 'completed' })
+    ])
+    session.dispose()
+  })
+
+  it('terminal child overflow → exactly one failed notification', async () => {
+    // compaction.auto false: the child errors and idles; opencode's task tool
+    // then fails the parent part with the child's error message.
+    const reason = `Subagent failed (task_id: ${CHILD_SES}): prompt is too long`
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      childError('ContextOverflowError'),
+      idle(CHILD_SES),
+      taskPart(CALL_A, 'error', { error: reason }),
+      idle(PARENT_SES)
+    ])
+    expect(notifications(calls)).toEqual([
+      expect.objectContaining({ toolUseId: CALL_A, status: 'failed' })
+    ])
+    // The reason rides the parent part's tool_result (the TaskCard shows it).
+    expect(
+      calls.find(
+        (c) =>
+          c[0] === 'session:tool-result' && (c[2] as { toolUseId: string }).toolUseId === CALL_A
+      )?.[2]
+    ).toMatchObject({ isError: true, result: reason })
+    // A child error never surfaces as the parent's own error.
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(false)
+    session.dispose()
+  })
+
+  // An aborted task is `stopped`, not `failed` (Claude: killed → stopped;
+  // Codex: interrupted → stopped). opencode marks it two ways.
+  it.each([
+    [
+      'interrupted tool (processor.ts)',
+      {
+        error: 'Tool execution aborted',
+        metadata: { sessionId: CHILD_SES, interrupted: true }
+      }
+    ],
+    ['cancelled child (task.ts)', { error: 'Task cancelled' }]
+  ])('aborted task part — %s → exactly one stopped notification', async (_label, extra) => {
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      taskPart(CALL_A, 'error', extra),
+      idle(CHILD_SES),
+      idle(PARENT_SES)
+    ])
+    expect(notifications(calls)).toEqual([
+      expect.objectContaining({ toolUseId: CALL_A, status: 'stopped' })
+    ])
+    session.dispose()
+  })
+
+  it('parent task part completing first emits the notification and drops the mapping', async () => {
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      taskPart(CALL_A, 'completed'),
+      // Late child events: the call is over, so these are ignored.
+      childAsk('perm_late'),
+      idle(CHILD_SES),
+      idle(PARENT_SES)
+    ])
+    expect(notifications(calls)).toEqual([
+      expect.objectContaining({ toolUseId: CALL_A, taskId: CHILD_SES, status: 'completed' })
+    ])
+    expect(approvalIds(calls)).toEqual([])
+    session.dispose()
+  })
+
+  it("a resumed child's newer call survives the old call's completed part being republished", async () => {
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      idle(CHILD_SES),
+      taskPart(CALL_A, 'completed'),
+      // Resume the same child (`task_id`) under a NEW call.
+      taskPart(CALL_B, 'running'),
+      // Compaction prune republishes the OLD completed part.
+      taskPart(CALL_A, 'completed', { time: { start: 1, end: 2, compacted: 3 } }),
+      childAsk('perm_resumed'),
+      idle(CHILD_SES),
+      taskPart(CALL_B, 'completed'),
+      idle(PARENT_SES)
+    ])
+    expect(approvalIds(calls)).toEqual(['perm_resumed_call'])
+    expect(notifications(calls).map((n) => n.toolUseId)).toEqual([CALL_A, CALL_B])
+    session.dispose()
+  })
+
+  it('background call: no notification at the part; the child idle sends exactly one', async () => {
+    const background = { metadata: { sessionId: CHILD_SES, background: true } }
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running', background),
+      taskPart(CALL_A, 'completed', background),
+      // The child keeps running past the part: its ask still surfaces.
+      childAsk('perm_bg'),
+      idle(PARENT_SES),
+      idle(CHILD_SES),
+      idle(CHILD_SES)
+    ])
+    expect(approvalIds(calls)).toEqual(['perm_bg_call'])
+    await vi.waitFor(() => {
+      if (notifications(calls).length === 0) throw new Error('waiting for the child idle')
+    })
+    expect(notifications(calls)).toEqual([
+      expect.objectContaining({ toolUseId: CALL_A, taskId: CHILD_SES, status: 'completed' })
+    ])
+    session.dispose()
+  })
+
+  it("a grandchild's mapping ends with the child's task call", async () => {
+    const GC_SES = 'ses_grandchild_life'
+    const GC_CALL = 'call_child_task_life'
+    const childTaskPart = (status: 'running' | 'completed'): OpencodeEvent =>
+      ev('message.part.updated', {
+        sessionID: CHILD_SES,
+        part: {
+          id: 'cp_task_life',
+          messageID: 'child_msg_task_life',
+          type: 'tool',
+          tool: 'task',
+          callID: GC_CALL,
+          state: {
+            status,
+            input: { description: 'nested' },
+            metadata: { sessionId: GC_SES },
+            ...(status === 'completed' ? { output: 'nested done' } : {})
+          }
+        }
+      })
+    const gcAsk = (id: string): OpencodeEvent =>
+      ev('permission.asked', {
+        sessionID: GC_SES,
+        id,
+        permission: 'bash',
+        patterns: ['ls'],
+        tool: { callID: `${id}_call` },
+        metadata: { command: 'ls' }
+      })
+    const { calls, session } = await runStream([
+      taskPart(CALL_A, 'running'),
+      childTaskPart('running'),
+      gcAsk('perm_gc_live'),
+      childTaskPart('completed'),
+      // The child's task call is over: late grandchild events are ignored.
+      gcAsk('perm_gc_late'),
+      idle(GC_SES),
+      idle(CHILD_SES),
+      taskPart(CALL_A, 'completed'),
+      idle(PARENT_SES)
+    ])
+    expect(approvalIds(calls)).toEqual(['perm_gc_live_call'])
+    expect(notifications(calls).filter((n) => n.toolUseId === GC_CALL)).toEqual([
+      expect.objectContaining({ taskId: GC_SES, status: 'completed' })
+    ])
+    expect(notifications(calls).filter((n) => n.toolUseId === CALL_A)).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('own-session ContextOverflowError does not end the turn or raise session:error', async () => {
+    const { calls, session } = await runStream([
+      ev('session.error', {
+        sessionID: PARENT_SES,
+        error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } }
+      }),
+      idle(PARENT_SES)
+    ])
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(false)
+    expect(calls.filter((c) => c[0] === 'session:result')).toHaveLength(1)
+    session.dispose()
   })
 })
