@@ -10,6 +10,7 @@ import {
 
 const PROTOCOLS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages'])
 const KINDS: ReadonlySet<string> = new Set(['subscription', 'custom', 'catalog'])
+const SERVER_KINDS: ReadonlySet<unknown> = new Set(['vllm', 'sglang', 'openai-compatible'])
 
 export function sharedProvidersDir(): string {
   return path.join(os.homedir(), '.claude', 'ui', 'providers')
@@ -256,6 +257,7 @@ function isModel(value: SharedProviderModel): boolean {
   if (value.reasoning !== undefined && typeof value.reasoning !== 'boolean') return false
   if (value.vision !== undefined && typeof value.vision !== 'boolean') return false
   if (!isPositiveInteger(value.contextWindow) || !isPositiveInteger(value.maxTokens)) return false
+  if (value.detected !== undefined && !isDetected(value.detected)) return false
   if (
     value.harnessOverrides &&
     Object.keys(value.harnessOverrides).some((key) => key !== 'pi' && key !== 'opencode')
@@ -272,6 +274,24 @@ function isModel(value: SharedProviderModel): boolean {
           (override.available === undefined || typeof override.available === 'boolean') &&
           (override.default === undefined || typeof override.default === 'boolean'))
     )
+  )
+}
+
+/**
+ * A model's Detect baseline: which server, when, and the facts it supplied —
+ * held to the model's own rules, since each is compared against one.
+ */
+function isDetected(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const detected = value as Record<string, unknown>
+  return (
+    SERVER_KINDS.has(detected.server) &&
+    typeof detected.at === 'string' &&
+    !!detected.at &&
+    isPositiveInteger(detected.contextWindow) &&
+    isPositiveInteger(detected.maxTokens) &&
+    (detected.vision === undefined || typeof detected.vision === 'boolean') &&
+    (detected.reasoning === undefined || typeof detected.reasoning === 'boolean')
   )
 }
 

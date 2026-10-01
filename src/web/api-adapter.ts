@@ -383,6 +383,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // carries a real refusal back. `set-key` sends the key host-side and returns
     // nothing — the same direction `vendor-auth:set-key` already travels.
     saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
     removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),

@@ -1513,7 +1513,8 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   function modelSetupGroup(): React.ReactNode {
     // opencode's own model overrides for this provider, under the id opencode
     // knows it by: a native row's id, or a catalog definition's opencode route
-    // (a custom definition's models are edited in its endpoint instead).
+    // (a custom definition's models, limits and capabilities included, are
+    // edited in its endpoint instead — ADR-086).
     const opencodeModelsId =
       entry.origin === 'opencode-native'
         ? nativeId

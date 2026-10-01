@@ -548,3 +548,26 @@ describe('PiSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
     expect(subject.hasDefinition(catalog)).toBe(true)
   })
 })
+
+describe('PiSharedProviderAdapter — a model’s Detect baseline (GUARD)', () => {
+  it('never reaches pi: models.json is byte-identical with or without it', () => {
+    adapter().applyDefinition(provider)
+    const plain = readFileSync(modelsPath, 'utf8')
+    rmSync(modelsPath)
+    adapter().applyDefinition({
+      ...provider,
+      models: provider.models.map((model) => ({
+        ...model,
+        detected: {
+          server: 'vllm' as const,
+          at: '2026-09-30T10:00:00.000Z',
+          contextWindow: 100_000,
+          maxTokens: 8_000,
+          vision: true,
+          reasoning: true
+        }
+      }))
+    })
+    expect(readFileSync(modelsPath, 'utf8')).toBe(plain)
+  })
+})

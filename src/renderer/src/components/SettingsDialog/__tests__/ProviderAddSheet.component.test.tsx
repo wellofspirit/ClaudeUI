@@ -602,6 +602,32 @@ describe('the custom endpoint', () => {
     expect(sent('shared-provider:save')).toEqual([])
   })
 
+  it('Detect’s limits and their baseline reach the saved definition (ADR-086)', async () => {
+    stub('shared-provider:probe', () => ({
+      status: 'detected',
+      server: 'vllm',
+      models: [{ id: 'qwen3-27b', contextWindow: 32768 }]
+    }))
+    await fillCustom()
+    await typeInto('ProviderForm.key', 'sk-gateway')
+    await click(screen.getByTestId('ProviderForm.detect'))
+    await screen.findByTestId('ProviderForm.detectResult')
+    // The typed key is what Detect uses on a provider that has none stored yet.
+    expect(sent('shared-provider:probe')).toEqual([
+      [{ baseUrl: 'https://llm.example/v1', protocol: 'openai-completions', apiKey: 'sk-gateway' }]
+    ])
+    await click(screen.getByTestId('ProviderAddSheet.customSave'))
+
+    const [model] = (sent('shared-provider:save')[0][0] as SharedProviderDefinition).models
+    expect(model).toMatchObject({
+      id: 'qwen3-27b',
+      contextWindow: 32768,
+      maxTokens: 8192,
+      detected: { server: 'vllm', contextWindow: 32768, maxTokens: 8192 }
+    })
+    expect(typeof model.detected?.at).toBe('string')
+  })
+
   it('saves with no key at all — a local server needs none', async () => {
     await fillCustom()
     await click(screen.getByTestId('ProviderAddSheet.customSave'))

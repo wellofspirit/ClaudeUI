@@ -246,7 +246,8 @@ const sharedProviderSpies = vi.hoisted(() => ({
   ownKeyHolders: vi.fn(async (): Promise<string[]> => []),
   syncProvider: vi.fn(async () => {}),
   disconnectProvider: vi.fn(async () => {}),
-  setRouteDefaultModel: vi.fn(async () => {})
+  setRouteDefaultModel: vi.fn(async () => {}),
+  probeEndpoint: vi.fn(async () => ({ status: 'detected', server: 'vllm', models: [] }))
 }))
 
 vi.mock('../../../core/shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
@@ -899,6 +900,33 @@ describe('session.ipc', () => {
         )
       }
       expect(sharedProviderSpies.ownKeyHolders).toHaveBeenCalledTimes(1)
+    })
+
+    it('shared-provider:probe shape-checks its request before the host dials anything', async () => {
+      // `null`s are what the web transport makes of omitted fields.
+      await expect(
+        harness.callSafe('shared-provider:probe', {
+          baseUrl: 'http://gpu:8000/v1',
+          protocol: null,
+          apiKey: null,
+          providerId: 'local'
+        })
+      ).resolves.toEqual({ status: 'detected', server: 'vllm', models: [] })
+      expect(sharedProviderSpies.probeEndpoint).toHaveBeenLastCalledWith({
+        baseUrl: 'http://gpu:8000/v1',
+        providerId: 'local'
+      })
+
+      sharedProviderSpies.probeEndpoint.mockClear()
+      for (const bad of [
+        undefined,
+        { baseUrl: 42 },
+        { baseUrl: 'http://gpu/v1', protocol: 'grpc' },
+        { baseUrl: 'http://gpu/v1', apiKey: { key: 'x' } },
+        { baseUrl: 'http://gpu/v1', providerId: 7 }
+      ])
+        await expect(harness.callSafe('shared-provider:probe', bad)).rejects.toThrow()
+      expect(sharedProviderSpies.probeEndpoint).not.toHaveBeenCalled()
     })
   })
 

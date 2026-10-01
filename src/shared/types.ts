@@ -9,6 +9,8 @@ import type {
 } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
+  EndpointProbeInput,
+  EndpointProbeResult,
   SharedProviderAccountList,
   SharedProviderAccountStatus,
   SharedProviderCuration,
@@ -1802,6 +1804,12 @@ interface SharedProviderAPI {
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
   saveSharedProvider(definition: SharedProviderDefinition): Promise<void>
+  /**
+   * Detect: what a custom endpoint serves, read host-side. The typed `apiKey`
+   * wins; otherwise `providerId` names a saved provider whose stored key the
+   * host uses. Never answers the key.
+   */
+  probeSharedEndpoint(input: EndpointProbeInput): Promise<EndpointProbeResult>
   removeSharedProvider(id: string): Promise<void>
   setSharedProviderRoute(
     id: string,
