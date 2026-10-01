@@ -255,6 +255,12 @@ export function TaskCard({ block, result, view, approval, denial }: Props): Reac
           : 'completed'
 
   const isCompleted = !isRunning && !isError
+  // Why the task failed. The tool_result's error text is the result body, but
+  // the body shows the subagent's own output whenever it streamed any — the
+  // usual case — which hid the reason (an opencode subagent that ran out of
+  // context read as a bare "failed"), so show it alongside that output.
+  // `isError` is already false for a stopped task (task-state.ts).
+  const failureSummary = isError && hasSubagentOutput && result?.isError ? resultBody : ''
   const isStopping = stoppingTaskIds.includes(toolUseId)
   // Cross-engine dispatch cards (ADR-033 M3, M4b) reuse this component via the
   // 'task' kind but have no backgrounding concept — cli.js's backgroundTask
@@ -557,6 +563,15 @@ export function TaskCard({ block, result, view, approval, denial }: Props): Reac
               </div>
             ) : null}
           </div>
+
+          {failureSummary && (
+            <div
+              data-testid="TaskCard.failureSummary"
+              className="border-t border-border px-3 py-2 text-[12px] text-danger whitespace-pre-wrap break-words"
+            >
+              {failureSummary}
+            </div>
+          )}
 
           {/* Footer — badges + usage + open in panel */}
           {(hasResult || isRunning) && (

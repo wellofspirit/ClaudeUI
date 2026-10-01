@@ -822,3 +822,69 @@ describe('TaskCard — a permission denial of the task call', () => {
     expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Failure reason alongside subagent output
+// ---------------------------------------------------------------------------
+//
+// A subagent that streamed output shows that output as the card body, so the
+// failed tool_result's error text (the reason) never appeared — an opencode
+// subagent that ran out of context read as a bare "failed". It now shows next
+// to that output; a stopped (aborted) task is not a failure and shows none.
+describe('TaskCard — failure reason', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const reason = 'Subagent failed (task_id: ses_child): prompt is too long'
+
+  function renderFinished(status: 'failed' | 'completed' | 'stopped', toolResult: string): void {
+    seed.subagentMessage(ROUTE, 'call_task_1', {
+      id: 'child_m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'working through the files' }],
+      timestamp: Date.now()
+    })
+    seed.taskNotification(ROUTE, {
+      taskId: 'ses_child',
+      toolUseId: 'call_task_1',
+      status,
+      outputFile: '',
+      summary: ''
+    })
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult,
+      isError: status !== 'completed'
+    }
+    render(<TaskCard block={makeTaskBlock()} result={result} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+  }
+
+  it('a failed task with subagent output shows the tool error next to that output', () => {
+    renderFinished('failed', reason)
+    expect(screen.getByTestId('SubagentMessages')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.failureSummary')).toHaveTextContent(reason)
+  })
+
+  it('a stopped task shows no failure strip', () => {
+    renderFinished('stopped', 'Task cancelled')
+    expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
+  })
+
+  it('a completed task shows no failure strip', () => {
+    renderFinished('completed', 'all done')
+    expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
+  })
+})
