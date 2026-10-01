@@ -163,6 +163,7 @@ import type { UsageTurnEvent, UsageTurnTokens } from './usage-recorder'
 import { usageFetcher } from './usage-fetcher'
 import { activeClaudeAttribution } from './usage-windows'
 import { buildClaudeAccountRef } from '../host'
+import { DISPATCH_TARGETS } from './dispatch-targets'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { credentialSync } from '../auth/vault/CredentialSync'
@@ -180,19 +181,6 @@ import type {
   PendingApproval,
   PermissionSuggestion
 } from '../../shared/types'
-
-/**
- * Which engines a session on each engine can dispatch into: every OTHER engine
- * (ADR-033's same-engine guard, `dispatchInner`), plus Codex into Codex, which
- * ADR-069 §7 lifts the guard for (a target is one more thread on the caller's
- * host).
- */
-const DISPATCH_TARGETS: Readonly<Record<EngineId, readonly EngineId[]>> = {
-  claude: ['opencode', 'pi', 'codex'],
-  opencode: ['claude', 'pi', 'codex'],
-  pi: ['claude', 'opencode', 'codex'],
-  codex: ['claude', 'opencode', 'pi', 'codex']
-}
 
 /**
  * Whether cross-engine dispatch is a real, honest capability for `engineId`

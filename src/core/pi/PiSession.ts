@@ -77,6 +77,7 @@ import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
 } from '../services/cross-engine-dispatcher'
+import { canDispatchInto } from '../services/dispatch-targets'
 import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
   decideWithSource,
@@ -2703,12 +2704,12 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> {
     const engine = input.engine
     const prompt = input.prompt
-    if ((engine !== 'claude' && engine !== 'opencode') || typeof prompt !== 'string') {
+    if (!canDispatchInto('pi', engine) || typeof prompt !== 'string') {
       return {
         content: [
           {
             type: 'text',
-            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode") and a string "prompt".'
+            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode"|"codex") and a string "prompt".'
           }
         ],
         isError: true

@@ -4582,6 +4582,26 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     expect(mockDispatch).not.toHaveBeenCalled()
   })
 
+  it('passes engine:"codex" through to the dispatcher (the bridge advertises it and pi → codex is a dispatch target)', async () => {
+    mockDispatch.mockResolvedValue({ text: 'done', sessionId: 'thr-1' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-codex', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantViaApproval(win, session, 'call_dispatch_codex', { engine: 'codex', prompt: 'x' })
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'codex', prompt: 'x' },
+      'call_dispatch_codex'
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(mockDispatch).toHaveBeenCalledWith(
+      { engine: 'codex', prompt: 'x', model: undefined, sessionId: undefined },
+      expect.objectContaining({ fromEngine: 'pi' })
+    )
+  })
+
   it("emit forwards to this.send (the dispatching session's own routing) — passing ctx.emit through calls window.webContents.send", async () => {
     mockDispatch.mockImplementation(
       async (_req, ctx: { emit: (channel: string, data: unknown) => void }) => {
