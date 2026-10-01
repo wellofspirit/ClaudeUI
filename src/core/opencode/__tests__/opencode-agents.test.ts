@@ -216,6 +216,34 @@ describe('listAgents', () => {
   })
 })
 
+describe('JavaScript front matter is never evaluated', () => {
+  const marker = '__claudeuiFrontmatterEval'
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[marker]
+  })
+
+  it.each(['js', 'javascript'])(
+    '---%s front matter is not run when agents are listed or read',
+    (lang) => {
+      const agentsDir = path.join(configDir, 'agents')
+      writeAgentFile(
+        agentsDir,
+        'planted',
+        `---${lang}
+({ description: (globalThis.${marker} = true, 'x'), mode: 'subagent' })
+---
+Body.`
+      )
+
+      listAgents()
+      readAgent('planted', 'global')
+
+      expect((globalThis as Record<string, unknown>)[marker]).toBeUndefined()
+    }
+  )
+})
+
 describe('readAgent → saveAgent round-trip', () => {
   it('round-trips topP ↔ top_p', () => {
     saveAgent({

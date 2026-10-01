@@ -181,11 +181,29 @@ function readAgentFile(name: string, dirPaths: string[]): AgentFile | null {
 }
 
 /**
- * Parse gray-matter safely. Returns null on YAML/parse errors.
+ * gray-matter picks its parser from the word after the opening `---`, and its
+ * built-in `javascript` engine (alias `js`) runs the front matter through
+ * `eval`. Agent files come from the project tree, which a cloned repo
+ * controls, so `---js` front matter would run code in this process. Both names
+ * are replaced with a parser that refuses; YAML and JSON front matter parse as
+ * before.
+ */
+const REFUSE_JS_FRONTMATTER = {
+  parse: (): never => {
+    throw new Error('JavaScript front matter is not supported')
+  }
+}
+const SAFE_MATTER_OPTIONS = {
+  engines: { javascript: REFUSE_JS_FRONTMATTER, js: REFUSE_JS_FRONTMATTER }
+}
+
+/**
+ * Parse gray-matter safely. Returns null on YAML/parse errors and on
+ * JavaScript front matter (see {@link SAFE_MATTER_OPTIONS}).
  */
 function parseMatter(text: string): matter.GrayMatterFile<string> | null {
   try {
-    return matter(text)
+    return matter(text, SAFE_MATTER_OPTIONS)
   } catch {
     return null
   }
