@@ -226,6 +226,29 @@ describe('Sidebar FC', () => {
     expect(useSessionStore.getState().activeSessionId).toBeNull()
   })
 
+  /**
+   * ADR-082 S7b: a session that never spawned (a pi session whose first spawn
+   * failed because pi was not installed) is in memory only, and its Recent row
+   * read as Claude: the in-memory row carried no engine, so `SessionItem` fell
+   * back to Claude's logo.
+   */
+  it('shows a session that never spawned under its own harness in Recent', async () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'pi' })
+    try {
+      useSessionStore.getState().createNewSession('pi-never-spawned', CWD)
+      await act(async () => {
+        await renderFC()
+      })
+      const recent = viewProps.recentSessions.find((s) => s.sessionId === 'pi-never-spawned')
+      expect(recent?.engineId).toBe('pi')
+      // The directory tree's in-memory rows agree.
+      const tree = viewProps.augmentedDirs.flatMap((group) => group.sessions)
+      expect(tree.find((s) => s.sessionId === 'pi-never-spawned')?.engineId).toBe('pi')
+    } finally {
+      useSessionStore.setState({ lastSelectedEngineId: 'claude' })
+    }
+  })
+
   // -------------------------------------------------------------------------
   // 3. onClickSession (loaded in store) — just switchSession
   // -------------------------------------------------------------------------

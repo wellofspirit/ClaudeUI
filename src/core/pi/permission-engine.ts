@@ -630,7 +630,7 @@ export const PLAN_EXIT_OUTSIDE_PLAN_REASON = 'exit_plan is only available in pla
 
 /**
  * Destructive-anywhere-in-the-string bash patterns — ported from
- * vendor/pi-cli/examples/extensions/plan-mode/utils.ts's DESTRUCTIVE_PATTERNS
+ * vendor/pi-src/packages/coding-agent/examples/extensions/plan-mode/utils.ts's DESTRUCTIVE_PATTERNS
  * (the pi-shipped reference implementation this milestone's kickoff spec
  * pointed at), with ClaudeUI-specific hardening marked inline below.
  * Unanchored word-boundary matches: a destructive token ANYWHERE in a chained
@@ -705,7 +705,7 @@ const PLAN_DESTRUCTIVE_PATTERNS: RegExp[] = [
  * EVERY trimmed segment must independently match one of these (the `^\s*`
  * anchors apply to each segment, not just the whole string).
  *
- * Ported from vendor/pi-cli/examples/extensions/plan-mode/utils.ts's
+ * Ported from vendor/pi-src/packages/coding-agent/examples/extensions/plan-mode/utils.ts's
  * SAFE_PATTERNS with three deliberate REMOVALS: `curl`, `wget -O -` and
  * `sed -n`. The example runs in pi's own TUI where plan mode is the user's
  * self-imposed toggle; in ClaudeUI a plan-mode bash allow is an AUTO-allow

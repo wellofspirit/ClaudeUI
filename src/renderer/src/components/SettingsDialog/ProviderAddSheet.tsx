@@ -18,12 +18,15 @@
  * pick: enable-for chips, then a key or an OAuth sign-in) or `custom` (the
  * endpoint form). Back returns to the list with the search intact.
  *
- * ROWS ARE WHAT THE USER DOES NOT HAVE. The registry snapshot the list renders
- * is the set of providers they DO have, so this sheet is its complement: an
- * opencode catalog entry that is already authenticated is a row over there, not
- * a candidate here, and a pi vendor with a key in `auth.json` likewise. The
- * shared vault owns the ids its ENABLED routes resolve to, so a managed id
- * (ChatGPT's `openai-codex` in pi) is never offered as a bare vendor.
+ * ROWS ARE WHAT CLAUDEUI DOES NOT MANAGE YET (owner ruling 2026-10-01, ADR-082
+ * §8 "As built (S7f)"). A provider created here must be usable in opencode and
+ * pi, so a harness that already holds its OWN key for the vendor — an
+ * authenticated opencode entry, a pi vendor with a key in `auth.json` — is
+ * still offered as a target, with a note saying so; creating asks before that
+ * key is replaced (`own-key-question.ts`), or creates the provider with that
+ * harness's route off. The shared vault owns its definitions' ids and the ids
+ * its ENABLED routes resolve to, so a managed id (ChatGPT's `openai-codex` in
+ * pi) is never offered as a bare vendor.
  *
  * WHERE EACH SAVE GOES — every one is an EXISTING writer, as in the Manage
  * sheet; this file introduces no channel of its own:
@@ -45,7 +48,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { OpencodeProviderCatalogEntry, VendorAuthOption } from '../../../../shared/types'
-import type { ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
+import {
+  vendorDisplayName,
+  type ProviderRegistrySnapshot
+} from '../../../../shared/provider-registry'
 import {
   validateSharedProviderId,
   type ConfigurableHarnessId,
@@ -55,8 +61,16 @@ import { Button, ChipSet, SettingRow, TextField } from './settings-controls'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import { LARGE_CATALOG, opencodeCurationAdapter, piCurationAdapter } from './ModelCuration'
 import { EngineChip } from './ProviderSheet'
+import { useEngineRuns } from './harness-store'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
+import {
+  OVERWRITE_OWN_LABEL,
+  keepOwnLabel,
+  ownKeyNote,
+  ownKeyQuestion,
+  readOwnKeyHolders
+} from './own-key-question'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderAddSheet'
@@ -73,6 +87,8 @@ interface Candidate {
   name: string
   /** The engines that offer this provider — the only ones the setup step lists. */
   engines: ConfigurableHarnessId[]
+  /** Those of them that already hold a credential of their OWN for it. */
+  own: ConfigurableHarnessId[]
   /** opencode's own OAuth option, when it has one (its label is the button's). */
   oauthLabel?: string
 }
@@ -116,24 +132,35 @@ export function ProviderAddSheet({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const { entries, opencodeInstalled } = snapshot
+  const { entries } = snapshot
+  /**
+   * A catalog source is a harness that runs (ADR-082 §8): one that does not
+   * offers no providers here, and nothing is read from it.
+   */
+  const runs = useEngineRuns()
+  const opencodeSource = runs('opencode')
+  const piSource = runs('pi')
 
   useEffect(() => {
     let cancelled = false
     let failed = false
     void Promise.all([
-      opencodeInstalled
+      opencodeSource
         ? window.api.getOpencodeProviders().catch((): OpencodeProviderCatalogEntry[] => {
             failed = true
             return []
           })
         : Promise.resolve<OpencodeProviderCatalogEntry[]>([]),
-      opencodeInstalled
+      opencodeSource
         ? window.api
             .vendorAuthListOptions('opencode')
             .catch((): Record<string, VendorAuthOption[]> => ({}))
         : Promise.resolve<Record<string, VendorAuthOption[]>>({}),
-      window.api.vendorAuthListOptions('pi').catch((): Record<string, VendorAuthOption[]> => ({})),
+      piSource
+        ? window.api
+            .vendorAuthListOptions('pi')
+            .catch((): Record<string, VendorAuthOption[]> => ({}))
+        : Promise.resolve<Record<string, VendorAuthOption[]>>({}),
       window.api.listSharedProviders().catch((): SharedProviderDefinition[] => []),
       window.api.getPiBinaryPath().catch((): string | null => null)
     ]).then(([cat, opencodeOpts, piOpts, defs, piPath]) => {
@@ -148,7 +175,7 @@ export function ProviderAddSheet({
     return () => {
       cancelled = true
     }
-  }, [opencodeInstalled])
+  }, [opencodeSource, piSource])
 
   /** The vault owns the native ids its routes resolve to — never offer those. */
   const managed = useMemo(() => {
@@ -167,22 +194,23 @@ export function ProviderAddSheet({
   }, [definitions])
 
   /**
-   * The catalog: everything the engines OFFER that is not already a row.
-   *
-   * opencode's own predicate for "configured" is the registry's row filter
-   * (`authenticated` / `free` / vetoed), so the complement is exactly its
-   * `unauthenticated` entries. pi has no such state — an entry in its auth.json
-   * IS the credential — so a pi candidate is a built-in vendor with an API-key
-   * option and no row of its own.
+   * The catalog: everything the engines OFFER that ClaudeUI does not manage yet
+   * — whether or not an engine holds a credential of its own for it (see the
+   * header). `own` records which do, from the same facts the list's native rows
+   * come from: an opencode entry that is `authenticated` (a key, a sign-in, or
+   * one from an env var), and a pi vendor with a row of its own (an entry in
+   * its auth.json IS the credential). A pi candidate is a built-in vendor with
+   * an API-key option. opencode's own veto (`disabled_providers`) keeps a
+   * provider out of its picker, so a vetoed one is not offered to opencode.
    */
   const candidates = useMemo((): Candidate[] => {
     const configuredPi = new Set(
       entries.filter((e) => e.origin === 'pi-native').map((e) => e.id.slice('pi:'.length))
     )
     const byId = new Map<string, Candidate>()
-    if (opencodeInstalled) {
+    if (opencodeSource) {
       for (const entry of catalog) {
-        if (entry.authState !== 'unauthenticated' || entry.disabled) continue
+        if (entry.disabled) continue
         // A shared definition already names this id — a catalog provider with its
         // routes off, say. Re-adding it here would replace that definition.
         if (managed.opencode.has(entry.id)) continue
@@ -191,33 +219,40 @@ export function ProviderAddSheet({
           id: entry.id,
           name: entry.name,
           engines: ['opencode'],
+          own: entry.authState === 'authenticated' ? ['opencode'] : [],
           ...(entry.authMethods.includes('oauth') && oauth
             ? { oauthLabel: oauth.label || 'Sign in with OAuth' }
             : {})
         })
       }
     }
+    const names = new Map(catalog.map((entry) => [entry.id, entry.name]))
     for (const [id, options] of Object.entries(piOptions)) {
-      if (configuredPi.has(id) || managed.pi.has(id)) continue
+      if (managed.pi.has(id)) continue
       if (!options.some((o) => o.type === 'api')) continue
+      const own: ConfigurableHarnessId[] = configuredPi.has(id) ? ['pi'] : []
       const existing = byId.get(id)
-      if (existing) existing.engines = [...existing.engines, 'pi']
-      // pi ships no display names — its own discovery reports the id too.
-      else byId.set(id, { id, name: id, engines: ['pi'] })
+      if (existing) {
+        existing.engines = [...existing.engines, 'pi']
+        existing.own = [...existing.own, ...own]
+      }
+      // pi ships no display names: opencode's catalog name, else the id
+      // title-cased — never the raw id (S7f).
+      else byId.set(id, { id, name: vendorDisplayName(id, names.get(id)), engines: ['pi'], own })
     }
     return [...byId.values()].sort(
       (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
     )
-  }, [catalog, opencodeOptions, piOptions, entries, managed, opencodeInstalled])
+  }, [catalog, opencodeOptions, piOptions, entries, managed, opencodeSource])
 
   /** Nothing offers a catalog at all — the section is not rendered empty. */
-  const hasCatalogSource = opencodeInstalled || Object.keys(piOptions).length > 0
+  const hasCatalogSource = opencodeSource || Object.keys(piOptions).length > 0
 
   const query = search.trim().toLowerCase()
   const matches = (...text: string[]): boolean =>
     !query || text.some((value) => value.toLowerCase().includes(query))
   const shownCandidates = candidates.filter((c) => matches(c.id, c.name))
-  const showClaudeForPi = piCommand !== null && matches('claude', 'pro', 'max', 'pi')
+  const showClaudeForPi = piSource && piCommand !== null && matches('claude', 'pro', 'max', 'pi')
 
   /** Run one write: report a rejection here rather than closing on a failure. */
   const run = useCallback(async (action: () => Promise<void>): Promise<void> => {
@@ -264,7 +299,7 @@ export function ProviderAddSheet({
           a terminal, so it belongs with the providers that engine owns. */}
       {showClaudeForPi && (
         <div className="mt-4">
-          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Engine sign-ins">
+          <SheetGroup testid={`${SHEET}.group`} id="engine-sign-ins" label="Harness sign-ins">
             <SettingRow
               testid={`${SHEET}.engineSignIn`}
               dataId="claude-pi"
@@ -306,7 +341,7 @@ export function ProviderAddSheet({
                     : catalogState === 'failed'
                       ? 'opencode’s provider catalog could not be read — its server did not answer.'
                       : candidates.length === 0
-                        ? 'Every provider these engines offer is already set up.'
+                        ? 'Every provider these harnesses offer is already set up.'
                         : 'No providers match.'
                 }
               />
@@ -318,7 +353,10 @@ export function ProviderAddSheet({
                   testid={`${SHEET}.catalog`}
                   dataId={candidate.id}
                   label={candidate.name}
-                  description={candidate.oauthLabel ? 'API key or OAuth' : 'API key'}
+                  description={[
+                    candidate.oauthLabel ? 'API key or OAuth' : 'API key',
+                    ...candidate.own.map((engine) => ownKeyNote(engine, candidate.name))
+                  ].join(' · ')}
                   onClick={() => setStep({ kind: 'setup', candidate })}
                 >
                   {candidate.engines.map((engine) => (
@@ -343,19 +381,23 @@ export function ProviderAddSheet({
         </div>
       )}
 
-      <div className="mt-4">
-        <SheetGroup testid={`${SHEET}.group`} id="custom" label="Custom endpoint">
-          <SettingRow
-            as="button"
-            testid={`${SHEET}.custom`}
-            label="Add an OpenAI-compatible endpoint"
-            description="One definition, delivered to each engine you enable — a local server, a proxy, or a gateway."
-            onClick={() => setStep({ kind: 'custom' })}
-          >
-            <span className="text-[12px] text-accent">Configure ›</span>
-          </SettingRow>
-        </SheetGroup>
-      </div>
+      {/* A custom endpoint is delivered to pi and opencode only: with neither
+          running there is nothing to enable it for, so it is not offered. */}
+      {(opencodeSource || piSource) && (
+        <div className="mt-4">
+          <SheetGroup testid={`${SHEET}.group`} id="custom" label="Custom endpoint">
+            <SettingRow
+              as="button"
+              testid={`${SHEET}.custom`}
+              label="Add an OpenAI-compatible endpoint"
+              description="One definition, delivered to each harness you enable — a local server, a proxy, or a gateway."
+              onClick={() => setStep({ kind: 'custom' })}
+            >
+              <span className="text-[12px] text-accent">Configure ›</span>
+            </SettingRow>
+          </SheetGroup>
+        </div>
+      )}
     </>
   )
 
@@ -364,22 +406,25 @@ export function ProviderAddSheet({
       <CatalogSetup
         candidate={step.candidate}
         busy={busy}
-        onSave={(engines, key) =>
+        onSave={(engines, key, replaceOwn) =>
           void run(async () => {
             const { id, name } = step.candidate
             if (isSharedProviderId(id)) {
               // One key per provider (ADR-074 §6): a catalog definition with a
               // route per chosen engine, then the key ONCE — the vault stores it
-              // and delivers it to each enabled engine.
+              // and delivers it to each enabled engine. A harness's own key is
+              // replaced only where the user said so (`replaceOwn` names those
+              // harnesses; any other keeps its own); one whose own key they
+              // kept is not in `engines`, so its route is off.
               await window.api.saveSharedProvider(catalogDefinition(id, name, engines))
-              await window.api.setSharedProviderApiKey(id, key)
+              await window.api.setSharedProviderApiKey(id, key, replaceOwn)
             } else {
               // An id the vault cannot name (models.dev ids are not all
               // `[a-z0-9-]`): each engine keeps its own copy, as before.
               for (const engine of engines) await window.api.vendorAuthSetKey(engine, id, key)
             }
             await seedLargeCatalogAllowlists(engines, id)
-            await onAdded(registryIdFor(engines[0], id))
+            await onAdded(registryIdFor(engines, id))
           })
         }
         onOAuthDone={() =>
@@ -418,7 +463,7 @@ export function ProviderAddSheet({
                 {error}
               </span>
             ) : (
-              'Pick one, then choose which engines get it.'
+              'Pick one, then choose which harnesses get it.'
             )}
           </span>
           {step.kind !== 'list' && (
@@ -447,10 +492,16 @@ export function ProviderAddSheet({
 
 /**
  * The registry row id an API-key add produces: the definition's own id when it
- * became a shared catalog definition, else the native `<engine>:<id>` row.
+ * became a shared catalog definition, else the first engine's native
+ * `<engine>:<id>` row — none when no engine was written (every picked harness
+ * kept its own key).
  */
-function registryIdFor(engine: ConfigurableHarnessId, providerId: string): string {
-  return isSharedProviderId(providerId) ? providerId : `${engine}:${providerId}`
+function registryIdFor(
+  engines: readonly ConfigurableHarnessId[],
+  providerId: string
+): string | null {
+  if (isSharedProviderId(providerId)) return providerId
+  return engines[0] ? `${engines[0]}:${providerId}` : null
 }
 
 function isSharedProviderId(id: string): boolean {
@@ -482,7 +533,7 @@ function catalogDefinition(
 }
 
 /** Provider → Key & engines → Models (mockup D); the last step is the Manage sheet. */
-const STEPS = ['Provider', 'Key & engines', 'Models'] as const
+const STEPS = ['Provider', 'Key & harnesses', 'Models'] as const
 
 function StepIndicator({ current }: { current: 1 | 2 }): React.JSX.Element {
   return (
@@ -511,6 +562,18 @@ function StepIndicator({ current }: { current: 1 | 2 }): React.JSX.Element {
       })}
     </div>
   )
+}
+
+/**
+ * Who holds an own key NOW (S7f rounds 2–3), among the harnesses offering the
+ * candidate: the sheet's snapshot is as old as the sheet, and its opencode half
+ * comes from a cached catalog, so a key written outside ClaudeUI meanwhile is
+ * read from the harnesses' auth files by the host instead. The service still
+ * replaces only the harnesses the question named.
+ */
+async function readOwnHarnesses(candidate: Candidate): Promise<ConfigurableHarnessId[]> {
+  const holders = await readOwnKeyHolders(candidate.id, candidate.own)
+  return candidate.engines.filter((engine) => holders.includes(engine))
 }
 
 /**
@@ -550,6 +613,13 @@ async function seedLargeCatalogAllowlists(
  * "Enable for", then the credential. The engine chips are the ONLY ones the
  * candidate is offered by: a key written into an engine that does not know the
  * provider is a credential nothing will ever read.
+ *
+ * A picked harness that holds a key of its OWN for the vendor is asked about
+ * before anything is written (owner ruling 2026-10-01): overwrite it and manage
+ * the key from ClaudeUI, or keep it — the provider is then created without that
+ * harness. Leaving the sheet (Back, Cancel, Escape) while asked writes nothing.
+ * Save re-reads who holds an own key before deciding, so the question names
+ * every harness that holds one now; Overwrite replaces only those it named.
  */
 function CatalogSetup({
   candidate,
@@ -559,11 +629,32 @@ function CatalogSetup({
 }: {
   candidate: Candidate
   busy: boolean
-  onSave: (engines: ConfigurableHarnessId[], key: string) => void
+  /** `replaceOwn`: the harnesses whose own key the user agreed to replace — the ones asked about. */
+  onSave: (
+    engines: ConfigurableHarnessId[],
+    key: string,
+    replaceOwn: ConfigurableHarnessId[]
+  ) => void
   onOAuthDone: () => void
 }): React.JSX.Element {
   const [selected, setSelected] = useState<ConfigurableHarnessId[]>(candidate.engines)
   const [key, setKey] = useState('')
+  /** Who holds an own key: as the sheet opened, then as Save last re-read it. */
+  const [own, setOwn] = useState<ConfigurableHarnessId[]>(candidate.own)
+  /** The picked harnesses that hold their own key, while the question is open. */
+  const [asking, setAsking] = useState<ConfigurableHarnessId[] | null>(null)
+  /** Save is re-reading who holds an own key. */
+  const [checking, setChecking] = useState(false)
+
+  const save = async (): Promise<void> => {
+    setChecking(true)
+    const now = await readOwnHarnesses(candidate)
+    setChecking(false)
+    setOwn(now)
+    const ownPicked = selected.filter((engine) => now.includes(engine))
+    if (ownPicked.length > 0) setAsking(ownPicked)
+    else onSave(selected, key.trim(), [])
+  }
 
   return (
     <div data-testid={`${SHEET}.setup`} data-id={candidate.id}>
@@ -572,44 +663,96 @@ function CatalogSetup({
           testid={`${SHEET}.enableFor`}
           layout="stacked"
           label="Use it in"
-          description="The key is delivered to each selected engine’s own auth file."
+          description="The key is delivered to each selected harness’s own auth file."
         >
           <ChipSet
             testid={`${SHEET}.engines`}
             value={selected}
             options={candidate.engines.map((engine) => ({ value: engine, label: engine }))}
-            onToggle={(value) =>
+            onToggle={(value) => {
+              setAsking(null)
               setSelected((current) =>
                 current.includes(value as ConfigurableHarnessId)
                   ? current.filter((engine) => engine !== value)
                   : [...current, value as ConfigurableHarnessId]
               )
-            }
+            }}
           />
         </SettingRow>
+        {own.map((engine) => (
+          <SettingRow
+            key={engine}
+            testid={`${SHEET}.ownKeyNote`}
+            dataId={engine}
+            dimmed={!selected.includes(engine)}
+            description={`${ownKeyNote(engine, candidate.name)}. Saving asks before it is replaced.`}
+          />
+        ))}
 
         <SettingRow
           testid={`${SHEET}.key`}
           label="API key"
-          description="Entered once. ClaudeUI stores it and delivers it to each engine you pick."
+          description="Entered once. ClaudeUI stores it and delivers it to each harness you pick."
         >
           <TextField
             type="password"
             testid={`${SHEET}.keyInput`}
             value={key}
-            onChange={setKey}
+            onChange={(value) => {
+              setAsking(null)
+              setKey(value)
+            }}
             placeholder="Paste the key"
             className="w-[150px]"
           />
           <Button
             variant="link"
             testid={`${SHEET}.save`}
-            disabled={busy || key.trim().length === 0 || selected.length === 0}
-            onClick={() => onSave(selected, key.trim())}
+            disabled={
+              busy ||
+              checking ||
+              key.trim().length === 0 ||
+              selected.length === 0 ||
+              asking !== null
+            }
+            onClick={() => void save()}
           >
             Save
           </Button>
         </SettingRow>
+
+        {asking && (
+          <SettingRow
+            testid={`${SHEET}.ownKeyConfirm`}
+            dataId={asking.join(',')}
+            description={
+              <span className="text-warning">{ownKeyQuestion(asking, candidate.name)}</span>
+            }
+          >
+            <Button
+              variant="primary"
+              testid={`${SHEET}.ownKeyOverwrite`}
+              disabled={busy}
+              onClick={() => onSave(selected, key.trim(), asking)}
+            >
+              {OVERWRITE_OWN_LABEL}
+            </Button>
+            <Button
+              variant="link"
+              testid={`${SHEET}.ownKeyKeep`}
+              disabled={busy}
+              onClick={() =>
+                onSave(
+                  selected.filter((engine) => !asking.includes(engine)),
+                  key.trim(),
+                  []
+                )
+              }
+            >
+              {keepOwnLabel(asking)}
+            </Button>
+          </SettingRow>
+        )}
 
         {candidate.oauthLabel && (
           <div className="px-3.5 py-2.5">
@@ -646,7 +789,8 @@ function CustomEndpointStep({
   busy: boolean
   onSave: (definition: SharedProviderDefinition, key: string) => void
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<SharedProviderDefinition>(blankProviderDraft)
+  const runs = useEngineRuns()
+  const [draft, setDraft] = useState<SharedProviderDefinition>(() => blankProviderDraft(runs))
   const [key, setKey] = useState('')
   const [invalid, setInvalid] = useState<string | null>(null)
 

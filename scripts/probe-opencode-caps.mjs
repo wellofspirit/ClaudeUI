@@ -22,25 +22,35 @@
  *   both              → attachment=true ∧ input.image=true      (both channels honored together)
  *
  * Usage:
- *   node scripts/probe-opencode-caps.mjs
+ *   node scripts/probe-opencode-caps.mjs          # the tested opencode in ClaudeUI's store
  *   node scripts/probe-opencode-caps.mjs --binary /path/to/opencode
  *
  * Exit 0 if every assertion passes, 1 otherwise.
  */
 
 import { spawn } from 'node:child_process'
-import { join, dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 
 // ── Binary resolution ──────────────────────────────────────────────────────
+// Default: the manifest's tested opencode in ClaudeUI's managed store
+// (`bun run ensure-opencode`; ADR-082 §8 retired `vendor/opencode-cli`).
 function resolveBinary() {
   const idx = process.argv.indexOf('--binary')
   if (idx !== -1 && process.argv[idx + 1]) return process.argv[idx + 1]
   const name = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
-  return join(ROOT, 'vendor', 'opencode-cli', name)
+  const { tested } = JSON.parse(
+    readFileSync(join(ROOT, 'src/shared/harness-manifests/opencode.json'), 'utf8')
+  )
+  const store = process.env.CLAUDEUI_HARNESS_STORE
+    ? resolve(process.env.CLAUDEUI_HARNESS_STORE)
+    : join(homedir(), '.claude', 'ui', 'harnesses')
+  return join(store, 'opencode', tested, name)
 }
 
 const BINARY = resolveBinary()

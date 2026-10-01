@@ -192,6 +192,18 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
     getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
     engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+    harnessState: () => ipcRenderer.invoke('harness:state'),
+    harnessVersions: (id) => ipcRenderer.invoke('harness:versions', { id }),
+    setHarnessSelection: (id, selection) =>
+      ipcRenderer.invoke('harness:set-selection', { id, selection }),
+    installHarness: (id, version) => ipcRenderer.invoke('harness:install', { id, version }),
+    cancelHarnessInstall: (id, version) =>
+      ipcRenderer.invoke('harness:install-cancel', { id, version }),
+    detectHarnesses: (ids) => ipcRenderer.invoke('harness:detect', ids ? { ids } : {}),
+    setHarnessUpdateMode: (mode) => ipcRenderer.invoke('harness:set-update-mode', { mode }),
+    updateHarnesses: () => ipcRenderer.invoke('harness:update-all'),
+    checkHarnessUpdates: () => ipcRenderer.invoke('harness:check-updates'),
+    answerHarnessUpgradePrompt: () => ipcRenderer.invoke('harness:answer-upgrade-prompt'),
     getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
     getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>
@@ -448,13 +460,24 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
-    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
+    // wire only when it names one (S7f).
+    setSharedProviderApiKey: (id, key, replaceOwn) =>
+      unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
     adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
     setSharedProviderCuration: (id, curation) =>
       unwrap('shared-provider:set-curation', id, curation),
     setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
+      unwrap(
+        'shared-provider:set-disabled',
+        id,
+        disabled,
+        ...(replaceOwn?.length ? [replaceOwn] : [])
+      ),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    useSharedProviderStoredKey: (id, harness) =>
+      unwrap('shared-provider:use-stored-key', id, harness),
+    getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>
       unwrap('shared-provider:set-default', id, harness, modelId),

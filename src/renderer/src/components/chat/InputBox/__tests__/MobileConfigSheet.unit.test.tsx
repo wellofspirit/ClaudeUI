@@ -279,7 +279,12 @@ describe('MobileConfigSheet — engine submenu', () => {
     fireEvent.click(screen.getByTestId('MobileConfigSheet.engine'))
 
     const options = screen.getAllByTestId('MobileConfigSheet.engineOption')
-    expect(options.map((o) => o.getAttribute('data-value'))).toEqual(['claude', 'opencode', 'pi'])
+    expect(options.map((o) => o.getAttribute('data-value'))).toEqual([
+      'claude',
+      'opencode',
+      'pi',
+      'codex'
+    ])
 
     const piOption = options.find((o) => o.getAttribute('data-value') === 'pi')!
     fireEvent.click(piOption)
@@ -296,7 +301,7 @@ describe('MobileConfigSheet — engine submenu', () => {
     expect(row).toBeDisabled()
     expect(row).toHaveAttribute(
       'title',
-      expect.stringContaining('Engine cannot change after session initialization')
+      expect.stringContaining('Harness cannot change after session initialization')
     )
     fireEvent.click(row)
     expect(screen.queryByTestId('MobileConfigSheet.engineOption')).not.toBeInTheDocument()

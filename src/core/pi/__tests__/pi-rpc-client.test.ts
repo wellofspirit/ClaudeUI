@@ -327,3 +327,46 @@ describe('PiRpcClient — stray error events do not crash the process', () => {
     }).not.toThrow()
   })
 })
+
+describe('PiRpcClient — launch (ADR-082 §2)', () => {
+  it('spawns a bare path (a native launch) exactly as before', async () => {
+    process.env.PI_RPC_LAUNCH_PROBE = 'inherited'
+    try {
+      const { PiRpcClient } = await import('../PiRpcClient')
+      const client = new PiRpcClient('/fake/pi', {
+        cwd: '/tmp',
+        args: ['--mode', 'rpc'],
+        env: { SITE: '1' }
+      })
+      await client.start()
+      const [command, args, opts] = mockSpawn.mock.calls[0]
+      expect(command).toBe('/fake/pi')
+      expect(args).toEqual(['--mode', 'rpc'])
+      expect(opts.cwd).toBe('/tmp')
+      expect(opts.env).toEqual({ ...process.env, SITE: '1' })
+      client.dispose()
+    } finally {
+      delete process.env.PI_RPC_LAUNCH_PROBE
+    }
+  })
+
+  it('spawns a node-script launch as [node, cli.js, ...args] with its env over the site env', async () => {
+    const { PiRpcClient } = await import('../PiRpcClient')
+    const client = new PiRpcClient(
+      {
+        command: '/usr/bin/node',
+        args: ['/pkg/dist/bundle/cli.js'],
+        env: { PI_MANAGED_INSTALL_ROOT: '/managed', SITE: 'launch-wins' }
+      },
+      { cwd: '/tmp', args: ['--mode', 'rpc', '-e', '/ext.ts'], env: { SITE: 'site' } }
+    )
+    await client.start()
+    const [command, args, opts] = mockSpawn.mock.calls[0]
+    expect(command).toBe('/usr/bin/node')
+    expect(args).toEqual(['/pkg/dist/bundle/cli.js', '--mode', 'rpc', '-e', '/ext.ts'])
+    expect(opts.env.PI_MANAGED_INSTALL_ROOT).toBe('/managed')
+    expect(opts.env.SITE).toBe('launch-wins')
+    expect(opts.env.PATH).toBe(process.env.PATH)
+    client.dispose()
+  })
+})

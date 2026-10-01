@@ -1,73 +1,43 @@
 /**
- * Resolve the vendored pi binary path in both dev and production.
+ * The pi binary the app spawns: thin delegates to the harness resolver
+ * (`../harness/resolve.ts`, ADR-082), which decides for every harness
+ * (`CLAUDEUI_PI_CLI`, then the harnesses.json selection: ClaudeUI's store or a
+ * System install; pi is not bundled, ADR-082 §8).
  *
- *   dev        → <projectRoot>/vendor/pi-cli/pi[.exe]              (flat legacy layout)
- *                <projectRoot>/vendor/pi-cli/pi/pi[.exe]           (release payload layout)
- *   production → <Resources>/pi-cli/pi[.exe]                       (flat, extraResources)
- *                <Resources>/pi-cli/pi/pi[.exe]                    (nested, extraResources)
- *                <app.asar.unpacked>/vendor/pi-cli/pi[.exe]        (flat fallback)
- *                <app.asar.unpacked>/vendor/pi-cli/pi/pi[.exe]     (nested fallback)
- *
- * Mirrors `OpencodeServerManager.locateBinary()` (same dev/prod split, same
- * `app.getAppPath()` / app.asar detection per ADR-026 — never `__dirname`,
- * which resolves inside the bundled out/main dir in built/dev Electron and
- * can't find <projectRoot>/vendor). electron-builder copies vendor/pi-cli →
- * extraResources `pi-cli` at build time (scripts/ensure-pi.mjs downloads it;
- * electron-builder.yml's extraResources entry maps vendor/pi-cli → pi-cli).
+ * A managed version is the whole release directory
+ * (`~/.claude/ui/harnesses/pi/<version>/`), because pi resolves its wasm,
+ * native addons and themes relative to its own executable; it may be flat
+ * (`<version>/pi[.exe]`) or nested (`<version>/pi/pi[.exe]`). The installer
+ * (`../harness/install/`, or `bun run ensure-pi` in development) puts it there.
  */
-import { statSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { getAppPath } from '../host'
+import type { HarnessLaunch } from '../../shared/harness-types'
+import { harnessAvailable, harnessLaunch, resolveHarness } from '../harness/resolve'
 
-const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
-
-function firstFile(candidates: string[]): string | null {
-  for (const candidate of candidates) {
-    try {
-      if (statSync(candidate).isFile()) return candidate
-    } catch {
-      // Missing or inaccessible candidates are unavailable.
-    }
-  }
-  return null
-}
-
-/**
- * Resolve the path to the first vendored pi candidate that is a regular file.
- */
+/** The pi executable, or null when none was found. For display and gating; spawn with {@link locatePiLaunch}. */
 export function locatePiBinary(): string | null {
-  // Outside Electron (vitest, integration tests, harness scripts) no host
-  // paths are wired — `getAppPath()` falls back to cwd, which is the project
-  // root in those contexts.
-  const appPath = getAppPath()
-
-  if (!appPath.includes('app.asar')) {
-    // Dev/built — appPath is the project root.
-    const vendorDir = join(appPath, 'vendor', 'pi-cli')
-    return firstFile([join(vendorDir, BINARY_NAME), join(vendorDir, 'pi', BINARY_NAME)])
-  }
-
-  // Production — extraResources copies vendor/pi-cli → <Resources>/pi-cli.
-  // dirname(appPath) is the Resources directory (where app.asar lives).
-  const resourcesDir = join(dirname(appPath), 'pi-cli')
-  const unpackedDir = join(appPath.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'pi-cli')
-  return firstFile([
-    join(resourcesDir, BINARY_NAME),
-    join(resourcesDir, 'pi', BINARY_NAME),
-    join(unpackedDir, BINARY_NAME),
-    join(unpackedDir, 'pi', BINARY_NAME)
-  ])
+  return resolveHarness('pi').path
 }
 
 /**
- * Cheap, deterministic "is pi installed?" check — does the binary resolve to
- * a regular file that exists on disk? Never spawns a process. Mirrors
- * `OpencodeServerManager.isBinaryAvailable()`.
+ * The pi a user can run in a terminal (`pi:binary-path`, the Settings "run
+ * `pi /login`" hint), or null when none was found. For a System pi from npm or
+ * pi.dev that is the shim or launcher detection found on PATH, not the `cli.js`
+ * ClaudeUI hands to node; every other source runs its executable directly.
  */
+export function locatePiDisplayPath(): string | null {
+  const resolved = resolveHarness('pi')
+  return resolved.displayPath ?? resolved.path
+}
+
+/**
+ * How to spawn pi, or null when none was found. A System npm install runs as
+ * `<node> <cli.js>` (ADR-082 §2), so every pi spawn goes through this.
+ */
+export function locatePiLaunch(): HarnessLaunch | null {
+  return harnessLaunch('pi')
+}
+
+/** Cheap "is pi installed?" check. Never spawns a process. */
 export function piBinaryAvailable(): boolean {
-  try {
-    return locatePiBinary() !== null
-  } catch {
-    return false
-  }
+  return harnessAvailable('pi')
 }

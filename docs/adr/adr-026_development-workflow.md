@@ -130,8 +130,9 @@ relaxes the review bar.
 - **Don't break Claude.** Claude is the daily driver and the live login path (the user is actively
   logged in — an auth-detection bug = lockout). Every change touching shared seams must be confirmed
   behavior-preserving for Claude via the real-app drive.
-- **opencode specifics.** Binary (~165 MB) is gitignored (`vendor/opencode-cli/`), vendored by
-  `ensure-opencode`, shipped via electron-builder `extraResources`. HTTP **Basic auth**
+- **opencode specifics.** Binary (~165 MB) lives in ClaudeUI's managed store
+  (`~/.claude/ui/harnesses/opencode/<version>/`), installed by `ensure-opencode` / the Installed
+  page and never packaged (ADR-082 §8). HTTP **Basic auth**
   (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) —
   NOT the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
   `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
@@ -139,11 +140,11 @@ relaxes the review bar.
   the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
   `/bundle-analyzer` to navigate the bundle.
 - **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the
-  verified notes) + the version-exact docs shipped in the vendored payload
-  (`vendor/pi-cli/docs/*.md`), then probe the real `vendor/pi-cli/pi` binary. For source-level
-  questions, **shallow-clone the pinned tag** (`git clone --depth 1 --branch v<piCliVersion>
-https://github.com/earendil-works/pi`) — there is deliberately **no** vendored pi source clone
-  (unlike `vendor/opencode-src/`). The bridge extension (`pi-bridge-source.ts`) must stay
+  verified notes) + the version-exact docs at the pinned tag
+  (`vendor/pi-src/packages/coding-agent/docs/*.md`), then probe the real pi binary (the managed
+  store's `~/.claude/ui/harnesses/pi/<version>/pi`, ADR-082 §8). For source-level questions, read
+  the upstream checkout `vendor/pi-src` at the tested tag (CLAUDE.md's rule for engine sources).
+  The bridge extension (`pi-bridge-source.ts`) must stay
   **import-free** and **fail-closed**; product code writes only `os.tmpdir()` (the bridge file) +
   `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key merge — never else under `~/.pi/**`.
 - **Commits.** One per item, no AI attribution, multi-paragraph body, stage precisely.

@@ -1047,6 +1047,9 @@ describe('CredentialSync.disconnectChatgpt', () => {
     }
     const pi = fakeFeedTarget()
     const opencode = fakeFeedTarget()
+    // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
+    pi.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: 1 })
+    opencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: 1 })
     const sync = new CredentialSync({
       vault,
       getEnabledRoutes: () => ({ pi: false, opencode: false })
@@ -1057,6 +1060,9 @@ describe('CredentialSync.disconnectChatgpt', () => {
     expect(removeCredential).toHaveBeenCalledTimes(2)
     expect(pi.remove).toHaveBeenCalledWith('openai-codex')
     expect(opencode.remove).toHaveBeenCalledWith('openai')
+    // The second disconnect finds no vault token left to recognise a copy by.
+    expect(pi.remove).toHaveBeenCalledTimes(1)
+    expect(opencode.remove).toHaveBeenCalledTimes(1)
     expect(sync.needsReauth).toBe(false)
     await expect(sync.getStatus()).resolves.toEqual({
       connected: false,

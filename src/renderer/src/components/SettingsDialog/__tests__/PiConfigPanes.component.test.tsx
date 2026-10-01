@@ -20,7 +20,8 @@
  *   7. `packages` object-form entries survive an edit of the string entries.
  *   8. The Raw pane refuses to save invalid JSON and writes the text verbatim.
  *   9. `trackingId` is never surfaced (pi generates it).
- *  10. Every pane self-gates on pi being installed.
+ *  10. No pane asks whether pi is installed: while it is not, the pi page
+ *      cannot be opened and the Models page hides its pi segment (ADR-082 §8).
  *  11. A rejected patch surfaces inline instead of being swallowed.
  *
  * ADR-065 split the panes that used to carry an in-pane sub-header into separate
@@ -74,7 +75,6 @@ const getEngineModels = vi.fn(async () => [])
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     readPiNativeRaw,
     patchPiNative,
     writePiNativeText,
@@ -721,29 +721,31 @@ describe('pi Configuration panes', () => {
     })
   })
 
-  // ── 11. Install gate ───────────────────────────────────────────────
+  // ── 11. Not installed (ADR-082 §8) ────────────────────────────────
 
-  describe('not-installed gate', () => {
-    const panes: [string, React.ReactElement][] = [
-      ['PiSessionBehaviorSection', <PiSessionBehaviorSection key="a" />],
-      ['PiRetrySection', <PiRetrySection key="b" />],
-      ['PiModelsSection', <PiModelsSection key="c" />],
-      ['PiToolsSection', <PiToolsSection key="e" />],
-      ['PiImagesSection', <PiImagesSection key="f" />],
-      ['PiWorkspaceSection', <PiWorkspaceSection key="g" />],
-      ['PiResourcesSection', <PiResourcesSection key="h" />],
-      ['PiNetworkSection', <PiNetworkSection key="i" />],
-      ['PiRawConfigSection', <PiRawConfigSection key="j" />]
+  describe('not installed', () => {
+    const pagePanes: [string, React.ReactElement, string][] = [
+      ['PiSessionBehaviorSection', <PiSessionBehaviorSection key="a" />, 'compaction.enabled'],
+      ['PiRetrySection', <PiRetrySection key="b" />, 'retry.enabled'],
+      ['PiToolsSection', <PiToolsSection key="e" />, 'shellPath'],
+      ['PiImagesSection', <PiImagesSection key="f" />, 'images.autoResize'],
+      ['PiWorkspaceSection', <PiWorkspaceSection key="g" />, 'defaultProjectTrust'],
+      ['PiResourcesSection', <PiResourcesSection key="h" />, 'packages'],
+      ['PiNetworkSection', <PiNetworkSection key="i" />, 'httpProxy'],
+      ['PiRawConfigSection', <PiRawConfigSection key="j" />, 'rawText']
     ]
 
-    it.each(panes)('%s renders the not-installed copy and no controls', async (testid, node) => {
-      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-      await renderPane(node)
-      expect(screen.getByTestId(testid).textContent).toContain('pi is not installed')
-      expect(screen.queryAllByTestId('PiConfigPane.toggle')).toHaveLength(0)
-      expect(screen.queryAllByTestId('PiConfigPane.number')).toHaveLength(0)
-      expect(screen.queryAllByTestId('PiConfigPane.rawText')).toHaveLength(0)
-    })
+    it.each(pagePanes)(
+      '%s renders its rows without asking whether pi is installed',
+      async (testid, node, key) => {
+        const engineIsInstalled = vi.fn(async () => false)
+        installApiStub({ engineIsInstalled })
+        await renderPane(node)
+        expect(screen.getByTestId(testid).textContent).not.toContain('Loading')
+        expect(rowFor(key)).toBeInTheDocument()
+        expect(engineIsInstalled).not.toHaveBeenCalled()
+      }
+    )
   })
 
   // ── 12. Section splits (ADR-065: no sub-headers inside a pane) ─────

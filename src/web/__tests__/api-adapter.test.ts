@@ -555,6 +555,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: ['local', 'sk-local']
   },
   {
+    method: 'setSharedProviderApiKey',
+    channel: 'shared-provider:set-key',
+    args: ['openrouter', 'sk-or', ['pi']]
+  },
+  {
     method: 'adoptSharedProviderNativeKey',
     channel: 'shared-provider:adopt-native',
     args: ['openrouter', 'pi']
@@ -567,9 +572,19 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   {
     method: 'setSharedProviderDisabled',
     channel: 'shared-provider:set-disabled',
-    args: ['openrouter-work', false, true]
+    args: ['openrouter-work', false, ['opencode']]
   },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
+  {
+    method: 'useSharedProviderStoredKey',
+    channel: 'shared-provider:use-stored-key',
+    args: ['openrouter', 'pi']
+  },
+  {
+    method: 'getSharedProviderOwnKeyHolders',
+    channel: 'shared-provider:own-key-holders',
+    args: ['openrouter']
+  },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
   {
     method: 'setSharedProviderDefaultModel',

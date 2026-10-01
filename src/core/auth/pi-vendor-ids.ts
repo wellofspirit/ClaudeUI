@@ -10,7 +10,7 @@
  */
 
 /**
- * API-key provider ids documented in vendor/pi-cli/docs/providers.md's
+ * API-key provider ids documented in vendor/pi-src/packages/coding-agent/docs/providers.md's
  * "API Keys" table (auth.json-key column), in the table's own order. This is
  * the exact, versioned, offline reference the M3 kickoff spec calls out —
  * deliberately NOT derived from the pinned source's ~140 built-in provider

@@ -8,7 +8,8 @@
  * that row carried before the split.
  *
  * Tested flows:
- *   1. Gated states: loading (probes pending) and not-installed
+ *   1. Loading while the config is pending (an opencode that does not run is
+ *      greyed in the page's segment, never here — ADR-082 §8)
  *   2. Load renders the current dispatch config (select value + chip states)
  *   3. Editing the default model saves the FULL merged EngineConfig —
  *      autoMode / other dispatch fields must not be clobbered
@@ -65,7 +66,6 @@ const saveEngineConfig = vi.fn(async (_engineId: string, cfg: EngineConfig) => {
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
     saveEngineConfig,
@@ -137,25 +137,12 @@ afterEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('OpencodeDispatchSection — gated states', () => {
-  it('shows Loading while probes are pending', () => {
-    installApiStub({
-      engineIsInstalled: vi.fn(() => new Promise(() => {})),
-      loadEngineConfig: vi.fn(() => new Promise(() => {}))
-    })
+describe('OpencodeDispatchSection — loading', () => {
+  it('shows Loading while the config is pending', () => {
+    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
     render(<OpencodeDispatchSection />)
     expect(screen.getByTestId('OpencodeDispatchSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('OpencodeDispatchSection.defaultModel')).toBeNull()
-  })
-
-  it('shows the not-installed message (no controls) when opencode is absent', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-    render(<OpencodeDispatchSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('OpencodeDispatchSection').textContent).toContain('not installed')
-    )
-    expect(screen.queryByTestId('OpencodeDispatchSection.defaultModel')).toBeNull()
-    expect(screen.queryAllByTestId('OpencodeDispatchSection.allowedModel')).toHaveLength(0)
   })
 })
 

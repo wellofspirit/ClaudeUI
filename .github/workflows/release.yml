@@ -101,6 +101,9 @@ jobs:
         run: |
           Add-MpPreference -ExclusionPath "${{ github.workspace }}"
           Add-MpPreference -ExclusionPath "$env:USERPROFILE\.bun"
+          # postinstall installs opencode, pi and Codex into ClaudeUI's managed
+          # store, outside the workspace since ADR-082 §8.
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.claude\ui\harnesses"
           Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron"
           Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron-builder"
           Add-MpPreference -ExclusionProcess "bun.exe"
@@ -139,15 +142,18 @@ jobs:
       - name: Read codex CLI version
         id: codex-version
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
 
-      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
-      # hit from another pin is a guaranteed re-download rather than a saving.
-      - name: Cache codex CLI binaries
+      # postinstall installs the tested opencode, pi and Codex into ClaudeUI's
+      # managed store (ADR-082 §8). Codex is the large one (two ~100 MB
+      # archives), so its version directory is cached; a restored directory
+      # with a valid install.json satisfies ensure-codex without a download.
+      # No restore-keys: another pin's directory is never this pin's.
+      - name: Cache codex harness
         uses: actions/cache@v6
         with:
-          path: vendor/codex-cli
-          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+          path: ~/.claude/ui/harnesses/codex/${{ steps.codex-version.outputs.version }}
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-harness-${{ steps.codex-version.outputs.version }}
 
       - name: Cache Electron binaries
         uses: actions/cache@v6
@@ -266,8 +272,10 @@ jobs:
       # `locateBunClaude()` reads `<appPath>/vendor/claude-cli/bun-claude[.exe]`
       # off the very app path `resolveAppPath()` (src/server/main.ts) settles on
       # for a compiled executable — the directory holding `out/web`, i.e. the
-      # stage root — so the staged layout is runnable as shipped, exactly like
-      # the other three engines. What the server does NOT carry is a Claude
+      # stage root — so the staged layout is runnable as shipped. opencode, pi
+      # and Codex are not shipped (ADR-082 §8): a fresh server has none until an
+      # admin installs them from Settings › Harnesses › Installed, into the
+      # server's own managed store. What the server does NOT carry is a Claude
       # sign-in: `setHostAuth(null)` leaves that seam empty, so cli.js uses the
       # deployment box's own credentials.
       - name: Build server executable (macOS)
@@ -288,9 +296,6 @@ jobs:
           cp -r dist/server-bin/. "$STAGE/"
           mkdir "$STAGE/vendor"
           cp -r vendor/claude-cli "$STAGE/vendor/claude-cli"
-          cp -r vendor/opencode-cli "$STAGE/vendor/opencode-cli"
-          cp -r vendor/pi-cli "$STAGE/vendor/pi-cli"
-          cp -r vendor/codex-cli "$STAGE/vendor/codex-cli"
           zip -r -y "$STAGE.zip" "$STAGE"
 
       # pwsh does not abort on a non-zero NATIVE exit code, and only the last
@@ -316,9 +321,6 @@ jobs:
           Copy-Item -Recurse -Path dist/server-bin -Destination $stage
           New-Item -ItemType Directory -Path "$stage/vendor" | Out-Null
           Copy-Item -Recurse -Path vendor/claude-cli -Destination "$stage/vendor/claude-cli"
-          Copy-Item -Recurse -Path vendor/opencode-cli -Destination "$stage/vendor/opencode-cli"
-          Copy-Item -Recurse -Path vendor/pi-cli -Destination "$stage/vendor/pi-cli"
-          Copy-Item -Recurse -Path vendor/codex-cli -Destination "$stage/vendor/codex-cli"
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
 
       - name: Upload server artifact
@@ -329,18 +331,19 @@ jobs:
 
   # Headless `claudeui-server` for linux x64 + arm64, each compiled host-natively
   # (arm64 hosted runners are free for public repos; bun cross-targets exist but
-  # are unnecessary here). The tarball is runnable
-  # as shipped: the compiled executable resolves its app path to the directory
-  # holding `out/web`, and every engine looks up `vendor/<engine>-cli` under
-  # that same root — so the linux opencode, pi and codex binaries that `bun
-  # install`'s postinstall vendors on this runner ride along (Codex additionally
-  # needs a system `bwrap` on the deployment box for its sandbox; see
-  # docs/architecture/codex.md). `vendor/claude-cli` does NOT:
-  # rebundle-cli is a documented clean skip for ELF (bun's ELF standalone layout
-  # is unimplemented), so there is no patched linux bun-claude and the Claude
+  # are unnecessary here). The tarball holds the executable alone: it resolves
+  # its app path to the directory holding `out/web`, where Claude Code would
+  # sit under `vendor/claude-cli`, and it does NOT: rebundle-cli is a
+  # documented clean skip for ELF (bun's ELF standalone layout is
+  # unimplemented), so there is no patched linux bun-claude and the Claude
   # engine is missing from the LINUX artifact specifically — fail-closed rather
-  # than silently unpatched. The mac and windows server zips assembled in the
-  # `build` job above DO ship it, because those hosts can rebundle.
+  # than silently unpatched (a System Claude Code can be selected instead).
+  # opencode, pi and Codex ship with no server (ADR-082 §8): an admin installs
+  # them from Settings › Harnesses › Installed into the deployment box's
+  # managed store (Codex additionally needs a system `bwrap` there for its
+  # sandbox; see docs/architecture/codex.md). The mac and windows server zips
+  # assembled in the `build` job above DO ship Claude Code, because those hosts
+  # can rebundle.
   server:
     name: Linux server build (${{ matrix.arch }})
     needs: version
@@ -387,15 +390,18 @@ jobs:
       - name: Read codex CLI version
         id: codex-version
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
 
-      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
-      # hit from another pin is a guaranteed re-download rather than a saving.
-      - name: Cache codex CLI binaries
+      # postinstall installs the tested opencode, pi and Codex into ClaudeUI's
+      # managed store (ADR-082 §8). Codex is the large one (two ~100 MB
+      # archives), so its version directory is cached; a restored directory
+      # with a valid install.json satisfies ensure-codex without a download.
+      # No restore-keys: another pin's directory is never this pin's.
+      - name: Cache codex harness
         uses: actions/cache@v6
         with:
-          path: vendor/codex-cli
-          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+          path: ~/.claude/ui/harnesses/codex/${{ steps.codex-version.outputs.version }}
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-harness-${{ steps.codex-version.outputs.version }}
 
       # postinstall downloads the Electron binary even though this job never
       # runs it; the os-only restore key hits ci.yml's ubuntu gates cache (the
@@ -432,10 +438,6 @@ jobs:
           STAGE="claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}"
           mkdir "$STAGE"
           cp -r dist/server-bin/. "$STAGE/"
-          mkdir "$STAGE/vendor"
-          cp -r vendor/opencode-cli "$STAGE/vendor/opencode-cli"
-          cp -r vendor/pi-cli "$STAGE/vendor/pi-cli"
-          cp -r vendor/codex-cli "$STAGE/vendor/codex-cli"
           tar -czf "$STAGE.tar.gz" "$STAGE"
 
       - name: Upload artifact
@@ -463,11 +465,12 @@ jobs:
           name: ClaudeUI ${{ needs.version.outputs.tag }}
           body: |
             The `claudeui-server-*` artifacts are the headless server: linux x64 and
-            arm64 as `.tar.gz`, macOS arm64 and Windows x64 as `.zip`. All four ship the
-            opencode, pi and Codex engines. The mac and Windows zips also ship the Claude
-            Code engine — the patched `bun-claude` builds on those hosts, and no linux
-            one exists yet — and it signs in with whatever `claude` credentials already
-            exist on that machine; the server manages no Claude account of its own.
+            arm64 as `.tar.gz`, macOS arm64 and Windows x64 as `.zip`. None ships opencode,
+            pi or Codex: an admin installs them from Settings › Harnesses › Installed in the
+            server's web UI. The mac and Windows zips ship the Claude Code engine — the
+            patched `bun-claude` builds on those hosts, and no linux one exists yet — and it
+            signs in with whatever `claude` credentials already exist on that machine; the
+            server manages no Claude account of its own.
             On linux, Codex's sandbox needs a system `bwrap` — install your distro's
             `bubblewrap` package, or sandboxed Codex commands fail.
             Unpack the mac zip with `unzip` or Finder so the executable bits survive

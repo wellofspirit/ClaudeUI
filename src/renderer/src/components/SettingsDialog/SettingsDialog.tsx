@@ -3,7 +3,8 @@ import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialogView } from './View'
 import { SettingsMobileView } from './MobileView'
-import { PAGES, enginesOf } from './settings-pages'
+import { PAGES, enginesOf, pageOf, pageOpens } from './settings-pages'
+import { useEngineRuns } from './harness-store'
 import { groupKey } from './settings-target'
 import type { SettingsPageId, SettingsTarget, VersionInfo } from './settings-target'
 import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/types'
@@ -34,7 +35,17 @@ export function SettingsDialog({
   // a preference — a group that does not offer it falls back to its first key.
   const sessionEngine = useActiveSession((s) => s.selectedEngineId)
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null)
-  const [activePage, setActivePage] = useState<SettingsPageId>(initialTarget?.page ?? lastPage)
+  const [requestedPage, setActivePage] = useState<SettingsPageId>(initialTarget?.page ?? lastPage)
+  /**
+   * A harness page cannot be opened while its harness does not run (ADR-082 §8):
+   * a deep link, a cross-link, the remembered page, or the page being open when
+   * the harness goes — each lands on Harnesses › Installed instead. Derived for
+   * this render (so the page never mounts), then committed below.
+   */
+  const runs = useEngineRuns()
+  const activePage: SettingsPageId = pageOpens(pageOf(requestedPage), runs)
+    ? requestedPage
+    : 'harnesses'
   const [activeGroup, setActiveGroup] = useState<string | null>(initialTarget?.group ?? null)
   // 0 = nothing has asked the pane to scroll yet.
   const [scrollNonce, setScrollNonce] = useState(0)
@@ -52,6 +63,14 @@ export function SettingsDialog({
     setSearch('')
     setScrollNonce((n) => n + 1)
   }, [targetPage, targetGroup])
+
+  // Commit a redirect, so the page does not come back by itself once the
+  // harness runs again; the group it asked for belongs to the page it left.
+  useEffect(() => {
+    if (activePage === requestedPage) return
+    setActivePage(activePage)
+    setActiveGroup(null)
+  }, [activePage, requestedPage])
 
   // Reopening lands where you left off.
   useEffect(() => {
@@ -90,7 +109,9 @@ export function SettingsDialog({
   /**
    * Every engine-segment group's current engine: the user's explicit pick if
    * there is one, else the active session's engine when the group offers it,
-   * else the group's first engine.
+   * else the group's first engine. The views resolve it against what can be
+   * selected (`engineFor`), so a harness that does not run falls through to the
+   * first one that does.
    */
   const engineByGroup = useMemo(() => {
     const out: Record<string, EngineId> = {}

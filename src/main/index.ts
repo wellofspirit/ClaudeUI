@@ -638,12 +638,18 @@ app.whenReady().then(() => {
   })
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
-  const versionInfo = { appVersion, cliVersion }
+  // The CLI version is read per call, not snapshotted here: the Claude Code
+  // harness can change while the app runs (ADR-082 — a System install, a
+  // selection change), and `getCliVersion()` is a cached resolver read.
+  const versionInfo = (): { appVersion: string; cliVersion: string } => ({
+    appVersion,
+    cliVersion: getCliVersion()
+  })
   // Publish it to core as well (ADR-072 §5): the usage hub sends the app version
   // with each push so the hub's machine list can say which build a device is on,
   // and `app.getVersion()` is reachable from main alone.
   setHostAppVersion(appVersion)
-  ipcMain.handle('app:version-info', () => versionInfo)
+  ipcMain.handle('app:version-info', () => versionInfo())
   // Mirror to the remote dispatcher so the web client's Settings dialog can
   // read the server's build versions.
   registerRemoteVersionInfo(versionInfo)

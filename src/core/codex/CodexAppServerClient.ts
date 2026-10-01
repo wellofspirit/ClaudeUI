@@ -5,12 +5,18 @@ import { TextDecoder } from 'node:util'
 import { getLogDir, logger } from '../services/logger'
 import { killProcessTree } from '../services/process-tree'
 import { codexHomeForEnv, codexHomeKey } from './codex-home'
-import { locateCodexBinary } from './codex-locate'
+import { locateCodexLaunch } from './codex-locate'
+import { withLaunch, type HarnessLaunch } from '../harness/launch'
+import { classifyVersion } from '../harness/version-gate'
+import { harnessManifest } from '../harness/manifests'
+import { HARNESS_VERSION_RE } from '../harness/selection-store'
 import type { InitializeParams } from './protocol/InitializeParams'
 import type { InitializeResponse } from './protocol/InitializeResponse'
 import type { RequestId } from './protocol/RequestId'
 import type { JSONRPCMessage } from './protocol/envelopes'
-import provenance from './protocol/provenance.json'
+
+/** Untested Codex versions already announced in the log (`checkVersion`). */
+const untestedVersionsLogged = new Set<string>()
 
 /**
  * What the OS said about the child, filled in by the `exit` handler. One record
@@ -339,14 +345,15 @@ export class CodexAppServerClient {
     if (this.state !== 'new') throw this.error('one-shot-client')
     this.state = 'starting'
     try {
-      const binary = locateCodexBinary()
-      if (!binary) throw this.error('binary-unavailable')
-      await this.checkVersion(binary)
+      const launch = locateCodexLaunch()
+      if (!launch) throw this.error('binary-unavailable')
+      await this.checkVersion(launch)
       if (this.closedError) throw this.closedError
       await this.awaitFirstRun()
-      const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
+      const spec = withLaunch(launch, ['app-server', '--listen', 'stdio://'], this.childEnv)
+      const child = spawn(spec.command, spec.args, {
         cwd: this.options.cwd,
-        env: this.childEnv,
+        env: spec.env,
         detached: process.platform !== 'win32',
         stdio: 'pipe',
         windowsHide: true
@@ -447,18 +454,26 @@ export class CodexAppServerClient {
     return this.state === 'closed'
   }
 
-  private checkVersion(binary: string): Promise<void> {
+  /**
+   * `codex --version` must print `codex-cli <version>` with a version the
+   * manifest accepts (ADR-082 §3, amending ADR-066's exact pin): the tested
+   * version, or an untested one in `[floor, ceiling)`. Anything else, including
+   * output that does not parse, refuses the start. The generated protocol types
+   * stay pinned to the tested version (`provenance.json`).
+   */
+  private checkVersion(launch: HarnessLaunch): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(binary, ['--version'], {
+      const spec = withLaunch(launch, ['--version'], this.childEnv)
+      const child = spawn(spec.command, spec.args, {
         cwd: this.options.cwd,
-        env: this.childEnv,
+        env: spec.env,
         detached: process.platform !== 'win32',
         stdio: 'pipe',
         windowsHide: true
       })
       let output = ''
       let settled = false
-      const finish = (valid: boolean): void => {
+      const finish = (valid: boolean, refusal = 'version-check-failed'): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
@@ -467,9 +482,9 @@ export class CodexAppServerClient {
         if (valid) resolve()
         // `fail()` stamps closedError before it trips `stopVersion`, so a
         // teardown mid-probe already carries the real reason (`disposed`,
-        // `spawn-failed`, …). Minting `version-check-failed` here would
-        // overwrite it and tell `start()`'s caller the wrong thing.
-        else reject(this.closedError ?? this.error('version-check-failed'))
+        // `spawn-failed`, …). Minting a version refusal here would overwrite
+        // it and tell `start()`'s caller the wrong thing.
+        else reject(this.closedError ?? this.error(refusal))
       }
       const timer = setTimeout(() => finish(false), this.options.requestTimeoutMs ?? 15000)
       this.stopVersion = () => finish(false)
@@ -482,9 +497,33 @@ export class CodexAppServerClient {
         if (output.length > 4096) finish(false)
       })
       child.on('error', () => finish(false))
-      child.on('close', (code) =>
-        finish(code === 0 && output.trim() === `codex-cli ${provenance.version}`)
-      )
+      child.on('close', (code) => {
+        const version = code === 0 ? /^codex-cli (\S+)$/.exec(output.trim())?.[1] : undefined
+        // Unparseable output is the generic refusal, as it always was.
+        if (version === undefined || !HARNESS_VERSION_RE.test(version)) return finish(false)
+        const verdict = classifyVersion('codex', version)
+        if (verdict === 'tested') return finish(true)
+        const { tested, floor, ceiling } = harnessManifest('codex')
+        if (verdict === 'untested') {
+          // Once per version per process: every client start (auth probes,
+          // lineage scans, sessions) runs this check.
+          if (!untestedVersionsLogged.has(version)) {
+            untestedVersionsLogged.add(version)
+            logger.info(
+              'CodexAppServerClient',
+              `Codex ${version} is untested (tested: ${tested}); running it`
+            )
+          }
+          return finish(true)
+        }
+        const why =
+          verdict === 'too-old' ? `older than ${floor}` : `${ceiling} or newer (a new major)`
+        logger.warn(
+          'CodexAppServerClient',
+          `Codex ${version} refused: ${why}; ClaudeUI accepts ${floor} or newer, below ${ceiling}`
+        )
+        finish(false, verdict === 'too-old' ? 'version-too-old' : 'version-incompatible')
+      })
     })
   }
 

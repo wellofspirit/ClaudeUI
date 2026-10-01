@@ -15,7 +15,8 @@
  *      the sibling keys ClaudeUI itself injects.
  *   6. `default_agent` offers only agents opencode would accept as a default.
  *   7. The Managed pane is static: three FORCED rows, no IPC.
- *   8. Every pane self-gates on opencode being installed.
+ *   8. No pane asks whether opencode is installed: the file is ClaudeUI's own
+ *      read, and the page cannot be opened while it is not (ADR-082 §8).
  *   9. A rejected patch surfaces inline instead of being swallowed.
  */
 
@@ -50,7 +51,6 @@ const listOpencodeAgents = vi.fn(async (): Promise<OpencodeAgentSummary[]> => []
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     readOpencodeNativeRaw,
     patchOpencodeNative,
     listOpencodeAgents,
@@ -738,34 +738,42 @@ describe('opencode Configuration panes', () => {
       expect(row.textContent).toContain('small_model')
       expect(row.textContent).toContain('autoshare')
     })
-
-    it('renders even when opencode is not installed (it describes ClaudeUI, not the file)', async () => {
-      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-      await renderPane(<OpencodeManagedKeysSection />)
-      expect(screen.getByTestId('OpencodeManagedKeysSection')).toBeTruthy()
-    })
   })
 
-  // ── 8. Install gate ────────────────────────────────────────────────
+  // ── 8. Not installed (ADR-082 §8) ─────────────────────────────────
 
-  describe('not-installed gate', () => {
-    const panes: [string, React.ReactElement][] = [
-      ['OpencodeSessionBehaviorSection', <OpencodeSessionBehaviorSection key="a" />],
-      ['OpencodeToolOutputSection', <OpencodeToolOutputSection key="b" />],
-      ['OpencodeAttachmentsSection', <OpencodeAttachmentsSection key="c" />],
-      ['OpencodeWorkspaceSection', <OpencodeWorkspaceSection key="d" />],
-      ['OpencodeToolsSection', <OpencodeToolsSection key="e" />],
-      ['OpencodeDiagnosticsSection', <OpencodeDiagnosticsSection key="f" />]
+  describe('not installed', () => {
+    // The file is ClaudeUI's own read and the page cannot be opened while
+    // opencode is not installed (SettingsDialogView's rail test), so no pane
+    // asks: each shows the file's values.
+    const panes: [string, React.ReactElement, string][] = [
+      [
+        'OpencodeSessionBehaviorSection',
+        <OpencodeSessionBehaviorSection key="a" />,
+        'compaction.auto'
+      ],
+      ['OpencodeToolOutputSection', <OpencodeToolOutputSection key="b" />, 'tool_output.max_lines'],
+      [
+        'OpencodeAttachmentsSection',
+        <OpencodeAttachmentsSection key="c" />,
+        'attachment.image.max_width'
+      ],
+      ['OpencodeWorkspaceSection', <OpencodeWorkspaceSection key="d" />, 'instructions'],
+      ['OpencodeToolsSection', <OpencodeToolsSection key="e" />, 'tools'],
+      ['OpencodeDiagnosticsSection', <OpencodeDiagnosticsSection key="f" />, 'logLevel']
     ]
 
-    it.each(panes)('%s renders the not-installed copy and no controls', async (testid, node) => {
-      installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-      await renderPane(node)
-      const root = screen.getByTestId(testid)
-      expect(root.textContent).toContain('opencode is not installed')
-      expect(screen.queryAllByTestId('OpencodeConfigPane.toggle')).toHaveLength(0)
-      expect(screen.queryAllByTestId('OpencodeConfigPane.number')).toHaveLength(0)
-    })
+    it.each(panes)(
+      '%s renders its rows without asking whether opencode is installed',
+      async (testid, node, key) => {
+        const engineIsInstalled = vi.fn(async () => false)
+        installApiStub({ engineIsInstalled })
+        await renderPane(node)
+        expect(screen.getByTestId(testid).textContent).not.toContain('Loading')
+        expect(rowFor(key)).toBeInTheDocument()
+        expect(engineIsInstalled).not.toHaveBeenCalled()
+      }
+    )
   })
 
   // ── 9. Patch failures surface ──────────────────────────────────────

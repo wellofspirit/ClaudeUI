@@ -54,6 +54,7 @@ import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { fedTokenHistory } from '../auth/vault/fed-token-history'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
@@ -62,6 +63,12 @@ import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
 import { claudeHostTokenKeeper } from '../services/claude-host-token'
+import { startDetectionScheduler } from '../harness/detect/scheduler'
+import { collectHarnessGarbage } from '../harness/install/gc'
+import { startHarnessUpdater } from '../harness/install/updater'
+import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
+import { harnessWritable } from '../harness/resolve'
+import { watchHarnessArrivals } from '../harness/arrivals'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -244,7 +251,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     onCredentialStored: (accountId) =>
       emitEvent('provider:auth-resolved', [
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
-      ])
+      ]),
+    // Nothing is fed into a harness that does not run, and a removal from one
+    // is a direct file edit (ADR-082 §8, S7d); the arrival wiring below catches
+    // it up. Here, not in the desktop registrar, so the headless server
+    // honours it too.
+    harnessRuns: harnessWritable,
+    // Which ChatGPT tokens ClaudeUI put into each engine, so a disconnect takes
+    // out a stale copy of its own too (ADR-082 §8, S7e). The file, here, for
+    // both hosts; the class defaults to memory so its tests touch no home.
+    fedTokens: fedTokenHistory()
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
@@ -274,6 +290,36 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   armCodexRulesSync()
   syncCodexRulesFile()
 
+  // The Installed page and every engine-installed gate follow harnesses live:
+  // each resolver invalidation goes out as `harness:changed { id }`, and each
+  // install's progress as `harness:install-progress`, to the desktop renderer
+  // and every remote client alike. Before the scheduler, so its first run's
+  // invalidations are not missed.
+  startHarnessEvents(emitEvent)
+
+  // System harness detection (ADR-082 §3), in the background: one run for
+  // every harness a few seconds after boot, on an unref'd timer, and from then
+  // on whenever the resolver finds a System selection's cache missing or stale.
+  // It spawns `--version` probes, so it never runs on boot's critical path or
+  // on a spawn; the resolver only ever reads its cache. Both hosts need it: the
+  // server resolves harnesses the same way. Test runs switch it off
+  // (`CLAUDEUI_DISABLE_HARNESS_DETECTION`, set in the vitest setup files).
+  // After that first run, the managed store's retention (ADR-082 §4): versions
+  // no session used for seven days are removed, off every spawn path. Then the
+  // harness updater (§6): one check against upstream now and every six hours,
+  // installing what it finds only when Install updates is Automatically.
+  // First of all, the one-time upgrade sheet (§8) is evaluated: after the boot
+  // detection, so a usable System install it found is not offered; with
+  // detection off, at once against the cache as it stands.
+  startDetectionScheduler({
+    afterBoot: async () => {
+      evaluateUpgradePrompt()
+      await collectHarnessGarbage()
+      startHarnessUpdater()
+    },
+    whenDisabled: () => evaluateUpgradePrompt()
+  })
+
   // Learn what every Codex thread is a branch OF, once per launch, alongside the
   // Claude session scan the line above sits next to (`registerSessionIpc` seeds
   // canonical and starts the directory walk; this hangs off that same moment).
@@ -300,6 +346,26 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       )
     }
   })()
+
+  // A harness that ARRIVES — pi or opencode goes from not running to running:
+  // an install, a selection change, a finished detection — gets what ClaudeUI
+  // held back while it could not run (ADR-082 §8, S7d): every shared provider's
+  // current route, then the ChatGPT credential.
+  // Only that harness is written. Before the boot sync below, so a detection
+  // that finishes during it is not missed; the two share the service's queue.
+  watchHarnessArrivals(['pi', 'opencode'], (id) => {
+    void (async () => {
+      try {
+        await sharedProviderService.harnessArrived(id)
+      } catch (err) {
+        logger.warn(
+          'main',
+          `delivering shared providers to ${id} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      await credentialSync.harnessArrived(id)
+    })()
+  })
 
   // Reconcile central credentials first, then materialize all shared-provider
   // routes. Both are best-effort and must never block app startup.

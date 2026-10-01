@@ -20,7 +20,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import type { ClaudePermissions } from '../../../shared/types'
 
@@ -43,6 +43,7 @@ import {
   resolveCodexHome,
   syncCodexRulesFile
 } from '../rules-sync'
+import { harnessManifest } from '../../harness/manifests'
 
 const perms = (partial: Partial<ClaudePermissions>): ClaudePermissions => ({
   allow: [],
@@ -442,21 +443,30 @@ describe('syncCodexRulesFile', () => {
  * "it looks right" is not enough — an escaping bug would silently invalidate the
  * whole file and, per `load_exec_policy`, drop every rule in the user layer.
  * `codex execpolicy check` is the same parser Codex loads rules with, so this
- * runs the real one wherever the vendored binary exists.
+ * runs the real one wherever the pinned binary is installed: ClaudeUI's real
+ * managed store (ADR-082 §8; `postinstall` / `bun run ensure-codex` put it
+ * there, on CI too). The test setup moves HOME, so `vitest.config.ts` names that
+ * store, read-only, as `CLAUDEUI_TEST_HARNESS_STORE`.
  */
 // `../codex-locate` is module-mocked above for the unit tests, so the real host
 // gate has to be pulled in explicitly rather than imported at the top.
 const { codexHostSupported } =
   await vi.importActual<typeof import('../codex-locate')>('../codex-locate')
-const vendoredCodex = resolve(
-  'vendor/codex-cli',
-  process.platform === 'win32' ? 'codex.exe' : 'codex'
-)
-const canRunCodex = codexHostSupported() && existsSync(vendoredCodex)
+const realStore = process.env.CLAUDEUI_TEST_HARNESS_STORE
+const pinnedDir = realStore ? join(realStore, 'codex', harnessManifest('codex').tested) : null
+const pinnedCodex = pinnedDir
+  ? join(pinnedDir, process.platform === 'win32' ? 'codex.exe' : 'codex')
+  : ''
+// install.json is written last, so its presence marks a complete, verified install.
+const canRunCodex =
+  codexHostSupported() &&
+  pinnedDir !== null &&
+  existsSync(join(pinnedDir, 'install.json')) &&
+  existsSync(pinnedCodex)
 
 describe.skipIf(!canRunCodex)('generated file against the real execpolicy parser', () => {
   const check = (rulesPath: string, argv: string[], codexHome: string) => {
-    const run = spawnSync(vendoredCodex, ['execpolicy', 'check', '--rules', rulesPath, ...argv], {
+    const run = spawnSync(pinnedCodex, ['execpolicy', 'check', '--rules', rulesPath, ...argv], {
       encoding: 'utf8',
       env: { ...process.env, CODEX_HOME: codexHome }
     })

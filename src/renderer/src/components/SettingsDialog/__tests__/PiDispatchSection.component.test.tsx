@@ -55,11 +55,9 @@ let savedConfigs: EngineConfig[] = []
 const saveEngineConfig = vi.fn(async (_engineId: string, cfg: EngineConfig) => {
   savedConfigs.push(structuredClone(cfg))
 })
-const engineIsInstalled = vi.fn(async () => true)
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled,
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
     saveEngineConfig,
@@ -119,25 +117,12 @@ afterEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('PiDispatchSection — gated states', () => {
-  it('shows Loading while probes are pending', () => {
-    installApiStub({
-      engineIsInstalled: vi.fn(() => new Promise(() => {})),
-      loadEngineConfig: vi.fn(() => new Promise(() => {}))
-    })
+describe('PiDispatchSection — loading', () => {
+  it('shows Loading while the config is pending', () => {
+    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
     render(<PiDispatchSection />)
     expect(screen.getByTestId('PiDispatchSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('PiDispatchSection.defaultModel')).toBeNull()
-  })
-
-  it('gates on PI being installed, not on opencode', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async (id: string) => id !== 'pi') })
-    render(<PiDispatchSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('PiDispatchSection').textContent).toContain('not installed')
-    )
-    expect(screen.queryByTestId('PiDispatchSection.defaultModel')).toBeNull()
-    expect(screen.queryAllByTestId('PiDispatchSection.allowedModel')).toHaveLength(0)
   })
 })
 

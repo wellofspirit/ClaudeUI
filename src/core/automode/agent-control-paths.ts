@@ -33,11 +33,13 @@ export const AGENT_CONTROL_DIRS: readonly string[] = [
   '.vscode',
   '.devcontainer',
   '.opencode',
-  // pi's project config dir (vendor/pi-cli/docs/configuration.md "Project
-  // `.pi` directory": settings, SYSTEM.md, extensions, skills, prompts).
+  // pi's project config dir (vendor/pi-src/packages/coding-agent/docs/
+  // configuration.md "Project `.pi` directory": settings, SYSTEM.md,
+  // extensions, skills, prompts).
   '.pi',
   // Agent Skills location pi discovers from cwd up to the repo root
-  // (vendor/pi-cli/docs/skills.md) — skills are instructions future sessions load.
+  // (vendor/pi-src/packages/coding-agent/docs/skills.md) — skills are
+  // instructions future sessions load.
   '.agents'
 ]
 
@@ -47,7 +49,7 @@ export const AGENT_CONTROL_FILES: readonly string[] = [
   'CLAUDE.local.md',
   'AGENTS.md',
   // Replaces AGENTS.md/CLAUDE.md in its directory for pi
-  // (vendor/pi-cli/docs/configuration.md "Context files").
+  // (vendor/pi-src/packages/coding-agent/docs/configuration.md "Context files").
   'AGENTS.override.md',
   '.mcp.json',
   'opencode.json',

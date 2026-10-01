@@ -1,0 +1,32 @@
+{
+  "id": "pi",
+  "tested": "0.87.1",
+  "floor": "0.87.1",
+  "ceiling": "1.0.0",
+  "platforms": {
+    "win32-x64": {
+      "asset": "pi-windows-x64.zip",
+      "archiveSha256": "aab2ba67baf8ff97a52d05b62d88e9e65a840c6ea8fa1029a28d62d210d4e5fc"
+    },
+    "win32-arm64": {
+      "asset": "pi-windows-arm64.zip",
+      "archiveSha256": "2e0d544999a765018ee5c2ff1a8b1a7e0f5d5b6b1e00b32d8c025d6c1dbcc833"
+    },
+    "darwin-arm64": {
+      "asset": "pi-darwin-arm64.tar.gz",
+      "archiveSha256": "4f8d288b78c9768d3a4ac6f61f06cd34394b82ac17d5b42d1e44a437add401b7"
+    },
+    "darwin-x64": {
+      "asset": "pi-darwin-x64.tar.gz",
+      "archiveSha256": "01d8ee28d7114fec4f4eeedbb7561f790853040e9bfbdeebe79437ab66ea51f5"
+    },
+    "linux-x64": {
+      "asset": "pi-linux-x64.tar.gz",
+      "archiveSha256": "80d78dd62d50049a006b981d994c61255bcc10e730b0c278d4ea0a755909764c"
+    },
+    "linux-arm64": {
+      "asset": "pi-linux-arm64.tar.gz",
+      "archiveSha256": "364b4a9f8491450b27a4857d4e3c780dbaf696790821c176a873e860cbbc3b89"
+    }
+  }
+}

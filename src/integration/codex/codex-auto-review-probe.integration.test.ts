@@ -10,12 +10,19 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { setHostPaths } from '../../core/host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexInstalled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { AskForApproval } from '../../core/codex/protocol/v2/AskForApproval'
 import type { ApprovalsReviewer } from '../../core/codex/protocol/v2/ApprovalsReviewer'
@@ -79,7 +86,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const enabled =
-  process.env.CODEX_INTEGRATION === '1' && process.platform === 'darwin' && process.arch === 'arm64'
+  process.env.CODEX_INTEGRATION === '1' &&
+  process.platform === 'darwin' &&
+  process.arch === 'arm64' &&
+  codexInstalled
 
 /** `sandbox-exec` refusing to nest inside the containment profile. */
 const EXIT_NESTED_SANDBOX = 71
@@ -117,6 +127,7 @@ afterEach(async () => {
     }
   } finally {
     setHostPaths(null)
+    releaseFixtureCodex()
     for (const teardown of teardowns.splice(0)) await teardown()
   }
   expect(survivors, 'app-server groups survived bounded disposal').toEqual([])
@@ -172,10 +183,7 @@ async function setupFixture(
     model?: string
   } = {}
 ): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -191,11 +199,12 @@ async function setupFixture(
     cwd,
     outside,
     join(directory, 'tmp'),
-    join(directory, 'vendor/codex-cli')
+    join(directory, FIXTURE_CODEX_DIR)
   ])
     mkdirSync(name, { recursive: true })
-  copyFileSync(installed, join(directory, 'vendor/codex-cli/codex'))
+  copyFileSync(installed, join(directory, `${FIXTURE_CODEX_DIR}/codex`))
   setHostPaths({ getAppPath: () => directory })
+  useFixtureCodex(directory)
   const requests: ProviderRequest[] = []
   const errors: string[] = []
   const script = { current: done as Script }
@@ -1263,7 +1272,7 @@ it.skipIf(!enabled)(
     const fixture = await setupFixture()
     const starlark = join(fixture.directory, 'fixture.rules')
     writeFileSync(starlark, FORBID_ECHO)
-    const binary = join(fixture.directory, 'vendor/codex-cli/codex')
+    const binary = join(fixture.directory, `${FIXTURE_CODEX_DIR}/codex`)
     const run = (...argv: string[]): { status: number | null; stdout: string } => {
       const result = spawnSync(binary, ['execpolicy', 'check', '--rules', starlark, ...argv], {
         encoding: 'utf8',

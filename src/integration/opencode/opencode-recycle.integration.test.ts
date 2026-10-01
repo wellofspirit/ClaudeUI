@@ -18,22 +18,22 @@
 // @vitest-environment node
 
 import { describe, it, expect, afterAll } from 'vitest'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpencodeServerManager } from '../../core/opencode/OpencodeServerManager'
+import { resolveHarness } from '../../core/harness/resolve'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
-const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
-const ROOT = join(__dirname, '..', '..', '..')
 
+/** The binary the app itself would spawn (the harness resolver, ADR-082). */
 function findBinary(): string | null {
-  const candidates = [
-    join(ROOT, 'vendor', 'opencode-cli', BINARY_NAME),
-    join(ROOT, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
-  ]
-  return candidates.find(existsSync) ?? null
+  return resolveHarness('opencode').path
 }
+
+// Evaluated once at collection time: a checkout without opencode installed
+// (`bun run ensure-opencode`, or a System selection) skips rather than fails.
+const BINARY_MISSING = !findBinary()
 
 async function alive(baseUrl: string, authHeader: string): Promise<boolean> {
   try {
@@ -46,7 +46,7 @@ async function alive(baseUrl: string, authHeader: string): Promise<boolean> {
   }
 }
 
-describe.skipIf(SKIP)('opencode recycleAll smoke', () => {
+describe.skipIf(SKIP || BINARY_MISSING)('opencode recycleAll smoke', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'oc-recycle-'))
   let mgr: OpencodeServerManager
 

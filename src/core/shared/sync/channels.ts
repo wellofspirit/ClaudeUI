@@ -429,6 +429,18 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: "ADR-072 §7: the usage hub client's state moved — the same bare nudge as the two usage channels above it. Replicated because a phone looking at the dashboard has to learn that another machine's rows arrived, and PAYLOAD-FREE because `usage-hub:status` is the one shape and it must never carry the device credential a fan-out would copy. No snapshot field."
   },
+  'harness:changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-082 arc 2: the harness resolver was invalidated for one harness (a detection finished, an install finished, a selection was saved, retention removed a version), or its update entry or the updater status moved (§6: a check found a version, an update run started or ended, the update mode was saved) — a nudge carrying only `{ id }`; clients re-read `harness:state`, the one shape. Replicated because every device shows the Installed page and the engine-installed gates, and a harness can appear or disappear while the app runs (ADR-082 Consequences). No snapshot field.'
+  },
+  'harness:install-progress': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: "ADR-082 §4: a managed install's phase and bytes (`HarnessInstallProgress`), at most four a second per install. Replicated, not the volatile lane: the lane is scoped to watched sessions and an install belongs to none. It rings, so a reconnecting client can replay stale progress; `harness:state`'s `installs` is the truth, and a `done`/`failed` phase is always the last event of an install. No snapshot field."
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     ring: true,

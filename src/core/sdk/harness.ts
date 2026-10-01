@@ -17,6 +17,7 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { onHarnessChanged, resolveHarness } from '../harness/resolve'
 import { locateBunClaude } from './locate'
 
 export interface HarnessInfo {
@@ -78,12 +79,35 @@ export function readHarnessInfo(binaryPath: string): HarnessInfo {
   return info
 }
 
-/** Does the binary the app spawns (`locateBunClaude()`) carry patch `name`? */
-export function harnessHasPatch(name: string): boolean {
-  return readHarnessInfo(locateBunClaude()).patches.has(name)
+/**
+ * The spawned binary's info, read once per resolved path. `harnessHasPatch` sits
+ * on `ClaudeSession.capabilities`, which runs on every status emit, so it must
+ * not stat version.json each time; a harness change (`invalidateHarness`) or a
+ * different resolved path re-reads it. A version.json rewritten in place under a
+ * running app is not noticed until then, the same staleness the resolver accepts.
+ */
+let spawned: { path: string; info: HarnessInfo } | null = null
+onHarnessChanged((id) => {
+  if (id === 'claude') spawned = null
+})
+
+function spawnedInfo(): HarnessInfo {
+  const binary = locateBunClaude()
+  if (spawned?.path !== binary) spawned = { path: binary, info: readHarnessInfo(binary) }
+  return spawned.info
 }
 
-/** The spawned binary's Claude Code version, or `'unknown'`. */
+/** Does the binary the app spawns (`locateBunClaude()`) carry patch `name`? */
+export function harnessHasPatch(name: string): boolean {
+  return spawnedInfo().patches.has(name)
+}
+
+/**
+ * The spawned binary's Claude Code version, or `'unknown'`. The resolution's
+ * version wins when it has one (a System install carries what its `--version`
+ * printed at detection, ADR-082 §3); otherwise the `version.json` beside the
+ * binary. Never spawns anything: this sits on hot paths.
+ */
 export function getCliVersion(): string {
-  return readHarnessInfo(locateBunClaude()).version
+  return resolveHarness('claude').version ?? spawnedInfo().version
 }

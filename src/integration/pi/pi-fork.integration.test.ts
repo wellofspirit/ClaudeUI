@@ -4,7 +4,7 @@
  * This is the proof for M5c: PiSession.doStart()'s fork/clone choreography —
  * spawn resuming the SOURCE, then EITHER `fork {entryId}` (drop a later user
  * turn + everything after) OR `clone` (duplicate the active branch as-is,
- * when forking the LATEST message) — against the REAL vendored pi binary,
+ * when forking the LATEST message) — against the REAL installed pi binary,
  * asserting the one guarantee the whole feature depends on: the SOURCE
  * session file is left byte-for-byte UNCHANGED by either operation, while a
  * brand-new, correctly-truncated session file is produced.

@@ -313,7 +313,13 @@ describe('an engine’s own key, and a key left behind (ADR-074 slice 10 review)
     expect(h.opencodeAuth.get('openrouter')).toBe(OWN)
     expect(h.piAuth.has('openrouter')).toBe(false)
 
-    await h.service.setDisabled('openrouter', false, true)
+    // Confirming for pi alone does not cover opencode's own key.
+    await expect(h.service.setDisabled('openrouter', false, ['pi'])).rejects.toThrow(
+      'opencode has its own key for OpenRouter'
+    )
+    expect(h.opencodeAuth.get('openrouter')).toBe(OWN)
+
+    await h.service.setDisabled('openrouter', false, ['opencode'])
     expect(h.opencodeAuth.get('openrouter')).toBe(KEY)
     expect(h.piAuth.get('openrouter')).toBe(KEY)
   })

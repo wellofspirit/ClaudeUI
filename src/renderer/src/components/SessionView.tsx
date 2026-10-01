@@ -21,6 +21,7 @@ import { QuitWorktreeModal } from './QuitWorktreeModal'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
 import { SignInDialog } from './auth/SignInDialog'
+import { HarnessUpgradeSheet } from './harness/HarnessUpgradeSheet'
 import { settingsTargetFromEvent, type SettingsTarget } from './SettingsDialog/settings-target'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
@@ -435,6 +436,10 @@ export function SessionView(): React.JSX.Element {
           entry point (banner, transcript row, settings rows, provider sheets)
           opens it by setting that slice rather than by rendering a flow. */}
       <SignInDialog />
+      {/* The one-time harness upgrade sheet (ADR-082 §8): app-level, above the
+          chat, shown only while the host says it is pending and to a
+          connection that may install. */}
+      <HarnessUpgradeSheet />
       {/* App-level (not per-session) notice: `tailscale serve` failed while TLS
           mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
           — renders null on web and while serve is healthy. */}

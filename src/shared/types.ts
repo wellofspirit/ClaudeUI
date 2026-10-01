@@ -17,6 +17,18 @@ import type {
   SharedProviderStatus
 } from './shared-provider'
 import type { ProviderRegistrySnapshot } from './provider-registry'
+import type {
+  HarnessId,
+  HarnessInstallCancelResult,
+  HarnessInstallResult,
+  HarnessSelection,
+  HarnessStateEntry,
+  HarnessStateSnapshot,
+  HarnessUpdateMode,
+  HarnessUpdatesView,
+  HarnessUpgradePromptView,
+  HarnessVersionsResult
+} from './harness-types'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -1654,6 +1666,30 @@ interface SessionAPI {
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>
+  // ── Harness manager (ADR-082 arc 2; `core/ipc/harness-commands.ts`) ──
+  // Reads are `config`; every write is `admin` (§7), so a base remote
+  // connection is refused them. Live updates arrive as the `harness:changed`
+  // and `harness:install-progress` sync events (`onSyncEvent`).
+  /** Every harness: manifest, selection, resolver answer, detection, store. No probes. */
+  harnessState(): Promise<HarnessStateSnapshot>
+  /** Upstream releases for the version dropdown (network, cached for an hour). */
+  harnessVersions(id: HarnessId): Promise<HarnessVersionsResult>
+  /** Save a harness's source; running sessions keep their binary. Throws on an invalid choice. */
+  setHarnessSelection(id: HarnessId, selection: HarnessSelection): Promise<HarnessStateEntry>
+  /** Install into ClaudeUI's store; resolves when the install finishes. */
+  installHarness(id: HarnessId, version: string): Promise<HarnessInstallResult>
+  /** Abort an in-flight `installHarness` for this harness and version. */
+  cancelHarnessInstall(id: HarnessId, version: string): Promise<HarnessInstallCancelResult>
+  /** Re-detect System installs (all harnesses when omitted); resolves with the new state. */
+  detectHarnesses(ids?: HarnessId[]): Promise<HarnessStateSnapshot>
+  /** Install updates: Automatically | Ask me (ADR-082 §6). Answers the updates view. */
+  setHarnessUpdateMode(mode: HarnessUpdateMode): Promise<HarnessUpdatesView>
+  /** Install every available harness update; resolves with the state once the run ends. */
+  updateHarnesses(): Promise<HarnessStateSnapshot>
+  /** Ask upstream for new versions now; resolves with the new state. */
+  checkHarnessUpdates(): Promise<HarnessStateSnapshot>
+  /** Answer the one-time upgrade sheet (ADR-082 §8): it does not come back. */
+  answerHarnessUpgradePrompt(): Promise<HarnessUpgradePromptView>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
@@ -1772,7 +1808,16 @@ interface SharedProviderAPI {
     harness: ConfigurableHarnessId,
     enabled: boolean
   ): Promise<void>
-  setSharedProviderApiKey(id: string, key: string): Promise<void>
+  /**
+   * Store a provider's key and deliver it to each enabled harness. A harness
+   * holding a key of its own for the vendor keeps it unless `replaceOwn` names
+   * it — the harnesses the user agreed to overwrite (ADR-082 §8, S7f).
+   */
+  setSharedProviderApiKey(
+    id: string,
+    key: string,
+    replaceOwn?: readonly ConfigurableHarnessId[]
+  ): Promise<void>
   /**
    * Adopt a key an engine already holds into a catalog definition (ADR-074 §6).
    * `keep` names the engine whose key wins; omitted, both must hold the same key.
@@ -1783,10 +1828,23 @@ interface SharedProviderAPI {
   /**
    * Switch a key or endpoint provider off (delivered to no engine; key, routes
    * and model list kept) or back on (ADR-074 slice 10). Switching on refuses to
-   * replace a key an engine holds of its own unless `replaceOwn` confirms it.
+   * replace a key a harness holds of its own unless `replaceOwn` names that
+   * harness (S7f: per harness).
    */
-  setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
+  setSharedProviderDisabled(
+    id: string,
+    disabled: boolean,
+    replaceOwn?: readonly ConfigurableHarnessId[]
+  ): Promise<void>
   syncSharedProvider(id: string): Promise<void>
+  /** Replace the key a route's engine kept of its own with the stored one (ADR-082 §8, S7d). */
+  useSharedProviderStoredKey(id: string, harness: ConfigurableHarnessId): Promise<void>
+  /**
+   * The running harnesses that hold a key of their own for a provider (a
+   * definition id, or a vendor id with no definition) right now, read from
+   * their auth files — what an own-key question names (S7f).
+   */
+  getSharedProviderOwnKeyHolders(id: string): Promise<ConfigurableHarnessId[]>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(
     id: string,
@@ -3073,7 +3131,8 @@ export interface ClaudeAPI
   getVersionInfo(): Promise<{ appVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
-  /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
+  /** The pi a user can run in a terminal (`locatePiDisplayPath()`): the resolved
+   *  executable, or a System pi's shim rather than its `cli.js`; null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
   /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives

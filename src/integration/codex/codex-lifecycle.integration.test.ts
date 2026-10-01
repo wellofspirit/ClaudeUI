@@ -9,7 +9,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import {
@@ -19,6 +19,13 @@ import {
 import { codexHostRegistry } from '../../core/codex/CodexHost'
 import { CodexService } from '../../core/codex/CodexService'
 import { setHostPaths } from '../../core/host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexInstalled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import provenance from '../../core/codex/protocol/provenance.json'
 
 /**
@@ -46,7 +53,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const enabled =
-  process.env.CODEX_INTEGRATION === '1' && process.platform === 'darwin' && process.arch === 'arm64'
+  process.env.CODEX_INTEGRATION === '1' &&
+  process.platform === 'darwin' &&
+  process.arch === 'arm64' &&
+  codexInstalled
 
 /**
  * The ONE JSON-RPC error the pinned binary answers every lifecycle refusal with:
@@ -107,6 +117,7 @@ afterEach(async () => {
       }
     } finally {
       setHostPaths(null)
+      releaseFixtureCodex()
       if (directory) rmSync(directory, { recursive: true, force: true })
       directory = undefined
     }
@@ -135,10 +146,7 @@ async function setupFixture(): Promise<{
   errors: string[]
   script: { current: Script }
 }> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -148,11 +156,12 @@ async function setupFixture(): Promise<{
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
-  const binary = join(directory, 'vendor/codex-cli/codex')
+  const binary = join(directory, `${FIXTURE_CODEX_DIR}/codex`)
   copyFileSync(installed, binary)
   setHostPaths({ getAppPath: () => directory! })
+  useFixtureCodex(directory!)
   const requests: Record<string, unknown>[] = []
   const errors: string[] = []
   const script = { current: ((): Record<string, unknown> => message('fixture complete')) as Script }

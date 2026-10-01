@@ -1,5 +1,15 @@
 import { defineConfig } from 'vitest/config'
+import { homedir } from 'os'
 import { resolve } from 'path'
+
+/**
+ * ClaudeUI's real managed harness store (ADR-082 §8: opencode, pi and Codex
+ * install there, only Claude Code is vendored). The setup files move HOME to a
+ * throwaway directory, so it is named here, where homedir() is still the
+ * developer's. An explicit CLAUDEUI_HARNESS_STORE wins.
+ */
+const realHarnessStore =
+  process.env.CLAUDEUI_HARNESS_STORE ?? resolve(homedir(), '.claude', 'ui', 'harnesses')
 
 const sharedAlias = {
   '@renderer': resolve(__dirname, 'src/renderer/src'),
@@ -25,6 +35,11 @@ export default defineConfig({
           environment: 'jsdom',
           globals: true,
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
+          // Read-only, for the few unit tests that run a real installed binary
+          // (rules-sync's execpolicy parser) and skip without it. Deliberately
+          // not CLAUDEUI_HARNESS_STORE: unit tests that install or collect keep
+          // writing to the throwaway home.
+          env: { CLAUDEUI_TEST_HARNESS_STORE: realHarnessStore },
           include: [
             'src/**/__tests__/**/*.test.{ts,tsx}',
             'src/**/__tests__/**/*.unit.test.{ts,tsx}'
@@ -90,6 +105,9 @@ export default defineConfig({
           environment: 'node',
           globals: true,
           setupFiles: ['./src/test/setup/node.setup.ts'],
+          // The suites run the opencode, pi and Codex installed in the real
+          // store, and skip without them.
+          env: { CLAUDEUI_HARNESS_STORE: realHarnessStore },
           include: ['src/integration/**/*.integration.test.ts'],
           testTimeout: 60000
         }

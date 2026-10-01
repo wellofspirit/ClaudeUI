@@ -178,7 +178,7 @@ describe('LinkedModelCuration', () => {
     expect(options).toEqual([
       ['opencode', 'opencode’s list (2)pi changes from 4 to 2 models.'],
       ['pi', 'pi’s list (4)opencode changes from 2 to 4 models.'],
-      ['union', 'Both combined (6)Nothing either engine shows today is removed.']
+      ['union', 'Both combined (6)Nothing either harness shows today is removed.']
     ])
     // Both combined is the default; Use one list persists it.
     await click(within(panel).getByTestId('S.curationJoinUse'))

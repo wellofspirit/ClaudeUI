@@ -8,13 +8,19 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexClient } from '../../core/codex/CodexClient'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
-import { codexIntegrationEnabled } from './integration-host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexIntegrationEnabled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import { codexCollaborationMode, codexTurnPolicy } from '../../core/codex/codex-turn-policy'
 import {
   fixtureAssistantMessage,
@@ -107,6 +113,7 @@ afterEach(async () => {
       provider = undefined
     } finally {
       setHostPaths(null)
+      releaseFixtureCodex()
       if (directory) rmSync(directory, { recursive: true, force: true })
       directory = undefined
     }
@@ -137,10 +144,7 @@ async function setupFixture(
    */
   model: string | null = 'mock-model'
 ): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -150,15 +154,16 @@ async function setupFixture(
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
   const exe = process.platform === 'win32' ? '.exe' : ''
-  copyFileSync(installed, join(directory, 'vendor/codex-cli', `codex${exe}`))
+  copyFileSync(installed, join(directory, FIXTURE_CODEX_DIR, `codex${exe}`))
   copyFileSync(
-    resolve('vendor/codex-cli', `codex-code-mode-host${exe}`),
-    join(directory, 'vendor/codex-cli', `codex-code-mode-host${exe}`)
+    storeCodexPath(`codex-code-mode-host${exe}`),
+    join(directory, FIXTURE_CODEX_DIR, `codex-code-mode-host${exe}`)
   )
   setHostPaths({ getAppPath: () => directory! })
+  useFixtureCodex(directory!)
 
   const requests: Record<string, unknown>[] = []
   const errors: string[] = []

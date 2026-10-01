@@ -12,24 +12,24 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 import snapshot from '../../core/opencode/protocol/doc-snapshot.1.18.9.json'
+import { resolveHarness } from '../../core/harness/resolve'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
-const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
 const ROOT = join(__dirname, '..', '..', '..')
 
+/** The binary the app itself would spawn (the harness resolver, ADR-082). */
 function findBinary(): string | null {
-  const candidates = [
-    join(ROOT, 'vendor', 'opencode-cli', BINARY_NAME),
-    join(ROOT, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
-  ]
-  return candidates.find(existsSync) ?? null
+  return resolveHarness('opencode').path
 }
 
-describe.skipIf(SKIP)('opencode server smoke', () => {
+// Evaluated once at collection time: a checkout without opencode installed
+// (`bun run ensure-opencode`, or a System selection) skips rather than fails.
+const BINARY_MISSING = !findBinary()
+
+describe.skipIf(SKIP || BINARY_MISSING)('opencode server smoke', () => {
   let proc: ChildProcess
   let baseUrl: string
   let authHeader: string

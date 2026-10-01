@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { UsageHubState, UsageHubStatus } from '../../../../shared/types'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import { ActionRow, Button, SettingRow, SettingsToggle, TextField } from './settings-controls'
+import { ipcErrorMessage } from '../../utils/ipc-error'
 import {
   formatDuration,
   HUB_STATE_SEVERITY,
@@ -75,20 +76,6 @@ function sameDraft(a: Draft, b: Draft): boolean {
     a.clientId === b.clientId &&
     a.enabled === b.enabled
   )
-}
-
-/**
- * The useful half of a rejected channel call.
- *
- * `ipcRenderer.invoke` wraps a handler's throw as "Error invoking remote method
- * '<channel>': <ClassName>: <message>", and the message is the part the URL
- * sanitiser wrote for the person typing ("the hub must be https, or http on
- * localhost"). Both wrappers are stripped so the row shows the sentence rather
- * than the plumbing.
- */
-function channelMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  return raw.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^\w*Error:\s*/, '')
 }
 
 /** An instant as how long ago it was, or `—` for one that never happened. */
@@ -232,7 +219,7 @@ export function UsageHubSettings(): React.JSX.Element {
         adopt(await call(), options.replaceDraft)
         options.onDone?.()
       } catch (error) {
-        options.onError(channelMessage(error))
+        options.onError(ipcErrorMessage(error))
       } finally {
         setBusy(false)
       }

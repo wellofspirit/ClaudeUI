@@ -5,7 +5,8 @@
  * PiSession has read `loadEngineConfig('pi').autoMode` since the phase-4
  * gatekeeper wiring; this section is the first UI that can write it. Tested
  * flows:
- *   1. Gated states: loading (probes pending) and pi-not-installed
+ *   1. Loading while the config is pending (a pi that does not run hides the
+ *      judge's pi segment, never reaches here — ADR-082 §8)
  *   2. Load renders the saved autoMode block; judge options are pi models ONLY
  *   3. The judge picker is the themed ModelPicker, NOT a native <select>
  *      (native <option> lists are OS-painted — unreadable under Monokai)
@@ -97,7 +98,6 @@ function supportFor(refused: Record<string, string> = {}) {
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
     judgeModelSupport: supportFor(),
@@ -146,26 +146,12 @@ describe('PiAutoModeSection — registration', () => {
   })
 })
 
-describe('PiAutoModeSection — gated states', () => {
-  it('shows Loading while probes are pending', () => {
-    installApiStub({
-      engineIsInstalled: vi.fn(() => new Promise(() => {})),
-      loadEngineConfig: vi.fn(() => new Promise(() => {}))
-    })
+describe('PiAutoModeSection — loading', () => {
+  it('shows Loading while the config is pending', () => {
+    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
     render(<PiAutoModeSection />)
     expect(screen.getByTestId('PiAutoModeSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('PiAutoModeSection.enabled')).toBeNull()
-  })
-
-  it('shows the not-installed message (no controls) when pi is absent', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-    render(<PiAutoModeSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('PiAutoModeSection').textContent).toContain('not installed')
-    )
-    expect(screen.queryByTestId('PiAutoModeSection.enabled')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.judgeModel')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.twoStageMode')).toBeNull()
   })
 })
 

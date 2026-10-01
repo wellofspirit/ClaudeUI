@@ -1,172 +1,88 @@
 /**
  * @vitest-environment node
  *
- * Minimal unit tests for pi-locate.ts's dev/production path resolution —
- * mirrors the OpencodeServerManager.locateBinary()/locateBunClaude() split
- * this module was written to match. The core `HostPaths` seam (getAppPath) and
- * `node:fs`'s `statSync` are stubbed so no real vendor/pi-cli directory is
- * required.
+ * pi-locate.ts is a thin delegate to the harness resolver (ADR-082). pi is not
+ * bundled (§8): it runs from ClaudeUI's managed store (or a System install,
+ * resolve-system.test.ts), and a vendored copy an old checkout left behind is
+ * never picked up. A real temp store stands in; the resolver caches, so each
+ * test starts from `invalidateHarness()`.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-const { mockGetAppPath, mockStatSync } = vi.hoisted(() => ({
-  mockGetAppPath: vi.fn(),
-  mockStatSync: vi.fn()
-}))
-
-vi.mock('node:fs', () => ({
-  statSync: mockStatSync
-}))
-
-import { locatePiBinary, piBinaryAvailable } from '../pi-locate'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { setHostPaths } from '../../host'
+import { invalidateHarness } from '../../harness/resolve'
+import { harnessManifest } from '../../harness/manifests'
+import { HARNESS_STORE_ENV } from '../../harness/store'
+import {
+  exeName,
+  fakeHarnessInstall,
+  writeHarnessPayload
+} from '../../../test/helpers/fake-harness'
+import {
+  locatePiBinary,
+  locatePiDisplayPath,
+  locatePiLaunch,
+  piBinaryAvailable
+} from '../pi-locate'
 
-const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
-const fileStat = { isFile: () => true }
-const directoryStat = { isFile: () => false }
-
-function normalized(path: unknown): string {
-  return String(path).replace(/\\/g, '/')
-}
-
-function mockFiles(...files: string[]): void {
-  mockStatSync.mockImplementation((path: string) => {
-    if (files.includes(normalized(path))) return fileStat
-    throw new Error('ENOENT')
-  })
-}
+const TESTED = harnessManifest('pi').tested
+let tmp: string
+let store: string
+const saved = { store: process.env[HARNESS_STORE_ENV], override: process.env.CLAUDEUI_PI_CLI }
 
 beforeEach(() => {
-  mockGetAppPath.mockReset()
-  mockStatSync.mockReset()
-  setHostPaths({ getAppPath: () => mockGetAppPath() })
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-locate-'))
+  store = path.join(tmp, 'store')
+  process.env[HARNESS_STORE_ENV] = store
+  delete process.env.CLAUDEUI_PI_CLI
+  setHostPaths({ getAppPath: () => path.join(tmp, 'app') })
+  invalidateHarness()
 })
 
-describe('locatePiBinary — dev path resolution', () => {
-  it('resolves <appPath>/vendor/pi-cli/<binary> when it exists (appPath has no app.asar)', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    const expected = `/project/root/vendor/pi-cli/${BINARY_NAME}`
-    mockFiles(expected)
-
-    const result = locatePiBinary()
-    expect(result?.replace(/\\/g, '/')).toBe(expected)
-  })
-
-  it('returns null when the dev vendor path does not exist', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    mockStatSync.mockImplementation(() => {
-      throw new Error('ENOENT')
-    })
-
-    expect(locatePiBinary()).toBeNull()
-  })
-
-  it('skips a directory at the flat path and resolves the nested release executable', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    const flat = `/project/root/vendor/pi-cli/${BINARY_NAME}`
-    const nested = `/project/root/vendor/pi-cli/pi/${BINARY_NAME}`
-    mockStatSync.mockImplementation((path: string) => {
-      const candidate = normalized(path)
-      if (candidate === flat) return directoryStat
-      if (candidate === nested) return fileStat
-      throw new Error('ENOENT')
-    })
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(nested)
-  })
-
-  it('returns null when the flat path is a directory without a nested executable', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    const flat = `/project/root/vendor/pi-cli/${BINARY_NAME}`
-    mockStatSync.mockImplementation((path: string) => {
-      if (normalized(path) === flat) return directoryStat
-      throw new Error('ENOENT')
-    })
-
-    expect(locatePiBinary()).toBeNull()
-  })
+afterEach(() => {
+  setHostPaths(null)
+  if (saved.store === undefined) delete process.env[HARNESS_STORE_ENV]
+  else process.env[HARNESS_STORE_ENV] = saved.store
+  if (saved.override === undefined) delete process.env.CLAUDEUI_PI_CLI
+  else process.env.CLAUDEUI_PI_CLI = saved.override
+  fs.rmSync(tmp, { recursive: true, force: true })
+  invalidateHarness()
 })
 
-describe('locatePiBinary — production candidate ordering', () => {
-  const packagedAppPath = '/Applications/ClaudeUI.app/Contents/Resources/app.asar'
-  const primaryCandidate = `/Applications/ClaudeUI.app/Contents/Resources/pi-cli/${BINARY_NAME}`
-  const nestedPrimaryCandidate = `/Applications/ClaudeUI.app/Contents/Resources/pi-cli/pi/${BINARY_NAME}`
-  const fallbackCandidate = `/Applications/ClaudeUI.app/Contents/Resources/app.asar.unpacked/vendor/pi-cli/${BINARY_NAME}`
-  const nestedFallbackCandidate = `/Applications/ClaudeUI.app/Contents/Resources/app.asar.unpacked/vendor/pi-cli/pi/${BINARY_NAME}`
-
-  it('prefers the primary extraResources candidate when it exists', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(primaryCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(primaryCandidate)
-  })
-
-  it('falls back to the app.asar.unpacked candidate when the primary is absent', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(fallbackCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(fallbackCandidate)
-  })
-
-  it('checks the primary candidate BEFORE the fallback — both existing still returns the primary', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(primaryCandidate, fallbackCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(primaryCandidate)
-  })
-
-  it('returns null when neither production candidate exists', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockStatSync.mockImplementation(() => {
-      throw new Error('ENOENT')
-    })
-
-    expect(locatePiBinary()).toBeNull()
-  })
-
-  it('resolves the nested extraResources release executable', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(nestedPrimaryCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(nestedPrimaryCandidate)
-  })
-
-  it('prefers nested extraResources over a flat app.asar.unpacked fallback', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(nestedPrimaryCandidate, fallbackCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(nestedPrimaryCandidate)
-  })
-
-  it('resolves the nested app.asar.unpacked fallback', () => {
-    mockGetAppPath.mockReturnValue(packagedAppPath)
-    mockFiles(nestedFallbackCandidate)
-
-    expect(locatePiBinary()?.replace(/\\/g, '/')).toBe(nestedFallbackCandidate)
-  })
-})
-
-describe('piBinaryAvailable', () => {
-  it('mirrors locatePiBinary — true when the dev vendor path exists', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    mockStatSync.mockReturnValue(fileStat)
+describe('locatePiBinary', () => {
+  it("runs the tested version from ClaudeUI's store", () => {
+    const dir = fakeHarnessInstall(store, 'pi', TESTED)
+    const bin = path.join(dir, exeName('pi'))
+    expect(locatePiBinary()).toBe(bin)
+    expect(locatePiDisplayPath()).toBe(bin)
+    expect(locatePiLaunch()).toEqual({ command: bin, args: [] })
     expect(piBinaryAvailable()).toBe(true)
   })
 
-  it('false when locatePiBinary resolves to null', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    mockStatSync.mockImplementation(() => {
-      throw new Error('ENOENT')
-    })
-    expect(piBinaryAvailable()).toBe(false)
+  it('finds the nested release executable (`<version>/pi/pi`)', () => {
+    const dir = fakeHarnessInstall(store, 'pi', TESTED, { nested: true })
+    expect(locatePiBinary()).toBe(path.join(dir, 'pi', exeName('pi')))
   })
 
-  it('false (never throws) when statSync itself throws', () => {
-    mockGetAppPath.mockReturnValue('/project/root')
-    mockStatSync.mockImplementation(() => {
-      throw new Error('EPERM')
-    })
-    expect(() => piBinaryAvailable()).not.toThrow()
+  it('never picks up a vendored or packaged copy', () => {
+    writeHarnessPayload(path.join(tmp, 'app', 'vendor', 'pi-cli'), 'pi')
+    expect(locatePiBinary()).toBeNull()
+    expect(locatePiLaunch()).toBeNull()
+    expect(piBinaryAvailable()).toBe(false)
+
+    const resources = path.join(tmp, 'Resources')
+    setHostPaths({ getAppPath: () => path.join(resources, 'app.asar') })
+    writeHarnessPayload(path.join(resources, 'pi-cli'), 'pi')
+    invalidateHarness()
+    expect(locatePiBinary()).toBeNull()
+  })
+
+  it('returns null, never throwing, with an empty store', () => {
+    expect(() => locatePiBinary()).not.toThrow()
+    expect(locatePiBinary()).toBeNull()
+    expect(locatePiDisplayPath()).toBeNull()
     expect(piBinaryAvailable()).toBe(false)
   })
 })

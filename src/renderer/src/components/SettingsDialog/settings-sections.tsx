@@ -56,7 +56,7 @@ import { LastPickNote, NewSessionModelSetting } from './NewSessionModelSetting'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
-import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
+import { useEngineInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
 import {
   OpencodeSessionBehaviorSection,
@@ -109,6 +109,11 @@ export interface SettingItem {
   key: string
   label: string
   keywords?: string // extra search terms
+  /**
+   * The harnesses this row is about, when it is about nothing else: hidden (and
+   * out of search) while none of them runs (ADR-082 §8, `itemsFor`).
+   */
+  harnesses?: readonly EngineId[]
   render: (
     settings: AppSettings,
     update: (p: Partial<AppSettings>) => void,
@@ -384,14 +389,15 @@ export function AutonomyModePicker(): React.JSX.Element {
   )
 }
 
-// ── opencode availability probe ──────────────────────────────────────
+// ── Harness availability ─────────────────────────────────────────────
 //
-// `useEngineInstalled` / `useOpencodeInstalled` / `usePiInstalled` moved to
-// ./use-engine-installed (imported above). They gate engine-scoped sections on
-// a cheap, deterministic binary-on-disk check that NEVER spawns a
-// server/process — the earlier `vendorAuthProbe`/`getEngineModels` approaches
-// needed a successful spawn + HTTP round-trip, so any transient spawn failure
-// hid the very sections that configure the engine.
+// No section below asks whether its harness is installed. While one is not
+// (ADR-082 §8, owner ruling 2026-09-30), the page model hides its segments and
+// groups on shared pages and greys its dispatch target (`segmentOptions`,
+// `visibleGroups` in settings-pages.tsx), so these bodies mount only for a
+// harness that runs. That reads the harness store's readiness, which never
+// spawns anything. (`useEngineInstalled`, from ./use-engine-installed, is left
+// to the permissions summary's Codex chip.)
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
@@ -418,7 +424,7 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 
 /**
  * Shared render/load/save core for the per-engine auto-mode editor.
- * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy/gating
+ * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy
  * wrappers around this — both engines read the SAME `EngineConfig.autoMode`
  * block (`loadEngineConfig(<engine>).autoMode` in OpencodeSession /
  * PiSession), and the classifier policy behind it is engine-neutral
@@ -428,8 +434,6 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
  * Self-contained: loads/saves its own EngineConfig via window.api
  * (SettingsDialog only wires the 'claude' engine config), editing ONLY the
  * `autoMode` block so sibling blocks (`dispatch`, `piConfig`, …) survive.
- *
- * `installed`: null = still probing (Loading), false = gate closed.
  *
  * The judge-model picker is fed from `getEngineModels()` filtered to this
  * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
@@ -449,15 +453,11 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 function AutoModeSection({
   engineId,
   testid,
-  installed,
-  notInstalledMessage,
   toggleDescription,
   judgeModelDescription
 }: {
   engineId: 'opencode' | 'pi'
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
   /** One sentence under the master switch — the ⓘ is gone (ADR-065). */
   toggleDescription: string
   judgeModelDescription: string
@@ -491,20 +491,13 @@ function AutoModeSection({
       .catch(() => {})
   }, [engineId])
 
-  // Both gated states are description-only ROWS, not bespoke markup: a card of
-  // rows that sometimes isn't one was three of the six row grammars ADR-065
-  // counted. Same testid on every branch, per ADR-027.
-  if (engineCfg === null || installed === null) {
+  // Loading is a description-only ROW, not bespoke markup: a card of rows that
+  // sometimes isn't one was three of the six row grammars ADR-065 counted. Same
+  // testid on every branch, per ADR-027.
+  if (engineCfg === null) {
     return (
       <div data-testid={testid}>
         <SettingRow description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid={testid}>
-        <SettingRow description={notInstalledMessage} />
       </div>
     )
   }
@@ -625,13 +618,10 @@ function JudgeSupportNotice({
  * autonomy on opencode. See ADR-023.
  */
 function OpencodeAutoModeSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <AutoModeSection
       engineId="opencode"
       testid="OpencodeAutoModeSection"
-      installed={installed}
-      notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
       toggleDescription="In Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, Full prompts you like Ask."
       judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
@@ -646,13 +636,10 @@ function OpencodeAutoModeSection(): React.JSX.Element {
  * `auto` and `full` autonomy modes, where opencode's covers Full only.
  */
 export function PiAutoModeSection(): React.JSX.Element {
-  const installed = usePiInstalled()
   return (
     <AutoModeSection
       engineId="pi"
       testid="PiAutoModeSection"
-      installed={installed}
-      notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
       toggleDescription="In Auto and Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, both prompt you like Ask."
       judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
@@ -674,38 +661,17 @@ export function PiAutoModeSection(): React.JSX.Element {
  */
 
 /**
- * Gate shared by both halves: `null` = still probing (Loading), `false` = no
- * possible caller / target (the explanatory row), `true` = render the rows.
- * A gated state is a description-only ROW now, not a bare paragraph — the id is
- * on the same root either way, so the halves stay assertable in every state
- * (ADR-027).
+ * The Loading row shared by both halves until the engine config has loaded. A
+ * description-only ROW, not a bare paragraph — the id is on the same root
+ * either way, so the halves stay assertable in every state (ADR-027).
  */
-function dispatchGateRow(
-  testid: string,
-  installed: boolean | null,
-  loaded: boolean,
-  notInstalledMessage: string
-): React.JSX.Element | null {
-  if (installed === null || !loaded) {
-    return (
-      <div data-testid={testid} className="divide-y divide-border/55">
-        <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid={testid} className="divide-y divide-border/55">
-        <SettingRow
-          testid={`${testid}.status`}
-          dataId="not-installed"
-          dimmed
-          description={notInstalledMessage}
-        />
-      </div>
-    )
-  }
-  return null
+function dispatchLoadingRow(testid: string, loaded: boolean): React.JSX.Element | null {
+  if (loaded) return null
+  return (
+    <div data-testid={testid} className="divide-y divide-border/55">
+      <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
+    </div>
+  )
 }
 
 /** Past this many models the chip set collapses behind a "Show all N" link. */
@@ -718,22 +684,18 @@ const DISPATCH_CHIP_PREVIEW = 8
 function DispatchIntoSection({
   engineId,
   testid,
-  installed,
-  notInstalledMessage,
   noModelsMessage
 }: {
   engineId: EngineId
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
   noModelsMessage: string
 }): React.JSX.Element {
   const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
   const models = useDispatchModels(engineId)
   const [showAll, setShowAll] = useState(false)
 
-  const gate = dispatchGateRow(testid, installed, engineCfg !== null, notInstalledMessage)
-  if (gate) return gate
+  const loading = dispatchLoadingRow(testid, engineCfg !== null)
+  if (loading) return loading
 
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
@@ -878,9 +840,7 @@ export function DispatchConcurrencySection({
  */
 function DispatchLimitsSection({
   engineId,
-  testid,
-  installed,
-  notInstalledMessage
+  testid
 }: {
   engineId: EngineId
   /**
@@ -891,14 +851,12 @@ function DispatchLimitsSection({
    * component happens to render it.
    */
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
 }): React.JSX.Element {
   const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
   const root = `${testid}.limits`
 
-  const gate = dispatchGateRow(root, installed, engineCfg !== null, notInstalledMessage)
-  if (gate) return gate
+  const loading = dispatchLoadingRow(root, engineCfg !== null)
+  if (loading) return loading
 
   // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
   // MINUTES — nobody wants to type 3600000. Blank and 0 BOTH mean no limit
@@ -969,68 +927,39 @@ function DispatchLimitsSection({
 
 // ── The six exported bodies, two per direction ───────────────────────
 //
-// Dispatch INTO Claude can only be CALLED from another engine, and opencode is
-// the only one installed separately — so both Claude halves gate on the same
-// opencode-installed probe as the opencode twin (ADR-030/ADR-033 M4-A: no
-// possible caller means the config has nothing to configure). pi gates on pi.
-
-const CLAUDE_DISPATCH_ABSENT =
-  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller.'
-const OPENCODE_DISPATCH_ABSENT =
-  'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
-const PI_DISPATCH_ABSENT =
-  'pi is not installed. Cross-engine dispatch lets a Claude or opencode session delegate a task to a pi agent.'
-const CODEX_DISPATCH_ABSENT =
-  'Codex is not installed. Cross-engine dispatch lets a Claude, opencode or pi session delegate a task to a Codex agent.'
+// Dispatch INTO Claude can only be CALLED from another engine, and since
+// ADR-082 §8 every other harness is installed separately — so the Claude target
+// is selectable only while one of opencode, pi or Codex runs (ADR-030/ADR-033
+// M4-A: no possible caller means the config has nothing to configure), and each
+// other target only while it runs itself. The page's segment greys the rest
+// (`segmentOptions`, settings-pages.tsx), so these bodies never ask.
 
 export function ClaudeDispatchIntoSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <DispatchIntoSection
       engineId="claude"
       testid="ClaudeDispatchSection"
-      installed={installed}
-      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
       noModelsMessage="No Claude models detected."
     />
   )
 }
 
 export function ClaudeDispatchLimitsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="claude"
-      testid="ClaudeDispatchSection"
-      installed={installed}
-      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="claude" testid="ClaudeDispatchSection" />
 }
 
 export function OpencodeDispatchIntoSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <DispatchIntoSection
       engineId="opencode"
       testid="OpencodeDispatchSection"
-      installed={installed}
-      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
       noModelsMessage="No opencode models detected."
     />
   )
 }
 
 export function OpencodeDispatchLimitsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="opencode"
-      testid="OpencodeDispatchSection"
-      installed={installed}
-      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="opencode" testid="OpencodeDispatchSection" />
 }
 
 /**
@@ -1041,28 +970,17 @@ export function OpencodeDispatchLimitsSection(): React.JSX.Element {
  * pi).
  */
 export function PiDispatchIntoSection(): React.JSX.Element {
-  const installed = usePiInstalled()
   return (
     <DispatchIntoSection
       engineId="pi"
       testid="PiDispatchSection"
-      installed={installed}
-      notInstalledMessage={PI_DISPATCH_ABSENT}
       noModelsMessage="No pi models detected."
     />
   )
 }
 
 export function PiDispatchLimitsSection(): React.JSX.Element {
-  const installed = usePiInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="pi"
-      testid="PiDispatchSection"
-      installed={installed}
-      notInstalledMessage={PI_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="pi" testid="PiDispatchSection" />
 }
 
 /**
@@ -1072,28 +990,17 @@ export function PiDispatchLimitsSection(): React.JSX.Element {
  * `DISPATCH_CALLERS.codex` still said "unsupported".
  */
 export function CodexDispatchIntoSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
   return (
     <DispatchIntoSection
       engineId="codex"
       testid="CodexDispatchSection"
-      installed={installed}
-      notInstalledMessage={CODEX_DISPATCH_ABSENT}
       noModelsMessage="No Codex models detected."
     />
   )
 }
 
 export function CodexDispatchLimitsSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
-  return (
-    <DispatchLimitsSection
-      engineId="codex"
-      testid="CodexDispatchSection"
-      installed={installed}
-      notInstalledMessage={CODEX_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="codex" testid="CodexDispatchSection" />
 }
 
 // ── Whole-direction compositions ─────────────────────────────────────
@@ -1164,18 +1071,12 @@ function codexEffortOptions(models: ModelInfo[], selected: string): string[] {
 }
 
 export function CodexDefaultsSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
   const { engineCfg, update } = useEngineConfigObject('codex')
   const models = useDispatchModels('codex')
   const testid = 'CodexDefaultsSection'
 
-  const gate = dispatchGateRow(
-    testid,
-    installed,
-    engineCfg !== null,
-    'Codex is not installed, so there is no session to give a default model to.'
-  )
-  if (gate) return gate
+  const loading = dispatchLoadingRow(testid, engineCfg !== null)
+  if (loading) return loading
 
   const codexConfig = engineCfg?.codexConfig ?? {}
   const defaultModel = codexConfig.defaultModel ?? ''
@@ -1272,13 +1173,12 @@ export function CodexDefaultsSection(): React.JSX.Element {
 // ── opencode Models section ──────────────────────────────────────────
 
 /**
- * Default model + small model selects for the opencode engine.
- * Self-gates on opencode availability (mirrors OpencodeAutoModeSection).
+ * Default model + small model selects for the opencode engine. Its segment is
+ * hidden while opencode is not installed (ADR-082 §8).
  */
 function OpencodeModelsSection(): React.JSX.Element {
   const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
@@ -1294,22 +1194,10 @@ function OpencodeModelsSection(): React.JSX.Element {
       .catch(() => {})
   }, [])
 
-  if (cfg === null || installed === null) {
+  if (cfg === null) {
     return (
       <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
         <SettingRow testid="OpencodeModelsSection.status" dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
-        <SettingRow
-          testid="OpencodeModelsSection.status"
-          dataId="not-installed"
-          dimmed
-          description="opencode is not installed. These settings apply to opencode sessions."
-        />
       </div>
     )
   }
@@ -1473,7 +1361,6 @@ const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONF
  * per-field commit point to hang an immediate write on.
  */
 function OpencodeRawConfigSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [filePath, setFilePath] = useState('')
@@ -1496,17 +1383,8 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   }, [])
   useEffect(() => load(), [load])
 
-  if (installed === null || original === null) {
+  if (original === null) {
     return <SettingRow testid="OpencodeRawConfigSection" description="Loading…" />
-  }
-  if (!installed) {
-    return (
-      <SettingRow
-        testid="OpencodeRawConfigSection"
-        dimmed
-        description="opencode is not installed. This edits opencode's own config file."
-      />
-    )
   }
 
   const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}

@@ -55,12 +55,13 @@ import { discoverOpencodeProviderCatalog } from '../opencode/model-discovery'
 import { peekPiCatalogCounts } from '../pi/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { loadEngineConfig } from '../services/ui-config'
-import type {
-  ProviderAccounts,
-  ProviderCredential,
-  ProviderEngineFacts,
-  ProviderEntry,
-  ProviderRegistrySnapshot
+import {
+  vendorDisplayName,
+  type ProviderAccounts,
+  type ProviderCredential,
+  type ProviderEngineFacts,
+  type ProviderEntry,
+  type ProviderRegistrySnapshot
 } from '../../shared/provider-registry'
 import {
   deliveredDefinition,
@@ -165,7 +166,9 @@ export function buildProviderRegistry(sources: ProviderRegistrySources): Provide
       .map((entry) => opencodeNativeEntry(entry, sources)),
     ...Object.entries(sources.piVendors)
       .filter(([vendorId]) => !owned.pi.has(vendorId))
-      .map(([vendorId, status]) => piNativeEntry(vendorId, status, sources))
+      .map(([vendorId, status]) =>
+        piNativeEntry(vendorId, status, sources, catalog.get(vendorId)?.name)
+      )
   ]
     .map((entry) => withKeySharing(entry, sources, catalog))
     .sort(byNameThenId)
@@ -370,6 +373,7 @@ function sharedEntry(
       }),
       ...(native ? { native: true } : {}),
       ...(error ? { error } : {}),
+      ...(status?.routes[harness].ownKeyKept ? { ownKeyKept: true as const } : {}),
       ...(status ? { delivered: status.routes[harness].delivered } : {})
     }
   }
@@ -432,11 +436,17 @@ function opencodeNativeEntry(
   sources: ProviderRegistrySources
 ): ProviderEntry {
   const counts = engineCounts('opencode', entry.id, sources, { catalogCount: entry.modelCount })
+  const credential = opencodeCredential(entry, sources.opencodeCredentialKinds)
   return {
     id: `opencode:${entry.id}`,
     name: entry.name,
     origin: 'opencode-native',
-    credential: opencodeCredential(entry, sources.opencodeCredentialKinds),
+    credential,
+    // A key or sign-in opencode holds of its own (in its auth.json, an env var or
+    // its config): the row says whose it is (ADR-082 §8, S7f).
+    ...(credential === 'api-key' || credential === 'connected' || credential === 'custom'
+      ? { ownedBy: 'opencode' as const }
+      : {}),
     // `disabled_providers` is opencode's own veto: the provider is configured
     // but reaches no picker. Native by construction — this row IS the store entry.
     engines: {
@@ -462,16 +472,24 @@ function opencodeNativeEntry(
 function piNativeEntry(
   vendorId: string,
   status: VendorAuthMap[string],
-  sources: ProviderRegistrySources
+  sources: ProviderRegistrySources,
+  /** opencode's (models.dev) name for the same vendor id, when its catalog was read. */
+  catalogName?: string
 ): ProviderEntry {
   const counts = engineCounts('pi', vendorId, sources, {})
+  const builtin = sources.piAuthOptions[vendorId] !== undefined
+  const credential = piCredential(status)
   return {
     id: `pi:${vendorId}`,
     // pi has no display-name catalog — its own model discovery reports
-    // `vendorName: vendorId` too (core/pi/model-discovery.ts).
-    name: vendorId,
+    // `vendorName: vendorId` too (core/pi/model-discovery.ts) — so a vendor pi
+    // ships takes opencode's catalog name, else its id title-cased; never the
+    // raw id (ADR-082 §8, S7f). A provider the user declared keeps the id they
+    // chose.
+    name: builtin ? vendorDisplayName(vendorId, catalogName) : vendorId,
     origin: 'pi-native',
-    credential: piCredential(status),
+    credential,
+    ...(builtin && credential !== 'none' ? { ownedBy: 'pi' as const } : {}),
     // pi has no per-provider veto: an entry in auth.json IS an enabled provider.
     // Turning the row off REMOVES it (owner ruling 1) — which is why there is no
     // disabled state to represent here.

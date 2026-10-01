@@ -89,8 +89,10 @@ src/
                          stubs, factories, helpers, setup (installs the SQLite driver)
   e2e/flows/           — layer-3 E2E tests
   integration/         — layer-4 integration tests (real engine binaries, gated)
-vendor/                — rebundled bun-claude + vendored opencode/pi binaries (not checked in)
-scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode,
+vendor/                — rebundled bun-claude + engine source checkouts (not checked in);
+                         opencode, pi and Codex live in ~/.claude/ui/harnesses (ADR-082)
+scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi/codex
+                         over the harness installer,
                          build-server.mjs for the two server artifacts,
                          verify-bun-sqlite.ts for driver conformance,
                          app-shot.mjs for real-app verification)

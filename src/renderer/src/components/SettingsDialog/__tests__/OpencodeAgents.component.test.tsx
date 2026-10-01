@@ -114,7 +114,6 @@ const generateOpencodeAgent = vi.fn(async () => ({
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     listOpencodeAgents: vi.fn(async () => []),
     readOpencodeAgent: vi.fn(async () => null),
     saveOpencodeAgent,
@@ -479,15 +478,20 @@ describe('OpencodeAgentsSection', () => {
     expect((projectBtn as HTMLButtonElement).disabled).toBe(true)
   })
 
-  // ── Not installed gate ────────────────────────────────────────────
+  // ── Not installed ─────────────────────────────────────────────────
 
-  it('shows not-installed message when opencode is not installed', async () => {
+  it('lists the agent files without asking whether opencode is installed (ADR-082 §8)', async () => {
+    // The files are ClaudeUI's own read, and the opencode page cannot be opened
+    // while opencode is not installed (SettingsDialogView's rail test).
+    const engineIsInstalled = vi.fn(async () => false)
     installApiStub({
-      engineIsInstalled: vi.fn(async () => false)
+      engineIsInstalled,
+      listOpencodeAgents: vi.fn(async () => [BUILTIN_AGENT])
     })
 
     await renderSection()
 
-    expect(screen.getByText(/opencode is not installed/)).toBeTruthy()
+    expect(screen.getAllByTestId('OpencodeAgentsSection.agentRow')).toHaveLength(1)
+    expect(engineIsInstalled).not.toHaveBeenCalled()
   })
 })

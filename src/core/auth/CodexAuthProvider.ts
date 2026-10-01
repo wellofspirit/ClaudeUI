@@ -4,6 +4,7 @@ import type { VendorAuthMap } from '../../shared/types'
 import type { CodexAuthStatus } from '../../shared/codex-types'
 import { CodexService } from '../codex/CodexService'
 import { codexBinaryAvailable } from '../codex/codex-locate'
+import { harnessUnavailableMessage } from '../harness/resolve'
 import { credentialSync } from './vault/CredentialSync'
 
 /**
@@ -36,7 +37,7 @@ export class CodexAuthProvider implements EngineAuthProvider {
         available: false,
         authenticated: false,
         authKind: null,
-        error: 'Codex is not installed for this platform'
+        error: harnessUnavailableMessage('codex')
       }
     const [status, catalog] = await Promise.all([
       this.service.accountStatus(),

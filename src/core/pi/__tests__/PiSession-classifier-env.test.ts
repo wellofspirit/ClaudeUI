@@ -45,7 +45,7 @@ const {
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: vi.fn(() => ({})) }))
 vi.mock('../pi-locate', () => ({
-  locatePiBinary: () => '/fake/pi',
+  locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
   piBinaryAvailable: () => true
 }))
 vi.mock('../model-discovery', async () => {

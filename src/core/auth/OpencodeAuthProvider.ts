@@ -383,6 +383,35 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     invalidateOpencodeModelCache()
   }
 
+  /**
+   * Delete one vendor's entry from auth.json DIRECTLY, without opencode's
+   * server — for while opencode does not run (ADR-082 §8, "As built (S7d)"),
+   * when there is no process whose in-memory provider map could go stale, and
+   * starting one just to relay a file edit is what the feed above avoids too.
+   * While opencode runs, removals keep the server path (`removeVendorAuth`),
+   * which recycles the live processes.
+   *
+   * The feed's read-modify-write discipline: an unreadable or non-object file
+   * is refused (backed up once, then this throws) rather than overwritten;
+   * every other vendor entry and every unknown field survive; an absent file
+   * or entry writes nothing and creates nothing.
+   */
+  async removeVendorAuthDirect(vendorId: string): Promise<void> {
+    const filePath = resolveOpencodeAuthJsonPath()
+    const file = readJsonFileForWrite(filePath)
+    if (!(vendorId in file)) return
+    // A removal destroys a credential ClaudeUI cannot restore: always leave a
+    // trace, the vendor id and the call site, never the key.
+    logger.info(
+      'OpencodeAuth',
+      `removing ${vendorId} from auth.json directly, opencode not running (${removalCaller()})`
+    )
+    delete file[vendorId]
+    writeJsonAtomic(filePath, file, { indent: 2 })
+    this.invalidateCache()
+    invalidateOpencodeModelCache()
+  }
+
   /** Read this vendor's current OAuth entry — used by CredentialSync's fs-watch resync to detect an engine-initiated rotation. Null if absent, non-oauth, or malformed. */
   async readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null> {
     try {

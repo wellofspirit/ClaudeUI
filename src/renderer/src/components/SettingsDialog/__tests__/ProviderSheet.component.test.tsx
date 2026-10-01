@@ -16,10 +16,13 @@
  * that pair's shared contract and cannot be seen from either half alone.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
+import { harnessStore } from '../harness-store'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
+import { ownKeysReplacedOnSwitchOn } from '../ProviderSheet'
 import { SubscriptionsSection } from '../SubscriptionsSection'
 import { useSessionStore } from '../../../stores/session-store'
 import type {
@@ -27,6 +30,7 @@ import type {
   ProviderRegistrySnapshot
 } from '../../../../../shared/provider-registry'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
+import type { HarnessId } from '../../../../../shared/harness-types'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -124,6 +128,12 @@ let definitions: SharedProviderDefinition[]
 /** Every `channel → args` the sheet sent, in order. */
 let calls: Array<{ channel: string; args: unknown[] }>
 let registryReads: number
+/**
+ * `shared-provider:own-key-holders` (S7f round 3): who holds an own key in the
+ * harnesses' files now, by id. Null = not answered, so the screens fall back to
+ * the registry's facts, as they do when the read fails.
+ */
+let holders: Record<string, string[]> | null
 /** `shared-provider:models` — what a per-route DEFAULT may be set to. */
 let sharedModels: Array<{ id: string; name?: string }>
 /** `session:get-opencode-providers` — read on demand by "Model overrides ›". */
@@ -203,6 +213,12 @@ beforeEach(async () => {
   stub('shared-provider:set-route')
   stub('shared-provider:set-default')
   stub('shared-provider:sync')
+  stub('shared-provider:use-stored-key')
+  holders = null
+  stub('shared-provider:own-key-holders', (id) => {
+    if (!holders) throw new Error('not answered')
+    return holders[id as string] ?? []
+  })
   stub('shared-provider:set-key')
   stub('shared-provider:disconnect')
   stub('provider-account:switch')
@@ -222,6 +238,7 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup()
   app.teardown()
+  harnessStore.resetForTests()
 })
 
 /**
@@ -263,6 +280,12 @@ const engineRow = (engine: string): HTMLElement =>
 
 const engineToggle = (engine: string): HTMLElement =>
   screen.getAllByTestId('ProviderSheet.engineToggle').find((el) => el.dataset.id === engine)!
+
+/** The element under `root` with this testid and `data-id`. */
+const byId = (root: HTMLElement, testid: string, id: string): HTMLElement =>
+  within(root)
+    .getAllByTestId(testid)
+    .find((el) => el.dataset.id === id)!
 
 async function click(el: HTMLElement): Promise<void> {
   await act(async () => {
@@ -366,13 +389,238 @@ describe('ENABLED FOR', () => {
     expect(called('vendorAuthSetKey')).toEqual([['pi', 'openrouter', 'sk-or-live']])
   })
 
-  it('says opencode is not installed instead of offering a toggle', async () => {
-    snapshot = { entries: [chatgpt], opencodeInstalled: false }
+  it('has no row, pill or curation for a harness that does not run, until it runs (ADR-082 §8)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi', 'codex']))
+    const rows = (): (string | undefined)[] =>
+      screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+    const pills = (): (string | undefined)[] =>
+      screen.queryAllByTestId('SubscriptionsSection.enginePill').map((el) => el.dataset.id)
     await openSheet('chatgpt')
-    expect(engineRow('opencode')).toHaveTextContent('opencode is not installed.')
+    await waitFor(() => expect(rows()).toEqual(['claude', 'opencode']))
+    // The ChatGPT card's Engines row, behind the sheet, says the same.
+    expect(pills()).toEqual(['opencode'])
     expect(
-      screen.queryAllByTestId('ProviderSheet.engineToggle').map((el) => el.dataset.id)
-    ).toEqual(['claude', 'pi'])
+      screen.queryAllByTestId('ProviderSheet.curate').map((el) => el.dataset.id)
+    ).not.toContain('pi')
+    expect(document.body.textContent).not.toMatch(/not installed/)
+
+    // Installed again: back as they were — no route was changed on the way.
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(rows()).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(pills()).toEqual(['codex', 'opencode', 'pi'])
+    expect(sent('shared-provider:set-route')).toEqual([])
+  })
+
+  it('the ChatGPT sheet has no "pi overrides" while pi does not run (ADR-082 §8)', async () => {
+    // chatgpt's pi route lands on a vendor pi ships (`piBuiltinId`), which is
+    // what draws Harness-specific › pi overrides.
+    const setup = (): (string | undefined)[] =>
+      screen.queryAllByTestId('ProviderSheet.modelSetup').map((el) => el.dataset.id)
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('chatgpt')
+    await waitFor(() =>
+      expect(
+        screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+      ).not.toContain('pi')
+    )
+    expect(setup()).not.toContain('pi-builtin')
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).toBeNull()
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(setup()).toContain('pi-builtin')
+  })
+
+  it('no key reconciliation between opencode and pi while one of them does not run', async () => {
+    snapshot = {
+      entries: [{ ...openrouter, keyConflict: { opencode: '…abcd', pi: '…wxyz' } }],
+      opencodeInstalled: true
+    }
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('opencode:openrouter')
+    await waitFor(() =>
+      expect(
+        screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
+      ).not.toContain('pi')
+    )
+    expect(screen.queryByTestId('ProviderSheet.keyConflict')).toBeNull()
+    expect(screen.queryByTestId('ProviderList.keyConflict')).toBeNull()
+  })
+
+  it('the ChatGPT card draws no empty Harnesses box: Manage sits with its other actions', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () =>
+      harnessSnapshot(['opencode', 'pi', 'codex'])
+    )
+    render(<SubscriptionsSection />)
+    await waitFor(() => expect(screen.getByTestId('SubscriptionsSection.manage')).toBeTruthy())
+    await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+    const gpt = byId(document.body, 'SubscriptionsSection.card', 'chatgpt')
+    await waitFor(() =>
+      expect(within(gpt).queryByTestId('SubscriptionsSection.engines')).toBeNull()
+    )
+    const actions = byId(gpt, 'SubscriptionsSection.actions', 'chatgpt')
+    expect(within(actions).getByTestId('SubscriptionsSection.manage')).toBeInTheDocument()
+    expect(within(actions).getByTestId('SubscriptionsSection.addAccount')).toBeInTheDocument()
+    await click(within(actions).getByTestId('SubscriptionsSection.manage'))
+    expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'chatgpt')
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    const row = within(gpt).getByTestId('SubscriptionsSection.engines')
+    expect(within(row).getByTestId('SubscriptionsSection.enginesLabel')).toHaveTextContent(
+      'Harnesses'
+    )
+    expect(within(row).getByTestId('SubscriptionsSection.manage')).toBeInTheDocument()
+    expect(within(actions).queryByTestId('SubscriptionsSection.manage')).toBeNull()
+  })
+
+  describe('the ChatGPT card and sheet name only harnesses that run (ADR-082 §8)', () => {
+    const twoAccounts: ProviderEntry['accounts'] = {
+      activeId: 'acc-1',
+      perSession: false,
+      list: [
+        { id: 'acc-1', email: 'first@example.com', accountId: 'ws-1', planType: 'pro' },
+        { id: 'acc-2', email: 'second@example.com', accountId: 'ws-2', planType: 'plus' }
+      ]
+    }
+    const withChatgpt = (patch: Partial<ProviderEntry>): void => {
+      snapshot = {
+        ...snapshot,
+        entries: snapshot.entries.map((e) => (e.id === 'chatgpt' ? { ...e, ...patch } : e))
+      }
+    }
+    const renderCard = async (missing: HarnessId[]): Promise<HTMLElement> => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(missing))
+      render(<SubscriptionsSection />)
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      return byId(document.body, 'SubscriptionsSection.card', 'chatgpt')
+    }
+
+    it('the Options fold waits for Codex; its copy names the routes that run', async () => {
+      withChatgpt({ accounts: twoAccounts })
+      let gpt = await renderCard(['codex', 'opencode', 'pi'])
+      await waitFor(() =>
+        expect(within(gpt).queryByTestId('SubscriptionsSection.options')).toBeNull()
+      )
+      expect(gpt.textContent).not.toMatch(/follow the active account/)
+      cleanup()
+      harnessStore.resetForTests()
+
+      // Codex alone: the option is there, and names no route that does not run.
+      gpt = await renderCard(['opencode', 'pi'])
+      await waitFor(() =>
+        expect(within(gpt).getByTestId('SubscriptionsSection.optionsSummary')).toBeTruthy()
+      )
+      const option = within(gpt).getByTestId('SubscriptionsSection.perSession')
+      expect(option.textContent).not.toMatch(/pi|opencode/)
+      cleanup()
+      harnessStore.resetForTests()
+
+      gpt = await renderCard(['pi'])
+      await waitFor(() =>
+        expect(within(gpt).getByTestId('SubscriptionsSection.perSession')).toHaveTextContent(
+          'opencode always follows the active account.'
+        )
+      )
+    })
+
+    it('signed out, the subtitle and the sign-in line name only harnesses that run', async () => {
+      withChatgpt({ credential: 'none', accounts: undefined })
+      let gpt = await renderCard(['codex', 'opencode', 'pi'])
+      await waitFor(() =>
+        expect(within(gpt).getByTestId('SubscriptionsSection.signInNote')).toHaveTextContent(/^$/)
+      )
+      expect(gpt.textContent).toContain('ChatGPT Plus, Pro or Business.')
+      expect(gpt.textContent).not.toMatch(/Codex|opencode|\bpi\b/)
+      cleanup()
+      harnessStore.resetForTests()
+
+      gpt = await renderCard(['codex'])
+      await waitFor(() =>
+        expect(within(gpt).getByTestId('SubscriptionsSection.signInNote')).toHaveTextContent(
+          'Sign in once; pi and opencode both use the same account.'
+        )
+      )
+      expect(gpt.textContent).toContain('used by pi and opencode.')
+      expect(gpt.textContent).not.toMatch(/Codex/)
+    })
+
+    it('with no harness running, removing the last account names none', async () => {
+      withChatgpt({ accounts: { ...twoAccounts, list: [twoAccounts.list[0]] } })
+      const gpt = await renderCard(['codex', 'opencode', 'pi'])
+      await waitFor(() =>
+        expect(within(gpt).queryByTestId('SubscriptionsSection.engines')).toBeNull()
+      )
+      const row = byId(gpt, 'SubscriptionsSection.account', 'acc-1')
+      await click(byId(row, 'SubscriptionsSection.more', 'acc-1'))
+      await click(
+        within(row)
+          .getAllByTestId('SubscriptionsSection.menuItem')
+          .find((el) => el.dataset.id === 'remove')!
+      )
+      const confirm = within(row).getByTestId('SubscriptionsSection.confirm')
+      expect(confirm.textContent).not.toMatch(/removed from|made there directly/)
+    })
+
+    it('pi alone not running: the last account’s removal names only what runs (S7e)', async () => {
+      withChatgpt({ accounts: { ...twoAccounts, list: [twoAccounts.list[0]] } })
+      const gpt = await renderCard(['pi'])
+      const row = byId(gpt, 'SubscriptionsSection.account', 'acc-1')
+      await click(byId(row, 'SubscriptionsSection.more', 'acc-1'))
+      await click(
+        within(row)
+          .getAllByTestId('SubscriptionsSection.menuItem')
+          .find((el) => el.dataset.id === 'remove')!
+      )
+      await waitFor(() =>
+        expect(within(row).getByTestId('SubscriptionsSection.confirm')).toHaveTextContent(
+          'ClaudeUI’s ChatGPT sign-in is removed from Codex and opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
+        )
+      )
+    })
+
+    it('the sheet’s armed Disconnect says what each running harness keeps (S7e)', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['codex']))
+      await openSheet('chatgpt')
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      expect(screen.queryByTestId('ProviderSheet.disconnectNote')).toBeNull()
+      await click(screen.getByTestId('ProviderSheet.disconnect'))
+      expect(screen.getByTestId('ProviderSheet.disconnectNote')).toHaveTextContent(
+        'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
+      )
+      expect(sent('shared-provider:disconnect')).toEqual([])
+    })
+
+    it('the sheet offers Sync now only while opencode or pi, which it syncs to, runs', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+      await openSheet('chatgpt')
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      await waitFor(() => expect(screen.queryByTestId('ProviderSheet.sync')).toBeNull())
+
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode']))
+      await act(async () => {
+        await harnessStore.refresh()
+      })
+      expect(screen.getByTestId('ProviderSheet.sync')).toHaveTextContent('Sync now')
+    })
+  })
+
+  it('an API provider has no delivery or default-model row for a harness that does not run', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await openSheet('ollama-local')
+    await waitFor(() =>
+      expect(screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).toEqual([
+        'opencode'
+      ])
+    )
+    expect(screen.queryAllByTestId('ProviderSheet.defaultModel')).toHaveLength(0)
   })
 })
 
@@ -476,7 +724,7 @@ describe('a subscription’s sheet', () => {
     expect(groups).not.toContain('accounts')
     expect(within(sheet).queryByTestId('ProviderSheet.credential')).not.toBeInTheDocument()
     expect(within(sheet).queryByTestId('ProviderSheet.accountsLink')).not.toBeInTheDocument()
-    expect(sheet).toHaveTextContent('ChatGPT · engines & models')
+    expect(sheet).toHaveTextContent('ChatGPT · harnesses & models')
     // ENABLED FOR keeps its rows.
     expect(groups).toContain('enabled')
   })
@@ -1188,7 +1436,7 @@ describe('API providers — one key, delivered to each engine', () => {
   it('Remove is allowed for a catalog provider, and says what it deletes', async () => {
     await openSheet('openrouter')
     expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(
-      'Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+      'Removing deletes the key from ClaudeUI and from each harness it’s delivered to.'
     )
     await click(screen.getByTestId('ProviderSheet.remove'))
     expect(sent('shared-provider:remove')).toEqual([])
@@ -1315,7 +1563,7 @@ describe('native keys — conflict and adoption (ADR-074 §6)', () => {
     // Nothing yet — the other engine's key is about to be replaced.
     expect(sent('shared-provider:adopt-native')).toEqual([])
     expect(screen.getByTestId('ProviderSheet.adoptConfirmRow')).toHaveTextContent(
-      'opencode’s key (…a41f) is deleted, and pi’s key (…09c2) is delivered to both engines.'
+      'opencode’s key (…a41f) is deleted, and pi’s key (…09c2) is delivered to both harnesses.'
     )
     // The confirm takes focus; the panel is a labelled group.
     expect(document.activeElement).toBe(screen.getByTestId('ProviderSheet.adoptConfirm'))
@@ -1467,6 +1715,27 @@ describe('a second key for a catalog provider (ADR-074 slice 10)', () => {
     await openSheet('openrouter')
     await click(screen.getByTestId('ProviderSheet.addAnotherKey'))
   }
+
+  it('offers only the harnesses that run, and none at all while neither does (ADR-082 §8)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    await openForm()
+    expect(
+      within(addSheet())
+        .getAllByTestId('AddAnotherKeySheet.engines.chip')
+        .map((el) => el.dataset.id)
+    ).toEqual(['opencode'])
+    cleanup()
+
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    await openSheet('openrouter')
+    expect(screen.queryByTestId('ProviderSheet.anotherKey')).toBeNull()
+  })
 
   it('is offered on a catalog provider’s Key section', async () => {
     await openSheet('openrouter')
@@ -1764,7 +2033,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(toggle).toHaveAttribute('role', 'switch')
     expect(toggle).toHaveAccessibleName('OpenRouter (Work)')
     await click(toggle)
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', true, false]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', true]])
 
     const row = listRow('openrouter-work')
     expect(within(row).getByTestId('ProviderList.off')).toHaveTextContent('Off')
@@ -1781,8 +2050,8 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
 
     await click(within(row).getByTestId('ProviderList.onOff'))
     expect(sent('shared-provider:set-disabled')).toEqual([
-      ['openrouter-work', true, false],
-      ['openrouter-work', false, false]
+      ['openrouter-work', true],
+      ['openrouter-work', false]
     ])
     expect(within(listRow('openrouter-work')).getByTestId('ProviderList.credential')).toBeTruthy()
   })
@@ -1811,7 +2080,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(screen.queryByTestId('ProviderList.switchOnConfirm')).toBeNull()
     await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
     await click(screen.getByTestId('ProviderList.switchOnReplace'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, ['pi']]])
   })
 
   it('a failed switch is said on the list, where the switch is', async () => {
@@ -1829,6 +2098,52 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     )
   })
 
+  it('switch-on asks the host first: a key given meanwhile is asked about, not refused (S7f)', async () => {
+    // The list still says no harness holds a key of its own…
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    stub('shared-provider:set-disabled', () => {
+      throw new Error('pi has its own key for OpenRouter (Work); switching it on replaces it.')
+    })
+    render(<ProviderList />)
+    await screen.findAllByTestId('ProviderList.row')
+    // …a first try, with nobody holding one yet, failed and says so.
+    holders = { 'openrouter-work': [] }
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(screen.getByTestId('ProviderList.switchError')).toBeTruthy()
+
+    // pi's auth file now holds its own key: the switch asks, naming pi, and the
+    // stale error goes.
+    holders = { 'openrouter-work': ['pi'] }
+    stub('shared-provider:set-disabled')
+    await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+    expect(screen.getByTestId('ProviderList.switchOnConfirm')).toHaveTextContent(
+      'pi’s own key for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    expect(screen.queryByTestId('ProviderList.switchError')).toBeNull()
+    // Only the first, refused try was sent so far.
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
+    await click(screen.getByTestId('ProviderList.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter-work', false],
+      ['openrouter-work', false, ['pi']]
+    ])
+  })
+
+  it('the sheet’s switch-on names who holds an own key now, not who did when it opened', async () => {
+    snapshot = { entries: [offEntry], opencodeInstalled: true }
+    holders = { 'openrouter-work': ['opencode', 'pi'] }
+    await openSheet('openrouter-work')
+    await click(screen.getByTestId('ProviderSheet.onOff'))
+    expect(screen.getByTestId('ProviderSheet.switchOnConfirm')).toHaveTextContent(
+      'opencode’s and pi’s own keys for OpenRouter (Work) will be replaced by the stored one.'
+    )
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    await click(screen.getByTestId('ProviderSheet.switchOnReplace'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter-work', false, ['opencode', 'pi']]
+    ])
+  })
+
   it('the sheet header switches it; while off it says what is kept, and routes stay editable', async () => {
     snapshot = { entries: [offEntry], opencodeInstalled: true }
     stub('shared-provider:set-route', () => {
@@ -1841,7 +2156,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     })
     await openSheet('openrouter-work')
     expect(screen.getByTestId('ProviderSheet.offNotice')).toHaveTextContent(
-      'Off — not delivered to any engine. Its key and settings are kept'
+      'Off — not delivered to any harness. Its key and settings are kept'
     )
     expect(engineRow('pi')).toHaveTextContent(
       'Off while OpenRouter (Work) is off — back on with it.'
@@ -1856,7 +2171,7 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
 
     expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'false')
     await click(screen.getByTestId('ProviderSheet.onOff'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, false]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
     expect(screen.queryByTestId('ProviderSheet.offNotice')).toBeNull()
     expect(screen.getByTestId('ProviderSheet.onOff')).toHaveAttribute('aria-checked', 'true')
   })
@@ -1881,7 +2196,65 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
       'opencode’s own key for OpenRouter (Work) will be replaced by the stored one.'
     )
     await click(screen.getByTestId('ProviderSheet.switchOnReplace'))
-    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false, ['opencode']]])
+  })
+
+  describe('never names a harness that does not run (ADR-082 §8, S7d)', () => {
+    /** Both engines hold a key of their own; pi does not run. */
+    const bothOwn: ProviderEntry = {
+      ...offEntry,
+      engines: {
+        opencode: { enabled: false, routeOn: true, ownCredential: true },
+        pi: { enabled: false, routeOn: true, ownCredential: true }
+      }
+    }
+    const piOwnOnly: ProviderEntry = {
+      ...offEntry,
+      engines: {
+        opencode: { enabled: false, routeOn: true },
+        pi: { enabled: false, routeOn: true, ownCredential: true }
+      }
+    }
+
+    it('ownKeysReplacedOnSwitchOn leaves out a harness that does not run', () => {
+      const all = (): boolean => true
+      const noPi = (engine: string): boolean => engine !== 'pi'
+      expect(ownKeysReplacedOnSwitchOn(bothOwn, all)).toEqual(['opencode', 'pi'])
+      expect(ownKeysReplacedOnSwitchOn(bothOwn, noPi)).toEqual(['opencode'])
+      expect(ownKeysReplacedOnSwitchOn(piOwnOnly, noPi)).toEqual([])
+    })
+
+    it('the list’s confirm names only opencode, and with only pi’s key it does not ask', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      snapshot = { entries: [bothOwn], opencodeInstalled: true }
+      render(<ProviderList />)
+      await screen.findAllByTestId('ProviderList.row')
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+      const confirm = screen.getByTestId('ProviderList.switchOnConfirm')
+      expect(confirm).toHaveTextContent(
+        'opencode’s own key for OpenRouter (Work) will be replaced by the stored one.'
+      )
+      expect(confirm.textContent).not.toMatch(/pi’s/)
+      cleanup()
+
+      snapshot = { entries: [piOwnOnly], opencodeInstalled: true }
+      render(<ProviderList />)
+      await screen.findAllByTestId('ProviderList.row')
+      await click(within(listRow('openrouter-work')).getByTestId('ProviderList.onOff'))
+      expect(screen.queryByTestId('ProviderList.switchOnConfirm')).toBeNull()
+      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
+    })
+
+    it('the sheet switches on without asking when only pi, which does not run, has a key', async () => {
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
+      snapshot = { entries: [piOwnOnly], opencodeInstalled: true }
+      await openSheet('openrouter-work')
+      await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
+      await click(screen.getByTestId('ProviderSheet.onOff'))
+      expect(screen.queryByTestId('ProviderSheet.switchOnConfirm')).toBeNull()
+      expect(sent('shared-provider:set-disabled')).toEqual([['openrouter-work', false]])
+    })
   })
 
   it('a failed switch still re-reads, so the sheet never shows a stale Off', async () => {
@@ -1909,5 +2282,225 @@ describe('switching an API provider off and on (ADR-074 slice 10)', () => {
     expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(
       'Off keeps the key and settings. Removing deletes the key from ClaudeUI'
     )
+  })
+})
+
+describe('a route that kept its own key (ADR-082 §8, S7d)', () => {
+  const kept: ProviderEntry = {
+    ...custom,
+    engines: {
+      opencode: { enabled: false },
+      pi: {
+        enabled: true,
+        providerId: 'ollama-local',
+        error: 'pi has its own key for Ollama; it was kept.',
+        ownKeyKept: true,
+        delivered: true
+      }
+    }
+  }
+
+  it('says it was kept and offers "Use the stored key", confirmed as switching on is', async () => {
+    snapshot = { entries: [kept], opencodeInstalled: true }
+    await openSheet('ollama-local')
+    expect(engineRow('pi')).toHaveTextContent('pi has its own key for Ollama; it was kept.')
+    expect(engineRow('pi').textContent).not.toMatch(/switch .* off and on/)
+    // Not a failure to retry: the action is to replace it, or leave it.
+    expect(within(engineRow('pi')).queryByTestId('ProviderSheet.retry')).toBeNull()
+
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.useStoredKey'))
+    expect(sent('shared-provider:use-stored-key')).toEqual([])
+    expect(engineRow('pi')).toHaveTextContent(
+      'pi’s own key for Ollama will be replaced by the stored one.'
+    )
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.useStoredCancel'))
+    expect(within(engineRow('pi')).getByTestId('ProviderSheet.useStoredKey')).toBeTruthy()
+
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.useStoredKey'))
+    await click(within(engineRow('pi')).getByTestId('ProviderSheet.useStoredConfirm'))
+    expect(sent('shared-provider:use-stored-key')).toEqual([['ollama-local', 'pi']])
+  })
+
+  it('a route that delivered as usual offers no such action', async () => {
+    await openSheet('ollama-local')
+    expect(screen.queryByTestId('ProviderSheet.useStoredKey')).toBeNull()
+  })
+})
+
+describe('a harness’s own key beside ClaudeUI’s provider for the vendor (S7f)', () => {
+  /** pi's own OpenRouter key — a native row, named for whose it is. */
+  const piOwn: ProviderEntry = {
+    id: 'pi:openrouter',
+    name: 'OpenRouter',
+    origin: 'pi-native',
+    credential: 'api-key',
+    engines: { pi: { enabled: true, native: true, providerId: 'openrouter' } },
+    piKind: 'builtin',
+    piBuiltinId: 'openrouter',
+    kindLabel: 'Catalog',
+    ownedBy: 'pi'
+  }
+  /** ClaudeUI's OpenRouter, switched off — the observed "duplicate". */
+  const sharedOff: ProviderEntry = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    origin: 'shared',
+    credential: 'api-key',
+    disabled: true,
+    kindLabel: 'Catalog',
+    engines: {
+      opencode: { enabled: false, routeOn: true },
+      pi: { enabled: false, routeOn: true, ownCredential: true }
+    }
+  }
+  const sharedOn: ProviderEntry = {
+    ...sharedOff,
+    disabled: undefined,
+    engines: {
+      opencode: { enabled: true, providerId: 'openrouter' },
+      pi: { enabled: true, providerId: 'openrouter' }
+    }
+  }
+  const definition = (over: Partial<SharedProviderDefinition> = {}): SharedProviderDefinition => ({
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    models: [],
+    managed: true,
+    disabled: true,
+    routes: { pi: { enabled: true }, opencode: { enabled: true } },
+    ...over
+  })
+
+  beforeEach(() => {
+    definitions = [chatgptDefinition, definition()]
+    snapshot = { entries: [sharedOff, piOwn], opencodeInstalled: true }
+    // Switched on, ClaudeUI's provider claims pi's slot: the native row goes.
+    stub('shared-provider:set-disabled', () => {
+      snapshot = { entries: [sharedOn], opencodeInstalled: true }
+    })
+  })
+
+  it('the native row is named for the provider and whose key it is — never the raw id', async () => {
+    const sheet = await openSheet('pi:openrouter')
+    const native = screen
+      .getAllByTestId('ProviderList.row')
+      .find((el) => el.dataset.id === 'pi:openrouter')!
+    expect(native).toHaveTextContent('OpenRouter · pi’s own key')
+    expect(native.textContent).not.toMatch(/\bopenrouter\b/)
+    expect(sheet).toHaveTextContent('OpenRouter · pi’s own key')
+  })
+
+  it('offers ClaudeUI’s OpenRouter instead, asks first, then switches it on with replaceOwn', async () => {
+    await openSheet('pi:openrouter')
+    const offer = await screen.findByTestId('ProviderSheet.useClaudeUi')
+    expect(offer).toHaveAttribute('data-id', 'openrouter')
+    expect(within(offer).getByTestId('ProviderSheet.useClaudeUiStart')).toHaveTextContent(
+      'Use ClaudeUI’s OpenRouter here instead'
+    )
+
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi already has its own OpenRouter key. Overwrite it and manage the key from ClaudeUI?'
+    )
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    // Its pi route is already on in its settings: switching it on is the whole act.
+    expect(sent('shared-provider:set-route')).toEqual([])
+    expect(sent('shared-provider:set-disabled')).toEqual([['openrouter', false, ['pi']]])
+    // The native row is gone; the sheet follows to ClaudeUI's provider.
+    await waitFor(() =>
+      expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'openrouter')
+    )
+  })
+
+  it('asks the host who holds an own key: one the list did not show is named too', async () => {
+    // The registry says only pi holds one; opencode's auth file has one too.
+    holders = { openrouter: ['pi', 'opencode'] }
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi and opencode already have their own OpenRouter keys. Overwrite them and manage the key from ClaudeUI?'
+    )
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    expect(sent('shared-provider:set-disabled')).toEqual([
+      ['openrouter', false, ['pi', 'opencode']]
+    ])
+  })
+
+  it('Cancel writes nothing', async () => {
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiCancel'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUi')).toBeTruthy()
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+    expect(sent('shared-provider:set-route')).toEqual([])
+  })
+
+  it('names every harness switching on replaces a key in', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...sharedOff,
+          engines: {
+            opencode: { enabled: false, routeOn: true, ownCredential: true },
+            pi: { enabled: false, routeOn: true, ownCredential: true }
+          }
+        },
+        piOwn
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('pi:openrouter')
+    await click(await screen.findByTestId('ProviderSheet.useClaudeUiStart'))
+    expect(screen.getByTestId('ProviderSheet.useClaudeUiConfirm')).toHaveTextContent(
+      'pi and opencode already have their own OpenRouter keys. Overwrite them and manage the key from ClaudeUI?'
+    )
+  })
+
+  it('a provider that is on, with its pi route off, turns that route on instead', async () => {
+    definitions = [
+      chatgptDefinition,
+      definition({
+        disabled: undefined,
+        routes: { pi: { enabled: false }, opencode: { enabled: true } }
+      })
+    ]
+    snapshot = {
+      entries: [
+        {
+          ...sharedOn,
+          engines: { ...sharedOn.engines, pi: { enabled: false, ownCredential: true } }
+        },
+        piOwn
+      ],
+      opencodeInstalled: true
+    }
+    await openSheet('pi:openrouter')
+    expect(await screen.findByTestId('ProviderSheet.useClaudeUi')).toHaveTextContent(
+      'ClaudeUI’s OpenRouter is off for pi'
+    )
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiStart'))
+    await click(screen.getByTestId('ProviderSheet.useClaudeUiOverwrite'))
+    expect(sent('shared-provider:set-route')).toEqual([['openrouter', 'pi', true]])
+    expect(sent('shared-provider:set-disabled')).toEqual([])
+  })
+
+  it('offers nothing without a ClaudeUI provider for the vendor, or one with no stored key', async () => {
+    definitions = [chatgptDefinition]
+    snapshot = { entries: [piOwn], opencodeInstalled: true }
+    await openSheet('pi:openrouter')
+    // Let the definitions read land before asserting absence.
+    await waitFor(() => expect(registryReads).toBeGreaterThan(0))
+    await act(async () => {})
+    expect(screen.queryByTestId('ProviderSheet.useClaudeUi')).toBeNull()
+    cleanup()
+
+    definitions = [chatgptDefinition, definition()]
+    snapshot = { entries: [{ ...sharedOff, credential: 'none' }, piOwn], opencodeInstalled: true }
+    await openSheet('pi:openrouter')
+    await act(async () => {})
+    expect(screen.queryByTestId('ProviderSheet.useClaudeUi')).toBeNull()
   })
 })

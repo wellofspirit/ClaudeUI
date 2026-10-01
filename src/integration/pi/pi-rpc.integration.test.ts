@@ -1,9 +1,10 @@
 /**
  * pi RPC integration smoke test.
  *
- * Gated: only runs when PI_INTEGRATION_TESTS=1. Uses the REAL vendored pi
- * binary — NOT included in default test / test:ci. Skips gracefully (not a
- * hard failure) if vendor/pi-cli is missing even when the env var is set.
+ * Gated: only runs when PI_INTEGRATION_TESTS=1. Uses the REAL pi the app would
+ * run (the harness resolver: ClaudeUI's store, `bun run ensure-pi`, or a
+ * System selection) — NOT included in default test / test:ci. Skips gracefully
+ * (not a hard failure) if pi is not installed even when the env var is set.
  *
  * Deliberately hand-rolls the raw JSONL send/receive protocol here rather than
  * reusing PiRpcClient — mirrors opencode-server.integration.test.ts's own
@@ -33,8 +34,8 @@ import { PI_BRIDGE_EXTENSION_SOURCE } from '../../core/pi/pi-bridge-source'
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 
 // Evaluated once at collection time (synchronous fs check) so every `it` in
-// this file can gate on it via it.skipIf — "skip gracefully if vendor/pi-cli
-// missing" even when PI_INTEGRATION_TESTS=1 is set.
+// this file can gate on it via it.skipIf — "skip gracefully if pi is not
+// installed" even when PI_INTEGRATION_TESTS=1 is set.
 const BINARY_MISSING = !locatePiBinary()
 
 /** Tiny extension fixture: registers a `/claudeui-probe` command with no

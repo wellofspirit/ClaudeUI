@@ -5,7 +5,8 @@
  * ClaudeUI reads/writes `~/.pi/agent/auth.json` DIRECTLY. This is the ONE
  * sanctioned write into `~/.pi/**`: a read-modify-write that preserves every
  * unknown provider entry and unknown field byte-for-byte, and keeps 0600 on
- * POSIX (see docs/protocol-pi/README.md "Auth" + vendor/pi-cli/docs/providers.md).
+ * POSIX (see docs/protocol-pi/README.md "Auth" +
+ * vendor/pi-src/packages/coding-agent/docs/providers.md).
  *
  * pi's native `pi /login` is TUI-interactive, but as of M6 ClaudeUI DOES drive
  * the `openai-codex` (ChatGPT) login itself via its own auth vault
@@ -232,11 +233,12 @@ export class PiAuthProvider implements EngineAuthProvider {
   /** Delete a provider's entry from auth.json entirely. Preserves every other entry. */
   async removeVendorAuth(vendorId: string): Promise<void> {
     const file = readAuthFileForWrite()
+    // Nothing to remove: nothing is written, so a pi that is not installed
+    // never gains an auth.json (or ~/.pi) from a removal (ADR-082 §8, S7d).
+    if (!(vendorId in file)) return
     // A removal destroys a credential ClaudeUI cannot restore, so it always
     // leaves a trace: the vendor id and the call site, never the key.
-    if (vendorId in file) {
-      logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
-    }
+    logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
     delete file[vendorId]
     writeAuthFile(file)
     invalidatePiModelCache()

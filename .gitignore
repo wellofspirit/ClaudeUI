@@ -14,15 +14,15 @@ bin/
 # scripts/extract-cli.mjs. Cached locally, rebuilt when claudeCliVersion
 # bumps in package.json.
 /vendor/claude-cli/
-# Vendored opencode binary — downloaded via scripts/ensure-opencode.mjs.
+# Engine binaries vendored before ADR-082 §8 (opencode, pi and Codex now install
+# into ~/.claude/ui/harnesses); still ignored for older checkouts.
 /vendor/opencode-cli/
-# Engine source checkouts (vendor/<engine>-src/, pinned to the vendored
-# binary's tag) for reading upstream behavior — see CLAUDE.md.
+/vendor/pi-cli/
+/vendor/codex-cli/
+# Engine source checkouts (vendor/<engine>-src/, at the tag of the engine's
+# tested version) for reading upstream behavior — see CLAUDE.md.
 /vendor/*-src/
 /.cache/
 
-# pi coding agent standalone build (vendored by ensure-pi)
-/vendor/pi-cli/
-/vendor/codex-cli/
 /review.md
 .claude/worktrees/

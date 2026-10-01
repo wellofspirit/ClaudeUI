@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
+  EngineId,
   ModelRef,
   SessionInfo,
   WorktreeInfo
@@ -60,6 +61,31 @@ function isCodexSession(sessionId: string): boolean {
       group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
     )
   )
+}
+
+/**
+ * A session that is in memory but not on disk yet (never spawned, or its
+ * transcript not listed yet), as a sidebar row. Its harness comes from
+ * `sessionEngines`, the record `createNewSession` writes: without it the row
+ * reads as Claude (`SessionItem`'s fallback), which is how a pi session whose
+ * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
+ */
+function inMemorySessionInfo(
+  sessionId: string,
+  data: SidebarSessionData,
+  engineId: EngineId | undefined,
+  projectKey: string
+): SessionInfo {
+  const now = Date.now()
+  return {
+    sessionId,
+    cwd: data.cwd,
+    projectKey,
+    title: data.firstUserText || 'New session',
+    timestamp: now,
+    lastActivityAt: now,
+    engineId: engineId ?? 'claude'
+  }
 }
 
 /** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
@@ -541,16 +567,7 @@ export function Sidebar({
       }
       if (!info) {
         const data = sidebarSessions[rid]
-        if (data) {
-          info = {
-            sessionId: rid,
-            cwd: data.cwd,
-            projectKey: '',
-            title: data.firstUserText || 'New session',
-            timestamp: Date.now(),
-            lastActivityAt: Date.now()
-          }
-        }
+        if (data) info = inMemorySessionInfo(rid, data, sessionEngines[rid]?.engineId, '')
       }
       // Apply custom title if set
       if (info && customTitles[rid]) {
@@ -558,7 +575,7 @@ export function Sidebar({
       }
       return info
     },
-    [directories, sidebarSessions, customTitles]
+    [directories, sidebarSessions, customTitles, sessionEngines]
   )
 
   // Memoize derived lists — only recompute when their inputs change
@@ -710,18 +727,8 @@ export function Sidebar({
     const inMemoryByPk: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
-      const sessionEngineId = (sessionEngines[rid]?.engineId ??
-        'claude') as import('../../../../shared/types').EngineId
       const pk = cwdToProjectKey(data.cwd)
-      const info: SessionInfo = {
-        sessionId: rid,
-        cwd: data.cwd,
-        projectKey: pk,
-        title: data.firstUserText || 'New session',
-        timestamp: Date.now(),
-        lastActivityAt: Date.now(),
-        engineId: sessionEngineId
-      }
+      const info = inMemorySessionInfo(rid, data, sessionEngines[rid]?.engineId, pk)
       if (!inMemoryByPk[pk]) inMemoryByPk[pk] = []
       inMemoryByPk[pk].push(info)
     }

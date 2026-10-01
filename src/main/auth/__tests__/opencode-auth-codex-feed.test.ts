@@ -144,6 +144,52 @@ describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
     }
   })
 
+  describe('removeVendorAuthDirect (ADR-082 §8, S7d: opencode not running)', () => {
+    it('removes only that vendor, keeping every other entry and unknown field', async () => {
+      writeAuthJson({
+        openrouter: { type: 'api', key: 'sk-fixture-1' },
+        openai: { type: 'oauth', access: 'a', refresh: 'r', expires: 1, custom: { keep: true } },
+        '#note': 'kept'
+      })
+      await provider.removeVendorAuthDirect('openrouter')
+      expect(readAuthJsonRaw()).toEqual({
+        openai: { type: 'oauth', access: 'a', refresh: 'r', expires: 1, custom: { keep: true } },
+        '#note': 'kept'
+      })
+      expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+    })
+
+    it('never goes through opencode’s server', async () => {
+      const { opencodeServerManager } = await import('../../../core/opencode/OpencodeServerManager')
+      writeAuthJson({ openrouter: { type: 'api', key: 'sk-fixture-1' } })
+      await provider.removeVendorAuthDirect('openrouter')
+      expect(opencodeServerManager.acquire).not.toHaveBeenCalled()
+    })
+
+    it('creates nothing when there is no auth.json', async () => {
+      await provider.removeVendorAuthDirect('openrouter')
+      expect(fs.existsSync(path.join(tmpDir, 'opencode'))).toBe(false)
+    })
+
+    it('writes nothing when the vendor has no entry', async () => {
+      writeAuthJson({ openai: { type: 'api', key: 'sk-fixture-2' } })
+      const raw = fs.readFileSync(authJsonPath(), 'utf-8')
+      const before = fs.statSync(authJsonPath()).mtimeMs
+      await provider.removeVendorAuthDirect('openrouter')
+      expect(fs.readFileSync(authJsonPath(), 'utf-8')).toBe(raw)
+      expect(fs.statSync(authJsonPath()).mtimeMs).toBe(before)
+      expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
+    })
+
+    it('refuses an unreadable file rather than overwrite it', async () => {
+      writeAuthJson('{ half-written')
+      await expect(provider.removeVendorAuthDirect('openrouter')).rejects.toThrow(
+        /Refusing to overwrite/
+      )
+      expect(fs.readFileSync(authJsonPath(), 'utf-8')).toBe('{ half-written')
+    })
+  })
+
   describe('readOauthEntry', () => {
     it('returns the entry (incl. accountId) for a present oauth vendor', async () => {
       writeAuthJson({
