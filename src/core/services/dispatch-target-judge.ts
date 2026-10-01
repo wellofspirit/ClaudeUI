@@ -66,32 +66,10 @@ import {
 } from '../automode/session-judge'
 import { loadSharedAutoModeConfig } from './ui-config'
 
-/** How many of the target's own assistant messages the judge may see (most recent kept). */
-export const TARGET_TRAJECTORY_MAX = 200
-
-/**
- * Upsert one of the target's forwarded messages into its trajectory (ADR-087
- * D1): assistant messages only, keyed by message id (a streamed message is
- * re-forwarded as it grows — the latest copy wins, at its first position),
- * insertion-ordered, bounded to {@link TARGET_TRAJECTORY_MAX} by dropping the
- * OLDEST. User-role messages never enter: on a target they are the dispatching
- * agent's prompts or tool results, and `slimTranscript` would render a prompt
- * as a `User:` line — the very authorisation the judge must only take from the
- * parent's human turns.
- */
-export function recordTrajectoryMessage(
-  trajectory: Map<string, ChatMessage>,
-  message: ChatMessage,
-  max: number = TARGET_TRAJECTORY_MAX
-): void {
-  if (message.role !== 'assistant') return
-  trajectory.set(message.id, message)
-  while (trajectory.size > max) {
-    const oldest = trajectory.keys().next().value
-    if (oldest === undefined) break
-    trajectory.delete(oldest)
-  }
-}
+// The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-088) so
+// `pi/pi-child-runner.ts` can record a child's trajectory without importing
+// this module; re-exported for its existing importers.
+export { recordTrajectoryMessage, TARGET_TRAJECTORY_MAX } from '../automode/trajectory'
 
 export interface DispatchTargetJudgeOptions {
   /** The TARGET engine — which is also the judge engine. */
