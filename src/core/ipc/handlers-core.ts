@@ -38,6 +38,7 @@ import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
+import { seedCanonicalTranscript } from './seed-canonical-transcript'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
@@ -127,10 +128,40 @@ export function sendPrompt(
   prompt: string,
   attachments?: AttachmentUpload[]
 ): void | Promise<void> {
-  if (!manager.get(routingId)) throw new Error(`No session for routingId: ${routingId}`)
-  const seeding = syncCore.pendingSeed(routingId)
+  const session = manager.get(routingId)
+  if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  const seeding = syncCore.pendingSeed(routingId) ?? reseedAfterExit(session, routingId)
   if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments)
   return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments))
+}
+
+/**
+ * A session that exited and is respawning IN PLACE has no `createSession` to seed
+ * canonical for it. The inactivity timer (or any `cancel()`) reports
+ * `disconnected`, which drops canonical's transcript; a prompt then reaches the same
+ * still-usable session object, which resumes its engine session by itself. Without a
+ * seed here the prompt would be the whole transcript and `seeded` would stay false,
+ * so every client that syncs would be told the transcript is on its way and be
+ * refused the fill.
+ *
+ * Applies when canonical holds nothing for the session, did not drop it as an empty
+ * one (`seeded` false), and the engine has a session to resume. Not when the prompt
+ * will only queue behind a running turn, and not for Codex: its `cancel()` closes the
+ * object for good (`run` refuses), so a Codex respawn always goes through
+ * `createSession`, which seeds. Registered with core exactly as `create-session.ts`
+ * does, so the send waits on the read.
+ */
+function reseedAfterExit(session: ISession, routingId: string): Promise<void> | undefined {
+  if (session.willQueue || session.engineId === 'codex') return undefined
+  const held = syncCore.getCanonicalState().sessions[routingId]
+  if (!held || held.seeded || held.messages.length > 0) return undefined
+  const resumeId = session.getSessionId()
+  if (!resumeId) return undefined
+  syncCore.trackSeed(
+    routingId,
+    seedCanonicalTranscript(routingId, resumeId, held.cwd, undefined, session.engineId)
+  )
+  return syncCore.pendingSeed(routingId)
 }
 
 /**

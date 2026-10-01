@@ -687,6 +687,13 @@ registered with core (`SyncCore.trackSeed`, from `create-session.ts`) and
 `session:user-message`, enqueues or runs. The wait is conditional (a session with no read in
 flight still sends synchronously), every send waiting on the same read resumes in arrival
 order, and the entry clears when the read settles, success or failure.
+A Claude, opencode or pi session that exits (the inactivity timer, any `cancel()`) and then
+respawns IN PLACE has no `createSession` to seed canonical: the next prompt reaches the same
+session object, which resumes its engine session itself (a cancelled Codex object refuses to
+run again, so Codex always respawns through `createSession`). `sendPrompt` therefore seeds in that case too — canonical
+holds nothing for the session, did not drop an empty one, and the engine has a session id to
+resume — through the same `seedCanonicalTranscript` (`ipc/seed-canonical-transcript.ts`) and
+`trackSeed`, and waits on it. A prompt that would only queue behind a running turn does not.
 
 **Bounds.** A resumed session re-reads its transcript from disk on the host, once per
 respawn. A client resyncing onto an exited session shows its

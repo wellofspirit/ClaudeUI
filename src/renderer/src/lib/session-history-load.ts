@@ -118,6 +118,15 @@ function stripForReplace(routingId: string, loaded: readonly ChatMessage[]): boo
  *
  * A Claude read that rejects rejects here too: the click path lets that propagate,
  * and the reload catches it and logs.
+ *
+ * Replace mode checks liveness at COMMIT time: the read takes seconds, and a prompt
+ * sent meanwhile spawns the engine and starts folding live events into the entry. A
+ * strip and `loadHistoricalSession` then would wipe the turn, stamp the running
+ * session historical and reset its capabilities, so a session that went live is
+ * `declined` — nothing committed, and the caller proceeds exactly as it would for a
+ * resident live entry (a click still opens it, a watch still watches it) — and its
+ * live fold owns it. Every caller (click, rename, watch toggle, post-hydrate reload)
+ * is covered by this one check.
  */
 export async function loadSessionIntoStore(
   info: SessionInfo,
@@ -159,6 +168,7 @@ export async function loadSessionIntoStore(
       statusLine: null,
       lastModel: null
     }
+    if (replace && isLive(routingId)) return 'declined'
     if (replace && !stripForReplace(routingId, messages)) return 'declined'
     // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
     // engine (and model) — it is the one that restores both onto the session.
@@ -189,6 +199,7 @@ export async function loadSessionIntoStore(
     if (!history)
       return replace && isCurrent() && holdsTranscript(routingId) ? 'declined' : 'skipped'
     if (!isCurrent()) return 'skipped'
+    if (replace && isLive(routingId)) return 'declined'
     if (replace && !stripForReplace(routingId, history.messages)) return 'declined'
     store().loadHistoricalSession(
       routingId,
@@ -250,6 +261,7 @@ export async function loadSessionIntoStore(
   }
   // A newer click superseded this one while history + subagents loaded — discard.
   if (!isCurrent()) return 'skipped'
+  if (replace && isLive(routingId)) return 'declined'
   if (replace && !stripForReplace(routingId, messages)) return 'declined'
   store().loadHistoricalSession(
     routingId,

@@ -194,6 +194,73 @@ describe('a declined load that a newer click superseded', () => {
   })
 })
 
+describe('a replace that lands after the session went live', () => {
+  it('click path: is declined, so a running session keeps its transcript and is not stamped historical', async () => {
+    // Idle evicted entry holding a tail; the user clicks it and the read is slow.
+    evictedEntry(['tail-1'])
+    let release!: (value: unknown) => void
+    loadSessionHistory.mockReturnValue(new Promise((resolve) => (release = resolve)))
+    const click = loadSessionIntoStore(INFO, {
+      isCurrent: () => true,
+      markRecent: true,
+      replace: replaceOnClick(store().sessions['sess'])
+    })
+
+    // Meanwhile the user sends: the engine spawns and live events fold in.
+    patchLocalSession('sess', { sdkActive: true, messages: [message('tail-1'), message('live-1')] })
+    store().markSessionLive('sess')
+    release(history('h1', 'h2'))
+
+    // PRE-FIX: strip + loadHistoricalSession wiped the live transcript and stamped
+    // the running session historical.
+    expect(await click).toBe('declined')
+    expect(ids('sess')).toEqual(['tail-1', 'live-1'])
+    expect(store().sessions['sess'].isHistorical).toBe(false)
+  })
+
+  it('covers the other callers of the loader too (rename / watch toggle go through it)', async () => {
+    evictedEntry(['tail-1'])
+    let release!: (value: unknown) => void
+    loadSessionHistory.mockReturnValue(new Promise((resolve) => (release = resolve)))
+    const rename = ensureTranscriptLoaded('sess')
+
+    patchLocalSession('sess', { sdkActive: true, messages: [message('live-1')] })
+    store().markSessionLive('sess')
+    release(history('h1'))
+
+    expect(await rename).toBe('declined')
+    expect(ids('sess')).toEqual(['live-1'])
+    expect(store().sessions['sess'].isHistorical).toBe(false)
+  })
+
+  it.each([
+    [
+      'opencode',
+      'loadOpencodeHistory',
+      { messages: [message('h1')], statusLine: null, lastModel: null }
+    ],
+    ['codex', 'loadSessionHistory', history('h1')]
+  ] as const)('guards the %s commit site too', async (engineId, api, read) => {
+    evictedEntry(['tail-1'])
+    let release!: (value: unknown) => void
+    ;(window.api as unknown as Record<string, ReturnType<typeof vi.fn>>)[api].mockReturnValue(
+      new Promise((resolve) => (release = resolve))
+    )
+    const click = loadSessionIntoStore(
+      { ...INFO, engineId },
+      { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
+    )
+
+    patchLocalSession('sess', { sdkActive: true, messages: [message('tail-1'), message('live-1')] })
+    store().markSessionLive('sess')
+    release(read)
+
+    expect(await click).toBe('declined')
+    expect(ids('sess')).toEqual(['tail-1', 'live-1'])
+    expect(store().sessions['sess'].isHistorical).toBe(false)
+  })
+})
+
 describe('a click whose read cannot replace a held transcript', () => {
   it('is declined (the caller still navigates) and leaves the entry evicted for the next click', async () => {
     evictedEntry(['tail-1'])

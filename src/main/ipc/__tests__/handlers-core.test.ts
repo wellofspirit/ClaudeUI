@@ -54,6 +54,13 @@ vi.mock('../../../core/services/delete-session-files', () => ({
 }))
 vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories }))
 
+// `sendPrompt` can seed canonical's transcript for a session respawning in place
+// (seed-canonical-transcript.ts), which reads through the engine history readers. This
+// file mocks `codex/history` for the delete path only, so the readers are stubbed whole.
+vi.mock('../../../core/services/engine-history', () => ({
+  readSessionHistory: vi.fn(async () => ({ messages: [], taskNotifications: [] }))
+}))
+
 // R1: a delete must UNWATCH before the file it watches disappears.
 const { unwatchSession } = vi.hoisted(() => ({ unwatchSession: vi.fn() }))
 vi.mock('../../../core/services/session-watcher', () => ({ unwatchSession }))

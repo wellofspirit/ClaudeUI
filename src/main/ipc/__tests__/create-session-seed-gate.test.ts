@@ -292,3 +292,111 @@ describe('sendPrompt after a resume', () => {
     expect(session.run).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * The idle timeout (or any `cancel()`) reports `disconnected` and canonical drops the
+ * transcript, but the session object stays usable: the next prompt reaches
+ * `session.run`, which respawns its engine by itself — there is no `createSession`,
+ * so nothing seeds canonical. `sendPrompt` has to.
+ */
+describe('sendPrompt after the session exited and respawns in place', () => {
+  function exitedSession(over: Record<string, unknown> = {}): {
+    manager: SessionManager
+    runs: string[]
+    session: Record<string, unknown>
+  } {
+    const runs: string[] = []
+    const session = {
+      engineId: 'claude',
+      willQueue: false,
+      getSessionId: () => RID,
+      run: (prompt: string) => {
+        runs.push(prompt)
+      },
+      enqueuePrompt: vi.fn(),
+      ...over
+    }
+    const manager = { create: vi.fn(), get: () => session } as unknown as SessionManager
+    // A live session with a transcript, then the inactivity timer's exit.
+    syncCore.emit('session:created', [RID, { cwd: '/r/repo' }])
+    syncCore.emit('session:message', [
+      RID,
+      { id: 'old-1', role: 'assistant', content: [{ type: 'text', text: 'old' }], timestamp: 1 }
+    ])
+    syncCore.emit('session:status', [
+      RID,
+      {
+        state: 'disconnected',
+        sessionId: RID,
+        model: null,
+        cwd: null,
+        totalCostUsd: 0,
+        engineId: 'claude',
+        capabilities: undefined,
+        account: null
+      }
+    ])
+    expect(syncCore.getCanonicalState().sessions[RID].seeded).toBe(false)
+    expect(transcript()).toEqual([])
+    return { manager, runs, session }
+  }
+
+  it('reads the history first, so canonical ends as history then the prompt', async () => {
+    const { manager, runs } = exitedSession()
+    readSessionHistory.mockResolvedValueOnce(historyOf('h1', 'h2'))
+
+    await sendPrompt(manager, RID, 'hello')
+
+    // PRE-FIX: nothing seeded canonical, so the prompt was the whole transcript.
+    expect(transcript()).toEqual(['h1', 'h2', 'hello'])
+    expect(runs).toEqual(['hello'])
+    expect(syncCore.getCanonicalState().sessions[RID].seeded).toBe(true)
+  })
+
+  it('reads the engine that owns the session (opencode resumes by its own id)', async () => {
+    const { manager } = exitedSession({ engineId: 'opencode', getSessionId: () => 'oc-sess' })
+    readSessionHistory.mockResolvedValueOnce(historyOf('h1'))
+
+    await sendPrompt(manager, RID, 'hello')
+
+    expect(readSessionHistory.mock.calls[0]?.[0]).toBe('oc-sess')
+    expect(readSessionHistory.mock.calls[0]?.[3]).toBe('opencode')
+    expect(transcript()).toEqual(['h1', 'hello'])
+  })
+
+  it('keeps two quick sends ordered behind the one read', async () => {
+    const { manager, runs } = exitedSession()
+    const read = heldRead()
+
+    const first = sendPrompt(manager, RID, 'one')
+    const second = sendPrompt(manager, RID, 'two')
+    expect(runs).toEqual([])
+    read.release(historyOf('h1'))
+    await Promise.all([first, second])
+
+    expect(runs).toEqual(['one', 'two'])
+    expect(transcript()).toEqual(['h1', 'one', 'two'])
+    expect(readSessionHistory).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing when there is nothing to resume, or the prompt only queues', async () => {
+    const noId = exitedSession({ getSessionId: () => null })
+    await sendPrompt(noId.manager, RID, 'hello')
+    expect(readSessionHistory).not.toHaveBeenCalled()
+    syncCore.resetCanonicalForTests()
+
+    const busy = exitedSession({ willQueue: true })
+    await sendPrompt(busy.manager, RID, 'hello')
+    expect(readSessionHistory).not.toHaveBeenCalled()
+    expect(busy.session.enqueuePrompt).toHaveBeenCalled()
+  })
+
+  it('does nothing for a session that still holds its transcript, or never held one', async () => {
+    const { manager } = exitedSession()
+    syncCore.resetCanonicalForTests()
+    // Complete as empty: spawned, never prompted, exited — nothing was dropped.
+    syncCore.emit('session:created', [RID, { cwd: '/r/repo' }])
+    await sendPrompt(manager, RID, 'hello')
+    expect(readSessionHistory).not.toHaveBeenCalled()
+  })
+})
