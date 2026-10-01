@@ -19,13 +19,19 @@
  * rows all speak the vault's vocabulary.
  */
 import { homedir } from 'node:os'
-import type { ChatgptAccountLimits, ChatgptRateLimits, RateWindow } from '../../shared/types'
+import type {
+  ChatgptAccountLimits,
+  ChatgptRateLimits,
+  CreditLimit,
+  RateWindow
+} from '../../shared/types'
 import { CodexService } from './CodexService'
 import { codexBinaryAvailable } from './codex-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateLimitsResponse'
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { RateLimitWindow } from './protocol/v2/RateLimitWindow'
+import type { SpendControlLimitSnapshot } from './protocol/v2/SpendControlLimitSnapshot'
 import { emitEvent } from '../services/sync-host'
 import { recordLimitSamples, type LimitSampleWindow } from '../services/window-samples'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
@@ -65,6 +71,47 @@ export function rateWindow(window: RateLimitWindow | null | undefined): RateWind
   }
 }
 
+/** A non-negative decimal amount, or null — `Number('')` is 0, which is not an amount. */
+function creditAmount(raw: string | null | undefined): number | null {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (text === '') return null
+  const value = Number(text)
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/**
+ * A member's credit allowance from the wire's `individualLimit`, or null.
+ *
+ * The amounts are decimal STRINGS on the wire (the backend's own fields, passed
+ * through `backend-client/src/client.rs` `map_individual_limit` untouched).
+ * One that does not parse, or is negative, drops the whole allowance — a bar
+ * with half its numbers is a claim nobody made — which is also what Codex's
+ * `/status` does (`tui/src/status/rate_limits.rs`, `format_credit_amount`).
+ *
+ * `resetsAt` is unix SECONDS like every other reset on this wire; a
+ * non-positive one is no statement and travels as null.
+ */
+export function creditLimit(
+  limit: SpendControlLimitSnapshot | null | undefined
+): CreditLimit | null {
+  if (!limit) return null
+  const used = creditAmount(limit.used)
+  const total = creditAmount(limit.limit)
+  const remaining = limit.remainingPercent
+  if (used === null || total === null) return null
+  if (typeof remaining !== 'number' || !Number.isFinite(remaining)) return null
+  const seconds = limit.resetsAt
+  return {
+    used,
+    limit: total,
+    remainingPercent: Math.max(0, Math.min(100, remaining)),
+    resetsAt:
+      typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0
+        ? new Date(seconds * 1000).toISOString()
+        : null
+  }
+}
+
 /**
  * One observed window as the sample writer takes it, under the kind the whole
  * reading resolved it to (S3c) — the DURATION's kind, never the slot's, and
@@ -82,7 +129,11 @@ function sampleWindow(kind: string, window: RateWindow): LimitSampleWindow {
 /** Does this snapshot say anything at all about what the account can spend? */
 function saysSomething(snapshot: RateLimitSnapshot | undefined): boolean {
   return (
-    !!snapshot && (!!snapshot.primary || !!snapshot.secondary || !!snapshot.credits?.hasCredits)
+    !!snapshot &&
+    (!!snapshot.primary ||
+      !!snapshot.secondary ||
+      !!snapshot.credits?.hasCredits ||
+      !!snapshot.individualLimit)
   )
 }
 
@@ -170,6 +221,10 @@ export class ChatgptRateLimitStore {
     const credits = snapshot.credits?.hasCredits
       ? { unlimited: snapshot.credits.unlimited, balance: snapshot.credits.balance }
       : previous?.credits
+    // And again for the allowance: a push that does not carry it says nothing
+    // about it (Codex's own session state keeps the prior one the same way,
+    // `core/src/state/session.rs`).
+    const allowance = creditLimit(snapshot.individualLimit) ?? previous?.creditLimit
     const entry: ChatgptAccountLimits = {
       ...((identity.email ?? previous?.email) ? { email: identity.email ?? previous?.email } : {}),
       ...((identity.planType ?? snapshot.planType ?? previous?.planType)
@@ -178,6 +233,7 @@ export class ChatgptRateLimitStore {
       primary,
       secondary,
       ...(credits ? { credits } : {}),
+      ...(allowance ? { creditLimit: allowance } : {}),
       fetchedAt: this.deps.now()
     }
     this.limits[vaultAccountId] = entry

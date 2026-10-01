@@ -437,6 +437,7 @@ const chatgptLimitsProvider: LimitsProvider = {
         plan: account.planType ?? null,
         windows,
         ...(account.credits ? { credits: account.credits } : {}),
+        ...(account.creditLimit ? { creditLimit: account.creditLimit } : {}),
         observedAt: account.fetchedAt,
         source: 'local',
         state: 'ok'

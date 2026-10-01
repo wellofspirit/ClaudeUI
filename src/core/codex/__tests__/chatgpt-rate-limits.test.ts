@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   ChatgptRateLimitStore,
+  creditLimit,
   pickRateLimitSnapshot,
   rateWindow,
   type ChatgptRateLimitDeps
@@ -481,5 +482,103 @@ describe('pickRateLimitSnapshot', () => {
       secondary: null,
       credits: { unlimited: false, balance: '7.00' }
     })
+  })
+})
+
+/**
+ * A business workspace member's credit allowance — the backend's
+ * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
+ * (`backend-client/src/client.rs` `map_individual_limit`) and its own `/status`
+ * shows as "Monthly credit limit — N of M credits used". Before this, a credits
+ * plan rendered only "Credits available", with the member's real numbers one
+ * field away on the same snapshot.
+ */
+describe('member credit allowance (individualLimit)', () => {
+  const allowance = (
+    over: Partial<{ limit: string; used: string; remainingPercent: number; resetsAt: number }> = {}
+  ): NonNullable<RateLimitSnapshot['individualLimit']> => ({
+    limit: '25000',
+    used: '8000',
+    remainingPercent: 68,
+    resetsAt: 1_735_693_200,
+    ...over
+  })
+
+  it('parses the wire strings and converts the reset from SECONDS', () => {
+    expect(creditLimit(allowance())).toEqual({
+      used: 8000,
+      limit: 25000,
+      remainingPercent: 68,
+      resetsAt: '2025-01-01T01:00:00.000Z'
+    })
+  })
+
+  it('keeps fractional amounts as they are - rounding is the display job', () => {
+    expect(creditLimit(allowance({ used: ' 12.5 ', limit: '100.25' }))).toMatchObject({
+      used: 12.5,
+      limit: 100.25
+    })
+  })
+
+  it.each([
+    ['an empty amount', { used: '' }],
+    ['a non-numeric amount', { limit: 'n/a' }],
+    ['a negative amount', { used: '-1' }],
+    ['a non-finite percent', { remainingPercent: Number.NaN }]
+  ])('drops the whole allowance for %s', (_, over) => {
+    expect(creditLimit(allowance(over))).toBeNull()
+  })
+
+  it('clamps the percent and treats a non-positive reset as none', () => {
+    expect(creditLimit(allowance({ remainingPercent: 140, resetsAt: 0 }))).toMatchObject({
+      remainingPercent: 100,
+      resetsAt: null
+    })
+  })
+
+  it('folds the allowance into the account beside its credits', () => {
+    const { store: limits } = store()
+    limits.record(
+      'acct-biz',
+      noWindows({
+        credits: { hasCredits: true, unlimited: false, balance: null },
+        individualLimit: allowance()
+      })
+    )
+    expect(limits.snapshot()['acct-biz']).toMatchObject({
+      credits: { unlimited: false, balance: null },
+      creditLimit: { used: 8000, limit: 25000, remainingPercent: 68 }
+    })
+  })
+
+  it('a sparse update keeps the allowance the last full read established', () => {
+    const { store: limits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record('acct-biz', noWindows())
+    expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({ used: 8000 })
+  })
+
+  it('a newer allowance replaces the old one', () => {
+    const { store: limits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record(
+      'acct-biz',
+      noWindows({ individualLimit: allowance({ used: '9000', remainingPercent: 64 }) })
+    )
+    expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({
+      used: 9000,
+      remainingPercent: 64
+    })
+  })
+
+  it('is never sampled - it is a monthly allowance, not a rolling window', () => {
+    const { store: limits, persist } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('counts as something to say, so the bucket fallback can find it', () => {
+    const bucket = noWindows({ individualLimit: allowance() })
+    expect(pickRateLimitSnapshot(response(noWindows(), { codex: bucket }))).toBe(bucket)
   })
 })

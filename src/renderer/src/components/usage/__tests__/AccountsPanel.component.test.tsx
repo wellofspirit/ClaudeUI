@@ -386,6 +386,59 @@ describe('AccountsPanel — reading state', () => {
     expect(screen.getByTestId('AccountsPanel.account')).toHaveTextContent(expected)
   })
 
+  /**
+   * A member's monthly allowance (Codex `individualLimit`) is one more meter on
+   * the row, with its amounts drawn at every width - "how many have I spent" is
+   * what a credits plan's row is read for.
+   */
+  it('draws the member allowance as a meter with its amounts', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [],
+            credits: { unlimited: false, balance: null },
+            creditLimit: { used: 8000, limit: 25000, remainingPercent: 68, resetsAt: null }
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+    const meter = screen.getByTestId('AccountsPanel.creditMeter')
+    expect(meter).toHaveAttribute('data-severity', 'ok')
+    expect(meter).toHaveTextContent('32%')
+    expect(within(meter).getByTestId('AccountsPanel.creditMeter.amount')).toHaveTextContent(
+      '8,000/25,000'
+    )
+    expect(within(meter).queryByTestId('AccountsPanel.creditMeter.reset')).toBeNull()
+    expect(meter.getAttribute('title')).toBe(
+      'Monthly credit limit · 32% used · 8,000 of 25,000 credits used'
+    )
+    // "credits plan" would only repeat what the meter already shows.
+    const row = screen.getByTestId('AccountsPanel.account')
+    expect(row).not.toHaveTextContent('credits plan')
+    expect(row).not.toHaveTextContent('no rate window')
+  })
+
+  it('grades a nearly spent allowance like any other meter', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [],
+            creditLimit: { used: 24000, limit: 25000, remainingPercent: 4, resetsAt: null }
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+    expect(screen.getByTestId('AccountsPanel.creditMeter')).toHaveAttribute('data-severity', 'crit')
+  })
+
   it('says "no rate window" for an account the limits read does not cover', () => {
     const data = makeDashboard({
       providers: [

@@ -3130,7 +3130,35 @@ export interface ChatgptAccountLimits {
    * panel shows for it. Absent when the backend says the account has no credits.
    */
   credits?: { unlimited: boolean; balance: string | null }
+  /**
+   * What a workspace's spend controls allow THIS member to use — see
+   * {@link CreditLimit}. Absent when the workspace sets no per-member limit.
+   */
+  creditLimit?: CreditLimit
   fetchedAt: number
+}
+
+/**
+ * A business workspace member's credit allowance: the backend's
+ * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
+ * and its own `/status` renders as "Monthly credit limit — N of M credits used".
+ *
+ * It is what makes a credits plan's usage legible. `credits` only says the
+ * workspace HAS credits (its balance is usually withheld from members), while
+ * this says how much of the member's share is spent.
+ *
+ * The wire carries the amounts as decimal STRINGS; they are parsed once on the
+ * way in, and an allowance whose amounts do not parse is dropped whole, as
+ * Codex's own display drops it. `resetsAt` is ISO 8601 like every
+ * {@link RateWindow}. It is a month away, not a rolling window, so it is never a
+ * window kind and is not sampled (ADR-071 §6 samples rolling windows only).
+ */
+export interface CreditLimit {
+  used: number
+  limit: number
+  /** 0-100, as the backend states it — not recomputed from the amounts. */
+  remainingPercent: number
+  resetsAt: string | null
 }
 
 /** Every account's limits, keyed by VAULT account id (never the workspace id). */
@@ -3182,6 +3210,8 @@ export interface AccountLimits {
   plan: string | null
   windows: AccountLimitWindow[]
   credits?: { unlimited: boolean; balance: string | null }
+  /** Local readings only: the hub relays sampled windows, and this is not one. */
+  creditLimit?: CreditLimit
   observedAt: number
   /**
    * Where the reading came from — ADR-072 relays readings from other machines.

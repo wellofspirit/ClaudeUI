@@ -6,7 +6,12 @@ import type {
   ExtraUsage,
   RateWindow
 } from '../../../../shared/types'
-import { formatTokenCount } from '../usage/usage-utils'
+import {
+  creditLimitUsedPercent,
+  formatCreditLimitSummary,
+  formatResetDate,
+  formatTokenCount
+} from '../usage/usage-utils'
 import { windowKindLabel, windowKindsForReading } from '../../../../shared/window-kind'
 
 export function getUsageColor(pct: number): string {
@@ -46,14 +51,20 @@ export function formatPlanName(tier: string | null): string {
 
 export function UsageProgressBar({
   label,
-  window: w
+  window: w,
+  detail
 }: {
   label: string
   window: RateWindow
+  /**
+   * The lines under the bar, in place of the rolling-window countdown — one
+   * fact per line, so a 220 px panel wraps between facts and not inside one.
+   */
+  detail?: ReadonlyArray<string>
 }): React.JSX.Element {
   const pct = Math.round(w.usedPercent)
   const color = getUsageColor(pct)
-  const resetStr = formatResetTime(w.resetsAt)
+  const lines = detail ?? [formatResetTime(w.resetsAt)].filter(Boolean)
 
   return (
     <div data-testid="UsageProgressBar" data-id={label} className="mb-2 last:mb-0">
@@ -67,7 +78,11 @@ export function UsageProgressBar({
           style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
         />
       </div>
-      {resetStr && <div className="text-[9px] text-text-muted mt-0.5">{resetStr}</div>}
+      {lines.map((line, i) => (
+        <div key={i} className={`text-[9px] text-text-muted ${i === 0 ? 'mt-0.5' : ''}`}>
+          {line}
+        </div>
+      ))}
     </div>
   )
 }
@@ -136,6 +151,11 @@ function chatgptWindowLabel(kind: string): string {
  * percentages" and "we could not read this account" are different statements,
  * and only the second deserves an apology. An account with both shows the bars
  * and the balance under them.
+ *
+ * A workspace that caps each member's spend reports that allowance too, and it
+ * is the number a member of a credits plan actually acts on — the bare
+ * "Credits available" says only that the workspace has some. So the allowance
+ * gets a bar, and the balance line steps aside when all it could add is that.
  */
 export function ChatgptUsageBlock({
   label,
@@ -145,6 +165,11 @@ export function ChatgptUsageBlock({
   limits: ChatgptAccountLimits
 }): React.JSX.Element {
   const kinds = windowKindsForReading(limits)
+  const { credits, creditLimit } = limits
+  // "Credits available" next to a bar of the member's allowance repeats it in
+  // fewer words; a real balance, or an unlimited one, still says something new.
+  const shownCredits =
+    credits && (credits.unlimited || credits.balance || !creditLimit) ? credits : null
   return (
     <div data-testid="UsagePanel.chatgptAccount" data-id={label} className="mb-2 last:mb-0">
       <div className="flex items-baseline justify-between gap-2 mb-1">
@@ -172,16 +197,32 @@ export function ChatgptUsageBlock({
           )}
         </>
       ) : (
-        !limits.credits && (
+        !credits &&
+        !creditLimit && (
           <div className="text-[9px] text-text-muted">No usage data for this account</div>
         )
       )}
-      {limits.credits && (
+      {creditLimit && (
+        <div data-testid="UsagePanel.chatgptCreditLimit">
+          <UsageProgressBar
+            label="Monthly credits"
+            window={{
+              usedPercent: creditLimitUsedPercent(creditLimit),
+              resetsAt: creditLimit.resetsAt
+            }}
+            detail={[
+              formatCreditLimitSummary(creditLimit),
+              ...(creditLimit.resetsAt ? [`resets ${formatResetDate(creditLimit.resetsAt)}`] : [])
+            ]}
+          />
+        </div>
+      )}
+      {shownCredits && (
         <div data-testid="UsagePanel.chatgptCredits" className="text-[9px] text-text-muted">
-          {limits.credits.unlimited
+          {shownCredits.unlimited
             ? 'Unlimited credits'
-            : limits.credits.balance
-              ? `Credits: ${limits.credits.balance}`
+            : shownCredits.balance
+              ? `Credits: ${shownCredits.balance}`
               : 'Credits available'}
         </div>
       )}

@@ -776,6 +776,28 @@ describe('the ChatGPT provider', () => {
     })
   })
 
+  it('passes a member credit allowance through beside the credits', async () => {
+    const creditLimit = {
+      used: 8000,
+      limit: 25000,
+      remainingPercent: 68,
+      resetsAt: '2026-11-01T00:00:00.000Z'
+    }
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        primary: null,
+        secondary: null,
+        credits: { unlimited: false, balance: null },
+        creditLimit,
+        fetchedAt: 5
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1]).toMatchObject({ windows: [], creditLimit, state: 'ok' })
+  })
+
   it('triggers the store’s own read only when refresh is asked for', async () => {
     await readAccountLimits({ refresh: false })
     expect(mockChatgptRefresh).not.toHaveBeenCalled()
