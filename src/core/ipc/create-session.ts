@@ -214,10 +214,22 @@ export async function prepareAndCreateSession(
   // an empty conversation. A fresh session has nothing to seed — the
   // `session:created` apply already marks it seeded.
   //
-  // Fire-and-forget and best-effort: this is SHADOW state in 4a, so a failed read
-  // must never break session creation. `seedSession` only fills an EMPTY
-  // transcript, so live events that arrive first always win.
+  // Best-effort: a failed read must never break session creation, so nothing here
+  // awaits it. But `seedSession` only fills an EMPTY transcript, so the read is
+  // registered with core and `handlers-core.sendPrompt` waits on it — a prompt that
+  // beat the read would otherwise be the transcript, and the history a no-op.
   if (resumeSessionId) {
-    void seedCanonicalTranscript(routingId, resumeSessionId, cwd, resumeSessionAt, resolvedEngineId)
+    const read = seedCanonicalTranscript(
+      routingId,
+      resumeSessionId,
+      cwd,
+      resumeSessionAt,
+      resolvedEngineId
+    )
+    // A respawn that did not pass through an exit (the session was disposed and
+    // recreated in place) still holds its seeded transcript, so the read is a no-op
+    // and a prompt has nothing to wait for.
+    const held = syncCore.getCanonicalState().sessions[routingId]
+    if (!(held?.seeded && held.messages.length > 0)) syncCore.trackSeed(routingId, read)
   }
 }

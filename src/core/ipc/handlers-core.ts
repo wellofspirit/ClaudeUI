@@ -112,8 +112,33 @@ import { describeJudgeModels } from '../automode/judge-route'
  * the engine still gets the bytes (`attachments`), while everything that is
  * replicated — the user-message event, a queue item — carries only the refs, so
  * a pasted screenshot never rides the ring or a snapshot.
+ *
+ * **A resumed session's history read goes first (ADR-087 §2).** Canonical's seed
+ * only fills an EMPTY transcript, so a prompt that beat the read would be the
+ * whole transcript and the history a no-op. The wait is conditional — a session
+ * with no read in flight still sends synchronously, so this stays a plain `void`
+ * for every other caller — and every send waiting on the same read resumes in the
+ * order it arrived (promise reactions run in registration order), so two quick
+ * sends are not reordered by it.
  */
 export function sendPrompt(
+  manager: SessionManager,
+  routingId: string,
+  prompt: string,
+  attachments?: AttachmentUpload[]
+): void | Promise<void> {
+  if (!manager.get(routingId)) throw new Error(`No session for routingId: ${routingId}`)
+  const seeding = syncCore.pendingSeed(routingId)
+  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments)
+  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments))
+}
+
+/**
+ * The body of {@link sendPrompt}. Looks the session up again: it can be cancelled
+ * and removed while the send waited on a history read, and that must surface as the
+ * same error rather than a send into nothing.
+ */
+function deliverPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,

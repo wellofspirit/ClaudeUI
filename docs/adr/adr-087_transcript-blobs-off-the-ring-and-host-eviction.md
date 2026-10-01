@@ -73,15 +73,24 @@ transcript that contains it is read again, and the client renders that as a quie
 
 ### 2. Canonical drops the transcript of a session with no live engine
 
-- On `session:status` → `disconnected` (every engine reports exit this way), and when a watched
-  session stops being watched, `SyncCore.evictTranscript` strips `messages`, `subagentMessages`
-  and the item streams and clears `seeded`, keeping the row and every light field.
+- On `session:status` → `disconnected` (Claude, opencode and Codex report engine exit this way;
+  pi's stop reports `idle` with `sdkActive` still true, a pre-existing pi quirk left for its own
+  follow-up, so a stopped pi session is not evicted), and when a watched session stops being
+  watched, `SyncCore.evictTranscript` strips `messages`, `subagentMessages` and the item streams
+  and clears `seeded`, keeping the row and every light field. A transcript that is already empty
+  is left alone — a spawned-but-never-prompted session has nothing to drop and must not be told
+  to read from disk.
 - It is a **host cache decision, not an event** — the mirror of the client's `evictLocalSessions`.
   Connected replicas keep the transcript they already folded; nothing blanks.
-- The snapshot says so: `PerSessionSnapshot.seeded: false` means "this transcript is not carried —
-  read it from disk". A client marks such a session evicted (the sidebar click then reloads it,
-  the path a locally evicted session already takes) and, when it is the session on screen, reloads
-  it from disk and replaces in one step.
+- The snapshot says so: `PerSessionSnapshot.seeded: false` means "canonical does not hold this
+  transcript" — whether the host dropped it or a resume's history read is still in flight. A client
+  reads `sdkActive` to tell the two apart: a dead one is marked evicted (the sidebar click then
+  reloads it from disk, the path a locally evicted session already takes) and, when it is the
+  session on screen, is reloaded and replaced in one step; a live one is filled from disk the way
+  a follower of a resume already is (fill-only, so an in-flight turn is never wiped). An evicted
+  entry always RESUMES on send — the resume decision must not key on "has messages", or a prompt
+  typed before the reload lands would start a new conversation under the old row — and the chat
+  shows its loading state, not the welcome screen, while the active entry is evicted.
 - The async history seed is now **awaited by `sendPrompt`**. `seedSession` only fills an empty
   transcript, so a prompt that beat the read used to leave canonical with a one-turn transcript
   marked complete; eviction would have turned that rare race into the common path.
@@ -96,7 +105,13 @@ transcript that contains it is read again, and the client renders that as a quie
 - **Accepted bounds.** An LRU-evicted blob shows as unavailable. A resumed session re-reads its
   transcript from disk on the host (a cost paid once per respawn, where it used to be zero). A
   client resyncing onto an exited session shows its last-known transcript until the disk read
-  lands. Neither a byte budget on the ring nor a disk tier for blobs is taken here.
+  lands; the replacement is a disk load, so it carries what the transcript file carries — message
+  ids are re-minted and the thinking-duration label (never persisted) is gone. A client that syncs
+  mid-resume and whose fill is refused by live events already folded shows the tail until its next
+  resync. The snapshot invariant (`restore(N) + fold === canonical@head`) holds on everything but
+  a transcript evicted AFTER the snapshot was taken (plus the todos / sentFiles derived from it),
+  which the invariant test masks for exactly those sessions and compares everywhere else. Neither a byte budget on the ring nor a
+  disk tier for blobs is taken here.
 
 ## Alternatives considered
 

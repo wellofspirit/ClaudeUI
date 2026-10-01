@@ -116,7 +116,7 @@ Every feature must express each interaction as exactly one of these. There is no
 ## Replication model
 
 - **Shared reducer:** a pure `applyEvent(state, event)` in `src/core/shared/sync/`, used by core (canonical) and by every client replica. One interpretation of every event; snapshot/event divergence becomes unrepresentable.
-- **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors today's renderer eviction; evicted sessions rehydrate from transcripts via queries.
+- **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors the renderer's: the host drops an exited session's transcript (`SyncCore.evictTranscript`, a cache decision — not an event, not a reducer branch; ADR-087 §2) and the snapshot says so with `seeded: false`; evicted sessions rehydrate from transcripts via queries, on the client.
 - **Client stores split:** a _replica store_ (reducer output only — no local writes) and a _view store_ (selection, drafts, layout, scroll — per-client by design; ADR-041's lesson, now type-enforced).
 - **Cursor discipline:** `lastSeq` advances only after an event is **applied**; pre-mount events buffer; a detected gap requests resync. `sync`/`sync-catchup`/`sync-full` + per-process `epoch` semantics carry over unchanged from the as-built protocol.
 - **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S2**: neither the two canonical-backed delta channels nor the three tails take a seq) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence). The bound is by entry COUNT, not bytes, so it only means something while entries are small: images and documents ride as `BlobRef`s (ADR-087), never as inline base64, and a client fetches the bytes on demand through `blob:get`. The same holds for the snapshot — a `sync-full` is all of canonical state, and one screenshot-heavy session used to make it ~273 MB.
@@ -412,6 +412,13 @@ Seeds are **not** events: they are refreshes of query-shaped state
 client's state changes, because every client either read the file itself or will receive
 it in its next snapshot.
 
+A session's TRANSCRIPT seed has a lifecycle of its own (ADR-087 §2). `seedSession` fills an
+empty transcript once, from `create-session.ts`; the host drops it again when the engine
+exits or the watch ends (`evictTranscript`, which clears `seeded` and is equally not an
+event), and a later resume seeds it again. The in-flight read is tracked per routing id
+(`trackSeed` / `pendingSeed`) and `handlers-core.sendPrompt` waits on it, because a seed
+that loses the race to a prompt is a no-op — it only fills an EMPTY transcript.
+
 Phase 5 S4 moved a WATCHED session's transcript into that category
 (`SyncCore.seedWatchedSession`, the REPLACE twin of `seedSession` — a watched `.jsonl`
 is its own only writer and only grows, so filling-only would freeze it at its first
@@ -422,7 +429,15 @@ snapshot still carries it, so a fresh client never refetches at all.
 
 **The invariant that certifies the cutover.** `restore(snapshot@N) + fold(events N+1 …
 head) === canonical@head`, over seeded random interleavings drawn from the committed
-golden fixtures (`src/core/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
+golden fixtures (`src/core/sync/__tests__/snapshot-invariant.unit.test.ts`). Its scope
+excludes exactly one thing: the transcript of a session the host evicted AFTER the
+snapshot (`evictTranscript`, ADR-087 §2). Eviction is a host cache policy outside the
+reducer, so a replica restored before it and folding the same events keeps the transcript
+canonical dropped. For such a session the comparison masks `messages`, `subagentMessages`,
+the item streams, and the `todos` / `sentFiles` derived from the transcript, and holds on
+every other field. `seeded` is stripped for such a session (canonical dropped it, the replica
+never did) and compared for every other one. A snapshot taken after the eviction restores the
+same empty transcript and is compared in full. It replaces
 the deleted `event-log.test.ts`, which pinned a workaround rather than a property: the old
 snapshot came from an async renderer round-trip, so the server deliberately UNDER-claimed
 the watermark; `getSnapshot()` reads the seq and serializes in one synchronous tick, so

@@ -367,8 +367,9 @@ function RemoteApp(): React.JSX.Element {
     hasHydratedRef.current = true
     Promise.all([
       import('@renderer/stores/replica'),
-      import('@renderer/utils/projection-audit')
-    ]).then(([{ startReplica, hydrateReplica }, { startProjectionAudit }]) => {
+      import('@renderer/utils/projection-audit'),
+      import('@renderer/lib/session-history-load')
+    ]).then(([{ startReplica, hydrateReplica }, { startProjectionAudit }, history]) => {
       // The store module is imported lazily here (the App chunk is what pulls it
       // in), so the tap cannot be installed at page load like the desktop's is —
       // it goes in now, before the first snapshot is folded. Events that arrived
@@ -379,8 +380,13 @@ function RemoteApp(): React.JSX.Element {
       // this path runs on every `sync-full`. A phone is where a lost reply is
       // hardest to notice and hardest to reproduce, so it audits here too.
       startProjectionAudit()
-      hydrateReplica(snapshot, isResync)
+      const outcome = hydrateReplica(snapshot, isResync)
+      // Before the post-hydrate reads, so nothing they do can keep the app from
+      // rendering.
       setReady(true)
+      // A snapshot does not always carry a transcript (ADR-087 §2); read what it
+      // left out from disk now.
+      history.finishHydrate(outcome)
     })
     // ADR-068 §3 (Slice 6, fixed in Slice 7): the ChatGPT auth view the model
     // picker and the composer hint read is NOT in the snapshot — it comes from

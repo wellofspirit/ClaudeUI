@@ -24,6 +24,19 @@
  * from the committed golden fixtures (the streams that actually broke the
  * as-built layer) plus the channels no fixture covers yet, so the interleavings
  * exercise real payload shapes rather than invented ones.
+ *
+ * **Scope: everything except a transcript the host dropped AFTER the snapshot.**
+ * The pool includes engine exit (`session:status` → `disconnected`), after which the
+ * host evicts the session's transcript (`SyncCore.evictTranscript`, ADR-087 §2).
+ * Eviction is a host cache policy OUTSIDE the reducer, so a replica restored before
+ * it and folding the same events keeps the transcript canonical dropped. For a
+ * session evicted at a seq beyond the snapshot's, the comparison therefore masks
+ * `messages`, `subagentMessages`, `itemStreams`, `itemStreamRevision`, `seeded`, and
+ * the two fields DERIVED from the transcript (`todos`, `sentFiles` — an event folded
+ * after the drop derives them from the tail canonical kept, a replica from the whole
+ * conversation it never dropped). Every other field, and every session whose
+ * eviction the snapshot already contains, is compared in full: both sides start from
+ * the same empty transcript.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -105,6 +118,11 @@ const EXTRA_EVENTS: PoolEvent[] = [
     'session:watch-update',
     { routingId: 'watched-2', sessionId: 'uuid-w2', projectKey: '-repo', cwd: '/repo/watched' }
   ],
+  // Engine exit: the trigger for the host's transcript eviction. Two sessions, so
+  // the interleavings put exits before AND after the snapshots they are compared
+  // against.
+  ['session:status', 'rid', runningStatus({ state: 'disconnected', sessionId: 'rid' })],
+  ['session:status', 'a', runningStatus({ state: 'disconnected', sessionId: 'a' })],
   [
     'config:sessions-changed',
     {
@@ -255,25 +273,73 @@ function stableJson(value: unknown): string {
 }
 
 /**
- * Canonical state as the wire sees it: `seeded` is core-internal bookkeeping the
- * snapshot cannot carry (a restored session is complete by definition), so it is
- * stripped from BOTH sides rather than asserted.
+ * Canonical state as the invariant compares it. A session in `masked` — evicted by
+ * the host after the snapshot — loses the transcript fields, `seeded`, and the two
+ * fields derived from the transcript, on both sides (see the header). Nothing else
+ * is stripped.
  */
-function comparable(state: CanonicalState): string {
+function comparable(state: CanonicalState, masked: ReadonlySet<string> = new Set()): string {
   const sessions = Object.fromEntries(
     Object.entries(state.sessions).map(([id, s]) => {
-      const { seeded: _seeded, ...rest } = s
-      return [id, rest]
+      if (!masked.has(id)) return [id, s]
+      const {
+        seeded: _seeded,
+        messages: _messages,
+        subagentMessages: _subagentMessages,
+        itemStreams: _itemStreams,
+        itemStreamRevision: _itemStreamRevision,
+        todos: _todos,
+        sentFiles: _sentFiles,
+        ...light
+      } = s
+      return [id, light]
     })
   )
   return stableJson({ ...state, sessions })
+}
+
+/** Which top-level or per-session fields differ — what a failure message should name. */
+function differingPaths(
+  a: CanonicalState,
+  b: CanonicalState,
+  masked: ReadonlySet<string>
+): string[] {
+  const paths: string[] = []
+  const left = JSON.parse(comparable(a, masked)) as Record<string, Record<string, unknown>>
+  const right = JSON.parse(comparable(b, masked)) as Record<string, Record<string, unknown>>
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    if (key !== 'sessions') {
+      if (stableJson(left[key]) !== stableJson(right[key])) paths.push(key)
+      continue
+    }
+    const ids = new Set([...Object.keys(left.sessions), ...Object.keys(right.sessions)])
+    for (const id of ids) {
+      const l = (left.sessions[id] ?? {}) as Record<string, unknown>
+      const r = (right.sessions[id] ?? {}) as Record<string, unknown>
+      for (const field of new Set([...Object.keys(l), ...Object.keys(r)])) {
+        if (stableJson(l[field]) !== stableJson(r[field])) paths.push(`${id}.${field}`)
+      }
+    }
+  }
+  return paths
+}
+
+/** One host-side transcript drop: which session, at which ring seq. */
+interface Eviction {
+  id: string
+  seq: number
 }
 
 /**
  * The invariant itself. Folds the ring's tail onto a restored snapshot and
  * compares with live canonical at head.
  */
-function expectFoldsToHead(core: SyncCore, snapshot: FullStateSnapshot, seed: number): void {
+function expectFoldsToHead(
+  core: SyncCore,
+  snapshot: FullStateSnapshot,
+  seed: number,
+  evictions: readonly Eviction[] = []
+): void {
   const tail = core.getAfter(snapshot.seq)
   expect(tail, `seed ${seed}: catchup from seq ${snapshot.seq} fell out of the ring`).not.toBeNull()
 
@@ -283,11 +349,14 @@ function expectFoldsToHead(core: SyncCore, snapshot: FullStateSnapshot, seed: nu
   }
 
   const live = core.getCanonicalState()
+  // Only evictions the snapshot does not already contain: those are the ones the
+  // restored replica never saw happen.
+  const masked = new Set(evictions.filter((e) => e.seq > snapshot.seq).map((e) => e.id))
   expect(
-    comparable(folded),
+    comparable(folded, masked),
     `seed ${seed}: snapshot@${snapshot.seq} + ${tail!.length} catchup event(s) ` +
-      `did not fold to canonical@${core.currentSeq()}`
-  ).toBe(comparable(live))
+      `did not fold to canonical@${core.currentSeq()} (differs at: ${differingPaths(folded, live, masked).join(', ')})`
+  ).toBe(comparable(live, masked))
   // The derived-field tripwire must agree on both sides too: a restore that
   // silently dropped `todos`/`sentFiles` would still compare equal if the fold
   // happened to re-derive them, and this catches the reverse (a restore that
@@ -299,13 +368,23 @@ function expectFoldsToHead(core: SyncCore, snapshot: FullStateSnapshot, seed: nu
 
 /**
  * Emit a seeded interleaving, taking a snapshot at random points, and check the
- * invariant for EVERY snapshot taken. Returns how many were checked so a test
- * can prove it wasn't vacuous.
+ * invariant for EVERY snapshot taken. Returns how many were checked, and how many
+ * transcripts the host dropped, so a test can prove it wasn't vacuous.
  */
-function runInterleaving(seed: number, eventCount = 60): number {
+function runInterleaving(seed: number, eventCount = 60): { checked: number; evicted: number } {
   const rand = mulberry32(seed)
   const core = new SyncCore()
   bootstrap(core)
+
+  // Record every real drop (a call that changed canonical) with the seq of the event
+  // that caused it. `process` calls through the instance, so the wrapper sees them all.
+  const evictions: Eviction[] = []
+  const evictTranscript = core.evictTranscript.bind(core)
+  core.evictTranscript = (id: string): void => {
+    const before = core.getCanonicalState()
+    evictTranscript(id)
+    if (core.getCanonicalState() !== before) evictions.push({ id, seq: core.currentSeq() })
+  }
 
   const snapshots: FullStateSnapshot[] = []
   for (let i = 0; i < eventCount; i++) {
@@ -317,8 +396,8 @@ function runInterleaving(seed: number, eventCount = 60): number {
   // Always include one taken at head — the "client connects right now" case.
   snapshots.push(core.getSnapshot())
 
-  for (const snapshot of snapshots) expectFoldsToHead(core, snapshot, seed)
-  return snapshots.length
+  for (const snapshot of snapshots) expectFoldsToHead(core, snapshot, seed, evictions)
+  return { checked: snapshots.length, evicted: evictions.length }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +428,14 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
 
   it('holds across 40 seeded interleavings', () => {
     let checked = 0
-    for (let seed = 1; seed <= 40; seed++) checked += runInterleaving(seed)
+    let evicted = 0
+    for (let seed = 1; seed <= 40; seed++) {
+      const run = runInterleaving(seed)
+      checked += run.checked
+      evicted += run.evicted
+    }
+    // The masked scope must actually be exercised, or the mask is dead code.
+    expect(evicted).toBeGreaterThan(10)
     // Every seed contributes at least the head snapshot, most contribute ~15.
     expect(checked).toBeGreaterThan(200)
   })

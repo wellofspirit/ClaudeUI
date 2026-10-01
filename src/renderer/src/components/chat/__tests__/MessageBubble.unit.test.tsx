@@ -54,6 +54,7 @@ beforeEach(() => {
         itemStreams: {},
         itemStreamRevision: 0,
         evicted: false,
+        transcriptLoadFailed: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
         errors: [],

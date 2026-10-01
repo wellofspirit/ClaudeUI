@@ -39,6 +39,7 @@ import {
 } from '../../renderer/src/stores/replica'
 import { isVolatileStream, volatileFlavorOf } from '../../core/shared/sync/channels'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
+import { resetHistoryLoadForTests } from '../../renderer/src/lib/session-history-load'
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
   ChatMessage,
@@ -93,6 +94,7 @@ function client(): SyncClient {
 export function resetReplicaSeam(): void {
   resetSyncClientForTests()
   resetReplicaForTests()
+  resetHistoryLoadForTests()
   seq = 0
 }
 

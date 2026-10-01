@@ -885,6 +885,10 @@ export interface PerSessionState {
    *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
    *  on reselection via loadHistoricalSession. */
   evicted: boolean
+  /** The disk read that would fill an evicted entry failed (or found no listing for
+   *  it), so the chat offers Retry instead of waiting. Per-client view state: set by
+   *  the post-hydrate reload, cleared by any load that lands. */
+  transcriptLoadFailed: boolean
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
@@ -995,6 +999,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   itemStreams: {},
   itemStreamRevision: 0,
   evicted: false,
+  transcriptLoadFailed: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -1214,9 +1219,9 @@ const MAX_RESIDENT_TRANSCRIPTS = 10
  * SEALED, so the strip happens in the replica (`evictLocalSessions`) and the
  * projection carries it into the store; the `evicted` / `isHistorical` flags are
  * per-client view state and stay here. Stripping the store directly would have
- * been undone by the next projection — canonical on the HOST deliberately does
- * not evict (docs/architecture/sync-channels.md §Eviction), so its copy still has
- * the transcript.
+ * been undone by the next projection. The host makes the same cache decision for
+ * itself, on its own rule (`SyncCore.evictTranscript`, docs/architecture/
+ * sync-channels.md §Eviction), and neither one is visible to the other.
  */
 function coldSessionIds(
   sessions: Record<string, PerSessionState>,
@@ -1250,6 +1255,79 @@ function coldSessionIds(
     if (canEvict) cold.push(id)
   }
   return cold
+}
+
+/**
+ * Does this session have a transcript on disk to resume — the question every
+ * lazy spawn asks to choose between `--resume <id>` and a brand-new
+ * conversation?
+ *
+ * Holding messages is not the test: an evicted entry holds none (the host dropped
+ * the transcript and the snapshot said so, ADR-087 §2) and is still the same
+ * conversation, so `evicted` and `isHistorical` count. Answering `false` for one
+ * starts a fresh conversation under a row the user believes they are continuing.
+ */
+export function hasResumableTranscript(
+  session: Pick<PerSessionState, 'messages' | 'evicted' | 'isHistorical'>
+): boolean {
+  return session.messages.length > 0 || session.evicted || session.isHistorical
+}
+
+/**
+ * The per-client VIEW half of an eviction: what a session entry says about
+ * itself once its transcript is not in memory. The transcript strip itself is
+ * sealed and goes through the replica (`evictLocalSessions`); this is the part
+ * that stays here, and the part the sidebar's click path reads — it reloads from
+ * disk exactly when `evicted` is set (`Sidebar.tsx` `handleClickSession`).
+ */
+export function evictedViewPatch(): Partial<PerSessionState> {
+  return {
+    evicted: true,
+    isHistorical: true,
+    bashOutputs: {},
+    backgroundOutputs: {},
+    backgroundWatcherCounts: {}
+  }
+}
+
+/**
+ * Mark sessions evicted in the view, for a transcript the replica does not hold
+ * for a reason other than this client's own cold-session strip — a snapshot that
+ * says the host dropped it. Unknown ids are skipped, like every `updateSession`.
+ */
+export function markViewEvicted(routingIds: readonly string[]): void {
+  if (routingIds.length === 0) return
+  useSessionStore.setState((state) => {
+    let sessions = state.sessions
+    for (const id of routingIds) sessions = updateSession(sessions, id, evictedViewPatch)
+    return { sessions }
+  })
+}
+
+/** Set or clear the "couldn't load this transcript" flag. Unknown ids are skipped. */
+export function setTranscriptLoadFailed(routingId: string, failed: boolean): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    if (!session || session.transcriptLoadFailed === failed) return state
+    return {
+      sessions: updateSession(state.sessions, routingId, () => ({ transcriptLoadFailed: failed }))
+    }
+  })
+}
+
+/**
+ * The sessions are not evicted after all — their transcript is back in memory by a
+ * path other than the sidebar's reload, or they turned out to be live. Only entries
+ * that carry the flag are rewritten.
+ */
+export function clearViewEvicted(routingIds: readonly string[]): void {
+  useSessionStore.setState((state) => {
+    let sessions = state.sessions
+    for (const id of routingIds) {
+      if (sessions[id]?.evicted) sessions = updateSession(sessions, id, () => ({ evicted: false }))
+    }
+    return sessions === state.sessions ? state : { sessions }
+  })
 }
 
 /**
@@ -1905,15 +1983,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       state.directories
     )
     let sessions = updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false }))
-    for (const id of cold) {
-      sessions = updateSession(sessions, id, () => ({
-        evicted: true,
-        isHistorical: true,
-        bashOutputs: {},
-        backgroundOutputs: {},
-        backgroundWatcherCounts: {}
-      }))
-    }
+    for (const id of cold) sessions = updateSession(sessions, id, evictedViewPatch)
     set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView, sessions })
     if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
     if (cold.length > 0) evictLocalSessions(cold)
@@ -2283,6 +2353,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: updateSession(s.sessions, routingId, () => ({
           isHistorical: true,
           evicted: false,
+          transcriptLoadFailed: false,
           warnings: warnings ?? base.warnings
         }))
       }))
@@ -3311,7 +3382,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // opencode sessions always pass routingId as resumeSessionId (the server resumes
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
-    const resumeId = session.messages.length > 0 || isOpencode ? routingId : undefined
+    const resumeId = hasResumableTranscript(session) || isOpencode ? routingId : undefined
     // A Codex pick is a NATIVE tier and the store keeps the user's last one at
     // every lifecycle stage (F15); `CodexSession.validateEffort` refuses a start
     // on a tier the model never published, so only a published one may ride

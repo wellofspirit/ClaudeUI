@@ -37,7 +37,7 @@ const storeMocks = vi.hoisted(() => ({ refreshProviderAuth: vi.fn(async () => {}
 vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app</div> }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {},
+  hydrateReplica: () => ({ reloadActive: null, fillResumed: [] }),
   // The render-loss detector starts beside the replica on this path and observes
   // it through the post-apply seam, so the mock has to offer one.
   onReplicaApplied: () => () => {},
