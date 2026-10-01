@@ -23,6 +23,7 @@ import {
 } from '../../../../../shared/permission-modes'
 import { engineMeta } from '../../../../../shared/engine-meta'
 import { HARNESS_IDS } from '../../../../../shared/harness-types'
+import { modelLabel } from './utils'
 import { EngineLogo } from '../../shared/EngineLogo'
 import { useHarnessStore } from '../../SettingsDialog/harness-store'
 import {
@@ -398,7 +399,7 @@ function ModelPage({
                   </span>
                   {m.description && (
                     <span className="text-[11px] text-text-muted truncate">
-                      {m.description.split('·')[1]?.trim()}
+                      {modelLabel(m).detail}
                     </span>
                   )}
                 </div>

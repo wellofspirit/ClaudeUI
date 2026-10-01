@@ -8,6 +8,7 @@ import {
   resolveSendAction,
   filterModelsForEngine,
   dedupeResolvedModels,
+  modelLabel,
   type SendContext,
   type ModelEntry
 } from '../utils'
@@ -299,5 +300,64 @@ describe('dedupeResolvedModels', () => {
 
   it('returns an empty list unchanged', () => {
     expect(dedupeResolvedModels([])).toEqual([])
+  })
+})
+
+describe('modelLabel', () => {
+  it('reads cli.js 2.1.285 rows: name in displayName, tagline alone in description', () => {
+    expect(
+      modelLabel({
+        value: 'haiku',
+        displayName: 'Haiku 4.5',
+        description: 'Fastest for quick answers',
+        engineId: 'claude'
+      })
+    ).toEqual({ shortName: 'Haiku 4.5', detail: 'Fastest for quick answers' })
+    // `default` keeps the "Name · detail" form, and its displayName names no model.
+    expect(
+      modelLabel({
+        value: 'default',
+        displayName: 'Default (recommended)',
+        description: 'Opus 5.5 · Best for everyday, complex tasks',
+        engineId: 'claude'
+      })
+    ).toEqual({ shortName: 'Opus 5.5', detail: 'Best for everyday, complex tasks' })
+  })
+  it('reads the "Name · detail" form (cli.js up to 2.1.280, opencode, pi)', () => {
+    expect(
+      modelLabel({
+        value: 'haiku',
+        displayName: 'Haiku',
+        description: 'Haiku 4.5 · Fastest for quick answers',
+        engineId: 'claude'
+      })
+    ).toEqual({ shortName: 'Haiku 4.5', detail: 'Fastest for quick answers' })
+    expect(
+      modelLabel({
+        value: 'openai/gpt-5.5',
+        displayName: 'gpt-5.5',
+        description: 'GPT-5.5 · OpenAI',
+        engineId: 'opencode'
+      })
+    ).toEqual({ shortName: 'GPT-5.5', detail: 'OpenAI' })
+  })
+  it('names a Codex row by displayName, never its marketing description', () => {
+    expect(
+      modelLabel({
+        value: 'gpt-5.5',
+        displayName: 'GPT-5.5',
+        description: 'Our most capable model for complex work',
+        engineId: 'codex'
+      })
+    ).toEqual({ shortName: 'GPT-5.5', detail: undefined })
+  })
+  it('falls back to displayName, then value, without a description', () => {
+    expect(modelLabel({ value: 'x', displayName: 'X', description: '' })).toEqual({
+      shortName: 'X'
+    })
+    expect(modelLabel({ value: 'x' })).toEqual({ shortName: 'x' })
+    expect(modelLabel({ value: 'x', description: 'Only text' })).toEqual({
+      shortName: 'Only text'
+    })
   })
 })

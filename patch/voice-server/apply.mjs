@@ -105,6 +105,45 @@ function assertNoChunkBoundary(matchText, label) {
   }
 }
 
+const chunkBody = (chunk) => src.slice(chunk.bodyStart, chunk.end)
+
+// `export{a,b as c}` → [['a','a'],['b','c']] as [local, exported] pairs.
+function chunkExports(chunk) {
+  const pairs = []
+  for (const m of chunkBody(chunk).matchAll(/export\{([^}]*)\}/g)) {
+    for (const entry of m[1].split(',')) {
+      const parts = entry.trim().split(/\s+as\s+/)
+      pairs.push([parts[0], parts[1] ?? parts[0]])
+    }
+  }
+  return pairs
+}
+
+const FALLBACK_TEXT = 'Unsupported control request subtype'
+const escapeRe = (s) => s.replace(/[$]/g, '\\$')
+
+// Where `name`, as seen from inside `chunk`, is bound to FALLBACK_TEXT: a
+// declaration in the chunk itself, or an import of one (a single hop — the
+// constant is imported straight from the chunk that declares it). Returns a
+// description of the binding, or null.
+function fallbackTextBinding(chunk, name) {
+  const declares = (c, local) =>
+    new RegExp(
+      `(?:\\b(?:var|let|const) |,)${escapeRe(local)}=${JSON.stringify(FALLBACK_TEXT)}[,;]`
+    ).test(chunkBody(c))
+  if (declares(chunk, name)) return `declared in ${chunk.spec}`
+  for (const m of chunkBody(chunk).matchAll(/import\{([^}]*)\}from"([^"]+)"/g)) {
+    for (const entry of m[1].split(',')) {
+      const parts = entry.trim().split(/\s+as\s+/)
+      if ((parts[1] ?? parts[0]) !== name) continue
+      const from = chunks.find((c) => c.spec === m[2])
+      const local = from && chunkExports(from).find(([, exported]) => exported === parts[0])?.[0]
+      return local && declares(from, local) ? `imported from ${from.spec}` : null
+    }
+  }
+  return null
+}
+
 if (src.includes(PATCH_A_MARKER)) {
   console.log('Part A already applied. Skipping.')
 } else {
@@ -205,19 +244,39 @@ if (src.includes(PATCH_A_MARKER)) {
   //   after:  else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
   // The optional `SANITIZE(String(...))` wrapper below matches both shapes.
   //
+  // 2.1.285 hoists the text into a constant that the loop imports from another
+  // chunk (`var r7e="Unsupported control request subtype"`):
+  //   else qe(C,`${r7e}: ${en(String(C.request.subtype))}`)
+  // The loop now carries a second site, the `ui_*` gate
+  // `else if(G8r(…))qe(C,`${r7e}: …`)`, which the leading `else ` excludes.
+  // A `${NAME}` prefix only counts when NAME provably binds the text
+  // (fallbackTextBinding), so the loose identifier cannot pick up some other
+  // `${x}: ${m.request.subtype}` message.
+  //
   // Do NOT confuse with the other "Unsupported control request subtype" sites:
   // the SDK Query transport throws (`throw Error("Unsupported control request subtype: "+…)`),
   // and DirectConnect / RemoteSessionManager prefix their message with a bracketed
   // tag. Only the stream-json stdin loop ClaudeUI drives has this exact shape.
   const anchorRe = new RegExp(
-    `else (${V})\\((${V}),\`Unsupported control request subtype: ` +
-      `\\$\\{(?:${V}\\(String\\()?\\2\\.request\\.subtype(?:\\)\\))?\\}\`\\)`
+    `else (${V})\\((${V}),\`(?:${FALLBACK_TEXT}|\\$\\{(${V})\\}): ` +
+      `\\$\\{(?:${V}\\(String\\()?\\2\\.request\\.subtype(?:\\)\\))?\\}\`\\)`,
+    'g'
   )
-  const anchorMatch = anchorRe.exec(src)
-  if (!anchorMatch) {
+  const allAnchors = [...src.matchAll(anchorRe)].filter((m) => {
+    if (m[3] === undefined) return true
+    const binding = fallbackTextBinding(chunkAt(m.index), m[3])
+    if (binding) console.log(`  Fallback text constant ${m[3]}: ${binding}`)
+    return binding !== null
+  })
+  if (allAnchors.length === 0) {
     console.error('ERROR: Cannot locate control-request fallback anchor')
     process.exit(1)
   }
+  if (allAnchors.length > 1) {
+    console.error(`ERROR: Anchor matched ${allAnchors.length} times`)
+    process.exit(1)
+  }
+  const anchorMatch = allAnchors[0]
   assertNoChunkBoundary(anchorMatch[0], 'control-request fallback')
 
   const anchorIdx = anchorMatch.index
@@ -226,13 +285,6 @@ if (src.includes(PATCH_A_MARKER)) {
   console.log(
     `  Control request anchor at char ${anchorIdx} (msgVar=${msgVar}, chunk ${anchorChunk.spec})`
   )
-
-  // Verify uniqueness
-  const allAnchors = [...src.matchAll(new RegExp(anchorRe, 'g'))]
-  if (allAnchors.length > 1) {
-    console.error('ERROR: Anchor matched multiple times')
-    process.exit(1)
-  }
 
   // -------------------------------------------------------------------------
   // Step 4: Work out how to reach the voice stream fn from the anchor's chunk
@@ -247,17 +299,7 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Resolving voice fn reachability ---')
 
-  const voiceChunkBody = src.slice(voiceChunk.bodyStart, voiceChunk.end)
-  // `export{a,b as c}` — build local → exported name
-  let exportedAs = null
-  for (const m of voiceChunkBody.matchAll(/export\{([^}]*)\}/g)) {
-    for (const entry of m[1].split(',')) {
-      const parts = entry.trim().split(/\s+as\s+/)
-      const local = parts[0]
-      const exported = parts[1] ?? parts[0]
-      if (local === voiceFnLocal) exportedAs = exported
-    }
-  }
+  const exportedAs = chunkExports(voiceChunk).find(([local]) => local === voiceFnLocal)?.[1] ?? null
 
   let voiceCallExpr // expression evaluating to the voice stream fn at the injection site
   let voiceImportStmt = '' // optional preamble that binds it

@@ -17,6 +17,9 @@ import type { RunFn, RunResult } from '../run'
 import { fingerprintOf } from '../fs-util'
 import { cmdShim, writeNative, writePackage, writeText } from './layout'
 
+/** The Claude Code version ClaudeUI tests (`claude.json#tested`): what a "tested" install reports. */
+const CLAUDE_TESTED = harnessManifest('claude').tested
+
 const WIN = process.platform === 'win32'
 const EXE = WIN ? '.exe' : ''
 let tmp: string
@@ -118,7 +121,7 @@ describe('de-duplication', () => {
     const prefix = path.join(tmp, 'npm')
     const pkg = writePackage(
       path.join(prefix, 'node_modules', '@anthropic-ai', 'claude-code'),
-      { name: '@anthropic-ai/claude-code', version: '2.1.280' },
+      { name: '@anthropic-ai/claude-code', version: CLAUDE_TESTED },
       { 'bin/claude.exe': 'native' }
     )
     const shim = writeText(
@@ -128,7 +131,7 @@ describe('de-duplication', () => {
     const exe = path.join(pkg, 'bin', 'claude.exe')
     // The same prefix is both on PATH (the shim) and an npm global root (a node lives there).
     writeNative(path.join(prefix, 'node.exe'))
-    const deps = depsFor({ [exe]: '2.1.280 (Claude Code)' }, { pathEntries: [prefix] })
+    const deps = depsFor({ [exe]: `${CLAUDE_TESTED} (Claude Code)` }, { pathEntries: [prefix] })
     // Force the `.cmd` to be the PATH hit on every host.
     deps.platform = 'win32'
     deps.env = { ...deps.env, APPDATA: path.join(tmp, 'nowhere') }
@@ -294,7 +297,7 @@ describe('detectHarnesses', () => {
       peak = Math.max(peak, ++active)
       await new Promise((r) => setTimeout(r, 5))
       active--
-      return ok(command === claude ? '2.1.280 (Claude Code)' : '1.18.32')
+      return ok(command === claude ? `${CLAUDE_TESTED} (Claude Code)` : '1.18.32')
     })
     const deps = depsFor({}, { probeRun, pathEntries: [path.join(tmp, 'bin')], concurrency: 1 })
     const detections = await detectHarnesses(undefined, deps)

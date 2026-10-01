@@ -652,6 +652,18 @@ function handleChildEvent(
         snap.callID = part.callID as string
         const state = part.state as ToolPartState | undefined
         snap.state = state
+        // A subagent's own `task` call (a nested subagent; opencode allows one
+        // when `subagent_depth` > 1): register the grandchild exactly as the
+        // own-session path registers a child, so its events route here under
+        // ITS call id (a `subagent-message` bucket of its own, and its idle a
+        // task-notification for that call) instead of being dropped as a
+        // foreign session. ADR-073 §7.
+        if ((part.tool as string) === 'task') {
+          const grandchildSessionId = (state?.metadata as Record<string, unknown> | undefined)
+            ?.sessionId as string | undefined
+          const callId = part.callID as string | undefined
+          if (grandchildSessionId && callId) childSessions.set(grandchildSessionId, callId)
+        }
       }
       acc.parts.set(partId, snap)
 

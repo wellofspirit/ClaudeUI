@@ -10,6 +10,7 @@ export function BashBackgroundEntry({
 }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
@@ -25,7 +26,8 @@ export function BashBackgroundEntry({
   const [following, setFollowing] = useState(true)
   const isAutoScrolling = useRef(false)
 
-  const { taskBlock } = findTaskBlocks(messages, toolUseId)
+  // A subagent's background Bash lives in that agent's bucket (ADR-073 §7).
+  const { taskBlock } = findTaskBlocks(messages, toolUseId, subagentMessages)
 
   // Watch on mount/expand, unwatch on unmount/collapse
   useEffect(() => {

@@ -45,11 +45,19 @@ If the user is on a model without effort support, the dropdown is hidden entirel
 
 ### Default effort per model
 
-| Model                            | Default |
-| -------------------------------- | ------- |
-| Opus 4.7                         | `xhigh` |
-| Opus 4.6 / Sonnet 4.6            | `high`  |
-| Older models with effort support | `high`  |
+From the catalog's `default_effort` (cli.js 2.1.285). A picker alias is judged by
+the model it resolves to, so `opus` and `default` start at `medium` while they
+point at Opus 5.5.
+
+| Model                         | Default  |
+| ----------------------------- | -------- |
+| Opus 5.5 / Sonnet 5.5         | `medium` |
+| Opus 4.7                      | `xhigh`  |
+| Every other model with effort | `high`   |
+
+A saved **Starting effort per model** (Settings › Models & providers › Default
+models) overrides this. An alias row saves under the alias's own name, so the
+setting follows the alias to its next model (ADR-074 §8).
 
 ## Capability matrix
 
@@ -90,6 +98,10 @@ Real `supportedModels()` output for a Max-plan user:
   }
 ]
 ```
+
+The `"Name · tagline"` descriptions above are the shape up to 2.1.280. From 2.1.285 `displayName`
+carries the full name and `description` the tagline alone, except on `default` (see
+`docs/protocol-cc/09-initialize.md`, `models`).
 
 `haiku` ships without capability fields; ClaudeUI's id heuristic recognises the `haiku` substring and correctly reports no effort / no adaptive.
 
@@ -155,7 +167,7 @@ Use the `bundle-analyzer` skill to navigate (`/bundle-analyzer`). For each rule:
 | Effort support set           | `"effort"` (settings key, same shape as above) or `"CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"`.                                    | Mirrors the adaptive set today. Re-check on every SDK bump in case they diverge.                                                                                              |
 | xhigh predicate              | `"xhigh_effort"` (settings key). The function returns true only when the model id contains `"opus-4-7"`.                   | Confirm whether new models join the xhigh tier.                                                                                                                               |
 | max predicate                | `"max_effort"` (settings key) and the literal `"haiku"` substring check.                                                   | A second check builds a `Set` of legacy model ids — search for `"claude-3-opus"` or `"claude-opus-4-5"` to find the set initialiser; copy the full list into `NO_MAX_EFFORT`. |
-| Default effort               | Search for the literal `"xhigh"` near a function returning `"high"` / `"medium"`.                                          | Branches on `"opus-4-7"` substring (returns `"xhigh"`), then `"opus-4-6"`. Update `defaultEffort()` if branches change.                                                       |
+| Default effort               | The baked catalog (`"Hand-maintained baked-in model catalog"`), each model's `default_effort`.                             | Per-model `default_effort` (`xhigh`, `medium`, or `high`). Update `defaultEffort()` when a model's value differs from `high`.                                                 |
 | Default budget for `enabled` | Search for the literal `upperLimit` or numeric tables `64000` / `128000`.                                                  | Per-model upper limits. The default budget the SDK fills in when `budgetTokens` is omitted is `upperLimit - 1`.                                                               |
 | Thinking display gating      | Search for the CLI flag literal `"--thinking-display <display>"` (declared once in commander setup).                       | The choices array `["summarized","omitted"]` and the line that conditionally sets `MY.display = H.thinkingDisplay`.                                                           |
 | Streaming delta types        | Search for the literal `"thinking_delta"`.                                                                                 | The async generator that mutates `p8.thinking += o8.thinking`. Confirms that summarised reasoning still arrives via the same delta type.                                      |

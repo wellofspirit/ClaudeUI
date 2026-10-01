@@ -773,10 +773,36 @@ describe('InputBox FC — rendered', () => {
     })
   }
 
-  it('reads the effort default of the model an alias RESOLVES to, not the baked alias table', async () => {
-    // The Default models table keys `opus` by what cli.js says it resolves to
-    // (`claude-opus-5`); the old lookup keyed it `claude-opus-5-5` from the
-    // alias table and never found the row the user set.
+  it('reads the effort saved for the alias, and `default` reads the alias it lands on', async () => {
+    // The Default models table keys `opus` by name, so the setting follows the
+    // alias to a new model; `default` shares the row of the alias that
+    // resolves where it does.
+    fcClaudeModels = [
+      claudeRow('default', 'claude-opus-5-5'),
+      claudeRow('opus', 'claude-opus-5-5'),
+      claudeRow('claude-opus-5', 'claude-opus-5')
+    ]
+    useSessionStore.setState((state) => ({
+      settings: {
+        ...state.settings,
+        modelEffortDefaults: { opus: 'low', 'claude-opus-5-5': 'max', 'claude-opus-5': 'xhigh' }
+      },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][5]).toBe('default')
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+  })
+
+  it('still reads a v3.5 effort saved under the model the alias RESOLVES to', async () => {
+    // v3.5 keyed `opus` by what cli.js said it resolved to (`claude-opus-5`).
+    // Until the row is edited that value still applies.
     fcClaudeModels = [claudeRow('opus', 'claude-opus-5[1m]')]
     useSessionStore.setState((state) => ({
       settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-5': 'low' } },
@@ -2156,6 +2182,7 @@ describe('InputBox FC — rendered', () => {
         },
         {
           value: 'sonnet',
+          resolvedModel: 'claude-sonnet-4-6',
           displayName: 'Sonnet',
           description: 'Sonnet 4.6',
           supportsEffort: true,

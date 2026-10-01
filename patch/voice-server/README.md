@@ -9,7 +9,7 @@ Exposes the CLI's built-in voice transcription pipeline (Deepgram via Anthropic'
 | Component              | Version at time of discovery | Last re-anchored |
 | ---------------------- | ---------------------------- | ---------------- |
 | SDK package            | 0.2.81                       | —                |
-| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)         | **2.1.261**      |
+| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)         | **2.1.285**      |
 
 The SDK bundles its own CLI, independent of the native `claude` binary.
 
@@ -195,22 +195,33 @@ Part B (sdk.mjs) was removed — `voiceServerStart()` / `voiceServerStop()` now 
 The control-request fallback warning. Until 2.1.280 `queue-control`, `background-task` and `usage-relay` injected at this anchor too; all three were deleted (ADR-079), and this is now the only patch that uses it:
 
 ```
-else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
+2.1.261  else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
+2.1.285  else qe(C,`${r7e}: ${en(String(C.request.subtype))}`)
 ```
 
-Regex (tolerates both the pre- and post-2.1.261 shapes):
+Regex (tolerates the pre-2.1.261, 2.1.261 and 2.1.285 shapes; `FALLBACK_TEXT` is
+`Unsupported control request subtype`):
 
 ```js
-else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{(?:[\w$]+\(String\()?\2\.request\.subtype(?:\)\))?\}`\)
+else ([\w$]+)\(([\w$]+),`(?:FALLBACK_TEXT|\$\{([\w$]+)\}): \$\{(?:[\w$]+\(String\()?\2\.request\.subtype(?:\)\))?\}`\)
 ```
 
-Two version notes baked into that pattern:
+Three version notes baked into that pattern:
 
 - **Tail-less since 2.1.219.** The dispatch chain is wrapped in `try/finally`, so the old
   `;continue}else if(MSG.type==="control_response")` tail no longer directly follows the fallback.
 - **Sanitised subtype since 2.1.261.** The echoed subtype went from `${r.request.subtype}` to
   `${Xn(String(r.request.subtype))}` — hence the optional `SANITIZE(String(` … `))` wrapper.
   The `\2` backref (message variable must match) is what keeps it from matching neighbours.
+- **Hoisted text since 2.1.285.** The literal moved into
+  `var r7e="Unsupported control request subtype"` in another chunk (`chunk-gbrc9xpe.js`),
+  which the loop's chunk imports. A `${NAME}` prefix only counts when
+  `fallbackTextBinding()` proves NAME is bound to the text: declared in the anchor's chunk,
+  or imported from a chunk whose `export{…}` maps it to such a declaration (one hop). Every
+  candidate that passes is counted, and exactly one must remain. 2.1.285 also added a second
+  fallback site to the loop, the `ui_*` gate
+  ``else if(G8r(C.request.subtype,…))qe(C,`${r7e}: …`)``. The leading `else ` (not `)qe(`)
+  excludes it, and it rejects only `ui_*` subtypes, so it never shadows `voice_server_*`.
 
 Sites that must **not** match, all present in 2.1.261:
 
@@ -632,3 +643,14 @@ surfaced:
 ## 2.1.280 reply-helper anchor
 
 The old `),<reply>(<msg>,{})}catch` site disappeared when stop_task moved into a routed handler. The patch now requires agreement across all `<reply>(<msg>,{})` sites in the control-request dispatch (five in 2.1.280), rather than identifying a single stop_task catch. Locate with `bundle-analyzer find vendor/claude-cli/cli.js "Unsupported control request subtype"` and verify the reply helper stays in scope. Application and syntax checks pass; live voice-server behavior is not covered by the shared patch test runner.
+
+## 2.1.285 fallback-text constant
+
+The fallback's literal became the imported constant `r7e`, so the anchor now also admits a
+`${NAME}: ` prefix, and only when NAME resolves to the text (see **Anchor** above). At 2.1.285 the
+loop lives in `chunk-24k3mat2.js`, `msgVar` is `C`, the reply helper is `$e` (five
+`$e(C,{})` sites), and the voice function is `Ccr` in `chunk-5bqa9hbf.js`, reached by dynamic
+import. Verified at runtime on the rebundled binary with a stream-json probe:
+`voice_server_start` returned a port and a TCP connect to it succeeded, a second start returned
+the same port, `voice_server_stop` returned `{stopped:true}`, and an unknown subtype still drew
+cli.js's own `Unsupported control request subtype: …` error.

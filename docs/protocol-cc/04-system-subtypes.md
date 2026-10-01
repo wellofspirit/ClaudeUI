@@ -48,6 +48,8 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `permission_allowed`      | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
 | `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
+| `session_title_changed`   | Session has / gets a user-set name (2.1.285)     | Title subscription (§4.29)       |
+| `per_turn_effort_changed` | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -270,8 +272,11 @@ The registry record's `isBackgrounded` at registration, read as
 - `false`: the task runs in the FOREGROUND and blocks its tool call — a Bash command without
   `run_in_background`, or an agent the model launched synchronously. Only such a task can be
   moved with `background_tasks` (07 §7.3).
-- `true`: it started in the background (`run_in_background: true`, an async agent launch, or a
-  Bash started inside a subagent).
+- `true`: it started in the background (`run_in_background: true`, or an async agent launch).
+  _Corrected 2026-09-30 (2.1.280, `scripts/probe-nested-agents.mjs`):_ an earlier revision listed
+  "a Bash started inside a subagent" here. It is wrong: a subagent's **foreground** Bash registers
+  `false` at depth 1 and depth 2 alike (with `owned_by_subagent: true`), exactly like the main
+  agent's, and only `run_in_background` or a later move makes it `true`.
 
 **Registration timing.** An agent registers within milliseconds of its tool_use. A foreground
 Bash registers only once it has run for 2 s: the Bash progress loop calls the registrar (`Ovn`,
@@ -300,6 +305,33 @@ are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
 **Scoping gotcha (probed 2026-08-26):** a background Bash started INSIDE a subagent emits its own
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
 `parent_tool_use_id`** — task events are not scoped to the agent that spawned the task.
+
+**Nested agents (probed 2026-09-30, 2.1.280, Haiku 4.5, `scripts/probe-nested-agents.mjs`).** The
+main agent spawned background agent A; A spawned background agent B, ran a foreground Bash past 2 s
+and a `run_in_background` Bash; B ran a foreground Bash past 2 s. The same scoping holds one level
+down, and every id stays the call's own:
+
+- B's `task_started` is **top-level**: `task_type: "local_agent"`, `spawn_depth: 2`,
+  `is_backgrounded: true`, and `tool_use_id` = **A's Agent call for B** (not A's id).
+- B's `assistant`/`user` snapshots carry `parent_tool_use_id` = B's own call id. B's `stream_event`s
+  carry the same plus `agent_id` = B's task id (Patch E). A consumer keyed by call id places B's
+  output under B, not A.
+- A's Agent `tool_use` for B, and its "Async agent launched" `tool_result`, arrive as A's
+  sub-agent frames (`parent_tool_use_id` = A's origin): the spawn call lives in **A's** transcript.
+- B's terminal `task_updated` + `task_notification` are top-level with `tool_use_id` = B's call id.
+  The `<task-notification>` user text for B landed in the MAIN transcript in this run (A had already
+  finished; which transcript receives it is timing-dependent). A's own background Bash's
+  notification went to A and resumed it: a second `task_started` for A under its origin id, whose
+  stream events carry only `agent_id` (ADR-078's idle self-resume).
+- On disk `subagents/` is flat: `agent-<id>.jsonl` + `agent-<id>.meta.json` for A and B alike. B's
+  sidecar names its parent, `{"toolUseId":"<B's call>","parentAgentId":"<A's id>","spawnDepth":2,…}`;
+  A's has no `parentAgentId` and `spawnDepth: 1`.
+- Shells: A's and B's foreground Bashes register `is_backgrounded: false`, `owned_by_subagent: true`
+  (see the correction above). A's `run_in_background` Bash registers `is_backgrounded: true`,
+  `owned_by_subagent: true`, and its `tool_use` arrives in A's bucket with `run_in_background: true`
+  intact.
+
+ClaudeUI's use of this is ADR-073 §7.
 
 ### A RESUMED agent emits a second `task_started` (probed 2026-09-21, 2.1.268)
 
@@ -1007,6 +1039,7 @@ The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subt
 | `api_metrics`          | Per-turn TTFT + output-tokens/sec line (distinct from top-level `api_metrics` message)     |
 | `local_command_output` | Output from a local slash command (e.g. `/usage`)                                          |
 | `files_persisted`      | Attachment-file persistence results                                                        |
+| `session_metadata`     | 2.1.285: `metadata.artifacts` from the same `notifyMetadataChanged` path as `task_summary` |
 
 If one of these is observed on stdout in a future CLI version, promote it to a numbered section.
 
@@ -1049,3 +1082,61 @@ on a resume whose transcript already carries both signals**, never mid-turn.
 ignores it — `handleSystemMessage` is an if-chain over known subtypes and
 `SystemMessage['subtype']` admits `string`, so an unhandled subtype is a no-op
 rather than an error.
+
+---
+
+## 4.29 `session_title_changed`
+
+**Added in 2.1.285.** The session's user-set name, for a host that displays it.
+
+```json
+{
+  "type": "system",
+  "subtype": "session_title_changed",
+  "title": "…",
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+The schema (`@internal`) says a headless session sends it **at startup when the
+session already has a name**, then after every change to the name. That includes a
+`rename_session` the host itself sent, but not an AI-generated title. A cleared
+name is not sent. A name another process writes into the transcript arrives only
+when this process next reads its transcript tail, after about 32 KB of its own
+writes or at a compaction. `title` is sanitised (control, bidi and zero-width
+characters become spaces, trimmed, at most 200 code points) and can carry a
+uniqueness suffix.
+
+**Gate.** Ungated. The emitter subscribes during stream-json session setup and
+fires once immediately, so on a resume of a named session it can arrive **before**
+`system/init`. Probed on 2.1.285: a stream-json spawn with `--name probe-title` and no
+prompt writes `session_title_changed` as its first stdout line. That is harmless to ClaudeUI, which reads init independently of
+the session-id latch (§4.2), but a consumer that treats "first system message" as
+init would break.
+
+**Consumer note.** Not consumed. ClaudeUI names sessions itself, and unknown
+subtypes are no-ops (§4.28).
+
+## 4.30 `per_turn_effort_changed`
+
+**Added in 2.1.285.** `@internal`. Sent once, when the conversation stops sending
+effort per turn because the server refused its per-turn effort message or a
+`role:"system"` message. From the retried request on, an effort change rewrites the
+cached prefix for every model, until a later `system/init` says otherwise.
+
+```json
+{
+  "type": "system",
+  "subtype": "per_turn_effort_changed",
+  "per_turn_effort_active": false,
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+`per_turn_effort_active` is always `false`; a change back to `true` is reported
+only by `system/init`. Relevant to models whose catalog entry carries the
+`per_turn_effort` capability (Sonnet 5.5 among them, 13 §13.5).
+
+**Consumer note.** Not consumed; unknown subtypes are no-ops.

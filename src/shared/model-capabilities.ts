@@ -55,8 +55,8 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.280):
- *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5`,
+ * catalog aliases at the time of writing (2.1.285):
+ *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5-5`,
  *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
  *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
  *   `fable` value falls through to the unknown-family "assume modern"
@@ -74,9 +74,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     case 'opus[1m]':
       return 'claude-opus-5-5'
     case 'sonnet':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'sonnet[1m]':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'haiku':
       return 'claude-haiku-4-5'
     default:
@@ -84,24 +84,88 @@ export function canonicalizeModelValue(value: string | undefined | null): string
   }
 }
 
+/** A Claude picker row, as far as effort keying needs one. */
+export interface ClaudeEffortRowInput {
+  value: string
+  resolvedModel?: string
+}
+
+const CLAUDE_FAMILY_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable'])
+
+/** The family alias a picker value names (`opus[1m]` → `opus`), else null. */
+function claudeFamilyAlias(value: string): string | null {
+  const bare = value.toLowerCase().replace(/\[1m\]$/, '')
+  return CLAUDE_FAMILY_ALIASES.has(bare) ? bare : null
+}
+
+/**
+ * The concrete model a Claude picker row runs on: what cli.js says it resolves
+ * to (`default` → `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku`
+ * target loses its date), else `canonicalizeModelValue`'s baked alias table,
+ * which cannot follow an account whose `opus` resolves somewhere else and has
+ * no answer for `default` at all.
+ */
+export function claudeResolvedModelId(model: ClaudeEffortRowInput | undefined | null): string {
+  if (!model) return ''
+  const resolved = normaliseModelId(model.resolvedModel)
+  if (resolved.startsWith('claude-')) return resolved
+  return canonicalizeModelValue(model.value)
+}
+
 /**
  * The `modelEffortDefaults` key for a Claude picker row (ADR-074 §8) — the ONE
  * rule both the settings table that writes the key and the composer that reads
  * it at spawn use, so the row a user edits is the row a session reads.
  *
- * The concrete model cli.js says the row resolves to wins (`default` →
- * `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku` target loses its
- * date). `canonicalizeModelValue`'s baked alias table is only the fallback, for
- * a row without `resolvedModel` — it cannot follow an account whose `opus` or
- * `default` resolves somewhere else, and has no answer for `default` at all.
+ * A family alias keys on the alias (`opus`, `opus[1m]` → `opus`), so the
+ * setting follows the alias when cli.js moves it to a new model. `default`
+ * shares the key of the alias in `catalog` that resolves to the same model, as
+ * it names no family of its own. Any other row names one specific model and
+ * keys on that model's id.
  */
 export function claudeEffortKey(
-  model: { value: string; resolvedModel?: string } | undefined | null
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
 ): string {
   if (!model) return ''
-  const resolved = normaliseModelId(model.resolvedModel)
-  if (resolved.startsWith('claude-')) return resolved
-  return canonicalizeModelValue(model.value)
+  const alias = claudeFamilyAlias(model.value)
+  if (alias) return alias
+  const resolved = claudeResolvedModelId(model)
+  if (model.value === 'default') {
+    const via = catalog.find(
+      (m) => claudeFamilyAlias(m.value) !== null && claudeResolvedModelId(m) === resolved
+    )
+    if (via) return claudeFamilyAlias(via.value)!
+  }
+  return resolved
+}
+
+/**
+ * The key a row's effort was saved under before ADR-074 §8 keyed aliases by
+ * name (v3.5: the resolved model id), when it differs from today's key and no
+ * row in `catalog` owns it. A value saved there still applies until the row is
+ * edited, which rewrites it under the new key.
+ */
+export function claudeLegacyEffortKey(
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
+): string | undefined {
+  const key = claudeEffortKey(model, catalog)
+  const legacy = claudeResolvedModelId(model)
+  if (!legacy || legacy === key) return undefined
+  if (catalog.some((m) => claudeEffortKey(m, catalog) === legacy)) return undefined
+  return legacy
+}
+
+/** The effort saved for a Claude picker row, under its key or its legacy key. */
+export function claudeSavedEffort(
+  efforts: Partial<Record<string, EffortLevel>> | undefined,
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
+): EffortLevel | undefined {
+  if (!efforts || !model) return undefined
+  const legacy = claudeLegacyEffortKey(model, catalog)
+  return efforts[claudeEffortKey(model, catalog)] ?? (legacy ? efforts[legacy] : undefined)
 }
 
 /**
@@ -155,12 +219,11 @@ export function modelSupportedEffortLevels(
 
 export function modelDefaultEffort(model: ModelCapabilityInput | undefined | null): EffortLevel {
   const allowed = modelSupportedEffortLevels(model)
-  // Use the id-based default first. Mirrors cli.js `YK6`, which since 2.1.154
-  // returns 'xhigh' only for opus-4-7 — opus-4-8 supports xhigh but defaults
-  // to 'high' (4.8-high is roughly 4.7-xhigh quality). A blanket
-  // "xhigh allowed ⇒ xhigh default" rule would now over-select for 4.8 and
-  // for the `default`/`opus` aliases that resolve to it.
-  const fallback = defaultEffort(model?.value)
+  // Use the id-based default first, judged on the model the row resolves to:
+  // `opus` and `default` are opaque to the heuristic, and cli.js defaults Opus
+  // 5.5 to 'medium'. A blanket "xhigh allowed ⇒ xhigh default" rule would
+  // over-select for every model but Opus 4.7.
+  const fallback = defaultEffort(model?.resolvedModel || model?.value)
   if (allowed.includes(fallback)) return fallback
   if (allowed.includes('high')) return 'high'
   return allowed[allowed.length - 1] ?? 'high'
@@ -268,10 +331,15 @@ export function supportedEffortLevels(model: string | undefined | null): EffortL
   })
 }
 
-/** Mirrors cli.js `YK6`. Opus 4.7 is the only model that defaults to xhigh. */
+/**
+ * Mirrors the catalog's `default_effort` (cli.js 2.1.285): `xhigh` for Opus
+ * 4.7, `medium` for Opus 5.5 and Sonnet 5.5, `high` for everything else.
+ * Picker aliases are resolved through the baked alias table first.
+ */
 export function defaultEffort(model: string | undefined | null): EffortLevel {
-  const id = normaliseModelId(model)
+  const id = normaliseModelId(canonicalizeModelValue(model))
   if (id.includes('opus-4-7')) return 'xhigh'
+  if (id.includes('opus-5-5') || id.includes('sonnet-5-5')) return 'medium'
   return 'high'
 }
 
@@ -384,7 +452,7 @@ const IMPLICIT_1M_BASE_MODELS = [
 /**
  * Picker aliases that cli.js currently resolves to an implicit-1M base model:
  * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
- * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
+ * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197).
  * Aliases track the latest model generation, so re-verify this set on
  * claudeCliVersion bumps.
  */

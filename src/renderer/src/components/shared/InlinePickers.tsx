@@ -14,6 +14,7 @@ import {
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { HARNESS_IDS } from '../../../../shared/harness-types'
+import { modelLabel } from '../chat/InputBox/utils'
 import {
   accountDisplayName,
   SIGN_IN_PROVIDER_LABEL,
@@ -461,9 +462,7 @@ export function ModelPicker({
                       )}
                     </span>
                     {m.description && (
-                      <span className="text-text-muted text-[10px]">
-                        {m.description.split('·')[1]?.trim()}
-                      </span>
+                      <span className="text-text-muted text-[10px]">{modelLabel(m).detail}</span>
                     )}
                   </button>
                 ))}

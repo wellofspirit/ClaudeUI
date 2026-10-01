@@ -83,6 +83,15 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    bun run test:patch          # the patches' own suites, against the rebuilt bun-claude
    ```
 
+   The live suites authenticate as whatever login the spawned binary finds. On a
+   machine where ClaudeUI manages the accounts, the default `~/.claude` login can be
+   long expired: every session then answers `authentication_failed` as plain
+   assistant text, and the suites fail at their first "used the tool" check,
+   which looks like a patch break. Hand the harness the active ClaudeUI account's
+   **access** token in `CLAUDE_CODE_OAUTH_TOKEN`, read by a script and never echoed.
+   cli.js takes that credential with `refreshToken:null`, so it cannot rotate the
+   refresh token the app's vault holds.
+
    The integration project is the one that catches real-world wire drift. `test:patch` runs two suites (`subagent-streaming`, `bash-output-streaming`, both live); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
 
 8. **Re-verify the context-window mirror**

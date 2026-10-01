@@ -59,7 +59,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const [following, setFollowing] = useState(true)
   const isAutoScrolling = useRef(false)
 
-  const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
+  // Nested-aware: a nested agent's call and result live in its parent's bucket,
+  // while its own transcript is `subagentMsgs[toolUseId]` as for any agent.
+  const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
+    messages,
+    toolUseId,
+    subagentMsgs
+  )
 
   // Referenced by the autoscroll effect below, so they must be computed before
   // it; they default to empty when the task block isn't present yet. `msgs` is
@@ -169,6 +175,9 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   )
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
+  // A nested call with no lifecycle record gives the engine nothing to stop:
+  // Claude's stopTask would fall back to interrupting the main turn (ADR-073 §7).
+  const canStop = ownerToolUseId === null || hasActiveTask
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
@@ -224,7 +233,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             {elapsed}
           </span>
         )}
-        {isRunning && !isStopping && (
+        {isRunning && !isStopping && canStop && (
           <button
             data-testid="TaskEntry.stop"
             onClick={handleStopTask}

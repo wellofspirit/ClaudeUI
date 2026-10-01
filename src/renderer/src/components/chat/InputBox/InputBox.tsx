@@ -11,7 +11,7 @@ import {
 import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels } from './utils'
+import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
@@ -34,7 +34,7 @@ import {
   modelResolveEffort,
   modelDefaultEffort,
   modelDefaultThinkingMode,
-  claudeEffortKey,
+  claudeSavedEffort,
   type EffortLevel,
   type ThinkingMode,
   codexPublishesEffort
@@ -270,18 +270,7 @@ export function InputBox(): React.JSX.Element {
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const models = useMemo(
-    () =>
-      availableModels.map((m) => {
-        // claude/opencode/pi discovery all emit "Name · detail" descriptions, so
-        // the head of the split is the name. Codex's native catalog puts a
-        // marketing sentence there instead ("Our most capable model for …"),
-        // which splits to the whole sentence — use its display name directly.
-        const shortName =
-          m.engineId === 'codex'
-            ? m.displayName
-            : m.description?.split('·')[0]?.trim() || m.displayName
-        return { ...m, shortName }
-      }),
+    () => availableModels.map((m) => ({ ...m, shortName: modelLabel(m).shortName })),
     [availableModels]
   )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
@@ -582,8 +571,13 @@ export function InputBox(): React.JSX.Element {
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
     // Keyed by `claudeEffortKey` — the rule the Default models table writes
-    // with — so an alias row reads the setting of the model it resolves to.
-    const userDefault = state.settings.modelEffortDefaults?.[claudeEffortKey(modelInfo)]
+    // with — so an alias reads the alias's setting and `default` the setting of
+    // the alias that resolves where it does.
+    const userDefault = claudeSavedEffort(
+      state.settings.modelEffortDefaults,
+      modelInfo,
+      state.availableModels.filter((m) => (m.engineId ?? 'claude') === engineId)
+    )
     // Not the codex branch (returned above): here the store's pick is one of
     // the Claude rungs, the only values the non-native picker can set.
     const desiredEffort: EffortLevel =

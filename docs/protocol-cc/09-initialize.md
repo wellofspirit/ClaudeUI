@@ -150,6 +150,14 @@ Always exactly once, by us, immediately after spawn and before (or concurrent wi
 - **`commands`** — slash commands the session supports. `name` excludes the leading `/`. `argumentHint` is a hint string like `"<file>"` that our UI shows inline.
 - **`agents`** — subagents invokable via the `Task` tool. `model` is optional (when absent, the agent inherits the parent turn's model).
 - **`models`** — ordered by cli.js's preference. Our harness exposes this via `supportedModels()`.
+  The name/tagline split changed at **2.1.285** (probed with the same signed-in account on both
+  binaries). Up to 2.1.280 `displayName` was the bare family (`"Haiku"`) and `description` carried
+  `"Haiku 4.5 · Fastest for quick answers"`. From 2.1.285 `displayName` is the full name
+  (`"Haiku 4.5"`) and `description` is the tagline alone (`"Fastest for quick answers"`). `default`
+  is the exception: `displayName` `"Default (recommended)"`, `description`
+  `"Opus 5.5 · Best for everyday, complex tasks"`. The picker reads both shapes through
+  `modelLabel()` (`src/renderer/src/components/chat/InputBox/utils.ts`). 2.1.285 also lists Fable
+  as `claude-fable-5-1` where 2.1.280 listed `claude-fable-5-1[1m]`.
 - **`models[].resolvedModel`** — the concrete model id whatever `value` names actually resolves to.
   The full set of rows probed on 2.1.268 — the only observations we hold, so do not generalize past
   them:

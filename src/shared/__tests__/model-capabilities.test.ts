@@ -17,6 +17,8 @@ import {
   modelResolveEffort,
   canonicalizeModelValue,
   claudeEffortKey,
+  claudeLegacyEffortKey,
+  claudeSavedEffort,
   resolveContextWindow,
   resolveClaudeCapabilities,
   claudeModelCapabilities,
@@ -144,12 +146,21 @@ describe('supportedEffortLevels', () => {
 })
 
 describe('defaultEffort', () => {
-  it('xhigh for opus-4-7, high for everyone else (incl. opus-4-8 and fable-5)', () => {
+  it('mirrors the catalog: xhigh for opus-4-7, medium for opus-5-5 / sonnet-5-5, else high', () => {
     expect(defaultEffort('claude-opus-4-7')).toBe('xhigh')
+    expect(defaultEffort('claude-opus-5-5')).toBe('medium')
+    expect(defaultEffort('claude-sonnet-5-5')).toBe('medium')
     expect(defaultEffort('claude-opus-4-8')).toBe('high')
+    expect(defaultEffort('claude-opus-5')).toBe('high')
+    expect(defaultEffort('claude-sonnet-5')).toBe('high')
     expect(defaultEffort('claude-fable-5')).toBe('high')
     expect(defaultEffort('claude-opus-4-6')).toBe('high')
     expect(defaultEffort('claude-sonnet-4-5')).toBe('high')
+  })
+  it('judges a picker alias by the model it resolves to', () => {
+    expect(defaultEffort('opus')).toBe('medium')
+    expect(defaultEffort('sonnet[1m]')).toBe('medium')
+    expect(defaultEffort('haiku')).toBe('high')
   })
 })
 
@@ -260,10 +271,17 @@ describe('modelDefaultEffort', () => {
   it('returns a level that the model actually supports', () => {
     const sonnet = {
       value: 'sonnet',
+      resolvedModel: 'claude-sonnet-4-6',
       supportsEffort: true,
       supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelDefaultEffort(sonnet)).toBe('high')
+  })
+  it("reads the RESOLVED model: `default` on Opus 5.5 starts at cli.js's medium", () => {
+    expect(modelDefaultEffort({ value: 'default', resolvedModel: 'claude-opus-5-5' })).toBe(
+      'medium'
+    )
+    expect(modelDefaultEffort({ value: 'default', resolvedModel: 'claude-opus-4-7' })).toBe('xhigh')
   })
   it('returns xhigh for opus-4-7 (via id heuristic)', () => {
     expect(modelDefaultEffort({ value: 'claude-opus-4-7' })).toBe('xhigh')
@@ -319,11 +337,11 @@ describe('modelDefaultThinkingMode', () => {
 })
 
 describe('canonicalizeModelValue', () => {
-  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.261)', () => {
+  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.285)', () => {
     expect(canonicalizeModelValue('opus')).toBe('claude-opus-5-5')
     expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5-5')
-    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5')
-    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5')
+    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5-5')
+    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5-5')
     expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')
   })
   it('passes canonical ids through (normalised, date stripped)', () => {
@@ -344,30 +362,71 @@ describe('canonicalizeModelValue', () => {
 })
 
 describe('claudeEffortKey (ADR-074 §8)', () => {
-  it('keys an alias by the model cli.js says it resolves to', () => {
-    expect(claudeEffortKey({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })).toBe(
-      'claude-opus-5'
+  // The 2.1.285 catalog as cli.js reports it: `default` and `opus` land on one
+  // model, `fable` has no alias row, older models are listed by id.
+  const CATALOG = [
+    { value: 'default', resolvedModel: 'claude-opus-5-5' },
+    { value: 'opus', resolvedModel: 'claude-opus-5-5' },
+    { value: 'claude-fable-5-1', resolvedModel: 'claude-fable-5-1' },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' },
+    { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' },
+    { value: 'claude-sonnet-5', resolvedModel: 'claude-sonnet-5' }
+  ]
+  it('keys a family alias by the alias, so the setting follows it to a new model', () => {
+    expect(claudeEffortKey({ value: 'opus', resolvedModel: 'claude-opus-5-5' })).toBe('opus')
+    expect(claudeEffortKey({ value: 'opus[1m]', resolvedModel: 'claude-opus-5-5[1m]' })).toBe(
+      'opus'
     )
-    // The baked table would say claude-opus-5-5; the account says otherwise.
-    expect(claudeEffortKey({ value: 'opus', resolvedModel: 'claude-opus-5[1m]' })).toBe(
-      'claude-opus-5'
-    )
+    expect(claudeEffortKey({ value: 'sonnet' })).toBe('sonnet')
+    expect(claudeEffortKey({ value: 'haiku', resolvedModel: 'claude-haiku-4-5' })).toBe('haiku')
   })
-  it('drops a date suffix on the resolved target', () => {
-    expect(claudeEffortKey({ value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' })).toBe(
-      'claude-haiku-4-5'
-    )
-  })
-  it('falls back to canonicalizeModelValue without a usable resolvedModel', () => {
-    expect(claudeEffortKey({ value: 'sonnet' })).toBe('claude-sonnet-5')
-    expect(claudeEffortKey({ value: 'claude-fable-5-1[1m]' })).toBe('claude-fable-5-1')
-    // A non-Claude target is not a key; the value's rule answers instead.
-    expect(claudeEffortKey({ value: 'opus', resolvedModel: 'gw-opus' })).toBe('claude-opus-5-5')
+  it('gives `default` the key of the alias that resolves where it does', () => {
+    expect(claudeEffortKey(CATALOG[0], CATALOG)).toBe('opus')
+    // No alias lands there: the model's own id, date and [1m] dropped.
+    expect(
+      claudeEffortKey({ value: 'default', resolvedModel: 'claude-opus-4-7[1m]' }, CATALOG)
+    ).toBe('claude-opus-4-7')
+    // Without a catalog there is nothing to share with.
+    expect(claudeEffortKey(CATALOG[0])).toBe('claude-opus-5-5')
     expect(claudeEffortKey({ value: 'default' })).toBe('default')
+  })
+  it('keys a specific model by its id, even the one an alias used to name', () => {
+    expect(claudeEffortKey(CATALOG[5], CATALOG)).toBe('claude-sonnet-5')
+    expect(claudeEffortKey({ value: 'claude-fable-5-1[1m]' })).toBe('claude-fable-5-1')
   })
   it('is empty for no row', () => {
     expect(claudeEffortKey(undefined)).toBe('')
     expect(claudeEffortKey(null)).toBe('')
+  })
+})
+
+describe('claudeSavedEffort — v3.5 values saved under the resolved model id', () => {
+  const CATALOG = [
+    { value: 'default', resolvedModel: 'claude-opus-5-5' },
+    { value: 'opus', resolvedModel: 'claude-opus-5-5' },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' },
+    { value: 'claude-sonnet-5', resolvedModel: 'claude-sonnet-5' }
+  ]
+  it('still reads the old key for an alias row, and the new key wins', () => {
+    expect(claudeLegacyEffortKey(CATALOG[1], CATALOG)).toBe('claude-opus-5-5')
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low' }, CATALOG[1], CATALOG)).toBe('low')
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low' }, CATALOG[0], CATALOG)).toBe('low')
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low', opus: 'max' }, CATALOG[0], CATALOG)).toBe(
+      'max'
+    )
+  })
+  it('never borrows a key a listed model owns', () => {
+    const catalog = [...CATALOG, { value: 'claude-sonnet-5-5', resolvedModel: 'claude-sonnet-5-5' }]
+    expect(claudeLegacyEffortKey(catalog[2], catalog)).toBeUndefined()
+    expect(claudeSavedEffort({ 'claude-sonnet-5-5': 'low' }, catalog[2], catalog)).toBeUndefined()
+  })
+  it('has no legacy key for a row keyed by its own model', () => {
+    expect(claudeLegacyEffortKey(CATALOG[3], CATALOG)).toBeUndefined()
+    expect(claudeSavedEffort({ 'claude-sonnet-5': 'high' }, CATALOG[3], CATALOG)).toBe('high')
+  })
+  it('is undefined with nothing saved or no row', () => {
+    expect(claudeSavedEffort(undefined, CATALOG[1], CATALOG)).toBeUndefined()
+    expect(claudeSavedEffort({ opus: 'low' }, undefined, CATALOG)).toBeUndefined()
   })
 })
 
@@ -378,6 +437,7 @@ describe('modelResolveEffort', () => {
   it('coerces user pick against SDK-provided levels', () => {
     const sonnet = {
       value: 'sonnet',
+      resolvedModel: 'claude-sonnet-4-6',
       supportsEffort: true,
       supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }

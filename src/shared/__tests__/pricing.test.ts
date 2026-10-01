@@ -65,6 +65,22 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(24.2)
   })
 
+  it('sonnet-5 / sonnet-5-5: tier_2_10 mirrors cli.js 2.1.285, not the 3.x/4.x $3/$15', () => {
+    for (const model of ['claude-sonnet-5', 'claude-sonnet-5-5']) {
+      const cost = equivalentCostUsd(
+        'anthropic',
+        model,
+        oneMTok({
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheWriteTokens: 1_000_000,
+          cacheReadTokens: 1_000_000
+        })
+      )
+      expect(cost).toBeCloseTo(2 + 10 + 2.5 + 0.2)
+    }
+  })
+
   it('opus-4 (classic): input rate = $15/MTok', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -800,6 +816,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'opus-4',
       'opus-5-5',
       'opus',
+      'sonnet-5',
       'sonnet',
       'haiku-4',
       'haiku-3',
@@ -813,6 +830,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))
     expect(order.indexOf('opus-4')).toBeLessThan(order.indexOf('opus'))
     expect(order.indexOf('haiku-4')).toBeLessThan(order.indexOf('haiku'))
+    expect(order.indexOf('sonnet-5')).toBeLessThan(order.indexOf('sonnet'))
   })
 
   it('carries the pricing numbers block-usage bills on, without a vendorId field', () => {
