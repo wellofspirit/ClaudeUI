@@ -1349,6 +1349,23 @@ export const MIGRATIONS: Migration[] = [
         UPDATE usage_hub_config SET cursor_rowid = 0;
       `)
     }
+  },
+  {
+    // ADR-071 §7, amended 2026-10-01: a reading at 0% names no window. A plan
+    // meter at 0% has not started its window, so its reset is provisional —
+    // ChatGPT answers "a week from now" for an idle weekly limit, a different
+    // instant on every reading — and every such reading had materialised a
+    // window of its own. `peak_percent` only ever grows, so 0 is exactly "no
+    // reading ever showed usage": the set the rule would never have created, and
+    // judged without the samples retention may already have pruned.
+    //
+    // Only the LOCAL ledger. `remote_usage_window` is the hub's, and the hub's
+    // own migration (claudeui-usage-hub `0005`) deletes them there and raises the
+    // epoch, which truncates this cache on the next pull.
+    version: 28,
+    up(db) {
+      db.exec(`DELETE FROM usage_window WHERE peak_percent = 0`)
+    }
   }
 ]
 

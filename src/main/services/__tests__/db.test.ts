@@ -226,7 +226,7 @@ describe('migration framework — user_version guard', () => {
       // v27: remote_account — the hub's names for the account keys — and the
       //      one-time cursor reset that re-reads the ledger under the
       //      attribution rule (ADR-072 §2, amended)
-      expect(userVersion(db)).toBe(27)
+      expect(userVersion(db)).toBe(28)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -315,7 +315,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(27)
+      expect(userVersion(db)).toBe(28)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -459,7 +459,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(27)
+      expect(userVersion(db)).toBe(28)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

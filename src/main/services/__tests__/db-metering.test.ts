@@ -51,7 +51,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
       runMigrations(db)
       // Bump alongside MIGRATIONS in db.ts — currently v27 (the hub's account
       // names and the one-time cursor reset).
-      expect(userVersion(db)).toBe(27)
+      expect(userVersion(db)).toBe(28)
     } finally {
       db.close()
     }

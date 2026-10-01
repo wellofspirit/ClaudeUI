@@ -135,8 +135,16 @@ export function recomputeUsageWindows(now: number): number {
 
     // A window of unknown LENGTH is sampled and never materialised (S3c): there
     // is no interval to sum, so a row for it could only hold a made-up one.
+    //
+    // Nor is one no reading shows usage in (ADR-071 §7, amended 2026-10-01). A
+    // meter at 0% has not started its window, so the end it reports is
+    // provisional — ChatGPT answers "a week from now" for an idle weekly limit,
+    // a different instant on every reading, and each one became a window of its
+    // own. Once usage starts the end stops moving and the first reading above 0%
+    // names it; the 0% readings that already carried that end are in its group.
     insertMissingUsageWindows(
       groups.flatMap((g) => {
+        if (!(g.peakPercent > 0)) return []
         const duration = windowDurationMs(g.windowKind, g.windowMinutes)
         if (duration === null) return []
         return [
