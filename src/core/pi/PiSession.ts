@@ -1116,7 +1116,7 @@ export class PiSession extends BaseSession {
     try {
       // The status line the loader also returns is for a COLD open (no session
       // object): this one seeds its own base from pi's tally below.
-      const { messages } = await loadPiSessionHistory(sessionId)
+      const { messages, subagentMessages } = await loadPiSessionHistory(sessionId)
       logger.info('PiSession', `Replaying ${messages.length} stored messages for ${sessionId}`)
 
       for (const msg of messages) {
@@ -1135,6 +1135,13 @@ export class PiSession extends BaseSession {
             })
           }
         }
+      }
+
+      // Host-run subagent transcripts (ADR-088), after the parent's messages
+      // so each lands under the `agent` card that spawned it. Never into
+      // messageHistory: the judge and /btw read the parent's own turns only.
+      for (const [toolUseId, childMessages] of Object.entries(subagentMessages ?? {})) {
+        this.send('session:subagent-message-batch', { toolUseId, messages: childMessages })
       }
 
       // Seed the durable cost base from pi's own tally so totalCostUsd

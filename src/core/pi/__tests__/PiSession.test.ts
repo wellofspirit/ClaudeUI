@@ -1778,6 +1778,38 @@ describe('PiSession resume', () => {
     expect(session.status.totalCostUsd).toBeCloseTo(1.25)
   })
 
+  it('H2: replays each host-run subagent transcript as session:subagent-message-batch after the parent messages, outside messageHistory (ADR-088)', async () => {
+    const child: ChatMessage = {
+      id: 'child-m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'child said' }],
+      timestamp: 3
+    }
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null,
+      subagentMessages: { 'call-agent-1': [child], 'call-agent-2': [] }
+    })
+    const win = new MockWindow()
+    const session = new PiSession('resume-sess-h2', win as never, '/cwd', {
+      resumeSessionId: 'resume-sess-h2'
+    })
+    await session.run(null)
+    await new Promise((r) => setImmediate(r))
+
+    expect(sentPayloads(win, 'session:subagent-message-batch')).toEqual([
+      { toolUseId: 'call-agent-1', messages: [child] },
+      { toolUseId: 'call-agent-2', messages: [] }
+    ])
+    const channels = sentChannels(win)
+    expect(channels.indexOf('session:subagent-message-batch')).toBeGreaterThan(
+      channels.indexOf('session:message')
+    )
+    expect(session.getMessages().map((m) => m.id)).toEqual(['m1'])
+  })
+
   it('a second replayStoredHistory call (run-once gate) never double-sends messages', async () => {
     mockLoadPiSessionHistory.mockResolvedValue({
       messages: [

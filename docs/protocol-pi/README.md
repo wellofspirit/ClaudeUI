@@ -256,6 +256,28 @@ Probed for M5b (2026-07-20, same binary):
   catalog DOES expose per-model higher-tier support (future: lift piModelCapabilities' conservative
   low/medium/high cap by reading this).
 
+Probed for ADR-088 host-run subagents (2026-10-01, the 0.87.1 managed-store binary, an isolated
+`PI_CODING_AGENT_DIR`, `PI_OFFLINE=1`, no model turn):
+
+- **P1 `--session-dir <D> --session-id <id>`**: `get_state` reports `sessionId === <id>` and
+  `sessionFile === <D>/<ISO-ts>_<id>.jsonl` — a FLAT layout, no `--<cwd>--` subdirectory under an
+  explicit dir. No file is written before the first assistant message
+  (`vendor/pi-src/packages/coding-agent/src/core/session-manager.ts` `_persist`). A fresh id prints
+  `Warning: No project session found with id …` on stderr (harmless).
+- **P2 `--append-system-prompt <text>`** appends inside `<addendum>…</addendum>` at the end of the
+  system prompt, and the argument may be a FILE PATH: pi reads the file when it exists
+  (`resource-loader.ts` `resolvePromptInput`).
+- **P3 `--tools a,b` is an allowlist over built-in AND extension tools** — a registered extension
+  tool missing from the list is inactive (`--tools read,grep,agent` gave `[read, grep, agent]`);
+  `-xt <name>` removes one tool; no `--tools` gives pi's defaults plus every extension tool.
+- **P4 resume**: with an existing `<D>/<ts>_<id>.jsonl`, the same `--session-dir`/`--session-id`
+  reopen it — but only from the cwd in its header. From a different cwd the same flags create a NEW
+  session (`SessionManager.findById` filters by header cwd when the session dir is not pi's
+  default), so a child must always be spawned with exactly the parent's cwd.
+- **P7 `details` persists**: a tool's returned `details` lands on the `toolResult` message
+  (`vendor/pi-src/packages/agent/src/agent-loop.ts`), and so in the session file — the
+  `details.cuiAgent` history link rides this.
+
 Probed for M5c fork/sideQuestion (2026-07-21, same binary):
 
 - **`fork {entryId}` ALONE creates a new session file and switches the client to it, leaving the

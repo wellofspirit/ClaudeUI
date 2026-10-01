@@ -36,13 +36,16 @@ interface EngineHistory {
 const bare = (load: {
   messages: SessionHistoryResult['messages']
   statusLine?: StatusLineData | null
+  /** pi's host-run subagent transcripts (ADR-088), passed through inline like Codex's. */
+  subagentMessages?: SessionHistoryResult['subagentMessages']
 }): SessionHistoryResult => ({
   messages: load.messages,
   taskNotifications: [],
   customTitle: null,
   statusLine: load.statusLine ?? null,
   agentIdToToolUseId: {},
-  warnings: []
+  warnings: [],
+  ...(load.subagentMessages ? { subagentMessages: load.subagentMessages } : {})
 })
 const readers: Record<EngineId, EngineHistory> = {
   claude: {

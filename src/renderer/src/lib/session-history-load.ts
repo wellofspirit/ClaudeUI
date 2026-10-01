@@ -168,12 +168,23 @@ export async function loadSessionIntoStore(
       statusLine: null,
       lastModel: null
     }
+    // Host-run pi subagent transcripts (ADR-088) come back inline, keyed by the
+    // parent `agent` call id — the Codex precedent below. opencode returns none.
+    const subagentMessages =
+      loaded && 'subagentMessages' in loaded ? loaded.subagentMessages : undefined
     if (replace && isLive(routingId)) return 'declined'
     if (replace && !stripForReplace(routingId, messages)) return 'declined'
     // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
     // engine (and model) — it is the one that restores both onto the session.
     seedHistoricalEngine(routingId, engineId, lastModel)
-    store().loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
+    store().loadHistoricalSession(
+      routingId,
+      messages,
+      info.cwd,
+      undefined,
+      subagentMessages,
+      statusLine
+    )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
     if (markRecent) store().addRecentSession(routingId)
     return 'loaded'

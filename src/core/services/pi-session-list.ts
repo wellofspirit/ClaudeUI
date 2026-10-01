@@ -44,12 +44,18 @@ import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
 import { blobStore } from './blob-store'
+import { childSessionFile, collectAgentIds, deleteChildSession } from '../pi/pi-subagent-store'
 
 /** `~/.pi/agent` — pi's own data root. */
 export function piAgentDir(): string {
   return path.join(os.homedir(), '.pi', 'agent')
 }
 
+/**
+ * The tree the sidebar lists and `findPiSessionFile` walks. Host-run subagent
+ * children live under `~/.claude/ui/pi-subagents` instead, by design (ADR-088):
+ * they are never listed or resumed as sessions of their own.
+ */
 function piSessionsDir(): string {
   return path.join(piAgentDir(), 'sessions')
 }
@@ -449,6 +455,7 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     if (!parsed) return { messages: [], statusLine: null }
     const active = activeBranchEntries(parsed.entries)
     const messages = convertPiSessionEntries(active)
+    const subagentMessages = loadSubagentMessages(active)
     // The billing type decides what this history was WORTH (ADR-071 §2) and it
     // comes from the probe snapshot, which is empty in a process that has not
     // touched pi auth yet. Warm it FIRST (one small local file read), and never
@@ -457,7 +464,12 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     await piAuthProvider.probe().catch(() => {})
     const statusLine =
       active.length > 0 ? piHistoryStatusLine(active, dispatchedCostEntriesFor(sessionId)) : null
-    return { messages, statusLine, lastModel: piLastModelRef(active) }
+    return {
+      messages,
+      statusLine,
+      lastModel: piLastModelRef(active),
+      ...(Object.keys(subagentMessages).length > 0 ? { subagentMessages } : {})
+    }
   } catch (err) {
     logger.debug(
       'PiSessionList',
@@ -465,6 +477,55 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     )
     return { messages: [], statusLine: null }
   }
+}
+
+/** How deep a parent → child → grandchild chain is followed (the spawn cap, ADR-088 D4). */
+const MAX_SUBAGENT_HISTORY_DEPTH = 3
+
+/**
+ * Host-run subagent transcripts for a parent's active branch (ADR-088), keyed
+ * by the parent `agent` call id — the key `session:subagent-message` uses
+ * live. Each child is read with the SAME `readPiSessionFile` →
+ * `activeBranchEntries` → `convertPiSessionEntries` pipeline as the parent,
+ * and its own `agent` calls are followed (depth ≤ 3, each child once). A
+ * missing or corrupt child file is skipped; an invalid id never reaches a path
+ * (pi-subagent-store's `isValidAgentId`).
+ */
+function loadSubagentMessages(parentEntries: PiSessionEntry[]): Record<string, ChatMessage[]> {
+  const out: Record<string, ChatMessage[]> = {}
+  const visited = new Set<string>()
+  const walk = (entries: PiSessionEntry[], depth: number): void => {
+    if (depth > MAX_SUBAGENT_HISTORY_DEPTH) return
+    for (const link of collectAgentIds(entries)) {
+      if (visited.has(link.agentId)) continue
+      visited.add(link.agentId)
+      const file = childSessionFile(link.agentId)
+      const parsed = file ? readPiSessionFile(file) : null
+      if (!parsed) continue
+      const childActive = activeBranchEntries(parsed.entries)
+      out[link.toolUseId] = convertPiSessionEntries(childActive)
+      walk(childActive, depth + 1)
+    }
+  }
+  walk(parentEntries, 1)
+  return out
+}
+
+/** Every child id reachable from `entries` (all entries, every branch), children's children included. */
+function reachableAgentIds(entries: PiSessionEntry[]): Set<string> {
+  const ids = new Set<string>()
+  const walk = (list: PiSessionEntry[], depth: number): void => {
+    if (depth > MAX_SUBAGENT_HISTORY_DEPTH) return
+    for (const link of collectAgentIds(list)) {
+      if (ids.has(link.agentId)) continue
+      ids.add(link.agentId)
+      const file = childSessionFile(link.agentId)
+      const parsed = file ? readPiSessionFile(file) : null
+      if (parsed) walk(parsed.entries, depth + 1)
+    }
+  }
+  walk(entries, 1)
+  return ids
 }
 
 /**
@@ -492,11 +553,38 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
  * Delete a pi session: unlink its .jsonl file and prune the parent
  * `--<mangled-cwd>--` dir if it's now empty. Best-effort: logs + swallows on
  * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer.
+ *
+ * Its host-run subagent children (ADR-088) go with it — read from the parent
+ * file FIRST, recursively through the child files — except a child another pi
+ * session file still references (a fork or clone copies the parent's entries,
+ * links included): those files are found by a substring prefilter on the ids,
+ * then parsed to confirm, and everything they reach is kept.
  */
 export async function deletePiSession(sessionId: string): Promise<void> {
   try {
     const filePath = findPiSessionFile(sessionId)
     if (!filePath) return
+    const parsed = readPiSessionFile(filePath)
+    const children = parsed ? reachableAgentIds(parsed.entries) : new Set<string>()
+    if (children.size > 0) {
+      const kept = new Set<string>()
+      for (const other of walkAllSessionFiles()) {
+        if (other === filePath) continue
+        let raw: string
+        try {
+          raw = fs.readFileSync(other, 'utf-8')
+        } catch {
+          continue
+        }
+        if (![...children].some((id) => raw.includes(id))) continue
+        const otherParsed = readPiSessionFile(other)
+        if (!otherParsed) continue
+        for (const id of reachableAgentIds(otherParsed.entries)) kept.add(id)
+      }
+      for (const id of children) {
+        if (!kept.has(id)) await deleteChildSession(id)
+      }
+    }
     await fs.promises.unlink(filePath)
     const dir = path.dirname(filePath)
     try {

@@ -5,7 +5,8 @@
 **Relates to:** ADR-018 (engine/vendor/account model), ADR-019 (opencode backend — the template this
 mirrors), ADR-020 (persistence/config plane), ADR-021 (neutral auth), ADR-022 (permission mapping),
 ADR-024 (interaction parity), ADR-025 (engine-neutral delete), ADR-030 (capability honesty),
-ADR-033/034 (cross-engine dispatch + cost accounting), ADR-026 (workflow)
+ADR-033/034 (cross-engine dispatch + cost accounting), ADR-026 (workflow), ADR-088 (supersedes the
+M5b in-pi subagent extension: host-run subagents)
 
 ## Context
 
@@ -97,7 +98,11 @@ Two facts drove the design, both **probed against the real binary before any pro
   must match; substitution constructs deny; network commands excluded — a plan-mode bash allow is
   an auto-allow with no human gate), and `exit_plan` asks — surfacing the same engine-neutral
   ExitPlanModeCard/Shift+Tab cycle Claude uses (kind `'plan'` in the tool registry).
-- **In-pi subagents (M5b):** a SECOND ClaudeUI-owned `-e` extension (`pi-subagent-source.ts`,
+- **In-pi subagents (M5b) — SUPERSEDED by [ADR-088](adr-088_pi-subagents-host-run.md).** As of
+  ADR-088 the extension below is retired (`pi-subagent-source.ts` deleted): subagents are host-run
+  `pi --mode rpc` children spawned by ClaudeUI through the bridge's own `agent` tool, and every
+  child tool call is gated by the parent session's live mode and judge. The original decision, for
+  history: a SECOND ClaudeUI-owned `-e` extension (`pi-subagent-source.ts`,
   content-verified tmp file like the bridge; this one imports node builtins — allowed, probed)
   ports pi's shipped subagent example to v1 scope: user-level agent `.md` discovery
   (`~/.pi/agent/agents`), single + parallel tasks, children spawned as

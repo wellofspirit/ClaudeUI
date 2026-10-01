@@ -112,7 +112,9 @@ them = inventing a feature pi doesn't have.
   **openai-codex only** — pi's other subscription vendors still show the terminal `/login` hint, and
   the live browser-consent click is the one manually-verified step. Anthropic-subscription is the
   next vault provider. The old PTY-login workaround idea is obsolete.
-- **`subagents`** — ✅ SHIPPED (M5b, `8f5a38a`): in-pi extension route (user decision — faithful to
+- **`subagents`** — superseded by [ADR-088](../adr/adr-088_pi-subagents-host-run.md) (host-run
+  children through the bridge's `agent` tool, gated by the parent; the in-pi extension below is
+  retired). Originally ✅ SHIPPED (M5b, `8f5a38a`): in-pi extension route (user decision — faithful to
   pi's example, agent defs in pi-native `~/.pi/agent/agents/*.md`). See ADR-035 + the M5b probe
   notes in `docs/protocol-pi/README.md`. Users author agent defs themselves; zero defs → the tool
   simply doesn't register. v2 candidates: project-local `.pi/agents` (needs a confirm-UI story),

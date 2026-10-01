@@ -5,7 +5,8 @@ const mocks = vi.hoisted(() => ({
   claude: vi.fn(),
   codex: vi.fn(),
   anchor: vi.fn(),
-  deleteThread: vi.fn(async () => {})
+  deleteThread: vi.fn(async () => {}),
+  pi: vi.fn()
 }))
 vi.mock('../../services/db', () => ({
   getSessionMeta: (id: string) => (id === 'native' ? { engineId: 'codex' } : undefined)
@@ -17,6 +18,11 @@ vi.mock('../history', () => ({
   resolveCodexForkAnchor: mocks.anchor
 }))
 vi.mock('../delete', () => ({ deleteCodexThread: mocks.deleteThread }))
+vi.mock('../../services/pi-session-list', () => ({
+  loadPiSessionHistory: mocks.pi,
+  listPiSessionsGlobal: vi.fn(),
+  deletePiSession: vi.fn()
+}))
 
 it('routes metadata-owned native reads without touching Claude files', async () => {
   const result = {
@@ -73,4 +79,19 @@ it('seeds a codex branch from the source truncated at its anchor turn', async ()
 it('deletes one codex thread natively instead of refusing', async () => {
   await historyFor('codex').delete('thread-1', 'unused-project-key')
   expect(mocks.deleteThread).toHaveBeenCalledExactlyOnceWith('thread-1')
+})
+
+/** H4 (ADR-088): pi's reader passes its host-run subagent transcripts through inline, like Codex's. */
+it('the pi branch returns subagentMessages from the pi reader', async () => {
+  const child = { id: 'c1', role: 'assistant', content: [], timestamp: 1 }
+  mocks.pi.mockResolvedValue({
+    messages: [],
+    statusLine: null,
+    subagentMessages: { 'call-agent': [child] }
+  })
+  expect((await historyFor('pi').read('pi-sess', 'unused')).subagentMessages).toEqual({
+    'call-agent': [child]
+  })
+  mocks.pi.mockResolvedValue({ messages: [], statusLine: null })
+  expect('subagentMessages' in (await historyFor('pi').read('pi-sess', 'unused'))).toBe(false)
 })

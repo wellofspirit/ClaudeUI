@@ -3985,6 +3985,12 @@ export interface EngineHistoryLoad {
    * fallback in place.
    */
   lastModel?: ModelRef | null
+  /**
+   * Host-run pi subagent transcripts (ADR-088), by the parent `agent` call id
+   * — the key `session:subagent-message` uses live. pi only; absent when the
+   * session ran no agents.
+   */
+  subagentMessages?: Record<string, ChatMessage[]>
 }
 
 /**

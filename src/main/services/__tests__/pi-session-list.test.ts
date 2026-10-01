@@ -940,3 +940,197 @@ describe('loadPiSessionHistory — lastModel', () => {
     expect(lastModel).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Host-run subagents (ADR-088): history link + deletion. Children live under
+// <home>/.claude/ui/pi-subagents/<agentId>/ (the homedir redirect above puts
+// that inside the fixture tree too).
+// ---------------------------------------------------------------------------
+
+const AGENT_A = '11111111-1111-4111-8111-111111111111'
+const AGENT_B = '22222222-2222-4222-8222-222222222222'
+const AGENT_MISSING = '33333333-3333-4333-8333-333333333333'
+
+function subagentsRoot(): string {
+  return join(testHome, '.claude', 'ui', 'pi-subagents')
+}
+
+const header = (id: string) => ({
+  type: 'session',
+  version: 3,
+  id,
+  timestamp: '2024-01-01T00:00:00.000Z',
+  cwd: '/proj/sub'
+})
+
+const assistantText = (id: string, parentId: string | null, text: string) => ({
+  type: 'message',
+  id,
+  parentId,
+  timestamp: '2024-01-01T00:00:02.000Z',
+  message: {
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    api: 'a',
+    provider: 'p',
+    model: 'm',
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    },
+    stopReason: 'stop',
+    timestamp: 2
+  }
+})
+
+/** An `agent` call + its toolResult carrying the cuiAgent history link. */
+const agentCall = (callId: string, agentId: string, parentId: string | null, n: number) => [
+  {
+    type: 'message',
+    id: `call-entry-${n}`,
+    parentId,
+    timestamp: '2024-01-01T00:00:03.000Z',
+    message: {
+      role: 'assistant',
+      content: [
+        {
+          type: 'toolCall',
+          id: callId,
+          name: 'agent',
+          arguments: { description: 'd', prompt: 'p' }
+        }
+      ],
+      api: 'a',
+      provider: 'p',
+      model: 'm',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: 'toolUse',
+      timestamp: 3
+    }
+  },
+  {
+    type: 'message',
+    id: `result-entry-${n}`,
+    parentId: `call-entry-${n}`,
+    timestamp: '2024-01-01T00:00:04.000Z',
+    message: {
+      role: 'toolResult',
+      toolCallId: callId,
+      toolName: 'agent',
+      content: [{ type: 'text', text: 'report' }],
+      details: { cuiAgent: { v: 1, agentId, subagentType: 'Explore', status: 'completed' } },
+      isError: false,
+      timestamp: 4
+    }
+  }
+]
+
+function writeChild(agentId: string, lines: unknown[]): string {
+  const dir = join(subagentsRoot(), agentId)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'system-prompt.md'), 'prompt', 'utf-8')
+  const file = join(dir, `2024-01-01T00-00-00_${agentId}.jsonl`)
+  writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
+  return file
+}
+
+describe('loadPiSessionHistory — host-run subagents (ADR-088)', () => {
+  it('H1: returns subagentMessages by the parent call id, a nested grandchild included; tolerates a missing child and rejects a traversal id', async () => {
+    writeSessionFile('--proj-sub--', '2024-01-01T00-00-00_parent-1.jsonl', [
+      header('parent-1'),
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'go', timestamp: 1 }
+      },
+      ...agentCall('call-A', AGENT_A, 'u1', 1),
+      ...agentCall('call-missing', AGENT_MISSING, 'result-entry-1', 2),
+      ...agentCall('call-evil', '../x', 'result-entry-2', 3)
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      assistantText('a1', null, 'child A here'),
+      ...agentCall('call-B', AGENT_B, 'a1', 9)
+    ])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'grandchild B here')])
+    // A decoy file outside the root that '../x' would resolve towards.
+    mkdirSync(join(testHome, '.claude', 'ui', 'x'), { recursive: true })
+    writeFileSync(
+      join(testHome, '.claude', 'ui', 'x', '2024-01-01T00-00-00_x.jsonl'),
+      JSON.stringify(header('x')) + '\n',
+      'utf-8'
+    )
+
+    const history = await loadPiSessionHistory('parent-1')
+    expect(Object.keys(history.subagentMessages ?? {}).sort()).toEqual(['call-A', 'call-B'])
+    expect(history.subagentMessages!['call-A'][0]).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'child A here' }]
+    })
+    expect(history.subagentMessages!['call-B'][0]).toMatchObject({
+      content: [{ type: 'text', text: 'grandchild B here' }]
+    })
+    // The parent's own transcript is unchanged by the link.
+    expect(history.messages.some((m) => m.role === 'user')).toBe(true)
+  })
+
+  it('omits subagentMessages for a session that ran no agents', async () => {
+    writeSessionFile('--proj-plain--', '2024-01-01T00-00-00_plain-1.jsonl', [
+      header('plain-1'),
+      assistantText('e1', null, 'hi')
+    ])
+    expect((await loadPiSessionHistory('plain-1')).subagentMessages).toBeUndefined()
+  })
+})
+
+describe('deletePiSession — host-run subagents (ADR-088)', () => {
+  it('H3: removes an unreferenced child (and its grandchild) by name, and keeps a child a second session file still references', async () => {
+    const parentFile = writeSessionFile('--proj-d--', '2024-01-01T00-00-00_parent-d.jsonl', [
+      header('parent-d'),
+      ...agentCall('call-A', AGENT_A, null, 1),
+      ...agentCall('call-M', AGENT_MISSING, 'result-entry-1', 2)
+    ])
+    writeChild(AGENT_A, [header(AGENT_A), ...agentCall('call-B', AGENT_B, null, 9)])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'gc')])
+    writeChild(AGENT_MISSING, [header(AGENT_MISSING), assistantText('m1', null, 'shared')])
+    // A fork of the parent that still links AGENT_MISSING.
+    writeSessionFile('--proj-d--', '2024-01-01T00-00-01_fork-d.jsonl', [
+      header('fork-d'),
+      ...agentCall('call-M', AGENT_MISSING, null, 2)
+    ])
+
+    await deletePiSession('parent-d')
+
+    expect(existsSync(parentFile)).toBe(false)
+    expect(existsSync(join(subagentsRoot(), AGENT_A))).toBe(false)
+    expect(existsSync(join(subagentsRoot(), AGENT_B))).toBe(false)
+    expect(readdirSync(join(subagentsRoot(), AGENT_MISSING)).sort()).toEqual([
+      `2024-01-01T00-00-00_${AGENT_MISSING}.jsonl`,
+      'system-prompt.md'
+    ])
+  })
+
+  it('never removes a file it did not create inside a child dir (by-name unlink, non-recursive rmdir)', async () => {
+    writeSessionFile('--proj-e--', '2024-01-01T00-00-00_parent-e.jsonl', [
+      header('parent-e'),
+      ...agentCall('call-A', AGENT_A, null, 1)
+    ])
+    writeChild(AGENT_A, [header(AGENT_A), assistantText('a1', null, 'x')])
+    writeFileSync(join(subagentsRoot(), AGENT_A, 'notes.txt'), 'user file', 'utf-8')
+
+    await deletePiSession('parent-e')
+
+    expect(readdirSync(join(subagentsRoot(), AGENT_A))).toEqual(['notes.txt'])
+  })
+})
