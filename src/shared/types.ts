@@ -3991,6 +3991,13 @@ export interface EngineHistoryLoad {
    * session ran no agents.
    */
   subagentMessages?: Record<string, ChatMessage[]>
+  /**
+   * Host-run pi subagents' terminal events (ADR-088 S3), from the task
+   * notifications ClaudeUI delivered into the parent and child files — read
+   * from the stored message's `details`, never parsed from its text. A
+   * background launch with no notification reads `unfinished`. pi only.
+   */
+  taskNotifications?: TaskNotification[]
 }
 
 /**

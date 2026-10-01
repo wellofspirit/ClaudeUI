@@ -87,7 +87,9 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         // Transport proof only: the gating policy is unit-tested.
         gateChild: async () => ({ behavior: 'allow' }),
         childAbandoned: () => {},
-        retractChildGates: () => {}
+        retractChildGates: () => {},
+        deliverToSession: () => {},
+        backgroundWorkChanged: () => {}
       }
       const manager = new PiSubagentManager(host, {
         registry: loadPiAgentRegistry({ cwd, userAgentsDir: join(cwd, 'no-user-agents') }),
@@ -98,7 +100,8 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         {
           description: 'Echo a marker',
           prompt: 'Do not call any tools. Reply with exactly: ECHO ping',
-          subagent_type: 'Explore'
+          subagent_type: 'Explore',
+          run_in_background: false
         },
         'call-integration-1',
         null

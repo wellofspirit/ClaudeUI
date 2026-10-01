@@ -29,6 +29,8 @@ import type {
   PiTextContent,
   PiToolExecutionPartialResult
 } from './pi-protocol'
+import { piCustomMessageToChat } from './pi-custom-message'
+import { piAgentDeliveryDetails } from './pi-delivery'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -146,6 +148,12 @@ export type PiMapperOutput =
    */
   | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
+  /** pi started a run (`agent_start`), possibly one it started on its own for a delivery (ADR-088 S3). */
+  | { kind: 'turn_start' }
+  /** One of ClaudeUI's own agent messages reached the session (its custom message_end). */
+  | { kind: 'agent_delivery'; deliveryId: string }
+  /** The bridge's `cui-deliver` handler refused a payload (pi reports it as an extension error; the ack still succeeds, P-S4). */
+  | { kind: 'delivery_error'; message: string }
   | { kind: 'ignore' }
 
 // ---------------------------------------------------------------------------
@@ -427,9 +435,30 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         return outputs
       }
 
-      // user/bashExecution message_end never occurs per the verified event
-      // order (only assistant gets a message_start/end pair; toolResult only
-      // gets message_end) — defensive ignore for forward-compat.
+      if (msg.role === 'custom') {
+        // An extension's pi.sendMessage (probe P-S1: a message_start/end pair
+        // with role 'custom'). The SAME converter as history, so the row is
+        // identical live and on reload (ADR-088 S3, Q10). ClaudeUI's own
+        // deliveries are recognised by customType + details, never by text;
+        // their `agent_delivery` is what confirms a delivery (the RPC ack of
+        // the /cui-deliver prompt does not, P-S4).
+        const message = piCustomMessageToChat({
+          id: uuid(),
+          customType: msg.customType,
+          content: msg.content,
+          display: msg.display,
+          details: msg.details,
+          timestamp: Date.now()
+        })
+        const ours = piAgentDeliveryDetails(msg.customType, msg.details)
+        const outputs: PiMapperOutput[] = []
+        if (message) outputs.push({ kind: 'message', message })
+        if (ours) outputs.push({ kind: 'agent_delivery', deliveryId: ours.deliveryId })
+        return outputs.length > 0 ? outputs : [{ kind: 'ignore' }]
+      }
+
+      // user/bashExecution message_end: pi's own user prompt is rendered from
+      // run() (PiSession) — ignored here, as before.
       return [{ kind: 'ignore' }]
     }
 
@@ -464,7 +493,11 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     }
 
     case 'extension_error': {
-      const { error } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      const { error, extensionPath } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      // ClaudeUI's own delivery command failing is not a turn error: no turn
+      // ran, and the host undoes what it set up for one (ADR-088 S3).
+      if (extensionPath === 'command:cui-deliver')
+        return [{ kind: 'delivery_error', message: error }]
       return [{ kind: 'error', message: error }]
     }
 
@@ -490,7 +523,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       ]
     }
 
-    // agent_start/agent_end, turn_start/turn_end, tool_execution_start/end
+    case 'agent_start':
+      // A run began. PiSession knows of the runs it starts itself (run()), but
+      // a woken delivery starts one inside pi (ADR-088 S3), and the session
+      // must not read as idle through it.
+      return [{ kind: 'turn_start' }]
+
+    // agent_end, turn_start/turn_end, tool_execution_start/end
     // (start carries nothing new — the arguments are already in the
     // toolcall_end message_update above; end is fully covered by the
     // following toolResult message_end), queue_update, compaction_start,

@@ -24,7 +24,9 @@ import type {
   ContentBlock,
   EngineHistoryLoad,
   ForkAnchorResult,
-  SessionInfo
+  SessionInfo,
+  TaskNotification,
+  TaskTerminalStatus
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import type {
@@ -38,6 +40,8 @@ import type {
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
+import { piCustomMessageToChat } from '../pi/pi-custom-message'
+import { piAgentDeliveryDetails } from '../pi/pi-delivery'
 import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
@@ -417,21 +421,19 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
       // An extension injected this into the model's context. It was dropped
       // entirely, so the transcript disagreed with what the model saw. Same row
       // Codex's hook fragments take, titled by the extension that wrote it, and
-      // rendered VERBATIM — an extension's text is third-party text.
+      // rendered VERBATIM — an extension's text is third-party text. The live
+      // mapper uses the same converter (ADR-088 S3), and ClaudeUI's own agent
+      // messages are recognised there by customType + details, never by text.
       const ts = Date.parse(e.timestamp)
-      const text =
-        typeof e.content === 'string'
-          ? e.content
-          : e.content
-              .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
-              .join('\n')
-      if (text)
-        messages.push({
-          id: e.id,
-          role: 'system',
-          content: [{ type: 'context_note', title: e.customType, fragments: [{ text }] }],
-          timestamp: Number.isFinite(ts) ? ts : Date.now()
-        })
+      const msg = piCustomMessageToChat({
+        id: e.id,
+        customType: e.customType,
+        content: e.content,
+        display: e.display,
+        details: e.details,
+        timestamp: Number.isFinite(ts) ? ts : Date.now()
+      })
+      if (msg) messages.push(msg)
     }
   }
   return messages
@@ -455,7 +457,8 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     if (!parsed) return { messages: [], statusLine: null }
     const active = activeBranchEntries(parsed.entries)
     const messages = convertPiSessionEntries(active)
-    const subagentMessages = loadSubagentMessages(active)
+    const { messages: subagentMessages, childEntries } = loadSubagentMessages(active)
+    const taskNotifications = collectPiTaskNotifications(active, childEntries)
     // The billing type decides what this history was WORTH (ADR-071 §2) and it
     // comes from the probe snapshot, which is empty in a process that has not
     // touched pi auth yet. Warm it FIRST (one small local file read), and never
@@ -468,7 +471,8 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
       messages,
       statusLine,
       lastModel: piLastModelRef(active),
-      ...(Object.keys(subagentMessages).length > 0 ? { subagentMessages } : {})
+      ...(Object.keys(subagentMessages).length > 0 ? { subagentMessages } : {}),
+      ...(taskNotifications.length > 0 ? { taskNotifications } : {})
     }
   } catch (err) {
     logger.debug(
@@ -491,8 +495,13 @@ const MAX_SUBAGENT_HISTORY_DEPTH = 3
  * missing or corrupt child file is skipped; an invalid id never reaches a path
  * (pi-subagent-store's `isValidAgentId`).
  */
-function loadSubagentMessages(parentEntries: PiSessionEntry[]): Record<string, ChatMessage[]> {
+function loadSubagentMessages(parentEntries: PiSessionEntry[]): {
+  messages: Record<string, ChatMessage[]>
+  /** Each child's active branch, for the notifications a grandchild left in its spawner's file. */
+  childEntries: PiSessionEntry[][]
+} {
   const out: Record<string, ChatMessage[]> = {}
+  const childEntries: PiSessionEntry[][] = []
   const visited = new Set<string>()
   const walk = (entries: PiSessionEntry[], depth: number): void => {
     if (depth > MAX_SUBAGENT_HISTORY_DEPTH) return
@@ -504,10 +513,95 @@ function loadSubagentMessages(parentEntries: PiSessionEntry[]): Record<string, C
       if (!parsed) continue
       const childActive = activeBranchEntries(parsed.entries)
       out[link.toolUseId] = convertPiSessionEntries(childActive)
+      childEntries.push(childActive)
       walk(childActive, depth + 1)
     }
   }
   walk(parentEntries, 1)
+  return { messages: out, childEntries }
+}
+
+/** Same words as the Claude reader's (session-history.ts), for the same state. */
+const PI_UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
+
+const isTerminalStatus = (s: unknown): s is TaskTerminalStatus =>
+  s === 'completed' || s === 'failed' || s === 'stopped'
+
+/**
+ * The host-run subagents' terminal events (ADR-088 S3), from every task
+ * notification ClaudeUI delivered into these files (the parent's and each
+ * child's — a grandchild's can land in its spawner's file). Read from the
+ * stored `custom_message`'s customType + `details` ONLY, never from its text,
+ * so a user message that merely looks like one counts for nothing. A
+ * background launch (`cuiAgent.background`) with no notification at all reads
+ * `unfinished` (ADR-073 §5): the transcript cannot tell a dead run from one
+ * still going in another process.
+ */
+function collectPiTaskNotifications(
+  parentEntries: PiSessionEntry[],
+  childFiles: PiSessionEntry[][]
+): TaskNotification[] {
+  // Which (call id → agent id) pairs each file may speak for (review R3): the
+  // parent's file for any agent of its tree (a root-owned notification can be
+  // about a grandchild whose spawner had finished); a child's file only for
+  // the agents that child itself launched. A child's word about any other
+  // agent's terminal state counts for nothing.
+  const linksOf = (entries: PiSessionEntry[]): Map<string, string> =>
+    new Map(collectAgentIds(entries).map((l) => [l.toolUseId, l.agentId]))
+  const tree = new Map<string, string>()
+  for (const entries of [parentEntries, ...childFiles]) {
+    for (const [toolUseId, agentId] of linksOf(entries)) tree.set(toolUseId, agentId)
+  }
+  const files = [
+    { entries: parentEntries, trusted: tree },
+    ...childFiles.map((entries) => ({ entries, trusted: linksOf(entries) }))
+  ]
+  const out: TaskNotification[] = []
+  const notified = new Set<string>()
+  const launches: Array<{ toolUseId: string; agentId: string }> = []
+  for (const { entries, trusted } of files) {
+    for (const e of entries) {
+      if (e.type === 'custom_message') {
+        const d = piAgentDeliveryDetails(e.customType, e.details)
+        if (!d || d.kind !== 'task-notification') continue
+        if (typeof d.agentId !== 'string' || typeof d.toolUseId !== 'string') continue
+        if (trusted.get(d.toolUseId) !== d.agentId) continue
+        if (!isTerminalStatus(d.status)) continue
+        notified.add(d.toolUseId)
+        out.push({
+          taskId: d.agentId,
+          toolUseId: d.toolUseId,
+          status: d.status,
+          outputFile: '',
+          summary: typeof d.summary === 'string' ? d.summary : '',
+          ...(d.usage ? { usage: d.usage } : {}),
+          ...(typeof d.runIndex === 'number' ? { runIndex: d.runIndex } : {})
+        })
+      } else if (
+        e.type === 'message' &&
+        e.message.role === 'toolResult' &&
+        e.message.toolName === 'agent'
+      ) {
+        const cui = (
+          e.message.details as { cuiAgent?: { agentId?: unknown; background?: unknown } }
+        )?.cuiAgent
+        if (cui?.background === true && typeof cui.agentId === 'string') {
+          launches.push({ toolUseId: e.message.toolCallId, agentId: cui.agentId })
+        }
+      }
+    }
+  }
+  for (const launch of launches) {
+    if (notified.has(launch.toolUseId)) continue
+    out.push({
+      taskId: launch.agentId,
+      toolUseId: launch.toolUseId,
+      status: 'unfinished',
+      outputFile: '',
+      summary: PI_UNFINISHED_SUMMARY,
+      runIndex: 1
+    })
+  }
   return out
 }
 

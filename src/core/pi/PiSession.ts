@@ -53,6 +53,7 @@ import { piUsageEvent } from './usage-row'
 // owns their gating (decideToolCall, parametrized by the child scope).
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
+import { deliveryCommand, PI_DELIVER_COMMAND, type PiAgentDelivery } from './pi-delivery'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -453,6 +454,14 @@ export class PiSession extends BaseSession {
   private inFlightDispatchIds = new Set<string>()
 
   // ── Host-run subagents (ADR-088) ─────────────────────────────────────────
+  /** The user prompt request still waiting for pi's ack (Fact S8, see deliverAgentMessage). */
+  private promptInFlight: Promise<unknown> | null = null
+  /** FIFO chain of agent deliveries into this session (ADR-088 S3). */
+  private deliveryChain: Promise<void> = Promise.resolve()
+  /** Count of runs pi reported starting (`agent_start`) — run()'s refusal branch reads it (M-1). */
+  private runStarts = 0
+  /** A woken delivery marked the session running and its run has not started yet (M-2). */
+  private wakePending = false
   /** Owns this session's `agent` children (pi-subagents.ts); gating stays here. */
   private readonly subagents: PiSubagentManager
   /** `loadPiAgentRegistry` (a test seam injects a fixed registry). */
@@ -519,7 +528,12 @@ export class PiSession extends BaseSession {
         childAbandoned: (info) => {
           session.retractPendingGate(info.toolCallId)
         },
-        retractChildGates: (scope) => session.retractChildGates(scope)
+        retractChildGates: (scope) => session.retractChildGates(scope),
+        deliverToSession: (payload) => session.deliverAgentMessage(payload),
+        backgroundWorkChanged: () => {
+          // Re-arm (or hold) the idle timer: it waits for background agents.
+          if (!session.isProcessing) session.resetInactivityTimer()
+        }
       },
       {
         ...(deps.spawnPiChild ? { spawn: deps.spawnPiChild } : {}),
@@ -610,6 +624,10 @@ export class PiSession extends BaseSession {
 
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    // A live background agent keeps the session (ADR-088 S3): disposing would
+    // kill it and lose its notification. backgroundWorkChanged re-arms this
+    // once the last one ends.
+    if (this.subagents.liveBackgroundCount > 0) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('PiSession', 'Idle timeout — auto-disconnecting')
@@ -1116,7 +1134,8 @@ export class PiSession extends BaseSession {
     try {
       // The status line the loader also returns is for a COLD open (no session
       // object): this one seeds its own base from pi's tally below.
-      const { messages, subagentMessages } = await loadPiSessionHistory(sessionId)
+      const { messages, subagentMessages, taskNotifications } =
+        await loadPiSessionHistory(sessionId)
       logger.info('PiSession', `Replaying ${messages.length} stored messages for ${sessionId}`)
 
       for (const msg of messages) {
@@ -1142,6 +1161,11 @@ export class PiSession extends BaseSession {
       // messageHistory: the judge and /btw read the parent's own turns only.
       for (const [toolUseId, childMessages] of Object.entries(subagentMessages ?? {})) {
         this.send('session:subagent-message-batch', { toolUseId, messages: childMessages })
+      }
+      // Their terminal events (ADR-088 S3), after the batches; the reducer
+      // folds them idempotently per (toolUseId, runIndex).
+      for (const notification of taskNotifications ?? []) {
+        this.send('session:task-notification', notification)
       }
 
       // Seed the durable cost base from pi's own tally so totalCostUsd
@@ -1204,6 +1228,23 @@ export class PiSession extends BaseSession {
   }
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    // The bridge's delivery command is ClaudeUI's alone (ADR-088 S3): a typed
+    // `/cui-deliver …` would mint a row marked as an agent's message. Refused
+    // before anything else, so nothing is sent and no state moves.
+    if (prompt !== null && prompt.trimStart().startsWith(PI_DELIVER_COMMAND)) {
+      this.send('session:error', 'That command is reserved for ClaudeUI.')
+      // A queued copy is dropped after this one refusal (M-3): left queued, it
+      // would be retried — and refused again — at every boundary.
+      let dropped = false
+      for (const item of this.queue.pending()) {
+        if (item.text !== prompt) continue
+        this.queue.setState(item, 'recalled')
+        dropped = true
+      }
+      if (dropped) this.queue.emit()
+      return
+    }
+
     this.clearInactivityTimer()
     this._cancelled = false
 
@@ -1273,9 +1314,18 @@ export class PiSession extends BaseSession {
     if (!wasBusy) this.mapperState.startTimeMs = Date.now()
     this.isProcessing = true
     this.sendStatus()
+    // A run pi starts on its own while this ack is pending (M-1, see below).
+    const runsBefore = this.runStarts
 
     try {
-      const resp = await this.client.request(command)
+      // Kept while in flight (Fact S8): a delivery that started a run inside
+      // this prompt's pre-run awaits would make pi refuse it as "already
+      // processing", so deliverAgentMessage waits for this ack first.
+      const request = this.client.request(command)
+      this.promptInFlight = request
+      const resp = await request.finally(() => {
+        if (this.promptInFlight === request) this.promptInFlight = null
+      })
       if (!resp.success) {
         // wasBusy (steer path): the ORIGINAL turn is still streaming — a
         // rejected steer must not flip isProcessing back to false out from
@@ -1283,8 +1333,10 @@ export class PiSession extends BaseSession {
         // let a subsequent run() send a bare `prompt` with no
         // `streamingBehavior`, which pi rejects outright while still
         // streaming (README.md "Commands"). Only a non-busy failure (this
-        // WAS the turn) resets processing/the inactivity timer.
-        if (!wasBusy) {
+        // WAS the turn) resets processing/the inactivity timer. Nor when pi
+        // started a run of its own meanwhile (a delivery, ADR-088 S3): the
+        // refusal is then "already processing", and that run is live.
+        if (!wasBusy && this.runStarts === runsBefore) {
           this.isProcessing = false
           this.resetInactivityTimer()
         }
@@ -1297,14 +1349,81 @@ export class PiSession extends BaseSession {
       // and must still consume its item. A never-queued prompt is a no-op.
       this.onPromptDelivered(prompt)
     } catch (err) {
-      // Same wasBusy carve-out as the !resp.success branch above.
-      if (!wasBusy) {
+      // Same carve-outs as the !resp.success branch above.
+      if (!wasBusy && this.runStarts === runsBefore) {
         this.isProcessing = false
         this.resetInactivityTimer()
       }
       this.send('session:error', err instanceof Error ? err.message : String(err))
       this.sendStatus()
     }
+  }
+
+  /**
+   * Put an agent-authored message into this session (ADR-088 S3): a
+   * background agent's notification whose owner is the root, and (S3b) a
+   * `send_message` to `main`. The ONLY path is the bridge's `/cui-deliver`
+   * command (pi-delivery.ts, the marking rule): never run(), never a plain
+   * `prompt`, `steer` or `follow_up`. Nothing is recorded or emitted here —
+   * the row arrives as pi's own `custom` message through dispatchOutput, at
+   * the moment pi actually delivers it (a running turn gets it at its next
+   * tool boundary; an idle session appends it, and starts a turn when `wake`).
+   * Serialized FIFO; never throws.
+   */
+  deliverAgentMessage(payload: PiAgentDelivery): void {
+    this.deliveryChain = this.deliveryChain
+      .then(() => this.sendDelivery(payload))
+      .catch((err) => {
+        logger.warn(
+          'PiSession',
+          `delivery ${payload.deliveryId} failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+        )
+      })
+  }
+
+  private async sendDelivery(payload: PiAgentDelivery): Promise<void> {
+    const ids = `delivery ${payload.deliveryId} (agent ${payload.details.agentId})`
+    // No process: its children are already gone with it (cancel/exit dispose
+    // them), and respawning would open a fresh pi session. Dropped.
+    if (!this.client || this._cancelled) {
+      logger.info('PiSession', `${ids} dropped: the session has no pi process`)
+      return
+    }
+    // Fact S8: a user prompt whose ack is not in yet may still be in pi's
+    // pre-run awaits; once its ack is in, a delivery steers it.
+    if (this.promptInFlight) await this.promptInFlight.catch(() => {})
+    const client = this.client
+    if (!client || this._cancelled) {
+      logger.info('PiSession', `${ids} dropped: the session has no pi process`)
+      return
+    }
+    const waking = payload.wake && !this.isProcessing
+    if (waking) {
+      // pi starts the turn itself (P-S3): the session reads as running now.
+      this.wakePending = true
+      this.isProcessing = true
+      this.mapperState.startTimeMs = Date.now()
+      this.clearInactivityTimer()
+      this.sendStatus()
+    }
+    let ok = false
+    try {
+      const resp = await client.request({ type: 'prompt', message: deliveryCommand(payload) })
+      ok = resp.success
+    } catch {
+      ok = false
+    }
+    if (ok) return
+    logger.warn('PiSession', `${ids} was not accepted by pi`)
+    if (waking && this.wakePending) this.undoWake()
+  }
+
+  /** A woken delivery will start no run after all: back to idle (M-2). */
+  private undoWake(): void {
+    this.wakePending = false
+    this.isProcessing = false
+    this.resetInactivityTimer()
+    this.sendStatus()
   }
 
   private dispatchOutputs(outputs: PiMapperOutput[]): void {
@@ -1405,6 +1524,7 @@ export class PiSession extends BaseSession {
 
       case 'result':
         this.isProcessing = false
+        this.wakePending = false
         this.accTotalDurationMs += output.durationMs
         this.sendStatusLine()
         this.send('session:result', {
@@ -1455,6 +1575,31 @@ export class PiSession extends BaseSession {
         this.send('session:error', output.message)
         break
 
+      case 'turn_start':
+        this.runStarts++
+        this.wakePending = false
+        // A run pi started on its own (a delivery that landed while pi was
+        // settling, ADR-088 S3) must not read as idle. A run started by run()
+        // or a woken delivery already set this.
+        if (!this.isProcessing) {
+          this.isProcessing = true
+          this.mapperState.startTimeMs = Date.now()
+          this.clearInactivityTimer()
+          this.sendStatus()
+        }
+        break
+
+      case 'agent_delivery':
+        // The row itself came through `message`; nothing waits on this here.
+        break
+
+      case 'delivery_error':
+        // The bridge refused a payload (M-2): no run will start for it, so a
+        // woken delivery must not leave the session reading "running".
+        logger.warn('PiSession', 'pi refused an agent delivery (cui-deliver failed)')
+        if (this.wakePending) this.undoWake()
+        break
+
       case 'ignore':
         break
     }
@@ -1469,7 +1614,10 @@ export class PiSession extends BaseSession {
   async interrupt(): Promise<void> {
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
-    this.rejectAllPendingGates('Interrupted')
+    // Only the session's OWN cards (ADR-088 S3, Q9): a background agent's
+    // cards survive the interrupt with it, and every foreground child stopped
+    // below retracts its own.
+    this.rejectOwnPendingGates('Interrupted')
     // Audit-residual B fix: pi's own turn-abort (the `abort` RPC below) does
     // NOT cancel a `dispatch_agent` child this turn started — the bridge's
     // /hosted-tool handler is just a JS promise awaiting
@@ -1488,9 +1636,10 @@ export class PiSession extends BaseSession {
       crossEngineDispatcher.stopDispatch(id, this.routingId)
     }
     this.inFlightDispatchIds.clear()
-    // Host-run subagents (ADR-088): a foreground child belongs to the turn
-    // being aborted (S3 revisits this for background runs).
-    this.subagents.stopAll('interrupt')
+    // Host-run subagents (ADR-088 S3, Q9 — Claude Code's Esc spares
+    // background agents too): a foreground child belongs to the turn being
+    // aborted; a background one does not.
+    this.subagents.stopForeground('interrupt')
     if (!this.client) return
     try {
       await this.client.request({ type: 'abort' })
@@ -1504,6 +1653,7 @@ export class PiSession extends BaseSession {
     this.dispatchOutputs(finishPiMessage(this.mapperState))
     this._cancelled = true
     this.isProcessing = false
+    this.wakePending = false
     this.disconnected = false
     this.rejectAllPendingGates('Interrupted')
     this.subagents.stopAll('dispose')
@@ -1949,6 +2099,21 @@ export class PiSession extends BaseSession {
       pending.resolve({ behavior: 'deny', reason })
     }
     this.pendingGates.clear()
+    this.hostedGrants.clear()
+  }
+
+  /**
+   * interrupt()'s twin of {@link rejectAllPendingGates}: only the session's
+   * OWN cards (`scope === null`) are denied; host-run children's cards are
+   * left to their own stop (ADR-088 S3, Q9). hostedGrants (the session's own)
+   * are cleared as before.
+   */
+  private rejectOwnPendingGates(reason: string): void {
+    for (const [requestId, pending] of [...this.pendingGates]) {
+      if (pending.scope !== null) continue
+      this.pendingGates.delete(requestId)
+      pending.resolve({ behavior: 'deny', reason })
+    }
     this.hostedGrants.clear()
   }
 

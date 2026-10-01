@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
+import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // Main can't import renderer code (separate Electron processes/bundles), so
 // permission-engine.ts (src/main/pi/) keeps its OWN small copy of this exact
@@ -335,7 +336,8 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       prompt: 'Look for X',
       subagent: 'Explore',
       name: 'Explore',
-      model: 'openai-codex/gpt-5.6-luna'
+      model: 'openai-codex/gpt-5.6-luna',
+      background: true
     })
     expect(
       PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', name: 'scout' })
@@ -344,8 +346,13 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       description: 'd',
       prompt: 'p',
       subagent: 'general-purpose',
-      name: 'scout'
+      name: 'scout',
+      background: true
     })
+    // ADR-088 S3: background is the default; only an explicit false is foreground.
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
+    ).toMatchObject({ kind: 'task', background: false })
     // Without description it is not the agent shape (the generic fallback stays).
     expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
   })
@@ -419,5 +426,61 @@ describe('PiEngineToolMap.displayName', () => {
     expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
     expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
+  })
+})
+
+describe('PiEngineToolMap — agent background comes from the RESULT once there is one (ADR-088 S3 review R1)', () => {
+  const input = { description: 'd', prompt: 'p' }
+  const result = (toolResult: string, isError?: boolean) => ({
+    type: 'tool_result' as const,
+    toolUseId: 'call-1',
+    toolResult,
+    ...(isError === undefined ? {} : { isError })
+  })
+  const launched = result(
+    "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\n…"
+  )
+  const stateOf = (background: boolean | undefined, hasResult: boolean, notified: boolean) =>
+    deriveTaskState({
+      isHistorical: false,
+      hasActiveTask: false,
+      isBackground: !!background,
+      hasResult,
+      notification: notified
+        ? { taskId: 'a', toolUseId: 'call-1', status: 'completed', outputFile: '', summary: '' }
+        : undefined,
+      resultIsError: false
+    })
+
+  it('a call refused before any spawn (isError, no lifecycle record) is settled, not running', () => {
+    const view = PiEngineToolMap.normalize(
+      'task',
+      input,
+      result('Agent type "nope" not found. Available agents: general-purpose', true)
+    )
+    expect(view).toMatchObject({ kind: 'task', background: false })
+    expect(stateOf(view.kind === 'task' ? view.background : undefined, true, false).isRunning).toBe(
+      false
+    )
+  })
+
+  it('an async-launched result is background: running until its notification', () => {
+    const view = PiEngineToolMap.normalize('task', input, launched)
+    expect(view).toMatchObject({ background: true })
+    const bg = view.kind === 'task' ? view.background : undefined
+    expect(stateOf(bg, true, false).isRunning).toBe(true)
+    expect(stateOf(bg, true, true).isRunning).toBe(false)
+  })
+
+  it('a definition that forced background (input said false) reads background on reload', () => {
+    const view = PiEngineToolMap.normalize('task', { ...input, run_in_background: false }, launched)
+    expect(view).toMatchObject({ background: true })
+  })
+
+  it('a foreground report is not background; before a result the input decides', () => {
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).toMatchObject({
+      background: false
+    })
+    expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
   })
 })

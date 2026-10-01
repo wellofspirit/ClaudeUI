@@ -232,11 +232,16 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
 /**
  * Render the transcript to compact text for the judge:
  *
- * - user text → `User: …`
+ * - user-role text → `User: …` (a `system` row never: see below)
  * - assistant tool CALLS → `toolName <input>`, followed by `{"outcome":"…"}`
  *   when `outcomes` has an entry for that call's `toolUseId` (phase 3, ref §5)
  * - the prose of the last assistant MESSAGE immediately preceding each user text
  *   message → `Assistant: …` (tail-truncated at {@link MAX_ASSISTANT_PROSE_CHARS})
+ *
+ * `role: 'system'` messages are skipped whole, whatever they carry: system rows
+ * are engine/host notes (compaction, API errors, Codex guardian notices,
+ * host-injected agent messages such as a pi task notification, ADR-088 S3) and
+ * never a human turn, so none may become a `User:` line or the user's consent.
  *
  * Everything else is dropped: thinking blocks, tool RESULTS (the dominant token
  * saver — like cli.js, the judge sees calls, not their outputs), images, and any
@@ -286,6 +291,9 @@ export function slimTranscript(
       if (prose.length > 0) pendingProse = prose.join('\n')
       continue
     }
+
+    // Engine/host notes, never a human turn (see the doc above).
+    if (m.role === 'system') continue
 
     for (const b of m.content) {
       if (b.type !== 'text') continue // tool_result etc. — not a human turn

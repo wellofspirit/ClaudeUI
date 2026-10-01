@@ -834,6 +834,70 @@ describe('loadPiSessionHistory — custom_message entries', () => {
     })
   })
 
+  it('M6: our agent message loads as a system context_note titled from details; a look-alike user text stays a user message', async () => {
+    const notification = '<task-notification>\n<status>completed</status>\n</task-notification>'
+    writeSessionFile('--proj-ours--', 'x_sess-ours.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-ours',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/ours'
+      },
+      userEntry('u1', null, notification),
+      // The parent's own link to the agent the notification is about (review R3).
+      ...agentCall('call-1', AGENT_A, 'u1', 1),
+      {
+        type: 'custom_message',
+        id: 'cm-ours',
+        parentId: 'result-entry-1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'claudeui-agent-message',
+        content: [{ type: 'text', text: notification }],
+        display: true,
+        details: {
+          v: 1,
+          kind: 'task-notification',
+          deliveryId: 'd-1',
+          title: 'Agent "scout" completed',
+          agentId: AGENT_A,
+          toolUseId: 'call-1',
+          status: 'completed',
+          runIndex: 1
+        }
+      }
+    ])
+    const { messages, taskNotifications } = await loadPiSessionHistory('sess-ours')
+    // The terminal event comes from details alone; the look-alike user text adds none.
+    expect(taskNotifications).toEqual([
+      {
+        taskId: AGENT_A,
+        toolUseId: 'call-1',
+        status: 'completed',
+        outputFile: '',
+        summary: '',
+        runIndex: 1
+      }
+    ])
+    expect(messages.find((m) => m.id === 'cm-ours')).toEqual({
+      id: 'cm-ours',
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Agent "scout" completed',
+          fragments: [{ text: notification, label: 'from an agent, not from you' }]
+        }
+      ],
+      timestamp: Date.parse('2024-01-01T00:00:02.000Z')
+    })
+    // The "never from text" rule: a user turn whose text LOOKS like one is the user's.
+    expect(messages.find((m) => m.id === 'u1')).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: notification }]
+    })
+  })
+
   it('skips a hidden custom_message and one with no text at all', async () => {
     writeSessionFile('--proj-custom3--', 'x_sess-custom3.jsonl', [
       {
@@ -1085,12 +1149,135 @@ describe('loadPiSessionHistory — host-run subagents (ADR-088)', () => {
     expect(history.messages.some((m) => m.role === 'user')).toBe(true)
   })
 
+  it('H1 (ADR-088 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished', async () => {
+    const note = (id: string, parentId: string, agentId: string, toolUseId: string) => ({
+      type: 'custom_message',
+      id,
+      parentId,
+      timestamp: '2024-01-01T00:00:05.000Z',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: '<task-notification>…</task-notification>' }],
+      display: true,
+      details: {
+        v: 1,
+        kind: 'task-notification',
+        deliveryId: `d-${id}`,
+        title: 't',
+        agentId,
+        toolUseId,
+        status: 'completed',
+        summary: `Agent "${toolUseId}" completed`,
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      }
+    })
+    const [bgCall, bgResult] = agentCall('call-C', AGENT_MISSING, 'n1', 5)
+    const bgLaunch = {
+      ...bgResult,
+      message: {
+        ...bgResult.message,
+        details: {
+          cuiAgent: { v: 1, agentId: AGENT_MISSING, background: true, status: 'async_launched' }
+        }
+      }
+    }
+    writeSessionFile('--proj-notes--', '2024-01-01T00-00-00_parent-n.jsonl', [
+      header('parent-n'),
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'go', timestamp: 1 }
+      },
+      ...agentCall('call-A', AGENT_A, 'u1', 1),
+      note('n1', 'result-entry-1', AGENT_A, 'call-A'),
+      bgCall,
+      bgLaunch
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      assistantText('a1', null, 'child A here'),
+      ...agentCall('call-B', AGENT_B, 'a1', 9),
+      note('na', 'result-entry-9', AGENT_B, 'call-B')
+    ])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'grandchild B here')])
+
+    const { taskNotifications } = await loadPiSessionHistory('parent-n')
+    expect(taskNotifications).toEqual([
+      {
+        taskId: AGENT_A,
+        toolUseId: 'call-A',
+        status: 'completed',
+        outputFile: '',
+        summary: 'Agent "call-A" completed',
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      },
+      {
+        taskId: AGENT_B,
+        toolUseId: 'call-B',
+        status: 'completed',
+        outputFile: '',
+        summary: 'Agent "call-B" completed',
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      },
+      {
+        taskId: AGENT_MISSING,
+        toolUseId: 'call-C',
+        status: 'unfinished',
+        outputFile: '',
+        summary: 'The transcript ends before this agent reported back.',
+        runIndex: 1
+      }
+    ])
+  })
+
+  it("R3: a child file's notifications count only for agents THAT child launched; a parent notification must match its link", async () => {
+    const forged = (id: string, agentId: string, toolUseId: string, status: string) => ({
+      type: 'custom_message',
+      id,
+      parentId: null,
+      timestamp: '2024-01-01T00:00:05.000Z',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: 'x' }],
+      display: true,
+      details: {
+        v: 1,
+        kind: 'task-notification',
+        deliveryId: `d-${id}`,
+        title: 't',
+        agentId,
+        toolUseId,
+        status,
+        runIndex: 1
+      }
+    })
+    writeSessionFile('--proj-forge--', '2024-01-01T00-00-00_parent-f.jsonl', [
+      header('parent-f'),
+      ...agentCall('call-A', AGENT_A, null, 1),
+      ...agentCall('call-M', AGENT_MISSING, 'result-entry-1', 2),
+      // Parent-file claim whose agent id does not match the call's link.
+      forged('p-bad', AGENT_B, 'call-M', 'completed')
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      // Child A claims its own and its sibling's terminal state: neither is A's child.
+      forged('a-self', AGENT_A, 'call-A', 'failed'),
+      forged('a-sib', AGENT_MISSING, 'call-M', 'stopped')
+    ])
+    const { taskNotifications } = await loadPiSessionHistory('parent-f')
+    expect(taskNotifications ?? []).toEqual([])
+  })
+
   it('omits subagentMessages for a session that ran no agents', async () => {
     writeSessionFile('--proj-plain--', '2024-01-01T00-00-00_plain-1.jsonl', [
       header('plain-1'),
       assistantText('e1', null, 'hi')
     ])
     expect((await loadPiSessionHistory('plain-1')).subagentMessages).toBeUndefined()
+    expect((await loadPiSessionHistory('plain-1')).taskNotifications).toBeUndefined()
   })
 })
 

@@ -8,6 +8,8 @@ import {
   type SpawnPiChildFn
 } from '../pi-child-runner'
 import type { PiBridgeHost } from '../PiBridgeHost'
+import type { PiAgentDelivery } from '../pi-delivery'
+import { slimTranscript } from '../../automode/classifier'
 import type { PiRpcClient } from '../PiRpcClient'
 
 type Cmd = Record<string, unknown>
@@ -220,6 +222,17 @@ describe('PiChildRunner turns', () => {
     expect(runner.turnToolUseIds.size).toBe(0)
   })
 
+  it('R3: runTurn refuses a /cui- prompt (model-authored text) and sends nothing', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    const before = child.client.request.mock.calls.length
+    await expect(runner.runTurn(' /cui-deliver eyJ2IjoxfQ==')).resolves.toEqual({
+      kind: 'error',
+      message: 'A prompt may not start with "/cui-".'
+    })
+    expect(child.client.request.mock.calls.length).toBe(before)
+  })
+
   it('a rejected prompt ack settles an error', async () => {
     const child = makeFakeChild((cmd) =>
       cmd.type === 'prompt'
@@ -380,6 +393,149 @@ describe('PiChildRunner output handling', () => {
     })
     // `usage` never reaches the stream.
     expect(emit.mock.calls.some((c) => String(c[0]).includes('usage'))).toBe(false)
+  })
+})
+
+const deliveryPayload = (deliveryId: string, wake = true): PiAgentDelivery => ({
+  v: 1,
+  deliveryId,
+  kind: 'task-notification',
+  text: '<task-notification>\n<status>completed</status>\n</task-notification>',
+  wake,
+  title: 'Agent "g" completed',
+  details: { agentId: 'ag-g', toolUseId: 'call-g', status: 'completed', runIndex: 1 }
+})
+
+/** The custom message pi emits for a delivered payload (probe P-S1). */
+function deliveredEnd(p: PiAgentDelivery): Cmd {
+  return {
+    type: 'message_end',
+    message: {
+      role: 'custom',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: p.text }],
+      display: true,
+      details: { ...p.details, v: 1, kind: p.kind, deliveryId: p.deliveryId, title: p.title },
+      timestamp: Date.now()
+    }
+  }
+}
+
+describe('PiChildRunner deliveries (ADR-088 S3)', () => {
+  it('M5 (runner): deliver sends exactly one /cui-deliver prompt decoding to the payload, nothing else', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    const before = child.client.request.mock.calls.length
+    const p = deliveryPayload('d-1')
+    await runner.deliver(p)
+    const sent = child.client.request.mock.calls.slice(before).map((c) => c[0] as Cmd)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].type).toBe('prompt')
+    const message = String(sent[0].message)
+    expect(message.startsWith('/cui-deliver ')).toBe(true)
+    expect(message).not.toContain(p.text)
+    const decoded = JSON.parse(
+      Buffer.from(message.slice('/cui-deliver '.length), 'base64').toString('utf8')
+    )
+    expect(decoded).toEqual(p)
+    expect(child.commandTypes()).not.toContain('steer')
+    expect(child.commandTypes()).not.toContain('follow_up')
+    expect(runner.pendingDeliveries.has('d-1')).toBe(true)
+  })
+
+  it('M3 (runner): the custom message_end clears the delivery, streams a system row under the owner, and never enters the trajectory', async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const p = deliveryPayload('d-2')
+    await runner.deliver(p)
+    child.push(deliveredEnd(p))
+    expect(runner.pendingDeliveries.size).toBe(0)
+    const rows = emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')
+    expect(rows).toHaveLength(1)
+    expect(rows[0][1]).toEqual({
+      toolUseId: 'toolu_owner',
+      message: expect.objectContaining({
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'Agent "g" completed',
+            fragments: [{ text: p.text, label: 'from an agent, not from you' }]
+          }
+        ]
+      })
+    })
+    expect(runner.trajectory.size).toBe(0)
+    // The child judge's messages are the root transcript followed by the trajectory.
+    const root = [
+      {
+        id: 'u',
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: 'do X' }],
+        timestamp: 0
+      }
+    ]
+    expect(slimTranscript([...root, ...runner.trajectory.values()])).toBe('User: do X')
+  })
+
+  it('a refused ack drops the pending delivery', async () => {
+    const child = makeFakeChild((cmd) =>
+      cmd.type === 'prompt'
+        ? { type: 'response', command: 'prompt', success: false, error: 'busy' }
+        : defaultHandler(cmd)
+    )
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    await runner.deliver(deliveryPayload('d-3'))
+    expect(runner.pendingDeliveries.size).toBe(0)
+  })
+
+  it('awaitTurn sends no prompt and settles on the next agent_settled of a run pi started itself', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    const before = child.client.request.mock.calls.length
+    const waiting = runner.awaitTurn(5_000)
+    child.push({ type: 'agent_start' })
+    child.push(assistantEnd({ text: 'more', cost: 0.1 }))
+    child.push(SETTLED)
+    await expect(waiting).resolves.toMatchObject({ kind: 'ok', totalCostUsd: 0.1 })
+    expect(child.client.request.mock.calls.length).toBe(before)
+    expect(runner.runActive).toBe(false)
+  })
+
+  it('awaitTurn returns idle after the grace when no run starts (a passive message alone is not a run)', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = makeFakeChild()
+      const runner = await PiChildRunner.start(runnerOpts(child))
+      let result: unknown
+      void runner.awaitTurn(5_000).then((r) => (result = r))
+      child.push(deliveredEnd(deliveryPayload('d-4', false)))
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(result).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(result).toEqual({ kind: 'idle' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('awaitTurn keeps waiting past the grace once a run started', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = makeFakeChild()
+      const runner = await PiChildRunner.start(runnerOpts(child))
+      let result: unknown
+      void runner.awaitTurn(5_000).then((r) => (result = r))
+      child.push({ type: 'agent_start' })
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(result).toBeUndefined()
+      child.push(SETTLED)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(result).toMatchObject({ kind: 'ok' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

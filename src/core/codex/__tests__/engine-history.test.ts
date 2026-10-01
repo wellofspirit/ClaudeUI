@@ -95,3 +95,19 @@ it('the pi branch returns subagentMessages from the pi reader', async () => {
   mocks.pi.mockResolvedValue({ messages: [], statusLine: null })
   expect('subagentMessages' in (await historyFor('pi').read('pi-sess', 'unused'))).toBe(false)
 })
+
+/** H3 (ADR-088 S3): the pi branch passes its subagents' terminal events through; none → []. */
+it('the pi branch returns taskNotifications from the pi reader', async () => {
+  const note = {
+    taskId: 'ag-1',
+    toolUseId: 'call-agent',
+    status: 'completed' as const,
+    outputFile: '',
+    summary: 'Agent "a" completed',
+    runIndex: 1
+  }
+  mocks.pi.mockResolvedValue({ messages: [], statusLine: null, taskNotifications: [note] })
+  expect((await historyFor('pi').read('pi-sess', 'unused')).taskNotifications).toEqual([note])
+  mocks.pi.mockResolvedValue({ messages: [], statusLine: null })
+  expect((await historyFor('pi').read('pi-sess', 'unused')).taskNotifications).toEqual([])
+})

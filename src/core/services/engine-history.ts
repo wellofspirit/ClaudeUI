@@ -38,9 +38,11 @@ const bare = (load: {
   statusLine?: StatusLineData | null
   /** pi's host-run subagent transcripts (ADR-088), passed through inline like Codex's. */
   subagentMessages?: SessionHistoryResult['subagentMessages']
+  /** pi's host-run subagents' terminal events (ADR-088 S3). */
+  taskNotifications?: SessionHistoryResult['taskNotifications']
 }): SessionHistoryResult => ({
   messages: load.messages,
-  taskNotifications: [],
+  taskNotifications: load.taskNotifications ?? [],
   customTitle: null,
   statusLine: load.statusLine ?? null,
   agentIdToToolUseId: {},

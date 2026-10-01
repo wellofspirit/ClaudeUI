@@ -56,6 +56,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
+import { isPiAsyncLaunchResult } from '../../../../../shared/pi-agent-result'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -220,7 +221,7 @@ function piNormalize(
         }
       }
       // Host-run subagents (ADR-088) — the `agent` tool: { description,
-      // prompt, subagent_type?, name?, model? }. Keyed on the shape (prompt +
+      // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
       // description, none of engine/agent/tasks): piNormalize never sees the
       // tool name. Checked BEFORE the legacy `subagent` shapes below.
       if (
@@ -240,7 +241,14 @@ function piNormalize(
           prompt: inp.prompt,
           subagent: type ?? 'general-purpose',
           ...(name ? { name } : {}),
-          ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {})
+          ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {}),
+          // Once a result exists it decides (ADR-088 S3): only the host's
+          // launch acknowledgement means a background run. A call refused
+          // before any spawn (validation, start failure, a deny) is settled,
+          // not "running" forever, and a definition that forced background
+          // reads as one on reload. Until then the input says: background is
+          // the default (D2), only an explicit false is foreground.
+          background: result ? isPiAsyncLaunchResult(result) : inp.run_in_background !== false
         }
       }
       // Legacy `subagent` tool (M5b transcripts; pi's upstream example).

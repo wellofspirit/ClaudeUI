@@ -172,6 +172,10 @@ export async function loadSessionIntoStore(
     // parent `agent` call id — the Codex precedent below. opencode returns none.
     const subagentMessages =
       loaded && 'subagentMessages' in loaded ? loaded.subagentMessages : undefined
+    // pi's agent notifications (ADR-088 S3): finished background runs, plus an
+    // `unfinished` entry for a launch that never reported back.
+    const taskNotifications =
+      loaded && 'taskNotifications' in loaded ? loaded.taskNotifications : undefined
     if (replace && isLive(routingId)) return 'declined'
     if (replace && !stripForReplace(routingId, messages)) return 'declined'
     // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
@@ -181,7 +185,7 @@ export async function loadSessionIntoStore(
       routingId,
       messages,
       info.cwd,
-      undefined,
+      taskNotifications,
       subagentMessages,
       statusLine
     )

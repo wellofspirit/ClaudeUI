@@ -690,9 +690,9 @@ describe('mapPiEvent — malformed/unknown event', () => {
     expect(out).toEqual([{ kind: 'ignore' }])
   })
 
-  it('known-but-unhandled-in-M1 event types (tool_execution_start, queue_update, agent_start) all map to ignore', () => {
+  it('known-but-unhandled event types (tool_execution_start, queue_update) map to ignore; agent_start is a turn_start (ADR-088 S3)', () => {
     const state = createPiMapperState()
-    expect(mapPiEvent({ type: 'agent_start' }, state)).toEqual([{ kind: 'ignore' }])
+    expect(mapPiEvent({ type: 'agent_start' }, state)).toEqual([{ kind: 'turn_start' }])
     expect(
       mapPiEvent(
         { type: 'tool_execution_start', toolCallId: 'x', toolName: 'bash', args: {} },
@@ -1504,5 +1504,119 @@ describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wi
         }
       ])
     }
+  })
+})
+
+describe('mapPiEvent — custom messages (ADR-088 S3)', () => {
+  const ourDetails = {
+    v: 1,
+    kind: 'task-notification',
+    deliveryId: 'd-1',
+    title: 'Agent "scout" completed',
+    agentId: 'ag-1',
+    toolUseId: 'call-1'
+  }
+
+  it('our custom message_end → a system context_note row plus agent_delivery', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: {
+          role: 'custom',
+          customType: 'claudeui-agent-message',
+          content: [{ type: 'text', text: '<task-notification>x</task-notification>' }],
+          display: true,
+          details: ourDetails,
+          timestamp: 1
+        }
+      } as PiEvent,
+      state
+    )
+    expect(out).toEqual([
+      {
+        kind: 'message',
+        message: {
+          id: expect.any(String),
+          role: 'system',
+          content: [
+            {
+              type: 'context_note',
+              title: 'Agent "scout" completed',
+              fragments: [
+                {
+                  text: '<task-notification>x</task-notification>',
+                  label: 'from an agent, not from you'
+                }
+              ]
+            }
+          ],
+          timestamp: expect.any(Number)
+        }
+      },
+      { kind: 'agent_delivery', deliveryId: 'd-1' }
+    ])
+  })
+
+  it("another extension's custom message renders like history (title = customType), no delivery; hidden ones are ignored", () => {
+    const state = createPiMapperState()
+    const other = (display: boolean): PiEvent =>
+      ({
+        type: 'message_end',
+        message: {
+          role: 'custom',
+          customType: 'some-ext',
+          content: 'hello',
+          display,
+          details: ourDetails,
+          timestamp: 1
+        }
+      }) as PiEvent
+    expect(mapPiEvent(other(true), state)).toEqual([
+      {
+        kind: 'message',
+        message: expect.objectContaining({
+          role: 'system',
+          content: [{ type: 'context_note', title: 'some-ext', fragments: [{ text: 'hello' }] }]
+        })
+      }
+    ])
+    expect(mapPiEvent(other(false), state)).toEqual([{ kind: 'ignore' }])
+  })
+
+  it('a custom message_start does not touch the assistant slot', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'message_start',
+        message: { role: 'custom', customType: 'x', content: 'y', display: true, timestamp: 1 }
+      } as PiEvent,
+      state
+    )
+    expect(out).toEqual([{ kind: 'ignore' }])
+    expect(state.currentMessageId).toBeNull()
+  })
+})
+
+describe('mapPiEvent — a cui-deliver extension_error (ADR-088 S3 review M-2)', () => {
+  it('maps to delivery_error, not a turn error; any other extension error is unchanged', () => {
+    const state = createPiMapperState()
+    expect(
+      mapPiEvent(
+        {
+          type: 'extension_error',
+          extensionPath: 'command:cui-deliver',
+          event: 'command',
+          error: 'invalid delivery'
+        },
+        state
+      )
+    ).toEqual([{ kind: 'delivery_error', message: 'invalid delivery' }])
+    expect(
+      mapPiEvent(
+        { type: 'extension_error', extensionPath: 'command:other', event: 'command', error: 'x' },
+        state
+      )
+    ).toEqual([{ kind: 'error', message: 'x' }])
   })
 })

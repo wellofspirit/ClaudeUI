@@ -32,6 +32,8 @@ import type { PiMapperOutput, PiMapperState } from './event-mapper'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import type { PiBridgeAbandoned, PiBridgeHandler, PiHostedToolHandler } from './PiBridgeHost'
 import { locatePiLaunch } from './pi-locate'
+import { deliveryCommand, isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
+import type { PiAgentDelivery } from './pi-delivery'
 import type {
   PiGetLastAssistantTextData,
   PiGetSessionStatsData,
@@ -200,6 +202,19 @@ export class PiChildRunner {
    * turn is no longer draining.
    */
   draining = false
+  /**
+   * Agent messages sent to this child (`deliver`) that pi has not delivered
+   * yet: an id leaves when its own `custom` message_end arrives (ADR-088 S3).
+   * The subagent drive keeps the child alive while any remain (a delivery that
+   * landed while pi was settling starts a deferred run, see `awaitTurn`).
+   */
+  readonly pendingDeliveries = new Set<string>()
+  /**
+   * pi is inside a run: set by `agent_start`, cleared by `agent_settled`. A run
+   * pi started on its own after the settle we consumed (a deferred delivery)
+   * shows here even when its delivery is already confirmed.
+   */
+  runActive = false
   /** The child's own assistant messages for the judge (ADR-087 D1, see
    *  `recordTrajectoryMessage`). */
   readonly trajectory = new Map<string, ChatMessage>()
@@ -387,6 +402,14 @@ export class PiChildRunner {
    * send a follow-up mid-turn.
    */
   runTurn(prompt: string): Promise<PiTurnOutcome> {
+    // Model-authored text (an agent's or a dispatcher's prompt) must never run
+    // a ClaudeUI bridge command in the child (ADR-088 S3): nothing is sent.
+    if (isReservedPiCommandText(prompt)) {
+      return Promise.resolve({
+        kind: 'error',
+        message: `A prompt may not start with "${PI_RESERVED_COMMAND_PREFIX}".`
+      })
+    }
     this.mapperState.startTimeMs = Date.now()
     this.mapperState.messageEnded = false
     // A fresh turn (first turn, or a continuation after a prior stop/timeout/
@@ -414,6 +437,64 @@ export class PiChildRunner {
       )
     })
     this.currentTurn = turn
+    return turn
+  }
+
+  /**
+   * Put an agent-authored message into this child (ADR-088 S3): the bridge's
+   * `/cui-deliver` command as an RPC `prompt` — never plain text, `steer` or
+   * `follow_up` (pi-delivery.ts, the marking rule). pi steers a running turn
+   * or, idle and `wake`, starts one; the id stays in `pendingDeliveries` until
+   * the custom message itself arrives (the ack does not confirm it, P-S4).
+   * Never rejects; a failed ack is logged with ids only.
+   */
+  async deliver(payload: PiAgentDelivery): Promise<void> {
+    this.pendingDeliveries.add(payload.deliveryId)
+    try {
+      const resp = await this.client.request({ type: 'prompt', message: deliveryCommand(payload) })
+      if (!resp.success) {
+        this.pendingDeliveries.delete(payload.deliveryId)
+        logger.warn(
+          this.logTag,
+          `delivery ${payload.deliveryId} (agent ${payload.details.agentId}) was not accepted`
+        )
+      }
+    } catch (err) {
+      this.pendingDeliveries.delete(payload.deliveryId)
+      logger.warn(
+        this.logTag,
+        `delivery ${payload.deliveryId} (agent ${payload.details.agentId}) failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+      )
+    }
+  }
+
+  /**
+   * Wait for a run pi starts ON ITS OWN (no prompt is sent): a delivery that
+   * landed while pi was settling runs AFTER the `agent_settled` the caller
+   * already consumed (agent-session.ts defers it, Facts S2/S3). Settles with
+   * that run's outcome, or `{kind: 'idle'}` when no run has started
+   * (`agent_start`) by the end of `idleGraceMs`. Once a run started, it waits
+   * for its settle however long it takes. Keyed on the run rather than on any
+   * event: a passive delivery appended at idle emits its message and no run.
+   */
+  awaitTurn(idleGraceMs: number): Promise<PiTurnOutcome | { kind: 'idle' }> {
+    const turn = new Promise<PiTurnOutcome | { kind: 'idle' }>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const settle = (outcome: PiTurnOutcome): void => {
+        if (timer) clearTimeout(timer)
+        resolve(outcome)
+      }
+      this.settled = settle
+      if (!this.runActive) {
+        timer = setTimeout(() => {
+          timer = undefined
+          if (this.settled !== settle || this.runActive) return
+          this.settled = null
+          resolve({ kind: 'idle' })
+        }, idleGraceMs)
+      }
+    })
+    this.currentTurn = turn as Promise<PiTurnOutcome>
     return turn
   }
 
@@ -533,7 +614,17 @@ export class PiChildRunner {
    * `onToolResult` hook and the stream ({@link forwardPiChildStream}).
    */
   private handleOutput(out: PiMapperOutput): void {
+    if (out.kind === 'turn_start') {
+      this.runActive = true
+      return
+    }
+    if (out.kind === 'agent_delivery') {
+      // The delivery's own custom message_end: THIS is delivery (the ack is not, P-S4).
+      this.pendingDeliveries.delete(out.deliveryId)
+      return
+    }
     if (out.kind === 'result') {
+      this.runActive = false
       this.settled?.({
         kind: 'ok',
         totalCostUsd: out.totalCostUsd,
@@ -654,6 +745,10 @@ export function forwardPiChildStream(
         }
       })
       break
+    // The runner consumes these (run start, delivery confirmation); no stream.
+    case 'turn_start':
+    case 'agent_delivery':
+    case 'delivery_error':
     case 'bash_output':
     case 'ignore':
       break

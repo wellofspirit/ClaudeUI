@@ -57,6 +57,31 @@ describe('SubagentMessages — persisted thinking block honors expandThinking', 
   })
 })
 
+describe('SubagentMessages — host-injected agent messages (ADR-088 S3)', () => {
+  it('M8: a nested system context_note renders ContextNoteBlock inside the subagent list', () => {
+    const note: ChatMessage = {
+      id: 'm-note-1',
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Message from the main agent',
+          fragments: [
+            { text: '<agent-message>hi</agent-message>', label: 'from an agent, not from you' }
+          ]
+        }
+      ],
+      timestamp: Date.now()
+    }
+    render(<SubagentMessages messages={[note]} />)
+    const list = screen.getByTestId('SubagentMessages')
+    const row = list.querySelector('[data-testid="SubagentMessage"][data-id="m-note-1"]')
+    expect(row).not.toBeNull()
+    expect(row!.querySelector('[data-testid="ContextNoteBlock"]')).not.toBeNull()
+    expect(screen.getByText('Message from the main agent')).toBeInTheDocument()
+  })
+})
+
 /**
  * Subagent tool-result images. A subagent's results live in
  * `subagentMessages`, outside the chat's ImageGalleryProvider, so
