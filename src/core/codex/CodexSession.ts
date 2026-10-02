@@ -262,6 +262,15 @@ const OVERRIDABLE_ACTIONS = new Set(['command', 'execve', 'applyPatch'])
 const INTERRUPTED_HOSTED_TOOL = '[Request interrupted by user for tool use]'
 /** The same tombstone for a stop nobody asked for: a failed turn, a lost transport. */
 const STOPPED_HOSTED_TOOL = '[Request stopped before the tool use finished]'
+/**
+ * What an interrupted (or failed) turn's still-open native card says. The
+ * binary does not complete these on an interrupt, so the card would spin for
+ * good; and a command's process is not necessarily gone with the turn.
+ */
+const INTERRUPTED_NATIVE_TOOL: Record<string, string> = {
+  commandExecution: 'Interrupted — the command may still be running in the background',
+  fileChange: 'Interrupted before the change was confirmed'
+}
 
 /**
  * The v2 notification carries a CAMEL-cased projection of the core's own
@@ -2783,11 +2792,34 @@ export class CodexSession extends BaseSession {
    *
    * Only ever ADDITIVE: a `tool_use` that already has a `tool_result` is
    * skipped, so a result the replay did deliver is never overwritten and one
-   * call is tombstoned once. Native `commandExecution` / `fileChange` items are
-   * deliberately out of scope — the binary completes those itself on an
-   * interrupt, so they are not orphaned in the first place.
+   * call is tombstoned once. Native `commandExecution` / `fileChange` items
+   * have their own sweep ({@link failUnresolvedNativeCalls}).
    */
   private failUnresolvedHostedCalls(text: string, turnId: string | null): void {
+    this.tombstoneOpenToolUses(turnId, (toolName) =>
+      CODEX_HOSTED_TOOL_NAMES.has(toolName) ? text : null
+    )
+  }
+
+  /**
+   * Tombstone an interrupted or failed turn's still-open native
+   * `commandExecution` / `fileChange` cards. An interrupt does NOT complete
+   * them: the turn ends `interrupted` with whatever `items` it carries (often
+   * none), so a card whose `item/completed` never came spins for good. The
+   * text stays honest — a command's process may outlive the turn, and a file
+   * change may or may not have landed. Additive and scoped to the turn, like
+   * the hosted sweep; a late completion replacing the tombstone is a
+   * follow-up.
+   */
+  private failUnresolvedNativeCalls(turnId: string): void {
+    this.tombstoneOpenToolUses(turnId, (toolName) => INTERRUPTED_NATIVE_TOOL[toolName] ?? null)
+  }
+
+  /** Give every open `tool_use` of `turnId` (all turns when null) that `textFor` names an error result. */
+  private tombstoneOpenToolUses(
+    turnId: string | null,
+    textFor: (toolName: string) => string | null
+  ): void {
     // `codexItemId` encodes [thread, turn, item] as JSON, so every id minted for
     // one turn shares the prefix an EMPTY item id produces, its own `""]` tail
     // dropped. Scoping matters: a late `turn/completed` for an earlier turn must
@@ -2803,10 +2835,11 @@ export class CodexSession extends BaseSession {
       if (
         block.type !== 'tool_use' ||
         !block.toolUseId.startsWith(prefix) ||
-        !CODEX_HOSTED_TOOL_NAMES.has(block.toolName) ||
         settled.has(block.toolUseId)
       )
         continue
+      const text = textFor(block.toolName)
+      if (text === null) continue
       settled.add(block.toolUseId)
       this.dispatch({ kind: 'toolResult', toolUseId: block.toolUseId, result: text, isError: true })
     }
@@ -2816,11 +2849,13 @@ export class CodexSession extends BaseSession {
     if (!this.threadId || typeof turn.id !== 'string' || this.endedTurns.has(turn.id)) return
     for (const item of turn.items ?? []) this.item(turn.id, item, true, true)
     // After the replay, never before it: what that did not complete never will.
-    if (turn.status === 'interrupted' || turn.status === 'failed')
+    if (turn.status === 'interrupted' || turn.status === 'failed') {
       this.failUnresolvedHostedCalls(
         turn.status === 'interrupted' ? INTERRUPTED_HOSTED_TOOL : STOPPED_HOSTED_TOOL,
         turn.id
       )
+      this.failUnresolvedNativeCalls(turn.id)
+    }
     this.flushItemStreams(turn.id)
     this.endedTurns.add(turn.id)
     // Past the `endedTurns` latch above, so a replayed `turn/completed` for a

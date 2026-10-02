@@ -215,9 +215,23 @@ Per patch `team-streaming-B` (retired) at char `8648903`:
   `queued_command` attachment converter `Sur` → `…n.origin&&{origin:n.origin}` on its `isReplay`
   frame), `{kind: 'human'}` on a typed prompt; other kinds include `auto-continuation`, `plugin`,
   `peer`. On disk verified (2.1.285 transcripts: the turn-starting `user` line and the
-  `queued_command` attachment, with `commandMode: 'task-notification'`, both carry it); the live
-  frame's shape is inferred from the converters (not probed). ClaudeUI recognises a notification by
-  `origin.kind` first and by the XML only when `origin` is absent (S4, ADR-087 amendment).
+  `queued_command` attachment, with `commandMode: 'task-notification'`, both carry it).
+  **On stdout the delivered `<task-notification>` user frame exists only with
+  `--replay-user-messages`, and only for a MID-TURN absorption** (static reading of 2.1.285, S4d):
+  the absorbed `queued_command` attachment reaches stdout through the converter `Sur` (the
+  `isReplay` frame above), which runs only on the replay path; an IDLE-time completion's turn-starting
+  user message is dropped from the SDK stream even with the flag (the stream filter `Gy` drops it via
+  `Lae` — a user message whose text carries the `<task-notification>` tag — and `Sbo`, which treats
+  `origin.kind: 'task-notification'` as not-external). ClaudeUI passes no `--replay-user-messages`,
+  so it never sees this frame live; its live signal is `system/task_notification` (§4.4 of
+  `04-system-subtypes.md`: `task_id`, `tool_use_id`, `status`, `output_file`, `summary`, `usage`,
+  optional `skip_transcript` / `ambient`; no XML, no result text). Find the functions by the strings
+  `function Sur(`, `function Lae(`, `function Sbo(` in `vendor/claude-cli/cli.js`. ClaudeSession
+  builds the agent note from that system frame (a backgrounded run only; none for `skip_transcript`
+  / `ambient`) and keeps the user-frame path as a fallback deduped per task run; it recognises a
+  notification user frame by `origin.kind` first and by the XML only when `origin` is absent (S4,
+  ADR-087 amendment). A foreground run also emits `system/task_notification` (its result returns
+  through the tool_result), so the frame alone does not mean the model was notified.
 - **`isReplay`** — present and `true` only on replay/ack/queued-command paths. Absent on live synthetic tool_result messages.
 - **`parent_tool_use_id`** — null for top-level; non-null when the user message is inside a subagent's tool execution.
 

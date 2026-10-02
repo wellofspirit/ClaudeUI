@@ -168,6 +168,13 @@ export interface SystemMessage extends BaseSDKMessage {
     tool_uses?: number
     duration_ms?: number
   } | null
+  /**
+   * task_notification: the run is not recorded in the transcript (cli.js's
+   * internal forks — dreams, scans, fork workers). Its model never sees it.
+   */
+  skip_transcript?: boolean
+  /** task_notification: an ambient (housekeeping) task the model never sees. */
+  ambient?: boolean
   /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'

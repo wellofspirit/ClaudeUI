@@ -124,6 +124,14 @@ test pins either):
   records add none). Recognition is structural first: cli.js's `origin.kind` (`'task-notification'`
   for a notification, `'human'` for a typed prompt); only a frame or line without `origin` (pre
   2.1.241) falls back to the XML with a known status. A typed prompt never becomes a system row.
+  **Corrected (S4d):** live, cli.js never puts the delivered user message on ClaudeUI's stdout
+  (only `--replay-user-messages` would, and only for a mid-turn absorption —
+  `docs/protocol-cc/03-inbound-messages.md` §3.4), so the live note is built from
+  `system/task_notification`: one note per task run, only for a run cli.js reported backgrounded
+  (a foreground run's result returns through its tool_result), none for `skip_transcript` /
+  `ambient` runs; its text is synthesised from the frame's fields (task id, status, summary, usage),
+  so the live note's text differs from the reloaded one (the delivered XML). The user-frame path
+  stays as a fallback, deduped per task run.
 - **Amended (S4, 2026-10-02) — ClaudeSession records the user's prompts.** Before S4 its
   `messageHistory` held no human turn at all (`run()` never recorded the prompt; the renderer adds
   the bubble from `session:user-message`), so a Claude session's dispatched pi/opencode target was

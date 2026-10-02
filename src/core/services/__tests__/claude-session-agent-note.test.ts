@@ -280,3 +280,88 @@ describe('ClaudeSession — a task notification is an agent note (S4)', () => {
     expect(userTexts()).toEqual(['first', 'second'])
   })
 })
+
+describe('ClaudeSession — the live agent note comes from system/task_notification (S4d)', () => {
+  const started = (isBackgrounded?: boolean): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'task_started',
+    task_id: 'a1b2c3',
+    tool_use_id: 'toolu_agent',
+    task_type: 'local_agent',
+    description: 'scan',
+    ...(isBackgrounded !== undefined ? { is_backgrounded: isBackgrounded } : {})
+  })
+  const ended = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'task_notification',
+    uuid: 'sys-note',
+    task_id: 'a1b2c3',
+    tool_use_id: 'toolu_agent',
+    status: 'completed',
+    output_file: '',
+    summary: 'Agent "scan" completed',
+    usage: { total_tokens: 1200, tool_uses: 3, duration_ms: 4000 },
+    ...extra
+  })
+  const notes = (sent: Array<[string, string, unknown]>): ChatMessage[] =>
+    messagesSent(sent).filter((m) => m.role === 'system')
+
+  it('a background run’s task_notification → exactly one system agent note, no user bubble', async () => {
+    const { session, sent } = await runWire('rid-d1', 'go', [started(true), ended()])
+    expect(notes(sent)).toEqual([
+      expect.objectContaining({
+        id: 'sys-note',
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'Agent "scan" completed',
+            fragments: [
+              {
+                text: 'Task a1b2c3: completed\nAgent "scan" completed\nUsage: 1200 tokens · 3 tool uses · 4s',
+                label: 'from an agent, not from you'
+              }
+            ]
+          }
+        ]
+      })
+    ])
+    expect(messagesSent(sent).filter((m) => m.role === 'user')).toEqual([])
+    expect(notifications(sent)).toHaveLength(1)
+    expect(session.getMessages().filter((m) => m.role === 'system')).toHaveLength(1)
+  })
+
+  it('a run moved to the background later (task_updated) gets its note too', async () => {
+    const { sent } = await runWire('rid-d1-flip', 'go', [
+      started(false),
+      {
+        type: 'system',
+        subtype: 'task_updated',
+        task_id: 'a1b2c3',
+        patch: { is_backgrounded: true }
+      },
+      ended()
+    ])
+    expect(notes(sent)).toHaveLength(1)
+  })
+
+  it.each([
+    ['a foreground run (its result returns through the tool_result)', [started(false), ended()]],
+    ['skip_transcript', [started(true), ended({ skip_transcript: true })]],
+    ['ambient', [started(true), ended({ ambient: true })]]
+  ])('no note for %s', async (_label, wire) => {
+    const { sent } = await runWire('rid-d1-skip', 'go', wire as Array<Record<string, unknown>>)
+    expect(notes(sent)).toEqual([])
+    expect(notifications(sent)).toHaveLength(1)
+  })
+
+  it('the system frame and the replayed user frame for the same run → one note', async () => {
+    const { sent } = await runWire('rid-d1-dedupe', 'go', [
+      started(true),
+      ended(),
+      notificationFrame({ origin: { kind: 'task-notification' } })
+    ])
+    expect(notes(sent)).toHaveLength(1)
+    expect(notes(sent)[0].id).toBe('sys-note')
+  })
+})

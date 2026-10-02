@@ -2395,25 +2395,49 @@ describe('Codex hosted tools', () => {
       expect(results()).toEqual([{ toolUseId: CARD, result: TOMBSTONE, isError: true }])
     })
 
-    it('leaves a native command item alone — the binary completes its own', async () => {
+    // S4d: this used to pin "the binary completes its own" — it does not: an
+    // interrupted turn ends with `items: []` and the command card spun for good.
+    const command = (status: string) => ({
+      id: 'command',
+      type: 'commandExecution',
+      command: 'pwd',
+      cwd: '/isolated',
+      status,
+      aggregatedOutput: '',
+      exitCode: status === 'completed' ? 0 : null,
+      durationMs: null
+    })
+    it('tombstones a native command an interrupt left open — honestly, once', async () => {
       const f = fixture()
       await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
+      ended(f, 'interrupted')
+      expect(results()).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","command"]',
+          result: 'Interrupted — the command may still be running in the background',
+          isError: true
+        }
+      ])
+    })
+
+    it('tombstones an open fileChange on a failed turn, and leaves a completed command alone', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
       f.notify('item/started', {
         threadId: 'root',
         turnId: 'turn',
-        item: {
-          id: 'command',
-          type: 'commandExecution',
-          command: 'pwd',
-          cwd: '/isolated',
-          status: 'inProgress',
-          aggregatedOutput: '',
-          exitCode: null,
-          durationMs: null
-        }
+        item: { id: 'patch', type: 'fileChange', changes: [], status: 'inProgress' }
       })
-      ended(f, 'interrupted')
-      expect(results()).toEqual([])
+      ended(f, 'failed', [command('completed')])
+      expect(results().filter((r) => r.isError === true)).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","patch"]',
+          result: 'Interrupted before the change was confirmed',
+          isError: true
+        }
+      ])
     })
   })
 })

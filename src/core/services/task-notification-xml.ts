@@ -119,6 +119,36 @@ export function isTaskNotificationDelivery(origin: unknown, text: string): boole
 const NOTE_TITLE_MAX = 120
 
 /**
+ * The agent note's TEXT for a notification seen as cli.js's
+ * `system/task_notification` frame (the live signal: ClaudeUI passes no
+ * `--replay-user-messages`, so the XML user message never reaches stdout —
+ * docs/protocol-cc/03-inbound-messages.md §3.4). Synthesised from the frame's
+ * own fields only, never model text beyond the summary; the history loader
+ * shows the delivered XML itself.
+ */
+export function taskNotificationNoteText(fields: {
+  taskId: string
+  status: string
+  summary: string
+  usage?: TaskNotification['usage']
+}): string {
+  const lines = [`Task ${fields.taskId}: ${fields.status}`]
+  if (fields.summary) lines.push(fields.summary)
+  const u = fields.usage
+  if (u) {
+    lines.push(
+      `Usage: ${u.totalTokens} tokens · ${u.toolUses} tool uses · ${Math.round(u.durationMs / 1000)}s`
+    )
+  }
+  return lines.join('\n')
+}
+
+/** cli.js's terminal status words → ClaudeUI's (`killed` reads `stopped`). */
+export function taskTerminalStatus(raw: string | undefined): TaskTerminalStatus | undefined {
+  return raw ? STATUS[raw] : undefined
+}
+
+/**
  * The agent note's title for a delivered notification (live and history use
  * the same one): the summary's first line, clipped; else the status; else a
  * generic title. Derives nothing beyond what {@link parseTaskNotificationXml}
