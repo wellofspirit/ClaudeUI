@@ -25,10 +25,14 @@
  *   node scripts/compress-web-assets.mjs --quiet         # silent on success
  */
 
-import { brotliCompressSync, gzipSync, constants } from 'node:zlib'
+import { brotliCompress, gzip, constants } from 'node:zlib'
+import { promisify } from 'node:util'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+const brotliAsync = promisify(brotliCompress)
+const gzipAsync = promisify(gzip)
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
@@ -79,7 +83,28 @@ function writeSibling(filePath, suffix, encoded, rawSize) {
   return encoded.length
 }
 
-function main() {
+/**
+ * Compress one file. The async zlib calls run on libuv's thread pool, so files
+ * compress in parallel. Brotli 11 over ~65 files was ~6 s on one core, and is
+ * now bounded by the largest bundle (~2 s).
+ */
+async function compressFile(filePath) {
+  const buf = readFileSync(filePath)
+  const [br, gz] = await Promise.all([
+    brotliAsync(buf, {
+      params: {
+        [constants.BROTLI_PARAM_QUALITY]: 11,
+        [constants.BROTLI_PARAM_SIZE_HINT]: buf.length
+      }
+    }),
+    gzipAsync(buf, { level: 9 })
+  ])
+  const brSize = writeSibling(filePath, '.br', br, buf.length)
+  writeSibling(filePath, '.gz', gz, buf.length)
+  return { filePath, rawSize: buf.length, brSize }
+}
+
+async function main() {
   if (!existsSync(TARGET_DIR)) {
     console.error(`[compress-web-assets] directory not found: ${TARGET_DIR}`)
     process.exit(1)
@@ -92,27 +117,17 @@ function main() {
    */
   const perDir = new Map()
 
-  for (const filePath of walk(TARGET_DIR)) {
-    // Never compress our own output (a `.js.br` has extname `.br` anyway, but
-    // be explicit — a stale `.gz.br` would be served as a broken asset).
-    if (filePath.endsWith('.br') || filePath.endsWith('.gz')) continue
-    if (!COMPRESSIBLE.has(extname(filePath).toLowerCase())) continue
+  const eligible = walk(TARGET_DIR).filter(
+    (filePath) =>
+      // Never compress our own output (a `.js.br` has extname `.br` anyway, but
+      // be explicit — a stale `.gz.br` would be served as a broken asset).
+      !filePath.endsWith('.br') &&
+      !filePath.endsWith('.gz') &&
+      COMPRESSIBLE.has(extname(filePath).toLowerCase()) &&
+      statSync(filePath).size >= MIN_SIZE
+  )
 
-    const rawSize = statSync(filePath).size
-    if (rawSize < MIN_SIZE) continue
-
-    const buf = readFileSync(filePath)
-    const br = brotliCompressSync(buf, {
-      params: {
-        [constants.BROTLI_PARAM_QUALITY]: 11,
-        [constants.BROTLI_PARAM_SIZE_HINT]: buf.length
-      }
-    })
-    const gz = gzipSync(buf, { level: 9 })
-
-    const brSize = writeSibling(filePath, '.br', br, rawSize)
-    writeSibling(filePath, '.gz', gz, rawSize)
-
+  for (const { filePath, rawSize, brSize } of await Promise.all(eligible.map(compressFile))) {
     const key = relative(TARGET_DIR, dirname(filePath)) || '.'
     const acc = perDir.get(key) ?? { files: 0, raw: 0, br: 0 }
     acc.files += 1
@@ -134,4 +149,4 @@ function main() {
     )
 }
 
-main()
+await main()
