@@ -199,7 +199,7 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     expect(messages[0].content[0]).toMatchObject({ type: 'cli_command', commandName: '/clear' })
   })
 
-  it('still routes a task-notification text block to taskNotifications, not a message', async () => {
+  it('still routes a task-notification text block to taskNotifications, and shows it as an agent note, never a user message (S4)', async () => {
     writeTranscript([
       userLine([
         {
@@ -210,7 +210,11 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     ])
 
     const { messages, taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
-    expect(messages).toHaveLength(0)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      content: [{ type: 'context_note', fragments: [{ label: 'from an agent, not from you' }] }]
+    })
     expect(taskNotifications).toHaveLength(1)
     expect(taskNotifications[0].taskId).toBe('agent-9')
   })

@@ -22,8 +22,8 @@ export interface KillProcessTreeDeps {
  * `child.kill()` is needed (the old "we still call child.kill() so exit fires"
  * comment was a misunderstanding — exit fires for ANY termination). Only if
  * taskkill can't even be spawned do we fall back to `child.kill()` so `exit`
- * still fires. This matches the already-correct `pi-subagent-source.ts`
- * `killTree`.
+ * still fires. (The retired M5b in-pi subagent extension carried the same
+ * `killTree` logic; ADR-088's host-run children are reaped by this function.)
  *
  * Non-Windows: a plain `SIGTERM` (the caller's existing behavior); POSIX signal
  * delivery to the process group is out of scope here.

@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
+import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // Main can't import renderer code (separate Electron processes/bundles), so
 // permission-engine.ts (src/main/pi/) keeps its OWN small copy of this exact
@@ -34,8 +35,9 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
-    // In-pi subagents (M5b) — the SECOND extension's bare-name registration,
-    // reusing the SAME 'task' kind as dispatch_agent.
+    // Host-run subagents (ADR-089) — the bridge's `agent` tool.
+    ['agent', 'task'],
+    // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
@@ -320,6 +322,41 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
   })
 
+  it('task: the agent tool ({description, prompt, subagent_type?, name?, model?}, ADR-089)', () => {
+    expect(
+      PiEngineToolMap.normalize('task', {
+        description: 'Find the gate',
+        prompt: 'Look for X',
+        subagent_type: 'Explore',
+        model: 'openai-codex/gpt-5.6-luna'
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Find the gate',
+      prompt: 'Look for X',
+      subagent: 'Explore',
+      name: 'Explore',
+      model: 'openai-codex/gpt-5.6-luna',
+      background: true
+    })
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', name: 'scout' })
+    ).toEqual({
+      kind: 'task',
+      description: 'd',
+      prompt: 'p',
+      subagent: 'general-purpose',
+      name: 'scout',
+      background: true
+    })
+    // ADR-089 S3: background is the default; only an explicit false is foreground.
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
+    ).toMatchObject({ kind: 'task', background: false })
+    // Without description it is not the agent shape (the generic fallback stays).
+    expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
+  })
+
   it('task: subagent single mode ({agent, task}) -> "Subagent: <agent>" / subagent field is the bare agent name', () => {
     const view = PiEngineToolMap.normalize('task', { agent: 'echoer', task: 'say hi' })
     expect(view).toEqual({
@@ -388,5 +425,104 @@ describe('PiEngineToolMap.displayName', () => {
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
+    expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
+  })
+})
+
+describe('PiEngineToolMap — agent background comes from the RESULT once there is one (ADR-089 S3 review R1)', () => {
+  const input = { description: 'd', prompt: 'p' }
+  const result = (toolResult: string, isError?: boolean) => ({
+    type: 'tool_result' as const,
+    toolUseId: 'call-1',
+    toolResult,
+    ...(isError === undefined ? {} : { isError })
+  })
+  const launched = result(
+    "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\n…"
+  )
+  const stateOf = (background: boolean | undefined, hasResult: boolean, notified: boolean) =>
+    deriveTaskState({
+      isHistorical: false,
+      hasActiveTask: false,
+      isBackground: !!background,
+      hasResult,
+      notification: notified
+        ? { taskId: 'a', toolUseId: 'call-1', status: 'completed', outputFile: '', summary: '' }
+        : undefined,
+      resultIsError: false
+    })
+
+  it('a call refused before any spawn (isError, no lifecycle record) is settled, not running', () => {
+    const view = PiEngineToolMap.normalize(
+      'task',
+      input,
+      result('Agent type "nope" not found. Available agents: general-purpose', true)
+    )
+    expect(view).toMatchObject({ kind: 'task', background: false })
+    expect(stateOf(view.kind === 'task' ? view.background : undefined, true, false).isRunning).toBe(
+      false
+    )
+  })
+
+  it('an async-launched result is background: running until its notification', () => {
+    const view = PiEngineToolMap.normalize('task', input, launched)
+    expect(view).toMatchObject({ background: true })
+    const bg = view.kind === 'task' ? view.background : undefined
+    expect(stateOf(bg, true, false).isRunning).toBe(true)
+    expect(stateOf(bg, true, true).isRunning).toBe(false)
+  })
+
+  it('a definition that forced background (input said false) reads background on reload', () => {
+    const view = PiEngineToolMap.normalize('task', { ...input, run_in_background: false }, launched)
+    expect(view).toMatchObject({ background: true })
+  })
+
+  it('a foreground report is not background; before a result the input decides', () => {
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).toMatchObject({
+      background: false
+    })
+    expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+  })
+})
+
+describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () => {
+  it('kinds mirror permission-engine (detail / note)', () => {
+    expect(PiEngineToolMap.kindOf('send_message')).toBe('detail')
+    expect(PiEngineToolMap.kindOf('task_stop')).toBe('note')
+    expect(piToolKind('send_message')).toBe('detail')
+    expect(piToolKind('task_stop')).toBe('note')
+  })
+
+  it('send_message: to + summary as fields, the message as the text; task_stop: a stop note', () => {
+    expect(
+      PiEngineToolMap.normalize('detail', { to: 'scout', summary: 'check X', message: 'also X' })
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'scout' },
+        { label: 'summary', value: 'check X' }
+      ],
+      text: 'also X'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toEqual({
+      kind: 'note',
+      icon: 'stop',
+      text: 'Stopped agent scout'
+    })
+  })
+
+  it('task_stop: once the host answered, the row says what it said (a refusal is not a stop)', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'note',
+        { task_id: 'scout' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'Agent scout is not running.',
+          isError: true
+        }
+      )
+    ).toEqual({ kind: 'note', icon: 'stop', text: 'Agent scout is not running.' })
   })
 })

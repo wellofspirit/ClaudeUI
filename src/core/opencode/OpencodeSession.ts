@@ -12,8 +12,6 @@ import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
   AttachmentUpload,
   ChatMessage,
-  ContentBlock,
-  ImageMediaType,
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
@@ -42,7 +40,6 @@ import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
-import { internAttachments } from '../services/blob-store'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import {
   mapEvent,
@@ -80,25 +77,20 @@ import type { OpencodeAgentInfo } from './OpencodeClient'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
-  classify,
-  formatUnparseableJudgeReply,
-  formatVerdictLine,
-  isAutoModeFastPathAllowed,
   type ClassifyResult,
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
+import { runJudgePipeline } from '../automode/judge-pipeline'
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
   allowRuleReviewBlock,
   AutoModeDenialTracker,
   autoModeReviewBlock,
-  formatAutoModeDenyReason,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
-import { allowRuleGate } from '../automode/allow-rule-gate'
+import { effectiveShellCwd } from '../automode/read-only-gate'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
 import {
@@ -344,7 +336,7 @@ export class OpencodeSession extends BaseSession {
   private pendingQuestions = new Map<string, AskUserQuestion[]>()
   // Per-message part accumulator keyed by messageId
   private accumulators = new Map<string, MessageAccumulator>()
-  // ADR-084 §1 — readOnlyBypass calls waiting for a tool part's input, keyed by
+  // ADR-084 §1 — readOnlyInput calls waiting for a tool part's input, keyed by
   // the part's callID. Settled from consumeEvents right after mapEvent applied a
   // `message.part.updated` to `accumulators`, by their own timeout, or by
   // cancel(); each settle removes itself, so an empty set never lingers.
@@ -641,27 +633,6 @@ export class OpencodeSession extends BaseSession {
     this.sendStatusLine()
   }
 
-  /**
-   * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
-   * the renderer's optimistic addUserMessage (session-store.ts): attachments
-   * first (image/document blocks), then a trailing text block. Keeps
-   * getMessages() / replay fidelity for image/PDF attachments sent via opencode.
-   * Like every ChatMessage, the blocks carry blob refs, not bytes (ADR-087).
-   */
-  private buildUserContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
-    const content: ContentBlock[] = []
-    for (const att of internAttachments(attachments) ?? []) {
-      const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
-      if (att.mediaType === 'application/pdf') {
-        content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
-      } else {
-        content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
-      }
-    }
-    if (prompt) content.push({ type: 'text', text: prompt })
-    return content
-  }
-
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
     this.clearInactivityTimer()
     // Reset the cancel flag so it only guards THIS run's connect window. cancel()
@@ -696,7 +667,7 @@ export class OpencodeSession extends BaseSession {
       const userMsg: ChatMessage = {
         id: uuid(),
         role: 'user',
-        content: this.buildUserContent(prompt, attachments),
+        content: this.userMessageContent(prompt, attachments),
         timestamp: Date.now()
       }
       this.messageHistory.push(userMsg)
@@ -737,6 +708,8 @@ export class OpencodeSession extends BaseSession {
       return this.run(prompt, attachments)
     }
 
+    // A fresh turn closes the user-stop window (ADR-090); the steer path above keeps it.
+    this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
 
@@ -768,7 +741,7 @@ export class OpencodeSession extends BaseSession {
       const userMsg: ChatMessage = {
         id: uuid(),
         role: 'user',
-        content: this.buildUserContent(prompt, attachments),
+        content: this.userMessageContent(prompt, attachments),
         timestamp: Date.now()
       }
       this.messageHistory.push(userMsg)
@@ -1462,6 +1435,8 @@ export class OpencodeSession extends BaseSession {
         this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
         this.sendStatus()
         this.resetInactivityTimer()
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-090).
+        this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now, as the next turn's prompt (isProcessing is already false, so
         // run() takes the fresh-turn path rather than the steer path).
@@ -1505,7 +1480,12 @@ export class OpencodeSession extends BaseSession {
       case 'error':
         this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
-        this.send('session:error', output.message)
+        // ADR-090: a turn the user stopped ends in opencode's
+        // MessageAbortedError — the abort's aftermath, not news. The window is
+        // the rule (an abort outside a user stop is unexplained and still shows).
+        if (!this.suppressedAfterUserStop('OpencodeSession', output.message)) {
+          this.send('session:error', output.message)
+        }
         this.sendStatus()
         this.resetInactivityTimer()
         break
@@ -1688,6 +1668,9 @@ export class OpencodeSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
+    // ADR-090: open the user-stop window for a live turn BEFORE the abort —
+    // the SSE `session.error` (MessageAbortedError) can beat the HTTP reply.
+    if (this.isProcessing) this.beginUserStop()
     if (this.client && this.openSessionId) {
       try {
         await this.client.abortSession(this.openSessionId)
@@ -1706,6 +1689,7 @@ export class OpencodeSession extends BaseSession {
     this.sealStreamItems()
     this._cancelled = true
     this.isProcessing = false
+    this.endUserStop()
     // Deliberate teardown (window close, idle timeout) is still a disconnect as
     // far as the renderer is concerned — Claude broadcasts 'disconnected' from
     // its own cancel() (claude-session.ts). Without it an idle-timed-out
@@ -2326,9 +2310,11 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
-   * ADR-084 §1 — the static read-only path, run after the category fast path
-   * and before any judge is resolved. True when it allowed the call (replied,
-   * card annotated); false sends the call on to the judge exactly as before.
+   * ADR-084 §1 — the input the pipeline's read-only gate reads
+   * (`inputFor('read-only')`), run after the category fast path and before any
+   * judge is resolved. `null` → no read-only gate (the call goes on to the
+   * allow-rule skip and the judge exactly as before); `'settled'` → the ask
+   * went away meanwhile (nothing replied, no judge asked).
    *
    * The command is read from the TOOL PART's own input, never from the ask's
    * `metadata` fallback: opencode's shell ask carries only `{command}` there
@@ -2337,11 +2323,13 @@ export class OpencodeSession extends BaseSession {
    * directory. The shell tool asks from its own `execute`, concurrently with
    * the processor publishing the part's input, so the ask can arrive first:
    * when the part carries no input yet, wait up to TOOL_INPUT_WAIT_MS for it.
-   * Still no tool part → no bypass (the judge decides).
+   * Still no tool part → no read-only gate (the judge decides).
    */
-  private async readOnlyBypass(approval: PendingApproval): Promise<boolean> {
-    if (!isShellToolName(approval.toolName)) return false
-    if (!this.isAutoMode(this.permissionMode)) return false
+  private async readOnlyInput(
+    approval: PendingApproval
+  ): Promise<Record<string, unknown> | null | 'settled'> {
+    if (!isShellToolName(approval.toolName)) return null
+    if (!this.isAutoMode(this.permissionMode)) return null
     let input = findToolInput(this.accumulators, undefined, approval.toolUseId)
     if (!input && approval.toolUseId) {
       logger.debug('OpencodeSession', 'auto-mode read-only bypass: waiting for the tool part input')
@@ -2353,91 +2341,29 @@ export class OpencodeSession extends BaseSession {
           'OpencodeSession',
           'auto-mode read-only bypass: session closed while waiting — not replying'
         )
-        return true
+        return 'settled'
       }
       // Answered server-side during the wait: settled, so handled — the same
-      // rule as the check after the gate below.
+      // rule as the pipeline's check after the gate (`stillPending`).
       if (!this.pendingApprovals.has(approval.requestId)) {
         logger.debug(
           'OpencodeSession',
           'auto-mode read-only bypass: ask resolved while it ran — not replying'
         )
-        return true
+        return 'settled'
       }
       input = findToolInput(this.accumulators, undefined, approval.toolUseId)
     }
     if (!input) {
       logger.debug('OpencodeSession', 'auto-mode read-only bypass refused (input:unverified)')
-      return false
+      return null
     }
-    const gate = await readOnlyGate({
-      action: { toolName: approval.toolName, input },
-      cwd: this.cwd,
-      permissions: this.mergedUserPermissions(),
-      autoModeActive: () => this.isAutoMode(this.permissionMode),
-      honoursWorkdir: true,
-      logSource: 'OpencodeSession'
-    })
-    // The capture awaited a subprocess; the ask may have been answered
-    // server-side meanwhile (`approval-resolved` drops it from the map). It is
-    // settled, so it is handled: no reply, and no judge call for it either.
-    if (!this.pendingApprovals.has(approval.requestId)) {
-      logger.debug(
-        'OpencodeSession',
-        'auto-mode read-only bypass: ask resolved while it ran — not replying'
-      )
-      return true
-    }
-    if (!gate.allow) return false
-    this.sendToolReview(approval.toolUseId, 'read-only')
-    this.autoReply(approval.requestId, 'once')
-    return true
-  }
-
-  /**
-   * ADR-085 §4 — the allow-rule judge skip, run after the read-only bypass and
-   * before any judge is resolved. True when a user allow rule let the call
-   * skip the judge (replied `once`, card annotated) or the ask was settled
-   * meanwhile; false sends it on to the judge exactly as before.
-   *
-   * The engine ruleset stripped every allow rule in auto mode
-   * (`withoutAllowRules`), so an allowed call still asks and the host decides
-   * here, from `mergedUserPermissions()` (allow rules included, read fresh).
-   * The gate is synchronous, so no mode can change while it runs beyond what
-   * its own `autoModeActive()` reads.
-   */
-  private allowRuleBypass(approval: PendingApproval): boolean {
-    const target = this.allowRuleAction(approval)
-    if (!target) return false
-    const type = approval.subagent ? this.subagentTask(approval.subagent)?.type : undefined
-    const gate = allowRuleGate({
-      action: target.action,
-      toolName: approval.toolName,
-      cwd: this.cwd,
-      permissions: this.mergedUserPermissions(),
-      autoModeActive: () => this.isAutoMode(this.permissionMode),
-      logSource: 'OpencodeSession',
-      ...(target.mcpToolKey ? { mcpToolKey: target.mcpToolKey } : {}),
-      ...(type ? { subagent: type } : {})
-    })
-    if (!gate.allow) return false
-    // The ask may have been answered while the read-only path awaited: it is
-    // settled, so handled — the rule readOnlyBypass follows.
-    if (!this.pendingApprovals.has(approval.requestId)) {
-      logger.debug(
-        'OpencodeSession',
-        'auto-mode allow-rule skip: ask already settled — not replying'
-      )
-      return true
-    }
-    this.sendAllowRuleReview(approval.toolUseId, gate.rule)
-    this.autoReply(approval.requestId, 'once')
-    return true
+    return input
   }
 
   /**
    * The allow-rule review on the call's card. A shell ask only gets here once
-   * its tool part is known (readOnlyBypass waited), but an MCP / webfetch ask
+   * its tool part is known (readOnlyInput waited), but an MCP / webfetch ask
    * can precede its part, and the reducer DROPS a block whose `tool_use` is in
    * no message yet — so, like sendDenial, hold it until the part's input
    * arrives (≤ TOOL_INPUT_WAIT_MS). The reply is never delayed.
@@ -2458,7 +2384,7 @@ export class OpencodeSession extends BaseSession {
    * What the allow-rule skip checks for this ask, or `undefined` (no skip —
    * the judge decides). Paths below are under
    * `vendor/opencode-src/packages/opencode/src/`.
-   * - shell: the TOOL PART's input only (readOnlyBypass already waited for
+   * - shell: the TOOL PART's input only (readOnlyInput already waited for
    *   it; the ask's `{command}` metadata would lose `workdir`);
    * - `webfetch`: the url (`tool/webfetch.ts:39-47` asks with
    *   `patterns: [params.url]`, `metadata: {url, …}`); `websearch`
@@ -2522,7 +2448,7 @@ export class OpencodeSession extends BaseSession {
    * `input: args`, `:67-80`), so its part input comes only from the
    * processor's `tool-call` handler (`session/processor.ts:331-351`), which
    * runs concurrently with `execute` — the ask can win (M-OC6). Waits up to
-   * TOOL_INPUT_WAIT_MS, like readOnlyBypass for shell. `null` when the session
+   * TOOL_INPUT_WAIT_MS, like readOnlyInput for shell. `null` when the session
    * closed or the ask was settled during the wait (nothing to reply); the
    * approval unchanged when it already carries input, has no tool part, or the
    * wait timed out (the judge then sees `{}`, as before).
@@ -2766,7 +2692,7 @@ export class OpencodeSession extends BaseSession {
   /**
    * What the pre-check reads: the permission mode at ask time, the user's
    * deny/ask (and, read in plan mode only, allow) rules FRESH per call (as
-   * readOnlyBypass reads them — a settings edit mid-session binds the next
+   * the pipeline's read-only gate reads them — a settings edit mid-session binds the next
    * ask; best-effort, so a load failure leaves only plan-refuse/session-allow/
    * continue), G9's compiled user-origin rules, this chat's session-allow set,
    * and (for child asks, ADR-085 S4) the ruleset last patched onto this
@@ -2922,23 +2848,23 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /**
+   * The auto-mode decision for one ask: the edit fast path here, then the
+   * shared judge pipeline (`automode/judge-pipeline.ts`, ADR-088) with
+   * opencode's hooks. G9 (a USER-authored ask rule outranks the classifier)
+   * runs before this, for every mode: the host pre-check in
+   * routePermissionAsk (ADR-085 S2).
+   */
   private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
     const category = approval.toolName
-    // G9 (a USER-authored ask rule outranks the classifier) runs before this,
-    // for every mode: the host pre-check in routePermissionAsk (ADR-085 S2).
-    // Fast-path: read-only/safe tools never need the judge. An exact set of
-    // built-in categories (`read`/`glob`/`grep`/`list`), so an MCP key
-    // (`<server>_<tool>`, ADR-085 §3) never takes it.
-    if (isAutoModeFastPathAllowed(category)) {
-      this.autoReply(approval.requestId, 'once')
-      return
-    }
     // ADR-084 §3 — the auto-mode ruleset asks for EVERY edit so this gate sees
     // it: an edit whose targets (patterns, the edit/write path, apply_patch
     // move destinations) are all clear of agent-control paths is the
     // acceptEdits auto-allow, with no judge call and no denial-cap bookkeeping,
     // exactly as when opencode allowed it server-side. Anything else — a
     // control path, or targets that cannot all be told — goes to the judge.
+    // Before the pipeline: its category fast path never covers `edit`, so the
+    // order between the two is unobservable.
     if (
       category === 'edit' &&
       editClearsAgentControl(approval.patterns, approval.input, this.cwd)
@@ -2946,118 +2872,104 @@ export class OpencodeSession extends BaseSession {
       this.autoReply(approval.requestId, 'once')
       return
     }
-    // ADR-084 §1 — a plainly read-only shell command in the workspace needs no
-    // judge: allowed here with a fixed review on the card, no recordAllow()
-    // (a static allow never resets the denial caps) and no usage row. Before
-    // the judge is resolved, so it holds even when no judge model does.
-    if (await this.readOnlyBypass(approval)) return
-    // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
-    // parity plus safety checks, allow-rule-skip.ts). Same bookkeeping as the
-    // read-only path: no recordAllow(), no usage row, no tool outcome. A child
-    // ask takes it too, with the PARENT's rules (ruling 4).
-    if (this.allowRuleBypass(approval)) return
-    // An ask with no input yet (an MCP tool, ADR-085 §3) — give the judge the
-    // tool part's real input, or the call settled meanwhile.
-    const judged = await this.inputForJudge(approval)
-    if (!judged) return
-    approval = judged
-    const judge = this.makeJudgeFn()
-    if (!judge) {
-      this.fallbackToHuman(approval)
-      return
-    }
-    try {
-      // Phase 3 ground truth. actionMeta FIRST: it is what resolves repo
-      // visibility, and classifierEnvironment picks the resolved value up on
-      // this same call rather than one approval later.
-      const actionMeta = await this.captureActionMeta(category, approval.input)
-      const environment = await this.classifierEnvironment()
-      // ADR-085 S4 — a child's call is judged as the assistant's own, against
-      // the parent's task that spawned it.
-      const subagent = approval.subagent ? this.subagentTask(approval.subagent) : undefined
-      const result = await classify(
-        {
-          messages: this.messageHistory,
-          action: {
-            toolName: category,
-            input: approval.input,
-            ...(approval.subagent ? { subagent: subagent ?? { type: 'unknown' } } : {})
-          },
-          environment,
-          ...(actionMeta ? { actionMeta } : {}),
-          ...(this.toolOutcomes.size ? { outcomes: Object.fromEntries(this.toolOutcomes) } : {}),
-          twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
+    // The approval the judge and the human card see: the ask itself, or — for
+    // an ask that came without input (an MCP tool) — with the tool part's
+    // input once `inputFor('judge')` has found it.
+    let judgedApproval = approval
+    let transport: JudgeTransport | null = null
+    const outcome = await runJudgePipeline(
+      { toolUseId: approval.toolUseId ?? '', toolName: category, input: approval.input },
+      {
+        logSource: 'OpencodeSession',
+        cwd: this.cwd,
+        currentMode: () => this.permissionMode,
+        autoModeActive: () => this.isAutoMode(this.permissionMode),
+        permissions: () => this.mergedUserPermissions(),
+        honoursWorkdir: true,
+        // ADR-084 §1 — the read-only gate reads the TOOL PART's input (it may
+        // wait for it, see readOnlyInput). ADR-085 S3 — an ask with no input
+        // yet (an MCP tool) gives the judge the tool part's real input; asked
+        // only after the allow-rule skip, which needs none, so a skippable ask
+        // is answered at once.
+        inputFor: async (stage) => {
+          if (stage === 'read-only') return this.readOnlyInput(approval)
+          const judged = await this.inputForJudge(approval)
+          if (!judged) return 'settled'
+          judgedApproval = judged
+          return judged.input
         },
-        judge
-      )
-      // ADR-085 S2 — the ask may have been settled while the judge ran: a
-      // session-allow sweep answered it `once`, or a server-side cascade
-      // (`approval-resolved`) dropped it. Replying now would 404 and paint a
-      // verdict on a call that already ran. Checked before G10, so a settled ask
-      // never gets a card either.
-      if (!this.pendingApprovals.has(approval.requestId)) {
-        logger.debug(
-          'OpencodeSession',
-          'auto-mode verdict for an ask already settled — not replying'
-        )
-        return
-      }
-      // G10 — the judge call is async and the user can switch autonomy mode
-      // while it is in flight (ref §3 step 5 / cli.js's
-      // `mode_changed_while_queued`). Re-read the CURRENT mode: if auto mode is
-      // no longer active the verdict is stale authority, so discard it and ask.
-      if (!this.isAutoMode(this.permissionMode)) {
-        logger.info(
-          'OpencodeSession',
-          `auto-mode verdict discarded — permission mode changed to "${this.permissionMode}" while the judge ran`
-        )
-        this.fallbackToHuman(approval)
-        return
-      }
-      const verdictLine = formatVerdictLine(result, category)
-      if (result.stage === 'error') {
-        // stage=error means no verdict was obtained — a WARN carrying the
-        // transport's own message, since a bare `stage=error` line says
-        // nothing about the cause (mirrors PiSession's identical treatment).
-        logger.warn('OpencodeSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
-      } else {
-        logger.info('OpencodeSession', verdictLine)
-      }
-      // Set only on a fail-closed unparseable verdict — the one block whose
-      // reason says nothing about WHY the judge's answer was unreadable.
-      if (result.raw !== undefined) {
-        logger.debug('OpencodeSession', formatUnparseableJudgeReply(result))
-      }
-      if (result.unavailable) {
-        this.fallbackToHuman(approval)
-        return
-      }
-      if (result.block) {
-        // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
-        // blocks → hand control to the human, with the cap's own sentence as the
-        // approval card's `decisionReason` so they see WHY they were asked.
-        const capped = this.autoDenials.recordBlock(result.category)
-        if (capped) {
-          this.fallbackToHuman(approval, capped)
-          return
+        // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
+        // parity plus safety checks, allow-rule-skip.ts). Same bookkeeping as
+        // the read-only path: no recordAllow(), no usage row, no tool outcome.
+        // A child ask takes it too, with the PARENT's rules (ruling 4). The
+        // engine ruleset stripped every allow rule in auto mode
+        // (`withoutAllowRules`), so an allowed call still asks and the host
+        // decides here, from `mergedUserPermissions()` (allow rules included,
+        // read fresh). allowRuleAction reads the ask's own data (patterns, the
+        // MCP key, the tool part's shell input the read-only stage already
+        // waited for); the gate applies `mcpToolKey` to MCP actions only.
+        allowRuleAction: () => this.allowRuleAction(approval)?.action,
+        mcpToolKey: sanitizeMcpName,
+        // ADR-085 S4 — a child's call is judged as the assistant's own,
+        // against the parent's task that spawned it.
+        subagent: approval.subagent
+          ? (this.subagentTask(approval.subagent) ?? { type: 'unknown' })
+          : undefined,
+        // A stale configured judge model fails closed (one session:error);
+        // no transport → the human decides.
+        judgeAvailable: () => {
+          transport = this.makeJudgeFn()
+          return transport !== null
+        },
+        judgeTransport: () => transport!,
+        messages: () => this.messageHistory,
+        environment: () => this.classifierEnvironment(),
+        captureActionMeta: (name, input) => this.captureActionMeta(name, input),
+        outcomes: () =>
+          this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
+        recordOutcome: (id, result) => {
+          if (approval.toolUseId) this.recordToolOutcome(id, result)
+        },
+        denials: this.autoDenials,
+        twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
+        // The allow-rule review waits for the tool part (sendAllowRuleReview);
+        // every other review goes out at once (sendToolReview). Both are
+        // no-ops without a toolUseId.
+        sendReview: (_id, review) =>
+          typeof review === 'object' && 'allowRule' in review
+            ? this.sendAllowRuleReview(approval.toolUseId, review.allowRule)
+            : this.sendToolReview(approval.toolUseId, review),
+        // ADR-085 S2 — the ask may have been settled meanwhile: a session-allow
+        // sweep answered it `once`, or a server-side cascade
+        // (`approval-resolved`) dropped it. Replying now would 404 and paint a
+        // verdict on a call that already ran. Each stage keeps its own line.
+        stillPending: (stage) => {
+          if (this.pendingApprovals.has(approval.requestId)) return true
+          const line =
+            stage === 'read-only'
+              ? 'auto-mode read-only bypass: ask resolved while it ran — not replying'
+              : stage === 'allow-rule'
+                ? 'auto-mode allow-rule skip: ask already settled — not replying'
+                : stage === 'judge'
+                  ? 'auto-mode verdict for an ask already settled — not replying'
+                  : null
+          if (line) logger.debug('OpencodeSession', line)
+          return false
         }
-        // Phase 3 — annotate the blocked call so a re-attempt is judged as a
-        // retry of something THIS monitor denied (post-block consent
-        // inheritance), not as a fresh proposal.
-        if (approval.toolUseId) this.recordToolOutcome(approval.toolUseId, 'automode-blocked')
-        this.sendToolReview(approval.toolUseId, result)
-        this.autoReply(approval.requestId, 'reject', formatAutoModeDenyReason(result))
-      } else {
-        this.autoDenials.recordAllow()
-        this.sendToolReview(approval.toolUseId, result)
-        this.autoReply(approval.requestId, 'once')
       }
-    } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `auto-mode classify failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-      this.fallbackToHuman(approval)
+    )
+    switch (outcome.kind) {
+      case 'allow':
+        this.autoReply(approval.requestId, 'once')
+        return
+      case 'deny':
+        this.autoReply(approval.requestId, 'reject', outcome.reason)
+        return
+      case 'human':
+        this.fallbackToHuman(judgedApproval, outcome.reason)
+        return
+      case 'settled':
+        return
     }
   }
 

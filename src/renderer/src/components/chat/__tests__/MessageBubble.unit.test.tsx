@@ -601,6 +601,32 @@ describe('MessageBubble — F20 rows', () => {
     expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
   })
 
+  it('M8 (top level — pins the pre-existing system-row routing, no S3 change): an agent message renders ContextNoteBlock, never the user bubble', () => {
+    const msg = makeChatMessage({
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Agent "scout" completed',
+          fragments: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+              label: 'from an agent, not from you'
+            }
+          ]
+        }
+      ]
+    })
+    const { container } = render(
+      <MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />
+    )
+    expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
+    expect(screen.getByText('Agent "scout" completed')).toBeInTheDocument()
+    // The user bubble is the right-aligned wrapper carrying data-markdown-source.
+    expect(container.querySelector('[data-markdown-source]')).toBeNull()
+    expect(container.querySelector('.justify-end')).toBeNull()
+  })
+
   it('routes a review_result system block to ReviewResultCard', () => {
     const msg = makeChatMessage({
       role: 'system',

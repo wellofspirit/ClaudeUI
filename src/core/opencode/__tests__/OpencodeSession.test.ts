@@ -8361,3 +8361,80 @@ describe('OpencodeSession — task call lifetime (child errors, overflow)', () =
     session.dispose()
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADR-090 — a user stop is not an error: the MessageAbortedError opencode
+// publishes for a turn the user stopped raises no banner.
+// ---------------------------------------------------------------------------
+
+describe('ADR-090 — a user stop is not an error', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_stop'
+
+  /** A pushed SSE feed (every subscriber replays from the start). */
+  function makeFeed(): (e: OpencodeEvent) => void {
+    const history: OpencodeEvent[] = []
+    const wakers = new Set<() => void>()
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      let i = 0
+      for (;;) {
+        while (i < history.length) yield history[i++]
+        if (signal?.aborted) return
+        await new Promise<void>((resolve) => {
+          wakers.add(resolve)
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }
+    })
+    return (e) => {
+      history.push(e)
+      const pending = [...wakers]
+      wakers.clear()
+      for (const wake of pending) wake()
+    }
+  }
+  const sessionError = (id: string, name: string, message: string): OpencodeEvent =>
+    ({
+      id,
+      type: 'session.error',
+      properties: { sessionID: SES, error: { name, data: { message } } }
+    }) as OpencodeEvent
+  const idle = (id: string): OpencodeEvent =>
+    ({ id, type: 'session.idle', properties: { sessionID: SES } }) as OpencodeEvent
+  const errors = (win: MockWindow): unknown[] =>
+    win.webContents.send.mock.calls.filter((c) => c[0] === 'session:error').map((c) => c[2])
+
+  it('E3: interrupt() → MessageAbortedError (before the abort reply) → no banner, the turn ends idle; a later turn’s error shows', async () => {
+    mockCreateSession.mockResolvedValue({ id: SES })
+    const push = makeFeed()
+    const win = new MockWindow()
+    const session = new OpencodeSession('r_stop', win as unknown as HostWindowHandle, '/tmp')
+    await session.run('go')
+    expect(session.status.state).toBe('running')
+
+    // The abort's HTTP reply lands only AFTER the SSE error (O1's race).
+    let reply!: () => void
+    mockAbortSession.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          reply = resolve
+        })
+    )
+    const stopping = session.interrupt()
+    push(sessionError('e1', 'MessageAbortedError', 'Aborted'))
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    reply()
+    await stopping
+    push(idle('e2'))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(errors(win)).toEqual([])
+    expect(session.status.state).toBe('idle')
+
+    // A fresh, non-interrupted turn: its error is news.
+    await session.run('again')
+    push(sessionError('e3', 'UnknownError', 'boom'))
+    await vi.waitFor(() => expect(errors(win)).toEqual(['boom']))
+    session.dispose()
+  })
+})

@@ -28,7 +28,7 @@ import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
-import type { EngineId } from '../../shared/types'
+import type { ChatMessage, EngineId } from '../../shared/types'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
@@ -46,8 +46,12 @@ import type {
  */
 export interface CallerSessionHandle {
   cwd: string
-  /** Claude-style permission-mode string (buildRuleset's `mode` param). */
-  autonomyMode: string
+  /** The caller's Claude-style permission mode, read LIVE at every dispatch
+   *  decision (ADR-088) — not a snapshot taken when the handle was built. */
+  getAutonomyMode: () => string
+  /** The caller's live transcript (ISession.getMessages), for the judge of a
+   *  dispatched pi/opencode target's calls (ADR-088). */
+  getMessages: () => ChatMessage[]
   /** Re-emits an event under the caller session's routing (ISession.emit). */
   emit: (channel: string, data: unknown) => void
   /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
@@ -279,7 +283,8 @@ export function createOpencodeHostedToolsServer(
           fromEngine: 'opencode',
           fromRoutingId: __xeng_caller_session,
           cwd: caller.cwd,
-          autonomyMode: caller.autonomyMode,
+          getAutonomyMode: caller.getAutonomyMode,
+          getMessages: caller.getMessages,
           emit: caller.emit,
           addDispatchedCost: caller.addDispatchedCost,
           toolUseId: __xeng_call_id,

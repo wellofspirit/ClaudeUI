@@ -6,6 +6,7 @@ per-direction liveness split superseded by the 2026-09-18 amendment below)
 **Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §1–§2 moves dispatched usage into `usage_event` and gates `dispatch.maxCostUsd` on the API-equivalent cost for every target.
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
+**Amended by:** [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live)
 
 ## Context
 
@@ -60,8 +61,10 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
    No depth counters. The tool is main-agent-only by policy; Claude-native subagents share the
    parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
 5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
-   ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is _not_
-   spun up for targets in v1, `full` maps to allow-all _minus the user's deny/ask rules_: since
+   ADR-022 `buildRuleset` for opencode; permission mode for Claude — since
+   [ADR-088](adr-088_dispatch-autonomy-inheritance.md) an auto-mode target is JUDGED (cli.js's own
+   judge for Claude, ClaudeUI's for pi/opencode, Codex's `auto_review` for Codex) and the mode is
+   read LIVE from the parent at every decision point; and since
    [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §2 every
    target engine carries the user's deny and ask rules — never the allow rules — and the host's
    robust matcher runs on every forwarded ask, so a denied command is refused and an ask-rule command
@@ -127,8 +130,8 @@ matter for maintenance are folded in below.)
   `asyncIterator.return()` kills the child, so `for await`+`break` is forbidden. Concurrent
   same-`session_id` dispatches are busy-rejected (one iterator per target). Target approvals
   forward as `xeng:` `PendingApproval`s resolved back into the target's `canUseTool` promise.
-  `full`/`auto` callers map to `bypassPermissions` on the target (no judge for targets in v1,
-  per §5); `plan` maps to `default`.
+  `full`/`auto` callers map to cli.js `auto` on the target (ADR-088; `bypassPermissions` callers
+  still map to `bypassPermissions`); `plan` maps to `default`.
 
 - **M3 shipped (subtask-parity UX).** Dispatched work renders via TaskCard ('task' kind; engine ·
   model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude

@@ -32,7 +32,13 @@ import {
   type TranscriptAgentEvent,
   type TranscriptTerminal
 } from './agent-identity'
-import { parseTaskNotificationXml, type ParsedTaskNotification } from './task-notification-xml'
+import {
+  isTaskNotificationDelivery,
+  parseTaskNotificationXml,
+  taskNotificationNoteTitle,
+  type ParsedTaskNotification
+} from './task-notification-xml'
+import { agentNoteMessage } from './agent-note'
 import { queuedCommandText } from '../sdk/queued-command-text'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
@@ -1001,6 +1007,21 @@ export async function loadSessionHistory(
       agentEvents.push(event)
       unstamped.push([entry, event])
     }
+    /**
+     * A notification cli.js DELIVERED (a turn-starting user line, or a
+     * `queued_command` attachment absorbed mid-turn): the same agent note the
+     * live session shows (ClaudeSession.handleTaskNotificationUserMessage), at
+     * the point the model read it, plus the usual `taskNotifications` entry.
+     * The queue-operation `enqueue` records are bookkeeping, not deliveries:
+     * they only feed `taskNotifications`.
+     */
+    const pushDeliveredNotification = (text: string, id: string, timestamp: number): void => {
+      const parsed = parseTaskNotificationXml(text)
+      messages.push(
+        agentNoteMessage({ id, title: taskNotificationNoteTitle(parsed), text, timestamp })
+      )
+      if (parsed?.status) pushNotification(parsed)
+    }
     /** Set once the anchor line has been READ — every LATER line is dropped. */
     let pastAnchor = false
 
@@ -1069,10 +1090,14 @@ export async function loadSessionHistory(
           // String content — can be user prompt, task-notification, or command
           if (isString) {
             const text = content as string
-            // Task notification
-            const notif = readTaskNotification(text)
-            if (notif) {
-              pushNotification(notif)
+            // Task notification — cli.js's delivery, by its `origin` marker
+            // (else its XML); a typed prompt (`origin.kind: 'human'`) never is.
+            if (isTaskNotificationDelivery(obj.origin, text)) {
+              pushDeliveredNotification(
+                text,
+                obj.uuid || `notif-${messages.length}`,
+                obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+              )
               return
             }
             // CLI commands — parse and emit as cli_command block
@@ -1115,9 +1140,12 @@ export async function loadSessionHistory(
             const attachments = extractAttachmentBlocks(content)
 
             // Check if text is actually a task notification
-            const notif = text ? readTaskNotification(text) : null
-            if (notif) {
-              pushNotification(notif)
+            if (text && isTaskNotificationDelivery(obj.origin, text)) {
+              pushDeliveredNotification(
+                text,
+                obj.uuid || `notif-${messages.length}`,
+                obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+              )
             } else if (
               text &&
               (text.startsWith('<command-name>') || text.startsWith('<local-command'))
@@ -1318,11 +1346,20 @@ export async function loadSessionHistory(
           // cli.js's own injections (forwarded intent, peer notes) are meta.
           if (att.isMeta === true) return
           const text = queuedCommandText(att.prompt)
-          // A task notification absorbed mid-turn rides the same attachment;
-          // its queue-operation `enqueue` already recorded it (deduped by text).
-          const notif = text ? readTaskNotification(text) : null
-          if (notif) {
-            pushNotification(notif)
+          // A task notification absorbed mid-turn rides the same attachment
+          // (`commandMode: 'task-notification'`, `origin.kind` likewise); its
+          // queue-operation `enqueue` already recorded the taskNotifications
+          // entry (deduped by text), and this is where the model read it.
+          if (
+            text &&
+            (att.commandMode === 'task-notification' ||
+              isTaskNotificationDelivery(att.origin, text))
+          ) {
+            pushDeliveredNotification(
+              text,
+              obj.uuid || `notif-${messages.length}`,
+              obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            )
             return
           }
           if (att.commandMode !== undefined && att.commandMode !== 'prompt') return

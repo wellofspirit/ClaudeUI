@@ -2395,25 +2395,49 @@ describe('Codex hosted tools', () => {
       expect(results()).toEqual([{ toolUseId: CARD, result: TOMBSTONE, isError: true }])
     })
 
-    it('leaves a native command item alone — the binary completes its own', async () => {
+    // S4d: this used to pin "the binary completes its own" — it does not: an
+    // interrupted turn ends with `items: []` and the command card spun for good.
+    const command = (status: string) => ({
+      id: 'command',
+      type: 'commandExecution',
+      command: 'pwd',
+      cwd: '/isolated',
+      status,
+      aggregatedOutput: '',
+      exitCode: status === 'completed' ? 0 : null,
+      durationMs: null
+    })
+    it('tombstones a native command an interrupt left open — honestly, once', async () => {
       const f = fixture()
       await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
+      ended(f, 'interrupted')
+      expect(results()).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","command"]',
+          result: 'Interrupted — the command may still be running in the background',
+          isError: true
+        }
+      ])
+    })
+
+    it('tombstones an open fileChange on a failed turn, and leaves a completed command alone', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
       f.notify('item/started', {
         threadId: 'root',
         turnId: 'turn',
-        item: {
-          id: 'command',
-          type: 'commandExecution',
-          command: 'pwd',
-          cwd: '/isolated',
-          status: 'inProgress',
-          aggregatedOutput: '',
-          exitCode: null,
-          durationMs: null
-        }
+        item: { id: 'patch', type: 'fileChange', changes: [], status: 'inProgress' }
       })
-      ended(f, 'interrupted')
-      expect(results()).toEqual([])
+      ended(f, 'failed', [command('completed')])
+      expect(results().filter((r) => r.isError === true)).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","patch"]',
+          result: 'Interrupted before the change was confirmed',
+          isError: true
+        }
+      ])
     })
   })
 })
@@ -2520,7 +2544,8 @@ describe('Codex cross-engine dispatch', () => {
         fromEngine: 'codex',
         fromRoutingId: 'temporary',
         cwd: '/isolated',
-        autonomyMode: 'acceptEdits',
+        getAutonomyMode: expect.any(Function),
+        getMessages: expect.any(Function),
         toolUseId: 'codex:["root","turn","dispatch-1"]',
         extra: expect.objectContaining({ signal: expect.any(AbortSignal) })
       })
@@ -2617,10 +2642,16 @@ describe('Codex cross-engine dispatch', () => {
     await expect(result).resolves.toMatchObject({ success: true })
     // The MODE still travels to the target verbatim — the card is ClaudeUI's
     // gate, not a downgrade of the user's autonomy choice.
-    expect(dispatcher.dispatch).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ autonomyMode: 'auto' })
-    )
+    const dispatchCtx = dispatcher.dispatch.mock.calls[0][1] as {
+      getAutonomyMode: () => string
+      getMessages: () => unknown[]
+    }
+    expect(dispatchCtx.getAutonomyMode()).toBe('auto')
+    // Live accessors (ADR-088): a later switch is visible through the SAME
+    // context, and the transcript is the session's live history.
+    await f.session.setPermissionMode('plan')
+    expect(dispatchCtx.getAutonomyMode()).toBe('plan')
+    expect(dispatchCtx.getMessages()).toBe(f.session.getMessages())
   })
 
   it('refuses a malformed call without a card and without dispatching', async () => {
@@ -5625,5 +5656,53 @@ describe('a Codex turn writes the usage ledger', () => {
     await f.session.run('hello')
     ended(f, 'root', 'turn')
     expect(usageRows).not.toHaveBeenCalled()
+  })
+})
+
+describe('a Codex user stop is not an error (ADR-090)', () => {
+  /** Distinct turn ids per `turn/start`, so a second turn is not an ended one. */
+  function withTurnIds(request: ReturnType<typeof fixture>['request']): void {
+    const base = request.getMockImplementation()!
+    let n = 0
+    request.mockImplementation(async (method: string, params?: unknown) =>
+      method === 'turn/start'
+        ? { turn: { id: `turn-${++n}`, status: 'inProgress', items: [] } }
+        : base(method, params)
+    )
+  }
+  const banners = (): unknown[] =>
+    events.mock.calls.filter(([channel]) => channel === 'session:error').map((c) => c[1][1])
+
+  it('E5: a turn that ends failed in a race with interrupt() raises no banner; a later failed turn does', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'failed', items: [], error: { message: 'x' } }
+    })
+    expect(banners()).toEqual([])
+
+    await session.run('again')
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-2', status: 'failed', items: [], error: { message: 'y' } }
+    })
+    expect(banners()).toEqual([
+      'Codex turn failed. Check native account status and settings; no credentials were changed.'
+    ])
+  })
+
+  it('E5 (pins existing behaviour): an interrupted turn with no error raises no banner', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'interrupted', items: [], error: null }
+    })
+    expect(banners()).toEqual([])
   })
 })

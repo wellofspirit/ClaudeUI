@@ -147,14 +147,13 @@ export function buildRuleset(mode: string): PermissionRule[] {
     default:
       // Claude default — read-only autonomy + ask for write-class tools.
       //
-      // `full`/`auto` are INTENTIONALLY gated identically to `default` for now.
-      // ClaudeUI's `full` autonomy maps to Claude's `auto` permission mode — an
-      // LLM-gated "security monitor", NOT `bypassPermissions`. We haven't ported
-      // that gatekeeper to opencode yet, so a raw `{*:allow}` here would make
-      // opencode `full` strictly LESS safe than Claude `full`. Interim: gate
-      // `full` like `default` (never less safe than Claude) until the classifier
-      // lands, at which point `full` switches risky tools to classifier-decided.
-      // See ADR-022.
+      // `full`/`auto` land here only as the NO-CLASSIFIER fallback: auto with
+      // `autoMode.enabled === false`. Every judged auto caller builds its base
+      // from `buildAutoModeRuleset` instead — the session (ADR-023, ADR-084 §3)
+      // and, since ADR-088, an opencode dispatch target — so it never takes
+      // this branch. Gated like `default` so a disabled classifier never means
+      // allow-all: `full` is an LLM-gated mode, never `bypassPermissions`
+      // (ADR-022).
       return [
         allowAll,
         ...guards,

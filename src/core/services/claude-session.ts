@@ -32,7 +32,15 @@ import {
   readAgentSidecar,
   type AgentIdentity
 } from './agent-identity'
-import { parseTaskNotificationXml } from './task-notification-xml'
+import {
+  isTaskNotificationDelivery,
+  parseTaskNotificationXml,
+  taskNotificationNoteText,
+  taskNotificationNoteTitle,
+  taskTerminalStatus,
+  liveTaskNoteSummary
+} from './task-notification-xml'
+import { agentNoteMessage } from './agent-note'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
@@ -304,6 +312,21 @@ export class ClaudeSession extends BaseSession {
    * them stopped.
    */
   private liveTasks = new Map<string, { owner: string; taskType: string }>()
+  /**
+   * Tasks cli.js reported as BACKGROUNDED (task_started `is_backgrounded`, or
+   * a later `task_updated` flip). Only a background run's end is delivered to
+   * the model as a notification, so only it gets an agent note; a foreground
+   * run's result returns through its tool_result (cli.js still emits a
+   * `system/task_notification` for it).
+   */
+  private backgroundedTaskIds = new Set<string>()
+  /**
+   * Each task's type and description from `task_started` — what cli.js builds
+   * its own notification `<summary>` from, and so the live note's title.
+   */
+  private taskDescriptions = new Map<string, { taskType: string; description: string }>()
+  /** `${taskId}#${runIndex}` of every run that already got its agent note. */
+  private notedTaskRuns = new Set<string>()
   /** Agent ids whose stream events were dropped unplaced — logged once each. */
   private unplacedAgentIds = new Set<string>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
@@ -641,6 +664,7 @@ export class ClaudeSession extends BaseSession {
         content = blocks
       }
 
+      const messageUuid = wireUuid ?? uuid()
       sdkMessage = {
         type: 'user' as const,
         session_id: this.sessionId || '',
@@ -648,8 +672,16 @@ export class ClaudeSession extends BaseSession {
         parent_tool_use_id: null,
         // Without a uuid cli.js emits no command_lifecycle frames for the
         // message and cancel_async_message cannot name it (03 §3.21).
-        uuid: wireUuid ?? uuid()
+        uuid: messageUuid
       }
+      // The user's own turn in this session's transcript (ADR-088 D1: the
+      // judge of a target this session dispatches reads it as the only real
+      // authorisation; cli.js never echoes a prompt back). A queued item is
+      // recorded when cli.js takes it (recordConsumedPrompt), not now.
+      const queued = wireUuid
+        ? this.queue.pending().some((item) => item.itemId === wireUuid)
+        : false
+      if (prompt !== null && !queued) this.recordUserPrompt(messageUuid, prompt, attachments)
     }
 
     if (this.messageChannel && !this.messageChannel.isEnded) {
@@ -783,6 +815,7 @@ export class ClaudeSession extends BaseSession {
             getRoutingId: () => this.routingId,
             cwd: this.cwd,
             getAutonomyMode: () => this.permissionMode,
+            getMessages: () => this.getMessages(),
             emit: (channel, data) => this.send(channel, data),
             addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
               this.addDispatchedCost(engineId, modelId, costUsd)
@@ -1542,9 +1575,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const itemId = msg.command_uuid
     if (typeof itemId !== 'string') return
     switch (msg.state) {
-      case 'started':
-        if (this.queue.consumeById(itemId)) this.queue.emit()
+      case 'started': {
+        const item = this.queue.consumeById(itemId)
+        if (!item) return
+        this.recordConsumedPrompt(item)
+        this.queue.emit()
         return
+      }
       case 'cancelled':
         if (this.queue.recallById(itemId)) this.queue.emit()
         return
@@ -1695,6 +1732,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // be sent to the background, so this gates the card's button.
     const background =
       typeof msg.is_backgrounded === 'boolean' ? { isBackgrounded: msg.is_backgrounded } : {}
+    if (msg.is_backgrounded === true) this.backgroundedTaskIds.add(taskId)
+    else if (msg.is_backgrounded === false) this.backgroundedTaskIds.delete(taskId)
+    this.taskDescriptions.set(taskId, { taskType, description: msg.description || '' })
     const origin =
       this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
@@ -1872,7 +1912,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const taskId = msg.task_id || ''
     const patch = msg.patch
     if (!taskId || !patch) return
-    if (patch.is_backgrounded === true) this.reportBackgrounded(taskId)
+    if (patch.is_backgrounded === true) {
+      this.backgroundedTaskIds.add(taskId)
+      this.reportBackgrounded(taskId)
+    }
     if (typeof patch.status !== 'string') return
 
     const status = patch.status
@@ -1933,6 +1976,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         }
       : undefined
 
+    const runIndex = matchedToolUseId ? (this.runCountByOrigin.get(matchedToolUseId) ?? 1) : 1
     this.send('session:task-notification', {
       taskId,
       toolUseId: matchedToolUseId,
@@ -1940,10 +1984,53 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       outputFile,
       summary: msg.summary || '',
       usage,
-      ...(matchedToolUseId
-        ? { runIndex: this.runCountByOrigin.get(matchedToolUseId) ?? 1 }
-        : undefined)
+      ...(matchedToolUseId ? { runIndex } : undefined)
     })
+
+    // The agent note (ADR-088 S4 amendment). This frame IS the live signal:
+    // without `--replay-user-messages` cli.js never puts the delivered
+    // <task-notification> user message on stdout (docs/protocol-cc/
+    // 03-inbound-messages.md §3.4). Only a BACKGROUND run's end reaches the
+    // model as a notification; runs the model never sees (`skip_transcript`,
+    // `ambient`) get none. Text is built from the frame's own fields.
+    const backgrounded = this.backgroundedTaskIds.delete(taskId)
+    if (!taskId || !backgrounded || msg.skip_transcript === true || msg.ambient === true) return
+    const status = taskTerminalStatus(msg.status) ?? 'completed'
+    const summary = msg.summary || ''
+    // The title is cli.js's own `<summary>` line, rebuilt from task_started's
+    // description — never this frame's `summary`, which for an agent is its
+    // (model-authored) result. It stays in the note's text below.
+    const known = this.taskDescriptions.get(taskId)
+    const titleLine = known ? liveTaskNoteSummary({ ...known, status }) : null
+    this.emitAgentNote(
+      taskId,
+      runIndex,
+      typeof msg.uuid === 'string' && msg.uuid ? msg.uuid : uuid(),
+      taskNotificationNoteTitle({ taskId, status, summary: titleLine ?? '', outputFile, raw: '' }),
+      taskNotificationNoteText({ taskId, status, summary, usage })
+    )
+  }
+
+  /**
+   * One agent note per task run, from whichever signal arrives first: the
+   * `system/task_notification` frame (always, live) or the delivered XML user
+   * message (only when cli.js replays user messages). The second is dropped.
+   */
+  private emitAgentNote(
+    taskId: string | undefined,
+    runIndex: number,
+    id: string,
+    title: string,
+    text: string
+  ): void {
+    if (taskId) {
+      const key = `${taskId}#${runIndex}`
+      if (this.notedTaskRuns.has(key)) return
+      this.notedTaskRuns.add(key)
+    }
+    const note = agentNoteMessage({ id, title, text, timestamp: Date.now() })
+    this.upsertMessage(note)
+    this.send('session:message', note)
   }
 
   private handleControlResponse(msg: ControlResponseMessage): void {
@@ -2131,8 +2218,37 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private flushQueueAtTurnEnd(): void {
     const pending = this.queue.pending()
     if (pending.length === 0) return
-    for (const item of pending) this.queue.setState(item, 'consumed')
+    for (const item of pending) {
+      this.queue.setState(item, 'consumed')
+      this.recordConsumedPrompt(item)
+    }
     this.queue.emit()
+  }
+
+  /**
+   * Record one of the user's prompts in `messageHistory` (local only: the
+   * renderer adds the bubble itself from `session:user-message`, so nothing is
+   * emitted — OpencodeSession/PiSession follow the same rule). Keyed by the
+   * wire uuid and recorded once: a queued item's late `started` after the
+   * turn-end flush finds it already there.
+   */
+  private recordUserPrompt(id: string, prompt: string, attachments?: AttachmentUpload[]): void {
+    if (this.messageHistory.some((m) => m.id === id)) return
+    this.messageHistory.push({
+      id,
+      role: 'user',
+      content: this.userMessageContent(prompt, attachments),
+      timestamp: Date.now()
+    })
+  }
+
+  /**
+   * A queued prompt cli.js took (ADR-053): now it is part of the conversation.
+   * Its bytes come from `queuedUploads` (the item itself carries blob refs
+   * only); called before the queue's `emit()`, which drops them.
+   */
+  private recordConsumedPrompt(item: QueuedItem): void {
+    this.recordUserPrompt(item.itemId, item.text, this.queuedUploads(item))
   }
 
   /**
@@ -3078,10 +3194,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * Handle SDK user messages. Two cases:
    *
    * 1. Array content with tool_result blocks → extract tool results (normal flow)
-   * 2. String content with <task-notification> XML → background agent completed.
-   *    The SDK injects this as a synthetic user message so the model can respond.
-   *    We parse the notification, resolve the background task, and insert the
-   *    message into the conversation so the assistant's response has context.
+   * 2. A task notification (cli.js's own delivery, recognised by its `origin`
+   *    marker, else by its XML — isTaskNotificationDelivery) → a background
+   *    agent finished. cli.js injects it as a user message so the model can
+   *    respond. We parse it, resolve the background task, and insert it into
+   *    the conversation as an agent note so the assistant's response has
+   *    context — never as the user's bubble.
    */
   private async handleUserMessage(msg: Record<string, unknown>): Promise<void> {
     const messageParam = msg.message as Record<string, unknown> | undefined
@@ -3097,7 +3215,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     // Case 2: String content — check for task notification
-    if (typeof content === 'string' && content.includes('<task-notification>')) {
+    if (typeof content === 'string' && isTaskNotificationDelivery(msg.origin, content)) {
       await this.handleTaskNotificationUserMessage(msg, content)
     }
   }
@@ -3175,6 +3293,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const summary = parsed?.summary ?? ''
     const outputFile = ''
     const usage = parsed?.usage
+    let runIndex = 1
 
     if (taskId) {
       // Same resolution order as handleTaskNotification: the agent's origin
@@ -3186,6 +3305,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.endTask(taskId)
       }
 
+      if (matchedToolUseId) runIndex = this.runCountByOrigin.get(matchedToolUseId) ?? 1
       const notification = {
         taskId,
         toolUseId: matchedToolUseId,
@@ -3193,23 +3313,26 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         outputFile,
         summary,
         usage,
-        ...(matchedToolUseId
-          ? { runIndex: this.runCountByOrigin.get(matchedToolUseId) ?? 1 }
-          : undefined)
+        ...(matchedToolUseId ? { runIndex } : undefined)
       }
       this.send('session:task-notification', notification)
     }
 
-    // Insert the synthetic user message into the conversation so the
-    // assistant's response (which follows) has visible context
-    const chatMsg: ChatMessage = {
-      id: (msg.uuid as string) || uuid(),
-      role: 'user',
-      content: [{ type: 'text', text: content }],
-      timestamp: Date.now()
-    }
-    this.upsertMessage(chatMsg)
-    this.send('session:message', chatMsg)
+    // Insert the notification into the conversation so the assistant's
+    // response (which follows) has visible context — as an agent note
+    // (`role: 'system'`), never the user's bubble, and never a `User:` line for
+    // ClaudeUI's judge of a dispatched target (ADR-088 D1, ADR-089). This path
+    // is the FALLBACK: cli.js only puts this frame on stdout with
+    // `--replay-user-messages` (and then only for a mid-turn absorption); the
+    // live note normally comes from `system/task_notification`, and a run
+    // gets one note either way. The text stays verbatim here.
+    this.emitAgentNote(
+      taskId,
+      runIndex,
+      (msg.uuid as string) || uuid(),
+      taskNotificationNoteTitle(parsed),
+      content
+    )
   }
 
   private detectTaskMapping(toolUseId: string, resultText: string): void {
