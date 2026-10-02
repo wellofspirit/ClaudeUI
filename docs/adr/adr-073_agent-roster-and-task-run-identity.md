@@ -369,8 +369,8 @@ was delivered and dropped.
   permissions allow it (`vendor/opencode-src/packages/opencode/src/tool/task.ts:104-117,145-149`;
   ClaudeUI exposes the setting). `handleChildEvent` now registers a child's own `task` call the way
   the own-session path does, so a grandchild's messages reach a bucket under its call id and its
-  `session.idle` becomes that call's task-notification. *(Superseded by §8: the terminal notification
-  now comes from the child's `task` part, and the grandchild's idle only seals its streams.)*
+  `session.idle` becomes that call's task-notification. _(Superseded by §8: the terminal notification
+  now comes from the child's `task` part, and the grandchild's idle only seals its streams.)_
 - **pi:** ClaudeUI's child processes load no `-e` extension, so its own `subagent` tool cannot
   recurse. A user-installed extension discovered in the child could spawn one; its content stays
   inside that extension's tool result and is not shown. Such a row settles through the rule above.
