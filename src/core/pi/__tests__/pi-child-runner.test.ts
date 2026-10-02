@@ -575,3 +575,59 @@ describe('forwardPiChildStream', () => {
     })
   })
 })
+
+describe('PiChildRunner — the error of a turn the host aborted (ADR-089)', () => {
+  /** P1: pi's aborted model request ends `stopReason: 'error'`, no content. */
+  const abortedEnd: Cmd = {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [],
+      provider: 'openai-codex',
+      model: 'gpt-5.6-luna',
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: 'error',
+      errorMessage: 'The operation was aborted.',
+      timestamp: Date.now()
+    }
+  }
+  const errorRows = (emit: ReturnType<typeof vi.fn>): unknown[] =>
+    emit.mock.calls.filter(
+      (c) => c[0] === 'session:subagent-message' && JSON.stringify(c[1]).includes('[error:')
+    )
+
+  it('E2: after abortTurn the error settles the turn but streams no [error: …] row', async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const turn = runner.runTurn('x')
+    await tick()
+    const aborting = runner.abortTurn(60_000)
+    child.push({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    child.push(abortedEnd)
+    await aborting
+    await expect(turn).resolves.toEqual({
+      kind: 'error',
+      message: 'The operation was aborted.'
+    })
+    expect(errorRows(emit)).toEqual([])
+  })
+
+  it('E2 (scope): without an abort the same error is still streamed as a row', async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const turn = runner.runTurn('x')
+    await tick()
+    child.push({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    child.push(abortedEnd)
+    await expect(turn).resolves.toMatchObject({ kind: 'error' })
+    expect(errorRows(emit)).toHaveLength(1)
+  })
+})

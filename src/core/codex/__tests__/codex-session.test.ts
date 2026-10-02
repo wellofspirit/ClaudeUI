@@ -5634,3 +5634,51 @@ describe('a Codex turn writes the usage ledger', () => {
     expect(usageRows).not.toHaveBeenCalled()
   })
 })
+
+describe('a Codex user stop is not an error (ADR-089)', () => {
+  /** Distinct turn ids per `turn/start`, so a second turn is not an ended one. */
+  function withTurnIds(request: ReturnType<typeof fixture>['request']): void {
+    const base = request.getMockImplementation()!
+    let n = 0
+    request.mockImplementation(async (method: string, params?: unknown) =>
+      method === 'turn/start'
+        ? { turn: { id: `turn-${++n}`, status: 'inProgress', items: [] } }
+        : base(method, params)
+    )
+  }
+  const banners = (): unknown[] =>
+    events.mock.calls.filter(([channel]) => channel === 'session:error').map((c) => c[1][1])
+
+  it('E5: a turn that ends failed in a race with interrupt() raises no banner; a later failed turn does', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'failed', items: [], error: { message: 'x' } }
+    })
+    expect(banners()).toEqual([])
+
+    await session.run('again')
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-2', status: 'failed', items: [], error: { message: 'y' } }
+    })
+    expect(banners()).toEqual([
+      'Codex turn failed. Check native account status and settings; no credentials were changed.'
+    ])
+  })
+
+  it('E5 (pins existing behaviour): an interrupted turn with no error raises no banner', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'interrupted', items: [], error: null }
+    })
+    expect(banners()).toEqual([])
+  })
+})

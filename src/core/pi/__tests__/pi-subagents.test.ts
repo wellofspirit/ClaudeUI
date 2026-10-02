@@ -36,6 +36,7 @@ import {
 } from '../pi-subagents'
 import { AutoModeDenialTracker } from '../../automode/denial-tracker'
 import { HostedGrants } from '../hosted-grants'
+import { logger } from '../../services/logger'
 import type { PiAgentDelivery } from '../pi-delivery'
 
 type Cmd = Record<string, unknown>
@@ -1957,5 +1958,111 @@ describe('PiSubagentManager — Fable arc review', () => {
       prompt: 'THE ORIGINAL TASK',
       description: 'Old task'
     })
+  })
+})
+
+describe('PiSubagentManager — logging (S4, ids and kinds only)', () => {
+  let info: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    info = vi.spyOn(logger, 'info')
+  })
+  afterEach(() => {
+    info.mockRestore()
+  })
+  /** Every PiSubagents info line logged so far. */
+  const lines = (): string[] =>
+    info.mock.calls.filter(([tag]) => tag === 'PiSubagents').map(([, msg]) => String(msg))
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+
+  it('L1: one end line per run — background, foreground and a user stop', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+
+    await mgr.run({ description: 'd', prompt: 'p' }, 'bg-l1', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(lines().filter((l) => / run 1 completed \(background\)$/.test(l))).toHaveLength(1)
+
+    const fg = await (async () => {
+      const pending = mgr.run(
+        { description: 'd', prompt: 'p', run_in_background: false },
+        'fg-l1',
+        null
+      )
+      await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+      await settle(fake.children[1])
+      return pending
+    })()
+    expect(fg.isError).toBeUndefined()
+    expect(lines().filter((l) => / run 1 completed \(foreground\)$/.test(l))).toHaveLength(1)
+
+    await mgr.run({ description: 'd', prompt: 'p' }, 'bg-stop', null)
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    await promptedWith(fake.children[2])
+    expect(mgr.stop('bg-stop', 'user')).toBe(true)
+    fake.children[2].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2))
+    expect(
+      lines().filter((l) => / run 1 stopped \(by user\) \(background\)$/.test(l))
+    ).toHaveLength(1)
+    // No run logged its end twice.
+    expect(lines().filter((l) => / run 1 (completed|stopped|failed)/.test(l))).toHaveLength(3)
+  })
+
+  it('L2: a background notification is logged with its delivery id, owner and wake — never its text', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+
+    await mgr.run({ description: 'Scan it', prompt: 'p' }, 'bg-n1', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const wake = lines().filter((l) => l.startsWith('task-notification '))
+    expect(wake).toEqual([
+      `task-notification ${delivered[0].deliveryId} for agent ${delivered[0].details.agentId} run 1 → main (wake)`
+    ])
+
+    await mgr.run({ description: 'Stop it', prompt: 'p' }, 'bg-n2', null)
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    await promptedWith(fake.children[1])
+    mgr.stop('bg-n2', 'user')
+    fake.children[1].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2))
+    expect(lines().filter((l) => l.startsWith('task-notification '))[1]).toBe(
+      `task-notification ${delivered[1].deliveryId} for agent ${delivered[1].details.agentId} run 1 → main (passive)`
+    )
+
+    for (const l of lines()) {
+      expect(l).not.toContain('report 1')
+      expect(l).not.toContain('<task-notification>')
+      expect(l).not.toContain('Scan it')
+    }
+  })
+
+  it('L3: send_message to a running child logs (steer) with no message text', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    const child = fake.children[0]
+    await promptedWith(child)
+    await mgr.sendMessage({ to: 'worker', message: 'SECRET-BODY', summary: 'SECRET-SUM' }, null)
+    const [p] = deliveriesOn(child)
+    expect(lines().filter((l) => l.startsWith('agent-message '))).toEqual([
+      `agent-message ${p.deliveryId} main → ${p.details.agentId} (steer)`
+    ])
+    for (const l of lines()) {
+      expect(l).not.toContain('SECRET-BODY')
+      expect(l).not.toContain('SECRET-SUM')
+    }
+    child.push(deliveredEvent(p))
+    await settle(child)
   })
 })

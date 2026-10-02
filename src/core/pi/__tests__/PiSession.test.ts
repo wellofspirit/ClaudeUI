@@ -938,6 +938,92 @@ describe('PiSession.interrupt', () => {
   })
 })
 
+describe('PiSession — a user stop is not an error (ADR-089)', () => {
+  /** pi's message_end for a turn error (P1: an aborted model request reads this way). */
+  const errorEnd = (errorMessage: string): PiEvent =>
+    ({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        model: 'm',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        stopReason: 'error',
+        errorMessage,
+        timestamp: 1
+      }
+    }) as never
+  /** One errored assistant message: message_start, then the error message_end. */
+  const errorTurn = (handler: (ev: PiEvent) => void, errorMessage: string): void => {
+    handler({
+      type: 'message_start',
+      message: { role: 'assistant', content: [], timestamp: 1 }
+    } as never)
+    handler(errorEnd(errorMessage))
+  }
+
+  it('E1: the aborted turn’s error after interrupt() raises no banner; the turn still ends; the next turn’s error does', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-stop-1', win as never, '/cwd', {})
+    await session.run('hi')
+    const handler = lastEventHandler()
+
+    await session.interrupt()
+    errorTurn(handler, 'The operation was aborted.')
+    handler({ type: 'agent_settled' } as never)
+
+    expect(sentPayloads(win, 'session:error')).toEqual([])
+    expect(sentChannels(win)).toContain('session:result')
+    expect((sentPayloads(win, 'session:status').at(-1) as { state: string }).state).toBe('idle')
+
+    // The window closed with the stopped turn: a later genuine error shows.
+    await session.run('next')
+    errorTurn(handler, '429 rate limited')
+    expect(sentPayloads(win, 'session:error')).toEqual(['429 rate limited'])
+  })
+
+  it('E1: interrupt() while idle opens no window — the next turn’s error still shows', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-stop-2', win as never, '/cwd', {})
+    await session.run('hi')
+    const handler = lastEventHandler()
+    handler({ type: 'agent_settled' } as never)
+
+    await session.interrupt() // idle: nothing to stop
+    await session.run('again')
+    errorTurn(handler, 'upstream 500')
+    expect(sentPayloads(win, 'session:error')).toEqual(['upstream 500'])
+  })
+
+  it('E1: an error racing the abort RPC (before its reply) is inside the window', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-stop-3', win as never, '/cwd', {})
+    await session.run('hi')
+    const handler = lastEventHandler()
+    let release!: () => void
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'abort'
+        ? new Promise((resolve) => {
+            release = () => resolve({ type: 'response', command: 'abort', success: true })
+          })
+        : defaultRequestImpl(cmd)
+    )
+    const stopping = session.interrupt()
+    errorTurn(handler, 'The operation was aborted.')
+    release()
+    await stopping
+    expect(sentPayloads(win, 'session:error')).toEqual([])
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Bridge abandonment (long-poll protocol) — PiBridgeHost's onAbandoned fires
 // when the pi child stops polling an exchange (it crashed, was killed, or its

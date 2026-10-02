@@ -620,7 +620,6 @@ export class PiSubagentManager {
     }
     entry.onDetach = null
     const end = first
-    logger.info('PiSubagents', `agent ${agentId} ${end.status}`)
     return {
       content: [{ type: 'text', text: end.text }],
       ...(end.status === 'completed' ? {} : { isError: true }),
@@ -954,6 +953,11 @@ export class PiSubagentManager {
       record.status = end.status
       // Only a run that actually ended stopped was stopped (review R1).
       record.stoppedBy = end.status === 'stopped' ? entry.stopReason : null
+      // One end line for every run, foreground or background (ids only).
+      logger.info(
+        'PiSubagents',
+        `agent ${record.agentId} run ${record.runIndex} ${end.status}${record.stoppedBy ? ` (by ${record.stoppedBy})` : ''} (${record.background ? 'background' : 'foreground'})`
+      )
       // F1: whatever the run was granted dies with it.
       scope.grants.clear()
       // C10 ordering: the notification goes out BEFORE the hosted tool
@@ -992,7 +996,14 @@ export class PiSubagentManager {
    * then names the spawner, so the root can tell it never launched that id.
    */
   private async notify(entry: LiveChild, end: RunEnd): Promise<void> {
-    if (!entry.record.background || entry.stopReason === 'dispose') return
+    if (!entry.record.background) return
+    if (entry.stopReason === 'dispose') {
+      logger.debug(
+        'PiSubagents',
+        `agent ${entry.record.agentId}: no notification (session disposing)`
+      )
+      return
+    }
     const spawnerRunner = entry.parentToolUseId ? this.liveRunner(entry.parentToolUseId) : null
     const via =
       entry.parentToolUseId && !spawnerRunner
@@ -1029,6 +1040,10 @@ export class PiSubagentManager {
         ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {})
       }
     }
+    logger.info(
+      'PiSubagents',
+      `task-notification ${payload.deliveryId} for agent ${entry.record.agentId} run ${entry.record.runIndex} → ${spawnerRunner ? (entry.record.spawnerAgentId ?? 'main') : 'main'} (${payload.wake ? 'wake' : 'passive'})`
+    )
     try {
       if (spawnerRunner) await spawnerRunner.deliver(payload)
       else this.host.deliverToSession(payload)
@@ -1116,9 +1131,11 @@ export class PiSubagentManager {
           'You are running in the foreground; your final report is returned to the agent that launched you.'
         )
       }
+      const deliveryId = uuidv4()
+      logger.info('PiSubagents', `agent-message ${deliveryId} ${fromId} → main (wake)`)
       this.host.deliverToSession({
         v: 1,
-        deliveryId: uuidv4(),
+        deliveryId,
         kind: 'agent-message',
         text: agentMessageText({ fromLabel, fromId, summary, message }),
         wake: true,
@@ -1160,6 +1177,10 @@ export class PiSubagentManager {
 
     const running = this.liveRunner(target.originToolUseId)
     if (running) {
+      logger.info(
+        'PiSubagents',
+        `agent-message ${payload.deliveryId} ${fromId} → ${target.agentId} (steer)`
+      )
       await running.deliver(payload)
       return textResult(`Message queued for delivery to ${target.label} at its next tool round.`)
     }
@@ -1193,6 +1214,10 @@ export class PiSubagentManager {
       )
     }
     const start: RunStart = { kind: 'delivery', payload }
+    logger.info(
+      'PiSubagents',
+      `agent-message ${payload.deliveryId} ${fromId} → ${target.agentId} (resume)`
+    )
     const launched = await this.launch(target, true, start)
     if (!launched.ok) return errorResult(launched.error)
     this.driveInBackground(launched.entry, start)

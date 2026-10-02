@@ -674,6 +674,15 @@ export class PiChildRunner {
     if (out.kind === 'error') {
       this.settled?.({ kind: 'error', message: out.message })
       this.settled = null
+      // ADR-089: while the host is draining a turn it aborted (a Stop,
+      // task_stop, an interrupt cascade, a dispatch stop or timeout) the error
+      // is the abort's own aftermath (pi reports an aborted model request as
+      // `stopReason: 'error'`) — settled above, never streamed as a row. The
+      // stop's own outcome is decided by whoever aborted the turn.
+      if (this.draining) {
+        logger.debug(this.logTag, 'turn error after an abort, not streamed')
+        return
+      }
       // Falls through — also forwarded as a visible stream chunk below (if a
       // toolUseId is set) so a live-watching human sees WHY the turn ended,
       // not just the eventual "Dispatched turn failed" summary.

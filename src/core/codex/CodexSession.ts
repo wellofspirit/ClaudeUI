@@ -934,6 +934,9 @@ export class CodexSession extends BaseSession {
     if (this.willQueue && prompt !== null)
       throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
+      // A fresh turn closes the user-stop window (ADR-089). A prompt never
+      // steers here: a running turn takes it through the queue (above).
+      this.endUserStop()
       this.resetAuthRowLatch()
       this.sending = true
       this.clearInactivityTimer()
@@ -1871,6 +1874,11 @@ export class CodexSession extends BaseSession {
     // down a target a later turn may continue. Idempotent — a dispatch that
     // already settled is simply absent from the dispatcher's registry.
     this.stopInFlightDispatches()
+    // ADR-089: open the user-stop window for a live (or starting) turn BEFORE
+    // `turn/interrupt` — a turn that ends `failed` in a race with the
+    // interrupt is the Stop's aftermath, not a failure to report. Not
+    // `interruptRequested`, which defers an interrupt across a start.
+    if (this.turnId || this.sending) this.beginUserStop()
     if (this.sending && !this.threadId) {
       this.dispose()
       return
@@ -1933,6 +1941,7 @@ export class CodexSession extends BaseSession {
     this.busy = false
     this.sending = false
     this.turnId = null
+    this.endUserStop()
     this.clearInactivityTimer()
     this.bashGate.cancelAll()
     this.output.clear()
@@ -2844,11 +2853,14 @@ export class CodexSession extends BaseSession {
       // Child streams may outlive this root turn.
       this.bashGate.cancelAll()
       this.output.clear()
-      if (turn.error)
-        this.send(
-          'session:error',
+      if (turn.error) {
+        const banner =
           'Codex turn failed. Check native account status and settings; no credentials were changed.'
-        )
+        // ADR-089: not after a user stop — the banner would misread the Stop.
+        if (!this.suppressedAfterUserStop('CodexSession', banner))
+          this.send('session:error', banner)
+      }
+      this.endUserStop()
       this.status('idle')
       this.resetInactivityTimer()
     }

@@ -737,6 +737,8 @@ export class OpencodeSession extends BaseSession {
       return this.run(prompt, attachments)
     }
 
+    // A fresh turn closes the user-stop window (ADR-089); the steer path above keeps it.
+    this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
 
@@ -1462,6 +1464,8 @@ export class OpencodeSession extends BaseSession {
         this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
         this.sendStatus()
         this.resetInactivityTimer()
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-089).
+        this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now, as the next turn's prompt (isProcessing is already false, so
         // run() takes the fresh-turn path rather than the steer path).
@@ -1505,7 +1509,12 @@ export class OpencodeSession extends BaseSession {
       case 'error':
         this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
-        this.send('session:error', output.message)
+        // ADR-089: a turn the user stopped ends in opencode's
+        // MessageAbortedError — the abort's aftermath, not news. The window is
+        // the rule (an abort outside a user stop is unexplained and still shows).
+        if (!this.suppressedAfterUserStop('OpencodeSession', output.message)) {
+          this.send('session:error', output.message)
+        }
         this.sendStatus()
         this.resetInactivityTimer()
         break
@@ -1688,6 +1697,9 @@ export class OpencodeSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
+    // ADR-089: open the user-stop window for a live turn BEFORE the abort —
+    // the SSE `session.error` (MessageAbortedError) can beat the HTTP reply.
+    if (this.isProcessing) this.beginUserStop()
     if (this.client && this.openSessionId) {
       try {
         await this.client.abortSession(this.openSessionId)
@@ -1706,6 +1718,7 @@ export class OpencodeSession extends BaseSession {
     this.sealStreamItems()
     this._cancelled = true
     this.isProcessing = false
+    this.endUserStop()
     // Deliberate teardown (window close, idle timeout) is still a disconnect as
     // far as the renderer is concerned — Claude broadcasts 'disconnected' from
     // its own cancel() (claude-session.ts). Without it an idle-timed-out

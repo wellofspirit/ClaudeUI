@@ -338,6 +338,21 @@ At source (`vendor/pi-src/packages/coding-agent/src/core/agent-session.ts`, `rpc
   inside that window makes the prompt fail "Agent is already processing"; once its ack is in, a
   delivery steers it.
 
+Probed/verified for ADR-089 (2026-10-02, at source in `vendor/pi-src` v0.87.1, and in a recorded
+session file + ClaudeUI log; no new probe run):
+
+- **An abort during a tool batch ends the turn `stopReason: "error"`, not `"aborted"`.** The aborted
+  batch leaves `hasMoreToolCalls` true and the loop requests the model again without checking the
+  signal (`packages/agent/src/agent-loop.ts:182-243, 262-296`; aborted calls read "Operation
+  aborted", 610-625; `bash` returns "Command aborted", `coding-agent/src/core/tools/bash.ts:356-357`).
+  The request's setup (`coding-agent/src/core/sdk.ts:375-385` → `model-runtime.ts:638-643`) rejects
+  on the aborted signal in `getAuth` (`model-runtime.ts:575-588`, 495-512), and `lazyStream` turns
+  any setup failure into an assistant message with `stopReason: "error"`, `content: []`,
+  `errorMessage: "The operation was aborted."` without consulting the signal
+  (`packages/ai/src/api/lazy.ts:4-23, 46-60`); the loop ends on it (`agent-loop.ts:244-254`), then
+  `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
+  (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-089).
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next

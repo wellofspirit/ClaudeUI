@@ -311,6 +311,9 @@ owner routing, the stop and inactivity semantics, the history of notifications; 
   parse: only a crafted cross-link in another session file can keep a child alive.
 - A steered message still undelivered at an interrupt stays in pi's queue until the next run (pi's
   `abort` keeps its queues, Fact S6).
+- Related: [ADR-089](adr-089_user-stop-is-not-an-error.md) — a stopped child streams no
+  `[error: …]` row (the runner drops a turn error while `draining`), and a user Stop of the pi
+  session raises no banner.
 - A passive delivery (a stop notice) to a live spawner is appended at the end of its turn and wakes
   nothing; its model sees it on its next turn, if there is one.
 - The Sidebar's pi-branch passthrough of `taskNotifications` has no renderer test harness.

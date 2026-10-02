@@ -877,6 +877,7 @@ export class PiSession extends BaseSession {
       this.dispatchOutputs(finishPiMessage(this.mapperState))
       this.isProcessing = false
       this.disconnected = true
+      this.endUserStop()
       this.client = null
       // The process is gone — any pending gate can never be resolved by it;
       // deny is the only sane resolution (also prevents a ghost approval card
@@ -1333,6 +1334,9 @@ export class PiSession extends BaseSession {
     if (wasBusy) command.streamingBehavior = 'steer'
 
     if (!wasBusy) this.mapperState.startTimeMs = Date.now()
+    // A fresh turn closes the user-stop window (ADR-089); a steer while the
+    // stopped turn drains keeps it.
+    if (!wasBusy) this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
     // A run pi starts on its own while this ack is pending (M-1, see below).
@@ -1560,6 +1564,8 @@ export class PiSession extends BaseSession {
         })
         this.sendStatus()
         this.resetInactivityTimer()
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-089).
+        this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now as the next turn's prompt (isProcessing is already false, so
         // run() sends a bare `prompt` rather than a `steer`).
@@ -1593,6 +1599,8 @@ export class PiSession extends BaseSession {
       }
 
       case 'error':
+        // ADR-089: the teardown of a turn the user stopped is not news.
+        if (this.suppressedAfterUserStop('PiSession', output.message)) break
         this.send('session:error', output.message)
         break
 
@@ -1612,6 +1620,7 @@ export class PiSession extends BaseSession {
 
       case 'agent_delivery':
         // The row itself came through `message`; nothing waits on this here.
+        logger.debug('PiSession', `delivery ${output.deliveryId} arrived`)
         break
 
       case 'delivery_error':
@@ -1645,6 +1654,11 @@ export class PiSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
+    // ADR-089: open the user-stop window before anything else, and only for a
+    // live turn — pi can report the abort as a turn error (an aborted model
+    // request ends `stopReason: 'error'`, docs/protocol-pi) before the abort
+    // RPC even replies.
+    if (this.isProcessing) this.beginUserStop()
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
     // Only the session's OWN cards (ADR-088 S3, Q9): a background agent's
@@ -1688,6 +1702,7 @@ export class PiSession extends BaseSession {
     this.isProcessing = false
     this.wakePending = false
     this.disconnected = false
+    this.endUserStop()
     this.rejectAllPendingGates('Interrupted')
     this.subagents.stopAll('dispose')
     if (this.client) {

@@ -92,6 +92,9 @@ export abstract class BaseSession implements ISession {
    */
   private queueFlushRerun = false
 
+  /** The user-stop window (ADR-089) — see {@link beginUserStop}. */
+  private userStopPending = false
+
   constructor(routingId: string, win: HostWindowHandle | null, cwd: string) {
     this.routingId = routingId
     this.win = win
@@ -398,6 +401,45 @@ export abstract class BaseSession implements ISession {
       clearTimeout(this.inactivityTimer)
       this.inactivityTimer = null
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // A user stop is not an error (ADR-089)
+  // ---------------------------------------------------------------------------
+  //
+  // An engine tearing down a turn the user stopped may report the teardown as
+  // a turn error (pi's aborted model request, opencode's MessageAbortedError,
+  // a Codex turn that fails in a race with the interrupt). That is not news to
+  // the user who pressed Stop, so while the window is open the session's
+  // TURN-ERROR banner is not sent; the turn-end bookkeeping still runs.
+  // ClaudeSession's `wasInterrupted` is the reference rule (it predates this
+  // helper and keeps its own flag). A user stop is reached only through the
+  // `session:interrupt` IPC (→ `interrupt()`), so the window is user-initiated
+  // by construction. The helper never touches status or processing state, and
+  // it never covers auth, prompt-ack, transport-loss, guardian or judge banners.
+
+  /**
+   * `interrupt()`: open the window — only when a turn is live (a window opened
+   * at idle would swallow the NEXT turn's genuine error), and BEFORE the abort
+   * request is sent (the engine's error can arrive before the request's reply).
+   */
+  protected beginUserStop(): void {
+    this.userStopPending = true
+  }
+
+  /** The stopped turn ended, a fresh turn started, or the session went away. */
+  protected endUserStop(): void {
+    this.userStopPending = false
+  }
+
+  /**
+   * True while the window is open — the caller then sends no turn-error
+   * banner. The suppressed text (an engine error string) is logged at info.
+   */
+  protected suppressedAfterUserStop(tag: string, message: string): boolean {
+    if (!this.userStopPending) return false
+    logger.info(tag, `turn error after a user stop, not shown: ${message}`)
+    return true
   }
 
   /**
