@@ -47,6 +47,7 @@ import {
   resolvePiForkAnchor
 } from '../../../core/services/pi-session-list'
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../../../core/services/fork-anchor'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let testHome: string
 
@@ -441,7 +442,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       toolResult: 'Image read',
       isError: false,
       // image/svg+xml is outside the modelled media types — dropped, not widened.
-      images: [{ mediaType: 'image/png', base64Data: 'PIIMG' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('PIIMG') }]
     })
   })
 

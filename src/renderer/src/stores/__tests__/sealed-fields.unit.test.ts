@@ -98,7 +98,9 @@ describe('the sealed set is DERIVED from the snapshot, not chosen', () => {
         !covered.has(k as never) &&
         // `routingId` is the map KEY, not state; the catalogs are app-level here and
         // sealed as such (the wire fans the one list into every session entry).
-        !['routingId', 'slashCommands', 'sdkSkillNames'].includes(k)
+        // `seeded` is replica-internal (ADR-087 §2): `hydrateReplica` reads it to set
+        // the store's per-client `evicted` view flag, and no store field mirrors it.
+        !['routingId', 'slashCommands', 'sdkSkillNames', 'seeded'].includes(k)
     )
     expect(
       unsealed,

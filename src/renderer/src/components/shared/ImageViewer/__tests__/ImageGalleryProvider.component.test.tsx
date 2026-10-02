@@ -6,18 +6,36 @@
  * position in a gallery flattened across every user message.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, fireEvent, waitFor } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { MessageBubble } from '../../../chat/MessageBubble'
 import { ImageGalleryProvider, useImageGallery } from '../ImageGalleryProvider'
 import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../../shared/types'
+import { blobRefOf } from '@test/helpers/blob-refs'
+import { resetBlobCacheForTests } from '../../../../lib/blob-cache'
 
 const ROUTE = 'route-image-gallery'
 
+/** What the host's blob store holds, by id — `window.api.getBlob` answers from it. */
+const hostBlobs = new Map<string, { mediaType: string; base64Data: string }>()
+
+/** A ref for these base64 bytes, with the bytes registered on the fake host. */
+function hostBlob(base64Data: string): { blobId: string; bytes: number } {
+  const ref = blobRefOf(base64Data)
+  hostBlobs.set(ref.blobId, { mediaType: 'image/png', base64Data })
+  return ref
+}
+
+function stubHostBlobs(): void {
+  hostBlobs.clear()
+  resetBlobCacheForTests()
+  window.api.getBlob = vi.fn(async (blobId: string) => hostBlobs.get(blobId) ?? null)
+}
+
 function image(base64Data: string, fileName?: string): ContentBlock {
-  return { type: 'image', mediaType: 'image/png', base64Data, fileName }
+  return { type: 'image', mediaType: 'image/png', ...hostBlob(base64Data), fileName }
 }
 
 function userMessage(id: string, content: ContentBlock[]): ChatMessage {
@@ -42,6 +60,7 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
 
   beforeEach(async () => {
     app = await bootTestApp()
+    stubHostBlobs()
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })
   })
@@ -52,7 +71,7 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
     document.body.style.overflow = ''
   })
 
-  it('renders one clickable thumb per image block', () => {
+  it('renders one clickable thumb per image block', async () => {
     const { getAllByTestId } = renderChat([
       userMessage('m1', [{ type: 'text', text: 'look' }, image('AAA', 'a.png'), image('BBB')])
     ])
@@ -62,12 +81,18 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
     expect(thumbs[0]).not.toBeDisabled()
     expect(thumbs[0].getAttribute('aria-label')).toBe('View image a.png')
     expect(thumbs[1].getAttribute('aria-label')).toBe('View attached image')
-    expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,AAA'
+    // The thumbnail resolves its bytes through blob:get, not from the message.
+    await waitFor(() =>
+      expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,AAA'
+      )
+    )
+    expect(thumbs[0].querySelector('[data-testid="BlobImage"]')?.getAttribute('data-state')).toBe(
+      'ready'
     )
   })
 
-  it('opens the viewer at the clicked thumbnail, indexed across all messages', () => {
+  it('opens the viewer at the clicked thumbnail, indexed across all messages', async () => {
     const { getAllByTestId, getByTestId, queryByTestId } = renderChat([
       userMessage('m1', [image('AAA', 'a.png')]),
       userMessage('m2', [image('BBB', 'b.png'), image('CCC', 'c.png')])
@@ -78,8 +103,12 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
     fireEvent.click(getAllByTestId('MessageBubble.imageThumb')[2])
     expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('3 / 3')
     expect(getByTestId('ImageViewerOverlay.filename').textContent).toBe('c.png')
-    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,CCC'
+    // The overlay resolves the CURRENT entry itself; until it lands there is no
+    // <img>, only a placeholder (the entry carries a ref, not a data: URI).
+    await waitFor(() =>
+      expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,CCC'
+      )
     )
   })
 
@@ -180,6 +209,7 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
 
   beforeEach(async () => {
     app = await bootTestApp()
+    stubHostBlobs()
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })
   })
@@ -191,7 +221,7 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
   })
 
   function toolImage(base64Data: string, fileName?: string): ToolResultImage {
-    return { mediaType: 'image/png', base64Data, ...(fileName ? { fileName } : {}) }
+    return { mediaType: 'image/png', ...hostBlob(base64Data), ...(fileName ? { fileName } : {}) }
   }
 
   /** An assistant turn: one Read tool_use + its image-only tool_result. */
@@ -212,7 +242,7 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
     }
   }
 
-  it('renders one clickable thumb per returned image inside the tool card', () => {
+  it('renders one clickable thumb per returned image inside the tool card', async () => {
     const { getByTestId, getAllByTestId } = renderChat([
       readWithImages('a1', 'tu-1', [toolImage('AAA', 'shot.png'), toolImage('BBB')])
     ])
@@ -225,12 +255,14 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
     expect(thumbs[0]).not.toBeDisabled()
     expect(thumbs[0].getAttribute('aria-label')).toBe('View image shot.png')
     expect(thumbs[1].getAttribute('aria-label')).toBe('View tool result image')
-    expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,AAA'
+    await waitFor(() =>
+      expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,AAA'
+      )
     )
   })
 
-  it('opens the viewer on the Tool results tab, indexed across all tool calls', () => {
+  it('opens the viewer on the Tool results tab, indexed across all tool calls', async () => {
     const { getAllByTestId, getByTestId } = renderChat([
       readWithImages('a1', 'tu-1', [toolImage('AAA', 'a.png')]),
       readWithImages('a2', 'tu-2', [toolImage('BBB', 'b.png'), toolImage('CCC', 'c.png')])
@@ -240,12 +272,14 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
     fireEvent.click(getAllByTestId('ToolResultImages.thumb')[2])
     expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('3 / 3')
     expect(getByTestId('ImageViewerOverlay.filename').textContent).toBe('c.png')
-    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,CCC'
+    await waitFor(() =>
+      expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,CCC'
+      )
     )
   })
 
-  it('shows both tabs when the conversation has attachments AND tool results, opening on the right one', () => {
+  it('shows both tabs when the conversation has attachments AND tool results, opening on the right one', async () => {
     const { getAllByTestId, getByTestId } = renderChat([
       userMessage('m1', [image('USER')]),
       readWithImages('a1', 'tu-1', [toolImage('TOOL', 't.png')])
@@ -255,14 +289,18 @@ describe('ImageGalleryProvider + tool-result image thumbnails', () => {
     const tabs = getAllByTestId('ImageViewerOverlay.tab')
     expect(tabs.map((t) => t.textContent)).toEqual(['Attachments', 'Tool results'])
     expect(tabs.find((t) => t.getAttribute('data-active'))!.textContent).toBe('Tool results')
-    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,TOOL'
+    await waitFor(() =>
+      expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,TOOL'
+      )
     )
 
     // Switching to Attachments pages that gallery instead.
     fireEvent.click(tabs[0])
-    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,USER'
+    await waitFor(() =>
+      expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,USER'
+      )
     )
   })
 

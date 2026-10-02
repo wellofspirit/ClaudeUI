@@ -11,6 +11,7 @@ import {
 } from '../history'
 import { setSessionMeta } from '../../services/db'
 import { CodexTransportError } from '../CodexAppServerClient'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const mocks = vi.hoisted(() => ({
   available: true,
@@ -773,7 +774,7 @@ it('renders every F20 thread-item kind on the COLD path, image bytes included', 
       )
     expect(viewed).toMatchObject({
       toolResult: '',
-      images: [{ mediaType: 'image/png', base64Data: png.toString('base64') }]
+      images: [{ mediaType: 'image/png', ...blobRefOf(png.toString('base64')) }]
     })
   } finally {
     rmSync(directory, { recursive: true, force: true })

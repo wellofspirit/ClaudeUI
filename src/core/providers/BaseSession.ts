@@ -1,5 +1,7 @@
 import type { HostWindowHandle } from '../host'
 import type {
+  AttachmentRef,
+  AttachmentUpload,
   ChatMessage,
   SessionStatus,
   EngineId,
@@ -11,6 +13,7 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
+import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
 import { emitEvent } from '../services/sync-host'
@@ -105,7 +108,7 @@ export abstract class BaseSession implements ISession {
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     clientUserMessageId?: string
   ): Promise<void>
   abstract interrupt(): Promise<void>
@@ -152,9 +155,10 @@ export abstract class BaseSession implements ISession {
 
   enqueuePrompt(
     text: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: AttachmentUpload[],
+    refs: AttachmentRef[] | undefined = internAttachments(attachments)
   ): void {
-    const item = this.queue.add(text, attachments)
+    const item = this.queue.add(text, attachments, refs)
     this.queue.emit()
     this.onPromptQueued(item)
   }
@@ -184,7 +188,16 @@ export abstract class BaseSession implements ISession {
    * item `queued` tells {@link flushQueuedItems} nothing landed.
    */
   protected forwardQueuedItem(item: QueuedItem): Promise<void> {
-    return this.run(item.text, item.attachments)
+    return this.run(item.text, this.queuedUploads(item))
+  }
+
+  /**
+   * The bytes a queued item's attachments were uploaded with. Every engine's
+   * drain path reads them HERE, never off `item.attachments`: the item is the
+   * broadcast shape and carries blob refs only (ADR-087).
+   */
+  protected queuedUploads(item: QueuedItem): AttachmentUpload[] | undefined {
+    return this.queue.uploadsFor(item)
   }
 
   /**

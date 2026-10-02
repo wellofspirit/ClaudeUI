@@ -17,7 +17,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { createElement } from 'react'
-import { useSessionStore } from '../../../../stores/session-store'
+import { markViewEvicted, useSessionStore } from '../../../../stores/session-store'
+import {
+  reloadActiveTranscript,
+  resetHistoryLoadForTests
+} from '../../../../lib/session-history-load'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
 import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
@@ -462,6 +466,7 @@ describe('InputBox FC — rendered', () => {
 
   afterEach(() => {
     app.teardown()
+    resetHistoryLoadForTests()
     vi.clearAllMocks()
   })
 
@@ -945,6 +950,97 @@ describe('InputBox FC — rendered', () => {
 
     // markSdkActive called — sdkActive is now true in store
     expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+  })
+
+  // ADR-087 §2: a snapshot that did not carry this transcript leaves an EMPTY,
+  // evicted entry that is still an existing conversation. The resume decision used
+  // to be `messages.length > 0`, so a prompt sent before the disk reload landed (or
+  // after it failed) spawned a brand-new conversation under the same row.
+  describe('a send on an evicted, empty session resumes it by id', () => {
+    const resumeIdOfSpawn = (): unknown => ipcCalls['session:create'][0][3]
+
+    it('control: a never-spawned empty session starts fresh (no resume id)', async () => {
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+      await viewProps.onSend()
+      expect(resumeIdOfSpawn()).toBeUndefined()
+    })
+
+    it('send', async () => {
+      markViewEvicted([FC_ROUTE])
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+      await viewProps.onSend()
+      expect(resumeIdOfSpawn()).toBe(FC_ROUTE)
+    })
+
+    it('waits for the transcript reload in flight, then resumes, with history already in place', async () => {
+      // The host seeds its own transcript the moment the engine spawns. A client
+      // read still open at that point loses the race and the sender is left with
+      // only the new turn, so the spawn must not start until the read settles.
+      markViewEvicted([FC_ROUTE])
+      useSessionStore.setState({
+        directories: [
+          {
+            cwd: '/test/cwd',
+            projectKey: '-test-cwd',
+            folderName: 'cwd',
+            sessions: [
+              {
+                sessionId: FC_ROUTE,
+                cwd: '/test/cwd',
+                projectKey: '-test-cwd',
+                title: 'Existing',
+                timestamp: 1,
+                lastActivityAt: 1
+              }
+            ]
+          }
+        ]
+      })
+      let release!: (value: unknown) => void
+      Object.assign(window.api, {
+        loadSessionHistory: vi.fn(() => new Promise((resolve) => (release = resolve)))
+      })
+      const reload = reloadActiveTranscript(FC_ROUTE)
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+
+      const sent = viewProps.onSend()
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)))
+      // Held behind the reload: no spawn yet.
+      expect(ipcCalls['session:create']).toBeUndefined()
+
+      release({
+        messages: [
+          { id: 'h1', role: 'assistant', content: [{ type: 'text', text: 'h1' }], timestamp: 1 }
+        ],
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null,
+        warnings: []
+      })
+      await act(async () => {
+        await reload
+        await sent
+      })
+
+      expect(ipcCalls['session:create']).toHaveLength(1)
+      expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+      expect(useSessionStore.getState().sessions[FC_ROUTE].messages.map((m) => m.id)).toEqual([
+        'h1'
+      ])
+    })
+
+    it('push-to-talk spawn (ensureSession)', async () => {
+      markViewEvicted([FC_ROUTE])
+      renderFC()
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(resumeIdOfSpawn()).toBe(FC_ROUTE)
+    })
   })
 
   // The pre-spawn mode pick has no event to carry it: `changePermissionMode`

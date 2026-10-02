@@ -19,6 +19,7 @@
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import { blobStore } from '../services/blob-store'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type {
   PiAgentMessage,
@@ -827,7 +828,8 @@ export function piToolResultText(content: Array<PiTextContent | PiImageContent>)
  *
  * `mimeType` is a free-form string on the wire, so it is filtered through
  * `IMAGE_MEDIA_TYPES`; pi carries no filename, so `fileName` is omitted.
- * Returns undefined (not []) when there is nothing to carry.
+ * The bytes are interned into the blob store and the images carry refs
+ * (ADR-087). Returns undefined (not []) when there is nothing to carry.
  *
  * Shared with the stored-replay path in pi-session-list.ts.
  */
@@ -839,7 +841,8 @@ export function piToolResultImages(
   for (const b of content) {
     if (b.type !== 'image') continue
     if (!isImageMediaType(b.mimeType) || !b.data) continue
-    images.push({ mediaType: b.mimeType, base64Data: b.data })
+    const ref = blobStore.put(b.mimeType, b.data)
+    if (ref) images.push({ mediaType: b.mimeType, ...ref })
   }
   return images.length > 0 ? images : undefined
 }

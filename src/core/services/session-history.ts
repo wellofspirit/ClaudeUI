@@ -24,6 +24,7 @@ import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
+import { blobStore } from './blob-store'
 import {
   agentIdOf,
   foldAgentIdentity,
@@ -844,7 +845,8 @@ function readTaskNotification(text: string): ParsedTaskNotification | null {
  * The transcript carries no filename, so `fileName` is omitted. Blocks with a
  * non-base64 source, a missing/empty `data`, or a media type outside
  * `IMAGE_MEDIA_TYPES` are skipped — never thrown on (a transcript is untrusted
- * input).
+ * input). The bytes are interned into the blob store and the blocks carry refs
+ * (ADR-087); a payload the store refuses is skipped the same way.
  */
 function extractAttachmentBlocks(content: unknown): ContentBlock[] {
   if (!Array.isArray(content)) return []
@@ -860,9 +862,11 @@ function extractAttachmentBlocks(content: unknown): ContentBlock[] {
     if (typeof mediaType !== 'string' || typeof data !== 'string' || !data) continue
     if (block.type === 'image') {
       if (!isImageMediaType(mediaType)) continue
-      blocks.push({ type: 'image', mediaType, base64Data: data })
+      const ref = blobStore.put(mediaType, data)
+      if (ref) blocks.push({ type: 'image', mediaType, ...ref })
     } else if (mediaType === 'application/pdf') {
-      blocks.push({ type: 'document', mediaType: 'application/pdf', base64Data: data })
+      const ref = blobStore.put(mediaType, data)
+      if (ref) blocks.push({ type: 'document', mediaType: 'application/pdf', ...ref })
     }
   }
   return blocks

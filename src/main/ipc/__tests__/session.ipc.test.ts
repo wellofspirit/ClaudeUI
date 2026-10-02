@@ -313,7 +313,8 @@ vi.mock('../../../core/services/logger', () => ({
 import { registerSessionIpc } from '../../../core/ipc/session.ipc'
 import { gitServiceManager } from '../../../core/services/git-service'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
-import { hostConnection } from '../../../core/ipc/command-registry'
+import { commandRegistry, hostConnection } from '../../../core/ipc/command-registry'
+import { blobStore } from '../../../core/services/blob-store'
 import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
@@ -475,7 +476,53 @@ describe('session.ipc', () => {
         sessionStub.willQueue = false
       }
       expect(events).toHaveLength(0)
-      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined)
+      // (text, uploads, refs) — no attachments, so neither half exists.
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined, undefined)
+    })
+
+    // ADR-087 — the upload is interned once at the top of sendPrompt: the engine
+    // keeps the bytes, everything replicated carries only the ref.
+    it('session:send interns an upload: the engine gets bytes, the relay gets a ref', async () => {
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      const upload = { mediaType: 'image/png', base64Data: 'iVBORw0KGgo=', fileName: 'a.png' }
+      await harness.call('session:send', 'rid-1', 'look', [upload])
+
+      expect(sessionStub.run).toHaveBeenCalledWith('look', [upload])
+      const relayed = events[0][1]
+      expect(relayed.attachments).toEqual([
+        {
+          mediaType: 'image/png',
+          blobId: expect.stringMatching(/^[0-9a-f]{64}$/),
+          bytes: 8,
+          fileName: 'a.png'
+        }
+      ])
+      expect(JSON.stringify(relayed)).not.toContain('iVBORw0KGgo=')
+    })
+
+    // ADR-087 — `blob:get` is a `chat` query on the invoke lane, and a miss of
+    // any kind is `null`, never an error the client has to catch.
+    it('blob:get returns the bytes behind a ref; unknown and malformed ids are null', async () => {
+      const bytes = Buffer.from('desktop-blob-bytes')
+      const ref = blobStore.putBytes('image/png', bytes)!
+
+      expect(await harness.call('blob:get', ref.blobId)).toEqual({
+        mediaType: 'image/png',
+        base64Data: bytes.toString('base64')
+      })
+      expect(await harness.call('blob:get', 'a'.repeat(64))).toBeNull()
+      for (const bad of ['', 'xyz', 'A'.repeat(64), `${ref.blobId}0`, '../../etc/passwd']) {
+        expect(await harness.call('blob:get', bad)).toBeNull()
+      }
+    })
+
+    it('blob:get is declared chat/query, shared by both transports', () => {
+      expect(commandRegistry.declaration('blob:get')).toMatchObject({
+        capability: 'chat',
+        kind: 'query'
+      })
+      expect(commandRegistry.channels('desktop')).toContain('blob:get')
     })
 
     it('session:send throws when routingId not found', async () => {

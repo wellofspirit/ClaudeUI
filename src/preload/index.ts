@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   ClaudeAPI,
   PermissionSuggestion,
   ProxySettings
@@ -129,11 +130,8 @@ const api: ClaudeAPI = {
       engineId,
       messageIndex
     ),
-  sendPrompt: (
-    routingId: string,
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ) => ipcRenderer.invoke('session:send', routingId, prompt, attachments),
+  sendPrompt: (routingId: string, prompt: string, attachments?: AttachmentUpload[]) =>
+    ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) => ipcRenderer.invoke('session:cancel', routingId),
   clearConversation: (routingId: string, permissionMode?: string) =>
     ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
@@ -166,6 +164,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
+  getBlob: (blobId: string) => ipcRenderer.invoke('blob:get', blobId),
   buildSubagentFileMap: (
     sessionId: string,
     projectKey: string,

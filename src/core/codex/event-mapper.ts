@@ -3,9 +3,11 @@ import type {
   ContentBlock,
   FileDiff,
   TodoItem,
+  ImageMediaType,
   ToolResultImage
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import { blobStore } from '../services/blob-store'
 import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { SubAgentActivityKind } from './protocol/v2/SubAgentActivityKind'
@@ -449,20 +451,20 @@ export function mapCodexItem(
                 : 'Image generation limit reached.',
             isError: true
           })
-        else
+        else {
+          // Always PNG: `ImageGenerationItem.result` is the base64 PNG the
+          // hosted tool returns (the `transparentBackground` flag is a PNG
+          // property). A blank result carries no strip rather than a broken
+          // thumbnail.
+          const images = item.result ? imageRef('image/png', item.result) : []
           outputs.push({
             kind: 'toolResult',
             toolUseId: id,
             result: item.savedPath ?? '',
             isError: item.status !== 'completed',
-            // Always PNG: `ImageGenerationItem.result` is the base64 PNG the
-            // hosted tool returns (the `transparentBackground` flag is a PNG
-            // property). A blank result carries no strip rather than a broken
-            // thumbnail.
-            ...(item.result
-              ? { images: [{ mediaType: 'image/png' as const, base64Data: item.result }] }
-              : {})
+            ...(images.length ? { images } : {})
           })
+        }
       }
       return outputs
     }
@@ -628,9 +630,20 @@ function mcpResultImages(content: JsonValue[] | null | undefined): ToolResultIma
     const mediaType = entry.mimeType
     const data = entry.data
     return isImageMediaType(mediaType) && typeof data === 'string' && data.length
-      ? [{ mediaType, base64Data: data }]
+      ? imageRef(mediaType, data)
       : []
   })
+}
+
+/**
+ * Intern one inline image into the blob store (ADR-087) and return its ref, or
+ * nothing when the store refuses the payload — the same outcome as any other
+ * malformed image. This mapper runs on live items AND cold history, and both
+ * must hand the transcript refs rather than bytes.
+ */
+function imageRef(mediaType: ImageMediaType, base64Data: string): ToolResultImage[] {
+  const ref = blobStore.put(mediaType, base64Data)
+  return ref ? [{ mediaType, ...ref }] : []
 }
 
 /**
@@ -650,9 +663,7 @@ function functionOutputImages(output: FunctionCallOutputBody): ToolResultImage[]
   return output.flatMap((entry) => {
     if (entry.type !== 'input_image' || !('image_url' in entry)) return []
     const match = /^data:([^;]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(entry.image_url)
-    return match && isImageMediaType(match[1])
-      ? [{ mediaType: match[1], base64Data: match[2] }]
-      : []
+    return match && isImageMediaType(match[1]) ? imageRef(match[1], match[2]) : []
   })
 }
 
@@ -723,8 +734,9 @@ function contentPatch(path: string, content: string, kind: 'add' | 'delete'): st
 
 function codexImage(url: string): ContentBlock[] {
   const match = /^data:([^;]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(url)
-  return match && isImageMediaType(match[1])
-    ? [{ type: 'image', mediaType: match[1], base64Data: match[2] }]
+  const [ref] = match && isImageMediaType(match[1]) ? imageRef(match[1], match[2]) : []
+  return ref
+    ? [{ type: 'image', ...ref }]
     : [{ type: 'text', text: '[Native image reference is not an inline supported image]' }]
 }
 

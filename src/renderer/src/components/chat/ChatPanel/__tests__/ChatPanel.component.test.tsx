@@ -13,8 +13,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
-import { useSessionStore } from '../../../../stores/session-store'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import {
+  clearViewEvicted,
+  markViewEvicted,
+  useSessionStore
+} from '../../../../stores/session-store'
+import { reloadActiveTranscript } from '../../../../lib/session-history-load'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 
 let mockIsMobile = true
@@ -26,7 +31,10 @@ vi.mock('../../../../hooks/useIsMobile', () => ({
 vi.mock('../TopBar', () => ({ TopBar: () => <div data-testid="TopBar" /> }))
 vi.mock('../WelcomeState', () => ({ WelcomeState: () => <div data-testid="WelcomeState" /> }))
 vi.mock('../QueuedMessageCard', () => ({ QueuedMessageCard: () => null }))
-vi.mock('../../MessageBubble', () => ({ MessageBubble: () => null }))
+vi.mock('../../MessageBubble', () => ({
+  MessageBubble: () => null,
+  TranscriptSessionProvider: ({ children }: { children: React.ReactNode }) => children
+}))
 vi.mock('../../ThinkingBlock', () => ({ ThinkingBlock: () => null }))
 vi.mock('../../InputBox', () => ({ InputBox: () => <div data-testid="InputBox" /> }))
 vi.mock('../../FloatingApproval', () => ({ FloatingApproval: () => null }))
@@ -175,5 +183,136 @@ describe('ChatPanel — fullscreen gesture hint', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
+  let app: TestApp
+  const originalMatchMedia = window.matchMedia
+  const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+  // A filled transcript mounts the message list, whose auto-scroll calls `scrollTo`,
+  // which jsdom does not implement.
+  const originalScrollTo = Element.prototype.scrollTo
+
+  beforeEach(async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = NoopResizeObserver
+    mockIsMobile = false
+    window.localStorage.setItem(HINT_KEY, '1')
+    Element.prototype.scrollTo = (() => {}) as typeof Element.prototype.scrollTo
+
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    window.localStorage.clear()
+    window.matchMedia = originalMatchMedia
+    ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = originalResizeObserver
+    Element.prototype.scrollTo = originalScrollTo
+  })
+
+  async function renderChatPanel(): Promise<{ unmount: () => void }> {
+    const { ChatPanel } = await import('../ChatPanel')
+    let result!: { unmount: () => void }
+    await act(async () => {
+      result = render(<ChatPanel />)
+    })
+    return result
+  }
+
+  it('control: a brand-new empty session shows the welcome state', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(screen.getByTestId('WelcomeState')).toBeInTheDocument()
+    expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
+    unmount()
+  })
+
+  it('shows a loading state, never the welcome screen, while the transcript is not in memory', async () => {
+    // An existing conversation whose transcript the snapshot did not carry: empty
+    // and evicted, with a live composer beneath. A welcome screen here presents it
+    // as a blank one.
+    markViewEvicted([ROUTE])
+    const { unmount } = await renderChatPanel()
+
+    expect(screen.getByTestId('TranscriptLoading')).toHaveTextContent('Loading conversation')
+    expect(screen.queryByTestId('WelcomeState')).toBeNull()
+    unmount()
+  })
+
+  it('shows Retry instead of a spinner once the reload failed, and Retry re-runs it', async () => {
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: '/d/repo',
+          projectKey: '-d-repo',
+          folderName: 'repo',
+          sessions: [
+            {
+              sessionId: ROUTE,
+              cwd: '/d/repo',
+              projectKey: '-d-repo',
+              title: 'Existing',
+              timestamp: 1,
+              lastActivityAt: 1
+            }
+          ]
+        }
+      ]
+    })
+    const loadSessionHistory = vi.fn().mockRejectedValue(new Error('disk gone'))
+    Object.assign(window.api, { loadSessionHistory, logRelay: vi.fn() })
+    markViewEvicted([ROUTE])
+    const { unmount } = await renderChatPanel()
+    expect(screen.getByTestId('TranscriptLoading')).toBeInTheDocument()
+
+    await act(async () => {
+      await reloadActiveTranscript(ROUTE)
+    })
+
+    expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
+    expect(screen.queryByTestId('WelcomeState')).toBeNull()
+    expect(screen.getByTestId('TranscriptLoadFailed')).toBeInTheDocument()
+
+    // Retry: the read succeeds this time.
+    loadSessionHistory.mockReset()
+    loadSessionHistory.mockResolvedValue({
+      messages: [{ id: 'h1', role: 'assistant', content: [], timestamp: 1 }],
+      taskNotifications: [],
+      customTitle: null,
+      agentIdToToolUseId: {},
+      statusLine: null,
+      warnings: []
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TranscriptLoadFailed.retry'))
+    })
+
+    expect(loadSessionHistory).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.queryByTestId('TranscriptLoadFailed')).toBeNull())
+    expect(useSessionStore.getState().sessions[ROUTE].messages).toHaveLength(1)
+    expect(useSessionStore.getState().sessions[ROUTE].evicted).toBe(false)
+    unmount()
+  })
+
+  it('leaves the loading state once the entry is no longer evicted', async () => {
+    markViewEvicted([ROUTE])
+    const { unmount } = await renderChatPanel()
+    expect(screen.getByTestId('TranscriptLoading')).toBeInTheDocument()
+
+    await act(async () => {
+      clearViewEvicted([ROUTE])
+    })
+
+    expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
+    unmount()
   })
 })

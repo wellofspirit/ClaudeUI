@@ -1,4 +1,6 @@
 import type {
+  AttachmentRef,
+  AttachmentUpload,
   ChatMessage,
   EngineId,
   ApprovalDecision,
@@ -38,7 +40,7 @@ export interface ISession {
   /** Run a prompt turn. Passing null spawns the process without sending a message. */
   run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     clientUserMessageId?: string
   ): Promise<void>
 
@@ -50,11 +52,12 @@ export interface ISession {
    * BaseSession for every engine; the only per-engine difference is WHEN the
    * item reaches the engine (claude pushes into cli.js's native queue
    * immediately, opencode/pi hold until the next sub-turn boundary).
+   *
+   * `attachments` are the engine-bound uploads; `refs` are what the broadcast
+   * item carries (ADR-087). `sendPrompt` interns once and passes both; a caller
+   * that omits `refs` gets the uploads interned here.
    */
-  enqueuePrompt(
-    text: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): void
+  enqueuePrompt(text: string, attachments?: AttachmentUpload[], refs?: AttachmentRef[]): void
 
   /**
    * Take back every still-recallable queued item, oldest first. `recalled`

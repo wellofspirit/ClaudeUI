@@ -10,7 +10,8 @@
  * carried returned images.
  *
  * Styling mirrors `MessageBubble`'s user-attachment strip, at the smaller 120px
- * cap that suits a tool card's density.
+ * cap that suits a tool card's density. Each thumbnail is a `BlobImage`: the
+ * bytes are fetched from the host as the card nears the viewport (ADR-087).
  *
  * Clicking opens the shared viewer on its "Tool results" tab via
  * `openToolResult`. With no `ImageGalleryProvider` mounted above (tests, or a
@@ -20,6 +21,7 @@
 
 import type { ToolResultImage } from '../../../../../shared/types'
 import { useImageGallery } from '../../shared/ImageViewer'
+import { BlobImage } from '../../shared/BlobImage'
 
 export function ToolResultImages({
   toolUseId,
@@ -46,10 +48,12 @@ export function ToolResultImages({
             enabled ? 'cursor-zoom-in' : 'cursor-default'
           }`}
         >
-          <img
-            src={`data:${image.mediaType};base64,${image.base64Data}`}
+          <BlobImage
+            blobId={image.blobId}
+            mediaType={image.mediaType}
             alt={image.fileName || 'Tool result image'}
             className="max-w-[120px] max-h-[120px] rounded-lg object-contain"
+            placeholderSize={120}
           />
         </button>
       ))}

@@ -22,6 +22,7 @@ import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
+import { reloadActiveTranscript } from '../../../lib/session-history-load'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
@@ -72,6 +73,8 @@ export function ChatPanel(): React.JSX.Element {
   const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
+  const evicted = useActiveSession((s) => s.evicted)
+  const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -267,7 +270,12 @@ export function ChatPanel(): React.JSX.Element {
     }
     return null
   }, [messages])
-  const showEmptyScreen = !hasContent && status.state === 'idle'
+  // An evicted entry is empty because its transcript is not in memory, not because
+  // the conversation is — the disk read that fills it is in flight or was
+  // abandoned (ADR-087 §2). `WelcomeState` there would present an existing
+  // conversation as a blank one with a live composer.
+  const loadingTranscript = !hasContent && evicted
+  const showEmptyScreen = !hasContent && !evicted && status.state === 'idle'
 
   // Mobile web only: double-tapping the chat toggles browser fullscreen (there
   // is no button — reclaiming the browser chrome is the whole point).
@@ -306,6 +314,35 @@ export function ChatPanel(): React.JSX.Element {
             <div className="h-full flex items-center justify-center">
               <WelcomeState />
             </div>
+          ) : loadingTranscript ? (
+            transcriptLoadFailed ? (
+              <div
+                data-testid="TranscriptLoadFailed"
+                className="h-full flex items-center justify-center"
+              >
+                <div className="flex items-center gap-3 -mt-16 animate-fade-in">
+                  <span className="text-[13px] text-text-muted">
+                    Couldn&apos;t load this conversation
+                  </span>
+                  <button
+                    data-testid="TranscriptLoadFailed.retry"
+                    onClick={() => {
+                      if (activeSessionId) void reloadActiveTranscript(activeSessionId)
+                    }}
+                    className="text-[13px] text-accent hover:underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                data-testid="TranscriptLoading"
+                className="h-full flex items-center justify-center"
+              >
+                <LoadingState label="Loading conversation..." />
+              </div>
+            )
           ) : !hasContent && status.state === 'running' ? (
             <div className="h-full flex items-center justify-center">
               <LoadingState />
@@ -453,7 +490,7 @@ export function ChatNoticeStack(): React.JSX.Element {
   )
 }
 
-function LoadingState(): React.JSX.Element {
+function LoadingState({ label = 'Thinking...' }: { label?: string }): React.JSX.Element {
   return (
     <div className="flex items-center gap-2.5 -mt-16 animate-fade-in">
       <div className="flex gap-[3px]">
@@ -465,7 +502,7 @@ function LoadingState(): React.JSX.Element {
           />
         ))}
       </div>
-      <span className="text-[13px] text-text-muted">Thinking...</span>
+      <span className="text-[13px] text-text-muted">{label}</span>
     </div>
   )
 }

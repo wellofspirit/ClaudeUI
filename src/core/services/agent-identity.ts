@@ -23,7 +23,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
-import { extractToolResultContent } from './tool-result-content'
+import { extractToolResultText } from './tool-result-content'
 
 /** An agent id in a spawn tool's result text: `agentId: a1b2…` (also TaskOutput-era `agent_id:`). */
 export const AGENT_ID_RE = /(?:agentId|agent_id):\s*(\S+)/
@@ -299,7 +299,7 @@ function collectToolResults(line: unknown, into: TranscriptToolResult[]): void {
     into.push({
       kind: 'result',
       toolUseId: block.tool_use_id,
-      text: extractToolResultContent(block.content).text,
+      text: extractToolResultText(block.content),
       structured
     })
   }

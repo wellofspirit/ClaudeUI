@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { findSessionInfo } from '../../../lib/session-history-load'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
 import {
@@ -219,6 +220,17 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) =>
     activeSessionId ? s.customTitles[activeSessionId] : undefined
+  )
+  // The session's name in the listing the sidebar row reads. An evicted entry is an
+  // existing conversation with no transcript in memory yet (`hasContent` is false),
+  // so it has to be named from here rather than read as a brand-new session — and
+  // the same fallback applies once the transcript lands, so the title does not
+  // change under the user when the load completes.
+  const evicted = useActiveSession((s) => s.evicted)
+  const directories = useSessionStore((s) => s.directories)
+  const listedTitle = useMemo(
+    () => (activeSessionId ? findSessionInfo(directories, activeSessionId)?.title : undefined),
+    [directories, activeSessionId]
   )
   const {
     collapsed: sidebarCollapsed,
@@ -843,11 +855,18 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               onMouseEnter={infoMouseEnter}
               onMouseLeave={infoMouseLeave}
             >
-              <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
+              <span
+                data-testid="TopBar.title"
+                className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default"
+              >
                 {cwd && hasContent && engineId && engineId !== 'claude' && (
                   <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
                 )}
-                {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
+                {!cwd
+                  ? 'New session'
+                  : hasContent || evicted
+                    ? customTitle || listedTitle || 'Session'
+                    : 'New session'}
               </span>
               {(cwd || displaySessionId) && (
                 <>

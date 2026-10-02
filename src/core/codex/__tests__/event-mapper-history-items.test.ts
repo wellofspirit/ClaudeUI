@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { codexItemId, codexPlanSteps, mapCodexDelta, mapCodexItem } from '../event-mapper'
 import type { ThreadItem } from '../protocol/v2/ThreadItem'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const ID = codexItemId('thread', 'turn', 'item')
 
@@ -35,7 +36,7 @@ describe('image references', () => {
       ]
     } as ThreadItem
     expect(blocks(item)).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'QUJD' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('QUJD') },
       { type: 'text', text: '[Native image reference is not an inline supported image]' }
     ])
   })
@@ -171,7 +172,7 @@ describe('mcpToolCall', () => {
       })
     )
     expect(out[1]).toMatchObject({
-      images: [{ mediaType: 'image/png', base64Data: 'AAAA' }],
+      images: [{ mediaType: 'image/png', ...blobRefOf('AAAA') }],
       result: ''
     })
   })
@@ -236,7 +237,7 @@ describe('imageView, imageGeneration and sleep', () => {
     ])
     expect(map(item)[1]).toMatchObject({
       isError: false,
-      images: [{ mediaType: 'image/png', base64Data: 'UE5HQkFTRTY0' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('UE5HQkFTRTY0') }]
     })
   })
 
@@ -406,7 +407,7 @@ describe('functionCallOutput', () => {
     } as unknown as ThreadItem
     expect(map(item)[1]).toMatchObject({
       result: 'line one\nline two',
-      images: [{ mediaType: 'image/png', base64Data: 'QUJD' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('QUJD') }]
     })
     expect(blocks(item)).toMatchObject([
       { toolInput: { namespace: 'plugin', source: 'another client' } }

@@ -90,6 +90,7 @@ import { SyncCore } from '../../../core/sync/sync-core'
 import { broadBashGlobs } from '../../../core/opencode/broad-bash-globs'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -3161,7 +3162,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
       images: [
         expect.objectContaining({
           mediaType: 'image/png',
-          base64Data: 'QUJD',
+          ...blobRefOf('QUJD'),
           fileName: 'shot.png'
         })
       ]

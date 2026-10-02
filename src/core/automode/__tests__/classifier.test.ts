@@ -34,6 +34,7 @@ import {
   type JudgeRequest
 } from '../classifier'
 import type { ChatMessage } from '../../../shared/types'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let seq = 0
 function msg(role: 'user' | 'assistant', content: ChatMessage['content']): ChatMessage {
@@ -66,7 +67,7 @@ describe('slimTranscript', () => {
     const messages: ChatMessage[] = [
       msg('assistant', [{ type: 'text', text: '   ' }]),
       msg('user', [
-        { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' },
+        { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') },
         { type: 'text', text: 'what is this' }
       ])
     ]

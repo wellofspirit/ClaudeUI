@@ -36,6 +36,7 @@ vi.mock('os', async (importOriginal) => {
 })
 
 import { loadSessionHistory } from '../../../core/services/session-history'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const PROJECT_KEY = 'test-project-queued-command'
 const SESSION_ID = '903d5166-8025-4343-b927-eddd67c69bfb'
@@ -121,7 +122,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
     // Pre-2.1.280 lines carry no source_uuid: the line's own uuid is the id.
     expect(messages[0]).toMatchObject({ id: 'line-uuid-1', role: 'user' })
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') },
       { type: 'text', text: 'look at this' }
     ])
   })
@@ -154,7 +155,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
 
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' }
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') }
     ])
   })
 

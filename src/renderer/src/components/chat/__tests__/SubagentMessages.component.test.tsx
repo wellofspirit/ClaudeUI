@@ -9,11 +9,13 @@
  * user can still toggle the individual block afterwards).
  */
 
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import type { ChatMessage } from '../../../../../shared/types'
 import { SubagentMessages } from '../SubagentMessages'
+import { blobRefOf } from '@test/helpers/blob-refs'
+import { resetBlobCacheForTests } from '../../../lib/blob-cache'
 
 const defaultSettings = useSessionStore.getState().settings
 
@@ -62,6 +64,13 @@ describe('SubagentMessages — persisted thinking block honors expandThinking', 
  * thumbnails inside its tool cards would be clickable but dead.
  */
 describe('SubagentMessages — tool-result image thumbnails', () => {
+  beforeEach(() => {
+    resetBlobCacheForTests()
+    window.api = {
+      getBlob: vi.fn(async () => ({ mediaType: 'image/png', base64Data: 'SUBIMG' }))
+    } as unknown as typeof window.api
+  })
+
   afterEach(() => {
     useSessionStore.setState({ settings: defaultSettings })
     document.body.style.overflow = ''
@@ -82,13 +91,13 @@ describe('SubagentMessages — tool-result image thumbnails', () => {
         toolUseId: 'sub-tu-1',
         toolResult: '',
         isError: false,
-        images: [{ mediaType: 'image/png', base64Data, fileName }]
+        images: [{ mediaType: 'image/png', ...blobRefOf(base64Data), fileName }]
       }
     ],
     timestamp: Date.now()
   })
 
-  it('renders the strip and opens the scoped viewer on click', () => {
+  it('renders the strip and opens the scoped viewer on click', async () => {
     render(<SubagentMessages messages={[toolMsg('SUBIMG', 'sub.png')]} />)
 
     const thumb = screen.getAllByTestId('ToolResultImages.thumb')[0]
@@ -96,8 +105,10 @@ describe('SubagentMessages — tool-result image thumbnails', () => {
     fireEvent.click(thumb)
 
     expect(screen.getByTestId('ImageViewerOverlay.filename').textContent).toBe('sub.png')
-    expect((screen.getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,SUBIMG'
+    await waitFor(() =>
+      expect((screen.getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,SUBIMG'
+      )
     )
     // Only the tool-results gallery is non-empty here, so no tab bar.
     expect(screen.queryAllByTestId('ImageViewerOverlay.tab')).toHaveLength(0)

@@ -1,7 +1,5 @@
 import { randomUUID } from 'crypto'
-import type { QueuedItem } from '../../shared/types'
-
-type Attachments = QueuedItem['attachments']
+import type { AttachmentRef, AttachmentUpload, QueuedItem } from '../../shared/types'
 
 /**
  * The per-session queue of record (ADR-053 / `docs/architecture/sync-core.md`
@@ -27,6 +25,14 @@ export class SessionQueue {
    * detail, not a domain state clients converge on.
    */
   private forwarded = new Set<string>()
+  /**
+   * The engine-bound bytes of each item's attachments, by item id. Private for
+   * the same reason as {@link forwarded}, and for a stronger one: the item is
+   * BROADCAST and folded into canonical state, so it carries blob refs only
+   * (ADR-087), while the engine still needs the upload it was sent. Dropped with
+   * the item when {@link emit} prunes it.
+   */
+  private uploads = new Map<string, AttachmentUpload[]>()
 
   constructor(private readonly broadcast: (items: QueuedItem[]) => void) {}
 
@@ -53,11 +59,21 @@ export class SessionQueue {
     this.forwarded.delete(item.itemId)
   }
 
-  add(text: string, attachments?: Attachments): QueuedItem {
+  /**
+   * Queue a prompt. `uploads` are what the engine will be handed
+   * ({@link uploadsFor}); `refs` are what the broadcast item carries.
+   */
+  add(text: string, uploads?: AttachmentUpload[], refs?: AttachmentRef[]): QueuedItem {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
-    if (attachments && attachments.length > 0) item.attachments = attachments
+    if (refs && refs.length > 0) item.attachments = refs
+    if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
     this.items.push(item)
     return item
+  }
+
+  /** The attachment bytes to hand the engine for this item, if it has any. */
+  uploadsFor(item: QueuedItem): AttachmentUpload[] | undefined {
+    return this.uploads.get(item.itemId)
   }
 
   /**
@@ -114,7 +130,9 @@ export class SessionQueue {
     if (this.items.length === 0) return
     this.broadcast(this.items.map((item) => ({ ...item })))
     for (const item of this.items) {
-      if (item.state !== 'queued') this.forwarded.delete(item.itemId)
+      if (item.state === 'queued') continue
+      this.forwarded.delete(item.itemId)
+      this.uploads.delete(item.itemId)
     }
     this.items = this.items.filter((item) => item.state === 'queued')
   }

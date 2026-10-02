@@ -306,6 +306,7 @@ import { setModelEnv } from '../../../core/sdk/model-env'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
+import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
 import { engineInstalled } from '../../../core/harness/resolve'
@@ -623,12 +624,34 @@ describe('registerRemoteHandlers', () => {
     } finally {
       sessionStub.willQueue = false
     }
-    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined)
+    // (text, uploads, refs) — no attachments, so neither half exists.
+    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined, undefined)
     expect(win.webContents.send).not.toHaveBeenCalledWith(
       'session:user-message',
       'rid-1',
       expect.anything()
     )
+  })
+
+  it('blob:get serves a blob over the remote transport; a miss is null, not an error', async () => {
+    const bytes = Buffer.from('remote-blob-bytes')
+    const ref = blobStore.putBytes('image/webp', bytes)!
+
+    expect(await dispatcher.handle(makeRequest('blob:get', ref.blobId), remoteConn)).toEqual({
+      mediaType: 'image/webp',
+      base64Data: bytes.toString('base64')
+    })
+    expect(await dispatcher.handle(makeRequest('blob:get', 'b'.repeat(64)), remoteConn)).toBeNull()
+    expect(await dispatcher.handle(makeRequest('blob:get', 'not-a-hash'), remoteConn)).toBeNull()
+    expect(await dispatcher.handle(makeRequest('blob:get', 42), remoteConn)).toBeNull()
+  })
+
+  it('blob:get is a base-reachable chat query, so a plain token connection can fetch images', () => {
+    const decl = commandRegistry.declaration('blob:get')
+    expect(decl?.capability).toBe('chat')
+    expect(decl?.kind).toBe('query')
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+    expect(commandRegistry.channels('remote')).toContain('blob:get')
   })
 
   it('session:send rejects when routingId not found', async () => {
@@ -1559,7 +1582,14 @@ const SHELL_GATED_CHANNELS = [
  * strictly weaker read than the arbitrary-path listing that channel already
  * grants, so the effective remote surface widens by nothing.
  */
-const POST_PORT_CHANNELS = ['session:clear-conversation', 'file:list-places'] as const
+const POST_PORT_CHANNELS = [
+  'session:clear-conversation',
+  'file:list-places',
+  // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
+  // already read these exact bytes inside the snapshot — an invoke, not an HTTP
+  // route, so on an E2E origin they stay inside the encrypted channel.
+  'blob:get'
+] as const
 
 /**
  * ADR-052 passkeys. Listed separately for the same reason the terminal set is:
