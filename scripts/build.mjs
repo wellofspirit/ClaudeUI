@@ -125,9 +125,10 @@ const ensureHarness = (id, update) => [
 ]
 
 const TARGETS = {
-  // Nothing here depends on another stage's output: typecheck is --noEmit,
-  // ensure-cli writes only vendor/claude-cli, and electron-vite reads neither.
-  build: [{ parallel: [...typecheckStages, ...ensureCli(false), ...electronViteBuild] }],
+  // No typecheck: CI and the release workflows run `bun run typecheck` as their
+  // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
+  // never reads, so the two run side by side.
+  build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
   'build:mac': [
     ...ensureCli(false),
     ...electronViteBuild,
