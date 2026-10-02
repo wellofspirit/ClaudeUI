@@ -690,7 +690,7 @@ describe('mapPiEvent — malformed/unknown event', () => {
     expect(out).toEqual([{ kind: 'ignore' }])
   })
 
-  it('known-but-unhandled event types (tool_execution_start, queue_update) map to ignore; agent_start is a turn_start (ADR-088 S3)', () => {
+  it('known-but-unhandled event types (tool_execution_start, queue_update) map to ignore; agent_start is a turn_start (ADR-089 S3)', () => {
     const state = createPiMapperState()
     expect(mapPiEvent({ type: 'agent_start' }, state)).toEqual([{ kind: 'turn_start' }])
     expect(
@@ -799,8 +799,8 @@ describe('mapPiEvent — tool_execution_update (M2b live bash output streaming)'
   })
 })
 
-describe('mapPiEvent — the retired M5b subagent tool (ADR-088)', () => {
-  // The in-pi `subagent` extension is retired (host-run subagents, ADR-088):
+describe('mapPiEvent — the retired M5b subagent tool (ADR-089)', () => {
+  // The in-pi `subagent` extension is retired (host-run subagents, ADR-089):
   // its `cuiSubagent` payloads no longer have a mapper output of their own. A
   // legacy transcript, or pi's upstream example extension, still maps safely.
   const cuiSubagent = { v: 1, agents: [{ agent: 'echoer', status: 'running', newMessages: [] }] }
@@ -1507,7 +1507,7 @@ describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wi
   })
 })
 
-describe('mapPiEvent — custom messages (ADR-088 S3)', () => {
+describe('mapPiEvent — custom messages (ADR-089 S3)', () => {
   const ourDetails = {
     v: 1,
     kind: 'task-notification',
@@ -1598,7 +1598,7 @@ describe('mapPiEvent — custom messages (ADR-088 S3)', () => {
   })
 })
 
-describe('mapPiEvent — a cui-deliver extension_error (ADR-088 S3 review M-2)', () => {
+describe('mapPiEvent — a cui-deliver extension_error (ADR-089 S3 review M-2)', () => {
   it('maps to delivery_error, not a turn error; any other extension error is unchanged', () => {
     const state = createPiMapperState()
     expect(
@@ -1621,7 +1621,7 @@ describe('mapPiEvent — a cui-deliver extension_error (ADR-088 S3 review M-2)',
   })
 })
 
-describe('mapPiEvent — a runtime send_message extension_error (ADR-088 review F3)', () => {
+describe('mapPiEvent — a runtime send_message extension_error (ADR-089 review F3)', () => {
   it('maps to send_message_error; any other runtime extension error stays an error', () => {
     const state = createPiMapperState()
     expect(

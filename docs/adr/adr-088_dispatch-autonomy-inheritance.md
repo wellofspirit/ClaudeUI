@@ -1,4 +1,4 @@
-# ADR-087: Dispatch targets inherit auto mode, live, and are judged
+# ADR-088: Dispatch targets inherit auto mode, live, and are judged
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
@@ -11,7 +11,7 @@ delegated work judged against the parent), [ADR-076](adr-076_claude-automode-ver
 (cli.js's own verdicts), [ADR-023](adr-023_opencode-automode-classifier.md) (ClaudeUI's judge),
 [ADR-067](adr-067_codex-shared-permission-model.md) (the shared permission ladder),
 [ADR-069](adr-069_codex-host-per-home-and-account.md) (Codex targets are threads on the caller's host),
-[ADR-088](adr-088_pi-subagents-host-run.md) (amends the transcript rule: `system` rows are skipped).
+[ADR-089](adr-089_pi-subagents-host-run.md) (amends the transcript rule: `system` rows are skipped).
 
 ## Context
 
@@ -107,12 +107,12 @@ test pins either):
   only `User:` lines (the only real authorisation); the child's own earlier calls tell the judge
   what it has already done. An opencode target's task children contribute nothing (their parts are
   not on the target's accumulators).
-- **Amended (ADR-088 S3, 2026-10-02):** `slimTranscript` skips every `role: 'system'` message, for
+- **Amended (ADR-089 S3, 2026-10-02):** `slimTranscript` skips every `role: 'system'` message, for
   every engine, before its user branch: system rows are engine/host notes (compaction, API errors,
   Codex guardian notices, and the agent messages ClaudeUI injects into a pi session — task
   notifications and `send_message` deliveries, which are system rows), never a human turn. Before
   this, a system row with a text block (Codex's guardian notice) rendered as a `User:` line when a
-  Codex session dispatched to a judged target. See [ADR-088](adr-088_pi-subagents-host-run.md)
+  Codex session dispatched to a judged target. See [ADR-089](adr-089_pi-subagents-host-run.md)
   "Background runs and messaging".
 - **Amended (S4, 2026-10-02) — Claude's own task notifications are system rows too.** cli.js
   delivers a background agent's `<task-notification>` as a `user` frame; ClaudeSession used to insert
@@ -204,7 +204,7 @@ The dispatcher reads the live mode through one helper that normalises the legacy
   `external` user lines (the delegation prompt and messages sent to that agent) render as user rows
   inside that agent's nested card — never in the root `messageHistory`, and Claude targets are judged
   by cli.js; a third-party pi extension's `pi.sendUserMessage` is indistinguishable from a typed
-  prompt in pi's session file (ClaudeUI's own agent messages are `custom`, ADR-088). Codex filters
+  prompt in pi's session file (ClaudeUI's own agent messages are `custom`, ADR-089). Codex filters
   its own contextual user fragments out of `userMessage` items; the user's own prompts and steers
   are real `user` rows everywhere.
 

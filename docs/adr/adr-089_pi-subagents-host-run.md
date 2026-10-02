@@ -1,10 +1,10 @@
-# ADR-088: pi subagents are host-run, gated by the parent, through an `agent` tool
+# ADR-089: pi subagents are host-run, gated by the parent, through an `agent` tool
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Supersedes:** [ADR-035](adr-035_pi-engine-backend.md)'s M5b in-pi subagent extension
 (`pi-subagent-source.ts`).
 **Relates to:** [ADR-035](adr-035_pi-engine-backend.md) (the pi backend and its bridge),
-[ADR-087](adr-087_dispatch-autonomy-inheritance.md) (auto mode inherited live, the shared judge
+[ADR-088](adr-088_dispatch-autonomy-inheritance.md) (auto mode inherited live, the shared judge
 pipeline, D1 context), [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) S4 (delegated
 work judged against the parent), [ADR-073](adr-073_agent-roster-and-task-run-identity.md) (task run
 identity, nested agents), [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) (task lifecycle
@@ -203,7 +203,7 @@ run_in_background !== false`. A background call returns once the child has start
 - **The marking, end to end.** pi stores the message with role `custom` (a `custom_message` entry on
   disk) → one converter (`pi-custom-message.ts`, live and history) turns ours into a
   `role: 'system'` row with one `context_note` (title from `details`, fragment label "from an agent,
-  not from you") → `slimTranscript` skips every `system` row (the ADR-087 amendment), the D1
+  not from you") → `slimTranscript` skips every `system` row (the ADR-088 amendment), the D1
   trajectory keeps assistant messages only, `/btw` keeps user/assistant only → it renders as a
   ContextNoteBlock at top level and in the nested card, never as a user bubble → history rebuilds the
   same row. The marking comes from role + customType + `details` only, never from text: no code
@@ -311,7 +311,7 @@ owner routing, the stop and inactivity semantics, the history of notifications; 
   parse: only a crafted cross-link in another session file can keep a child alive.
 - A steered message still undelivered at an interrupt stays in pi's queue until the next run (pi's
   `abort` keeps its queues, Fact S6).
-- Related: [ADR-089](adr-089_user-stop-is-not-an-error.md) — a stopped child streams no
+- Related: [ADR-090](adr-090_user-stop-is-not-an-error.md) — a stopped child streams no
   `[error: …]` row (the runner drops a turn error while `draining`), and a user Stop of the pi
   session raises no banner.
 - A passive delivery (a stop notice) to a live spawner is appended at the end of its turn and wakes

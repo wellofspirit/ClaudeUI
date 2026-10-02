@@ -1,6 +1,6 @@
 /**
  * One-shot `/hosted-tool` execution grants (SECURITY, A1) — shared by
- * PiSession's own bridge and every host-run subagent's bridge (ADR-088), so
+ * PiSession's own bridge and every host-run subagent's bridge (ADR-089), so
  * the mint / consume / withhold-after-abandon rules exist once.
  *
  *  - `mint` records `toolCallId -> toolName` the instant `/tool-call` decided

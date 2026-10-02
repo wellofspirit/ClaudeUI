@@ -1,6 +1,6 @@
 /**
  * The usage-ledger row for one pi assistant message — shared by PiSession's
- * own turns and its host-run subagents' (ADR-088 D6), so the account
+ * own turns and its host-run subagents' (ADR-089 D6), so the account
  * attribution and the list-price flag are stated once.
  */
 import { piAuthProvider } from '../auth/PiAuthProvider'

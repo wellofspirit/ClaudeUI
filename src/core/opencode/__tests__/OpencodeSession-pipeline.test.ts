@@ -1,5 +1,5 @@
 /**
- * ADR-087 — "no third copy of the judge pipeline": OpencodeSession decides an
+ * ADR-088 — "no third copy of the judge pipeline": OpencodeSession decides an
  * auto-mode ask through `runJudgePipeline` (automode/judge-pipeline.ts) and
  * keeps no step-for-step copy of its body. A structural guard over the
  * session's source (comments stripped), since a re-inlined copy would pass

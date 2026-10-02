@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-08-03)
 **Relates to:** ADR-030 (capability honesty), ADR-038 (event-driven approval lifecycle — the
 same "never infer lifecycle in the renderer" principle applied to approvals)
-**Related:** [ADR-089](adr-089_user-stop-is-not-an-error.md) (a user stop is not an error — the
+**Related:** [ADR-090](adr-090_user-stop-is-not-an-error.md) (a user stop is not an error — the
 sibling adapter contract for turn-error banners; the disconnect banners stay unsuppressed)
 
 ## Context

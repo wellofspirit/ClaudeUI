@@ -421,7 +421,7 @@ function deliveredEnd(p: PiAgentDelivery): Cmd {
   }
 }
 
-describe('PiChildRunner deliveries (ADR-088 S3)', () => {
+describe('PiChildRunner deliveries (ADR-089 S3)', () => {
   it('M5 (runner): deliver sends exactly one /cui-deliver prompt decoding to the payload, nothing else', async () => {
     const child = makeFakeChild()
     const runner = await PiChildRunner.start(runnerOpts(child))
@@ -576,7 +576,7 @@ describe('forwardPiChildStream', () => {
   })
 })
 
-describe('PiChildRunner — the error of a turn the host aborted (ADR-089)', () => {
+describe('PiChildRunner — the error of a turn the host aborted (ADR-090)', () => {
   /** P1: pi's aborted model request ends `stopReason: 'error'`, no content. */
   const abortedEnd: Cmd = {
     type: 'message_end',

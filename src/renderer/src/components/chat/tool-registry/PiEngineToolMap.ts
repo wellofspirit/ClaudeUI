@@ -43,7 +43,7 @@
  * lifted kind (MessageBubble.renderToolBlock routes it to ExitPlanModeCard
  * before ever consulting displayName), engine-agnostic by design.
  *
- * ADR-088: host-run pi subagents — the bridge's `agent` tool (v9, gated on
+ * ADR-089: host-run pi subagents — the bridge's `agent` tool (v9, gated on
  * CLAUDEUI_PI_AGENT_TOOL) maps to 'task', reusing TaskCard alongside
  * dispatch_agent. `subagent` (legacy M5b transcripts from the retired in-pi
  * extension, and pi's upstream example extension) maps to 'task' too.
@@ -101,7 +101,7 @@ function piKindOf(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
-    // Host-run pi subagents (ADR-088) — the bridge's own `agent` tool. Reuses
+    // Host-run pi subagents (ADR-089) — the bridge's own `agent` tool. Reuses
     // the SAME 'task' kind dispatch_agent does — TaskCard is engine-neutral
     // and disambiguates by input shape (see piNormalize's 'task' case below).
     // Mirrors permission-engine.ts's piToolKind IDENTICAL case (single-source
@@ -112,7 +112,7 @@ function piKindOf(toolName: string): ToolKind {
     // extension. Mirrors permission-engine.ts's piToolKind IDENTICAL case.
     case 'subagent':
       return 'task'
-    // ADR-088 S3b: the bridge's `send_message` / `task_stop` (Claude's
+    // ADR-089 S3b: the bridge's `send_message` / `task_stop` (Claude's
     // SendMessage / TaskStop rows). Mirrors permission-engine.ts's piToolKind.
     case 'send_message':
       return 'detail'
@@ -226,7 +226,7 @@ function piNormalize(
           subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
         }
       }
-      // Host-run subagents (ADR-088) — the `agent` tool: { description,
+      // Host-run subagents (ADR-089) — the `agent` tool: { description,
       // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
       // description, none of engine/agent/tasks): piNormalize never sees the
       // tool name. Checked BEFORE the legacy `subagent` shapes below.
@@ -248,7 +248,7 @@ function piNormalize(
           subagent: type ?? 'general-purpose',
           ...(name ? { name } : {}),
           ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {}),
-          // Once a result exists it decides (ADR-088 S3): only the host's
+          // Once a result exists it decides (ADR-089 S3): only the host's
           // launch acknowledgement means a background run. A call refused
           // before any spawn (validation, start failure, a deny) is settled,
           // not "running" forever, and a definition that forced background
@@ -297,7 +297,7 @@ function piNormalize(
       }
     }
 
-    // send_message (ADR-088 S3b): who and the preview as fields, the message
+    // send_message (ADR-089 S3b): who and the preview as fields, the message
     // itself as the text — the shape Claude's SendMessage row takes.
     case 'detail': {
       const fields: { label: string; value: string }[] = []
@@ -309,7 +309,7 @@ function piNormalize(
       return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
     }
 
-    // task_stop (ADR-088 S3b): the host's own answer once there is one — a
+    // task_stop (ADR-089 S3b): the host's own answer once there is one — a
     // refusal or "not running" must not read as a stop.
     case 'note':
       return {

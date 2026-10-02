@@ -47,10 +47,10 @@ import type {
 export interface CallerSessionHandle {
   cwd: string
   /** The caller's Claude-style permission mode, read LIVE at every dispatch
-   *  decision (ADR-087) — not a snapshot taken when the handle was built. */
+   *  decision (ADR-088) — not a snapshot taken when the handle was built. */
   getAutonomyMode: () => string
   /** The caller's live transcript (ISession.getMessages), for the judge of a
-   *  dispatched pi/opencode target's calls (ADR-087). */
+   *  dispatched pi/opencode target's calls (ADR-088). */
   getMessages: () => ChatMessage[]
   /** Re-emits an event under the caller session's routing (ISession.emit). */
   emit: (channel: string, data: unknown) => void

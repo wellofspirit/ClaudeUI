@@ -150,7 +150,7 @@ export function buildRuleset(mode: string): PermissionRule[] {
       // `full`/`auto` land here only as the NO-CLASSIFIER fallback: auto with
       // `autoMode.enabled === false`. Every judged auto caller builds its base
       // from `buildAutoModeRuleset` instead — the session (ADR-023, ADR-084 §3)
-      // and, since ADR-087, an opencode dispatch target — so it never takes
+      // and, since ADR-088, an opencode dispatch target — so it never takes
       // this branch. Gated like `default` so a disabled classifier never means
       // allow-all: `full` is an LLM-gated mode, never `bypassPermissions`
       // (ADR-022).

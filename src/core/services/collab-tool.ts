@@ -12,10 +12,10 @@ export interface CollabServerContext {
   /** Live routingId lookup — the session is rekeyed to its UUID after init. */
   getRoutingId: () => string
   cwd: string
-  /** Live permission-mode lookup — read at every dispatch decision (ADR-087). */
+  /** Live permission-mode lookup — read at every dispatch decision (ADR-088). */
   getAutonomyMode: () => string
   /** The session's live transcript (`getMessages()`), for the judge of a
-   *  dispatched pi/opencode target's calls (ADR-087). */
+   *  dispatched pi/opencode target's calls (ADR-088). */
   getMessages: () => ChatMessage[]
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void

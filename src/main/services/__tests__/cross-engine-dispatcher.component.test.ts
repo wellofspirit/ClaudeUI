@@ -55,7 +55,7 @@ vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
   collectClaudeMcpForOpencode: mockCollectClaudeMcp
 }))
-// ADR-087 — the target judge's ground truth and the shared trust lists stay
+// ADR-088 — the target judge's ground truth and the shared trust lists stay
 // hermetic: no git subprocess, never the dev's own `~/.claude/ui/automode.json`.
 vi.mock('../../../core/automode/ground-truth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/automode/ground-truth')>()),
@@ -319,7 +319,7 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
 /**
  * `autonomyMode` is a CONVENIENCE override (the ~50 call sites stay readable):
  * it becomes `getAutonomyMode: () => mode`. Pass `getAutonomyMode` itself for a
- * live switch (ADR-087).
+ * live switch (ADR-088).
  */
 function makeCtx(
   overrides: Partial<DispatchContext> & { autonomyMode?: string } = {}
@@ -344,7 +344,7 @@ function makeCtx(
 }
 
 /**
- * A scripted judge transport for ADR-087's target judge, injected through
+ * A scripted judge transport for ADR-088's target judge, injected through
  * `DispatcherDeps.makeJudgeTransport` (no mocked modules). Each reply is
  * consumed by one judge call (one call per judgement in `twoStageMode: 'fast'`):
  * a string is the completion, an Error is a transport failure, a function is
@@ -2025,7 +2025,7 @@ function makeFakeClaudeTarget(opts: { rejectAuto?: boolean } = {}): {
   push: (msg: Partial<SDKMessage> & { type: string }) => void
   lastCanUseTool: () => ClaudeQuerySpawnOpts['canUseTool'] | undefined
   lastAbortController: () => AbortController | undefined
-  /** Every `set_permission_mode` the dispatcher sent (ADR-087 live mode). */
+  /** Every `set_permission_mode` the dispatcher sent (ADR-088 live mode). */
   setModeCalls: string[]
 } {
   const spawnCalls: ClaudeQuerySpawnOpts[] = []
@@ -2049,7 +2049,7 @@ function makeFakeClaudeTarget(opts: { rejectAuto?: boolean } = {}): {
   const handle = {
     [Symbol.asyncIterator]: () => iterator,
     // cli.js answers a rejected `auto` with a control_response error, which
-    // QueryHandle.setPermissionMode throws (docs/protocol-cc, ADR-087 F3).
+    // QueryHandle.setPermissionMode throws (docs/protocol-cc, ADR-088 F3).
     setPermissionMode: vi.fn(async (mode: string) => {
       setModeCalls.push(mode)
       if (opts.rejectAuto && mode === 'auto') {
@@ -2283,7 +2283,7 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('autonomy-mode inheritance', () => {
-    // ADR-087: an auto parent's Claude target runs cli.js `auto` (its own
+    // ADR-088: an auto parent's Claude target runs cli.js `auto` (its own
     // judge), never bypass; only a bypass parent still spawns bypass + skip.
     it.each([
       ['auto', 'auto', false],
@@ -5231,7 +5231,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
-  // ADR-087: an auto parent's pi target is JUDGED (see the ADR-087 block
+  // ADR-088: an auto parent's pi target is JUDGED (see the ADR-088 block
   // below); only with pi's own judge switched off does auto keep the
   // historical allow-all base.
   it("T8: 'auto' with pi's autoMode.enabled false auto-allows a mutating tool with NO forwarded approval and no judge call", async () => {
@@ -6807,9 +6807,9 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
     expect(env.CLAUDEUI_PI_SKILL_DIRS).toBe('')
-    // ADR-088: a dispatch target never gets the `agent` tool either.
+    // ADR-089: a dispatch target never gets the `agent` tool either.
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
-    // ADR-088 S3b: nor `send_message`.
+    // ADR-089 S3b: nor `send_message`.
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
@@ -7110,7 +7110,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     ['acceptEdits', 'untrusted', 'workspace-write', 'user'],
     ['auto', 'on-request', 'workspace-write', 'auto_review']
   ])(
-    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — on thread/start, and again on every turn/start (ADR-087)",
+    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — on thread/start, and again on every turn/start (ADR-088)",
     async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
       const target = makeFakeCodexTarget()
       const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
@@ -7130,7 +7130,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
         allowProviderModelFallback: false,
         historyMode: 'paginated'
       })
-      // ADR-087 — the per-turn request re-sends the policy for the parent's
+      // ADR-088 — the per-turn request re-sends the policy for the parent's
       // LIVE mode, the same `codexTurnPolicy` CodexSession sends.
       const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
       expect(turnStart.params).toMatchObject(codexTurnPolicy(mode))
@@ -7429,7 +7429,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
     await pending
   })
 
-  // ADR-087 review R1: `auto` gates as `default` (the interactive
+  // ADR-088 review R1: `auto` gates as `default` (the interactive
   // `CodexSession.gate()` rule) — what reaches the gate under `auto_review` is
   // what the guardian ESCALATED, and escalations belong to the human.
   it('R1: auto mode ASKS the human for what the native reviewer escalated — never a silent accept', async () => {
@@ -9931,7 +9931,7 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
   })
 
   describe('(e) pi target', () => {
-    // A scripted judge that ALLOWS (ADR-087): without G9 an auto-mode ask rule
+    // A scripted judge that ALLOWS (ADR-088): without G9 an auto-mode ask rule
     // would be judged and allowed instead of reaching the human.
     const piJudge = makeScriptedJudge()
     async function start(mode: string) {
@@ -10068,7 +10068,7 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await pending
     })
 
-    // ADR-087 review R1: an escalation reaching the gate under `auto` gates as
+    // ADR-088 review R1: an escalation reaching the gate under `auto` gates as
     // `default` — with no matching rule, the human decides (was: accepted).
     it('without a matching rule auto gates as default — the escalation asks the human', async () => {
       const { target, ctx, pending } = await start('auto')
@@ -10144,12 +10144,12 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
 })
 
 // ---------------------------------------------------------------------------
-// ADR-087 — dispatch targets inherit auto mode, live, and are JUDGED: pi and
+// ADR-088 — dispatch targets inherit auto mode, live, and are JUDGED: pi and
 // opencode targets by ClaudeUI's own judge (the shared pipeline, scripted here
 // through `makeJudgeTransport`), Claude/Codex targets by their engines' own.
 // ---------------------------------------------------------------------------
 
-describe('CrossEngineDispatcher — ADR-087: judged dispatch targets', () => {
+describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
   /** Enough turns of the event loop for the pipeline's awaits to settle. */
   const flush = async (): Promise<void> => {
     for (let i = 0; i < 8; i++) await tick()

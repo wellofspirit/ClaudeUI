@@ -6,7 +6,7 @@ per-direction liveness split superseded by the 2026-09-18 amendment below)
 **Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §1–§2 moves dispatched usage into `usage_event` and gates `dispatch.maxCostUsd` on the API-equivalent cost for every target.
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
-**Amended by:** [ADR-087](adr-087_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live)
+**Amended by:** [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live)
 
 ## Context
 
@@ -62,7 +62,7 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
    parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
 5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
    ADR-022 `buildRuleset` for opencode; permission mode for Claude — since
-   [ADR-087](adr-087_dispatch-autonomy-inheritance.md) an auto-mode target is JUDGED (cli.js's own
+   [ADR-088](adr-088_dispatch-autonomy-inheritance.md) an auto-mode target is JUDGED (cli.js's own
    judge for Claude, ClaudeUI's for pi/opencode, Codex's `auto_review` for Codex) and the mode is
    read LIVE from the parent at every decision point; and since
    [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §2 every
@@ -130,7 +130,7 @@ matter for maintenance are folded in below.)
   `asyncIterator.return()` kills the child, so `for await`+`break` is forbidden. Concurrent
   same-`session_id` dispatches are busy-rejected (one iterator per target). Target approvals
   forward as `xeng:` `PendingApproval`s resolved back into the target's `canUseTool` promise.
-  `full`/`auto` callers map to cli.js `auto` on the target (ADR-087; `bypassPermissions` callers
+  `full`/`auto` callers map to cli.js `auto` on the target (ADR-088; `bypassPermissions` callers
   still map to `bypassPermissions`); `plan` maps to `default`.
 
 - **M3 shipped (subtask-parity UX).** Dispatched work renders via TaskCard ('task' kind; engine ·

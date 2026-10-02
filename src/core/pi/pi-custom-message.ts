@@ -2,7 +2,7 @@
  * One converter for pi `custom` messages (an extension's `pi.sendMessage`),
  * shared by the live mapper (event-mapper.ts `message_end`) and the history
  * loader (pi-session-list.ts `custom_message` entries), so a row renders the
- * same live and on reload (ADR-088 S3, Q10).
+ * same live and on reload (ADR-089 S3, Q10).
  *
  * Every row is `role: 'system'` with one `context_note`: context the model saw
  * that the user never typed, rendered verbatim (an extension's text is

@@ -110,14 +110,14 @@
  *    every extension factory during startup and waits for it before startup
  *    continues, and tools run only in a session (vendor/pi-src/packages/coding-agent/docs/
  *    extensions.md, "Respect the runtime lifecycle").
- *  - v9 ADDED the `agent` tool (ADR-088: host-run pi subagents) in its OWN
+ *  - v9 ADDED the `agent` tool (ADR-089: host-run pi subagents) in its OWN
  *    block, gated on CLAUDEUI_PI_AGENT_TOOL=1 + bridgeUrl/bridgeToken and
  *    INDEPENDENT of CLAUDEUI_PI_HOSTED_TOOLS (a subagent child gets `agent`
  *    and none of the other hosted tools). Its description is a fixed preamble
  *    plus the agent-type listing ClaudeUI passes in CLAUDEUI_PI_AGENT_LISTING.
  *    `postHostedTool` moved out of the hosted-tools block so both blocks share
  *    it; it is defined whenever bridgeUrl && bridgeToken.
- *  - v10 (ADR-088 S3) ADDED the `cui-deliver` command, ClaudeUI's ONLY way to
+ *  - v10 (ADR-089 S3) ADDED the `cui-deliver` command, ClaudeUI's ONLY way to
  *    put an agent-authored message (a task notification, a send_message) into
  *    a pi session. It is registered whenever bridgeUrl && bridgeToken, with no
  *    other gate (inert without a host that sends it). The host sends it as an
@@ -128,9 +128,9 @@
  *    (agent-session.ts sendCustomMessage). The message is stored with role
  *    `custom`, which is how ClaudeUI marks it as never the user's (never from
  *    its text). The handler must reach pi.sendMessage with NO await first
- *    (ADR-088 S3, Fact S7). The `agent` tool gained `run_in_background`
+ *    (ADR-089 S3, Fact S7). The `agent` tool gained `run_in_background`
  *    (background is the default) and its description now says so.
- *  - v11 (ADR-088 S3b) ADDED `send_message` in its OWN block, gated on
+ *  - v11 (ADR-089 S3b) ADDED `send_message` in its OWN block, gated on
  *    CLAUDEUI_PI_SEND_MESSAGE=1 + bridgeUrl/bridgeToken, and `task_stop` inside
  *    the `agent` block (only an agent that may launch agents may stop them).
  *    Both are hosted tools: execute() POSTs /hosted-tool like `agent`.
@@ -430,7 +430,7 @@ export default function (pi) {
     }
   }
 
-  // agent (bridge v9, ADR-088): launch a ClaudeUI-hosted pi subagent. Its OWN
+  // agent (bridge v9, ADR-089): launch a ClaudeUI-hosted pi subagent. Its OWN
   // gate, independent of CLAUDEUI_PI_HOSTED_TOOLS -- a subagent child gets
   // this tool (when it may spawn) and none of the other hosted tools. The
   // agent types come from ClaudeUI's registry via CLAUDEUI_PI_AGENT_LISTING.
@@ -475,7 +475,7 @@ export default function (pi) {
     });
   }
 
-  // send_message (bridge v11, ADR-088 S3b): its OWN gate, independent of the
+  // send_message (bridge v11, ADR-089 S3b): its OWN gate, independent of the
   // agent tool -- every subagent child gets it, including one that may not
   // launch agents.
   if (process.env.CLAUDEUI_PI_SEND_MESSAGE === '1' && bridgeUrl && bridgeToken) {
@@ -500,7 +500,7 @@ export default function (pi) {
 
   if (!bridgeUrl || !bridgeToken) return;
 
-  // cui-deliver (bridge v10, ADR-088 S3): the host's ONLY way to put an
+  // cui-deliver (bridge v10, ADR-089 S3): the host's ONLY way to put an
   // agent-authored message (a task notification or a send_message) into this
   // session. ClaudeUI sends it as an RPC prompt '/cui-deliver <base64 JSON>';
   // an extension command runs at once, even mid-turn. pi.sendMessage stores
@@ -510,7 +510,7 @@ export default function (pi) {
   // idle session appends it (and starts a turn when wake is true).
   // NO await may come before pi.sendMessage: pi marks a run active
   // synchronously inside that call chain, so two back-to-back deliveries can
-  // never both start a run (ADR-088 S3, Fact S7). The ack of the prompt does
+  // never both start a run (ADR-089 S3, Fact S7). The ack of the prompt does
   // not confirm delivery; ClaudeUI waits for the custom message itself. Every
   // failure throws (pi reports it as an extension error); nothing here may
   // ever carry the bridge URL or token.

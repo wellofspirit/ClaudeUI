@@ -261,7 +261,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         fromEngine: 'opencode',
         fromRoutingId: 'ses_caller',
         cwd: '/proj',
-        // The caller's live accessors, passed through (ADR-087).
+        // The caller's live accessors, passed through (ADR-088).
         getAutonomyMode,
         getMessages,
         emit,

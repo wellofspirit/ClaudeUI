@@ -2647,7 +2647,7 @@ describe('Codex cross-engine dispatch', () => {
       getMessages: () => unknown[]
     }
     expect(dispatchCtx.getAutonomyMode()).toBe('auto')
-    // Live accessors (ADR-087): a later switch is visible through the SAME
+    // Live accessors (ADR-088): a later switch is visible through the SAME
     // context, and the transcript is the session's live history.
     await f.session.setPermissionMode('plan')
     expect(dispatchCtx.getAutonomyMode()).toBe('plan')
@@ -5659,7 +5659,7 @@ describe('a Codex turn writes the usage ledger', () => {
   })
 })
 
-describe('a Codex user stop is not an error (ADR-089)', () => {
+describe('a Codex user stop is not an error (ADR-090)', () => {
   /** Distinct turn ids per `turn/start`, so a second turn is not an ended one. */
   function withTurnIds(request: ReturnType<typeof fixture>['request']): void {
     const base = request.getMockImplementation()!

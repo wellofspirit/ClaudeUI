@@ -148,7 +148,7 @@ export type PiMapperOutput =
    */
   | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
-  /** pi started a run (`agent_start`), possibly one it started on its own for a delivery (ADR-088 S3). */
+  /** pi started a run (`agent_start`), possibly one it started on its own for a delivery (ADR-089 S3). */
   | { kind: 'turn_start' }
   /** One of ClaudeUI's own agent messages reached the session (its custom message_end). */
   | { kind: 'agent_delivery'; deliveryId: string }
@@ -445,7 +445,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       if (msg.role === 'custom') {
         // An extension's pi.sendMessage (probe P-S1: a message_start/end pair
         // with role 'custom'). The SAME converter as history, so the row is
-        // identical live and on reload (ADR-088 S3, Q10). ClaudeUI's own
+        // identical live and on reload (ADR-089 S3, Q10). ClaudeUI's own
         // deliveries are recognised by customType + details, never by text;
         // their `agent_delivery` is what confirms a delivery (the RPC ack of
         // the /cui-deliver prompt does not, P-S4).
@@ -502,7 +502,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     case 'extension_error': {
       const { error, extensionPath } = ev as Extract<PiEvent, { type: 'extension_error' }>
       // ClaudeUI's own delivery command failing is not a turn error: no turn
-      // ran, and the host undoes what it set up for one (ADR-088 S3).
+      // ran, and the host undoes what it set up for one (ADR-089 S3).
       if (extensionPath === 'command:cui-deliver')
         return [{ kind: 'delivery_error', message: error }]
       const { event } = ev as Extract<PiEvent, { type: 'extension_error' }>
@@ -536,7 +536,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
 
     case 'agent_start':
       // A run began. PiSession knows of the runs it starts itself (run()), but
-      // a woken delivery starts one inside pi (ADR-088 S3), and the session
+      // a woken delivery starts one inside pi (ADR-089 S3), and the session
       // must not read as idle through it.
       return [{ kind: 'turn_start' }]
 

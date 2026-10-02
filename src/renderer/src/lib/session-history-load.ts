@@ -168,11 +168,11 @@ export async function loadSessionIntoStore(
       statusLine: null,
       lastModel: null
     }
-    // Host-run pi subagent transcripts (ADR-088) come back inline, keyed by the
+    // Host-run pi subagent transcripts (ADR-089) come back inline, keyed by the
     // parent `agent` call id — the Codex precedent below. opencode returns none.
     const subagentMessages =
       loaded && 'subagentMessages' in loaded ? loaded.subagentMessages : undefined
-    // pi's agent notifications (ADR-088 S3): finished background runs, plus an
+    // pi's agent notifications (ADR-089 S3): finished background runs, plus an
     // `unfinished` entry for a launch that never reported back.
     const taskNotifications =
       loaded && 'taskNotifications' in loaded ? loaded.taskNotifications : undefined

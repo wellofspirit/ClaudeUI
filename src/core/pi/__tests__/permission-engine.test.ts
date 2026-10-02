@@ -85,7 +85,7 @@ describe('piToolKind', () => {
     expect(piToolKind('exit_plan')).toBe('plan')
   })
 
-  it('maps the agent tool (bridge v9, ADR-088) to the "task" kind', () => {
+  it('maps the agent tool (bridge v9, ADR-089) to the "task" kind', () => {
     expect(piToolKind('agent')).toBe('task')
   })
 
@@ -1014,7 +1014,7 @@ describe('EMPTY_RULES — frozen (A9)', () => {
 })
 
 describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
-  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent, agent, send_message and task_stop (ADR-088)', () => {
+  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent, agent, send_message and task_stop (ADR-089)', () => {
     expect([...PI_HOSTED_TOOL_NAMES].sort()).toEqual(
       [
         'agent',

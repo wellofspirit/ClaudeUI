@@ -8363,11 +8363,11 @@ describe('OpencodeSession — task call lifetime (child errors, overflow)', () =
 })
 
 // ---------------------------------------------------------------------------
-// ADR-089 — a user stop is not an error: the MessageAbortedError opencode
+// ADR-090 — a user stop is not an error: the MessageAbortedError opencode
 // publishes for a turn the user stopped raises no banner.
 // ---------------------------------------------------------------------------
 
-describe('ADR-089 — a user stop is not an error', () => {
+describe('ADR-090 — a user stop is not an error', () => {
   beforeEach(setupMocks)
 
   const SES = 'ses_stop'

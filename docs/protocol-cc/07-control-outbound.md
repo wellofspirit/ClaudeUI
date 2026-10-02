@@ -155,7 +155,7 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 
 **Note:** `"ask"` is a legacy mode name — cli.js may accept it but `"default"` is preferred.
 
-**`auto` (2.1.285, re-verified 2026-10-01):** the mode is normalised by `Kg(e.request.mode)`, and `auto` is rejected only when the auto-mode gate is off (`T==="auto"&&!vw()` → `"set_permission_mode:auto rejected — gate not enabled"`), `bypassPermissions` only when disabled by settings. A rejection comes back as a control_response error, which `q.setPermissionMode` throws (the dispatcher's Claude targets fall back to `default`, ADR-087). The full enum is in `14-auto-mode-classifier.md` §1.
+**`auto` (2.1.285, re-verified 2026-10-01):** the mode is normalised by `Kg(e.request.mode)`, and `auto` is rejected only when the auto-mode gate is off (`T==="auto"&&!vw()` → `"set_permission_mode:auto rejected — gate not enabled"`), `bypassPermissions` only when disabled by settings. A rejection comes back as a control_response error, which `q.setPermissionMode` throws (the dispatcher's Claude targets fall back to `default`, ADR-088). The full enum is in `14-auto-mode-classifier.md` §1.
 
 ---
 

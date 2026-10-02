@@ -35,7 +35,7 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
-    // Host-run subagents (ADR-088) — the bridge's `agent` tool.
+    // Host-run subagents (ADR-089) — the bridge's `agent` tool.
     ['agent', 'task'],
     // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
@@ -322,7 +322,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
   })
 
-  it('task: the agent tool ({description, prompt, subagent_type?, name?, model?}, ADR-088)', () => {
+  it('task: the agent tool ({description, prompt, subagent_type?, name?, model?}, ADR-089)', () => {
     expect(
       PiEngineToolMap.normalize('task', {
         description: 'Find the gate',
@@ -349,7 +349,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       name: 'scout',
       background: true
     })
-    // ADR-088 S3: background is the default; only an explicit false is foreground.
+    // ADR-089 S3: background is the default; only an explicit false is foreground.
     expect(
       PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
     ).toMatchObject({ kind: 'task', background: false })
@@ -429,7 +429,7 @@ describe('PiEngineToolMap.displayName', () => {
   })
 })
 
-describe('PiEngineToolMap — agent background comes from the RESULT once there is one (ADR-088 S3 review R1)', () => {
+describe('PiEngineToolMap — agent background comes from the RESULT once there is one (ADR-089 S3 review R1)', () => {
   const input = { description: 'd', prompt: 'p' }
   const result = (toolResult: string, isError?: boolean) => ({
     type: 'tool_result' as const,
@@ -485,7 +485,7 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
   })
 })
 
-describe('PiEngineToolMap — send_message / task_stop rows (ADR-088 S3b)', () => {
+describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () => {
   it('kinds mirror permission-engine (detail / note)', () => {
     expect(PiEngineToolMap.kindOf('send_message')).toBe('detail')
     expect(PiEngineToolMap.kindOf('task_stop')).toBe('note')

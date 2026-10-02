@@ -53,7 +53,7 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
 import { piUsageEvent } from './usage-row'
-// Host-run subagents (ADR-088): the manager owns the children; this session
+// Host-run subagents (ADR-089): the manager owns the children; this session
 // owns their gating (decideToolCall, parametrized by the child scope).
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
@@ -369,9 +369,9 @@ export class PiSession extends BaseSession {
       toolName: string
       input: Record<string, unknown>
       toolCallId: string
-      /** Where a human REJECT is recorded: the session's own map, or a child's (ADR-088). */
+      /** Where a human REJECT is recorded: the session's own map, or a child's (ADR-089). */
       outcomes: Map<string, ToolOutcome>
-      /** The host-run child the card belongs to (ADR-088), or null for the session's own call. */
+      /** The host-run child the card belongs to (ADR-089), or null for the session's own call. */
       scope: PiChildScope | null
     }
   >()
@@ -437,7 +437,7 @@ export class PiSession extends BaseSession {
    *
    * The mint/consume/withhold rules and their 256-entry bounds live in
    * {@link HostedGrants}, shared with every host-run subagent's own bridge
-   * (ADR-088).
+   * (ADR-089).
    */
   private hostedGrants = new HostedGrants()
 
@@ -457,10 +457,10 @@ export class PiSession extends BaseSession {
    */
   private inFlightDispatchIds = new Set<string>()
 
-  // ── Host-run subagents (ADR-088) ─────────────────────────────────────────
+  // ── Host-run subagents (ADR-089) ─────────────────────────────────────────
   /** The user prompt request still waiting for pi's ack (Fact S8, see deliverAgentMessage). */
   private promptInFlight: Promise<unknown> | null = null
-  /** FIFO chain of agent deliveries into this session (ADR-088 S3). */
+  /** FIFO chain of agent deliveries into this session (ADR-089 S3). */
   private deliveryChain: Promise<void> = Promise.resolve()
   /** Count of runs pi reported starting (`agent_start`) — run()'s refusal branch reads it (M-1). */
   private runStarts = 0
@@ -505,7 +505,7 @@ export class PiSession extends BaseSession {
     win: HostWindowHandle | null,
     cwd: string,
     opts: EngineSpawnOptions = {},
-    /** Test seams for the host-run subagents (ADR-088); production passes none. */
+    /** Test seams for the host-run subagents (ADR-089); production passes none. */
     deps: {
       spawnPiChild?: SpawnPiChildFn
       subagentsRoot?: string
@@ -628,7 +628,7 @@ export class PiSession extends BaseSession {
 
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
-    // A live background agent keeps the session (ADR-088 S3): disposing would
+    // A live background agent keeps the session (ADR-089 S3): disposing would
     // kill it and lose its notification. backgroundWorkChanged re-arms this
     // once the last one ends.
     if (this.subagents.liveBackgroundCount > 0) return
@@ -794,7 +794,7 @@ export class PiSession extends BaseSession {
       const bridgePath = writeBridgeExtension()
 
       const args = ['--mode', 'rpc', '-e', bridgePath]
-      // Host-run subagents (ADR-088): the agent registry is a spawn-time
+      // Host-run subagents (ADR-089): the agent registry is a spawn-time
       // snapshot (Claude Code loads its definitions at start too) — a
       // definition added mid-session takes effect at the next spawn. Never
       // throws (unreadable files become diagnostics).
@@ -830,7 +830,7 @@ export class PiSession extends BaseSession {
           // on whether this session's mode happens to be 'plan' right now
           // (that's a separate, later step — see the re-entry send below).
           ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
-          // Host-run subagents (ADR-088): the bridge's own `agent` (+
+          // Host-run subagents (ADR-089): the bridge's own `agent` (+
           // `task_stop`) and `send_message` tools, and the agent types for
           // the `agent` description. No second `-e`.
           ...(this.capabilities.subagents
@@ -1166,18 +1166,18 @@ export class PiSession extends BaseSession {
         }
       }
 
-      // Host-run subagent transcripts (ADR-088), after the parent's messages
+      // Host-run subagent transcripts (ADR-089), after the parent's messages
       // so each lands under the `agent` card that spawned it. Never into
       // messageHistory: the judge and /btw read the parent's own turns only.
       for (const [toolUseId, childMessages] of Object.entries(subagentMessages ?? {})) {
         this.send('session:subagent-message-batch', { toolUseId, messages: childMessages })
       }
-      // Their terminal events (ADR-088 S3), after the batches; the reducer
+      // Their terminal events (ADR-089 S3), after the batches; the reducer
       // folds them idempotently per (toolUseId, runIndex).
       for (const notification of taskNotifications ?? []) {
         this.send('session:task-notification', notification)
       }
-      // ADR-088 S3b (G7): the depth-1 agents of earlier runs, so send_message
+      // ADR-089 S3b (G7): the depth-1 agents of earlier runs, so send_message
       // can address (and resume) them across an app restart.
       try {
         for (const link of loadPiAgentLinks(sessionId)) this.subagents.adoptRecord(link)
@@ -1248,7 +1248,7 @@ export class PiSession extends BaseSession {
   }
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
-    // The bridge's commands are ClaudeUI's alone (ADR-088 S3): a typed
+    // The bridge's commands are ClaudeUI's alone (ADR-089 S3): a typed
     // `/cui-deliver …` would mint a row marked as an agent's message, and the
     // plan commands are PiSession's own toggle channel (it sends them itself,
     // not through run()). Every `/cui-` start is refused before anything else,
@@ -1334,7 +1334,7 @@ export class PiSession extends BaseSession {
     if (wasBusy) command.streamingBehavior = 'steer'
 
     if (!wasBusy) this.mapperState.startTimeMs = Date.now()
-    // A fresh turn closes the user-stop window (ADR-089); a steer while the
+    // A fresh turn closes the user-stop window (ADR-090); a steer while the
     // stopped turn drains keeps it.
     if (!wasBusy) this.endUserStop()
     this.isProcessing = true
@@ -1359,7 +1359,7 @@ export class PiSession extends BaseSession {
         // `streamingBehavior`, which pi rejects outright while still
         // streaming (README.md "Commands"). Only a non-busy failure (this
         // WAS the turn) resets processing/the inactivity timer. Nor when pi
-        // started a run of its own meanwhile (a delivery, ADR-088 S3): the
+        // started a run of its own meanwhile (a delivery, ADR-089 S3): the
         // refusal is then "already processing", and that run is live.
         if (!wasBusy && this.runStarts === runsBefore) {
           this.isProcessing = false
@@ -1385,7 +1385,7 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * Put an agent-authored message into this session (ADR-088 S3): a
+   * Put an agent-authored message into this session (ADR-089 S3): a
    * background agent's notification whose owner is the root, and (S3b) a
    * `send_message` to `main`. The ONLY path is the bridge's `/cui-deliver`
    * command (pi-delivery.ts, the marking rule): never run(), never a plain
@@ -1522,7 +1522,7 @@ export class PiSession extends BaseSession {
         break
 
       case 'usage': {
-        // The session's own row (the shared builder — ADR-088 D6: a
+        // The session's own row (the shared builder — ADR-089 D6: a
         // subagent's row is the same shape with origin 'child').
         recordUsageEvent(
           piUsageEvent(output, {
@@ -1564,7 +1564,7 @@ export class PiSession extends BaseSession {
         })
         this.sendStatus()
         this.resetInactivityTimer()
-        // The stopped turn (if any) has ended: the user-stop window closes (ADR-089).
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-090).
         this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now as the next turn's prompt (isProcessing is already false, so
@@ -1599,7 +1599,7 @@ export class PiSession extends BaseSession {
       }
 
       case 'error':
-        // ADR-089: the teardown of a turn the user stopped is not news.
+        // ADR-090: the teardown of a turn the user stopped is not news.
         if (this.suppressedAfterUserStop('PiSession', output.message)) break
         this.send('session:error', output.message)
         break
@@ -1608,7 +1608,7 @@ export class PiSession extends BaseSession {
         this.runStarts++
         this.wakePending = false
         // A run pi started on its own (a delivery that landed while pi was
-        // settling, ADR-088 S3) must not read as idle. A run started by run()
+        // settling, ADR-089 S3) must not read as idle. A run started by run()
         // or a woken delivery already set this.
         if (!this.isProcessing) {
           this.isProcessing = true
@@ -1654,14 +1654,14 @@ export class PiSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
-    // ADR-089: open the user-stop window before anything else, and only for a
+    // ADR-090: open the user-stop window before anything else, and only for a
     // live turn — pi can report the abort as a turn error (an aborted model
     // request ends `stopReason: 'error'`, docs/protocol-pi) before the abort
     // RPC even replies.
     if (this.isProcessing) this.beginUserStop()
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
-    // Only the session's OWN cards (ADR-088 S3, Q9): a background agent's
+    // Only the session's OWN cards (ADR-089 S3, Q9): a background agent's
     // cards survive the interrupt with it, and every foreground child stopped
     // below retracts its own.
     this.rejectOwnPendingGates('Interrupted')
@@ -1683,7 +1683,7 @@ export class PiSession extends BaseSession {
       crossEngineDispatcher.stopDispatch(id, this.routingId)
     }
     this.inFlightDispatchIds.clear()
-    // Host-run subagents (ADR-088 S3, Q9 — Claude Code's Esc spares
+    // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
     // background agents too): a foreground child belongs to the turn being
     // aborted; a background one does not.
     this.subagents.stopForeground('interrupt')
@@ -1964,7 +1964,7 @@ export class PiSession extends BaseSession {
     this.decideToolCall(payload, null)
 
   /**
-   * The gate for a host-run subagent's tool call (ADR-088 D2): the SAME ladder
+   * The gate for a host-run subagent's tool call (ADR-089 D2): the SAME ladder
    * as the session's own calls (`decideToolCall`), parametrized by the child
    * scope — the parent's LIVE mode narrowed by the definition (D3), the
    * parent's rules and session allows, and the judge with the child's own
@@ -1976,7 +1976,7 @@ export class PiSession extends BaseSession {
 
   /**
    * The one gate ladder (gateToolCallInner's body, shared with `gateChild`).
-   * `scope` null = this session's own call, byte-identical to before ADR-088.
+   * `scope` null = this session's own call, byte-identical to before ADR-089.
    * With a scope the mode is `narrowMode(parent mode, definition mode)`, read
    * on EVERY call (live, owner ruling 1), and every deny reason uses it where
    * the session's own call reads `this.permissionMode`.
@@ -1996,14 +1996,14 @@ export class PiSession extends BaseSession {
       cwd: this.cwd
     })
 
-    // Spawn-call rung (ADR-088 Q1, Claude Code parity): launching an agent
+    // Spawn-call rung (ADR-089 Q1, Claude Code parity): launching an agent
     // needs no card in any non-auto mode, plan included — every action the
     // child takes is gated by this same live mode anyway. After the deny-rule
     // check, before the mode base. In auto mode it falls through: the `task`
     // kind under the `acceptEdits` base asks, and the judge decides.
     // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
     // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
-    // `send_message` takes the same rung (ADR-088 S3b, Q6): a message that
+    // `send_message` takes the same rung (ADR-089 S3b, Q6): a message that
     // resumes or redirects an agent is delegation, judged like a spawn in auto.
     // (As above, the deny-rule guard cannot fire yet: no rule row maps a
     // Claude tool to the `detail`/`note` kinds these two tools carry.)
@@ -2058,7 +2058,7 @@ export class PiSession extends BaseSession {
     return this.askHuman(payload, undefined, scope)
   }
 
-  /** The mode a call is gated under: the session's, narrowed for a child (ADR-088 D3). */
+  /** The mode a call is gated under: the session's, narrowed for a child (ADR-089 D3). */
   private gateMode(scope: PiChildScope | null): string {
     return scope
       ? narrowMode(this.permissionMode, scope.definition.permissionMode)
@@ -2084,7 +2084,7 @@ export class PiSession extends BaseSession {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
       const requestId = uuid()
-      // A child's card (ADR-088) is raised under THIS session with the
+      // A child's card (ADR-089) is raised under THIS session with the
       // child's own call id: it renders floating and on the nested card.
       this.pendingGates.set(requestId, {
         resolve,
@@ -2100,7 +2100,7 @@ export class PiSession extends BaseSession {
         toolUseId: toolCallId,
         toolName,
         input,
-        // ADR-088 review F4: a child's card names the agent whose action it is.
+        // ADR-089 review F4: a child's card names the agent whose action it is.
         ...(scope
           ? {
               agent: {
@@ -2176,7 +2176,7 @@ export class PiSession extends BaseSession {
   /**
    * interrupt()'s twin of {@link rejectAllPendingGates}: only the session's
    * OWN cards (`scope === null`) are denied; host-run children's cards are
-   * left to their own stop (ADR-088 S3, Q9). hostedGrants (the session's own)
+   * left to their own stop (ADR-089 S3, Q9). hostedGrants (the session's own)
    * are cleared as before.
    */
   private rejectOwnPendingGates(reason: string): void {
@@ -2229,7 +2229,7 @@ export class PiSession extends BaseSession {
       // has no consumer left, so letting it run would only burn tokens.
       crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
     }
-    // A host-run subagent (ADR-088) whose `agent` exchange pi stopped
+    // A host-run subagent (ADR-089) whose `agent` exchange pi stopped
     // waiting for has no consumer either.
     if (info.toolName === 'agent') this.subagents.stop(info.toolCallId, 'interrupt')
     logger.warn(
@@ -2243,7 +2243,7 @@ export class PiSession extends BaseSession {
    * (pi stopped polling its `/tool-call` exchange). pendingGates is keyed by
    * requestId, so the entry is found by its toolCallId; resolving it (rather
    * than just dropping it) is what releases whatever gate promise is still
-   * awaited. Shared by the session's own bridge and its subagents' (ADR-088).
+   * awaited. Shared by the session's own bridge and its subagents' (ADR-089).
    * Returns the retracted requestId, or null.
    */
   private retractPendingGate(toolCallId: string): string | null {
@@ -2257,7 +2257,7 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * A host-run child was stopped (ADR-088): every card it still has open is
+   * A host-run child was stopped (ADR-089): every card it still has open is
    * retracted and its gate denied 'Agent stopped'.
    */
   private retractChildGates(scope: PiChildScope): void {
@@ -2615,7 +2615,7 @@ export class PiSession extends BaseSession {
    * on this action" is not otherwise visible to the user.
    *
    * G9 is pi's own (the one place pi does better than opencode); every step
-   * after it is the shared {@link runJudgePipeline} (ADR-087).
+   * after it is the shared {@link runJudgePipeline} (ADR-088).
    */
   private async classifyAutoMode(
     payload: PiToolCallPayload,
@@ -2640,7 +2640,7 @@ export class PiSession extends BaseSession {
     }
 
     // Everything after G9 is the shared pipeline (automode/judge-pipeline.ts,
-    // ADR-087), with pi's hooks. Notes specific to pi:
+    // ADR-088), with pi's hooks. Notes specific to pi:
     //
     // G8, ANSWERED FOR pi (plan §7 Q2): pi's ask path does NOT fire for
     // read/grep/find/ls under auto mode, so the pipeline's category fast path
@@ -2661,7 +2661,7 @@ export class PiSession extends BaseSession {
     // gate reads it in FULL (only the ladder's copy had its allow rules
     // stripped by `withoutAllowRules`).
     //
-    // A host-run subagent's call (ADR-088 D2.4) changes only what is the
+    // A host-run subagent's call (ADR-089 D2.4) changes only what is the
     // child's: its header (`subagent`), its transcript — this session's (the
     // ROOT, whose human turns are the only real authorisation) followed by
     // the acting child's own assistant-only trajectory (D1; an intermediate
@@ -2669,7 +2669,7 @@ export class PiSession extends BaseSession {
     // agent-authored, and the acting child's own calls are what is being
     // judged) — its outcomes and denial caps, its narrowed live mode (G10
     // re-reads it), and `stillPending` (a stopped or draining child). With no
-    // scope every hook is exactly what it was before ADR-088.
+    // scope every hook is exactly what it was before ADR-089.
     const childHooks = scope
       ? {
           subagent: {
@@ -2723,7 +2723,7 @@ export class PiSession extends BaseSession {
         return outcome.reason ? { kind: 'human', reason: outcome.reason } : ASK_HUMAN
       case 'settled':
         // A host-run subagent was stopped (or is draining) while its call was
-        // judged (ADR-088): refuse. For the session's own call this stays
+        // judged (ADR-089): refuse. For the session's own call this stays
         // unreachable — no `stillPending` hook is passed (pi's gate is a
         // single awaited HTTP request — nothing answers the call elsewhere
         // while it is judged) — and fail-safe: ask the human.
@@ -2825,10 +2825,10 @@ export class PiSession extends BaseSession {
       case 'dispatch_agent':
         return this.handleDispatchAgent(input, toolCallId)
 
-      // Host-run subagents (ADR-088): this session is the parent (depth 0).
+      // Host-run subagents (ADR-089): this session is the parent (depth 0).
       case 'agent':
         return this.subagents.run(input, toolCallId, null)
-      // ADR-088 S3b: messaging and stopping, as the session (caller null).
+      // ADR-089 S3b: messaging and stopping, as the session (caller null).
       case 'send_message':
         return this.subagents.sendMessage(input, null)
       case 'task_stop':
@@ -2898,7 +2898,7 @@ export class PiSession extends BaseSession {
       fromEngine: 'pi',
       fromRoutingId: this.routingId,
       cwd: this.cwd,
-      // Live (ADR-087): the target follows this session's mode switches, and
+      // Live (ADR-088): the target follows this session's mode switches, and
       // the judge of a pi/opencode target reads this transcript.
       getAutonomyMode: () => this.getAutonomyMode(),
       getMessages: () => this.messageHistory,
@@ -2929,7 +2929,7 @@ export class PiSession extends BaseSession {
 
   /**
    * ISession.backgroundTask — "Send to background" on a host-run subagent's
-   * TaskCard (ADR-088 S3b, Q7; `handlers-core.backgroundTask`, gated on
+   * TaskCard (ADR-089 S3b, Q7; `handlers-core.backgroundTask`, gated on
    * `capabilities.backgroundTasks`): the waiting `agent` call returns the
    * async-launched text now, and the run notifies when it ends.
    */

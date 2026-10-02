@@ -438,7 +438,7 @@ describe('FloatingApproval rendered component', () => {
     expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
   })
 
-  it("F4 (ADR-088): a pi child's card names the agent; an own-session card has no agent line", () => {
+  it("F4 (ADR-089): a pi child's card names the agent; an own-session card has no agent line", () => {
     setup({
       toolName: 'bash',
       input: { command: 'npm run build' },

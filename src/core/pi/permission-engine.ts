@@ -139,7 +139,7 @@ export function piToolKind(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
-    // Host-run pi subagents (ADR-088): the bridge's own `agent` tool
+    // Host-run pi subagents (ADR-089): the bridge's own `agent` tool
     // (pi-bridge-source.ts v9, gated on CLAUDEUI_PI_AGENT_TOOL) — the SAME
     // 'task' kind dispatch_agent uses (TaskCard is engine-neutral). Mirrors
     // PiEngineToolMap.kindOf's IDENTICAL case (single-source guard test).
@@ -150,7 +150,7 @@ export function piToolKind(toolName: string): ToolKind {
     // Same 'task' kind; mirrored in PiEngineToolMap.kindOf.
     case 'subagent':
       return 'task'
-    // ADR-088 S3b: the bridge's `send_message` / `task_stop` — Claude's
+    // ADR-089 S3b: the bridge's `send_message` / `task_stop` — Claude's
     // SendMessage / TaskStop row kinds. Mirrored in PiEngineToolMap.kindOf.
     case 'send_message':
       return 'detail'
@@ -192,7 +192,7 @@ export const PI_AUTO_ALLOW_HOSTED_TOOLS: ReadonlySet<string> = new Set([
  * PI_AUTO_ALLOW_HOSTED_TOOLS above is a STRICT SUBSET (the three auto-allowed
  * ones; `dispatch_agent` and `agent` get normal gating instead, see
  * PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment for why — `agent`'s gate is
- * PiSession's spawn-call rung, ADR-088 Q1). PiSession's
+ * PiSession's spawn-call rung, ADR-089 Q1). PiSession's
  * gateToolCall wrapper checks THIS superset — not the auto-allow set — to
  * decide which allow decisions mint a one-shot `/hosted-tool` execution grant
  * (security fix: a call outside this set has no `/hosted-tool` counterpart to

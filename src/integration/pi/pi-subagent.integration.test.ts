@@ -1,5 +1,5 @@
 /**
- * pi host-run subagent integration GUARD test (ADR-088).
+ * pi host-run subagent integration GUARD test (ADR-089).
  *
  * The proof that a host-run child is real (S3: in the background by default,
  * notifying through a delivery, then resumed by send_message): `PiSubagentManager` spawns a REAL
@@ -58,7 +58,7 @@ const BINARY_MISSING = !locatePiBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
 describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
-  'pi host-run subagent integration (ADR-088)',
+  'pi host-run subagent integration (ADR-089)',
   () => {
     let cwd: string
     let root: string
@@ -102,7 +102,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         sessionsRoot: root
       })
 
-      // Background is the default (ADR-088 S3, D2): the call returns at once.
+      // Background is the default (ADR-089 S3, D2): the call returns at once.
       const result = await manager.run(
         {
           description: 'Echo a marker',

@@ -1,5 +1,5 @@
 /**
- * ADR-087 — the per-target judge: what it hands the judge transport (usage
+ * ADR-088 — the per-target judge: what it hands the judge transport (usage
  * attribution under the dispatching routing id, the model fallback), the
  * fail-closed stale-judge-model check, the one-per-target banners, where the
  * review goes, and the D1 hybrid transcript (parent + the target's own

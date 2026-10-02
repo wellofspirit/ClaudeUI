@@ -101,7 +101,7 @@ export interface PiHostedToolResult {
   content: Array<{ type: 'text'; text: string }>
   isError?: boolean
   /**
-   * Structured data for pi's `toolResult.details` (ADR-088: the `agent` tool's
+   * Structured data for pi's `toolResult.details` (ADR-089: the `agent` tool's
    * `cuiAgent` history link). The bridge returns a result whose `content` is
    * an array VERBATIM (pi-bridge-source.ts), so this reaches pi as-is, and pi
    * persists `details` on the toolResult message in the session file — never
@@ -680,7 +680,7 @@ export class PiBridgeHost {
  * the auth vault use, derived locally (no import of either — see the
  * writer's doc comment for the full rationale). The retired M5b subagent
  * extension's copies under `pi-ext/claudeui-pi-subagent/` are inert and left
- * on disk (ADR-088). `mkdirSync(recursive:true)`
+ * on disk (ADR-089). `mkdirSync(recursive:true)`
  * creates it with the process's default (umask-restricted) perms under the
  * user's own home dir, which is NOT world-writable the way `os.tmpdir()`
  * (`/tmp` on POSIX) normally is — closing the preplant hole described below.

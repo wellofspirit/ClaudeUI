@@ -258,7 +258,7 @@ export interface PiBashExecutionMessage {
  * An extension's `pi.sendMessage` (messages.ts `CustomMessage`): live as a
  * `message_start`/`message_end` pair with this role, on disk as a
  * `custom_message` ENTRY (not a `message` entry). ClaudeUI's own agent
- * deliveries are these with customType 'claudeui-agent-message' (ADR-088 S3,
+ * deliveries are these with customType 'claudeui-agent-message' (ADR-089 S3,
  * pi-delivery.ts). The LLM sees it as a user-role message (messages.ts).
  */
 export interface PiCustomMessage {

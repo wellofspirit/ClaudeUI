@@ -674,7 +674,7 @@ export class ClaudeSession extends BaseSession {
         // message and cancel_async_message cannot name it (03 §3.21).
         uuid: messageUuid
       }
-      // The user's own turn in this session's transcript (ADR-087 D1: the
+      // The user's own turn in this session's transcript (ADR-088 D1: the
       // judge of a target this session dispatches reads it as the only real
       // authorisation; cli.js never echoes a prompt back). A queued item is
       // recorded when cli.js takes it (recordConsumedPrompt), not now.
@@ -1987,7 +1987,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       ...(matchedToolUseId ? { runIndex } : undefined)
     })
 
-    // The agent note (ADR-087 S4 amendment). This frame IS the live signal:
+    // The agent note (ADR-088 S4 amendment). This frame IS the live signal:
     // without `--replay-user-messages` cli.js never puts the delivered
     // <task-notification> user message on stdout (docs/protocol-cc/
     // 03-inbound-messages.md §3.4). Only a BACKGROUND run's end reaches the
@@ -3321,7 +3321,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // Insert the notification into the conversation so the assistant's
     // response (which follows) has visible context — as an agent note
     // (`role: 'system'`), never the user's bubble, and never a `User:` line for
-    // ClaudeUI's judge of a dispatched target (ADR-087 D1, ADR-088). This path
+    // ClaudeUI's judge of a dispatched target (ADR-088 D1, ADR-089). This path
     // is the FALLBACK: cli.js only puts this frame on stdout with
     // `--replay-user-messages` (and then only for a mid-turn absorption); the
     // live note normally comes from `system/task_notification`, and a run

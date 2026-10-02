@@ -230,7 +230,7 @@ Per patch `team-streaming-B` (retired) at char `8648903`:
   builds the agent note from that system frame (a backgrounded run only; none for `skip_transcript`
   / `ambient`) and keeps the user-frame path as a fallback deduped per task run; it recognises a
   notification user frame by `origin.kind` first and by the XML only when `origin` is absent (S4,
-  ADR-087 amendment). A foreground run also emits `system/task_notification` (its result returns
+  ADR-088 amendment). A foreground run also emits `system/task_notification` (its result returns
   through the tool_result), so the frame alone does not mean the model was notified.
 - **`isReplay`** — present and `true` only on replay/ack/queued-command paths. Absent on live synthetic tool_result messages.
 - **`parent_tool_use_id`** — null for top-level; non-null when the user message is inside a subagent's tool execution.

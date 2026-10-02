@@ -63,7 +63,7 @@ export function piAgentDir(): string {
 
 /**
  * The tree the sidebar lists and `findPiSessionFile` walks. Host-run subagent
- * children live under `~/.claude/ui/pi-subagents` instead, by design (ADR-088):
+ * children live under `~/.claude/ui/pi-subagents` instead, by design (ADR-089):
  * they are never listed or resumed as sessions of their own.
  */
 function piSessionsDir(): string {
@@ -428,7 +428,7 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
       // entirely, so the transcript disagreed with what the model saw. Same row
       // Codex's hook fragments take, titled by the extension that wrote it, and
       // rendered VERBATIM — an extension's text is third-party text. The live
-      // mapper uses the same converter (ADR-088 S3), and ClaudeUI's own agent
+      // mapper uses the same converter (ADR-089 S3), and ClaudeUI's own agent
       // messages are recognised there by customType + details, never by text.
       const ts = Date.parse(e.timestamp)
       const msg = piCustomMessageToChat({
@@ -490,7 +490,7 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
 }
 
 /**
- * The depth-1 agent records a resumed PiSession rebuilds (ADR-088 S3b, G7),
+ * The depth-1 agent records a resumed PiSession rebuilds (ADR-089 S3b, G7),
  * from the parent's active branch. Best-effort: [] on any failure.
  */
 export function loadPiAgentLinks(sessionId: string): PiAgentLinkRecord[] {
@@ -503,11 +503,11 @@ export function loadPiAgentLinks(sessionId: string): PiAgentLinkRecord[] {
   }
 }
 
-/** How deep a parent → child → grandchild chain is followed (the spawn cap, ADR-088 D4). */
+/** How deep a parent → child → grandchild chain is followed (the spawn cap, ADR-089 D4). */
 const MAX_SUBAGENT_HISTORY_DEPTH = 3
 
 /**
- * Host-run subagent transcripts for a parent's active branch (ADR-088), keyed
+ * Host-run subagent transcripts for a parent's active branch (ADR-089), keyed
  * by the parent `agent` call id — the key `session:subagent-message` uses
  * live. Each child is read with the SAME `readPiSessionFile` →
  * `activeBranchEntries` → `convertPiSessionEntries` pipeline as the parent,
@@ -548,7 +548,7 @@ const isTerminalStatus = (s: unknown): s is TaskTerminalStatus =>
   s === 'completed' || s === 'failed' || s === 'stopped'
 
 /**
- * The host-run subagents' terminal events (ADR-088 S3), from every task
+ * The host-run subagents' terminal events (ADR-089 S3), from every task
  * notification ClaudeUI delivered into these files (the parent's and each
  * child's — a grandchild's can land in its spawner's file). Read from the
  * stored `custom_message`'s customType + `details` ONLY, never from its text,
@@ -668,7 +668,7 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
  * `--<mangled-cwd>--` dir if it's now empty. Best-effort: logs + swallows on
  * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer.
  *
- * Its host-run subagent children (ADR-088) go with it — read from the parent
+ * Its host-run subagent children (ADR-089) go with it — read from the parent
  * file FIRST, recursively through the child files — except a child another pi
  * session file still references (a fork or clone copies the parent's entries,
  * links included): those files are found by a substring prefilter on the ids,

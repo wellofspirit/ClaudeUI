@@ -61,7 +61,7 @@ const ContentBlockView = memo(function ContentBlockView({
     return <ThinkingBlock text={block.text} />
   }
   // Context the host put into the CHILD's prompt that no one typed there: a
-  // task notification or an agent message (ADR-088 S3). Verbatim, collapsed,
+  // task notification or an agent message (ADR-089 S3). Verbatim, collapsed,
   // the same row the top-level transcript uses, never a user bubble.
   if (block.type === 'context_note') {
     return <ContextNoteBlock block={block} />

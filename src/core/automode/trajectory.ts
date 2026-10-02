@@ -1,6 +1,6 @@
 /**
  * What a dispatched target or a host-run child agent did, kept for its judge
- * and its task card (ADR-087 D1, ADR-088): its own assistant trajectory and
+ * and its task card (ADR-088 D1, ADR-089): its own assistant trajectory and
  * the distinct tool_use ids of the turn in flight.
  *
  * A leaf module (type-only shared imports) so both the cross-engine
@@ -12,7 +12,7 @@ import type { ChatMessage } from '../../shared/types'
 export const TARGET_TRAJECTORY_MAX = 200
 
 /**
- * Upsert one of the target's forwarded messages into its trajectory (ADR-087
+ * Upsert one of the target's forwarded messages into its trajectory (ADR-088
  * D1): assistant messages only, keyed by message id (a streamed message is
  * re-forwarded as it grows — the latest copy wins, at its first position),
  * insertion-ordered, bounded to {@link TARGET_TRAJECTORY_MAX} by dropping the
@@ -44,7 +44,7 @@ export function recordTrajectoryMessage(
  * same betaMessage id), and the opencode SSE tap re-emits the whole rebuilt
  * message on every `message.part.updated` (event-mapper's upsert-by-message-id
  * model). A counter would re-count the same tool_use on every emission.
- * Shared by both directions' streaming taps (and, since ADR-088, by
+ * Shared by both directions' streaming taps (and, since ADR-089, by
  * `PiChildRunner`, which streams the pi target and pi subagents).
  */
 export function collectToolUseIds(message: ChatMessage, into: Set<string>): void {

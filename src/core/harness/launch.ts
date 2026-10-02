@@ -16,7 +16,7 @@ export type { HarnessLaunch }
  * tells ClaudeUI's pi bridge extension that pi runs this way, so it can drop
  * `ELECTRON_RUN_AS_NODE` before pi starts children (an Electron app pi's bash
  * tool starts must not start as Node; `pi-bridge-source.ts`). Host-run pi
- * subagents (ADR-088) are spawned by ClaudeUI itself through this same launch,
+ * subagents (ADR-089) are spawned by ClaudeUI itself through this same launch,
  * so they get the variable the same way their parent does.
  */
 export const ELECTRON_NODE_ENV: Readonly<Record<string, string>> = Object.freeze({

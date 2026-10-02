@@ -1,5 +1,5 @@
 /**
- * Host-injected agent messages (ADR-088 S3): the payload ClaudeUI hands the
+ * Host-injected agent messages (ADR-089 S3): the payload ClaudeUI hands the
  * bridge's `cui-deliver` command, and the reading of the `custom` message pi
  * stores for it.
  *
@@ -31,7 +31,7 @@ export const PI_RESERVED_COMMAND_PREFIX = '/cui-'
  * sent as a pi `prompt` (pi runs an extension command before anything else).
  * Every host path that sends such text as a child's prompt refuses it: an
  * `agent` prompt, a dispatch target's prompt (both through
- * `PiChildRunner.runTurn`) and, in S3b, a `send_message` (ADR-088 S3).
+ * `PiChildRunner.runTurn`) and, in S3b, a `send_message` (ADR-089 S3).
  */
 export function isReservedPiCommandText(text: string): boolean {
   return text.trimStart().startsWith(PI_RESERVED_COMMAND_PREFIX)

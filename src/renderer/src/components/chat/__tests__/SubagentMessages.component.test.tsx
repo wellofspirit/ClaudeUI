@@ -57,7 +57,7 @@ describe('SubagentMessages — persisted thinking block honors expandThinking', 
   })
 })
 
-describe('SubagentMessages — host-injected agent messages (ADR-088 S3)', () => {
+describe('SubagentMessages — host-injected agent messages (ADR-089 S3)', () => {
   it('M8: a nested system context_note renders ContextNoteBlock inside the subagent list', () => {
     const note: ChatMessage = {
       id: 'm-note-1',

@@ -1018,14 +1018,14 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     renderer already has the correct truncated view from the store's own
  *     optimistic seed) — mirrors ClaudeSession's identical "forks excluded"
  *     cost-seeding posture.
- *   - backgroundTasks → true since ADR-088 S2: it is the gate
+ *   - backgroundTasks → true since ADR-089 S2: it is the gate
  *     `handlers-core.stopTask` checks, and a host-run subagent's TaskCard has
  *     a per-agent Stop (`PiSession.stopTask`). "Send to background" stays
  *     inert: it also needs `activeTasks[id].isBackgrounded === false`, which
  *     pi never sends. Background runs themselves arrive in S3.
  *   - voice → unwired; a dedicated follow-up once its RPC surface is wired the
  *     same way OpencodeSession's was.
- *   - subagents → HOST-RUN (ADR-088, superseding M5b's in-pi extension): the
+ *   - subagents → HOST-RUN (ADR-089, superseding M5b's in-pi extension): the
  *     bridge's own `agent` tool (pi-bridge-source.ts v9, gated on
  *     CLAUDEUI_PI_AGENT_TOOL) calls back over `/hosted-tool`, and PiSession's
  *     `PiSubagentManager` spawns one `pi --mode rpc` child per call

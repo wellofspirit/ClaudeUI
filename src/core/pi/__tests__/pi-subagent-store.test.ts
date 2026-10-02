@@ -1,5 +1,5 @@
 /**
- * `collectAgentLinkRecords` (ADR-088 S3b, G7): what a resumed parent session
+ * `collectAgentLinkRecords` (ADR-089 S3b, G7): what a resumed parent session
  * rebuilds its depth-1 agent records from. Pure: in-memory session entries.
  */
 import { describe, expect, it } from 'vitest'
@@ -39,7 +39,7 @@ function notification(details: Record<string, unknown>): PiSessionEntry {
   } as PiSessionEntry
 }
 
-describe('collectAgentLinkRecords (ADR-088 S3b review R2)', () => {
+describe('collectAgentLinkRecords (ADR-089 S3b review R2)', () => {
   it("reads a foreground link's cuiAgent (stoppedBy included)", () => {
     expect(
       collectAgentLinkRecords([
@@ -121,7 +121,7 @@ describe('collectAgentLinkRecords (ADR-088 S3b review R2)', () => {
   })
 })
 
-describe('collectAgentLinkRecords — the task (ADR-088 review F8)', () => {
+describe('collectAgentLinkRecords — the task (ADR-089 review F8)', () => {
   it("recovers prompt and description from the parent's own agent call input", () => {
     const call: PiSessionEntry = {
       ...base(),

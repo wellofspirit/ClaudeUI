@@ -499,7 +499,7 @@ export interface PendingApproval {
    */
   subagent?: { sessionId: string; parentToolUseId: string }
   /**
-   * pi only (ADR-088): set on a host-run child's ask — WHICH agent proposes the
+   * pi only (ADR-089): set on a host-run child's ask — WHICH agent proposes the
    * action, so the card can say so (the label is the agent's name, else its
    * task description, sanitized). An "allow for this session" on such a card
    * still allows for the whole session, children included (Claude Code parity).
@@ -3993,13 +3993,13 @@ export interface EngineHistoryLoad {
    */
   lastModel?: ModelRef | null
   /**
-   * Host-run pi subagent transcripts (ADR-088), by the parent `agent` call id
+   * Host-run pi subagent transcripts (ADR-089), by the parent `agent` call id
    * — the key `session:subagent-message` uses live. pi only; absent when the
    * session ran no agents.
    */
   subagentMessages?: Record<string, ChatMessage[]>
   /**
-   * Host-run pi subagents' terminal events (ADR-088 S3), from the task
+   * Host-run pi subagents' terminal events (ADR-089 S3), from the task
    * notifications ClaudeUI delivered into the parent and child files — read
    * from the stored message's `details`, never parsed from its text. A
    * background launch with no notification reads `unfinished`. pi only.

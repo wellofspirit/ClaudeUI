@@ -1,5 +1,5 @@
 /**
- * Host-run pi subagents (ADR-088): the parent session's `agent` tool spawns
+ * Host-run pi subagents (ADR-089): the parent session's `agent` tool spawns
  * one headless `pi --mode rpc` child per call, through the SAME
  * {@link PiChildRunner} the cross-engine dispatcher drives a pi target with.
  *
@@ -15,7 +15,7 @@
  * id, NEVER through `PiSession.dispatchOutput`: that path records into the
  * parent transcript, which the judge and `/btw` read (kickoff C8).
  *
- * RUNS (ADR-088). An agent runs in the BACKGROUND by default (D2): the tool
+ * RUNS (ADR-089). An agent runs in the BACKGROUND by default (D2): the tool
  * call returns at once and the run notifies its owner when it ends, through
  * the bridge's `/cui-deliver` command (pi-delivery.ts — never as the user's
  * text). `run_in_background: false` waits for the report (foreground). The
@@ -73,7 +73,7 @@ import { piSubagentSessionsRoot, type PiAgentLinkRecord } from './pi-subagent-st
 
 /** Live children (all depths) one session may run at once. */
 export const MAX_CONCURRENT_PI_SUBAGENTS = 20
-/** Nesting depth: the parent's children are depth 1; a depth-3 child cannot spawn (ADR-088 D4). */
+/** Nesting depth: the parent's children are depth 1; a depth-3 child cannot spawn (ADR-089 D4). */
 export const MAX_PI_SUBAGENT_DEPTH = 3
 /** How long a stop waits for the abandoned turn to settle before the run returns. */
 export const PI_SUBAGENT_ABORT_GRACE_MS = 3_000
@@ -96,14 +96,14 @@ export interface PiSubagentHost {
   skillDirsEnv(): Record<string, string>
   /** BaseSession.send — NEVER dispatchOutput (see the module doc). */
   send(channel: string, data: unknown): void
-  /** The parent's gate, parametrized by the child scope (ADR-088 D2). */
+  /** The parent's gate, parametrized by the child scope (ADR-089 D2). */
   gateChild(scope: PiChildScope, payload: PiToolCallPayload): Promise<GateDecision>
   /** pi stopped waiting for a child's `/tool-call` exchange: retract its approval card, if any. */
   childAbandoned(info: PiBridgeAbandoned): void
   /** A child was stopped: retract (dismiss + deny 'Agent stopped') every approval card it still has open. */
   retractChildGates(scope: PiChildScope): void
   /**
-   * Put an agent-authored message into the PARENT session (ADR-088 S3): a
+   * Put an agent-authored message into the PARENT session (ADR-089 S3): a
    * background run's notification whose owner is the root. Never awaited by
    * the manager; the session serializes and gates it.
    */
@@ -170,7 +170,7 @@ export function narrowMode(parentMode: string, definitionMode?: string): string 
 }
 
 /**
- * A child's env (ADR-088 D4). Every gate var is set EXPLICITLY — `''`, never
+ * A child's env (ADR-089 D4). Every gate var is set EXPLICITLY — `''`, never
  * omission — because PiRpcClient spawns with `{...process.env, ...opts.env}`:
  * an omitted flag would leak through from the ClaudeUI process's own env (the
  * `buildPiTargetChildEnv` argument). A child gets no hosted tools, never
@@ -196,7 +196,7 @@ export function buildPiSubagentChildEnv(
 }
 
 /**
- * A child's flags after `--mode rpc -e <bridge>` (ADR-088 D4, every one
+ * A child's flags after `--mode rpc -e <bridge>` (ADR-089 D4, every one
  * probed — the kickoff's P1-P5). Persisted (never `--no-session`): the
  * session file under `dir` is the history link and S3's resume target.
  */
@@ -242,7 +242,7 @@ export function buildPiSubagentChildArgs(opts: {
 export type PiStopReason = 'user' | 'agent' | 'interrupt' | 'dispose'
 
 /**
- * Every agent this session ran, live or finished (ADR-088 S3b, G1): what a
+ * Every agent this session ran, live or finished (ADR-089 S3b, G1): what a
  * `send_message` resume needs to respawn it on the SAME session file, and what
  * `send_message`/`task_stop` resolve names and ids against. `live` (below)
  * stays keyed by the origin call id; a record outlives its runs.
@@ -282,7 +282,7 @@ export interface PiAgentRecord {
  * One RUN of an agent (per launch). Everything here dies with the run; the
  * agent's lasting state (label, mode, run index, trajectory) is on `record`,
  * and per-run gate state on the reused scope (`stopped`, `grants`) is reset at
- * every run start and end (ADR-088 review F1).
+ * every run start and end (ADR-089 review F1).
  */
 interface LiveChild {
   record: PiAgentRecord
@@ -349,7 +349,7 @@ export function safeForegroundReport(report: string): string {
 
 /**
  * How long the drive waits for a run pi starts on its own after a settle, when
- * a delivery sent to the child is still undelivered (ADR-088 S3, see `drive`).
+ * a delivery sent to the child is still undelivered (ADR-089 S3, see `drive`).
  */
 export const PI_DELIVERY_IDLE_GRACE_MS = 5_000
 /** A task notification's `<result>` cap (characters). */
@@ -418,7 +418,7 @@ const attr = (v: string): string => v.replace(/["<>\r\n]/g, ' ')
 
 /**
  * An agent's label as delivered titles and summaries show it: a model-authored
- * description can carry quotes, markup or line breaks (ADR-088 review F5).
+ * description can carry quotes, markup or line breaks (ADR-089 review F5).
  */
 const cleanLabel = (v: string): string => attr(v).trim().slice(0, 64) || 'agent'
 
@@ -508,7 +508,7 @@ export class PiSubagentManager {
       return errorResult('agent requires a non-empty string "prompt".')
     }
     // pi would run it as one of ClaudeUI's bridge commands in the child (a
-    // forged agent message, ADR-088 S3); the runner refuses it too.
+    // forged agent message, ADR-089 S3); the runner refuses it too.
     if (isReservedPiCommandText(prompt)) {
       return errorResult(`agent "prompt" may not start with "${PI_RESERVED_COMMAND_PREFIX}".`)
     }
@@ -904,7 +904,7 @@ export class PiSubagentManager {
         const next = await Promise.race([runner.awaitTurn(PI_DELIVERY_IDLE_GRACE_MS), stopped])
         if (next !== 'stopped' && next.kind === 'idle') {
           if (runner.pendingDeliveries.size > 0) {
-            // Lost: pi neither delivered it nor started a run (ADR-088 residual).
+            // Lost: pi neither delivered it nor started a run (ADR-089 residual).
             logger.warn(
               'PiSubagents',
               `agent ${scope.agentId}: undelivered message(s) ${[...runner.pendingDeliveries].join(', ')} — no run started`

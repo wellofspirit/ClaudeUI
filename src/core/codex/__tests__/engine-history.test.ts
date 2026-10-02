@@ -81,7 +81,7 @@ it('deletes one codex thread natively instead of refusing', async () => {
   expect(mocks.deleteThread).toHaveBeenCalledExactlyOnceWith('thread-1')
 })
 
-/** H4 (ADR-088): pi's reader passes its host-run subagent transcripts through inline, like Codex's. */
+/** H4 (ADR-089): pi's reader passes its host-run subagent transcripts through inline, like Codex's. */
 it('the pi branch returns subagentMessages from the pi reader', async () => {
   const child = { id: 'c1', role: 'assistant', content: [], timestamp: 1 }
   mocks.pi.mockResolvedValue({
@@ -96,7 +96,7 @@ it('the pi branch returns subagentMessages from the pi reader', async () => {
   expect('subagentMessages' in (await historyFor('pi').read('pi-sess', 'unused'))).toBe(false)
 })
 
-/** H3 (ADR-088 S3): the pi branch passes its subagents' terminal events through; none → []. */
+/** H3 (ADR-089 S3): the pi branch passes its subagents' terminal events through; none → []. */
 it('the pi branch returns taskNotifications from the pi reader', async () => {
   const note = {
     taskId: 'ag-1',

@@ -94,7 +94,7 @@ export abstract class BaseSession implements ISession {
    */
   private queueFlushRerun = false
 
-  /** The user-stop window (ADR-089) — see {@link beginUserStop}. */
+  /** The user-stop window (ADR-090) — see {@link beginUserStop}. */
   private userStopPending = false
 
   constructor(routingId: string, win: HostWindowHandle | null, cwd: string) {
@@ -406,7 +406,7 @@ export abstract class BaseSession implements ISession {
   }
 
   // ---------------------------------------------------------------------------
-  // A user stop is not an error (ADR-089)
+  // A user stop is not an error (ADR-090)
   // ---------------------------------------------------------------------------
   //
   // An engine tearing down a turn the user stopped may report the teardown as

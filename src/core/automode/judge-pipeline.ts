@@ -1,7 +1,7 @@
 /**
  * The auto-mode judge pipeline — ONE implementation of the engine-neutral steps
  * between "the engine asked about a tool call" and "allow / deny / ask the
- * human" (ADR-087 §shared pipeline).
+ * human" (ADR-088 §shared pipeline).
  *
  * PiSession, OpencodeSession and the cross-engine dispatcher's pi/opencode
  * targets all run ClaudeUI's own judge (ADR-023, ADR-081). Before this module
@@ -88,7 +88,7 @@ export interface JudgePipelineHooks {
   ) => AllowSkipAction | undefined
   /** How a rule's MCP tool name compares to the action's (opencode: its sanitiser). */
   mcpToolKey?: (ruleTool: string) => string
-  /** Set when the call is delegated work (ADR-085 S4 task child / ADR-087 dispatch target). */
+  /** Set when the call is delegated work (ADR-085 S4 task child / ADR-088 dispatch target). */
   subagent?: ClassifierAction['subagent']
   /** False → the human decides with no judge call (stale configured judge model, ADR-023 fail-closed). */
   judgeAvailable: () => Promise<boolean> | boolean

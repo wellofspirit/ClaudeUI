@@ -196,7 +196,7 @@ function parentScope(depth: number): PiChildScope {
   }
 }
 
-describe('narrowMode (ADR-088 D3: a definition only narrows)', () => {
+describe('narrowMode (ADR-089 D3: a definition only narrows)', () => {
   it('returns the lower-ranked mode and the parent mode when the definition sets none', () => {
     expect(narrowMode('auto', undefined)).toBe('auto')
     expect(narrowMode('auto', 'plan')).toBe('plan')
@@ -775,7 +775,7 @@ describe('PiSubagentManager.run', () => {
 })
 
 // ---------------------------------------------------------------------------
-// ADR-088 S3 — background runs, notifications, owner routing, stops
+// ADR-089 S3 — background runs, notifications, owner routing, stops
 // ---------------------------------------------------------------------------
 
 /** Decode the /cui-deliver prompt(s) a fake child received. */
@@ -842,7 +842,7 @@ const promptedWith = async (child: FakeChild): Promise<void> => {
   await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
 }
 
-describe('PiSubagentManager — background runs (ADR-088 S3)', () => {
+describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
   it('B1: no run_in_background → returns the async-launched text before the child settles; task-started says isBackgrounded', async () => {
     const fake = makeFakeSpawn()
     const { host, sent } = makeOrderedHost()
@@ -1130,7 +1130,7 @@ describe('PiSubagentManager — background runs (ADR-088 S3)', () => {
   })
 })
 
-describe('PiSubagentManager — owner routing liveness (ADR-088 S3 review R2)', () => {
+describe('PiSubagentManager — owner routing liveness (ADR-089 S3 review R2)', () => {
   /** Root foreground F (child 1) launches background GB (child 2) through its own agent tool. */
   async function fWithGb(fake: ReturnType<typeof makeFakeSpawn>, mgr: PiSubagentManager) {
     const pendingF = mgr.run(
@@ -1222,7 +1222,7 @@ describe('PiSubagentManager — owner routing liveness (ADR-088 S3 review R2)', 
   })
 })
 
-describe('PiSubagentManager — reserved bridge commands (ADR-088 S3 review R3)', () => {
+describe('PiSubagentManager — reserved bridge commands (ADR-089 S3 review R3)', () => {
   it('an agent prompt starting with /cui- is refused before any spawn', async () => {
     const fake = makeFakeSpawn()
     const { host } = makeOrderedHost()
@@ -1242,11 +1242,11 @@ describe('PiSubagentManager — reserved bridge commands (ADR-088 S3 review R3)'
 })
 
 // ---------------------------------------------------------------------------
-// ADR-088 S3b — send_message, resume, names, task_stop, Send to background,
+// ADR-089 S3b — send_message, resume, names, task_stop, Send to background,
 // record rebuild
 // ---------------------------------------------------------------------------
 
-describe('PiSubagentManager — messaging (ADR-088 S3b)', () => {
+describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
   function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
     return new PiSubagentManager(host, {
       spawn: fake.spawn,

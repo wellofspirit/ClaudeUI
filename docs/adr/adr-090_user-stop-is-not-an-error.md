@@ -1,8 +1,8 @@
-# ADR-089: A user stop is not an error
+# ADR-090: A user stop is not an error
 
 **Status:** Accepted (2026-10-02). Built on branch `pi-subagents-dispatch-judge` (S4a).
 **Relates to:** [ADR-045](adr-045_engine-disconnect-status-contract.md) (the sibling adapter
-contract: disconnect status), [ADR-088](adr-088_pi-subagents-host-run.md) (pi subagents, their Stop
+contract: disconnect status), [ADR-089](adr-089_pi-subagents-host-run.md) (pi subagents, their Stop
 and `task_stop`), [ADR-053](adr-053_queue-item-identity-cc-parity.md) (a steer is not a fresh turn).
 
 ## Context

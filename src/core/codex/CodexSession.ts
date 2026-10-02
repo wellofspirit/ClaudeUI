@@ -943,7 +943,7 @@ export class CodexSession extends BaseSession {
     if (this.willQueue && prompt !== null)
       throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
-      // A fresh turn closes the user-stop window (ADR-089). A prompt never
+      // A fresh turn closes the user-stop window (ADR-090). A prompt never
       // steers here: a running turn takes it through the queue (above).
       this.endUserStop()
       this.resetAuthRowLatch()
@@ -1883,7 +1883,7 @@ export class CodexSession extends BaseSession {
     // down a target a later turn may continue. Idempotent — a dispatch that
     // already settled is simply absent from the dispatcher's registry.
     this.stopInFlightDispatches()
-    // ADR-089: open the user-stop window for a live (or starting) turn BEFORE
+    // ADR-090: open the user-stop window for a live (or starting) turn BEFORE
     // `turn/interrupt` — a turn that ends `failed` in a race with the
     // interrupt is the Stop's aftermath, not a failure to report. Not
     // `interruptRequested`, which defers an interrupt across a start.
@@ -2892,7 +2892,7 @@ export class CodexSession extends BaseSession {
       if (turn.error) {
         const banner =
           'Codex turn failed. Check native account status and settings; no credentials were changed.'
-        // ADR-089: not after a user stop — the banner would misread the Stop.
+        // ADR-090: not after a user stop — the banner would misread the Stop.
         if (!this.suppressedAfterUserStop('CodexSession', banner))
           this.send('session:error', banner)
       }
@@ -3379,7 +3379,7 @@ export class CodexSession extends BaseSession {
       // The user's OWN autonomy choice, un-narrowed: `gate()`'s auto→default
       // mapping governs what this client asks about, not what the dispatched
       // agent is allowed to do (the human just approved this dispatch anyway).
-      // Read live (ADR-087): the target follows this session's mode switches.
+      // Read live (ADR-088): the target follows this session's mode switches.
       getAutonomyMode: () => this.permissionMode,
       getMessages: () => this.messageHistory,
       emit: (channel, data) => this.send(channel, data),

@@ -1006,7 +1006,7 @@ describe('loadPiSessionHistory — lastModel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Host-run subagents (ADR-088): history link + deletion. Children live under
+// Host-run subagents (ADR-089): history link + deletion. Children live under
 // <home>/.claude/ui/pi-subagents/<agentId>/ (the homedir redirect above puts
 // that inside the fixture tree too).
 // ---------------------------------------------------------------------------
@@ -1107,7 +1107,7 @@ function writeChild(agentId: string, lines: unknown[]): string {
   return file
 }
 
-describe('loadPiSessionHistory — host-run subagents (ADR-088)', () => {
+describe('loadPiSessionHistory — host-run subagents (ADR-089)', () => {
   it('H1: returns subagentMessages by the parent call id, a nested grandchild included; tolerates a missing child and rejects a traversal id', async () => {
     writeSessionFile('--proj-sub--', '2024-01-01T00-00-00_parent-1.jsonl', [
       header('parent-1'),
@@ -1149,7 +1149,7 @@ describe('loadPiSessionHistory — host-run subagents (ADR-088)', () => {
     expect(history.messages.some((m) => m.role === 'user')).toBe(true)
   })
 
-  it('H1 (ADR-088 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished', async () => {
+  it('H1 (ADR-089 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished', async () => {
     const note = (id: string, parentId: string, agentId: string, toolUseId: string) => ({
       type: 'custom_message',
       id,
@@ -1281,7 +1281,7 @@ describe('loadPiSessionHistory — host-run subagents (ADR-088)', () => {
   })
 })
 
-describe('deletePiSession — host-run subagents (ADR-088)', () => {
+describe('deletePiSession — host-run subagents (ADR-089)', () => {
   it('H3: removes an unreferenced child (and its grandchild) by name, and keeps a child a second session file still references', async () => {
     const parentFile = writeSessionFile('--proj-d--', '2024-01-01T00-00-00_parent-d.jsonl', [
       header('parent-d'),

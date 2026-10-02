@@ -1,5 +1,5 @@
 /**
- * ADR-087 — the shared auto-mode judge pipeline. The two static gates are
+ * ADR-088 — the shared auto-mode judge pipeline. The two static gates are
  * mocked (each has its own suite); `classify()` is real, driven by a scripted
  * transport, so the ordering, the settle checks, G10, the denial caps and the
  * review/outcome bookkeeping are what this suite pins.

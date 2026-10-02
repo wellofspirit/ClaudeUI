@@ -256,7 +256,7 @@ Probed for M5b (2026-07-20, same binary):
   catalog DOES expose per-model higher-tier support (future: lift piModelCapabilities' conservative
   low/medium/high cap by reading this).
 
-Probed for ADR-088 host-run subagents (2026-10-01, the 0.87.1 managed-store binary, an isolated
+Probed for ADR-089 host-run subagents (2026-10-01, the 0.87.1 managed-store binary, an isolated
 `PI_CODING_AGENT_DIR`, `PI_OFFLINE=1`, no model turn):
 
 - **P1 `--session-dir <D> --session-id <id>`**: `get_state` reports `sessionId === <id>` and
@@ -297,7 +297,7 @@ Probed for M5c fork/sideQuestion (2026-07-21, same binary):
   branch) and no equivalent of Claude's `side_question` control request — hence sideQuestion's
   transcript-fed ephemeral rather than an in-session query.
 
-Probed for ADR-088 S3 (2026-10-02, pi 0.87.1 managed-store binary, isolated `PI_CODING_AGENT_DIR`,
+Probed for ADR-089 S3 (2026-10-02, pi 0.87.1 managed-store binary, isolated `PI_CODING_AGENT_DIR`,
 `PI_OFFLINE=1`, no credentials; a scratch extension registering `cui-deliver` that base64-decodes its
 args and calls `pi.sendMessage`):
 
@@ -338,7 +338,7 @@ At source (`vendor/pi-src/packages/coding-agent/src/core/agent-session.ts`, `rpc
   inside that window makes the prompt fail "Agent is already processing"; once its ack is in, a
   delivery steers it.
 
-Probed/verified for ADR-089 (2026-10-02, at source in `vendor/pi-src` v0.87.1, and in a recorded
+Probed/verified for ADR-090 (2026-10-02, at source in `vendor/pi-src` v0.87.1, and in a recorded
 session file + ClaudeUI log; no new probe run):
 
 - **An abort during a tool batch ends the turn `stopReason: "error"`, not `"aborted"`.** The aborted
@@ -351,7 +351,7 @@ session file + ClaudeUI log; no new probe run):
   `errorMessage: "The operation was aborted."` without consulting the signal
   (`packages/ai/src/api/lazy.ts:4-23, 46-60`); the loop ends on it (`agent-loop.ts:244-254`), then
   `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
-  (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-089).
+  (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-090).
 
 ## Behavior gotchas
 

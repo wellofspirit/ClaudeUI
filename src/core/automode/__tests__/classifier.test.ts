@@ -59,7 +59,7 @@ describe('slimTranscript', () => {
     expect(slimTranscript(messages)).toBe('User: research chatview\ngrep {"pattern":"ChatPanel"}')
   })
 
-  it('M1: a system row is never a User: line, whatever it carries (ADR-088 S3)', () => {
+  it('M1: a system row is never a User: line, whatever it carries (ADR-089 S3)', () => {
     const messages: ChatMessage[] = [
       msg('user', [{ type: 'text', text: 'do X' }]),
       {

@@ -1,6 +1,6 @@
 /**
  * Where host-run pi subagents' sessions live, and how a parent session finds
- * and removes them (ADR-088 §persistence).
+ * and removes them (ADR-089 §persistence).
  *
  * Every child is one directory, `~/.claude/ui/pi-subagents/<agentId>/`,
  * holding the child's appended system prompt (`system-prompt.md`) and pi's own
@@ -76,7 +76,7 @@ export function collectAgentIds(entries: readonly PiSessionEntry[]): PiAgentLink
   return links
 }
 
-/** A depth-1 agent as the parent's history tells it (ADR-088 S3b, G7: the record rebuild). */
+/** A depth-1 agent as the parent's history tells it (ADR-089 S3b, G7: the record rebuild). */
 export interface PiAgentLinkRecord {
   agentId: string
   originToolUseId: string

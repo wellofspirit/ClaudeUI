@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * S4 (ADR-087 D1 / ADR-088): a task notification cli.js delivers is an AGENT
+ * S4 (ADR-088 D1 / ADR-089): a task notification cli.js delivers is an AGENT
  * NOTE — `role: 'system'`, one `context_note` labelled "from an agent, not
  * from you" — never the user's bubble, and never a `User:` line for the judge
  * of a target this session dispatches. The user's own prompts ARE recorded in
@@ -33,7 +33,7 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { isBinaryAvailable: (): boolean => false }
 }))
 // Dispatch available, so the session hands its live transcript to the collab
-// server — the same `getMessages` a dispatched target's judge reads (ADR-087).
+// server — the same `getMessages` a dispatched target's judge reads (ADR-088).
 vi.mock('../cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
   crossEngineDispatchAvailable: (): boolean => true
@@ -235,7 +235,7 @@ describe('ClaudeSession — a task notification is an agent note (S4)', () => {
       notificationFrame({ origin: { kind: 'task-notification' } })
     ])
     expect(collab.ctx).not.toBeNull()
-    // The same transcript the dispatch target's judge reads (ADR-087:
+    // The same transcript the dispatch target's judge reads (ADR-088:
     // `messages: () => entry.ctx.getMessages()` → classify).
     const requests: JudgeRequest[] = []
     await classify(

@@ -73,7 +73,7 @@ import { isShellToolName } from '../automode/shell-lexical'
 import { parseModelString, peekOpencodeModels } from '../opencode/model-discovery'
 import { peekPiModels } from '../pi/model-discovery'
 import { editClearsAgentControl } from '../opencode/agent-control-gate'
-// ADR-087 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
+// ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
 // automode pipeline + the judge transport), no session class.
 import { DispatchTargetJudge } from './dispatch-target-judge'
 import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
@@ -104,7 +104,7 @@ import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec). The
-// process/transport half of a pi target lives in `PiChildRunner` (ADR-088),
+// process/transport half of a pi target lives in `PiChildRunner` (ADR-089),
 // shared with PiSession's host-run subagents; the gate policy stays here.
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
 import {
@@ -228,7 +228,7 @@ export interface DispatchContext {
   cwd: string
   /**
    * The dispatching session's permission mode (Claude-style string), read LIVE
-   * (ADR-087 ruling 3): every decision point calls it again, so a target
+   * (ADR-088 ruling 3): every decision point calls it again, so a target
    * follows the parent's mode switches instead of a creation-time snapshot.
    * `entry.ctx` is replaced on every continuation, so `entry.ctx.getAutonomyMode()`
    * is always the latest caller's accessor.
@@ -237,7 +237,7 @@ export interface DispatchContext {
   /**
    * The DISPATCHING session's transcript (`messageHistory`), read live — the
    * live array, never a copy. What ClaudeUI's judge reads the user's intent
-   * from when it judges a pi/opencode target's call (ADR-087; the ADR-085 S4
+   * from when it judges a pi/opencode target's call (ADR-088; the ADR-085 S4
    * precedent: a delegated call is judged against the parent transcript).
    */
   getMessages: () => ChatMessage[]
@@ -301,7 +301,7 @@ function targetDenyReason(
 
 /**
  * The dispatching session's LIVE permission mode as every target path reads it
- * (ADR-087), with the legacy `full` normalised to `auto`. Sessions speak `auto`
+ * (ADR-088), with the legacy `full` normalised to `auto`. Sessions speak `auto`
  * today, so this is defensive — but `CODEX_TURN_POLICY` has no `full` row (a
  * `full` parent would run a Codex thread with no guardian) and `full` is not a
  * cli.js permission mode, so no target path may see it raw.
@@ -315,7 +315,7 @@ function liveMode(ctx: DispatchContext): string {
  * The shell command an opencode target's `bash` ask is about: the ask's
  * `metadata.command`, else its patterns; `undefined` for a non-shell ask or
  * one with no command text. Shared by the host refusal rungs and auto mode's
- * G9 (ADR-085 §3, ADR-087).
+ * G9 (ADR-085 §3, ADR-088).
  */
 function opencodeAskShellCommand(
   permission: string,
@@ -422,7 +422,7 @@ export type SpawnClaudeQueryFn = (opts: ClaudeQuerySpawnOpts) => Promise<QueryHa
 
 /**
  * Spawn opts for a headless pi dispatch target (ADR-033 M4c) — the shared
- * `PiChildSpawnOpts` (ADR-088). `gateHandler` is the two-stage approval gate
+ * `PiChildSpawnOpts` (ADR-089). `gateHandler` is the two-stage approval gate
  * (see `CrossEngineDispatcher.gatePiTargetToolCall`); a target passes no
  * `hostedToolHandler`.
  */
@@ -525,7 +525,7 @@ export interface DispatcherDeps {
   loadUserRules?: (cwd: string) => MergedClaudeRules
   /**
    * The judge transport factory for pi/opencode targets in auto mode
-   * (ADR-087). Defaults to `makeSessionJudgeTransport` (ClaudeUI's own HTTP
+   * (ADR-088). Defaults to `makeSessionJudgeTransport` (ClaudeUI's own HTTP
    * judge, ADR-081); tests inject a scripted transport.
    */
   makeJudgeTransport?: (opts: SessionJudgeOptions) => JudgeTransport
@@ -970,11 +970,11 @@ interface OpencodeTargetEntry {
   /**
    * The user's compiled deny/ask rules ALONE (`compileClaudeRulesToOpencode(
    * userDenyAsk(cwd))`, read at creation) — G9's "is this a user ask rule?"
-   * check under auto mode (ADR-087): `permission` mixes them with the mode
+   * check under auto mode (ADR-088): `permission` mixes them with the mode
    * base and the backstop, whose asks are not the user's.
    */
   userRules: PermissionRule[]
-  /** ClaudeUI's judge for this target's asks under auto mode (ADR-087). */
+  /** ClaudeUI's judge for this target's asks under auto mode (ADR-088). */
   judge: DispatchTargetJudge
   /**
    * The resolved canonical model this target was created with — the judge's
@@ -994,7 +994,7 @@ interface OpencodeTargetEntry {
   /**
    * The target's own assistant messages, upserted by id from the SSE tap's
    * `mapEvent` output, bounded (`recordTrajectoryMessage`) — what the judge
-   * reads after the parent transcript (ADR-087 D1). Persists across
+   * reads after the parent transcript (ADR-088 D1). Persists across
    * continuation turns. A task child's messages never land here (its parts
    * are not on the target's accumulators).
    */
@@ -1050,7 +1050,7 @@ interface ClaudeTargetEntry {
   ctx: DispatchContext
   /**
    * The permission mode the target's cli.js process currently runs under
-   * (ADR-087): the spawn's `permissionMode`, then whatever
+   * (ADR-088): the spawn's `permissionMode`, then whatever
    * `syncClaudeTargetMode` last applied with `set_permission_mode`.
    */
   appliedPermissionMode: PermissionMode
@@ -1144,7 +1144,7 @@ interface ClaudeTargetEntry {
  * continuation, matching the opencode target's survive-the-process pattern.
  *
  * The process, its bridge, the mapper, the per-turn accumulators, the
- * trajectory and the abort-and-drain race live on `runner` (ADR-088, shared
+ * trajectory and the abort-and-drain race live on `runner` (ADR-089, shared
  * with PiSession's host-run subagents); the gate, the cost rule and cap, the
  * ledger row and the busy-reject stay on this entry and in the dispatcher.
  */
@@ -1165,12 +1165,12 @@ interface PiTargetEntry {
   cwd: string
   /** The child process + its OWN loopback approval-gate host (ADR-033 §4 — a
    *  dispatch target gets its own bridge, never shares the dispatching
-   *  session's), driven by the shared `PiChildRunner` (ADR-088). */
+   *  session's), driven by the shared `PiChildRunner` (ADR-089). */
   runner: PiChildRunner
   /**
    * Latest dispatching context — used to forward approvals/stream events
    * mid-turn. The gate reads the mode LIVE from it
-   * (`ctx.getAutonomyMode()`, ADR-087 ruling 3) — there is no creation-time
+   * (`ctx.getAutonomyMode()`, ADR-088 ruling 3) — there is no creation-time
    * mode snapshot on this entry: pi's gate is ClaudeUI's own (the bridge
    * asks per call), so nothing native has to agree with it. The mode is
    * passed DIRECTLY (no translation) as `permission-engine.ts`'s
@@ -1196,7 +1196,7 @@ interface PiTargetEntry {
    *  "openai-codex/gpt-5.6-luna") — fixed for the target's lifetime, same as
    *  Claude/opencode targets (a continuation call cannot switch models). */
   model: string
-  /** ClaudeUI's judge for this target's asks under auto mode (ADR-087). */
+  /** ClaudeUI's judge for this target's asks under auto mode (ADR-088). */
   judge: DispatchTargetJudge
   /** The latest dispatch prompt (set at every turn start) — the judge's subagent task. */
   lastPrompt: string
@@ -1242,7 +1242,7 @@ interface CodexTargetEntry {
   /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
   ctx: DispatchContext
   /**
-   * The mode the thread's NATIVE policy currently runs under (ADR-087): set
+   * The mode the thread's NATIVE policy currently runs under (ADR-088): set
    * from `ctx.getAutonomyMode()` at creation (`thread/start`'s baseline) and
    * REFRESHED at every `turn/start`, which sends `codexTurnPolicy(mode)` so
    * the thread follows the parent's live mode turn by turn.
@@ -1929,7 +1929,7 @@ class ClaudeInputChannel implements AsyncIterable<Record<string, unknown>> {
 }
 
 /**
- * Prefixed to every prompt a Claude TARGET receives (ADR-087). cli.js's own
+ * Prefixed to every prompt a Claude TARGET receives (ADR-088). cli.js's own
  * auto-mode judge sees only the target's transcript, where the dispatch prompt
  * is a `user` message — without this it would read another agent's words as
  * the user's own authorisation. pi/opencode targets need none (ClaudeUI's
@@ -1957,9 +1957,9 @@ function buildClaudeDispatchMessage(
 /**
  * Map the dispatching session's inherited autonomy (a Claude-style
  * permission-mode string) to the Claude TARGET's permissionMode (ADR-033 M2
- * item 5, amended by ADR-087).
+ * item 5, amended by ADR-088).
  *  - 'auto' → cli.js `auto`: the target is JUDGED by cli.js's own auto-mode
- *    classifier (ADR-087 rulings 1-2), never run allow-all. No skip flag —
+ *    classifier (ADR-088 rulings 1-2), never run allow-all. No skip flag —
  *    `auto` needs none.
  *  - 'bypassPermissions' → bypassPermissions + allowDangerouslySkipPermissions:
  *    a parent that is itself in bypass is not in auto, and its target is
@@ -2028,7 +2028,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
 
 /**
  * Real default for `DispatcherDeps.spawnPiTarget` (ADR-033 M4c):
- * `defaultSpawnPiChild` (pi-child-runner.ts, ADR-088), which mirrors
+ * `defaultSpawnPiChild` (pi-child-runner.ts, ADR-089), which mirrors
  * `PiSession.doStart()`'s spawn shape (bridge host first, then the version-
  * keyed extension file, then the child), with two deliberate differences for
  * a headless DISPATCH target:
@@ -2086,7 +2086,7 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_SKILL_DIRS: '',
-    // ADR-088: a dispatch target never gets the host-run `agent` or
+    // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
     CLAUDEUI_PI_SEND_MESSAGE: ''
@@ -2448,7 +2448,7 @@ export class CrossEngineDispatcher {
       this.dismissPendingForTarget(sessionId)
       if (entry.kind === 'opencode') {
         // A verdict still in flight sees the entry gone from `this.targets`
-        // (its `stillPending`), so it replies nothing (ADR-087).
+        // (its `stillPending`), so it replies nothing (ADR-088).
         if (entry.ctx.toolUseId) this.sealOpencodeTargetItems(entry, entry.ctx.toolUseId)
         // Settle a turn still in flight (ADR-033's 2026-09-01 amendment). The
         // entry has just left `this.targets` and its session is about to be
@@ -2588,7 +2588,7 @@ export class CrossEngineDispatcher {
     } else {
       entry = await this.createOpencodeTarget(ctx, model)
     }
-    // The judge's subagent task is the LATEST dispatch prompt (ADR-087).
+    // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
     entry.lastPrompt = req.prompt
 
     // ── Run the turn ──────────────────────────────────────────────────────
@@ -3021,14 +3021,14 @@ export class CrossEngineDispatcher {
       // spawn-time asks missed it). Targets never carry the auto-mode MCP
       // base, so MCP is not a gated category here.
       //
-      // ADR-087 — a judged auto parent gets the auto-mode base (every edit
+      // ADR-088 — a judged auto parent gets the auto-mode base (every edit
       // asks, so the host's agent-control matcher sees it; ADR-084 §3) with
       // no MCP servers; anything else `buildRuleset(mode)`. The ruleset is a
       // CREATION-TIME snapshot (a PATCH only appends), while the host answers
       // every ask by the LIVE mode: a target created under `default` and
       // switched to `auto` is judged on every edit/bash/webfetch ask; one
       // created under `acceptEdits` and switched to `auto` keeps the
-      // server-side edit allow except the agent-control patterns (ADR-087
+      // server-side edit allow except the agent-control patterns (ADR-088
       // residual).
       const judge = new DispatchTargetJudge({
         engine: 'opencode',
@@ -3490,7 +3490,7 @@ export class CrossEngineDispatcher {
         }
       }
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      // ADR-087 — the parent is in auto (read LIVE) and the target engine's
+      // ADR-088 — the parent is in auto (read LIVE) and the target engine's
       // judge is on: ClaudeUI's judge answers instead of a card. After the
       // refusal rungs and the child-gated rung above, so a deny rule, plan
       // mode and the target's own rules still speak first.
@@ -3510,7 +3510,7 @@ export class CrossEngineDispatcher {
       const requestID = props.requestID as string | undefined
       if (!requestID) return
       // Answered server-side while our judge ran (the cascade): its verdict
-      // must reply nothing (ADR-087, `judging`).
+      // must reply nothing (ADR-088, `judging`).
       const owner = this.opencodeTargetForSession((props.sessionID as string | undefined) ?? '')
       owner?.judging.delete(requestID)
       const key = XENG_REQUEST_PREFIX + requestID
@@ -3540,7 +3540,7 @@ export class CrossEngineDispatcher {
    *    too (`PLAN_MODE_DENY_REASON_NO_EXIT_TOOL` — opencode has no
    *    `exit_plan`; ADR-085 S4, S3b verifier F4).
    * Anything else — an ask-rule hit, a plan-safe command — goes on: to the
-   * human, or under auto mode to the judge (ADR-087; a user ask rule still
+   * human, or under auto mode to the judge (ADR-088; a user ask rule still
    * reaches the human, `judgeOpencodeTargetAsk`'s G9). Targets get no allow rules
    * (`userDenyAsk` compiles deny/ask only), so there is no allow-rule rung.
    * No command text is logged (ADR-084 logging rule).
@@ -3594,7 +3594,7 @@ export class CrossEngineDispatcher {
    * surfaces share `requestId`). Absent on the wire for a non-tool-scoped ask;
    * never invent one — a wrong id binds the card to the wrong block, which is
    * worse than no inline card at all. `decisionReason` is auto mode's denial-cap
-   * sentence when the judge handed the call back (ADR-087).
+   * sentence when the judge handed the call back (ADR-088).
    */
   private forwardOpencodeTargetAsk(
     entry: OpencodeTargetEntry,
@@ -3628,7 +3628,7 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * ADR-087 — an opencode target's ask under a judged auto mode: ClaudeUI's
+   * ADR-088 — an opencode target's ask under a judged auto mode: ClaudeUI's
    * judge (the shared pipeline, `DispatchTargetJudge`) decides, the human only
    * when the judge cannot.
    *
@@ -3781,7 +3781,7 @@ export class CrossEngineDispatcher {
       { value: 0 },
       entry.childSessions
     )
-    // ADR-087 D1 — the target's own assistant messages, for its judge. Before
+    // ADR-088 D1 — the target's own assistant messages, for its judge. Before
     // the toolUseId gate: the judge needs them whether or not the card streams.
     if (output.kind === 'message') recordTrajectoryMessage(entry.trajectory, output.message)
     const toolUseId = entry.ctx.toolUseId
@@ -4006,7 +4006,7 @@ export class CrossEngineDispatcher {
       }
       existing.ctx = ctx
       entry = existing
-      // ADR-087 ruling 3 — the parent's mode is read live: bring the process
+      // ADR-088 ruling 3 — the parent's mode is read live: bring the process
       // to it before the turn's prompt is pushed (and before `busy`).
       await this.syncClaudeTargetMode(entry)
     } else {
@@ -4498,7 +4498,7 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Bring a Claude target's process to the parent's LIVE mode (ADR-087 ruling
+   * Bring a Claude target's process to the parent's LIVE mode (ADR-088 ruling
    * 3) with cli.js's `set_permission_mode` control request.
    *
    * Pull model: called at a continuation turn's start and at the target's
@@ -4586,7 +4586,7 @@ export class CrossEngineDispatcher {
    * matcher is refused with the rule, no card: cli.js got the same rules as
    * `--settings` but matches them by its own text prefix, which a reordered
    * form evades. Residual: under `bypassPermissions` (a bypass target) and
-   * `auto` (cli.js's own judge decides first, ADR-087) only what cli.js itself
+   * `auto` (cli.js's own judge decides first, ADR-088) only what cli.js itself
    * asks reaches this gate, so there cli.js's own matcher decides the rest.
    */
   private async awaitClaudeTargetApproval(
@@ -4595,7 +4595,7 @@ export class CrossEngineDispatcher {
     input: Record<string, unknown>,
     opts: CanUseToolContext
   ): Promise<CanUseToolResult> {
-    // ADR-087 — a parent switch since the turn started reaches the process at
+    // ADR-088 — a parent switch since the turn started reaches the process at
     // its next ask. The ask in hand was produced under the OLD mode and is
     // decided below as usual (a human answers it; an ask already parked on
     // the human stays with the human).
@@ -4734,7 +4734,7 @@ export class CrossEngineDispatcher {
    *  extended to pi in M4c and to codex in slice H). */
   private dismissPendingForTarget(targetSessionId: string): void {
     // An opencode target's asks still under judgement reply nothing once the
-    // turn is stopped (ADR-087, `OpencodeTargetEntry.judging`).
+    // turn is stopped (ADR-088, `OpencodeTargetEntry.judging`).
     const target = this.targets.get(targetSessionId)
     if (target?.kind === 'opencode') target.judging.clear()
     for (const [key, pending] of [...this.pendingApprovals]) {
@@ -4927,7 +4927,7 @@ export class CrossEngineDispatcher {
         return errorResult(`Failed to start dispatched pi agent: ${msg}`)
       }
     }
-    // The judge's subagent task is the LATEST dispatch prompt (ADR-087).
+    // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
     entry.lastPrompt = req.prompt
 
     // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
@@ -5174,7 +5174,7 @@ export class CrossEngineDispatcher {
       unpricedTurns: 0,
       turnEngineCostUsd: null,
       model,
-      // ClaudeUI's judge for this target (ADR-087) — its closures read the
+      // ClaudeUI's judge for this target (ADR-088) — its closures read the
       // entry live (the ctx is replaced on every continuation).
       judge: undefined as unknown as DispatchTargetJudge,
       lastPrompt: ''
@@ -5224,14 +5224,14 @@ export class CrossEngineDispatcher {
    * ROLE (forward an 'ask' to the dispatching session, resolve a local
    * Promise) with an extra stage IN FRONT of it: `permission-engine.decideWithSource()`
    * runs FIRST against the parent's LIVE mode (`entry.ctx.getAutonomyMode()`,
-   * ADR-087 ruling 3) with the user's DENY and ASK rules only (ADR-085 §3 —
+   * ADR-088 ruling 3) with the user's DENY and ASK rules only (ADR-085 §3 —
    * never their allow rules or "allow for this session" clicks: a dispatched
    * target does not inherit what the user pre-approved for their own chats)
    * + an empty sessionAllows set — so 'allow' resolves immediately (no
    * round-trip). The ask-rule rung precedes the mode base, so a user ask rule
    * still asks and a user deny rule refuses with the rule in every mode.
    *
-   * ADR-087 — under a JUDGED auto mode (the parent in `auto`/`full` and pi's
+   * ADR-088 — under a JUDGED auto mode (the parent in `auto`/`full` and pi's
    * `autoMode.enabled` not false) the ladder decides from the `acceptEdits`
    * base, exactly as PiSession does for itself, and an 'ask' goes to
    * ClaudeUI's judge (`DispatchTargetJudge`, the shared pipeline) instead of
@@ -5335,7 +5335,7 @@ export class CrossEngineDispatcher {
   /**
    * A pi target's ask to the human: a card on the DISPATCHING session, mirrors
    * awaitClaudeTargetApproval. `decisionReason` is auto mode's denial-cap
-   * sentence when the judge handed the call back (ADR-087).
+   * sentence when the judge handed the call back (ADR-088).
    */
   private forwardPiTargetAsk(
     entry: PiTargetEntry,
@@ -5749,7 +5749,7 @@ export class CrossEngineDispatcher {
    *
    * THE POLICY ENVELOPE (ADR-066, slice H). All three native knobs are set
    * HERE, on `thread/start`, as the creation-time baseline — and, since
-   * ADR-087, re-sent on every `turn/start` for the parent's LIVE mode
+   * ADR-088, re-sent on every `turn/start` for the parent's LIVE mode
    * (`driveCodexTurn`; `TurnStartParams` overrides all three "for this turn and
    * subsequent turns"). The rows come from the
    * SAME table `CodexSession` uses (`codex-turn-policy.ts`), so a dispatched
@@ -5919,7 +5919,7 @@ export class CrossEngineDispatcher {
    * The native policy is sent on EVERY turn (`codexTurnPolicy(mode)` — the
    * same call `CodexSession` makes; `turn/start` overrides it "for this turn
    * and subsequent turns"), so the thread follows the parent's LIVE mode at
-   * each turn start (ADR-087 ruling 3). `thread/start` still carries the
+   * each turn start (ADR-088 ruling 3). `thread/start` still carries the
    * creation-time baseline. `entry.autonomyMode` is refreshed to the mode sent
    * here — the mode the gate decides by (see that field: a mid-turn switch
    * binds at the next turn).
@@ -6278,7 +6278,7 @@ export class CrossEngineDispatcher {
    *
    * The shared permission engine runs FIRST, against `entry.autonomyMode` —
    * the mode the thread's native policy runs under THIS turn (refreshed at
-   * every turn start, ADR-087; never the live accessor, see that field) —
+   * every turn start, ADR-088; never the live accessor, see that field) —
    * with the user's DENY and ASK rules only (ADR-085 §3) and an
    * empty session-allow set: a dispatched target does not inherit the user's
    * allow rules or their "allow for this session" clicks (same reasoning as

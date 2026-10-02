@@ -1,5 +1,5 @@
 /**
- * ClaudeUI's auto-mode judge for ONE pi or opencode dispatch target (ADR-087).
+ * ClaudeUI's auto-mode judge for ONE pi or opencode dispatch target (ADR-088).
  *
  * A target spun off a parent in auto mode inherits auto mode (ruling 3) and is
  * JUDGED (ruling 1): pi and opencode targets by ClaudeUI's own judge (ruling 2
@@ -9,7 +9,7 @@
  * denial caps, the tool-outcome map, the memoized session-start git facts and
  * the one-per-target banners — exactly what each session holds per session.
  *
- * What the judge reads (ADR-087, owner ruling D1): the DISPATCHING session's
+ * What the judge reads (ADR-088, owner ruling D1): the DISPATCHING session's
  * transcript — the human turns there are the only real authorisation — then
  * the target's OWN assistant trajectory (its earlier calls, user-role messages
  * removed: the dispatch prompts are agent-authored, never the user's words),
@@ -67,7 +67,7 @@ import {
 } from '../automode/session-judge'
 import { loadSharedAutoModeConfig } from './ui-config'
 
-// The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-088) so
+// The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
 // `pi/pi-child-runner.ts` can record a child's trajectory without importing
 // this module; re-exported for its existing importers.
 export { recordTrajectoryMessage, TARGET_TRAJECTORY_MAX } from '../automode/trajectory'
@@ -182,7 +182,7 @@ export class DispatchTargetJudge {
     })
   }
 
-  /** Parent transcript, then the target's own assistant trajectory (ADR-087 D1). */
+  /** Parent transcript, then the target's own assistant trajectory (ADR-088 D1). */
   judgeMessages(): ChatMessage[] {
     const own = [...this.opts.trajectory()].filter((m) => m.role === 'assistant')
     return [...this.opts.messages(), ...own]

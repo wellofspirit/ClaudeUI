@@ -1,6 +1,6 @@
 /**
  * The first line of the `agent` tool result ClaudeUI's host returns for a pi
- * subagent launched in the background (ADR-088 S3; Claude Code's wording).
+ * subagent launched in the background (ADR-089 S3; Claude Code's wording).
  * Shared so the renderer can tell a launched background run from a call that
  * was refused before any spawn: the tool_result block carries no `details`
  * (`cuiAgent` stays on disk), and this text is written only by the host

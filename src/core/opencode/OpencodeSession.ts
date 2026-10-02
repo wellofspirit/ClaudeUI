@@ -708,7 +708,7 @@ export class OpencodeSession extends BaseSession {
       return this.run(prompt, attachments)
     }
 
-    // A fresh turn closes the user-stop window (ADR-089); the steer path above keeps it.
+    // A fresh turn closes the user-stop window (ADR-090); the steer path above keeps it.
     this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
@@ -1435,7 +1435,7 @@ export class OpencodeSession extends BaseSession {
         this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
         this.sendStatus()
         this.resetInactivityTimer()
-        // The stopped turn (if any) has ended: the user-stop window closes (ADR-089).
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-090).
         this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now, as the next turn's prompt (isProcessing is already false, so
@@ -1480,7 +1480,7 @@ export class OpencodeSession extends BaseSession {
       case 'error':
         this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
-        // ADR-089: a turn the user stopped ends in opencode's
+        // ADR-090: a turn the user stopped ends in opencode's
         // MessageAbortedError — the abort's aftermath, not news. The window is
         // the rule (an abort outside a user stop is unexplained and still shows).
         if (!this.suppressedAfterUserStop('OpencodeSession', output.message)) {
@@ -1668,7 +1668,7 @@ export class OpencodeSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
-    // ADR-089: open the user-stop window for a live turn BEFORE the abort —
+    // ADR-090: open the user-stop window for a live turn BEFORE the abort —
     // the SSE `session.error` (MessageAbortedError) can beat the HTTP reply.
     if (this.isProcessing) this.beginUserStop()
     if (this.client && this.openSessionId) {
@@ -2850,7 +2850,7 @@ export class OpencodeSession extends BaseSession {
 
   /**
    * The auto-mode decision for one ask: the edit fast path here, then the
-   * shared judge pipeline (`automode/judge-pipeline.ts`, ADR-087) with
+   * shared judge pipeline (`automode/judge-pipeline.ts`, ADR-088) with
    * opencode's hooks. G9 (a USER-authored ask rule outranks the classifier)
    * runs before this, for every mode: the host pre-check in
    * routePermissionAsk (ADR-085 S2).

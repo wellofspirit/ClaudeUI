@@ -1,12 +1,12 @@
 /**
  * One headless `pi --mode rpc` child, driven turn by turn (ADR-033 M4c,
- * ADR-088): the transport the cross-engine dispatcher's pi TARGET and a pi
+ * ADR-089): the transport the cross-engine dispatcher's pi TARGET and a pi
  * session's host-run SUBAGENTS share.
  *
  * TRANSPORT IS SHARED; POLICY IS NOT. The runner owns the process and its own
  * loopback `PiBridgeHost`, the event mapper, turn driving (`runTurn`), the
  * abort-and-drain race (`abortTurn`, `draining`), the per-turn accumulators,
- * the ADR-087 D1 trajectory and the stream forwarding
+ * the ADR-088 D1 trajectory and the stream forwarding
  * ({@link forwardPiChildStream}). The GATE POLICY stays with each consumer
  * and is injected as `spawnOpts.gateHandler`: the dispatcher passes
  * `gatePiTargetToolCall` (the user's deny/ask rules only, then
@@ -152,7 +152,7 @@ export interface PiChildRunnerOpts {
   now?: () => number
   /**
    * The D1 trajectory to record into. A subagent passes its agent's own map so
-   * a resumed run's judge still sees the agent's earlier actions (ADR-088 S3b);
+   * a resumed run's judge still sees the agent's earlier actions (ADR-089 S3b);
    * absent = a fresh map for this runner.
    */
   trajectory?: Map<string, ChatMessage>
@@ -210,7 +210,7 @@ export class PiChildRunner {
   draining = false
   /**
    * Agent messages sent to this child (`deliver`) that pi has not delivered
-   * yet: an id leaves when its own `custom` message_end arrives (ADR-088 S3).
+   * yet: an id leaves when its own `custom` message_end arrives (ADR-089 S3).
    * The subagent drive keeps the child alive while any remain (a delivery that
    * landed while pi was settling starts a deferred run, see `awaitTurn`).
    */
@@ -221,7 +221,7 @@ export class PiChildRunner {
    * shows here even when its delivery is already confirmed.
    */
   runActive = false
-  /** The child's own assistant messages for the judge (ADR-087 D1, see
+  /** The child's own assistant messages for the judge (ADR-088 D1, see
    *  `recordTrajectoryMessage`). */
   readonly trajectory: Map<string, ChatMessage>
   /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
@@ -410,7 +410,7 @@ export class PiChildRunner {
    */
   runTurn(prompt: string): Promise<PiTurnOutcome> {
     // Model-authored text (an agent's or a dispatcher's prompt) must never run
-    // a ClaudeUI bridge command in the child (ADR-088 S3): nothing is sent.
+    // a ClaudeUI bridge command in the child (ADR-089 S3): nothing is sent.
     if (isReservedPiCommandText(prompt)) {
       return Promise.resolve({
         kind: 'error',
@@ -421,7 +421,7 @@ export class PiChildRunner {
   }
 
   /**
-   * Start a turn with a HOST-BUILT agent message instead of a prompt (ADR-088
+   * Start a turn with a HOST-BUILT agent message instead of a prompt (ADR-089
    * S3b: `send_message` resuming a finished agent). The bridge command is built
    * here from the structured payload — never accepted as text, so `runTurn`'s
    * refusal of `/cui-` stays absolute for model-authored prompts. The command
@@ -465,7 +465,7 @@ export class PiChildRunner {
   }
 
   /**
-   * Put an agent-authored message into this child (ADR-088 S3): the bridge's
+   * Put an agent-authored message into this child (ADR-089 S3): the bridge's
    * `/cui-deliver` command as an RPC `prompt` — never plain text, `steer` or
    * `follow_up` (pi-delivery.ts, the marking rule). pi steers a running turn
    * or, idle and `wake`, starts one; the id stays in `pendingDeliveries` until
@@ -640,7 +640,7 @@ export class PiChildRunner {
   private handleOutput(output: PiMapperOutput): void {
     let out = output
     if (out.kind === 'send_message_error') {
-      // ADR-088 review F3: while one of our deliveries is pending this is its
+      // ADR-089 review F3: while one of our deliveries is pending this is its
       // async failure — not the turn's. With exactly one pending it is that
       // one (dropped, so the drive does not wait for it); otherwise it stays
       // an ordinary extension error.
@@ -674,7 +674,7 @@ export class PiChildRunner {
     if (out.kind === 'error') {
       this.settled?.({ kind: 'error', message: out.message })
       this.settled = null
-      // ADR-089: while the host is draining a turn it aborted (a Stop,
+      // ADR-090: while the host is draining a turn it aborted (a Stop,
       // task_stop, an interrupt cascade, a dispatch stop or timeout) the error
       // is the abort's own aftermath (pi reports an aborted model request as
       // `stopReason: 'error'`) — settled above, never streamed as a row. The
@@ -711,7 +711,7 @@ export class PiChildRunner {
       return
     }
 
-    // ADR-087 D1 — the child's own assistant messages, for its judge; above
+    // ADR-088 D1 — the child's own assistant messages, for its judge; above
     // the tool_use gate like the accounting (the judge needs them either way).
     if (out.kind === 'message' || out.kind === 'item_seal') {
       recordTrajectoryMessage(this.trajectory, out.message)

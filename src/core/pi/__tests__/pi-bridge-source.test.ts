@@ -16,7 +16,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 11 (ADR-088 S3b added send_message and task_stop)', () => {
+  it('is version 11 (ADR-089 S3b added send_message and task_stop)', () => {
     expect(PI_BRIDGE_VERSION).toBe('11')
   })
 
@@ -449,7 +449,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
   })
 })
 
-describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () => {
+describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () => {
   const originalFetch = globalThis.fetch
 
   afterEach(() => {
@@ -553,7 +553,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-088)', () =>
   })
 })
 
-describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, ADR-088 S3b)', () => {
+describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, ADR-089 S3b)', () => {
   const originalFetch = globalThis.fetch
   afterEach(() => {
     globalThis.fetch = originalFetch
@@ -617,7 +617,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
   })
 })
 
-describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-088 S3)', () => {
+describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-089 S3)', () => {
   const encode = (p: unknown): string => Buffer.from(JSON.stringify(p), 'utf8').toString('base64')
   const valid = {
     v: 1,

@@ -2,7 +2,7 @@
  * The agent note — one engine-neutral row shape for context an AGENT put into
  * a conversation (a task notification, a message from another agent): never
  * the user's bubble, and never a `User:` line for ClaudeUI's judge
- * (`slimTranscript` skips `system` rows; ADR-087 D1, ADR-088).
+ * (`slimTranscript` skips `system` rows; ADR-088 D1, ADR-089).
  *
  * `role: 'system'` with one `context_note` whose single fragment carries the
  * text verbatim (ContextNoteBlock never runs markdown) and a label saying where

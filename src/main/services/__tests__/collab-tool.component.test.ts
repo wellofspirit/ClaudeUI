@@ -112,7 +112,7 @@ describe('createCollabServer', () => {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
         cwd: '/tmp/project',
-        // The accessors themselves, read live by the dispatcher (ADR-087).
+        // The accessors themselves, read live by the dispatcher (ADR-088).
         getAutonomyMode: ctx.getAutonomyMode,
         getMessages: ctx.getMessages,
         emit: ctx.emit,
@@ -188,7 +188,7 @@ describe('createCollabServer', () => {
     expect(dispatchSpy.mock.calls[0][1]).toMatchObject({ fromRoutingId: 'temp-uuid' })
     expect(dispatchSpy.mock.calls[1][1]).toMatchObject({ fromRoutingId: 'stable-session-uuid' })
     // The mode is an accessor the dispatcher reads at every decision point
-    // (ADR-087), so even the FIRST dispatch's context now sees the switch.
+    // (ADR-088), so even the FIRST dispatch's context now sees the switch.
     expect(dispatchSpy.mock.calls[0][1].getAutonomyMode()).toBe('plan')
     expect(dispatchSpy.mock.calls[1][1].getAutonomyMode()).toBe('plan')
     mode = 'acceptEdits'
@@ -276,7 +276,7 @@ describe('createCollabServer', () => {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
         cwd: '/tmp/project',
-        // The accessors themselves, read live by the dispatcher (ADR-087).
+        // The accessors themselves, read live by the dispatcher (ADR-088).
         getAutonomyMode: ctx.getAutonomyMode,
         getMessages: ctx.getMessages,
         emit: ctx.emit,

@@ -1,5 +1,5 @@
 /**
- * The agent types a pi session's `agent` tool can launch (ADR-088): ClaudeUI's
+ * The agent types a pi session's `agent` tool can launch (ADR-089): ClaudeUI's
  * built-ins, then the user's `~/.pi/agent/agents/*.md`, then the project's
  * `.pi/agents/*.md` — later wins per normalized name. Modeled on Claude
  * Code's subagent definitions (a Markdown file whose front matter names the
@@ -56,7 +56,7 @@ export interface PiAgentDefinition {
   /** `'inherit'` or a pi picker value `provider/id`. */
   model: 'inherit' | string
   thinking?: PiThinkingLevel
-  /** Narrows only (ADR-088 D3). */
+  /** Narrows only (ADR-089 D3). */
   permissionMode?: string
   /** Parsed and stored; background runs arrive in S3. */
   background?: boolean
@@ -65,7 +65,7 @@ export interface PiAgentDefinition {
   /**
    * A project `.pi/agents` file that replaced a BUILT-IN type (e.g. a repo's
    * own `general-purpose`): the listing marks it `(project)` so the model
-   * and the user can tell (ADR-088 review F7).
+   * and the user can tell (ADR-089 review F7).
    */
   overridesBuiltin?: boolean
 }
@@ -313,7 +313,7 @@ export function parseAgentFile(
     if (typeof data.permissionMode === 'string' && PERMISSION_MODES.includes(data.permissionMode)) {
       permissionMode = data.permissionMode
     } else {
-      // Fail safe: an unknown mode can only narrow (ADR-088 D3).
+      // Fail safe: an unknown mode can only narrow (ADR-089 D3).
       warn('unknown permissionMode; using default')
       permissionMode = 'default'
     }

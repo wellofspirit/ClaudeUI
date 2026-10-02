@@ -369,7 +369,7 @@ vi.mock('../../auth/PiAuthProvider', () => ({
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
   realpathSync: Object.assign((p: string) => p, { native: (p: string) => p }),
-  // Host-run subagents (ADR-088): a child's session dir + appended prompt file.
+  // Host-run subagents (ADR-089): a child's session dir + appended prompt file.
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn()
 }))
@@ -672,7 +672,7 @@ describe('PiSession.run — sends a prompt', () => {
     // the vi.hoisted comment) — dedicated tests below cover the "off" paths.
     // Plan mode (M5a): CLAUDEUI_PI_PLAN_TOOLS is '1' by default too — `plan`
     // is a static-true engine capability, same as hostedMcp above. Host-run
-    // subagents (ADR-088): the bridge's own `agent` tool + the agent-type
+    // subagents (ADR-089): the bridge's own `agent` tool + the agent-type
     // listing — `subagents` is likewise a static-true engine capability, and
     // there is no second -e any more (the M5b extension is retired).
     expect(MockPiRpcClient).toHaveBeenCalledWith(
@@ -938,7 +938,7 @@ describe('PiSession.interrupt', () => {
   })
 })
 
-describe('PiSession — a user stop is not an error (ADR-089)', () => {
+describe('PiSession — a user stop is not an error (ADR-090)', () => {
   /** pi's message_end for a turn error (P1: an aborted model request reads this way). */
   const errorEnd = (errorMessage: string): PiEvent =>
     ({
@@ -1870,7 +1870,7 @@ describe('PiSession resume', () => {
     expect(session.status.totalCostUsd).toBeCloseTo(1.25)
   })
 
-  it('H2: replays each host-run subagent transcript as session:subagent-message-batch after the parent messages, outside messageHistory (ADR-088)', async () => {
+  it('H2: replays each host-run subagent transcript as session:subagent-message-batch after the parent messages, outside messageHistory (ADR-089)', async () => {
     const child: ChatMessage = {
       id: 'child-m1',
       role: 'assistant',
@@ -1902,7 +1902,7 @@ describe('PiSession resume', () => {
     expect(session.getMessages().map((m) => m.id)).toEqual(['m1'])
   })
 
-  it('H2 (ADR-088 S3): replays each stored task notification as session:task-notification, after the subagent batches', async () => {
+  it('H2 (ADR-089 S3): replays each stored task notification as session:task-notification, after the subagent batches', async () => {
     const notes = [
       {
         taskId: 'ag-1',
@@ -3932,7 +3932,7 @@ describe('PiSession.run — slash-prefixed prompt passthrough (M2b)', () => {
     })
   })
 
-  it('M7: /cui-deliver is reserved — nothing is sent (not even a spawn) and session:error says so (ADR-088 S3)', async () => {
+  it('M7: /cui-deliver is reserved — nothing is sent (not even a spawn) and session:error says so (ADR-089 S3)', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-slash-2', win as never, '/cwd', {})
 
@@ -4695,7 +4695,7 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
         toolUseId: 'call_dispatch_1'
       })
     )
-    // Live accessors (ADR-087), not snapshots.
+    // Live accessors (ADR-088), not snapshots.
     const dispatchCtx = mockDispatch.mock.calls[0][1] as DispatchContext
     expect(dispatchCtx.getAutonomyMode()).toBe('acceptEdits')
     expect(dispatchCtx.getMessages()).toBe(session.getMessages())
@@ -5179,7 +5179,7 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Host-run subagents (ADR-088) — the parent side: the bridge env, the Q1 spawn
+// Host-run subagents (ADR-089) — the parent side: the bridge env, the Q1 spawn
 // rung, the child gate (live mode, D3 narrowing, the judge with D1 context),
 // child streaming that never enters the parent transcript, usage rows, Stop,
 // interrupt/cancel/abandonment. Children are a fake SpawnPiChildFn injected
@@ -5274,7 +5274,7 @@ function childAssistantToolCall(id: string, name: string, args: Record<string, u
   } as unknown as PiEvent
 }
 
-describe('PiSession — host-run subagents (ADR-088)', () => {
+describe('PiSession — host-run subagents (ADR-089)', () => {
   const AGENT_INPUT = {
     description: 'Tidy the build',
     prompt: 'CHILD-TASK-PROMPT: fix the build',
@@ -5852,7 +5852,7 @@ describe('PiSession — host-run subagents (ADR-088)', () => {
     session.dispose()
   })
 
-  // ── ADR-088 S3: background runs, deliveries, the marking invariant ─────────
+  // ── ADR-089 S3: background runs, deliveries, the marking invariant ─────────
 
   const BG_INPUT = { description: 'Scan the repo', prompt: 'CHILD-TASK-PROMPT: scan' }
 
@@ -6212,7 +6212,7 @@ describe('PiSession — host-run subagents (ADR-088)', () => {
     session.dispose()
   })
 
-  // ── ADR-088 S3b: messaging gates, Send to background, record rebuild ──────
+  // ── ADR-089 S3b: messaging gates, Send to background, record rebuild ──────
 
   it('S7: send_message is allowed with no card in default and plan, judged once in auto; task_stop is allowed in auto with zero judge calls', async () => {
     for (const mode of ['default', 'plan']) {

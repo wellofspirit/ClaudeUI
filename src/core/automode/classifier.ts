@@ -240,7 +240,7 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
  *
  * `role: 'system'` messages are skipped whole, whatever they carry: system rows
  * are engine/host notes (compaction, API errors, Codex guardian notices,
- * host-injected agent messages such as a pi task notification, ADR-088 S3) and
+ * host-injected agent messages such as a pi task notification, ADR-089 S3) and
  * never a human turn, so none may become a `User:` line or the user's consent.
  *
  * Everything else is dropped: thinking blocks, tool RESULTS (the dominant token
@@ -322,7 +322,7 @@ export function renderAction(action: ClassifierAction): string {
  * as the assistant's own action against the same user intent. Two callers:
  * - an opencode task CHILD (ADR-085 S4): the judge sees only the PARENT
  *   transcript, whose `task` line is the child's mandate;
- * - a dispatch TARGET (ADR-087, type `dispatch:<engine>`, the latest dispatch
+ * - a dispatch TARGET (ADR-088, type `dispatch:<engine>`, the latest dispatch
  *   prompt as the task): the judge sees the PARENT transcript followed by the
  *   target's own assistant trajectory (its user-role messages removed), so the
  *   parent's human turns stay the only `User:` lines.
