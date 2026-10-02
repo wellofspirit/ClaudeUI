@@ -87,7 +87,6 @@ const typecheckStages = [
   { label: 'typecheck:node', steps: [['bun', ['run', '--silent', 'typecheck:node']]] },
   { label: 'typecheck:web', steps: [['bun', ['run', '--silent', 'typecheck:web']]] }
 ]
-const typecheck = [{ parallel: typecheckStages }]
 const electronViteBuild = [
   { label: 'electron-vite build', steps: [['bunx', ['electron-vite', 'build', ...LL]]] }
 ]
@@ -124,16 +123,28 @@ const ensureHarness = (id, update) => [
   }
 ]
 
+// Everything a package needs before electron-builder, as one parallel group.
+// The members share no outputs: typecheck is --noEmit, ensure-cli writes
+// vendor/claude-cli, electron-vite writes out/{main,preload,renderer} (each
+// target empties only its own dir), and the web build writes out/web.
+const prepare = ({ typecheck }) => [
+  {
+    parallel: [
+      ...(typecheck ? typecheckStages : []),
+      ...ensureCli(false),
+      ...electronViteBuild,
+      ...webBuild
+    ]
+  }
+]
+
 const TARGETS = {
   // No typecheck: CI and the release workflows run `bun run typecheck` as their
   // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
   // never reads, so the two run side by side.
   build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
   'build:mac': [
-    ...typecheck,
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --mac --dir',
       steps: [
@@ -162,29 +173,21 @@ const TARGETS = {
     }
   ],
   'build:win': [
-    ...typecheck,
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --win --dir',
       steps: [['bunx', ['electron-builder', '--win', '--dir']]]
     }
   ],
   'build:linux': [
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: false }),
     {
       label: 'electron-builder --linux',
       steps: [['bunx', ['electron-builder', '--linux']]]
     }
   ],
   'build:unpack': [
-    ...typecheck,
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --dir',
       steps: [['bunx', ['electron-builder', '--dir']]]
