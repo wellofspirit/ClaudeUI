@@ -398,7 +398,7 @@ function handleOwnEvent(
       // ctx.metadata also sets `input: args`). A tool that asks straight from
       // `execute` can beat it: the shell tool does (tool/shell.ts `execute` →
       // `ask`), and the part is then often still `pending` with `input: {}` —
-      // readOnlyBypass (OpencodeSession) waits for it rather than trusting
+      // readOnlyInput (OpencodeSession) waits for it rather than trusting
       // this snapshot. Fall back to `metadata` (populated for built-in tools)
       // then {}.
       const metadata = props.metadata as Record<string, unknown> | undefined

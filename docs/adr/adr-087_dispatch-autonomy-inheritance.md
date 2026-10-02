@@ -70,11 +70,34 @@ PiSession and OpencodeSession each carried: the category fast path, the ADR-084 
 ADR-085 §4 allow-rule gate (skipped when no `allowRuleAction` hook is given), the fail-closed stale
 judge-model check, ground truth, `classify`, the settle check, G10, verdict logging, the denial
 caps, outcomes and the review. Engine specifics are hooks; G9 (a user ask rule → the human) stays
-in each caller. PiSession runs on it. OpencodeSession was **not** migrated: the pipeline takes one
-input for all three gates, which would move opencode's tool-part input wait in front of the
-allow-rule skip and delay an allow-rule-covered MCP ask's reply by up to `TOOL_INPUT_WAIT_MS` — an
-observable ordering change. `src/core/services/dispatch-target-judge.ts` (`DispatchTargetJudge`, one
-per pi/opencode target) supplies the target hooks.
+in each caller. PiSession runs on it, and so does OpencodeSession (S4, 2026-10-02); opencode's
+agent-control edit fast path (ADR-084 §3) stays in the session, before the pipeline.
+`src/core/services/dispatch-target-judge.ts` (`DispatchTargetJudge`, one per pi/opencode target)
+supplies the target hooks.
+
+opencode needed two hooks, because its ask can precede its tool input (ADR-084 §1, ADR-085 §3):
+
+- **`inputFor(stage)`** — the input a stage reads. `'read-only'` is awaited before the read-only
+  gate (opencode: the shell TOOL PART's input, waiting up to `TOOL_INPUT_WAIT_MS`; `null` skips the
+  gate). `'judge'` is awaited AFTER the allow-rule skip and before the stale-judge check (opencode:
+  an MCP ask's part input; ground truth and `classify` read it, and the human card shows it).
+  `'settled'` from either ends the pipeline with no reply. Without the hook every stage reads
+  `action.input`. The judge stage sits after the allow-rule skip on purpose: a single input for all
+  three gates (the first design) would put the MCP wait in front of the skip and delay an
+  allow-rule-covered ask's reply by up to `TOOL_INPUT_WAIT_MS` — an observable ordering change.
+- **`stillPending(stage)`** — the settle check now names its stage (`'read-only'`, `'allow-rule'`,
+  `'judge'`, `'error'`), so opencode keeps its stage-specific log lines; and the pipeline checks it
+  once more after an allow-rule allow, before the review (opencode's old skip did). Implementations
+  without the parameter (pi children, the dispatch targets) are unchanged.
+
+Two behaviour deltas of the migration, accepted (each is the pipeline's existing rule; no existing
+test pins either):
+
+1. A judge path that throws after the ask was answered meanwhile ends `settled`; opencode used to
+   raise a card for the already-answered ask (a bug fix).
+2. A child ask whose parent `task` part carries no input logs its allow-rule gate line with
+   `(subagent unknown)` (the pipeline uses one `subagent` value for the gate's log and the judge's
+   header); opencode passed no subagent to the gate in that case.
 
 ### What a target's judge sees
 
@@ -164,6 +187,5 @@ The dispatcher reads the live mode through one helper that normalises the legacy
 
 ## Out of scope
 
-- Migrating OpencodeSession onto the shared pipeline (see above).
 - Re-PATCHing an opencode target's ruleset on a mode switch.
 - Moving an ask already parked on the human to the judge after a switch into auto.

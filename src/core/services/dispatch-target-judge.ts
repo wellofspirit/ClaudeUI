@@ -56,7 +56,8 @@ import {
   runJudgePipeline,
   type JudgePipelineAction,
   type JudgePipelineOutcome,
-  type JudgePipelineReview
+  type JudgePipelineReview,
+  type JudgePipelineStage
 } from '../automode/judge-pipeline'
 import { effectiveShellCwd } from '../automode/read-only-gate'
 import {
@@ -103,7 +104,7 @@ export interface DispatchTargetJudgeCall {
   /** The dispatching session's live mode (`entry.ctx.getAutonomyMode()`). */
   currentMode: () => string
   /** False once the ask was answered elsewhere / the dispatch stopped → `settled`. */
-  stillPending?: () => boolean
+  stillPending?: (stage: JudgePipelineStage) => boolean
   /** Whether the engine's shell honours `input.workdir` (opencode true, pi false). */
   honoursWorkdir: boolean
   /** The caller cannot vouch for the shell command's working directory → no read-only gate. */

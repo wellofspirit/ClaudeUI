@@ -256,3 +256,140 @@ describe('runJudgePipeline', () => {
     expect(judge.mock.calls[0][0].user).toContain('automode-blocked')
   })
 })
+
+describe('runJudgePipeline — staged input and settle checks (S4, opencode on the pipeline)', () => {
+  it('J-T1: inputFor("read-only") null skips the gate and makes no stillPending call', async () => {
+    const stillPending = vi.fn(() => true)
+    // Both stages answer null: no read-only input, and the judge reads action.input.
+    const inputFor = vi.fn(async (_stage: 'read-only' | 'judge') => null)
+    const { hooks } = setup({ inputFor, stillPending, judgeAvailable: () => false })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human' })
+    expect(mockReadOnlyGate).not.toHaveBeenCalled()
+    expect(stillPending).not.toHaveBeenCalled()
+  })
+
+  it('J-T1: an object from inputFor("read-only") is what the gate reads', async () => {
+    const roInput = { command: 'ls', workdir: '/repo/sub' }
+    const { hooks } = setup({
+      inputFor: async (stage) => (stage === 'read-only' ? roInput : null),
+      judgeAvailable: () => false
+    })
+    await runJudgePipeline(bash, hooks)
+    expect(mockReadOnlyGate).toHaveBeenCalledWith(
+      expect.objectContaining({ action: { toolName: 'bash', input: roInput } })
+    )
+  })
+
+  it('J-T1: "settled" from inputFor("read-only") returns settled before the allow-rule hook', async () => {
+    const allowRuleAction = vi.fn(() => ({ kind: 'shell' as const, command: 'x' }))
+    const { hooks, judge } = setup({
+      inputFor: async () => 'settled',
+      allowRuleAction
+    })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'settled' })
+    expect(allowRuleAction).not.toHaveBeenCalled()
+    expect(mockReadOnlyGate).not.toHaveBeenCalled()
+    expect(judge).not.toHaveBeenCalled()
+  })
+
+  it('J-T2: the allow-rule hook runs BEFORE inputFor("judge"); an allow-rule allow never asks for the judge input', async () => {
+    const order: string[] = []
+    const inputFor = vi.fn(async (stage: 'read-only' | 'judge') => {
+      order.push(`inputFor:${stage}`)
+      return null
+    })
+    const allowRuleAction = vi.fn(() => {
+      order.push('allowRuleAction')
+      return { kind: 'shell' as const, command: 'rm -rf build' }
+    })
+    const { hooks } = setup({ inputFor, allowRuleAction, judgeAvailable: () => false })
+    await runJudgePipeline(bash, hooks)
+    expect(order).toEqual(['inputFor:read-only', 'allowRuleAction', 'inputFor:judge'])
+
+    mockAllowRuleGate.mockReturnValue({ allow: true, rule: 'Bash(rm:*)', rules: ['Bash(rm:*)'] })
+    inputFor.mockClear()
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'allow' })
+    expect(inputFor.mock.calls.map(([stage]) => stage)).toEqual(['read-only'])
+  })
+
+  it('J-T3: ground truth and the judge read the inputFor("judge") object, which resolves before judgeAvailable', async () => {
+    const order: string[] = []
+    const judged = { command: 'rm -rf JUDGED-INPUT' }
+    const captureActionMeta = vi.fn(async () => undefined)
+    const { hooks, judge } = setup(
+      {
+        inputFor: async (stage) => {
+          order.push(`inputFor:${stage}`)
+          return stage === 'judge' ? judged : null
+        },
+        judgeAvailable: () => {
+          order.push('judgeAvailable')
+          return true
+        },
+        captureActionMeta
+      },
+      ['<block>no</block>']
+    )
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'allow' })
+    expect(order).toEqual(['inputFor:read-only', 'inputFor:judge', 'judgeAvailable'])
+    expect(captureActionMeta).toHaveBeenCalledWith('bash', judged)
+    expect(judge.mock.calls[0][0].user).toContain('JUDGED-INPUT')
+  })
+
+  it('J-T3: "settled" from inputFor("judge") returns settled with no judge call', async () => {
+    const judgeAvailable = vi.fn(() => true)
+    const { hooks, judge } = setup({
+      inputFor: async (stage) => (stage === 'judge' ? 'settled' : null),
+      judgeAvailable
+    })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'settled' })
+    expect(judgeAvailable).not.toHaveBeenCalled()
+    expect(judge).not.toHaveBeenCalled()
+  })
+
+  it('J-T4: stillPending receives its stage at each check', async () => {
+    const stages: string[] = []
+    const stillPending = (stage: string): boolean => {
+      stages.push(stage)
+      return true
+    }
+    // read-only + judge
+    await runJudgePipeline(bash, setup({ stillPending }, ['<block>no</block>']).hooks)
+    expect(stages).toEqual(['read-only', 'judge'])
+    // error
+    stages.length = 0
+    await runJudgePipeline(
+      bash,
+      setup({
+        stillPending,
+        skipReadOnlyGate: true,
+        environment: async () => {
+          throw new Error('boom')
+        }
+      }).hooks
+    )
+    expect(stages).toEqual(['error'])
+    // allow-rule
+    stages.length = 0
+    mockAllowRuleGate.mockReturnValue({ allow: true, rule: 'Bash(rm:*)', rules: ['Bash(rm:*)'] })
+    await runJudgePipeline(
+      bash,
+      setup({
+        stillPending,
+        skipReadOnlyGate: true,
+        allowRuleAction: () => ({ kind: 'shell', command: 'rm -rf build' })
+      }).hooks
+    )
+    expect(stages).toEqual(['allow-rule'])
+  })
+
+  it('J-T4: an allow-rule allow for an ask settled meanwhile → settled, no review', async () => {
+    mockAllowRuleGate.mockReturnValue({ allow: true, rule: 'Bash(rm:*)', rules: ['Bash(rm:*)'] })
+    const { hooks, sendReview } = setup({
+      stillPending: (stage) => stage !== 'allow-rule',
+      allowRuleAction: () => ({ kind: 'shell', command: 'rm -rf build' })
+    })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'settled' })
+    expect(sendReview).not.toHaveBeenCalled()
+  })
+})

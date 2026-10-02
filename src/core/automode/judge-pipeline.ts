@@ -21,6 +21,16 @@
  *   agent-control edit clear, ADR-084 §3).
  * - Turning the outcome into the engine's reply.
  *
+ * Stage order: fast path → read-only gate (on `inputFor('read-only')` when
+ * given, else `action.input`) + settled check → allow-rule gate (+ settled
+ * check before its review) → `inputFor('judge')` → judge available → ground
+ * truth + classify (on the judged input) → settled → G10 → verdict, caps,
+ * review → on a throw: settled, else the human. `inputFor` exists for engines
+ * whose ask can precede its tool input (opencode, ADR-084 §1 / ADR-085 §3);
+ * its `'judge'` stage is NEVER awaited before the allow-rule skip, so an ask
+ * an allow rule covers is answered without waiting for an input it does not
+ * need.
+ *
  * Log line texts are byte-identical to what the two sessions logged before the
  * extraction; `logSource` is the only variable.
  */
@@ -97,12 +107,30 @@ export interface JudgePipelineHooks {
   twoStageMode: () => 'both' | 'fast' | 'thinking'
   sendReview: (toolUseId: string, review: JudgePipelineReview) => void
   /**
-   * Checked after every await (the read-only gate and the judge call). `false`
+   * Checked after every await (the read-only gate, the judge call, a thrown
+   * error) and once more after an allow-rule allow, before its review. `false`
    * → `settled`: the ask was answered elsewhere meanwhile (opencode's cascade
    * or session-allow sweep; a drained dispatch) — the caller replies nothing.
+   * The stage lets a caller keep its stage-specific log lines; an
+   * implementation that takes no parameter stays assignable.
    */
-  stillPending?: () => boolean
+  stillPending?: (stage: JudgePipelineStage) => boolean
+  /**
+   * For engines whose ask can precede its tool input (opencode, ADR-084 §1 /
+   * ADR-085 §3): the input a stage should look at, resolved (and possibly
+   * waited for) by the caller. `'read-only'` is awaited before the read-only
+   * gate: an object → the gate runs on it; `null` → the gate (and its settled
+   * check) is skipped. `'judge'` is awaited AFTER the allow-rule skip — never
+   * before it, so a skippable ask is answered at once — and before
+   * `judgeAvailable()`: an object → ground truth and the judge read it;
+   * `null` → `action.input`. `'settled'` → the ask was answered meanwhile.
+   * Omitted → every stage reads `action.input`.
+   */
+  inputFor?: (stage: 'read-only' | 'judge') => Promise<Record<string, unknown> | null | 'settled'>
 }
+
+/** Where {@link JudgePipelineHooks.stillPending} is being asked. */
+export type JudgePipelineStage = 'read-only' | 'allow-rule' | 'judge' | 'error'
 
 export type JudgePipelineOutcome =
   | { kind: 'allow' }
@@ -125,7 +153,7 @@ export async function runJudgePipeline(
   hooks: JudgePipelineHooks
 ): Promise<JudgePipelineOutcome> {
   const { toolUseId, toolName, input } = action
-  const settled = (): boolean => hooks.stillPending?.() === false
+  const settled = (stage: JudgePipelineStage): boolean => hooks.stillPending?.(stage) === false
 
   // Fast path — read-only/safe categories never need the judge. An exact set
   // of built-in categories, so an MCP key never takes it.
@@ -136,20 +164,24 @@ export async function runJudgePipeline(
   // allow never resets the denial caps) and no usage row. Before the
   // judge-model check, so it holds even when no judge model resolves.
   if (!hooks.skipReadOnlyGate) {
-    const readOnly = await readOnlyGate({
-      action: { toolName, input },
-      cwd: hooks.cwd,
-      permissions: hooks.permissions(),
-      autoModeActive: hooks.autoModeActive,
-      honoursWorkdir: hooks.honoursWorkdir,
-      logSource: hooks.logSource
-    })
-    // The gate may have awaited a git capture; the ask may have been answered
-    // meanwhile. Settled → handled: no reply, no review, no judge call.
-    if (settled()) return SETTLED
-    if (readOnly.allow) {
-      hooks.sendReview(toolUseId, 'read-only')
-      return ALLOW
+    const roInput = hooks.inputFor ? await hooks.inputFor('read-only') : input
+    if (roInput === 'settled') return SETTLED
+    if (roInput !== null) {
+      const readOnly = await readOnlyGate({
+        action: { toolName, input: roInput },
+        cwd: hooks.cwd,
+        permissions: hooks.permissions(),
+        autoModeActive: hooks.autoModeActive,
+        honoursWorkdir: hooks.honoursWorkdir,
+        logSource: hooks.logSource
+      })
+      // The gate may have awaited a git capture; the ask may have been answered
+      // meanwhile. Settled → handled: no reply, no review, no judge call.
+      if (settled('read-only')) return SETTLED
+      if (readOnly.allow) {
+        hooks.sendReview(toolUseId, 'read-only')
+        return ALLOW
+      }
     }
   }
 
@@ -170,10 +202,18 @@ export async function runJudgePipeline(
       ...(hooks.subagent ? { subagent: hooks.subagent.type } : {})
     })
     if (gate.allow) {
+      // The read-only stage may have awaited; an ask answered meanwhile gets
+      // no reply and no review.
+      if (settled('allow-rule')) return SETTLED
       hooks.sendReview(toolUseId, { allowRule: gate.rule })
       return ALLOW
     }
   }
+
+  // The judge's input — only now, after the allow-rule skip (see `inputFor`).
+  const judged = hooks.inputFor ? await hooks.inputFor('judge') : null
+  if (judged === 'settled') return SETTLED
+  const judgeInput = judged ?? input
 
   // A configured judge model that no longer exists fails CLOSED — never judged
   // by a stand-in. Checked after the static paths so a stale judge does not
@@ -184,13 +224,17 @@ export async function runJudgePipeline(
     // Ground truth. actionMeta FIRST: it is what resolves repo visibility, and
     // the environment picks the resolved value up on this same call rather
     // than one approval later.
-    const actionMeta = await hooks.captureActionMeta(toolName, input)
+    const actionMeta = await hooks.captureActionMeta(toolName, judgeInput)
     const environment = await hooks.environment()
     const outcomes = hooks.outcomes()
     const result = await classify(
       {
         messages: hooks.messages(),
-        action: { toolName, input, ...(hooks.subagent ? { subagent: hooks.subagent } : {}) },
+        action: {
+          toolName,
+          input: judgeInput,
+          ...(hooks.subagent ? { subagent: hooks.subagent } : {})
+        },
         environment,
         ...(actionMeta ? { actionMeta } : {}),
         ...(outcomes ? { outcomes } : {}),
@@ -202,7 +246,7 @@ export async function runJudgePipeline(
     // The ask may have been settled while the judge ran. Replying now would
     // answer a call that already ran and paint a verdict on it. Checked before
     // G10, so a settled ask never gets a card either.
-    if (settled()) return SETTLED
+    if (settled('judge')) return SETTLED
 
     // G10 — the user can switch autonomy mode while the judge is in flight
     // (cli.js's `mode_changed_while_queued`). Re-read the CURRENT mode: if auto
@@ -255,7 +299,7 @@ export async function runJudgePipeline(
     )
     // A throw after the ask was answered elsewhere (a stop, opencode's
     // cascade) must not forward a card for an already-answered ask.
-    if (settled()) return SETTLED
+    if (settled('error')) return SETTLED
     return HUMAN
   }
 }
