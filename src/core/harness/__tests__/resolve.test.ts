@@ -257,7 +257,11 @@ describe('codex needs its code-mode host beside the executable', () => {
 
     fakeHarnessInstall(store, 'codex', CODEX_TESTED)
     invalidateHarness('codex')
-    expect(codexCodeModeHostPath()).toBe(path.join(dir, exeName('codex-code-mode-host')))
+    // The resolver answers beside the CANONICAL executable: on macOS `os.tmpdir()`
+    // is a symlink (`/var` → `/private/var`), so the expectation must be too.
+    expect(codexCodeModeHostPath()).toBe(
+      path.join(fs.realpathSync(dir), exeName('codex-code-mode-host'))
+    )
     expect(harnessAvailable('codex')).toBe(true)
   })
 
