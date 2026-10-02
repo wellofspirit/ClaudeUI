@@ -130,6 +130,7 @@ const TARGETS = {
   // never reads, so the two run side by side.
   build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
   'build:mac': [
+    ...typecheck,
     ...ensureCli(false),
     ...electronViteBuild,
     ...webBuild,
