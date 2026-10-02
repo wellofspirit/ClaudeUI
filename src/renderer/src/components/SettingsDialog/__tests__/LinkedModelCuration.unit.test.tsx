@@ -139,6 +139,10 @@ describe('LinkedModelCuration', () => {
     expect(within(row('b')).getAllByTestId('S.modelMark')[1].getAttribute('title')).toBe(
       'pi does not offer this model'
     )
+    expect(within(row('b')).getByLabelText('pi does not offer this model')).toHaveAttribute(
+      'data-available',
+      'false'
+    )
   })
 
   it('an edit in the shared list persists ONE linked record', async () => {

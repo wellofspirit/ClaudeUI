@@ -2202,6 +2202,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     warnings?
   ) => {
     const state = useSessionStore.getState()
+    // A disk read can finish after this session has resumed. Guard config as
+    // well as transcript seeding: neither may replace a live backend's state.
+    if (
+      state.sessions[routingId]?.sdkActive ||
+      state.sessions[routingId]?.status.state === 'running'
+    )
+      return
     {
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine

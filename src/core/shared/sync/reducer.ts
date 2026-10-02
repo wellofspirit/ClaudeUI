@@ -53,6 +53,7 @@ import {
   SEND_USER_FILE_TOOL
 } from '../../../shared/derive-session'
 import { channelSpec } from './channels'
+import { engineMeta } from '../../../shared/engine-meta'
 import { emptySession, type CanonicalSessionState, type CanonicalState } from './state'
 
 /** One event as the ring holds it (the frame envelope, minus transport bits). */
@@ -1049,19 +1050,34 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               ...(status.codex?.overrides?.model ? { codexModelExplicit: true } : {})
             }
           : {}),
+        ...((status.engineId === 'opencode' || status.engineId === 'pi') &&
+        status.model?.engineId === status.engineId
+          ? {
+              selectedModel: engineMeta(status.engineId).encodeModelValue(status.model),
+              selectedEngineId: status.engineId
+            }
+          : {}),
         ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
       }))
 
-      if (status.engineId === 'codex' && status.model)
+      if (
+        status.model &&
+        (status.engineId === 'codex' ||
+          ((status.engineId === 'opencode' || status.engineId === 'pi') &&
+            status.model.engineId === status.engineId))
+      )
         next = {
           ...next,
           sessionEngines: {
             ...next.sessionEngines,
             [id]: {
-              engineId: 'codex',
+              engineId: status.engineId,
               model: {
                 ...status.model,
-                modelId: status.codex?.overrides?.model ?? status.model.modelId
+                modelId:
+                  status.engineId === 'codex'
+                    ? (status.codex?.overrides?.model ?? status.model.modelId)
+                    : status.model.modelId
               }
             }
           }

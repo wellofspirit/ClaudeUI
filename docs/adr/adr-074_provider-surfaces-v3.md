@@ -203,7 +203,19 @@ What the build changed about the decision:
 6. **Models in the picker is a summary + a stacked editor** in the Manage sheet (mockup D), which re-reads
    the definition after every write so a split list never reopens as one.
 7. **Removal logging**: every `removeVendorAuth` logs the vendor id and call path (never the key), after
-   an unexplained loss of the owner's pi OpenRouter key during the arc.
+    an unexplained loss of the owner's pi OpenRouter key during the arc.
+
+**Amended 2026-10-01, stale rows and live model identity.** API providers' Remove action can remove
+disabled-only stale opencode entries by clearing their native veto and ClaudeUI curation.
+The ownership checks and conditional rediscovery of external providers are specified in
+[ADR-044](adr-044_opencode-provider-disable-vs-remove.md).
+
+Defaults and picker curation do not switch an existing session's model. When curation removes its
+model, the composer retains its identity and reported live capabilities rather than substituting
+a listed/default model. For live opencode/pi sessions the model badge follows `status.model`,
+including while an explicit picker change awaits the backend acknowledgement. Status events
+reconcile the shared selected model and per-session model record, as Codex already does. A delayed
+historical load cannot overwrite the config or transcript of a session that has become live.
 
 ### 10. New sessions: last pick or configured default (owner ruling)
 

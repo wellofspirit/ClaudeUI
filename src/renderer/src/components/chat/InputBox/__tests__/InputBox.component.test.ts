@@ -453,6 +453,10 @@ describe('InputBox FC — rendered', () => {
       // The Claude-defaults tests below write these; none may leak forward.
       claudeDefaultModel: '',
       claudeDefaultModelConfigured: false,
+      opencodeDefaultModel: '',
+      opencodeDefaultModelConfigured: false,
+      piDefaultModel: '',
+      piDefaultModelConfigured: false,
       settings: { ...state.settings, modelEffortDefaults: {} }
     }))
     mirrorStoreIntoReplica()
@@ -1130,6 +1134,103 @@ describe('InputBox FC — rendered', () => {
   // R1b — a reopened opencode/pi session whose model the discovered catalog
   // does not (yet) hold used to read as the CONFIGURED default: a model the
   // session never ran and the resume will not spawn.
+  it.each(['claude', 'opencode', 'pi'] as const)(
+    '%s: changing defaults and curation preserves the live model and capabilities until an explicit pick',
+    async (engine) => {
+      const oldValue = engine === 'claude' ? 'old-model' : 'provider/old-model'
+      const nextValue = engine === 'claude' ? 'new-model' : 'provider/new-model'
+      const oldModel: ModelInfo = {
+        value: oldValue,
+        displayName: 'Old model',
+        description: '',
+        engineId: engine,
+        vision: false,
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'high'],
+        supportsAdaptiveThinking: false
+      }
+      const nextModel: ModelInfo = {
+        value: nextValue,
+        displayName: 'New model',
+        description: '',
+        engineId: engine,
+        vision: true,
+        supportsEffort: false,
+        supportsAdaptiveThinking: false
+      }
+      useSessionStore.setState((state) => ({
+        availableModels: [oldModel, nextModel],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: oldValue,
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              engineId: engine,
+              sessionId: 'live-session',
+              model: { engineId: engine, vendorId: 'provider', modelId: 'old-model' },
+              capabilities: {
+                ...state.sessions[FC_ROUTE].status.capabilities,
+                vision: false,
+                reasoning: {
+                  effort: { levels: ['low', 'high'] },
+                  ...(engine === 'claude' ? { thinking: { modes: ['adaptive'] as const } } : {})
+                }
+              }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      fcClaudeModels = [oldModel, nextModel]
+      await act(async () => {
+        renderFC()
+      })
+      expect(viewProps.selectedModel.value).toBe(oldValue)
+
+      await act(async () => {
+        useSessionStore.setState({
+          availableModels: [nextModel],
+          [`${engine}DefaultModel`]: nextValue,
+          [`${engine}DefaultModelConfigured`]: true
+        })
+      })
+      expect(viewProps.selectedModel.value).toBe(oldValue)
+      expect(viewProps.selectedModel.shortName).toBe(oldValue)
+      expect(viewProps.models.map((model) => model.value)).toEqual([nextValue])
+      expect(viewProps.visionEnabled).toBe(false)
+      expect(viewProps.effortSupported).toBe(true)
+      expect(viewProps.allowedEffortLevels).toEqual(['low', 'high'])
+      expect(viewProps.showThinkingPicker).toBe(engine === 'claude')
+      if (engine === 'claude') expect(viewProps.thinkingMode).toBe('adaptive')
+      expect(ipcCalls['session:set-model']).toBeUndefined()
+      expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe(oldValue)
+
+      await act(async () => {
+        viewProps.onSelectModel(nextValue)
+      })
+      expect(ipcCalls['session:set-model']).toEqual([[FC_ROUTE, nextValue]])
+      expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe(nextValue)
+      if (engine !== 'claude') expect(viewProps.selectedModel.value).toBe(oldValue)
+      // Vision follows the backend acknowledgement, not the catalog/default edit.
+      expect(viewProps.visionEnabled).toBe(false)
+      await act(async () => {
+        const status = useSessionStore.getState().sessions[FC_ROUTE].status
+        seed.status(FC_ROUTE, {
+          ...status,
+          model: { engineId: engine, vendorId: 'provider', modelId: 'new-model' },
+          capabilities: { ...status.capabilities, vision: true, reasoning: {} }
+        })
+      })
+      expect(viewProps.selectedModel.value).toBe(nextValue)
+      expect(viewProps.visionEnabled).toBe(true)
+      expect(viewProps.effortSupported).toBe(false)
+    }
+  )
+
   const OPENCODE_CATALOG: ModelInfo[] = [
     {
       value: 'anthropic/claude-x',
@@ -1139,6 +1240,54 @@ describe('InputBox FC — rendered', () => {
       vendorId: 'anthropic'
     }
   ]
+
+  it.each(['opencode', 'pi'] as const)(
+    '%s displays the live model even when a snapshot has a different listed selection',
+    async (engine) => {
+      const next: ModelInfo = {
+        value: 'local/new-default',
+        engineId: engine,
+        displayName: 'New default',
+        description: '',
+        vision: true,
+        supportsEffort: false,
+        supportsAdaptiveThinking: false
+      }
+      useSessionStore.setState((state) => ({
+        availableModels: [next],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: next.value,
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              engineId: engine,
+              sessionId: 'live',
+              model: { engineId: engine, vendorId: 'local', modelId: 'old-model' },
+              capabilities: {
+                ...state.sessions[FC_ROUTE].status.capabilities,
+                vision: false,
+                reasoning: {}
+              }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      fcClaudeModels = [next]
+      await act(async () => {
+        renderFC()
+      })
+      expect(viewProps.selectedModel.value).toBe('local/old-model')
+      expect(viewProps.selectedModel.shortName).toBe('local/old-model')
+      expect(viewProps.visionEnabled).toBe(false)
+      expect(viewProps.effortSupported).toBe(false)
+      expect(ipcCalls['session:set-model']).toBeUndefined()
+    }
+  )
 
   it('an active opencode session names an absent model as unavailable, not as the default', () => {
     useSessionStore.setState((state) => ({
@@ -1157,7 +1306,7 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
 
-    expect(viewProps.selectedModel.shortName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.shortName).toBe('alicloud/qwen-x')
     expect(viewProps.selectedModel.displayName).not.toBe('Claude X')
   })
 
@@ -1286,7 +1435,7 @@ describe('InputBox FC — rendered', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).toBe('opencode/mimo-v2.5-free')
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
@@ -2879,7 +3028,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).toBe('openai-codex/stale-model')
     expect(viewProps.selectedModel.engineId).toBe('pi')
   })
 

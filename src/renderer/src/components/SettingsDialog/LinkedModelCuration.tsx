@@ -510,7 +510,9 @@ export function LinkedModelCuration({
             data-testid={`${testid}.modelMark`}
             data-id={e}
             data-available={has ? 'true' : 'false'}
+            role="img"
             title={has ? `Offered by ${label}` : `${label} does not offer this model`}
+            aria-label={has ? `Offered by ${label}` : `${label} does not offer this model`}
             className={`rounded px-[5px] font-mono text-[9.5px] font-bold leading-4 border ${
               has ? 'border-accent/30 bg-accent/5 text-accent' : 'border-border text-text-muted'
             }`}

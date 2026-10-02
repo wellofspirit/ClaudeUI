@@ -54,6 +54,30 @@ function assistant(id: string, content: ChatMessage['content']): ChatMessage {
 }
 
 describe('reducer — session registry', () => {
+  it.each(['opencode', 'pi'] as const)(
+    '%s status reconciles a stale selected/default model with the live backend',
+    (engineId) => {
+      const model = { engineId, vendorId: 'local', modelId: 'old-model' }
+      const s = fold([
+        ['session:created', 'rid', { cwd: '/repo', engineId, model: 'local/new-default' }],
+        ['session:status', 'rid', status({ engineId, model })]
+      ])
+      expect(s.sessions.rid.selectedModel).toBe('local/old-model')
+      expect(s.sessionEngines.rid).toEqual({ engineId, model })
+      const changed = fold(
+        [
+          [
+            'session:status',
+            'rid',
+            status({ engineId, model: { ...model, modelId: 'explicit-pick' } })
+          ]
+        ],
+        s
+      )
+      expect(changed.sessions.rid.selectedModel).toBe('local/explicit-pick')
+      expect(changed.sessionEngines.rid.model?.modelId).toBe('explicit-pick')
+    }
+  )
   it('creates a session with its cwd and marks the engine live', () => {
     const s = fold([created()])
     expect(s.sessions['rid'].cwd).toBe('/repo')

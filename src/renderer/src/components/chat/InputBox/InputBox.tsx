@@ -273,7 +273,7 @@ export function InputBox(): React.JSX.Element {
     () => availableModels.map((m) => ({ ...m, shortName: modelLabel(m).shortName })),
     [availableModels]
   )
-  const selectedModelValue = useActiveSession((s) => s.selectedModel)
+  const requestedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
   const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
@@ -287,6 +287,15 @@ export function InputBox(): React.JSX.Element {
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
   const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
+  // opencode/pi report the model the live process will actually use. Local
+  // picks and historical hydration can differ until a setter is acknowledged.
+  const selectedModelValue =
+    sdkActive &&
+    !!startedSessionId &&
+    (effectiveEngineId === 'opencode' || effectiveEngineId === 'pi') &&
+    status.model?.engineId === effectiveEngineId
+      ? engineMeta(effectiveEngineId).encodeModelValue(status.model)
+      : requestedModelValue
   const engineLocked = sdkActive || !!startedSessionId || !!isHistorical
   // A harness that does not run (ADR-082 §8): the banner above the input
   // offers it, Send stays off and the model picker says why, instead of an
@@ -353,6 +362,27 @@ export function InputBox(): React.JSX.Element {
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
+    // Curation changes the picker, not an existing session's model. Keep the
+    // reference visible even when discovery no longer returns its metadata.
+    const missingSelection = {
+      ...unset,
+      value: selectedModelValue,
+      displayName:
+        engine === 'claude' && selectedModelValue === 'default' ? 'Default' : selectedModelValue,
+      shortName:
+        engine === 'claude' && selectedModelValue === 'default' ? 'Default' : selectedModelValue,
+      description: 'Not in the current model list. Choose a model to change this session.',
+      supportsEffort: sdkActive && !!startedSessionId && !!capabilities.reasoning.effort,
+      supportedEffortLevels:
+        sdkActive && startedSessionId ? capabilities.reasoning.effort?.levels : undefined,
+      supportsAdaptiveThinking:
+        sdkActive &&
+        !!startedSessionId &&
+        capabilities.reasoning.thinking?.modes.includes('adaptive') === true
+    }
+    if (activeSessionId && selectedModelValue && engine === 'claude') {
+      return missingSelection
+    }
     if (engine === 'codex') {
       // Welcome screen, no sticky pick: the CONFIGURED default is what
       // `createNewSession` will seed, so the pill must name it rather than the
@@ -382,17 +412,10 @@ export function InputBox(): React.JSX.Element {
       // not it: on a reopened session whose model the discovered catalog
       // momentarily lacks (an alicloud provider that has not answered yet),
       // substituting the default names a model the session never ran and the
-      // resume will not spawn. Say the catalog cannot place it instead —
-      // exactly as the Codex arm above does.
+      // resume will not spawn. Preserve its identity without claiming that
+      // absence from the curated picker means the live model is unavailable.
       if (activeSessionId && selectedModelValue) {
-        return sameEngine.length > 0
-          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
-          : {
-              ...unset,
-              value: selectedModelValue,
-              displayName: selectedModelValue,
-              shortName: selectedModelValue
-            }
+        return missingSelection
       }
       // Welcome screen: the SAME resolver the store seeds sessions with, so
       // the pill shows what will actually spawn. `null` = the user's
@@ -431,7 +454,9 @@ export function InputBox(): React.JSX.Element {
     activeSessionId,
     codexModelExplicit,
     isHistorical,
-    startedSessionId
+    startedSessionId,
+    sdkActive,
+    capabilities.reasoning
   ])
   useSeedModelWhenHarnessReady(
     activeSessionId,
@@ -1232,7 +1257,21 @@ export function InputBox(): React.JSX.Element {
   // carrying authoritative SDK capability fields) so the pickers track the
   // user's model selection live, before any spawn/setModel round-trip. No
   // parallel modelSupports* derivation here.
-  const reasoning = useMemo(() => claudeModelCapabilities(selectedModel).reasoning, [selectedModel])
+  const reasoning = useMemo(() => {
+    const listed = models.some(
+      (model) =>
+        model.value === selectedModel.value && (model.engineId ?? 'claude') === effectiveEngineId
+    )
+    // A running model can outlive its picker entry. Its reported capabilities
+    // remain valid; a synthetic row has no metadata to replace them with.
+    if (
+      liveBackend &&
+      (!listed || effectiveEngineId === 'opencode' || effectiveEngineId === 'pi')
+    ) {
+      return capabilities.reasoning
+    }
+    return claudeModelCapabilities(selectedModel).reasoning
+  }, [selectedModel, models, effectiveEngineId, liveBackend, capabilities.reasoning])
   const thinkingCap = reasoning.thinking
   const effortCap = reasoning.effort
 
