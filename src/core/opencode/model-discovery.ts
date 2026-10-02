@@ -310,6 +310,10 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
       // credential-free provider ('free', no auth methods), so the re-enable path
       // can avoid offering a meaningless API-key input.
       const isFree = FREE_OPENCODE_VENDOR_IDS.has(id)
+      const actions = resolveProviderActions({
+        ...buildActionInput(id, isFree, configured, ownership),
+        disabled: true
+      })
       entries.push({
         id,
         name: declaredNames.get(id) ?? id,
@@ -321,7 +325,7 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
         // opencode reports no source for it. The action decision does not depend
         // on source (only its wording does), so availability stays correct here.
         ...describeProviderProvenance(id, configured),
-        actions: resolveProviderActions(buildActionInput(id, isFree, configured, ownership))
+        actions
       })
     }
 

@@ -1,6 +1,6 @@
 # ADR-044: opencode providers — Disable and Remove are different operations, over one merged list
 
-**Status:** Accepted (2026-07-31)
+**Status:** Accepted (2026-07-31; amended 2026-10-01 for removal of stale disabled-only rows)
 **Relates to:** [ADR-028](adr-028_opencode-native-config-in-place.md), [ADR-031](adr-031_opencode-config-leaf-merge-writes.md), [ADR-036](adr-036_unified-auth-vault.md), [ADR-037](adr-037_shared-provider-routing-and-plaintext-vault.md), [ADR-027](adr-027_test-data-attributes.md)
 
 ## Context
@@ -65,6 +65,24 @@ carried on each catalog entry, so the row never re-derives it:
 A blocked trash icon is **rendered disabled with the reason as its tooltip**, not
 hidden: "you cannot remove this" is information the user needs.
 
+**Amended 2026-10-01, owner ruling: stale disabled-only rows can be removed.** A non-free
+provider whose only remaining configuration is its native disabled veto, with no credential
+and no declaration in either global file, offers **Remove provider** with `removeKind: 'settings'`.
+This clears its `disabled_providers` entry and ClaudeUI model curation, removing the leftover
+harness settings rather than hiding the row. It deletes no credential or declaration and creates
+no dismissal bookkeeping. When no other source supplies the provider, discovery stops synthesizing
+it and the Settings row disappears. A known unconfigured catalog vendor remains available through
+Add; an unknown old endpoint can be recreated through Add endpoint.
+
+The backend re-reads the veto, credentials and both global declarations immediately before this
+settings write. A row that has gained a credential/declaration, become enabled, or is a free gateway
+rejects a stale removal rather than removing different state under an outdated confirmation.
+Other disabled entries remain in Settings. OpenCode Zen's free entry is retained. A declaration in
+the other global file remains non-removable under the existing ownership rules. Project config or
+environment sources are never deleted; clearing the veto can allow such a source to supply the
+provider again, so disappearance is conditional on there being no other source. Desktop and
+web/remote use the existing removal command with the same backend validation.
+
 ### 2. Remove must clear its own veto
 
 `removeOpencodeProvider` drops the id from `disabled_providers` and from
@@ -74,6 +92,8 @@ symptom on a later re-add. The declaration delete and the veto cleanup share ONE
 config read-modify-write, so no window exists where the declaration is gone but
 `disabled_providers` still names it. A failed credential delete aborts before any
 config write, so a transient server-spawn error cannot destroy a declaration.
+
+Settings-only removal uses this same veto/curation cleanup, without a credential/declaration delete.
 
 ### 3. Availability is computed from ClaudeUI-owned reads, never by probing opencode
 

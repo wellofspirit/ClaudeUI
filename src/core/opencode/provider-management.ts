@@ -9,6 +9,8 @@
  *     every derivation source. Nothing is destroyed; it is reversible.
  *   - REMOVE destroys what ClaudeUI actually owns — the auth.json credential
  *     and/or the provider declaration in the one global config file it writes.
+ *     A disabled-only row removes its veto and picker curation without deleting
+ *     credentials or declarations (ADR-044's 2026-10-01 amendment).
  *
  * The original bug was applying the general remedy (disable) to a case the
  * specific one covered: ChatGPT's credential was deleted AND the id was vetoed,
@@ -20,9 +22,16 @@
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
 import { logger } from '../services/logger'
-import { readOpencodeNativeConfig, writeOpencodeNativeConfig } from './opencode-config'
+import {
+  readDeclaredProviderIds,
+  readOpencodeNativeConfig,
+  writeOpencodeNativeConfig
+} from './opencode-config'
 import { invalidateOpencodeModelCache } from './model-discovery'
 import type { ProviderRemoveKind } from '../../shared/types'
+import { readOpencodeCredentialTypesSync } from './auth-store'
+import { resolveProviderActions } from './provider-actions'
+import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 
 /**
  * Toggle a provider's `disabled_providers` membership. Purely additive/subtractive
@@ -61,6 +70,26 @@ export function setOpencodeProviderDisabled(id: string, disabled: boolean): void
  * declaration is gone but the veto still names it.
  */
 export async function removeOpencodeProvider(id: string, kind: ProviderRemoveKind): Promise<void> {
+  if (kind === 'settings') {
+    // Re-read at the write boundary. A stale Settings snapshot must not silently
+    // enable a newly credentialed or declared provider under the old confirmation.
+    const native = readOpencodeNativeConfig()
+    const actions = resolveProviderActions({
+      disabled: native.disabledProviders?.includes(id),
+      isFree: FREE_OPENCODE_VENDOR_IDS.has(id),
+      hasCredential: Object.hasOwn(readOpencodeCredentialTypesSync(), id),
+      declaredInOurFile: Object.hasOwn(native.providers ?? {}, id),
+      declaredElsewhereGlobal: readDeclaredProviderIds().includes(id)
+    })
+    if (actions.removeKind !== 'settings') {
+      throw new Error(
+        'This provider is no longer a stale disabled entry. Refresh Settings before removing it.'
+      )
+    }
+  }
+  if (kind !== 'credential' && kind !== 'declaration' && kind !== 'both' && kind !== 'settings') {
+    throw new Error('Invalid provider removal kind')
+  }
   if (kind === 'credential' || kind === 'both') {
     await opencodeAuthProvider.removeVendorAuth(id)
   }
@@ -98,7 +127,6 @@ function clearModelAllowlistEntry(id: string): void {
   const config = loadEngineConfig('opencode')
   const allowlist = config.opencodeConfig?.modelAllowlist
   if (!allowlist || allowlist[id] === undefined) return
-
   const next = { ...allowlist }
   delete next[id]
   saveEngineConfig('opencode', {

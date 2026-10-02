@@ -773,8 +773,8 @@ export interface PiModelsRaw {
 /** opencode's own provenance label for a configured provider (`/config/providers`). */
 export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api'
 
-/** What Remove would actually destroy. `null` when Remove is unavailable. */
-export type ProviderRemoveKind = 'credential' | 'declaration' | 'both'
+/** What Remove deletes; `settings` clears a disabled-only entry and picker curation. */
+export type ProviderRemoveKind = 'credential' | 'declaration' | 'both' | 'settings'
 
 /**
  * Which actions the opencode provider row may offer for one provider. Computed
@@ -1657,7 +1657,8 @@ interface SessionAPI {
   setOpencodeProviderDisabled(providerId: string, disabled: boolean): Promise<void>
   /**
    * Destructive: deletes the credential and/or provider declaration ClaudeUI owns,
-   * then clears the id from `disabled_providers` and the model allowlist. Pass the
+   * then clears the id from `disabled_providers` and the model allowlist. Settings-only
+   * removal clears those entries without deleting credentials or declarations. Pass the
    * `removeKind` from the entry's resolved `actions` — never a widened value.
    */
   removeOpencodeProvider(providerId: string, kind: ProviderRemoveKind): Promise<void>

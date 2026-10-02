@@ -132,6 +132,54 @@ const byId = (snapshot: { entries: { id: string }[] }, id: string): any =>
 // ---------------------------------------------------------------------------
 
 describe('dedupe — a shared definition owns the native row it routes to', () => {
+  it('a disabled-only entry offers removal and disappears once its settings are cleared', () => {
+    const registry = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({
+            id: 'llamacpp',
+            authState: 'unauthenticated',
+            disabled: true,
+            actions: { ...REMOVABLE, removeKind: 'settings' }
+          }),
+          catalogEntry({
+            id: 'mtp',
+            authState: 'unauthenticated',
+            disabled: true,
+            actions: { ...REMOVABLE, removeKind: 'settings' }
+          }),
+          catalogEntry({ id: 'opencode', authState: 'free' }),
+          catalogEntry({ id: 'keyed', disabled: true })
+        ]
+      })
+    )
+    expect(registry.entries.map((entry) => entry.id)).toEqual([
+      'anthropic',
+      'opencode:keyed',
+      'opencode:llamacpp',
+      'opencode:mtp',
+      'opencode:opencode'
+    ])
+    expect(byId(registry, 'opencode:llamacpp').opencodeRemoveKind).toBe('settings')
+    const after = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'llamacpp', authState: 'unauthenticated', disabled: false }),
+          catalogEntry({
+            id: 'mtp',
+            authState: 'unauthenticated',
+            disabled: true,
+            actions: { ...REMOVABLE, removeKind: 'settings' }
+          }),
+          catalogEntry({ id: 'opencode', authState: 'free' }),
+          catalogEntry({ id: 'keyed', disabled: true })
+        ]
+      })
+    )
+    expect(after.entries.map((entry) => entry.id)).toEqual(
+      registry.entries.map((entry) => entry.id).filter((id) => id !== 'opencode:llamacpp')
+    )
+  })
   it('folds both native entries into the ONE shared row', () => {
     const snapshot = buildProviderRegistry(
       sources({

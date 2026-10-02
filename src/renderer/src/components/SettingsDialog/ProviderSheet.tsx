@@ -1335,6 +1335,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   const remove = removeAction()
   /** What Remove deletes, said beside it while nothing failed. */
   const removeNote = !error && isApiShared && remove !== null
+  const settingsRemoveNote = !error && entry.opencodeRemoveKind === 'settings'
   /**
    * What disconnecting ChatGPT does to each harness (ADR-082 §8, "As built
    * (S7e)"), said while the Disconnect press is armed and nothing failed.
@@ -1683,7 +1684,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                 a surface ends up reporting a stale failure next to a fresh row. */}
             <span
               data-testid={`${SHEET}.error`}
-              className={`${removeNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
+              className={`${removeNote || settingsRemoveNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
             >
               {error}
             </span>
@@ -1705,6 +1706,15 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                 {entry.credential === 'api-key'
                   ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each harness it’s delivered to.'
                   : 'Off keeps the settings; Remove deletes them.'}
+              </span>
+            )}
+            {settingsRemoveNote && (
+              <span
+                data-testid={`${SHEET}.removeNote`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                Clears this provider from opencode’s disabled list and removes its picker curation.
+                External credentials and configuration are unchanged.
               </span>
             )}
             <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>

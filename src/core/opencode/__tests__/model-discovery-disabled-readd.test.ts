@@ -21,6 +21,18 @@
  * Disable/Remove split is asserted here at the discovery boundary.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { EngineConfig } from '../../../shared/types'
+import { removeOpencodeProvider } from '../provider-management'
+import { buildProviderRegistry } from '../../shared-providers/provider-registry'
+
+const privateStore = vi.hoisted(() => ({ config: {} as EngineConfig }))
+vi.mock('../../shared-providers/index', () => ({ sharedProviderService: {} }))
+vi.mock('../../auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: { removeVendorAuth: vi.fn() }
+}))
+vi.mock('../../services/logger', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
+}))
 
 // ---------------------------------------------------------------------------
 // Hoist mock fns before vi.mock()
@@ -59,7 +71,10 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
 
 // Hermetic: do NOT read the developer's real ~/.claude/ui/engines/opencode.json.
 vi.mock('../../services/ui-config', () => ({
-  loadEngineConfig: () => ({})
+  loadEngineConfig: () => privateStore.config,
+  saveEngineConfig: (_id: string, config: EngineConfig) => {
+    privateStore.config = config
+  }
 }))
 
 // Hermetic: do NOT read the developer's real opencode.json/opencode.jsonc —
@@ -68,6 +83,8 @@ vi.mock('../../services/ui-config', () => ({
 // readDeclaredProviderIds (unions BOTH global config files), NOT from
 // readOpencodeNativeConfig().providers (single resolved file only).
 vi.mock('../opencode-config', () => ({
+  writeOpencodeNativeConfig: (fields: unknown) =>
+    mockReadOpencodeNativeConfig.mockReturnValue(fields),
   readOpencodeNativeConfig: mockReadOpencodeNativeConfig,
   readDeclaredProviderIds: mockReadDeclaredProviderIds,
   // Row-action availability names the OTHER global config file in its
@@ -79,6 +96,7 @@ vi.mock('../opencode-config', () => ({
 // Remove is available. Unmocked, this would read the DEVELOPER's real credential
 // store and make action assertions machine-dependent.
 vi.mock('../auth-store', () => ({
+  readOpencodeCredentialTypesSync: mockCredentialTypes,
   readOpencodeCredentialTypes: async () => mockCredentialTypes(),
   resolveOpencodeAuthJsonPath: () => '/data/opencode/auth.json'
 }))
@@ -155,6 +173,7 @@ const AUTH_CATALOG = {
 }
 
 function setupMocks(disabledProviders: string[], declaredProviderIds: string[] = []): void {
+  privateStore.config = {}
   mockAcquire.mockReset()
   mockRelease.mockReset()
   MockOpencodeClient.mockReset()
@@ -191,6 +210,76 @@ describe('model-discovery — disabled provider re-add (Add provider list)', () 
     expect(openai!.authMethods).toEqual(['oauth', 'api'])
     expect(openai!.modelCount).toBe(0)
     expect(openai!.name).toBe('openai')
+  })
+
+  it('offers settings cleanup only for disabled-only rows and drops them after the veto is cleared', async () => {
+    setupMocks(['llamacpp', 'external', 'keyed', 'opencode'], ['external'])
+    mockCredentialTypes.mockReturnValue({ keyed: 'api' })
+    const catalog = await discoverOpencodeProviderCatalog()
+    expect(catalog.find((entry) => entry.id === 'llamacpp')).toMatchObject({
+      disabled: true,
+      actions: { removeKind: 'settings' }
+    })
+    expect(catalog.find((entry) => entry.id === 'external')?.actions.canRemove).toBe(false)
+    expect(catalog.find((entry) => entry.id === 'opencode')?.actions.canRemove).toBe(false)
+    expect(catalog.find((entry) => entry.id === 'keyed')?.actions.removeKind).toBe('credential')
+    // The write-time validation must use fresh credentials, not the earlier row.
+    mockCredentialTypes.mockReturnValue({ keyed: 'api', llamacpp: 'api' })
+    const restored = await discoverOpencodeProviderCatalog()
+    expect(restored.find((entry) => entry.id === 'llamacpp')).toMatchObject({
+      actions: { removeKind: 'credential' }
+    })
+    mockReadOpencodeNativeConfig.mockReturnValue({
+      disabledProviders: ['external', 'keyed', 'opencode']
+    })
+    const after = await discoverOpencodeProviderCatalog()
+    expect(after.find((entry) => entry.id === 'llamacpp')).toBeUndefined()
+  })
+
+  it('discovery → Remove provider → registry drops the stale row and preserves siblings', async () => {
+    setupMocks(['llamacpp', 'mtplx'])
+    mockReadOpencodeNativeConfig.mockReturnValue({
+      disabledProviders: ['llamacpp', 'mtplx'],
+      model: 'anthropic/claude-x',
+      providers: { unrelated: { name: 'Keep' } }
+    })
+    privateStore.config = {
+      autoMode: { enabled: true },
+      opencodeConfig: {
+        modelAllowlist: { llamacpp: ['old'], unrelated: ['keep'] }
+      }
+    }
+    const registry = async () =>
+      buildProviderRegistry({
+        definitions: [],
+        statuses: [],
+        opencodeCatalog: await discoverOpencodeProviderCatalog(),
+        opencodeCredentialKinds: {},
+        opencodeModelAllowlist: privateStore.config.opencodeConfig?.modelAllowlist ?? {},
+        piVendors: {},
+        piAuthOptions: {},
+        accounts: null,
+        claudeAccount: null
+      })
+    const before = await registry()
+    const row = before.entries.find((entry) => entry.id === 'opencode:llamacpp')!
+    expect(row.opencodeRemoveKind).toBe('settings')
+    await removeOpencodeProvider('llamacpp', row.opencodeRemoveKind!)
+    expect(mockReadOpencodeNativeConfig()).toEqual({
+      disabledProviders: ['mtplx'],
+      model: 'anthropic/claude-x',
+      providers: { unrelated: { name: 'Keep' } }
+    })
+    expect(privateStore.config).toEqual({
+      autoMode: { enabled: true },
+      opencodeConfig: {
+        modelAllowlist: { unrelated: ['keep'] }
+      }
+    })
+    const after = await registry()
+    expect(after.entries.map((entry) => entry.id)).toEqual(
+      before.entries.map((entry) => entry.id).filter((id) => id !== 'opencode:llamacpp')
+    )
   })
 
   it('synthesizes a disabled FREE vendor (zen gateway) with authState free and no auth methods', async () => {

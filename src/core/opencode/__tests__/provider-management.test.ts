@@ -20,13 +20,16 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { NativeOpencodeFields } from '../opencode-config'
+import type { EngineConfig } from '../../../shared/types'
 
 const removeVendorAuth = vi.fn(async (_id: string): Promise<void> => {})
 const writeNative = vi.fn<(fields: NativeOpencodeFields) => void>()
 const invalidate = vi.fn()
 const saveEngine = vi.fn()
 let native: NativeOpencodeFields = {}
-let engineConfig: { opencodeConfig?: { modelAllowlist?: Record<string, string[]> } } = {}
+let engineConfig: EngineConfig = {}
+let credentials: Record<string, 'api' | 'oauth'> = {}
+let declaredElsewhere: string[] = []
 
 vi.mock('../../auth/OpencodeAuthProvider', () => ({
   opencodeAuthProvider: {
@@ -35,9 +38,11 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 }))
 vi.mock('../opencode-config', () => ({
   readOpencodeNativeConfig: () => native,
+  readDeclaredProviderIds: () => [...Object.keys(native.providers ?? {}), ...declaredElsewhere],
   writeOpencodeNativeConfig: (fields: NativeOpencodeFields) => writeNative(fields)
 }))
 vi.mock('../model-discovery', () => ({ invalidateOpencodeModelCache: () => invalidate() }))
+vi.mock('../auth-store', () => ({ readOpencodeCredentialTypesSync: () => credentials }))
 vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: () => engineConfig,
   saveEngineConfig: (id: string, cfg: unknown) => saveEngine(id, cfg)
@@ -51,6 +56,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   native = {}
   engineConfig = {}
+  credentials = {}
+  declaredElsewhere = []
 })
 
 describe('setOpencodeProviderDisabled', () => {
@@ -82,6 +89,49 @@ describe('setOpencodeProviderDisabled', () => {
 })
 
 describe('removeOpencodeProvider — clears its own veto', () => {
+  it('removes disabled-only settings and curation, preserving unrelated config and credentials', async () => {
+    native = {
+      disabledProviders: ['llamacpp', 'other'],
+      model: 'other/model',
+      providers: { other: {} }
+    }
+    engineConfig = {
+      autoMode: { enabled: true },
+      opencodeConfig: {
+        modelAllowlist: { llamacpp: ['old'], other: ['keep'] },
+        smallModel: 'other/small'
+      }
+    }
+    await removeOpencodeProvider('llamacpp', 'settings')
+    expect(writeNative).toHaveBeenCalledWith({ ...native, disabledProviders: ['other'] })
+    expect(removeVendorAuth).not.toHaveBeenCalled()
+    expect(saveEngine).toHaveBeenCalledWith('opencode', {
+      ...engineConfig,
+      opencodeConfig: {
+        ...engineConfig.opencodeConfig,
+        modelAllowlist: { other: ['keep'] }
+      }
+    })
+    expect(invalidate).toHaveBeenCalledOnce()
+  })
+
+  it.each(['credential', 'declaration', 'external declaration', 'enabled', 'free'])(
+    'rejects a stale removal after the row has become %s',
+    async (change) => {
+      native = { disabledProviders: ['mine'] }
+      if (change === 'credential') credentials = { mine: 'api' }
+      if (change === 'declaration') native.providers = { mine: {} }
+      if (change === 'external declaration') declaredElsewhere = ['mine']
+      if (change === 'enabled') native.disabledProviders = []
+      const id = change === 'free' ? 'opencode' : 'mine'
+      if (change === 'free') native.disabledProviders = [id]
+      await expect(removeOpencodeProvider(id, 'settings')).rejects.toThrow('no longer a stale')
+      expect(saveEngine).not.toHaveBeenCalled()
+      expect(writeNative).not.toHaveBeenCalled()
+      expect(removeVendorAuth).not.toHaveBeenCalled()
+    }
+  )
+
   it('drops a stale disabled_providers entry when removing a credential', async () => {
     // THE REGRESSION: this is the exact live state that stranded ChatGPT —
     // credential present in auth.json, id vetoed in disabled_providers.

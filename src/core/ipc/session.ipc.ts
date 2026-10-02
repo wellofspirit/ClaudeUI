@@ -899,9 +899,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     }
   })
 
-  // Destructive: deletes the credential and/or the provider declaration ClaudeUI
+  // Deletes the credential and/or the provider declaration ClaudeUI
   // owns. `kind` must come from the entry's resolved actions — widening it here
-  // would delete something the UI never warned about.
+  // would delete something the UI never warned about. `settings` clears only
+  // disabled-list membership/curation, revalidating at the write boundary.
   handleIpc({
     channel: 'session:remove-opencode-provider',
     capability: 'config',

@@ -754,6 +754,34 @@ describe('a subscription’s sheet', () => {
 // ── Removal ──────────────────────────────────────────────────────────
 
 describe('Remove provider', () => {
+  it('removes a disabled-only opencode row with a settings-cleanup explanation', async () => {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((entry) =>
+        entry.id === 'opencode:openrouter'
+          ? {
+              ...entry,
+              credential: 'none',
+              opencodeRemoveKind: 'settings',
+              engines: {
+                opencode: { enabled: false, providerId: 'openrouter', native: true }
+              }
+            }
+          : entry
+      )
+    }
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeEnabled()
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent('disabled list')
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.filter((entry) => entry.id !== 'opencode:openrouter')
+    }
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(sent('session:remove-opencode-provider')).toEqual([['openrouter', 'settings']])
+    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+  })
   it('refuses to remove a built-in shared definition, and says so', async () => {
     await openSheet('chatgpt')
     const remove = screen.getByTestId('ProviderSheet.remove')
