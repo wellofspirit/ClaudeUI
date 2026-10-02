@@ -29,7 +29,10 @@ function session(id: string, engineId: EngineId): SessionInfo {
   }
 }
 
-function renderView(group: DirectoryGroup): SidebarViewProps {
+function renderView(
+  group: DirectoryGroup,
+  overrides: Partial<SidebarViewProps> = {}
+): SidebarViewProps {
   const noop = (): void => {}
   const props: SidebarViewProps = {
     platform: 'win32',
@@ -81,7 +84,8 @@ function renderView(group: DirectoryGroup): SidebarViewProps {
     onCancelDelete: noop,
     onWorktreeCleanupKeep: noop,
     onWorktreeCleanupRemove: noop,
-    onWorktreeCleanupCancel: noop
+    onWorktreeCleanupCancel: noop,
+    ...overrides
   }
   render(<SidebarView {...props} />)
   return props
@@ -120,4 +124,29 @@ describe('SidebarView delete menus', () => {
 
     expect(props.onDeleteProject).toHaveBeenCalledWith(group)
   })
+
+  it.each<[EngineId | undefined, string]>([
+    ['claude', `~/.claude/projects/${PROJECT_KEY}/s-1.jsonl`],
+    [undefined, `~/.claude/projects/${PROJECT_KEY}/s-1.jsonl`],
+    ['codex', 's-1'],
+    ['opencode', 's-1'],
+    ['pi', 's-1']
+  ])(
+    'the session confirmation names a %s session by a path only Claude has',
+    (engineId, detail) => {
+      renderView(groupOf(session('s-1', engineId ?? 'claude')), {
+        deleteTarget: {
+          kind: 'session',
+          sessionId: 's-1',
+          projectKey: PROJECT_KEY,
+          title: 'Session s-1',
+          engineId
+        }
+      })
+      const modal = screen.getByTestId('DeleteConfirmModal')
+      expect(within(modal).getByText(detail)).toBeInTheDocument()
+      expect(modal.textContent).toContain('and its subagents. This cannot be undone.')
+      expect(modal.textContent).not.toContain('from disk')
+    }
+  )
 })

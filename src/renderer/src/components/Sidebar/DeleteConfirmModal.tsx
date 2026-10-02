@@ -72,8 +72,12 @@ export function DeleteConfirmModal({
         kind === 'session' ? (
           <>
             This will permanently delete{' '}
+            {/* Engine-neutral on purpose: every engine's delete takes the
+                session's agents with it (Claude's subagent dir, opencode's child
+                sessions, pi's agent sessions, Codex's spawn subtree), and not
+                every engine keeps them on disk. */}
             <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its
-            subagent data from disk. This cannot be undone.
+            subagents. This cannot be undone.
             {branches?.length ? (
               <span data-testid="DeleteConfirmModal.branches" className="mt-2 block">
                 Also deletes {branches.length} branch
