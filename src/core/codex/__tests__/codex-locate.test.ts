@@ -89,7 +89,11 @@ it.skipIf(!codexHostSupported())(
     expect(codexBinaryAvailable()).toBe(false)
     const dir = fakeHarnessInstall(store, 'codex', TESTED)
     invalidateHarness()
-    expect(locateCodexCodeModeHost()).toBe(path.join(dir, exeName('codex-code-mode-host')))
+    // The host is located beside the CANONICAL binary: on macOS `os.tmpdir()` is a
+    // symlink (`/var` → `/private/var`), so the expectation must be too.
+    expect(locateCodexCodeModeHost()).toBe(
+      path.join(fs.realpathSync(dir), exeName('codex-code-mode-host'))
+    )
     expect(codexBinaryAvailable()).toBe(true)
   }
 )
