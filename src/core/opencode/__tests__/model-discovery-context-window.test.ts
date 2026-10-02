@@ -21,7 +21,12 @@ const { mockAcquire, mockRelease, MockOpencodeClient } = vi.hoisted(() => {
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    release: mockRelease,
+    // Discovery's own server (acquireDetached), released through the same spy.
+    acquireDetached: async (cwd: string) => ({
+      ...(await mockAcquire(cwd)),
+      release: () => mockRelease(cwd)
+    })
   }
 }))
 

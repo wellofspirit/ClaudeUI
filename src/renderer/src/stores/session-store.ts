@@ -3737,6 +3737,22 @@ export const useSessionStore = create<SessionState>((set) => ({
     }))
 }))
 
+// A harness that now runs as a different binary (ADR-082 §8): main has
+// already dropped that engine's model catalog (`core/harness/catalog-
+// invalidation.ts`), so every picker and open model sheet reads it again off
+// the nonce. The provider registry counts pi's models from main's WARM catalog
+// only, so it is re-read once that is warm. `harness-store` notices the change
+// for every client surface at once; it imports nothing from here.
+harnessStore.followRunChanges((changed) => {
+  useSessionStore.getState().reloadModels()
+  const warmPi = changed.includes('pi') && harnessStore.readiness('pi') === 'ready'
+  void Promise.resolve()
+    .then(() => (warmPi ? window.api.getPiModelCatalogGroups() : undefined))
+    .catch(() => undefined)
+    .then(() => useSessionStore.getState().refreshProviderAuth())
+    .catch(() => undefined)
+})
+
 // ---------------------------------------------------------------------------
 // Terminal selectors (derive from active session's cwd)
 // ---------------------------------------------------------------------------

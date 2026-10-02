@@ -1,4 +1,4 @@
-import { opencodeServerManager } from './OpencodeServerManager'
+import { opencodeServerManager, type DetachedServer } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { loadEngineConfig } from '../services/ui-config'
@@ -104,39 +104,157 @@ function loadModelAllowlist(): Record<string, string[]> {
   }
 }
 
+/** What one discovery server answered — the snapshot AND the picker's groups derive from it. */
+interface DiscoveryProbe {
+  snapshot: CatalogSnapshot
+  /** GET /config/providers — the providers usable now, with their models. */
+  usable: ConfigProvider[]
+}
+type ConfigProvider = Awaited<ReturnType<OpencodeClient['getConfigProviders']>>['providers'][number]
+
+/** /config/providers as last discovered, when it listed any provider. */
+let cachedUsable: ConfigProvider[] | null = null
 /**
- * Fetch (or return cached) the raw provider catalog by spinning up a transient
- * server in PERSISTED_SESSIONS_DIR, calling GET /provider (full catalog) +
- * /config/providers (configured) + /provider/auth (auth loaders), then releasing.
+ * Bumped by invalidateOpencodeModelCache(). Every cache write — snapshot,
+ * usable providers, groups, the capability map — is gated on the generation
+ * its probe started under, so a probe that outlives an invalidation (an auth
+ * or config write, a harness install or selection change) cannot publish what
+ * the previous opencode, or the previous credentials, reported.
+ */
+let generation = 0
+/** The probe in flight for the CURRENT generation; dropped by an invalidation. */
+let pendingProbe: { promise: Promise<DiscoveryProbe>; cancel: () => void } | null = null
+/**
+ * How many times a caller whose probe was overtaken by an invalidation asks
+ * again (the pi twin's rule): past this it gets an empty answer, never one from
+ * a superseded generation.
+ */
+const SUPERSEDED_RETRIES = 2
+const EMPTY_PROBE: DiscoveryProbe = {
+  snapshot: { all: [], configured: new Map(), authCatalog: {} },
+  usable: []
+}
+
+/**
+ * Ask a discovery server of its OWN (`acquireDetached`, never the pooled one
+ * other holders keep alive) for GET /provider (full catalog) + /config/providers
+ * (configured) + /provider/auth (auth loaders), then kill it. A server of its
+ * own because the pooled `PERSISTED_SESSIONS_DIR` server outlives a harness
+ * change while anyone holds it, and opencode builds its provider map once per
+ * process: discovery must ask the opencode that runs NOW.
  *
- * Throws on any failure (caller decides how to degrade — opencode is optional).
+ * Concurrent callers of one generation share one probe. Throws when no server
+ * starts (caller decides how to degrade — opencode is optional).
+ */
+function probeDiscovery(): Promise<DiscoveryProbe> {
+  if (pendingProbe) return pendingProbe.promise
+  const started = generation
+  const current = (): boolean => generation === started
+  let server: DetachedServer | null = null
+  const entry = {
+    promise: Promise.resolve(EMPTY_PROBE),
+    cancel: () => server?.release()
+  }
+  entry.promise = (async (): Promise<DiscoveryProbe> => {
+    const lease = await opencodeServerManager.acquireDetached(PERSISTED_SESSIONS_DIR)
+    server = lease
+    try {
+      // An invalidation cancelled us while the server started: say nothing.
+      if (!current()) return EMPTY_PROBE
+      const client = new OpencodeClient(lease.baseUrl, lease.authHeader)
+      const [providerList, configResp, authCatalog] = await Promise.all([
+        settle('GET /provider', () => client.getProviders(), { all: [] } as { all?: Provider[] }),
+        settle('GET /config/providers', () => client.getConfigProviders(), {
+          providers: [] as ConfigProvider[]
+        }),
+        settle(
+          'GET /provider/auth',
+          () => client.getProviderAuth(),
+          {} as Record<string, AuthOption[]>
+        )
+      ])
+      const usable = configResp.providers ?? []
+      const probe: DiscoveryProbe = {
+        snapshot: {
+          all: providerList.all ?? [],
+          configured: new Map(
+            usable.map((p) => [p.id, { source: p.source, env: p.env ?? [] }] as const)
+          ),
+          authCatalog: authCatalog ?? {}
+        },
+        usable
+      }
+      if (!current()) return EMPTY_PROBE
+      // Only cache what is non-empty (a transient empty list shouldn't stick).
+      if (probe.snapshot.all.length > 0) cachedCatalog = probe.snapshot
+      if (usable.length > 0) cachedUsable = usable
+      return probe
+    } finally {
+      lease.release()
+    }
+  })().finally(() => {
+    // Identity-gated: an invalidation may already have replaced this entry.
+    if (pendingProbe === entry) pendingProbe = null
+  })
+  pendingProbe = entry
+  return entry.promise
+}
+
+/** One read of a probe; a failure is that read's empty answer, logged. */
+async function settle<T>(what: string, read: () => Promise<T>, empty: T): Promise<T> {
+  try {
+    return await read()
+  } catch (err) {
+    logger.warn(
+      'opencode',
+      `Discovery ${what} failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
+    )
+    return empty
+  }
+}
+
+/**
+ * `attempt()` for the CURRENT generation — what every public read answers.
+ *
+ * The generation is checked AFTER the attempt's last await and the answer is
+ * returned in that same synchronous step: nothing an invalidation superseded
+ * — a probe's answer, a derivation, a failure — reaches a caller. A caller
+ * whose attempt was overtaken (it answered, or failed — say the old server
+ * never started) asks again under the new generation, joining whatever probe
+ * that started; past SUPERSEDED_RETRIES it gets `empty`, never an old answer.
+ * A CURRENT failure is opencode being unavailable: logged, and `empty` (opencode
+ * is optional and Claude must not break).
+ */
+async function currentDiscovery<T>(
+  attempt: (live: () => boolean) => Promise<T>,
+  empty: T,
+  failed: (reason: string) => string,
+  cached: () => T | null = () => null
+): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    const hit = cached()
+    if (hit !== null) return hit
+    const started = generation
+    const live = (): boolean => generation === started
+    try {
+      const value = await attempt(live)
+      if (live()) return value
+    } catch (err) {
+      if (live()) {
+        logger.warn('opencode', failed(err instanceof Error ? err.message : String(err)))
+        return empty
+      }
+    }
+    if (tries >= SUPERSEDED_RETRIES) return empty
+  }
+}
+
+/**
+ * The raw provider catalog: cached, or the probe's (joined or started). Throws
+ * when no discovery server starts.
  */
 async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
-  if (cachedCatalog) return cachedCatalog
-
-  const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-  const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
-  try {
-    const [providerList, configResp, authCatalog] = await Promise.all([
-      client.getProviders(),
-      client.getConfigProviders().catch(() => ({ providers: [] })),
-      client.getProviderAuth().catch(() => ({}) as Record<string, AuthOption[]>)
-    ])
-    const snapshot: CatalogSnapshot = {
-      all: providerList.all ?? [],
-      configured: new Map(
-        (configResp.providers ?? []).map(
-          (p) => [p.id, { source: p.source, env: p.env ?? [] }] as const
-        )
-      ),
-      authCatalog: authCatalog ?? {}
-    }
-    // Only cache a non-empty catalog (a transient empty list shouldn't stick).
-    if (snapshot.all.length > 0) cachedCatalog = snapshot
-    return snapshot
-  } finally {
-    opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
-  }
+  return cachedCatalog ?? (await probeDiscovery()).snapshot
 }
 
 /**
@@ -218,125 +336,123 @@ function buildActionInput(
  *
  * Returns [] on any failure (binary missing, spawn error, network error).
  */
-export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProviderCatalogEntry[]> {
+export function discoverOpencodeProviderCatalog(): Promise<OpencodeProviderCatalogEntry[]> {
+  return currentDiscovery(
+    providerCatalogAttempt,
+    [],
+    (reason) => `Provider catalog discovery failed (opencode optional): ${reason}`
+  )
+}
+
+async function providerCatalogAttempt(): Promise<OpencodeProviderCatalogEntry[]> {
+  const { all, configured, authCatalog } = await fetchCatalogSnapshot()
+
+  // Action availability inputs — all cheap ClaudeUI-owned local reads. Read
+  // ONCE here rather than per entry: ~146 providers × three file reads would
+  // otherwise hit the disk on every settings open.
+  const ownership = await readProviderOwnership()
+  // A provider the user DECLARED as an endpoint (an adapter package or a base
+  // URL of its own in opencode's config) is a custom endpoint, not a catalog
+  // vendor — the one fact `source` cannot tell apart (a models.dev provider
+  // with a key in the config is `config` too).
+  const declaredEndpoints = new Set<string>()
   try {
-    const { all, configured, authCatalog } = await fetchCatalogSnapshot()
-
-    // Action availability inputs — all cheap ClaudeUI-owned local reads. Read
-    // ONCE here rather than per entry: ~146 providers × three file reads would
-    // otherwise hit the disk on every settings open.
-    const ownership = await readProviderOwnership()
-    // A provider the user DECLARED as an endpoint (an adapter package or a base
-    // URL of its own in opencode's config) is a custom endpoint, not a catalog
-    // vendor — the one fact `source` cannot tell apart (a models.dev provider
-    // with a key in the config is `config` too).
-    const declaredEndpoints = new Set<string>()
-    try {
-      for (const [id, settings] of Object.entries(readOpencodeNativeConfig().providers ?? {})) {
-        if (settings.npm || settings.baseURL) declaredEndpoints.add(id)
-      }
-    } catch {
-      // opencode's own config files are optional.
+    for (const [id, settings] of Object.entries(readOpencodeNativeConfig().providers ?? {})) {
+      if (settings.npm || settings.baseURL) declaredEndpoints.add(id)
     }
-
-    const entries = all.map((provider): OpencodeProviderCatalogEntry => {
-      const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
-      const isConfigured = configured.has(provider.id)
-      const authState: OpencodeProviderCatalogEntry['authState'] = isFree
-        ? 'free'
-        : isConfigured
-          ? 'authenticated'
-          : 'unauthenticated'
-
-      // Auth methods: derive from the custom-loader catalog when present.
-      // Providers absent from it still accept a generic API key, so fall back
-      // to ['api'] for non-free providers (e.g. openrouter via OPENROUTER_API_KEY).
-      const authMethods: ('api' | 'oauth')[] = isFree
-        ? []
-        : deriveAuthMethods(provider.id, authCatalog)
-
-      return {
-        id: provider.id,
-        name: provider.name || provider.id,
-        authState,
-        authMethods,
-        modelCount: Object.keys(provider.models ?? {}).length,
-        // Anything reaching this branch came from GET /provider, which excludes
-        // disabled ids outright — so these are all enabled by construction.
-        disabled: false,
-        ...(declaredEndpoints.has(provider.id) ? { declaredEndpoint: true as const } : {}),
-        ...describeProviderProvenance(provider.id, configured),
-        actions: resolveProviderActions(
-          buildActionInput(provider.id, isFree, configured, ownership)
-        )
-      }
-    })
-
-    // opencode's GET /provider EXCLUDES disabled providers from `all` entirely
-    // (verified against the live server), so a disabled provider is invisible to
-    // the catalog and we have no name / modelCount for it. Re-synthesize an entry
-    // for every disabled id, flagged `disabled: true`, so the single merged
-    // provider list can render it in a disabled state with an Enable action.
-    //
-    // Declared providers are INCLUDED here (they were previously skipped, when
-    // declarations lived in a separate "Custom providers" section). With the two
-    // surfaces merged into one list, a declared+disabled provider that is skipped
-    // renders NOWHERE — it silently vanishes while opencode ignores it, which is
-    // the honesty bug this merge exists to close.
-    //
-    // The disabled list is read FRESH here on every call — deliberately NOT
-    // folded into the cached fetchCatalogSnapshot() — so that immediately after an
-    // enable clears an id from disabledProviders, the synthetic entry for it
-    // disappears on the very next catalog read even while the underlying server
-    // catalog snapshot is still warm.
-    let disabledIds: string[] = []
-    const declaredNames = new Map<string, string>()
-    try {
-      const native = readOpencodeNativeConfig()
-      disabledIds = native.disabledProviders ?? []
-      // A declared provider carries its own display name, which the catalog can
-      // no longer supply once it is disabled. Fall back to the bare id.
-      for (const [id, settings] of Object.entries(native.providers ?? {})) {
-        if (settings.name) declaredNames.set(id, settings.name)
-      }
-    } catch {
-      // opencode's own config files are optional — treat as "nothing disabled".
-    }
-
-    const presentIds = new Set(entries.map((e) => e.id))
-    for (const id of disabledIds) {
-      if (presentIds.has(id)) continue
-      // Mirror the regular-entry derivation: a disabled zen gateway is still a
-      // credential-free provider ('free', no auth methods), so the re-enable path
-      // can avoid offering a meaningless API-key input.
-      const isFree = FREE_OPENCODE_VENDOR_IDS.has(id)
-      const actions = resolveProviderActions({
-        ...buildActionInput(id, isFree, configured, ownership),
-        disabled: true
-      })
-      entries.push({
-        id,
-        name: declaredNames.get(id) ?? id,
-        authState: isFree ? 'free' : 'unauthenticated',
-        authMethods: isFree ? [] : deriveAuthMethods(id, authCatalog),
-        modelCount: 0,
-        disabled: true,
-        // No provenance: a disabled provider is absent from /config/providers, so
-        // opencode reports no source for it. The action decision does not depend
-        // on source (only its wording does), so availability stays correct here.
-        ...describeProviderProvenance(id, configured),
-        actions
-      })
-    }
-
-    return entries.sort((a, b) => a.name.localeCompare(b.name))
-  } catch (err) {
-    logger.warn(
-      'opencode',
-      `Provider catalog discovery failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
-    )
-    return []
+  } catch {
+    // opencode's own config files are optional.
   }
+
+  const entries = all.map((provider): OpencodeProviderCatalogEntry => {
+    const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
+    const isConfigured = configured.has(provider.id)
+    const authState: OpencodeProviderCatalogEntry['authState'] = isFree
+      ? 'free'
+      : isConfigured
+        ? 'authenticated'
+        : 'unauthenticated'
+
+    // Auth methods: derive from the custom-loader catalog when present.
+    // Providers absent from it still accept a generic API key, so fall back
+    // to ['api'] for non-free providers (e.g. openrouter via OPENROUTER_API_KEY).
+    const authMethods: ('api' | 'oauth')[] = isFree
+      ? []
+      : deriveAuthMethods(provider.id, authCatalog)
+
+    return {
+      id: provider.id,
+      name: provider.name || provider.id,
+      authState,
+      authMethods,
+      modelCount: Object.keys(provider.models ?? {}).length,
+      // Anything reaching this branch came from GET /provider, which excludes
+      // disabled ids outright — so these are all enabled by construction.
+      disabled: false,
+      ...(declaredEndpoints.has(provider.id) ? { declaredEndpoint: true as const } : {}),
+      ...describeProviderProvenance(provider.id, configured),
+      actions: resolveProviderActions(buildActionInput(provider.id, isFree, configured, ownership))
+    }
+  })
+
+  // opencode's GET /provider EXCLUDES disabled providers from `all` entirely
+  // (verified against the live server), so a disabled provider is invisible to
+  // the catalog and we have no name / modelCount for it. Re-synthesize an entry
+  // for every disabled id, flagged `disabled: true`, so the single merged
+  // provider list can render it in a disabled state with an Enable action.
+  //
+  // Declared providers are INCLUDED here (they were previously skipped, when
+  // declarations lived in a separate "Custom providers" section). With the two
+  // surfaces merged into one list, a declared+disabled provider that is skipped
+  // renders NOWHERE — it silently vanishes while opencode ignores it, which is
+  // the honesty bug this merge exists to close.
+  //
+  // The disabled list is read FRESH here on every call — deliberately NOT
+  // folded into the cached fetchCatalogSnapshot() — so that immediately after an
+  // enable clears an id from disabledProviders, the synthetic entry for it
+  // disappears on the very next catalog read even while the underlying server
+  // catalog snapshot is still warm.
+  let disabledIds: string[] = []
+  const declaredNames = new Map<string, string>()
+  try {
+    const native = readOpencodeNativeConfig()
+    disabledIds = native.disabledProviders ?? []
+    // A declared provider carries its own display name, which the catalog can
+    // no longer supply once it is disabled. Fall back to the bare id.
+    for (const [id, settings] of Object.entries(native.providers ?? {})) {
+      if (settings.name) declaredNames.set(id, settings.name)
+    }
+  } catch {
+    // opencode's own config files are optional — treat as "nothing disabled".
+  }
+
+  const presentIds = new Set(entries.map((e) => e.id))
+  for (const id of disabledIds) {
+    if (presentIds.has(id)) continue
+    // Mirror the regular-entry derivation: a disabled zen gateway is still a
+    // credential-free provider ('free', no auth methods), so the re-enable path
+    // can avoid offering a meaningless API-key input.
+    const isFree = FREE_OPENCODE_VENDOR_IDS.has(id)
+    const actions = resolveProviderActions({
+      ...buildActionInput(id, isFree, configured, ownership),
+      disabled: true
+    })
+    entries.push({
+      id,
+      name: declaredNames.get(id) ?? id,
+      authState: isFree ? 'free' : 'unauthenticated',
+      authMethods: isFree ? [] : deriveAuthMethods(id, authCatalog),
+      modelCount: 0,
+      disabled: true,
+      // No provenance: a disabled provider is absent from /config/providers, so
+      // opencode reports no source for it. The action decision does not depend
+      // on source (only its wording does), so availability stays correct here.
+      ...describeProviderProvenance(id, configured),
+      actions
+    })
+  }
+
+  return entries.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /** A limit a declared model may carry: a positive integer (the repository's own rule). */
@@ -349,58 +465,56 @@ function positive(value: number | undefined): value is number {
  * dialog). Reads from the cached catalog snapshot — no extra server spawn when
  * warm. Returns [] on failure or unknown provider.
  */
-export async function getOpencodeProviderModels(
-  providerId: string
-): Promise<OpencodeCatalogModel[]> {
-  try {
-    const { all } = await fetchCatalogSnapshot()
-    const provider = all.find((p) => p.id === providerId)
-    if (!provider) return []
-    // Same zen-gated free derivation as discoverOpencodeModels — see its comment.
-    const providerIsFreeGateway = FREE_OPENCODE_VENDOR_IDS.has(providerId)
-    // A provider-level endpoint wins over each model's (ADR-074 slice 10).
-    const baseURL = provider.options?.baseURL
-    const providerUrl = typeof baseURL === 'string' && baseURL ? baseURL : undefined
-    return Object.entries(provider.models ?? {})
-      .map(([modelId, m]): OpencodeCatalogModel => {
-        const rec = m as Provider['models'][string] & { release_date?: string }
-        const isFree =
-          providerIsFreeGateway && !!rec.cost && rec.cost.input === 0 && rec.cost.output === 0
-        return {
-          id: modelId,
-          name: rec.name || modelId,
-          releaseDate: rec.release_date,
-          toolCalling: !!rec.capabilities?.toolcall,
-          reasoning: !!rec.capabilities?.reasoning,
-          ...(isFree ? { free: true } : {}),
-          // A second key's declared copy of the model reads these (ADR-074
-          // slice 10); a zero limit is opencode's "unknown", not a limit.
-          ...(positive(rec.limit?.context) ? { contextWindow: rec.limit!.context } : {}),
-          ...(positive(rec.limit?.output) ? { maxTokens: rec.limit!.output } : {}),
-          ...(rec.capabilities?.input ? { vision: rec.capabilities.input.image === true } : {}),
-          ...((providerUrl ?? rec.api?.url) ? { apiUrl: providerUrl ?? rec.api.url } : {}),
-          ...(rec.api?.npm ? { apiNpm: rec.api.npm } : {})
-        }
-      })
-      .sort((a, b) => {
-        // Newest-first by release date when available, else by name.
-        if (a.releaseDate && b.releaseDate) return b.releaseDate.localeCompare(a.releaseDate)
-        if (a.releaseDate) return -1
-        if (b.releaseDate) return 1
-        return a.name.localeCompare(b.name)
-      })
-  } catch (err) {
-    logger.warn(
-      'opencode',
-      `Provider model list failed for ${providerId}: ${err instanceof Error ? err.message : String(err)}`
-    )
-    return []
-  }
+export function getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]> {
+  return currentDiscovery(
+    () => providerModelsAttempt(providerId),
+    [],
+    (reason) => `Provider model list failed for ${providerId}: ${reason}`
+  )
+}
+
+async function providerModelsAttempt(providerId: string): Promise<OpencodeCatalogModel[]> {
+  const { all } = await fetchCatalogSnapshot()
+  const provider = all.find((p) => p.id === providerId)
+  if (!provider) return []
+  // Same zen-gated free derivation as discoverOpencodeModels — see its comment.
+  const providerIsFreeGateway = FREE_OPENCODE_VENDOR_IDS.has(providerId)
+  // A provider-level endpoint wins over each model's (ADR-074 slice 10).
+  const baseURL = provider.options?.baseURL
+  const providerUrl = typeof baseURL === 'string' && baseURL ? baseURL : undefined
+  return Object.entries(provider.models ?? {})
+    .map(([modelId, m]): OpencodeCatalogModel => {
+      const rec = m as Provider['models'][string] & { release_date?: string }
+      const isFree =
+        providerIsFreeGateway && !!rec.cost && rec.cost.input === 0 && rec.cost.output === 0
+      return {
+        id: modelId,
+        name: rec.name || modelId,
+        releaseDate: rec.release_date,
+        toolCalling: !!rec.capabilities?.toolcall,
+        reasoning: !!rec.capabilities?.reasoning,
+        ...(isFree ? { free: true } : {}),
+        // A second key's declared copy of the model reads these (ADR-074
+        // slice 10); a zero limit is opencode's "unknown", not a limit.
+        ...(positive(rec.limit?.context) ? { contextWindow: rec.limit!.context } : {}),
+        ...(positive(rec.limit?.output) ? { maxTokens: rec.limit!.output } : {}),
+        ...(rec.capabilities?.input ? { vision: rec.capabilities.input.image === true } : {}),
+        ...((providerUrl ?? rec.api?.url) ? { apiUrl: providerUrl ?? rec.api.url } : {}),
+        ...(rec.api?.npm ? { apiNpm: rec.api.npm } : {})
+      }
+    })
+    .sort((a, b) => {
+      // Newest-first by release date when available, else by name.
+      if (a.releaseDate && b.releaseDate) return b.releaseDate.localeCompare(a.releaseDate)
+      if (a.releaseDate) return -1
+      if (b.releaseDate) return 1
+      return a.name.localeCompare(b.name)
+    })
 }
 
 /**
- * Discover opencode providers + models by spinning up a transient server in
- * PERSISTED_SESSIONS_DIR, calling GET /config/providers, then releasing.
+ * Discover opencode providers + models: the discovery probe's GET
+ * /config/providers (see probeDiscovery), filtered and grouped.
  *
  * Returns [] on any failure (binary missing, spawn error, network error) —
  * opencode is optional and Claude must not break.
@@ -413,106 +527,103 @@ export async function getOpencodeProviderModels(
  * provider WITH an allowlist key surfaces only the listed models (empty → none);
  * a provider WITHOUT a key surfaces all of its models (legacy behaviour).
  */
-export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
-  if (cachedGroups) return cachedGroups
+export function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
+  return currentDiscovery(
+    groupsAttempt,
+    [],
+    (reason) => `Model discovery failed (opencode optional): ${reason}`,
+    () => cachedGroups
+  )
+}
 
-  try {
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
-    try {
-      const resp = await client.getConfigProviders()
-      const allowlist = loadModelAllowlist()
-      const groups: EngineModelGroup[] = []
+async function groupsAttempt(live: () => boolean): Promise<EngineModelGroup[]> {
+  const usable = cachedUsable ?? (await probeDiscovery()).usable
+  // Late for its generation: build the answer, publish nothing (and the
+  // caller, `currentDiscovery`, asks again).
+  const publish = live()
+  const allowlist = loadModelAllowlist()
+  const groups: EngineModelGroup[] = []
 
-      for (const provider of resp.providers ?? []) {
-        // Apply the per-provider model allowlist (key-presence gated).
-        const allowed = allowlist[provider.id]
-        const allowedSet = allowed ? new Set(allowed) : null
+  for (const provider of usable) {
+    // Apply the per-provider model allowlist (key-presence gated).
+    const allowed = allowlist[provider.id]
+    const allowedSet = allowed ? new Set(allowed) : null
 
-        const models: ModelInfo[] = Object.entries(provider.models ?? {})
-          .filter(([modelId]) => !allowedSet || allowedSet.has(modelId))
-          .map(([modelId, m]) => {
-            const caps = m.capabilities
-            const vision = !!(caps?.attachment || caps?.input?.image)
-            const toolCalling = !!caps?.toolcall
-            // description follows the picker convention "shortName · subLabel":
-            // split[0] renders as the primary label, split[1] as the muted sub-label
-            // (see InputBox shortName derivation + InlinePickers). Model name first,
-            // provider second — matching Claude's "<model> · <hint>" order — so an
-            // OpenCode Zen model reads "MiMo V2.5 Free" (primary) / "OpenCode Zen" (sub),
-            // not the inverted provider-first form.
-            const description = `${m.name || modelId} · ${provider.name}`
-            // Cache the full capability input for status-line context-window lookups AND
-            // for resolveOpencodeCapabilities (session vision/toolCalling/promptCaching).
-            modelCapsCache.set(`${provider.id}/${modelId}`, {
-              capabilities: {
-                attachment: caps?.attachment,
-                toolcall: caps?.toolcall,
-                reasoning: caps?.reasoning,
-                input: caps?.input ? { image: caps.input.image } : undefined
-              },
-              limit: m.limit ? { context: m.limit.context, output: m.limit.output } : undefined,
-              cost: m.cost?.cache ? { cache: m.cost.cache } : undefined
-            })
-            // Compute reasoning variant keys: only when reasoning is true and variants exist.
-            const reasoningVariants =
-              caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
-                ? Object.keys(m.variants)
-                : []
-            // A model is free iff the catalog reports cost AND both input/output are zero
-            // AND the provider is a credential-free zen gateway (FREE_OPENCODE_VENDOR_IDS).
-            // Subscription/OAuth-authenticated providers (e.g. openai) report zeroed catalog
-            // costs for models the USER pays for elsewhere — that's not "free", it's a
-            // pricing-catalog blind spot, so gate on provider identity, not just cost.
-            // Missing cost is treated as unknown, not free.
-            const isFree =
-              !!m.cost &&
-              m.cost.input === 0 &&
-              m.cost.output === 0 &&
-              FREE_OPENCODE_VENDOR_IDS.has(provider.id)
-            return {
-              value: `${provider.id}/${modelId}`,
-              displayName: m.name || modelId,
-              description,
-              engineId: 'opencode' as const,
-              vendorId: provider.id,
-              vision,
-              toolCalling,
-              supportsEffort: false,
-              supportsAdaptiveThinking: false,
-              ...(reasoningVariants.length > 0 ? { reasoningVariants } : {}),
-              ...(isFree ? { free: true } : {})
-            }
+    const models: ModelInfo[] = Object.entries(provider.models ?? {})
+      .filter(([modelId]) => !allowedSet || allowedSet.has(modelId))
+      .map(([modelId, m]) => {
+        const caps = m.capabilities
+        const vision = !!(caps?.attachment || caps?.input?.image)
+        const toolCalling = !!caps?.toolcall
+        // description follows the picker convention "shortName · subLabel":
+        // split[0] renders as the primary label, split[1] as the muted sub-label
+        // (see InputBox shortName derivation + InlinePickers). Model name first,
+        // provider second — matching Claude's "<model> · <hint>" order — so an
+        // OpenCode Zen model reads "MiMo V2.5 Free" (primary) / "OpenCode Zen" (sub),
+        // not the inverted provider-first form.
+        const description = `${m.name || modelId} · ${provider.name}`
+        // Cache the full capability input for status-line context-window lookups AND
+        // for resolveOpencodeCapabilities (session vision/toolCalling/promptCaching).
+        if (publish)
+          modelCapsCache.set(`${provider.id}/${modelId}`, {
+            capabilities: {
+              attachment: caps?.attachment,
+              toolcall: caps?.toolcall,
+              reasoning: caps?.reasoning,
+              input: caps?.input ? { image: caps.input.image } : undefined
+            },
+            limit: m.limit ? { context: m.limit.context, output: m.limit.output } : undefined,
+            cost: m.cost?.cache ? { cache: m.cost.cache } : undefined
           })
-
-        if (models.length > 0) {
-          groups.push({
-            engineId: 'opencode',
-            vendorId: provider.id,
-            vendorName: provider.name,
-            models
-          })
+        // Compute reasoning variant keys: only when reasoning is true and variants exist.
+        const reasoningVariants =
+          caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
+            ? Object.keys(m.variants)
+            : []
+        // A model is free iff the catalog reports cost AND both input/output are zero
+        // AND the provider is a credential-free zen gateway (FREE_OPENCODE_VENDOR_IDS).
+        // Subscription/OAuth-authenticated providers (e.g. openai) report zeroed catalog
+        // costs for models the USER pays for elsewhere — that's not "free", it's a
+        // pricing-catalog blind spot, so gate on provider identity, not just cost.
+        // Missing cost is treated as unknown, not free.
+        const isFree =
+          !!m.cost &&
+          m.cost.input === 0 &&
+          m.cost.output === 0 &&
+          FREE_OPENCODE_VENDOR_IDS.has(provider.id)
+        return {
+          value: `${provider.id}/${modelId}`,
+          displayName: m.name || modelId,
+          description,
+          engineId: 'opencode' as const,
+          vendorId: provider.id,
+          vision,
+          toolCalling,
+          supportsEffort: false,
+          supportsAdaptiveThinking: false,
+          ...(reasoningVariants.length > 0 ? { reasoningVariants } : {}),
+          ...(isFree ? { free: true } : {})
         }
-      }
+      })
 
-      // Only cache a NON-EMPTY result. An empty array is truthy, so caching it
-      // would make `if (cachedGroups) return` a permanent hit — a single transient
-      // empty discovery (server half-ready, providers momentarily unreported) would
-      // then stick until an explicit invalidation. A genuinely-empty result (all
-      // providers disabled) simply re-discovers next call; config/auth changes
-      // already invalidate, so the common case stays cheap.
-      if (groups.length > 0) cachedGroups = groups
-      return groups
-    } finally {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    if (models.length > 0) {
+      groups.push({
+        engineId: 'opencode',
+        vendorId: provider.id,
+        vendorName: provider.name,
+        models
+      })
     }
-  } catch (err) {
-    logger.warn(
-      'opencode',
-      `Model discovery failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
-    )
-    return []
   }
+
+  // Only cache a NON-EMPTY result. An empty array is truthy, so caching it
+  // would make `if (cachedGroups) return` a permanent hit — a single transient
+  // empty discovery (server half-ready, providers momentarily unreported) would
+  // then stick until an explicit invalidation. A genuinely-empty result (all
+  // providers disabled) simply re-discovers next call; config/auth changes
+  // already invalidate, so the common case stays cheap.
+  if (publish && groups.length > 0) cachedGroups = groups
+  return groups
 }
 
 /**
@@ -589,9 +700,19 @@ export function peekOpencodeModels(): EngineModelGroup[] | null {
   return cachedGroups
 }
 
-/** Invalidate the model + catalog discovery caches (call on auth/config change). */
+/**
+ * Invalidate the model + catalog discovery caches (call on auth/config change,
+ * and when the opencode ClaudeUI runs changes — `harness/catalog-invalidation.ts`).
+ * Starts a new generation: the probe in flight is killed (its server is its
+ * own, so no session notices) and can no longer write a cache.
+ */
 export function invalidateOpencodeModelCache(): void {
+  generation++
   cachedGroups = null
   cachedCatalog = null
+  cachedUsable = null
   modelCapsCache.clear()
+  const obsolete = pendingProbe
+  pendingProbe = null
+  obsolete?.cancel()
 }

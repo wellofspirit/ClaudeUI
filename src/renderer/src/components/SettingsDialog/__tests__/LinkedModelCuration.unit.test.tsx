@@ -10,8 +10,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
-import { createRef, useState } from 'react'
+import { createRef, StrictMode, useState } from 'react'
 import { LinkedModelCuration } from '../LinkedModelCuration'
+import { useSessionStore } from '../../../stores/session-store'
 import type { CuratedEngine, CurationAdapter } from '../ModelCuration'
 import type { CurationModel } from '../ModelCurationList'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
@@ -254,5 +255,119 @@ describe('LinkedModelCuration', () => {
     expect(row('b').dataset.locked).toBe('true')
     await click(row('b'))
     expect(setCuration).not.toHaveBeenCalled()
+  })
+})
+
+describe('LinkedModelCuration — an open block follows a model reload', () => {
+  const marks = (id: string): Record<string, string | undefined> =>
+    Object.fromEntries(
+      within(row(id))
+        .getAllByTestId('S.modelMark')
+        .map((el) => [el.dataset.id, el.dataset.available])
+    )
+  /** What a harness install or selection change does in the renderer. */
+  const reloadModels = (): Promise<void> =>
+    act(async () => {
+      useSessionStore.getState().reloadModels()
+    })
+
+  it('flips pi’s mark to available when a newer pi lists the model, without closing', async () => {
+    const piCatalog = [model('gpt-6-sol')]
+    await mount(
+      chatgpt(),
+      fakeAdapter('opencode', [model('gpt-6-sol'), model('gpt-6.1-sol')], undefined),
+      { ...fakeAdapter('pi', [], undefined), loadCatalog: async () => [...piCatalog] }
+    )
+    expect(marks('gpt-6.1-sol')).toEqual({ opencode: 'true', pi: 'false' })
+
+    piCatalog.push(model('gpt-6.1-sol'))
+    await reloadModels()
+    expect(marks('gpt-6.1-sol')).toEqual({ opencode: 'true', pi: 'true' })
+  })
+
+  it('a slow older load landing after a newer one does not bring the old catalog back', async () => {
+    const answers: Array<(catalog: CurationModel[]) => void> = []
+    const pi = {
+      ...fakeAdapter('pi', [], undefined),
+      loadCatalog: () => new Promise<CurationModel[]>((resolve) => answers.push(resolve))
+    }
+    render(
+      <Harness
+        definition={chatgpt()}
+        adapters={[fakeAdapter('opencode', [model('a'), model('b')], undefined), pi]}
+      />
+    )
+    await act(async () => {})
+    await reloadModels()
+    expect(answers).toHaveLength(2)
+
+    await act(async () => answers[1]([model('a'), model('b')]))
+    await act(async () => answers[0]([model('a')]))
+    expect(marks('b')).toEqual({ opencode: 'true', pi: 'true' })
+  })
+
+  it('reads the settings a model reload may have changed, so a new reference locks its model', async () => {
+    discovered = [
+      {
+        engineId: 'pi',
+        vendorId: 'openai-codex',
+        vendorName: 'ChatGPT',
+        models: [{ value: 'openai-codex/b', displayName: 'b', description: '', engineId: 'pi' }]
+      }
+    ]
+    await mount(
+      chatgpt({ linked: true, models: ['a', 'b'] }),
+      fakeAdapter('opencode', [model('a'), model('b')], ['a', 'b']),
+      fakeAdapter('pi', [model('a'), model('b')], ['a', 'b'])
+    )
+    expect(row('b').dataset.locked).toBeUndefined()
+
+    engineConfigs = { pi: { piConfig: { defaultModel: 'openai-codex/b' } } }
+    await reloadModels()
+    expect(row('b').dataset.locked).toBe('true')
+  })
+
+  it('a reload during a shared-list save keeps the edit, and the save still lands', async () => {
+    let land!: () => void
+    setCuration.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          land = resolve
+        })
+    )
+    await mount(
+      chatgpt({ linked: true, models: ['a', 'b'] }),
+      fakeAdapter('opencode', [model('a'), model('b')], ['a', 'b']),
+      fakeAdapter('pi', [model('a'), model('b')], ['a', 'b'])
+    )
+    await click(row('b'))
+    expect(row('b')).toHaveAttribute('aria-checked', 'false')
+
+    await reloadModels()
+    expect(row('b')).toHaveAttribute('aria-checked', 'false')
+    await act(async () => land())
+    expect(setCuration).toHaveBeenCalledWith('chatgpt', { linked: true, models: ['a'] })
+    expect(row('b')).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('under StrictMode (both roots use it), loads on mount and follows a reload', async () => {
+    const piCatalog = [model('gpt-6-sol')]
+    render(
+      <StrictMode>
+        <Harness
+          definition={chatgpt()}
+          adapters={[
+            fakeAdapter('opencode', [model('gpt-6-sol'), model('gpt-6.1-sol')], undefined),
+            { ...fakeAdapter('pi', [], undefined), loadCatalog: async () => [...piCatalog] }
+          ]}
+        />
+      </StrictMode>
+    )
+    await screen.findAllByTestId('S.curationLink.option')
+    expect(marks('gpt-6.1-sol')).toEqual({ opencode: 'true', pi: 'false' })
+
+    piCatalog.push(model('gpt-6.1-sol'))
+    await reloadModels()
+    expect(marks('gpt-6.1-sol')).toEqual({ opencode: 'true', pi: 'true' })
   })
 })

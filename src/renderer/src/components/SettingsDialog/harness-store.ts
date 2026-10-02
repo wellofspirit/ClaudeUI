@@ -39,10 +39,12 @@ import type {
   HarnessUpdateMode,
   HarnessVersionsResult
 } from '../../../../shared/harness-types'
+import { HARNESS_IDS } from '../../../../shared/harness-types'
 import { ipcErrorMessage, isInvokeTimeout, isPermissionDenied } from '../../utils/ipc-error'
 import {
   engineRunsIn,
   harnessReadiness,
+  harnessRunIdentity,
   installKey,
   installNeeded,
   type EngineRuns,
@@ -146,8 +148,29 @@ class HarnessStore {
    * cannot blink them out of the pill.
    */
   private readonly requested = new Set<string>()
+  /**
+   * What each harness ran as in the last snapshot (`harnessRunIdentity`), or
+   * null before the first. Kept across subscribers coming and going, so a
+   * change while nobody watched is still one on the next read.
+   */
+  private ran: Map<HarnessId, string> | null = null
+  /** Told which harnesses now run as a different binary (`followRunChanges`). */
+  private runFollower: ((changed: HarnessId[]) => void) | null = null
 
   getState = (): HarnessStoreState => this.state
+
+  /**
+   * Be told, once per snapshot, which harnesses now run as a different binary
+   * than the snapshot before: an install, an uninstall, an update, a selection
+   * moved between versions, a System install upgraded in place. The first
+   * snapshot is no change, and neither is a re-read that moved nothing (a
+   * detection run). One follower: the session store, which reloads models
+   * (ADR-082 §8). Here rather than in a component, so it holds with no composer
+   * mounted — Settings open over an empty window.
+   */
+  followRunChanges = (follower: ((changed: HarnessId[]) => void) | null): void => {
+    this.runFollower = follower
+  }
 
   /** `useSyncExternalStore`'s subscribe: the first subscriber starts the feed. */
   subscribe = (listener: () => void): (() => void) => {
@@ -162,6 +185,16 @@ class HarnessStore {
   private set(patch: Partial<HarnessStoreState>): void {
     this.state = { ...this.state, ...patch }
     for (const listener of this.listeners) listener()
+    if (patch.snapshot) this.noticeRunChanges(patch.snapshot)
+  }
+
+  private noticeRunChanges(snapshot: HarnessStateSnapshot): void {
+    const before = this.ran
+    const now = new Map(HARNESS_IDS.map((id) => [id, harnessRunIdentity(snapshot, id)] as const))
+    this.ran = now
+    if (!before) return
+    const changed = HARNESS_IDS.filter((id) => before.get(id) !== now.get(id))
+    if (changed.length > 0) this.runFollower?.(changed)
   }
 
   private retain(): void {
@@ -570,6 +603,7 @@ class HarnessStore {
     this.readSeq++
     this.cancelled.clear()
     this.requested.clear()
+    this.ran = null
     this.state = INITIAL
   }
 }

@@ -19,7 +19,15 @@ const { mockAcquire, mockRelease, MockOpencodeClient, mockLoadEngineConfig } = v
 }))
 
 vi.mock('../OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
+  opencodeServerManager: {
+    acquire: mockAcquire,
+    release: mockRelease,
+    // Discovery's own server (acquireDetached), released through the same spy.
+    acquireDetached: async (cwd: string) => ({
+      ...(await mockAcquire(cwd)),
+      release: () => mockRelease(cwd)
+    })
+  }
 }))
 vi.mock('../OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
 vi.mock('../../services/persisted-sessions-dir', () => ({

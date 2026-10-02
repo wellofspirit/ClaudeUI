@@ -283,6 +283,12 @@ export interface HarnessResolvedView {
   reason?: string
   /** `harnessAvailable`: can a session start on it (Codex also needs its host). */
   available: boolean
+  /**
+   * `harnessRevision`: changes exactly when the binary does — what main
+   * drops a model catalog on, and what the renderer reloads models on. Absent
+   * from a host older than it.
+   */
+  revision?: string
 }
 
 export interface HarnessStateEntry {

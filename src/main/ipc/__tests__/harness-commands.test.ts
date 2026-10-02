@@ -69,6 +69,7 @@ import { fingerprintOf } from '../../../core/harness/detect/fs-util'
 import { harnessManifest } from '../../../core/harness/manifests'
 import {
   harnessEnvVar,
+  harnessRevision,
   invalidateHarness,
   onHarnessChanged,
   resolveHarness
@@ -393,6 +394,44 @@ describe('harness:state', () => {
       displayPath: install.displayPath,
       available: true
     })
+  })
+})
+
+describe('harness:state revision', () => {
+  const revisionOf = async (id: 'opencode' | 'pi'): Promise<string | undefined> =>
+    ((await call(registryOf(), 'harness:state')) as HarnessStateSnapshot).harnesses[id].resolved
+      .revision
+
+  it('is an opaque token that moves when the binary changes in place, path and version kept', async () => {
+    // An override keeps source, path and version fixed: only the file moves.
+    const binary = file(`override/opencode${EXE}`, 'opencode 1')
+    process.env[harnessEnvVar('opencode')] = binary
+    invalidateHarness('opencode')
+    const before = await call(registryOf(), 'harness:state')
+    const first = (before as HarnessStateSnapshot).harnesses.opencode.resolved
+    expect(first.revision).toMatch(/^[0-9a-f]{16}$/)
+    expect(JSON.stringify(before)).not.toContain('opencode 1')
+
+    fs.writeFileSync(binary, 'opencode 1, upgraded in place')
+    invalidateHarness('opencode')
+    const after = ((await call(registryOf(), 'harness:state')) as HarnessStateSnapshot).harnesses
+      .opencode.resolved
+    expect(after).toMatchObject({ source: first.source, path: first.path, version: first.version })
+    expect(after.revision).not.toBe(first.revision)
+  })
+
+  it('holds still across re-reads and invalidations that change nothing (a detection run)', async () => {
+    process.env[harnessEnvVar('pi')] = file(`override/pi${EXE}`)
+    invalidateHarness('pi')
+    const first = await revisionOf('pi')
+    invalidateHarness()
+    expect(await revisionOf('pi')).toBe(first)
+  })
+
+  it('is the token main drops the model catalog on', async () => {
+    process.env[harnessEnvVar('pi')] = file(`override/pi${EXE}`)
+    invalidateHarness('pi')
+    expect(await revisionOf('pi')).toBe(harnessRevision('pi'))
   })
 })
 

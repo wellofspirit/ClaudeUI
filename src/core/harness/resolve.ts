@@ -46,6 +46,7 @@
  *
  * Electron-free, like everything in core; `getAppPath()` is the host seam.
  */
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type {
@@ -523,6 +524,39 @@ export function harnessAvailable(id: HarnessId): boolean {
   if (e.resolved.path === null) return false
   if (id === 'codex') return codexHostSupported() && e.codexHost !== null
   return true
+}
+
+/**
+ * Which binary `id` runs as, as one opaque token: two equal tokens mean the
+ * same binary, so the same model catalog. Folds in where it resolved from, its
+ * path and stated version, whether it can run, and the file's size and mtime —
+ * a System install upgraded in place keeps its path and may state no version.
+ *
+ * The ONE definition of "the harness changed" for model catalogs: main drops
+ * an engine's discovery caches when it moves (`catalog-invalidation.ts`), and
+ * `harness:state` carries it (`resolved.revision`) so the renderer reloads
+ * models on exactly the same changes. It leaves as a truncated hash: the path,
+ * size and mtime it folds stay in main, like detection's fingerprints.
+ */
+export function harnessRevision(id: HarnessId): string {
+  const resolved = resolveHarness(id)
+  let stamp = ''
+  if (resolved.path !== null) {
+    try {
+      const stat = fs.statSync(resolved.path)
+      stamp = `${stat.size}:${stat.mtimeMs}`
+    } catch {
+      stamp = 'unreadable'
+    }
+  }
+  const identity = [
+    resolved.source,
+    resolved.path ?? '',
+    resolved.version ?? '',
+    harnessAvailable(id) ? 'runs' : 'stopped',
+    stamp
+  ].join('\0')
+  return createHash('sha256').update(identity).digest('hex').slice(0, 16)
 }
 
 /**

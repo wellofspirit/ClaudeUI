@@ -187,6 +187,72 @@ describe('InputBox on a harness that does not run', () => {
     expect(viewProps.banner).toBeNull()
   })
 
+  describe('a harness that keeps running as a different binary', () => {
+    /** Main reads, in order: pi's catalog warmed, then the registry re-read. */
+    let reads: string[]
+
+    beforeEach(() => {
+      reads = []
+      app.bridge.ipcMain.handle('session:get-pi-model-catalog', () => {
+        reads.push('pi-catalog')
+        return []
+      })
+      app.bridge.ipcMain.handle('provider-registry:list', () => {
+        reads.push('registry')
+        return { entries: [], opencodeInstalled: true }
+      })
+    })
+
+    /** The snapshot with `id` resolved to another managed version. */
+    function upgraded(id: HarnessId, version: string): HarnessStateSnapshot {
+      const next = snapshot()
+      next.harnesses[id] = {
+        ...next.harnesses[id],
+        resolved: { ...next.harnesses[id].resolved, version, path: `/store/${id}/${version}` }
+      }
+      return next
+    }
+
+    async function refreshTo(next: HarnessStateSnapshot): Promise<void> {
+      state = next
+      await act(async () => {
+        await harnessStore.refresh()
+      })
+      await act(async () => {})
+    }
+
+    it('reloads the models, then the registry once pi’s catalog is warm, on a pi update', async () => {
+      await sessionOn('pi')
+      const before = modelFetches
+      await refreshTo(upgraded('pi', '0.99.2'))
+      expect(modelFetches).toBe(before + 1)
+      expect(reads).toEqual(['pi-catalog', 'registry'])
+    })
+
+    it('reloads on an opencode selection change without warming pi', async () => {
+      await sessionOn('opencode')
+      const before = modelFetches
+      await refreshTo(upgraded('opencode', '1.18.34'))
+      expect(modelFetches).toBe(before + 1)
+      expect(reads).toEqual(['registry'])
+    })
+
+    it('reloads when a harness stops running', async () => {
+      await sessionOn('claude')
+      const before = modelFetches
+      await refreshTo(snapshot(['pi']))
+      expect(modelFetches).toBe(before + 1)
+    })
+
+    it('reloads nothing for a re-read that changed nothing (a detection run)', async () => {
+      await sessionOn('pi')
+      const before = modelFetches
+      await refreshTo(snapshot())
+      expect(modelFetches).toBe(before)
+      expect(reads).toEqual([])
+    })
+  })
+
   it.each([
     ['claude', 'Ask Claude anything, / for commands'],
     ['opencode', 'Ask opencode anything, / for commands'],

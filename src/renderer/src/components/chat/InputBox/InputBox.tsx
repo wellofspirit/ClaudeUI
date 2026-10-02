@@ -19,10 +19,7 @@ import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
 import { HarnessInstallBanner } from '../../harness/HarnessInstallBanner'
-import {
-  useReloadModelsOnHarnessReady,
-  useSeedModelWhenHarnessReady
-} from '../../harness/use-harness-ready'
+import { useSeedModelWhenHarnessReady } from '../../harness/use-harness-ready'
 import { useHarnessReadiness } from '../../SettingsDialog/harness-store'
 import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
 import { engineMeta } from '../../../../../shared/engine-meta'
@@ -304,7 +301,6 @@ export function InputBox(): React.JSX.Element {
   // behaviour.
   const harnessReadiness = useHarnessReadiness(effectiveEngineId)
   const harnessBlocked = !harnessCanRun(harnessReadiness) && !sdkActive
-  useReloadModelsOnHarnessReady()
   // Deduped: cli.js lists `default` and its concrete equivalent (`opus[1m]`)
   // as two rows with the same description, which the shortName derivation above
   // renders identically. The `selectedModel` memo below deliberately resolves

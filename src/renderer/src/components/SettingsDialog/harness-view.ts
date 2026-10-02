@@ -517,6 +517,25 @@ export function harnessReadiness(
   return entry.selection.source === 'system' ? 'system-unusable' : 'missing'
 }
 
+/**
+ * Which binary `id` runs as, per the snapshot: whether it runs, and main's
+ * `resolved.revision` — the token main drops that engine's model catalog on
+ * (`core/harness/catalog-invalidation.ts`), so the renderer reloads models on
+ * exactly the same changes, a System install upgraded in place included. A
+ * host older than `revision` gets its source, path and version instead.
+ * Equal strings mean nothing a model catalog depends on moved.
+ */
+export function harnessRunIdentity(
+  snapshot: HarnessStateSnapshot | null | undefined,
+  id: HarnessId
+): string {
+  const resolved = snapshot?.harnesses[id]?.resolved
+  const binary =
+    resolved?.revision ??
+    [resolved?.source ?? '', resolved?.path ?? '', resolved?.version ?? ''].join('\0')
+  return `${harnessReadiness(snapshot, id)}\0${binary}`
+}
+
 /** A session on this harness can start (or nothing is known yet, which is today's behaviour). */
 export function harnessCanRun(readiness: HarnessReadiness): boolean {
   return readiness === 'ready' || readiness === 'unknown'

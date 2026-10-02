@@ -27,6 +27,11 @@ export interface ServerConnection {
   authHeader: string
 }
 
+/** A server of the caller's own (`acquireDetached`): `release()` kills it, once. */
+export interface DetachedServer extends ServerConnection {
+  release: () => void
+}
+
 export interface ServerHandle extends ServerConnection {
   refCount: number
   process: ChildProcess
@@ -357,6 +362,18 @@ export class OpencodeServerManager {
    * instead of each launching a server (the race FIX 1 closes).
    */
   private pending = new Map<string, Promise<ServerHandle>>()
+  /** Servers handed out by acquireDetached() and not yet released. */
+  private detached = new Set<ServerHandle>()
+  /**
+   * The last `opencode serve` start, until it printed its port (or failed).
+   * Starts take turns: opencode migrates its ONE database at startup, and two
+   * processes migrating a database that needs it — a fresh one, or the first
+   * start after an update that adds a migration — race, and the loser exits
+   * ("Failed query: CREATE TABLE …", verified against 1.18.34). Concurrent
+   * starts are common: a discovery server beside a session's, two projects.
+   * A server that is up has migrated, so only the start waits, never a request.
+   */
+  private startTurn: Promise<unknown> = Promise.resolve()
   /**
    * Set once dispose() runs. A spawn already in flight when dispose() is called
    * would otherwise re-insert its resolved handle into `handles` AFTER dispose()
@@ -431,57 +448,9 @@ export class OpencodeServerManager {
     if (inFlight) return inFlight
 
     const spawnPromise = (async (): Promise<ServerHandle> => {
-      const password = randomBytes(24).toString('base64url')
-      const authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
-      const launch = this.getLaunch()
-
-      // Start the per-cwd MCP host BEFORE spawning opencode so we have the
-      // port + token to inject via OPENCODE_CONFIG_CONTENT.
-      // Engine-native config (model, providers, agents) is read by opencode from
-      // its own global config file (written by opencode-config.ts) — not injected here.
-      // dispatch_agent registration here stays UNCONDITIONAL (unlike Claude's
-      // claude-ui-collab, gated on crossEngineDispatchAvailable('claude')): the
-      // server is per-cwd and outlives any one harness change (ADR-082), so the
-      // honest per-session answer is the session's `crossEngineDispatch`
-      // capability, and a dispatch into a harness that is gone is refused by
-      // the dispatcher's own per-request guards.
-      const mcpHost = await this.startMcpHostFn(
-        createOpencodeHostedToolsServer(key, {
-          lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
-          dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx))
-        })
-      )
-
-      let child: ChildProcess
-      let baseUrl: string
-      try {
-        const result = await this.spawnFn(launch, key, password, mcpHost.port, mcpHost.token)
-        child = result.process
-        baseUrl = result.baseUrl
-      } catch (err) {
-        // If spawn fails, tear down the MCP host we already started.
-        await mcpHost.close().catch(() => {})
-        throw err
-      }
-
-      const handle: ServerHandle = {
-        baseUrl,
-        password,
-        authHeader,
-        refCount: 0,
-        process: child,
-        mcpHost,
-        exitListeners: new Set()
-      }
-
-      // dispose() ran while this spawn was in flight: do NOT register the handle
-      // (it would leak past app quit — see `disposed`). Reap what we just spawned
-      // and reject so the pending entry is cleared like any other spawn failure.
-      if (this.disposed) {
-        this.killProcess(child)
-        await mcpHost.close().catch(() => {})
-        throw new Error('OpencodeServerManager disposed during spawn')
-      }
+      const handle = await this.startServer(key)
+      const child = handle.process
+      const mcpHost = handle.mcpHost
 
       this.handles.set(key, handle)
 
@@ -532,6 +501,80 @@ export class OpencodeServerManager {
   }
 
   /**
+   * Spawn one server for `key` with its MCP host — registered NOWHERE: the
+   * caller owns it (the pool's `handles`, or a detached lease). Reaps what it
+   * started, and rejects, when dispose() ran meanwhile.
+   */
+  private async startServer(key: string): Promise<ServerHandle> {
+    // Shut down: start nothing, not even the MCP host.
+    if (this.disposed) throw new Error('OpencodeServerManager disposed')
+    const password = randomBytes(24).toString('base64url')
+    const authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
+    // Fail fast — before an MCP host — when opencode cannot run at all. The
+    // launch actually spawned is resolved again when this start's turn comes.
+    this.getLaunch()
+
+    // Start the per-cwd MCP host BEFORE spawning opencode so we have the
+    // port + token to inject via OPENCODE_CONFIG_CONTENT.
+    // Engine-native config (model, providers, agents) is read by opencode from
+    // its own global config file (written by opencode-config.ts) — not injected here.
+    // dispatch_agent registration here stays UNCONDITIONAL (unlike Claude's
+    // claude-ui-collab, gated on crossEngineDispatchAvailable('claude')): the
+    // server is per-cwd and outlives any one harness change (ADR-082), so the
+    // honest per-session answer is the session's `crossEngineDispatch`
+    // capability, and a dispatch into a harness that is gone is refused by
+    // the dispatcher's own per-request guards.
+    const mcpHost = await this.startMcpHostFn(
+      createOpencodeHostedToolsServer(key, {
+        lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
+        dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx))
+      })
+    )
+
+    let child: ChildProcess
+    let baseUrl: string
+    try {
+      const turn = this.startTurn.then(() => {
+        // A start queued behind others: shutdown may have come meanwhile, so
+        // look again right before spawning — never spawn after dispose(). And
+        // resolve the launch NOW: an install or selection change made while
+        // this waited is what the next server should run.
+        if (this.disposed) throw new Error('OpencodeServerManager disposed before spawn')
+        return this.spawnFn(this.getLaunch(), key, password, mcpHost.port, mcpHost.token)
+      })
+      this.startTurn = turn.catch(() => {})
+      const result = await turn
+      child = result.process
+      baseUrl = result.baseUrl
+    } catch (err) {
+      // If spawn fails (or never ran), tear down the MCP host we already started.
+      await mcpHost.close().catch(() => {})
+      throw err
+    }
+
+    const handle: ServerHandle = {
+      baseUrl,
+      password,
+      authHeader,
+      refCount: 0,
+      process: child,
+      mcpHost,
+      exitListeners: new Set()
+    }
+
+    // dispose() ran while this spawn was in flight: do NOT register the handle
+    // (it would leak past app quit — see `disposed`). Reap what we just spawned
+    // and reject so the pending entry is cleared like any other spawn failure.
+    if (this.disposed) {
+      this.killProcess(child)
+      await mcpHost.close().catch(() => {})
+      throw new Error('OpencodeServerManager disposed during spawn')
+    }
+
+    return handle
+  }
+
+  /**
    * Acquire a server for `cwd`. Spawns one if none exists (or joins an in-flight
    * spawn), else reuses the existing one. Increments the refcount. Pair every
    * `acquire` with exactly one `release`.
@@ -541,6 +584,35 @@ export class OpencodeServerManager {
     const handle = await this.resolveHandle(key)
     handle.refCount++
     return { baseUrl: handle.baseUrl, password: handle.password, authHeader: handle.authHeader }
+  }
+
+  /**
+   * A server for `cwd` of its OWN — never the pooled one, never shared — that
+   * lives until its `release()`. For reads that must answer from the opencode
+   * ClaudeUI runs NOW: a pooled server is started once and kept for as long as
+   * anyone holds `cwd` (an OAuth hold, a reconciler pass, a throwaway agent
+   * turn), so after a harness install or selection change it can still be the
+   * previous binary, with the provider map that binary built at startup.
+   *
+   * Spawned from the resolver's current answer, like every pooled spawn, and
+   * reaped by dispose(). Releasing it touches nothing a session holds.
+   */
+  async acquireDetached(cwd: string): Promise<DetachedServer> {
+    const handle = await this.startServer(resolvePath(cwd))
+    this.detached.add(handle)
+    handle.process.on('exit', () => {
+      if (this.detached.delete(handle)) handle.mcpHost.close().catch(() => {})
+    })
+    return {
+      baseUrl: handle.baseUrl,
+      password: handle.password,
+      authHeader: handle.authHeader,
+      release: () => {
+        if (!this.detached.delete(handle)) return
+        this.killProcess(handle.process)
+        handle.mcpHost.close().catch(() => {})
+      }
+    }
   }
 
   /**
@@ -657,6 +729,11 @@ export class OpencodeServerManager {
     }
     this.handles.clear()
     this.pending.clear()
+    for (const handle of this.detached) {
+      this.killProcess(handle.process)
+      handle.mcpHost.close().catch(() => {})
+    }
+    this.detached.clear()
   }
 
   private killProcess(child: ChildProcess): void {

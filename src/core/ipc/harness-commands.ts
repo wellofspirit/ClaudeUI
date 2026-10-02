@@ -81,6 +81,7 @@ import { harnessManifest } from '../harness/manifests'
 import {
   bundledClaudeVersion,
   harnessAvailable,
+  harnessRevision,
   invalidateHarness,
   onHarnessChanged,
   resolveHarness
@@ -205,7 +206,8 @@ function stateEntry(
       path: resolved.path,
       ...(resolved.displayPath !== undefined ? { displayPath: resolved.displayPath } : {}),
       ...(resolved.reason !== undefined ? { reason: resolved.reason } : {}),
-      available: harnessAvailable(id)
+      available: harnessAvailable(id),
+      revision: harnessRevision(id)
     },
     system: systemView(id, detection),
     managed: managedView(id),

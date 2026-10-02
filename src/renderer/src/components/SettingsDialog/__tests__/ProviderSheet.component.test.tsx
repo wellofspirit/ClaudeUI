@@ -913,11 +913,24 @@ describe('MODELS IN THE PICKER', () => {
   const mode = (id: 'all' | 'pick'): HTMLElement =>
     screen.getAllByTestId('ProviderSheet.curationMode.option').find((el) => el.dataset.id === id)!
 
+  /**
+   * opencode's settings as stored: the allowlist writer saves into them and the
+   * block reads them back — it re-reads after each of its own writes.
+   */
+  let settings: { model?: string; modelAllowlist?: Record<string, string[]> }
+
   beforeEach(() => {
     app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => models)
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
-    }))
+    settings = { modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] } }
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => settings)
+    stub('models:set-provider-allowlist', (engine, providerId, next) => {
+      if (engine !== 'opencode') return
+      const { [providerId as string]: _, ...rest } = settings.modelAllowlist ?? {}
+      settings = {
+        ...settings,
+        modelAllowlist: next ? { ...rest, [providerId as string]: next as string[] } : rest
+      }
+    })
   })
 
   it('curates through the ONE allowlist writer, one row at a time', async () => {
@@ -958,7 +971,7 @@ describe('MODELS IN THE PICKER', () => {
   })
 
   it('an ABSENT allowlist is All models; unticking one switches to Only, with Undo', async () => {
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
+    settings = {}
     await openModels('opencode:openrouter')
     expect(mode('all')).toHaveAttribute('aria-pressed', 'true')
     for (const model of models) expect(row(model.id)).toHaveAttribute('aria-checked', 'true')
@@ -982,9 +995,7 @@ describe('MODELS IN THE PICKER', () => {
   it('the summary row and the engine row say what the block says, not the registry', async () => {
     // The registry fixture claims 2 curated models; one of the stored ids is gone
     // from the catalog, so the block counts 1 — and so must everything else.
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gone'] }
-    }))
+    settings = { modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gone'] } }
     await openModels('opencode:openrouter')
     expect(screen.getByTestId('ProviderSheet.modelsSummary')).toHaveTextContent('1 picked')
     expect(engineRow('opencode')).toHaveTextContent('1 of 3 models reach the picker.')
@@ -1042,10 +1053,10 @@ describe('MODELS IN THE PICKER', () => {
 
   it('locks a model a setting uses, says where, and refuses to untick it', async () => {
     // No-silent-fallback (ADR-059): the reference would break far from here.
-    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
+    settings = {
       model: 'openrouter/moonshotai/kimi-k3',
       modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
-    }))
+    }
     discoveredKimi()
     await openModels('opencode:openrouter')
     const lock = screen

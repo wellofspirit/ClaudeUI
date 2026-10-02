@@ -25,10 +25,24 @@ const DISCOVERY_TIMEOUT_MS = 15_000
 
 let cachedCatalog: PiModel[] | null = null
 let cachedGroups: EngineModelGroup[] | null = null
+/**
+ * Bumped by invalidatePiModelCache(). Every cache write below is gated on the
+ * generation its probe started under, so a probe that outlives an invalidation
+ * (a login, a config write, a harness install or selection change) can never
+ * publish what the PREVIOUS pi, or the previous credentials, reported.
+ */
+let generation = 0
+/** The probe in flight for the CURRENT generation. */
+interface PendingProbe {
+  promise: Promise<PiModel[]>
+  /** Kill the probe process: its answer is already obsolete. */
+  cancel: () => void
+}
 /** Dedups concurrent callers (discoverPiModels + getPiModelCatalog + a racing
  *  session:get-engine-models IPC call) into a single ephemeral spawn, mirroring
- *  OpencodeServerManager's `pending` map precedent. */
-let pendingFetch: Promise<PiModel[]> | null = null
+ *  OpencodeServerManager's `pending` map precedent. Dropped by an invalidation,
+ *  so no caller after it can join a probe of the old generation. */
+let pendingFetch: PendingProbe | null = null
 /** Negative cache: epoch ms of the last EMPTY probe (no auth / transient
  *  failure). While fresh, callers short-circuit to [] instead of re-spawning a
  *  15s-timeout probe on every picker open / session construct / setModel. Zeroed
@@ -36,36 +50,80 @@ let pendingFetch: Promise<PiModel[]> | null = null
  *  so a transient empty can't stick permanently the way an outright cache would. */
 let emptyProbeAtMs = 0
 const EMPTY_CACHE_TTL_MS = 60_000
+/**
+ * How many times a caller whose probe was overtaken by an invalidation asks
+ * again. Each retry is a probe of the new generation; past this, invalidations
+ * are arriving faster than pi answers, and the caller gets [] (pi is optional)
+ * rather than an answer from a superseded generation.
+ */
+const SUPERSEDED_RETRIES = 2
 
 /**
- * Spawn the ephemeral probe process and fetch the raw model catalog. Shared by
- * discoverPiModels() and getPiModelCatalog() so both stay warm off one spawn.
- * Returns [] on any failure (binary missing, spawn error, RPC error/timeout).
+ * `derive(catalog)` for the CURRENT generation — what every public read
+ * answers. Shared by discoverPiModels(), getPiModelCatalog() and
+ * getPiModelCatalogGroups() so all stay warm off one spawn. A failed probe is
+ * an empty catalog (binary missing, spawn error, RPC error/timeout).
+ *
+ * The generation is checked AFTER the last await and `derive` runs in that same
+ * synchronous step, right before the value is returned: nothing an
+ * invalidation superseded — the probe's answer, a cache write, a grouping —
+ * reaches a caller. A caller whose probe was overtaken asks again under the new
+ * generation (`cached` first: the probe that overtook it may have filled it),
+ * joining whatever probe that started.
  */
-async function fetchPiModelCatalog(): Promise<PiModel[]> {
-  if (cachedCatalog) return cachedCatalog
-  // Recent empty probe still within its cooldown — skip the expensive spawn.
-  if (emptyProbeAtMs > 0 && Date.now() - emptyProbeAtMs < EMPTY_CACHE_TTL_MS) return []
-  if (pendingFetch) return pendingFetch
+async function currentCatalog<T>(
+  derive: (models: PiModel[]) => T,
+  empty: T,
+  cached: () => T | null = () => null
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const hit = cached()
+    if (hit !== null) return hit
+    const started = generation
+    const models = await probeCatalog()
+    if (started === generation) return derive(models)
+    if (attempt >= SUPERSEDED_RETRIES) return empty
+  }
+}
 
-  pendingFetch = (async (): Promise<PiModel[]> => {
+/** One answer for the current generation: cached, negative-cached, joined, or a fresh probe. */
+function probeCatalog(): Promise<PiModel[]> {
+  if (cachedCatalog) return Promise.resolve(cachedCatalog)
+  // Recent empty probe still within its cooldown — skip the expensive spawn.
+  if (emptyProbeAtMs > 0 && Date.now() - emptyProbeAtMs < EMPTY_CACHE_TTL_MS) {
+    return Promise.resolve([])
+  }
+  if (pendingFetch) return pendingFetch.promise
+
+  const started = generation
+  const current = (): boolean => generation === started
+  let client: PiRpcClient | null = null
+  const entry: PendingProbe = {
+    promise: Promise.resolve([]),
+    cancel: () => client?.dispose()
+  }
+  entry.promise = (async (): Promise<PiModel[]> => {
     // Binary-missing is already cheap (no spawn) and can flip when pi is
-    // installed — don't negative-cache it, just re-check.
+    // installed — don't negative-cache it, just re-check. The resolver is
+    // invalidated before this generation began, so this is the pi that runs now.
     if (!piBinaryAvailable()) return []
     const launch = locatePiLaunch()
     if (!launch) return []
 
-    const client = new PiRpcClient(launch, {
+    const probe = new PiRpcClient(launch, {
       cwd: homedir(),
       args: ['--mode', 'rpc', '--no-session']
     })
+    client = probe
     try {
-      await client.start()
-      const resp = await client.request<PiGetAvailableModelsData>(
+      await probe.start()
+      if (!current()) return []
+      const resp = await probe.request<PiGetAvailableModelsData>(
         { type: 'get_available_models' },
         DISCOVERY_TIMEOUT_MS
       )
       const models = resp.success && resp.data ? resp.data.models : []
+      if (!current()) return []
       if (models.length > 0) cachedCatalog = models
       // Negative-cache an empty result (no auth, RPC failure) so we don't
       // re-spawn a fresh 15s-timeout probe on the very next call. Bounded by
@@ -79,17 +137,19 @@ async function fetchPiModelCatalog(): Promise<PiModel[]> {
         `Model discovery failed (pi optional): ${err instanceof Error ? err.message : String(err)}`
       )
       // A spawn/timeout failure is exactly the pathological repeat-probe case —
-      // negative-cache it too (still bounded by the TTL).
-      emptyProbeAtMs = Date.now()
+      // negative-cache it too (still bounded by the TTL). Not for a probe an
+      // invalidation cancelled: its failure says nothing about the new pi.
+      if (current()) emptyProbeAtMs = Date.now()
       return []
     } finally {
-      client.dispose()
+      probe.dispose()
     }
   })().finally(() => {
-    pendingFetch = null
+    // Identity-gated: an invalidation may already have replaced this entry.
+    if (pendingFetch === entry) pendingFetch = null
   })
-
-  return pendingFetch
+  pendingFetch = entry
+  return entry.promise
 }
 
 /**
@@ -120,24 +180,27 @@ export function effortLevelsFromModel(
  * Value convention: `"<provider>/<id>"` (matches opencode's; decoded by
  * `engineMeta('pi').decodeModelValue`).
  */
-export async function discoverPiModels(): Promise<EngineModelGroup[]> {
-  if (cachedGroups) return cachedGroups
-
-  const models = await fetchPiModelCatalog()
-  if (models.length === 0) return []
-
-  // Per provider (ADR-074 §1): a provider with no key shows every model it
-  // reports, so one curated provider no longer hides every other one.
-  const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
-  const groups = groupPiModels(models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id)))
-
-  cachedGroups = groups
-  return groups
+export function discoverPiModels(): Promise<EngineModelGroup[]> {
+  return currentCatalog(
+    (models) => {
+      if (models.length === 0) return []
+      // Per provider (ADR-074 §1): a provider with no key shows every model it
+      // reports, so one curated provider no longer hides every other one.
+      const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
+      const groups = groupPiModels(
+        models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id))
+      )
+      cachedGroups = groups
+      return groups
+    },
+    [],
+    () => cachedGroups
+  )
 }
 
 /** Unfiltered authenticated catalog for model-management UI. */
-export async function getPiModelCatalogGroups(): Promise<EngineModelGroup[]> {
-  return groupPiModels(await fetchPiModelCatalog())
+export function getPiModelCatalogGroups(): Promise<EngineModelGroup[]> {
+  return currentCatalog(groupPiModels, [])
 }
 
 function groupPiModels(models: PiModel[]): EngineModelGroup[] {
@@ -187,8 +250,8 @@ function groupPiModels(models: PiModel[]): EngineModelGroup[] {
  * selected model's contextWindow/maxTokens for capability seeding
  * (resolvePiCapabilities), since ModelInfo carries no structured limit fields.
  */
-export async function getPiModelCatalog(): Promise<PiModel[]> {
-  return fetchPiModelCatalog()
+export function getPiModelCatalog(): Promise<PiModel[]> {
+  return currentCatalog((models) => models, [])
 }
 
 /**
@@ -268,9 +331,18 @@ export function peekPiCatalogCounts(): Record<string, number> | null {
   return counts
 }
 
-/** Invalidate the model discovery cache (call on auth/config change — M3). */
+/**
+ * Invalidate the model discovery cache (call on auth/config change — M3 — and
+ * when the pi ClaudeUI runs changes, `harness/catalog-invalidation.ts`). Starts
+ * a new generation: the probe in flight is killed and can no longer write a
+ * cache, and the next caller probes afresh.
+ */
 export function invalidatePiModelCache(): void {
+  generation++
   cachedCatalog = null
   cachedGroups = null
   emptyProbeAtMs = 0
+  const obsolete = pendingFetch
+  pendingFetch = null
+  obsolete?.cancel()
 }

@@ -216,12 +216,28 @@ export function ModelCuration({
   const saveChain = useRef<Promise<void>>(Promise.resolve())
   /** Bumped per edit, per engine, so a failed save knows whether a later edit is queued. */
   const latestEdit = useRef<Partial<Record<CuratedEngine, number>>>({})
+  /**
+   * Saves not yet on disk, per engine. A selection read while one is (or
+   * overtaken by a later edit) predates the edit on show, so a load keeps the
+   * shown one instead.
+   */
+  const unwritten = useRef<Partial<Record<CuratedEngine, number>>>({})
+  /**
+   * Bumped by every `reloadModels()`: a curation write anywhere, a harness
+   * install or selection change. An open block reads its catalog again — a
+   * newly installed pi lists models the old one never did.
+   */
+  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
 
   const adapterKey = adapters.map((a) => `${a.engine}:${a.providerId}`).join(',')
 
   useEffect(() => {
+    // A newer run (or the unmount) cancels this one, so only the latest load lands.
     let cancelled = false
     for (const adapter of adapters) {
+      const engine = adapter.engine
+      const editAtStart = latestEdit.current[engine] ?? 0
+      const writingAtStart = (unwritten.current[engine] ?? 0) > 0
       void Promise.all([
         adapter.loadCatalog().catch((): CurationModel[] => []),
         adapter.loadSelection().catch(() => undefined)
@@ -229,7 +245,18 @@ export function ModelCuration({
         const emptyText =
           catalog.length === 0 ? await adapter.describeEmpty?.().catch(() => undefined) : undefined
         if (cancelled) return
-        setStates((prev) => ({ ...prev, [adapter.engine]: { catalog, selection, emptyText } }))
+        const selectionFresh = !writingAtStart && (latestEdit.current[engine] ?? 0) === editAtStart
+        setStates((prev) => {
+          const shown = prev[engine]
+          return {
+            ...prev,
+            [engine]: {
+              catalog,
+              emptyText,
+              selection: selectionFresh || !shown ? selection : shown.selection
+            }
+          }
+        })
       })
     }
     return () => {
@@ -237,7 +264,7 @@ export function ModelCuration({
     }
     // `adapterKey` is the adapters' identity; the objects are rebuilt per render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adapterKey])
+  }, [adapterKey, modelReloadNonce])
 
   useEffect(() => {
     if (!onSummary) return
@@ -266,7 +293,7 @@ export function ModelCuration({
     return () => {
       cancelled = true
     }
-  }, [adapterKey])
+  }, [adapterKey, modelReloadNonce])
 
   const adapter = adapters.find((a) => a.engine === engine) ?? adapters[0]
   const state = adapter ? states[adapter.engine] : undefined
@@ -327,9 +354,15 @@ export function ModelCuration({
     const generation = (latestEdit.current[target.engine] ?? 0) + 1
     latestEdit.current[target.engine] = generation
     const isLatest = (): boolean => latestEdit.current[target.engine] === generation
+    unwritten.current[target.engine] = (unwritten.current[target.engine] ?? 0) + 1
     saveChain.current = saveChain.current.then(async () => {
       try {
-        await target.save(next)
+        try {
+          await target.save(next)
+        } finally {
+          // On disk or refused: either way a read from here on is not older than it.
+          unwritten.current[target.engine] = (unwritten.current[target.engine] ?? 1) - 1
+        }
         useSessionStore.getState().reloadModels()
         await onWrote()
       } catch (e) {

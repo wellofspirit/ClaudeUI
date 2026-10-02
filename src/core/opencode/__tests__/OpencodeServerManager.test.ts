@@ -852,3 +852,218 @@ describe('OpencodeServerManager recycleAll', () => {
     expect(mgr.activeCount).toBe(0)
   })
 })
+
+describe('OpencodeServerManager acquireDetached', () => {
+  /** A manager whose locator answers whatever `binary.path` says at spawn time. */
+  function detachedHarness(): {
+    manager: OpencodeServerManager
+    binary: { path: string }
+    spawned: Array<{ binary: string; child: FakeChild }>
+    hosts: FakeMcpHost[]
+  } {
+    const binary = { path: '/store/opencode/1.18.32/opencode' }
+    const spawned: Array<{ binary: string; child: FakeChild }> = []
+    let port = 41000
+    const spawnFn: SpawnServerFn = async (launch) => {
+      const child = makeFakeChild()
+      spawned.push({ binary: launch.command, child })
+      return { process: child, baseUrl: `http://127.0.0.1:${port++}` }
+    }
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const manager = new OpencodeServerManager({
+      spawnFn,
+      locateBinaryFn: () => binary.path,
+      startMcpHostFn
+    })
+    return { manager, binary, spawned, hosts }
+  }
+
+  it('spawns the binary that resolves NOW, even while a pooled server for the cwd is held', async () => {
+    const { manager, binary, spawned } = detachedHarness()
+    const pooled = await manager.acquire('/tmp/discovery')
+    binary.path = '/store/opencode/1.18.34/opencode'
+
+    const own = await manager.acquireDetached('/tmp/discovery')
+    expect(spawned.map((s) => s.binary)).toEqual([
+      '/store/opencode/1.18.32/opencode',
+      '/store/opencode/1.18.34/opencode'
+    ])
+    expect(own.baseUrl).not.toBe(pooled.baseUrl)
+    // The pool still hands the held server to its next caller: nothing a
+    // session holds was replaced.
+    expect((await manager.acquire('/tmp/discovery')).baseUrl).toBe(pooled.baseUrl)
+    expect(manager.activeCount).toBe(1)
+    own.release()
+    manager.dispose()
+  })
+
+  it('release kills only its own server, once', async () => {
+    const { manager, spawned, hosts } = detachedHarness()
+    await manager.acquire('/tmp/discovery')
+    const own = await manager.acquireDetached('/tmp/discovery')
+
+    own.release()
+    own.release()
+    expect(spawned[1].child.killed).toBe(true)
+    expect(hosts[1].closed).toBe(true)
+    expect(spawned[0].child.killed).toBe(false)
+    expect(hosts[0].closed).toBe(false)
+    expect(manager.activeCount).toBe(1)
+    manager.dispose()
+  })
+
+  it('dispose reaps a detached server nobody released', async () => {
+    const { manager, spawned, hosts } = detachedHarness()
+    await manager.acquireDetached('/tmp/discovery')
+    manager.dispose()
+    expect(spawned[0].child.killed).toBe(true)
+    expect(hosts[0].closed).toBe(true)
+  })
+
+  it('an unexpected death closes its MCP host; a later release is a no-op', async () => {
+    const { manager, spawned, hosts } = detachedHarness()
+    const own = await manager.acquireDetached('/tmp/discovery')
+    spawned[0].child.emit('exit', 1, null)
+    await Promise.resolve()
+    expect(hosts[0].closed).toBe(true)
+
+    spawned[0].child.kill = (() => {
+      throw new Error('killed a dead server')
+    }) as ChildProcess['kill']
+    expect(() => own.release()).not.toThrow()
+    manager.dispose()
+  })
+})
+
+describe('OpencodeServerManager start turns', () => {
+  it('starts one server at a time — pooled, other cwds and detached alike — and a failed start passes the turn on', async () => {
+    let starting = 0
+    let most = 0
+    let failNext = true
+    let port = 42000
+    const spawnFn: SpawnServerFn = async () => {
+      starting++
+      most = Math.max(most, starting)
+      await new Promise((r) => setTimeout(r, 5))
+      starting--
+      if (failNext) {
+        failNext = false
+        throw new Error('opencode exited before printing port')
+      }
+      return { process: makeFakeChild(), baseUrl: `http://127.0.0.1:${port++}` }
+    }
+    const { startMcpHostFn } = makeMcpHostFn()
+    const manager = makeManager(spawnFn, startMcpHostFn)
+
+    const results = await Promise.allSettled([
+      manager.acquire('/tmp/a'),
+      manager.acquire('/tmp/b'),
+      manager.acquireDetached('/tmp/a'),
+      manager.acquireDetached('/tmp/c')
+    ])
+    expect(most).toBe(1)
+    expect(results.map((r) => r.status)).toEqual([
+      'rejected',
+      'fulfilled',
+      'fulfilled',
+      'fulfilled'
+    ])
+    manager.dispose()
+  })
+})
+
+describe('OpencodeServerManager start turns across shutdown', () => {
+  /** A spawnFn whose starts the test lands one by one, recording the binary each ran. */
+  function heldSpawns(): {
+    spawnFn: SpawnServerFn
+    started: Array<{ binary: string; child: FakeChild; land: () => void }>
+  } {
+    const started: Array<{ binary: string; child: FakeChild; land: () => void }> = []
+    let port = 43000
+    const spawnFn: SpawnServerFn = (launch) =>
+      new Promise<SpawnResult>((resolve) => {
+        const child = makeFakeChild()
+        started.push({
+          binary: launch.command,
+          child,
+          land: () => resolve({ process: child, baseUrl: `http://127.0.0.1:${port++}` })
+        })
+      })
+    return { spawnFn, started }
+  }
+  /** Let queued promise turns run (MCP hosts start, starts reach the queue). */
+  const turns = async (): Promise<void> => {
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+  }
+
+  it('dispose with starts queued: the one in flight is reaped, the queued ones never spawn', async () => {
+    const { spawnFn, started } = heldSpawns()
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const manager = makeManager(spawnFn, startMcpHostFn)
+
+    const results = Promise.allSettled([
+      manager.acquire('/tmp/a'),
+      manager.acquire('/tmp/b'),
+      manager.acquireDetached('/tmp/c')
+    ])
+    await turns()
+    expect(started).toHaveLength(1)
+    expect(hosts).toHaveLength(3)
+
+    manager.dispose()
+    started[0].land()
+    const settled = await results
+
+    expect(settled.map((r) => r.status)).toEqual(['rejected', 'rejected', 'rejected'])
+    // The start in flight came up after shutdown and was reaped at once.
+    expect(started[0].child.killed).toBe(true)
+    // The queued starts never spawned at all.
+    expect(started).toHaveLength(1)
+    // Every MCP host started for them is closed.
+    expect(hosts.every((h) => h.closed)).toBe(true)
+    // Nothing is held: no pooled handle, no in-flight entry, no detached server.
+    expect(manager.activeCount).toBe(0)
+    expect(manager['pending'].size).toBe(0)
+    expect(manager['detached'].size).toBe(0)
+  })
+
+  it('an acquire after dispose rejects at once, starting no MCP host and no server', async () => {
+    const { spawnFn, started } = heldSpawns()
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const manager = makeManager(spawnFn, startMcpHostFn)
+    manager.dispose()
+
+    await expect(manager.acquire('/tmp/a')).rejects.toThrow(/disposed/)
+    await expect(manager.acquireDetached('/tmp/a')).rejects.toThrow(/disposed/)
+    expect(hosts).toHaveLength(0)
+    expect(started).toHaveLength(0)
+  })
+
+  it('a queued start runs the binary that resolves when its turn comes', async () => {
+    const { spawnFn, started } = heldSpawns()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const binary = { path: '/store/opencode/1.18.32/opencode' }
+    const manager = new OpencodeServerManager({
+      spawnFn,
+      locateBinaryFn: () => binary.path,
+      startMcpHostFn
+    })
+
+    const first = manager.acquire('/tmp/a')
+    const queued = manager.acquireDetached('/tmp/b')
+    await turns()
+    // An install lands while the second start waits its turn.
+    binary.path = '/store/opencode/1.18.34/opencode'
+    started[0].land()
+    await first
+    await turns()
+    started[1].land()
+    ;(await queued).release()
+
+    expect(started.map((s) => s.binary)).toEqual([
+      '/store/opencode/1.18.32/opencode',
+      '/store/opencode/1.18.34/opencode'
+    ])
+    manager.dispose()
+  })
+})

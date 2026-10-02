@@ -69,6 +69,9 @@ import { startHarnessUpdater } from '../harness/install/updater'
 import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
 import { harnessWritable } from '../harness/resolve'
 import { watchHarnessArrivals } from '../harness/arrivals'
+import { startCatalogInvalidation } from '../harness/catalog-invalidation'
+import { invalidatePiModelCache } from '../pi/model-discovery'
+import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -289,6 +292,15 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
   armCodexRulesSync()
   syncCodexRulesFile()
+
+  // A harness install, uninstall, selection change or update replaces the
+  // binary pi's and opencode's model discovery asked, so their catalogs go with
+  // it (`harness/catalog-invalidation.ts`). Before the events below, so main has
+  // already dropped them when the renderer is nudged to read models again.
+  startCatalogInvalidation({
+    pi: invalidatePiModelCache,
+    opencode: invalidateOpencodeModelCache
+  })
 
   // The Installed page and every engine-installed gate follow harnesses live:
   // each resolver invalidation goes out as `harness:changed { id }`, and each
