@@ -77,6 +77,7 @@ vi.mock('../../../main/auth/ClaudeAuthProvider', () => ({
 import { ClaudeSession } from '../claude-session'
 import type { BrowserWindow } from 'electron'
 import { classify, slimTranscript, type JudgeRequest } from '../../automode/classifier'
+import { parseTaskNotificationXml, taskNotificationNoteTitle } from '../task-notification-xml'
 
 const XML =
   '<task-notification>\n<task-id>a1b2c3</task-id>\n<status>completed</status>\n' +
@@ -299,7 +300,8 @@ describe('ClaudeSession — the live agent note comes from system/task_notificat
     tool_use_id: 'toolu_agent',
     status: 'completed',
     output_file: '',
-    summary: 'Agent "scan" completed',
+    // 2.1.285: the live frame's summary is the agent's RESULT (model-authored).
+    summary: 'Found 3 files.',
     usage: { total_tokens: 1200, tool_uses: 3, duration_ms: 4000 },
     ...extra
   })
@@ -315,10 +317,10 @@ describe('ClaudeSession — the live agent note comes from system/task_notificat
         content: [
           {
             type: 'context_note',
-            title: 'Agent "scan" completed',
+            title: 'Agent "scan" finished',
             fragments: [
               {
-                text: 'Task a1b2c3: completed\nAgent "scan" completed\nUsage: 1200 tokens · 3 tool uses · 4s',
+                text: 'Task a1b2c3: completed\nFound 3 files.\nUsage: 1200 tokens · 3 tool uses · 4s',
                 label: 'from an agent, not from you'
               }
             ]
@@ -363,5 +365,42 @@ describe('ClaudeSession — the live agent note comes from system/task_notificat
     ])
     expect(notes(sent)).toHaveLength(1)
     expect(notes(sent)[0].id).toBe('sys-note')
+  })
+})
+
+describe('ClaudeSession — the live note’s title matches the reloaded one (S4e)', () => {
+  it('a completed background agent: live title == the title history reads from cli.js’s XML', async () => {
+    const { sent } = await runWire('rid-s4e', 'go', [
+      {
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'a9',
+        tool_use_id: 'toolu_a9',
+        task_type: 'local_agent',
+        description: 'Survey the repo',
+        is_backgrounded: true
+      },
+      {
+        type: 'system',
+        subtype: 'task_notification',
+        uuid: 'sys-a9',
+        task_id: 'a9',
+        tool_use_id: 'toolu_a9',
+        status: 'completed',
+        output_file: '',
+        summary: 'The repo has three packages and no tests.'
+      }
+    ])
+    // What cli.js delivers for the same run (its `Not` builder writes
+    // `Agent "<description>" finished`), read the way the history loader reads it.
+    const xml =
+      '<task-notification>\n<task-id>a9</task-id>\n<tool-use-id>toolu_a9</tool-use-id>\n' +
+      '<status>completed</status>\n<summary>Agent "Survey the repo" finished</summary>\n' +
+      '<result>The repo has three packages and no tests.</result>\n</task-notification>'
+    const historyTitle = taskNotificationNoteTitle(parseTaskNotificationXml(xml))
+    const live = messagesSent(sent).find((m) => m.role === 'system')!
+    const liveTitle = (live.content[0] as { title: string }).title
+    expect(historyTitle).toBe('Agent "Survey the repo" finished')
+    expect(liveTitle).toBe(historyTitle)
   })
 })

@@ -130,8 +130,12 @@ test pins either):
   `system/task_notification`: one note per task run, only for a run cli.js reported backgrounded
   (a foreground run's result returns through its tool_result), none for `skip_transcript` /
   `ambient` runs; its text is synthesised from the frame's fields (task id, status, summary, usage),
-  so the live note's text differs from the reloaded one (the delivered XML). The user-frame path
-  stays as a fallback, deduped per task run.
+  so the live note's text differs from the reloaded one (the delivered XML). Its TITLE is cli.js's
+  own `<summary>` line rebuilt from `task_started`'s description (`Agent "<description>" finished`,
+  S4e) — never the frame's `summary`, which in 2.1.285 is the agent's model-authored result — so it
+  matches the reloaded title (exactly for a completed agent; a failed/stopped title lacks cli.js's
+  error/stopper tail, which the frame does not carry). The user-frame path stays as a fallback,
+  deduped per task run.
 - **Amended (S4, 2026-10-02) — ClaudeSession records the user's prompts.** Before S4 its
   `messageHistory` held no human turn at all (`run()` never recorded the prompt; the renderer adds
   the bubble from `session:user-message`), so a Claude session's dispatched pi/opencode target was

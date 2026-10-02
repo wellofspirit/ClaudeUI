@@ -37,7 +37,8 @@ import {
   parseTaskNotificationXml,
   taskNotificationNoteText,
   taskNotificationNoteTitle,
-  taskTerminalStatus
+  taskTerminalStatus,
+  liveTaskNoteSummary
 } from './task-notification-xml'
 import { agentNoteMessage } from './agent-note'
 import { classifyApiError } from './api-error'
@@ -319,6 +320,11 @@ export class ClaudeSession extends BaseSession {
    * `system/task_notification` for it).
    */
   private backgroundedTaskIds = new Set<string>()
+  /**
+   * Each task's type and description from `task_started` — what cli.js builds
+   * its own notification `<summary>` from, and so the live note's title.
+   */
+  private taskDescriptions = new Map<string, { taskType: string; description: string }>()
   /** `${taskId}#${runIndex}` of every run that already got its agent note. */
   private notedTaskRuns = new Set<string>()
   /** Agent ids whose stream events were dropped unplaced — logged once each. */
@@ -1728,6 +1734,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       typeof msg.is_backgrounded === 'boolean' ? { isBackgrounded: msg.is_backgrounded } : {}
     if (msg.is_backgrounded === true) this.backgroundedTaskIds.add(taskId)
     else if (msg.is_backgrounded === false) this.backgroundedTaskIds.delete(taskId)
+    this.taskDescriptions.set(taskId, { taskType, description: msg.description || '' })
     const origin =
       this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
@@ -1990,11 +1997,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (!taskId || !backgrounded || msg.skip_transcript === true || msg.ambient === true) return
     const status = taskTerminalStatus(msg.status) ?? 'completed'
     const summary = msg.summary || ''
+    // The title is cli.js's own `<summary>` line, rebuilt from task_started's
+    // description — never this frame's `summary`, which for an agent is its
+    // (model-authored) result. It stays in the note's text below.
+    const known = this.taskDescriptions.get(taskId)
+    const titleLine = known ? liveTaskNoteSummary({ ...known, status }) : null
     this.emitAgentNote(
       taskId,
       runIndex,
       typeof msg.uuid === 'string' && msg.uuid ? msg.uuid : uuid(),
-      taskNotificationNoteTitle({ taskId, status, summary, outputFile, raw: '' }),
+      taskNotificationNoteTitle({ taskId, status, summary: titleLine ?? '', outputFile, raw: '' }),
       taskNotificationNoteText({ taskId, status, summary, usage })
     )
   }

@@ -143,6 +143,44 @@ export function taskNotificationNoteText(fields: {
   return lines.join('\n')
 }
 
+/**
+ * The `<summary>` line cli.js itself writes into a delivered notification,
+ * rebuilt for the LIVE note from what `task_started` told us — so the live
+ * title matches the one the history loader reads from the XML. The live
+ * `system/task_notification.summary` is NOT this line: for an agent it carries
+ * the agent's result (model-authored), so it is never a title.
+ *
+ * cli.js 2.1.285 (find by the strings `vWt='Agent "'` and `Dbe="Background
+ * command "` in vendor/claude-cli/cli.js):
+ * - agent (`Not`): `Agent "<description>" ` + `finished` | `failed: <error>` |
+ *   `was stopped by Claude` | `was stopped by user` | `was stopped…`;
+ * - background shell: `Background command "<description>" ` + `completed
+ *   (exit code N)` | `failed with exit code N` | `was stopped…`.
+ * The live frame carries no error text, exit code or stopper, so those tails
+ * are left off: a completed agent's title matches exactly, the others match up
+ * to that tail. Null without a description (the caller falls back to a status
+ * title).
+ */
+export function liveTaskNoteSummary(task: {
+  taskType: string
+  description: string
+  status: TaskTerminalStatus
+}): string | null {
+  if (!task.description) return null
+  if (task.taskType === 'local_bash') {
+    const verb =
+      task.status === 'completed'
+        ? 'completed'
+        : task.status === 'failed'
+          ? 'failed'
+          : 'was stopped'
+    return `Background command "${task.description}" ${verb}`
+  }
+  const verb =
+    task.status === 'completed' ? 'finished' : task.status === 'failed' ? 'failed' : 'was stopped'
+  return `Agent "${task.description}" ${verb}`
+}
+
 /** cli.js's terminal status words → ClaudeUI's (`killed` reads `stopped`). */
 export function taskTerminalStatus(raw: string | undefined): TaskTerminalStatus | undefined {
   return raw ? STATUS[raw] : undefined
