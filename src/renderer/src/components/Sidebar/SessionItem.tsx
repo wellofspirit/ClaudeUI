@@ -383,8 +383,9 @@ export const SessionItem = memo(function SessionItem({
               Unhide session
             </button>
           )}
-          {onDelete && info.engineId !== 'codex' && (
+          {onDelete && (
             <button
+              data-testid="SessionItem.delete"
               onClick={() => {
                 menu.close()
                 onDelete()
