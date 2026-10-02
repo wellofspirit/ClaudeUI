@@ -6,10 +6,11 @@ import { discoverCodexModels } from '../model-discovery'
 import {
   listCodexSessions,
   loadCodexHistory,
+  markCodexThreadDeleted,
   resolveCodexForkAnchor,
   scanCodexLineage
 } from '../history'
-import { setSessionMeta } from '../../services/db'
+import { ensureCodexSessionOverrides, setSessionMeta } from '../../services/db'
 import { CodexTransportError } from '../CodexAppServerClient'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 
@@ -658,6 +659,47 @@ it('lists a cached branch the native listing omits, and tombstones one that is g
   // Only a refusal the re-read confirmed drops the branch; a broken read keeps it.
   expect(mocks.forks.get('gone')).toEqual([null, null])
   expect(mocks.forks.get('unreachable')).toEqual(['root', null])
+})
+
+// A sidebar refresh whose `thread/list` went out before a delete and came back
+// after it (observed 2026-10-02, a project delete racing two refreshes): the
+// answer still names the thread, and adopting it re-created the rows the delete
+// had just forgotten, then read it twice and tombstoned it.
+it('a listing that raced a delete does not bring the deleted thread back', async () => {
+  mocks.list.mockImplementation(async () => {
+    markCodexThreadDeleted('raced-delete')
+    return [listedRoot, { ...listedRoot, id: 'raced-delete' }]
+  })
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.forks.set('root', [null, 2])
+  const listed = await listCodexSessions(undefined, instant)
+  expect(listed.map((session) => session.sessionId)).toEqual(['root'])
+  expect(readIds()).toEqual([])
+  expect(mocks.forks.has('raced-delete')).toBe(false)
+  const adopted = [
+    ...vi.mocked(setSessionMeta).mock.calls.map(([id]) => id),
+    ...vi.mocked(ensureCodexSessionOverrides).mock.calls.map(([id]) => id)
+  ]
+  expect(adopted).not.toContain('raced-delete')
+})
+
+it('a branch deleted while its read is in flight is not confirmed, tombstoned or listed', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.forks.set('root', [null, 2])
+  mocks.forks.set('read-raced', ['root', null])
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    // The delete lands between the read going out and its refusal coming back:
+    // `forgetThread` marks the id and drops the cache row.
+    markCodexThreadDeleted(threadId)
+    mocks.forks.delete(threadId)
+    throw new CodexTransportError('rpc-error--32600')
+  })
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId)).toEqual(['root'])
+  // One read, no confirming second one (that is the warning this removes)...
+  expect(readIds()).toEqual(['read-raced'])
+  // ...and no `(null, null)` tombstone written over the row the delete removed.
+  expect(mocks.forks.has('read-raced')).toBe(false)
 })
 
 it('never treats a thread that claims itself as its own branch', async () => {

@@ -2,7 +2,7 @@ import { homedir } from 'node:os'
 import { CodexService } from './CodexService'
 import type { CodexClientOptions } from './CodexAppServerClient'
 import { locateCodexBinary } from './codex-locate'
-import type { CodexReadTuning } from './history'
+import { markCodexThreadDeleted, type CodexReadTuning } from './history'
 import { logger } from '../services/logger'
 import {
   deleteCodexFork,
@@ -151,6 +151,8 @@ function assertCodexInstalled(): void {
 
 /** Forget everything ClaudeUI stored about a thread the binary has deleted. */
 function forgetThread(threadId: string): void {
+  // First, so a sidebar listing in flight cannot re-create what follows.
+  markCodexThreadDeleted(threadId)
   deleteCodexFork(threadId)
   deleteCodexSessionOverrides(threadId)
   deleteSessionMeta(threadId)
