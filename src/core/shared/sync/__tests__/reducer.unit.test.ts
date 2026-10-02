@@ -1604,8 +1604,8 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
       ['config:settings-changed', { theme: 'monokai' }]
     ])
     const restored = fromSnapshot(toSnapshot(live, 42))
-    // `seeded` is core-internal and not on the wire — a restored session is
-    // complete by definition. Everything else must match exactly.
+    // `seeded` is bookkeeping the comparison ignores (a live session here is
+    // seeded, so it restores as such). Everything else must match exactly.
     const strip = (s: CanonicalState): unknown => ({
       ...s,
       sessions: Object.fromEntries(

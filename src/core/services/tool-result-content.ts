@@ -24,9 +24,14 @@
  *
  * Everything here treats its input as untrusted (a transcript on disk, a wire
  * frame): malformed blocks are skipped, never thrown on.
+ *
+ * Images leave here as blob REFS (ADR-087): the bytes are interned into the
+ * host's `blobStore`, so nothing downstream — events, the ring, canonical
+ * state, a history load's reply — carries base64.
  */
 
 import { isImageMediaType, type ToolResultImage } from '../../shared/types'
+import { blobStore } from './blob-store'
 
 export interface ToolResultContent {
   /** The joined result text — identical to what the old inline collapse produced. */
@@ -51,6 +56,8 @@ export interface ToolResultContent {
  * `ContentBlock`s (and handles `document`) rather than `ToolResultImage`s.
  *
  * The transcript/wire carries no filename for these, so `fileName` is omitted.
+ * A payload the blob store refuses (undecodable, larger than the store) is
+ * skipped like any other malformed block.
  */
 export function extractToolResultImages(content: unknown): ToolResultImage[] {
   if (!Array.isArray(content)) return []
@@ -64,7 +71,8 @@ export function extractToolResultImages(content: unknown): ToolResultImage[] {
     const mediaType = source.media_type
     const data = source.data
     if (!isImageMediaType(mediaType) || typeof data !== 'string' || !data) continue
-    images.push({ mediaType, base64Data: data })
+    const ref = blobStore.put(mediaType, data)
+    if (ref) images.push({ mediaType, ...ref })
   }
   return images
 }
@@ -79,14 +87,22 @@ export function extractToolResultImages(content: unknown): ToolResultImage[] {
  *   { type: 'tool_result', toolUseId, toolResult: text, ...(images ? { images } : {}) }
  */
 export function extractToolResultContent(content: unknown): ToolResultContent {
-  if (typeof content === 'string') return { text: content }
-  if (!Array.isArray(content)) return { text: '' }
-
-  // Preserved verbatim from the six call sites this replaced.
-  const text = content
-    .map((c) => ((c as Record<string, unknown> | null)?.text as string) || '')
-    .join('\n')
-
+  const text = extractToolResultText(content)
+  if (!Array.isArray(content)) return { text }
   const images = extractToolResultImages(content)
   return images.length > 0 ? { text, images } : { text }
+}
+
+/**
+ * The text half of {@link extractToolResultContent} alone, for a reader that
+ * never shows the images (agent identity scans whole transcripts) and so must
+ * not pay to hash and intern every screenshot in them.
+ */
+export function extractToolResultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  // Preserved verbatim from the six call sites this replaced.
+  return content
+    .map((c) => ((c as Record<string, unknown> | null)?.text as string) || '')
+    .join('\n')
 }

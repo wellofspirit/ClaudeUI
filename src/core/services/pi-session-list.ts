@@ -24,7 +24,9 @@ import type {
   ContentBlock,
   EngineHistoryLoad,
   ForkAnchorResult,
-  SessionInfo
+  SessionInfo,
+  TaskNotification,
+  TaskTerminalStatus
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import type {
@@ -38,17 +40,32 @@ import type {
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
+import { piCustomMessageToChat } from '../pi/pi-custom-message'
+import { piAgentDeliveryDetails } from '../pi/pi-delivery'
 import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
+import { blobStore } from './blob-store'
+import {
+  childSessionFile,
+  collectAgentIds,
+  collectAgentLinkRecords,
+  deleteChildSession,
+  type PiAgentLinkRecord
+} from '../pi/pi-subagent-store'
 
 /** `~/.pi/agent` — pi's own data root. */
 export function piAgentDir(): string {
   return path.join(os.homedir(), '.pi', 'agent')
 }
 
+/**
+ * The tree the sidebar lists and `findPiSessionFile` walks. Host-run subagent
+ * children live under `~/.claude/ui/pi-subagents` instead, by design (ADR-089):
+ * they are never listed or resumed as sessions of their own.
+ */
 function piSessionsDir(): string {
   return path.join(piAgentDir(), 'sessions')
 }
@@ -364,9 +381,11 @@ function convertPiTextOrImageContent(
     if (b.type === 'text') {
       if (b.text) blocks.push({ type: 'text', text: b.text })
     } else if (isImageMediaType(b.mimeType)) {
-      blocks.push({ type: 'image', mediaType: b.mimeType, base64Data: b.data })
+      const ref = blobStore.put(b.mimeType, b.data)
+      if (ref) blocks.push({ type: 'image', mediaType: b.mimeType, ...ref })
     }
-    // Unrecognised mime types are dropped — see IMAGE_MEDIA_TYPES.
+    // Unrecognised mime types are dropped — see IMAGE_MEDIA_TYPES. So is a
+    // payload the blob store refuses (ADR-087).
   }
   return blocks
 }
@@ -408,21 +427,19 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
       // An extension injected this into the model's context. It was dropped
       // entirely, so the transcript disagreed with what the model saw. Same row
       // Codex's hook fragments take, titled by the extension that wrote it, and
-      // rendered VERBATIM — an extension's text is third-party text.
+      // rendered VERBATIM — an extension's text is third-party text. The live
+      // mapper uses the same converter (ADR-089 S3), and ClaudeUI's own agent
+      // messages are recognised there by customType + details, never by text.
       const ts = Date.parse(e.timestamp)
-      const text =
-        typeof e.content === 'string'
-          ? e.content
-          : e.content
-              .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
-              .join('\n')
-      if (text)
-        messages.push({
-          id: e.id,
-          role: 'system',
-          content: [{ type: 'context_note', title: e.customType, fragments: [{ text }] }],
-          timestamp: Number.isFinite(ts) ? ts : Date.now()
-        })
+      const msg = piCustomMessageToChat({
+        id: e.id,
+        customType: e.customType,
+        content: e.content,
+        display: e.display,
+        details: e.details,
+        timestamp: Number.isFinite(ts) ? ts : Date.now()
+      })
+      if (msg) messages.push(msg)
     }
   }
   return messages
@@ -446,6 +463,8 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     if (!parsed) return { messages: [], statusLine: null }
     const active = activeBranchEntries(parsed.entries)
     const messages = convertPiSessionEntries(active)
+    const { messages: subagentMessages, childEntries } = loadSubagentMessages(active)
+    const taskNotifications = collectPiTaskNotifications(active, childEntries)
     // The billing type decides what this history was WORTH (ADR-071 §2) and it
     // comes from the probe snapshot, which is empty in a process that has not
     // touched pi auth yet. Warm it FIRST (one small local file read), and never
@@ -454,7 +473,13 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     await piAuthProvider.probe().catch(() => {})
     const statusLine =
       active.length > 0 ? piHistoryStatusLine(active, dispatchedCostEntriesFor(sessionId)) : null
-    return { messages, statusLine, lastModel: piLastModelRef(active) }
+    return {
+      messages,
+      statusLine,
+      lastModel: piLastModelRef(active),
+      ...(Object.keys(subagentMessages).length > 0 ? { subagentMessages } : {}),
+      ...(taskNotifications.length > 0 ? { taskNotifications } : {})
+    }
   } catch (err) {
     logger.debug(
       'PiSessionList',
@@ -462,6 +487,159 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     )
     return { messages: [], statusLine: null }
   }
+}
+
+/**
+ * The depth-1 agent records a resumed PiSession rebuilds (ADR-089 S3b, G7),
+ * from the parent's active branch. Best-effort: [] on any failure.
+ */
+export function loadPiAgentLinks(sessionId: string): PiAgentLinkRecord[] {
+  try {
+    const filePath = findPiSessionFile(sessionId)
+    const parsed = filePath ? readPiSessionFile(filePath) : null
+    return parsed ? collectAgentLinkRecords(activeBranchEntries(parsed.entries)) : []
+  } catch {
+    return []
+  }
+}
+
+/** How deep a parent → child → grandchild chain is followed (the spawn cap, ADR-089 D4). */
+const MAX_SUBAGENT_HISTORY_DEPTH = 3
+
+/**
+ * Host-run subagent transcripts for a parent's active branch (ADR-089), keyed
+ * by the parent `agent` call id — the key `session:subagent-message` uses
+ * live. Each child is read with the SAME `readPiSessionFile` →
+ * `activeBranchEntries` → `convertPiSessionEntries` pipeline as the parent,
+ * and its own `agent` calls are followed (depth ≤ 3, each child once). A
+ * missing or corrupt child file is skipped; an invalid id never reaches a path
+ * (pi-subagent-store's `isValidAgentId`).
+ */
+function loadSubagentMessages(parentEntries: PiSessionEntry[]): {
+  messages: Record<string, ChatMessage[]>
+  /** Each child's active branch, for the notifications a grandchild left in its spawner's file. */
+  childEntries: PiSessionEntry[][]
+} {
+  const out: Record<string, ChatMessage[]> = {}
+  const childEntries: PiSessionEntry[][] = []
+  const visited = new Set<string>()
+  const walk = (entries: PiSessionEntry[], depth: number): void => {
+    if (depth > MAX_SUBAGENT_HISTORY_DEPTH) return
+    for (const link of collectAgentIds(entries)) {
+      if (visited.has(link.agentId)) continue
+      visited.add(link.agentId)
+      const file = childSessionFile(link.agentId)
+      const parsed = file ? readPiSessionFile(file) : null
+      if (!parsed) continue
+      const childActive = activeBranchEntries(parsed.entries)
+      out[link.toolUseId] = convertPiSessionEntries(childActive)
+      childEntries.push(childActive)
+      walk(childActive, depth + 1)
+    }
+  }
+  walk(parentEntries, 1)
+  return { messages: out, childEntries }
+}
+
+/** Same words as the Claude reader's (session-history.ts), for the same state. */
+const PI_UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
+
+const isTerminalStatus = (s: unknown): s is TaskTerminalStatus =>
+  s === 'completed' || s === 'failed' || s === 'stopped'
+
+/**
+ * The host-run subagents' terminal events (ADR-089 S3), from every task
+ * notification ClaudeUI delivered into these files (the parent's and each
+ * child's — a grandchild's can land in its spawner's file). Read from the
+ * stored `custom_message`'s customType + `details` ONLY, never from its text,
+ * so a user message that merely looks like one counts for nothing. A
+ * background launch (`cuiAgent.background`) with no notification at all reads
+ * `unfinished` (ADR-073 §5): the transcript cannot tell a dead run from one
+ * still going in another process.
+ */
+function collectPiTaskNotifications(
+  parentEntries: PiSessionEntry[],
+  childFiles: PiSessionEntry[][]
+): TaskNotification[] {
+  // Which (call id → agent id) pairs each file may speak for (review R3): the
+  // parent's file for any agent of its tree (a root-owned notification can be
+  // about a grandchild whose spawner had finished); a child's file only for
+  // the agents that child itself launched. A child's word about any other
+  // agent's terminal state counts for nothing.
+  const linksOf = (entries: PiSessionEntry[]): Map<string, string> =>
+    new Map(collectAgentIds(entries).map((l) => [l.toolUseId, l.agentId]))
+  const tree = new Map<string, string>()
+  for (const entries of [parentEntries, ...childFiles]) {
+    for (const [toolUseId, agentId] of linksOf(entries)) tree.set(toolUseId, agentId)
+  }
+  const files = [
+    { entries: parentEntries, trusted: tree },
+    ...childFiles.map((entries) => ({ entries, trusted: linksOf(entries) }))
+  ]
+  const out: TaskNotification[] = []
+  const notified = new Set<string>()
+  const launches: Array<{ toolUseId: string; agentId: string }> = []
+  for (const { entries, trusted } of files) {
+    for (const e of entries) {
+      if (e.type === 'custom_message') {
+        const d = piAgentDeliveryDetails(e.customType, e.details)
+        if (!d || d.kind !== 'task-notification') continue
+        if (typeof d.agentId !== 'string' || typeof d.toolUseId !== 'string') continue
+        if (trusted.get(d.toolUseId) !== d.agentId) continue
+        if (!isTerminalStatus(d.status)) continue
+        notified.add(d.toolUseId)
+        out.push({
+          taskId: d.agentId,
+          toolUseId: d.toolUseId,
+          status: d.status,
+          outputFile: '',
+          summary: typeof d.summary === 'string' ? d.summary : '',
+          ...(d.usage ? { usage: d.usage } : {}),
+          ...(typeof d.runIndex === 'number' ? { runIndex: d.runIndex } : {})
+        })
+      } else if (
+        e.type === 'message' &&
+        e.message.role === 'toolResult' &&
+        e.message.toolName === 'agent'
+      ) {
+        const cui = (
+          e.message.details as { cuiAgent?: { agentId?: unknown; background?: unknown } }
+        )?.cuiAgent
+        if (cui?.background === true && typeof cui.agentId === 'string') {
+          launches.push({ toolUseId: e.message.toolCallId, agentId: cui.agentId })
+        }
+      }
+    }
+  }
+  for (const launch of launches) {
+    if (notified.has(launch.toolUseId)) continue
+    out.push({
+      taskId: launch.agentId,
+      toolUseId: launch.toolUseId,
+      status: 'unfinished',
+      outputFile: '',
+      summary: PI_UNFINISHED_SUMMARY,
+      runIndex: 1
+    })
+  }
+  return out
+}
+
+/** Every child id reachable from `entries` (all entries, every branch), children's children included. */
+function reachableAgentIds(entries: PiSessionEntry[]): Set<string> {
+  const ids = new Set<string>()
+  const walk = (list: PiSessionEntry[], depth: number): void => {
+    if (depth > MAX_SUBAGENT_HISTORY_DEPTH) return
+    for (const link of collectAgentIds(list)) {
+      if (ids.has(link.agentId)) continue
+      ids.add(link.agentId)
+      const file = childSessionFile(link.agentId)
+      const parsed = file ? readPiSessionFile(file) : null
+      if (parsed) walk(parsed.entries, depth + 1)
+    }
+  }
+  walk(entries, 1)
+  return ids
 }
 
 /**
@@ -489,11 +667,38 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
  * Delete a pi session: unlink its .jsonl file and prune the parent
  * `--<mangled-cwd>--` dir if it's now empty. Best-effort: logs + swallows on
  * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer.
+ *
+ * Its host-run subagent children (ADR-089) go with it — read from the parent
+ * file FIRST, recursively through the child files — except a child another pi
+ * session file still references (a fork or clone copies the parent's entries,
+ * links included): those files are found by a substring prefilter on the ids,
+ * then parsed to confirm, and everything they reach is kept.
  */
 export async function deletePiSession(sessionId: string): Promise<void> {
   try {
     const filePath = findPiSessionFile(sessionId)
     if (!filePath) return
+    const parsed = readPiSessionFile(filePath)
+    const children = parsed ? reachableAgentIds(parsed.entries) : new Set<string>()
+    if (children.size > 0) {
+      const kept = new Set<string>()
+      for (const other of walkAllSessionFiles()) {
+        if (other === filePath) continue
+        let raw: string
+        try {
+          raw = fs.readFileSync(other, 'utf-8')
+        } catch {
+          continue
+        }
+        if (![...children].some((id) => raw.includes(id))) continue
+        const otherParsed = readPiSessionFile(other)
+        if (!otherParsed) continue
+        for (const id of reachableAgentIds(otherParsed.entries)) kept.add(id)
+      }
+      for (const id of children) {
+        if (!kept.has(id)) await deleteChildSession(id)
+      }
+    }
     await fs.promises.unlink(filePath)
     const dir = path.dirname(filePath)
     try {

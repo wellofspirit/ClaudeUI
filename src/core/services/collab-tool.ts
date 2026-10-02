@@ -5,14 +5,18 @@ import { crossEngineDispatcher } from './cross-engine-dispatcher'
 import { loadEngineConfig } from './ui-config'
 import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
-import type { EngineId } from '../../shared/types'
+import type { ChatMessage, EngineId } from '../../shared/types'
 
 export interface CollabServerContext {
   engineId: EngineId
   /** Live routingId lookup — the session is rekeyed to its UUID after init. */
   getRoutingId: () => string
   cwd: string
+  /** Live permission-mode lookup — read at every dispatch decision (ADR-088). */
   getAutonomyMode: () => string
+  /** The session's live transcript (`getMessages()`), for the judge of a
+   *  dispatched pi/opencode target's calls (ADR-088). */
+  getMessages: () => ChatMessage[]
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
@@ -110,7 +114,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               fromEngine: ctx.engineId,
               fromRoutingId: ctx.getRoutingId(),
               cwd: ctx.cwd,
-              autonomyMode: ctx.getAutonomyMode(),
+              getAutonomyMode: ctx.getAutonomyMode,
+              getMessages: ctx.getMessages,
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
               toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,

@@ -39,6 +39,7 @@ import {
 } from '../../renderer/src/stores/replica'
 import { isVolatileStream, volatileFlavorOf } from '../../core/shared/sync/channels'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
+import { resetHistoryLoadForTests } from '../../renderer/src/lib/session-history-load'
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
   ChatMessage,
@@ -53,7 +54,8 @@ import type {
   MeteringSnapshot,
   SlashCommandInfo,
   FileDiff,
-  ToolResultImage
+  ToolResultImage,
+  AttachmentRef
 } from '../../shared/types'
 
 let seq = 0
@@ -92,6 +94,7 @@ function client(): SyncClient {
 export function resetReplicaSeam(): void {
   resetSyncClientForTests()
   resetReplicaForTests()
+  resetHistoryLoadForTests()
   seq = 0
 }
 
@@ -268,7 +271,7 @@ export const seed = {
       id?: string
       timestamp?: number
       prompt?: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+      attachments?: AttachmentRef[]
     }
   ) => emitSync('session:user-message', [routingId, data]),
 

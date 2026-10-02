@@ -30,12 +30,8 @@
 import { useEffect } from 'react'
 import { onSyncEvent, markSyncReady } from '../../../core/shared/sync/client-registry'
 import { useSessionStore } from '../stores/session-store'
-import {
-  onReplicaApplied,
-  seedColdSession,
-  seedWatchedSession,
-  getReplicaState
-} from '../stores/replica'
+import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
+import { loadResumedTranscript } from '../lib/session-history-load'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
@@ -110,8 +106,13 @@ export function hasAutoContinuingTask(
  * whether this client is the ORIGINATOR (which already registered the session
  * locally, with its engine/model pick) or a follower learning about someone
  * else's session for the first time.
+ *
+ * `evicted` rides along because a resident entry is not always one WITH a
+ * transcript: a snapshot that did not carry it (ADR-087 §2) leaves an empty,
+ * evicted entry, and this client then needs the resumed session's history
+ * exactly as a follower that had never seen the session does.
  */
-const wasResidentAtCreate = new Map<string, boolean>()
+const wasResidentAtCreate = new Map<string, { evicted: boolean }>()
 
 // ---------------------------------------------------------------------------
 // The watched-session refetch (phase 5 S4)
@@ -252,10 +253,8 @@ export function useClaudeEvents(): void {
       // Pre-fold capture (see wasResidentAtCreate)
       // -------------------------------------------------------------------
       onSyncEvent('session:created', (routingId) => {
-        wasResidentAtCreate.set(
-          routingId,
-          useSessionStore.getState().sessions[routingId] !== undefined
-        )
+        const resident = useSessionStore.getState().sessions[routingId]
+        if (resident) wasResidentAtCreate.set(routingId, { evicted: resident.evicted })
       }),
 
       // -------------------------------------------------------------------
@@ -495,50 +494,33 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     case 'session:created': {
       const data = args[1] as
         { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string } | undefined
-      const wasResident = wasResidentAtCreate.get(routingId) === true
+      const resident = wasResidentAtCreate.get(routingId)
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
       // `isHistorical` is view state, so it is cleared here.
       store.markSessionLive(routingId)
-      if (wasResident) return
-      // Another client created this session. Register it locally — recents +
-      // engine map — and either follow it or flag it in the sidebar.
-      const follow = store.settings.remoteFollowActions
-      store.registerRemoteSession(routingId, follow)
-      if (!follow) store.setNeedsAttention(routingId, true)
+      if (resident && !resident.evicted) return
+      // An evicted resident entry is already registered (recents, engine map) and
+      // must not re-announce itself; it only lacks the transcript.
+      if (!resident) {
+        // Another client created this session. Register it locally — recents +
+        // engine map — and either follow it or flag it in the sidebar.
+        const follow = store.settings.remoteFollowActions
+        store.registerRemoteSession(routingId, follow)
+        if (!follow) store.setNeedsAttention(routingId, true)
+      }
       if (!data?.resumeSessionId) return
       // A resumed session's transcript lives on disk. The HOST seeds its own
       // canonical copy (create-session.ts), but that seed is not an event, so
-      // this replica has to read the same source for itself; `seedColdSession`
-      // is idempotent and refuses to clobber live content.
-      const resumeSessionId = data.resumeSessionId
-      // The session's own key (the dir its file lives in), not its group's — a
-      // worktree-relocated transcript is listed under its home group.
-      const projectKey = store.directories
-        .flatMap((g) => g.sessions)
-        .find((s) => s.sessionId === resumeSessionId)?.projectKey
-      if (!projectKey) return
-      // The FORK anchor rides the birth event (F3) and is passed straight
-      // through: without it this client painted the parent's post-anchor turns
-      // above an engine that was resumed from the truncated prefix — a
-      // conversation whose visible tail the model has never seen. Absent (the
-      // non-fork case, and an older host) loads the whole transcript, exactly as
-      // before. Canonical's own seed passes the same value to the same loader.
-      void window.api
-        .loadSessionHistory(resumeSessionId, projectKey, data.resumeSessionAt)
-        .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
-          const s = useSessionStore.getState()
-          if (!s.sessions[routingId]) return
-          seedColdSession(routingId, {
-            cwd: data.cwd ?? s.sessions[routingId].cwd,
-            messages,
-            taskNotifications,
-            ...(statusLine ? { statusLine } : {})
-          })
-          if (warnings?.length) for (const w of warnings) s.addWarning(routingId, w)
-          if (customTitle) s.setCustomTitle(routingId, customTitle)
-          s.markSessionLive(routingId)
-        })
+      // this replica has to read the same source for itself — fill-only, so live
+      // content that already streamed in wins. The fork anchor rides the birth
+      // event (F3) and is passed through for the same reason canonical's own seed
+      // takes it.
+      void loadResumedTranscript(routingId, {
+        resumeSessionId: data.resumeSessionId,
+        resumeSessionAt: data.resumeSessionAt,
+        cwd: data.cwd
+      })
       return
     }
 

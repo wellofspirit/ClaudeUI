@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import {
+  hasResumableTranscript,
+  useActiveSession,
+  useSessionStore
+} from '../../../stores/session-store'
 import type { DiffComment } from '../../../../../shared/types'
 import { composeReviewPrompt } from './utils'
 import { ReviewBarView } from './View'
@@ -26,7 +30,7 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
     // Lazy SDK create if not yet active
     if (!sdkActive) {
       const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+      const isHistorical = session && hasResumableTranscript(session) && !session.sdkActive
       const resumeId = isHistorical ? activeSessionId : undefined
       await window.api.createSession(
         activeSessionId,

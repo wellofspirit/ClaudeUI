@@ -1045,10 +1045,19 @@ describe('session:user-message (the reducer builds the transcript row)', () => {
     seed.userMessage('r1', {
       id: 'u1',
       prompt: 'look at this',
-      attachments: [{ mediaType: 'image/png', base64Data: 'AAA', fileName: 'shot.png' }]
+      attachments: [
+        { mediaType: 'image/png', blobId: 'a'.repeat(64), bytes: 3, fileName: 'shot.png' }
+      ]
     })
     const content = store().sessions['r1'].messages[0].content
-    expect(content[0].type).toBe('image')
+    // The block is a ref: an id and a size, never the bytes (ADR-087).
+    expect(content[0]).toEqual({
+      type: 'image',
+      mediaType: 'image/png',
+      blobId: 'a'.repeat(64),
+      bytes: 3,
+      fileName: 'shot.png'
+    })
     expect(content[1].type).toBe('text')
   })
 
@@ -1056,10 +1065,18 @@ describe('session:user-message (the reducer builds the transcript row)', () => {
     seed.userMessage('r1', {
       id: 'u1',
       prompt: 'read this',
-      attachments: [{ mediaType: 'application/pdf', base64Data: 'AAA', fileName: 'doc.pdf' }]
+      attachments: [
+        { mediaType: 'application/pdf', blobId: 'b'.repeat(64), bytes: 3, fileName: 'doc.pdf' }
+      ]
     })
     const content = store().sessions['r1'].messages[0].content
-    expect(content[0].type).toBe('document')
+    expect(content[0]).toEqual({
+      type: 'document',
+      mediaType: 'application/pdf',
+      blobId: 'b'.repeat(64),
+      bytes: 3,
+      fileName: 'doc.pdf'
+    })
     expect(content[1].type).toBe('text')
   })
 

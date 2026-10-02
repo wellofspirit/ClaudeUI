@@ -232,11 +232,16 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
 /**
  * Render the transcript to compact text for the judge:
  *
- * - user text → `User: …`
+ * - user-role text → `User: …` (a `system` row never: see below)
  * - assistant tool CALLS → `toolName <input>`, followed by `{"outcome":"…"}`
  *   when `outcomes` has an entry for that call's `toolUseId` (phase 3, ref §5)
  * - the prose of the last assistant MESSAGE immediately preceding each user text
  *   message → `Assistant: …` (tail-truncated at {@link MAX_ASSISTANT_PROSE_CHARS})
+ *
+ * `role: 'system'` messages are skipped whole, whatever they carry: system rows
+ * are engine/host notes (compaction, API errors, Codex guardian notices,
+ * host-injected agent messages such as a pi task notification, ADR-089 S3) and
+ * never a human turn, so none may become a `User:` line or the user's consent.
  *
  * Everything else is dropped: thinking blocks, tool RESULTS (the dominant token
  * saver — like cli.js, the judge sees calls, not their outputs), images, and any
@@ -287,6 +292,9 @@ export function slimTranscript(
       continue
     }
 
+    // Engine/host notes, never a human turn (see the doc above).
+    if (m.role === 'system') continue
+
     for (const b of m.content) {
       if (b.type !== 'text') continue // tool_result etc. — not a human turn
       if (!b.text.trim()) continue
@@ -307,12 +315,17 @@ export function renderAction(action: ClassifierAction): string {
 }
 
 /**
- * The header line above the rendered action. A subagent's call (ADR-085 S4)
- * says which subagent proposed it and the parent `task` that spawned it — the
- * task fields JSON-rendered (absent ones omitted; the prompt clipped at
+ * The header line above the rendered action. A subagent's call says which
+ * subagent proposed it and the task that spawned it — the task fields
+ * JSON-rendered (absent ones omitted; the prompt clipped at
  * {@link MAX_SUBAGENT_PROMPT_CHARS}, then `…`) — and asks the judge to read it
- * as the assistant's own action against the same user intent: the judge sees
- * only the PARENT transcript, whose `task` line is the child's mandate.
+ * as the assistant's own action against the same user intent. Two callers:
+ * - an opencode task CHILD (ADR-085 S4): the judge sees only the PARENT
+ *   transcript, whose `task` line is the child's mandate;
+ * - a dispatch TARGET (ADR-088, type `dispatch:<engine>`, the latest dispatch
+ *   prompt as the task): the judge sees the PARENT transcript followed by the
+ *   target's own assistant trajectory (its user-role messages removed), so the
+ *   parent's human turns stay the only `User:` lines.
  * Exactly one line; the system prompt is untouched (byte-stability, ADR-081 §4).
  */
 function actionHeader(action: ClassifierAction): string {

@@ -245,6 +245,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onDelete && (
             <button
+              data-testid="DirectoryItem.delete"
               onClick={() => {
                 menu.close()
                 onDelete()

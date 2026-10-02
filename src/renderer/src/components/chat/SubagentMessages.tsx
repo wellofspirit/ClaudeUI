@@ -11,6 +11,7 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { DiagramGalleryProvider } from './DiagramGallery'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ContextNoteBlock } from './ContextNoteBlock'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
 interface Props {
@@ -58,6 +59,12 @@ const ContentBlockView = memo(function ContentBlockView({
   }
   if (block.type === 'thinking' && block.text) {
     return <ThinkingBlock text={block.text} />
+  }
+  // Context the host put into the CHILD's prompt that no one typed there: a
+  // task notification or an agent message (ADR-089 S3). Verbatim, collapsed,
+  // the same row the top-level transcript uses, never a user bubble.
+  if (block.type === 'context_note') {
+    return <ContextNoteBlock block={block} />
   }
   return null
 })

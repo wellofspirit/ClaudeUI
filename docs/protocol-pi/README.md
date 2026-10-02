@@ -256,6 +256,28 @@ Probed for M5b (2026-07-20, same binary):
   catalog DOES expose per-model higher-tier support (future: lift piModelCapabilities' conservative
   low/medium/high cap by reading this).
 
+Probed for ADR-089 host-run subagents (2026-10-01, the 0.87.1 managed-store binary, an isolated
+`PI_CODING_AGENT_DIR`, `PI_OFFLINE=1`, no model turn):
+
+- **P1 `--session-dir <D> --session-id <id>`**: `get_state` reports `sessionId === <id>` and
+  `sessionFile === <D>/<ISO-ts>_<id>.jsonl` — a FLAT layout, no `--<cwd>--` subdirectory under an
+  explicit dir. No file is written before the first assistant message
+  (`vendor/pi-src/packages/coding-agent/src/core/session-manager.ts` `_persist`). A fresh id prints
+  `Warning: No project session found with id …` on stderr (harmless).
+- **P2 `--append-system-prompt <text>`** appends inside `<addendum>…</addendum>` at the end of the
+  system prompt, and the argument may be a FILE PATH: pi reads the file when it exists
+  (`resource-loader.ts` `resolvePromptInput`).
+- **P3 `--tools a,b` is an allowlist over built-in AND extension tools** — a registered extension
+  tool missing from the list is inactive (`--tools read,grep,agent` gave `[read, grep, agent]`);
+  `-xt <name>` removes one tool; no `--tools` gives pi's defaults plus every extension tool.
+- **P4 resume**: with an existing `<D>/<ts>_<id>.jsonl`, the same `--session-dir`/`--session-id`
+  reopen it — but only from the cwd in its header. From a different cwd the same flags create a NEW
+  session (`SessionManager.findById` filters by header cwd when the session dir is not pi's
+  default), so a child must always be spawned with exactly the parent's cwd.
+- **P7 `details` persists**: a tool's returned `details` lands on the `toolResult` message
+  (`vendor/pi-src/packages/agent/src/agent-loop.ts`), and so in the session file — the
+  `details.cuiAgent` history link rides this.
+
 Probed for M5c fork/sideQuestion (2026-07-21, same binary):
 
 - **`fork {entryId}` ALONE creates a new session file and switches the client to it, leaving the
@@ -274,6 +296,62 @@ Probed for M5c fork/sideQuestion (2026-07-21, same binary):
 - pi has NO in-session non-persisting "ask" RPC (prompt/steer/followUp all persist to the active
   branch) and no equivalent of Claude's `side_question` control request — hence sideQuestion's
   transcript-fed ephemeral rather than an in-session query.
+
+Probed for ADR-089 S3 (2026-10-02, pi 0.87.1 managed-store binary, isolated `PI_CODING_AGENT_DIR`,
+`PI_OFFLINE=1`, no credentials; a scratch extension registering `cui-deliver` that base64-decodes its
+args and calls `pi.sendMessage`):
+
+- **P-S1** `prompt {message: '/cui-deliver <b64>'}` with `triggerTurn: false` at idle → `success:
+true`; `message_start`/`message_end` with `role: 'custom'` and our `customType`; `get_messages`
+  lists it as `custom`; the session file gains a `custom_message` entry (`display: true`).
+  `Buffer` is available inside an extension.
+- **P-S2** RPC `steer` sent at IDLE → `success: true`, then `get_state` shows `isStreaming: false`,
+  `pendingMessageCount: 1`: the message is stranded until the next prompt. Never inject with
+  `steer`/`follow_up`.
+- **P-S3** the same command with `triggerTurn: true` at idle runs a full turn (`agent_start` …
+  `agent_end`, `agent_settled`): one `agent_settled` per wake.
+- **P-S4** a handler that throws still answers `success: true` (pi emits an `extension_error` from
+  `command:cui-deliver`): the ack never confirms delivery, the `custom` message_end does.
+- **P-S5** `get_commands` lists `cui-deliver` with `sourceInfo.scope: 'temporary'` (filtered out of
+  ClaudeUI's slash menu with the other bridge commands).
+
+At source (`vendor/pi-src/packages/coding-agent/src/core/agent-session.ts`, `rpc-mode.ts`,
+`messages.ts`; `packages/agent/src/agent-loop.ts`):
+
+- **S1** RPC `prompt` is fire-and-forget inside pi; the response is written once the preflight ends,
+  so stdin commands are processed concurrently.
+- **S2** `prompt()` runs an extension command first, even mid-stream, and returns; a prompt arriving
+  while pi emits `agent_settled` is deferred until after it.
+- **S3** `sendCustomMessage`: streaming + trigger → `agent.steer`; idle + trigger → a new run
+  (deferred if settling); streaming + no trigger → appended at the END of the turn (the model does
+  not see it in that run); idle + no trigger → appended now.
+- **S4** a steered message is delivered after the current tool batch, before the next LLM call; the
+  run keeps going while steering messages remain.
+- **S5** `custom` messages reach the LLM as `user`-role messages and persist as `custom_message`
+  entries — the marking lives in the role and `customType`, not in what the model sees.
+- **S6** `abort()` does not clear the steer/follow-up queues: an undelivered steer survives an
+  interrupt and is polled at the next run.
+- **S7** `_runAgentPrompt` marks the run active synchronously before its first await, and the chain
+  `prompt` → command handler → `pi.sendMessage` → `sendCustomMessage` has no await before it when
+  the handler does not await: two back-to-back deliveries can never both start a run.
+- **S8** a user prompt has awaits before its `isStreaming` check, so a delivery that starts a run
+  inside that window makes the prompt fail "Agent is already processing"; once its ack is in, a
+  delivery steers it.
+
+Probed/verified for ADR-090 (2026-10-02, at source in `vendor/pi-src` v0.87.1, and in a recorded
+session file + ClaudeUI log; no new probe run):
+
+- **An abort during a tool batch ends the turn `stopReason: "error"`, not `"aborted"`.** The aborted
+  batch leaves `hasMoreToolCalls` true and the loop requests the model again without checking the
+  signal (`packages/agent/src/agent-loop.ts:182-243, 262-296`; aborted calls read "Operation
+  aborted", 610-625; `bash` returns "Command aborted", `coding-agent/src/core/tools/bash.ts:356-357`).
+  The request's setup (`coding-agent/src/core/sdk.ts:375-385` → `model-runtime.ts:638-643`) rejects
+  on the aborted signal in `getAuth` (`model-runtime.ts:575-588`, 495-512), and `lazyStream` turns
+  any setup failure into an assistant message with `stopReason: "error"`, `content: []`,
+  `errorMessage: "The operation was aborted."` without consulting the signal
+  (`packages/ai/src/api/lazy.ts:4-23, 46-60`); the loop ends on it (`agent-loop.ts:244-254`), then
+  `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
+  (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-090).
 
 ## Behavior gotchas
 

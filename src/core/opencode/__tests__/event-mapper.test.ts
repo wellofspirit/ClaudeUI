@@ -8,6 +8,7 @@ import {
   type MessageAccumulator
 } from '../event-mapper'
 import type { OpencodeEvent, StoredMessage } from '../protocol/types'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const SESSION_ID = 'ses_abc123'
 const START_TIME = Date.now()
@@ -1024,7 +1025,9 @@ describe('extractToolResult', () => {
         ]
       }
     })
-    expect(res?.images).toEqual([{ mediaType: 'image/png', base64Data: 'LIVE', fileName: 'a.png' }])
+    expect(res?.images).toEqual([
+      { mediaType: 'image/png', ...blobRefOf('LIVE'), fileName: 'a.png' }
+    ])
   })
 
   it('omits images for a tool that returned none', () => {

@@ -16,6 +16,7 @@ import { emptyCanonicalState } from '../../shared/sync/state'
 import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -1902,6 +1903,75 @@ describe('Codex held queue', () => {
     )
   })
 
+  // ADR-087: the queue item that is BROADCAST carries refs; the engine is still
+  // handed the bytes the user uploaded.
+  describe('a queued item with an attachment', () => {
+    const UPLOAD = { mediaType: 'image/png', base64Data: 'QUJDREVGR0g=', fileName: 'shot.png' }
+    const DATA_URL = 'data:image/png;base64,QUJDREVGR0g='
+
+    it('steers the ORIGINAL upload bytes, and broadcasts only the ref', async () => {
+      const { session, request, notify, queues } = fixture()
+      await session.run('hello')
+      session.enqueuePrompt('look at this', [UPLOAD])
+      const itemId = queues().at(-1)![0].itemId
+      notify('item/completed', BOUNDARY)
+      await vi.waitFor(() => expect(steers(request)).toHaveLength(1))
+
+      expect(steers(request)[0]).toEqual({
+        threadId: 'root',
+        expectedTurnId: 'turn',
+        clientUserMessageId: `steer-${itemId}`,
+        input: [
+          { type: 'text', text: 'look at this', text_elements: [] },
+          { type: 'image', url: DATA_URL }
+        ]
+      })
+      await vi.waitFor(() =>
+        expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+      )
+      for (const broadcast of queues()) {
+        expect(broadcast[0].attachments).toEqual([
+          { mediaType: 'image/png', ...blobRefOf(UPLOAD.base64Data), fileName: 'shot.png' }
+        ])
+      }
+      expect(JSON.stringify(queues())).not.toContain(UPLOAD.base64Data)
+    })
+
+    it('starts the next turn with the ORIGINAL upload bytes when it is forwarded at idle', async () => {
+      const { session, request, notify, queues } = fixture()
+      await session.run('hello')
+      session.enqueuePrompt('look at this', [UPLOAD])
+      const itemId = queues().at(-1)![0].itemId
+      // No sub-turn boundary: the turn simply ends, so the item goes out as a
+      // fresh `turn/start` rather than a steer.
+      notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [] }
+      })
+      await vi.waitFor(() => expect(starts(request)).toHaveLength(2))
+
+      expect(steers(request)).toEqual([])
+      expect(starts(request)[1]).toEqual(
+        expect.objectContaining({
+          clientUserMessageId: `steer-${itemId}`,
+          input: [
+            { type: 'text', text: 'look at this', text_elements: [] },
+            { type: 'image', url: DATA_URL }
+          ]
+        })
+      )
+      await vi.waitFor(() =>
+        expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+      )
+      for (const broadcast of queues()) {
+        expect(broadcast[0].attachments).toEqual([
+          { mediaType: 'image/png', ...blobRefOf(UPLOAD.base64Data), fileName: 'shot.png' }
+        ])
+      }
+      expect(JSON.stringify(queues())).not.toContain(UPLOAD.base64Data)
+    })
+  })
+
   it('steers duplicate texts under distinct ids and consumes them in order', async () => {
     const { session, request, notify, queues } = fixture()
     await session.run('hello')
@@ -2325,25 +2395,49 @@ describe('Codex hosted tools', () => {
       expect(results()).toEqual([{ toolUseId: CARD, result: TOMBSTONE, isError: true }])
     })
 
-    it('leaves a native command item alone — the binary completes its own', async () => {
+    // S4d: this used to pin "the binary completes its own" — it does not: an
+    // interrupted turn ends with `items: []` and the command card spun for good.
+    const command = (status: string) => ({
+      id: 'command',
+      type: 'commandExecution',
+      command: 'pwd',
+      cwd: '/isolated',
+      status,
+      aggregatedOutput: '',
+      exitCode: status === 'completed' ? 0 : null,
+      durationMs: null
+    })
+    it('tombstones a native command an interrupt left open — honestly, once', async () => {
       const f = fixture()
       await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
+      ended(f, 'interrupted')
+      expect(results()).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","command"]',
+          result: 'Interrupted — the command may still be running in the background',
+          isError: true
+        }
+      ])
+    })
+
+    it('tombstones an open fileChange on a failed turn, and leaves a completed command alone', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: command('inProgress') })
       f.notify('item/started', {
         threadId: 'root',
         turnId: 'turn',
-        item: {
-          id: 'command',
-          type: 'commandExecution',
-          command: 'pwd',
-          cwd: '/isolated',
-          status: 'inProgress',
-          aggregatedOutput: '',
-          exitCode: null,
-          durationMs: null
-        }
+        item: { id: 'patch', type: 'fileChange', changes: [], status: 'inProgress' }
       })
-      ended(f, 'interrupted')
-      expect(results()).toEqual([])
+      ended(f, 'failed', [command('completed')])
+      expect(results().filter((r) => r.isError === true)).toEqual([
+        {
+          toolUseId: 'codex:["root","turn","patch"]',
+          result: 'Interrupted before the change was confirmed',
+          isError: true
+        }
+      ])
     })
   })
 })
@@ -2450,7 +2544,8 @@ describe('Codex cross-engine dispatch', () => {
         fromEngine: 'codex',
         fromRoutingId: 'temporary',
         cwd: '/isolated',
-        autonomyMode: 'acceptEdits',
+        getAutonomyMode: expect.any(Function),
+        getMessages: expect.any(Function),
         toolUseId: 'codex:["root","turn","dispatch-1"]',
         extra: expect.objectContaining({ signal: expect.any(AbortSignal) })
       })
@@ -2547,10 +2642,16 @@ describe('Codex cross-engine dispatch', () => {
     await expect(result).resolves.toMatchObject({ success: true })
     // The MODE still travels to the target verbatim — the card is ClaudeUI's
     // gate, not a downgrade of the user's autonomy choice.
-    expect(dispatcher.dispatch).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ autonomyMode: 'auto' })
-    )
+    const dispatchCtx = dispatcher.dispatch.mock.calls[0][1] as {
+      getAutonomyMode: () => string
+      getMessages: () => unknown[]
+    }
+    expect(dispatchCtx.getAutonomyMode()).toBe('auto')
+    // Live accessors (ADR-088): a later switch is visible through the SAME
+    // context, and the transcript is the session's live history.
+    await f.session.setPermissionMode('plan')
+    expect(dispatchCtx.getAutonomyMode()).toBe('plan')
+    expect(dispatchCtx.getMessages()).toBe(f.session.getMessages())
   })
 
   it('refuses a malformed call without a card and without dispatching', async () => {
@@ -5221,7 +5322,7 @@ describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
     expect(results()[0]).toMatchObject({
       result: '',
       isError: false,
-      images: [{ mediaType: 'image/png', base64Data: PNG.toString('base64') }]
+      images: [{ mediaType: 'image/png', ...blobRefOf(PNG.toString('base64')) }]
     })
     // …and the canonical history agrees with what went out on the wire.
     const block = session
@@ -5555,5 +5656,53 @@ describe('a Codex turn writes the usage ledger', () => {
     await f.session.run('hello')
     ended(f, 'root', 'turn')
     expect(usageRows).not.toHaveBeenCalled()
+  })
+})
+
+describe('a Codex user stop is not an error (ADR-090)', () => {
+  /** Distinct turn ids per `turn/start`, so a second turn is not an ended one. */
+  function withTurnIds(request: ReturnType<typeof fixture>['request']): void {
+    const base = request.getMockImplementation()!
+    let n = 0
+    request.mockImplementation(async (method: string, params?: unknown) =>
+      method === 'turn/start'
+        ? { turn: { id: `turn-${++n}`, status: 'inProgress', items: [] } }
+        : base(method, params)
+    )
+  }
+  const banners = (): unknown[] =>
+    events.mock.calls.filter(([channel]) => channel === 'session:error').map((c) => c[1][1])
+
+  it('E5: a turn that ends failed in a race with interrupt() raises no banner; a later failed turn does', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'failed', items: [], error: { message: 'x' } }
+    })
+    expect(banners()).toEqual([])
+
+    await session.run('again')
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-2', status: 'failed', items: [], error: { message: 'y' } }
+    })
+    expect(banners()).toEqual([
+      'Codex turn failed. Check native account status and settings; no credentials were changed.'
+    ])
+  })
+
+  it('E5 (pins existing behaviour): an interrupted turn with no error raises no banner', async () => {
+    const { session, notify, request } = fixture()
+    withTurnIds(request)
+    await session.run('hello')
+    await session.interrupt()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn-1', status: 'interrupted', items: [], error: null }
+    })
+    expect(banners()).toEqual([])
   })
 })

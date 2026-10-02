@@ -36,6 +36,7 @@ vi.mock('os', async (importOriginal) => {
 })
 
 import { loadSessionHistory } from '../../../core/services/session-history'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 const PROJECT_KEY = 'test-project-queued-command'
 const SESSION_ID = '903d5166-8025-4343-b927-eddd67c69bfb'
@@ -121,7 +122,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
     // Pre-2.1.280 lines carry no source_uuid: the line's own uuid is the id.
     expect(messages[0]).toMatchObject({ id: 'line-uuid-1', role: 'user' })
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') },
       { type: 'text', text: 'look at this' }
     ])
   })
@@ -154,7 +155,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
 
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' }
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') }
     ])
   })
 
@@ -178,7 +179,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
     expect(messages.map((m) => m.id)).toEqual(['real'])
   })
 
-  it('reads a task notification absorbed mid-turn as a notification, once', async () => {
+  it('reads a task notification absorbed mid-turn as a notification, once, shown as one agent note (S4)', async () => {
     const xml =
       '<task-notification>\n<task-id>bg42</task-id>\n<status>completed</status>\n' +
       '<summary>done</summary>\n</task-notification>'
@@ -190,7 +191,18 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
 
     const { messages, taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
 
-    expect(messages).toEqual([])
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'done',
+            fragments: [{ text: xml, label: 'from an agent, not from you' }]
+          }
+        ]
+      })
+    ])
     expect(taskNotifications).toEqual([
       expect.objectContaining({ taskId: 'bg42', status: 'completed', summary: 'done' })
     ])

@@ -8,10 +8,12 @@ import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import type {
+  AttachmentUpload,
   AutoModeConfig,
   SharedAutoModeConfig,
   ChatMessage,
   ContentBlock,
+  ImageMediaType,
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
@@ -23,20 +25,14 @@ import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
+import { internAttachments } from '../services/blob-store'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { harnessUnavailableMessage } from '../harness/resolve'
 import { locatePiLaunch } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
-import {
-  mapPiEvent,
-  createPiMapperState,
-  buildPiChatMessage,
-  piToolResultImages,
-  piToolResultText,
-  finishPiMessage
-} from './event-mapper'
-import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
+import { mapPiEvent, createPiMapperState, finishPiMessage } from './event-mapper'
+import type { PiMapperOutput, PiMapperState } from './event-mapper'
 import type {
   PiCloneData,
   PiForkData,
@@ -47,10 +43,22 @@ import type {
   PiRpcCommand
 } from './pi-protocol'
 import { getPiModelCatalog, discoverPiModels, effortLevelsFromModel } from './model-discovery'
-import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
+import {
+  findPiSessionFile,
+  loadPiAgentLinks,
+  loadPiSessionHistory
+} from '../services/pi-session-list'
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
-import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
+import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
+import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
+import { piUsageEvent } from './usage-row'
+// Host-run subagents (ADR-089): the manager owns the children; this session
+// owns their gating (decideToolCall, parametrized by the child scope).
+import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
+import type { SpawnPiChildFn } from './pi-child-runner'
+import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
+import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
   PiBridgeAbandoned,
@@ -74,6 +82,7 @@ import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
 } from '../services/cross-engine-dispatcher'
+import { canDispatchInto } from '../services/dispatch-targets'
 import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
   decideWithSource,
@@ -90,25 +99,16 @@ import {
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
-import {
-  classify,
-  formatUnparseableJudgeReply,
-  formatVerdictLine,
-  isAutoModeFastPathAllowed,
-  type ClassifyResult,
-  type EnvironmentInfo,
-  type JudgeTransport
-} from '../automode/classifier'
+import type { ClassifyResult, EnvironmentInfo, JudgeTransport } from '../automode/classifier'
 import {
   allowRuleReviewBlock,
   AutoModeDenialTracker,
   autoModeReviewBlock,
-  formatAutoModeDenyReason,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd, readOnlyGate } from '../automode/read-only-gate'
-import { allowRuleGate } from '../automode/allow-rule-gate'
+import { effectiveShellCwd } from '../automode/read-only-gate'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
+import { runJudgePipeline } from '../automode/judge-pipeline'
 import {
   analyzeRedirects,
   captureGitConfigArmed,
@@ -136,7 +136,7 @@ import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 // setTimeout/clearTimeout only).
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 
-/** Fail-closed default for an unrecognized /hosted-tool toolName (defense in depth — the bridge extension only ever sends the four names it registers, but handleHostedTool must never crash on an unexpected one). */
+/** Fail-closed default for an unrecognized /hosted-tool toolName (defense in depth — the bridge extension only ever sends the five names it registers, but handleHostedTool must never crash on an unexpected one). */
 function unknownHostedTool(toolName: string): PiHostedToolResult {
   return { content: [{ type: 'text', text: `Unknown hosted tool "${toolName}"` }], isError: true }
 }
@@ -206,8 +206,8 @@ const SIDE_QUESTION_TIMEOUT_MS = 60_000
  * `thinking`/`image`/`document`/`cli_command`/`api_error`/`compact_separator`
  * are dropped: thinking is pi's own internal reasoning (out of scope for a
  * side question about WHAT is happening, not WHY the model privately
- * reasoned it), image/document blocks would otherwise dump raw base64 into a
- * text prompt, and the rest are ClaudeUI meta-transcript entries with no
+ * reasoned it), image/document blocks would otherwise put opaque blob refs
+ * (ADR-087) into a text prompt, and the rest are ClaudeUI meta-transcript entries with no
  * conversational content. A message that reduces to nothing (e.g. a
  * tool-only turn whose blocks were all dropped) still gets a placeholder so
  * the line count/ordering stays intact.
@@ -369,6 +369,10 @@ export class PiSession extends BaseSession {
       toolName: string
       input: Record<string, unknown>
       toolCallId: string
+      /** Where a human REJECT is recorded: the session's own map, or a child's (ADR-089). */
+      outcomes: Map<string, ToolOutcome>
+      /** The host-run child the card belongs to (ADR-089), or null for the session's own call. */
+      scope: PiChildScope | null
     }
   >()
   /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
@@ -413,53 +417,30 @@ export class PiSession extends BaseSession {
    * SECURITY (A1): one-shot `/hosted-tool` execution grants, `toolCallId ->
    * toolName`, minted by gateToolCall's wrapper (below) the instant `/tool-
    * call` decides 'allow' for a name in PI_HOSTED_TOOL_NAMES, and consumed
-   * (deleted) by handleHostedTool on first use. Without this, the bearer
-   * token alone gated `/hosted-tool` — and that token sits in the pi child's
-   * env, reachable from any ALREADY-APPROVED bash command (`curl
+   * by handleHostedTool on first use. Without this, the bearer token alone
+   * gated `/hosted-tool` — and that token sits in the pi child's env,
+   * reachable from any ALREADY-APPROVED bash command (`curl
    * $CLAUDEUI_PI_BRIDGE_URL/hosted-tool -d '{"toolName":"dispatch_agent",...}'`),
    * bypassing dispatch_agent's own deliberate 'ask' gating entirely. Cleared
    * wholesale by rejectAllPendingGates (interrupt/cancel/unexpected exit) —
    * a grant minted for a turn that no longer exists must not survive it.
-   * Bounded to 256 entries (oldest evicted first, Map insertion order) so a
-   * long-running session that never executes a granted call can't grow this
-   * unboundedly.
-   */
-  private hostedGrants = new Map<string, string>()
-  /**
-   * SECURITY (abandonment race): `toolCallId`s whose `/tool-call` exchange
-   * PiBridgeHost abandoned (its "Long-poll protocol") while the gate decision
-   * was still being computed. `handleBridgeAbandoned` adds them;
-   * `gateToolCall` consumes one to WITHHOLD the grant a late `allow` would
-   * otherwise mint.
    *
-   * Needed because the two events are not ordered: `handleBridgeAbandoned` can
-   * only force-deny a `pendingGates` entry, and an auto-mode-judged call has
-   * none — the judge runs for tens of seconds inside `gateToolCallInner` with
-   * nothing registered anywhere, then resolves 'allow' into `gateToolCall`'s
-   * wrapper long after the host stopped waiting. Deleting the grant at abandon
-   * time (which we also do) therefore misses the grant that has not been
-   * minted yet.
+   * SECURITY (abandonment race): `handleBridgeAbandoned` marks a `toolCallId`
+   * whose `/tool-call` exchange PiBridgeHost abandoned while the gate decision
+   * was still being computed, and the wrapper then WITHHOLDS the grant a late
+   * `allow` would otherwise mint. Needed because the two events are not
+   * ordered: `handleBridgeAbandoned` can only force-deny a `pendingGates`
+   * entry, and an auto-mode-judged call has none — the judge runs for tens of
+   * seconds inside `gateToolCallInner` with nothing registered anywhere, then
+   * resolves 'allow' into `gateToolCall`'s wrapper long after the host stopped
+   * waiting.
    *
-   * A `Set`, not a `Map`: only membership matters. Bounded to 256 with
-   * oldest-first eviction, the same way `hostedGrants` above is — a session
-   * whose pi child repeatedly dies must not grow this without limit. Eviction
-   * is safe: the worst case of dropping an old id is the pre-fix behavior for
-   * a gate that has been in flight past 256 later abandonments.
+   * The mint/consume/withhold rules and their 256-entry bounds live in
+   * {@link HostedGrants}, shared with every host-run subagent's own bridge
+   * (ADR-089).
    */
-  private recentlyAbandonedToolCallIds = new Set<string>()
+  private hostedGrants = new HostedGrants()
 
-  // ── In-pi subagents (M5b) ─────────────────────────────────────────────────
-  /**
-   * Dedup guard for handleSubagentUpdate's per-agent usage recording —
-   * `<toolUseId>:<agent-array-index>`, added the FIRST time that slot reaches
-   * status done/error with a usage payload. Prevents double-counting cost if
-   * the terminal payload arrives via BOTH the last `tool_execution_update`
-   * AND the final toolResult `message_end`'s `details` (event-mapper.ts emits
-   * a `subagent_update` from either path — see its doc comment). Bounded
-   * like `hostedGrants` above (oldest evicted first) so a long-running
-   * session's cumulative subagent calls can't grow this unboundedly.
-   */
-  private recordedSubagentUsage = new Set<string>()
   /**
    * In-flight `dispatch_agent` tool-call ids (M4b; audit-residual B fix) —
    * added at the START of handleDispatchAgent, BEFORE the
@@ -470,11 +451,25 @@ export class PiSession extends BaseSession {
    * propagates into an in-flight dispatched child instead of leaving it
    * running/spending after the SOURCE turn was aborted (previously a
    * documented v1 limitation — see handleDispatchAgent's doc comment). A
-   * plain `Set` (not bounded like hostedGrants/recordedSubagentUsage above) —
+   * plain `Set` (not bounded like hostedGrants above) —
    * entries live for, at most, the duration of one in-flight dispatch call,
    * never accumulate across a long-running session.
    */
   private inFlightDispatchIds = new Set<string>()
+
+  // ── Host-run subagents (ADR-089) ─────────────────────────────────────────
+  /** The user prompt request still waiting for pi's ack (Fact S8, see deliverAgentMessage). */
+  private promptInFlight: Promise<unknown> | null = null
+  /** FIFO chain of agent deliveries into this session (ADR-089 S3). */
+  private deliveryChain: Promise<void> = Promise.resolve()
+  /** Count of runs pi reported starting (`agent_start`) — run()'s refusal branch reads it (M-1). */
+  private runStarts = 0
+  /** A woken delivery marked the session running and its run has not started yet (M-2). */
+  private wakePending = false
+  /** Owns this session's `agent` children (pi-subagents.ts); gating stays here. */
+  private readonly subagents: PiSubagentManager
+  /** `loadPiAgentRegistry` (a test seam injects a fixed registry). */
+  private readonly loadAgentRegistry: (cwd: string) => PiAgentRegistry
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -509,9 +504,46 @@ export class PiSession extends BaseSession {
     routingId: string,
     win: HostWindowHandle | null,
     cwd: string,
-    opts: EngineSpawnOptions = {}
+    opts: EngineSpawnOptions = {},
+    /** Test seams for the host-run subagents (ADR-089); production passes none. */
+    deps: {
+      spawnPiChild?: SpawnPiChildFn
+      subagentsRoot?: string
+      loadAgentRegistry?: (cwd: string) => PiAgentRegistry
+    } = {}
   ) {
     super(routingId, win, cwd)
+    this.loadAgentRegistry = deps.loadAgentRegistry ?? ((dir) => loadPiAgentRegistry({ cwd: dir }))
+    // The host reads this session LIVE (routingId changes on a rekey).
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const session = this
+    this.subagents = new PiSubagentManager(
+      {
+        get routingId() {
+          return session.routingId
+        },
+        get cwd() {
+          return session.cwd
+        },
+        currentModel: () => session._model,
+        skillDirsEnv: () => session.computeSkillDirsEnv(),
+        send: (channel, data) => session.send(channel, data),
+        gateChild: (scope, payload) => session.gateChild(scope, payload),
+        childAbandoned: (info) => {
+          session.retractPendingGate(info.toolCallId)
+        },
+        retractChildGates: (scope) => session.retractChildGates(scope),
+        deliverToSession: (payload) => session.deliverAgentMessage(payload),
+        backgroundWorkChanged: () => {
+          // Re-arm (or hold) the idle timer: it waits for background agents.
+          if (!session.isProcessing) session.resetInactivityTimer()
+        }
+      },
+      {
+        ...(deps.spawnPiChild ? { spawn: deps.spawnPiChild } : {}),
+        ...(deps.subagentsRoot ? { sessionsRoot: deps.subagentsRoot } : {})
+      }
+    )
     // sandboxConfig/thinkingMode are intentionally unread — Claude-only
     // options per EngineSpawnOptions' docs / ADR-030. `effort` IS consumed
     // (M2b) — see doStart()'s spawn-time effort application. resumeSessionAt/
@@ -588,7 +620,7 @@ export class PiSession extends BaseSession {
   }
 
   /** Public accessor for cross-engine dispatch (ADR-033) — used by
-   *  handleDispatchAgent (M4b) to build DispatchContext.autonomyMode, mirroring
+   *  handleDispatchAgent (M4b) to build DispatchContext.getAutonomyMode, mirroring
    *  OpencodeSession's identical accessor's call site (createOpencodeHostedToolsServer). */
   getAutonomyMode(): string {
     return this.permissionMode
@@ -596,6 +628,10 @@ export class PiSession extends BaseSession {
 
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    // A live background agent keeps the session (ADR-089 S3): disposing would
+    // kill it and lose its notification. backgroundWorkChanged re-arms this
+    // once the last one ends.
+    if (this.subagents.liveBackgroundCount > 0) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('PiSession', 'Idle timeout — auto-disconnecting')
@@ -758,13 +794,19 @@ export class PiSession extends BaseSession {
       const bridgePath = writeBridgeExtension()
 
       const args = ['--mode', 'rpc', '-e', bridgePath]
-      // In-pi subagents (M5b): a SECOND, separate `-e` extension
-      // (pi-subagent-source.ts), added AFTER the bridge's — gated on the
-      // STATIC capability (mirrors hostedMcp/plan below), independent of
-      // whether any user-level agent .md files actually exist (the extension
-      // itself no-ops — registers no tool — when discovery finds zero).
+      // Host-run subagents (ADR-089): the agent registry is a spawn-time
+      // snapshot (Claude Code loads its definitions at start too) — a
+      // definition added mid-session takes effect at the next spawn. Never
+      // throws (unreadable files become diagnostics).
       if (this.capabilities.subagents) {
-        args.push('-e', writeSubagentExtension())
+        const registry = this.loadAgentRegistry(this.cwd)
+        this.subagents.setRegistry(registry)
+        if (registry.diagnostics.length > 0) {
+          logger.debug(
+            'PiSession',
+            `agent registry: ${registry.list().length} type(s), ${registry.diagnostics.length} definition file(s) skipped or adjusted`
+          )
+        }
       }
       if (this.resumeSessionId) {
         // Resolve the on-disk file for the resume id; fall back to the raw id
@@ -788,16 +830,15 @@ export class PiSession extends BaseSession {
           // on whether this session's mode happens to be 'plan' right now
           // (that's a separate, later step — see the re-entry send below).
           ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
-          // In-pi subagents (M5b): CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is a
-          // spawn-time SNAPSHOT of this._model — a mid-session model switch
-          // (setModel) does not retarget the already-spawned subagent
-          // extension (it re-reads process.env fresh on every `subagent` tool
-          // call, but the CHILD pi process's env was fixed at ITS OWN spawn
-          // time here). Acceptable v1 (documented, not a bug) — an agent
-          // definition's OWN `model:` frontmatter field always overrides this
-          // default regardless.
+          // Host-run subagents (ADR-089): the bridge's own `agent` (+
+          // `task_stop`) and `send_message` tools, and the agent types for
+          // the `agent` description. No second `-e`.
           ...(this.capabilities.subagents
-            ? { CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: this._model }
+            ? {
+                CLAUDEUI_PI_AGENT_TOOL: '1',
+                CLAUDEUI_PI_AGENT_LISTING: this.subagents.listing(),
+                CLAUDEUI_PI_SEND_MESSAGE: '1'
+              }
             : {}),
           ...this.computeSkillDirsEnv()
         }
@@ -836,6 +877,7 @@ export class PiSession extends BaseSession {
       this.dispatchOutputs(finishPiMessage(this.mapperState))
       this.isProcessing = false
       this.disconnected = true
+      this.endUserStop()
       this.client = null
       // The process is gone — any pending gate can never be resolved by it;
       // deny is the only sane resolution (also prevents a ghost approval card
@@ -844,6 +886,8 @@ export class PiSession extends BaseSession {
       // grants — a /hosted-tool POST racing this exit has nothing left to
       // execute against anyway.
       this.rejectAllPendingGates('Interrupted')
+      // Foreground children belong to the turn that just died with it.
+      this.subagents.stopAll('dispose')
       if (this.bridgeHost) {
         this.bridgeHost.dispose()
         this.bridgeHost = null
@@ -1100,7 +1144,8 @@ export class PiSession extends BaseSession {
     try {
       // The status line the loader also returns is for a COLD open (no session
       // object): this one seeds its own base from pi's tally below.
-      const { messages } = await loadPiSessionHistory(sessionId)
+      const { messages, subagentMessages, taskNotifications } =
+        await loadPiSessionHistory(sessionId)
       logger.info('PiSession', `Replaying ${messages.length} stored messages for ${sessionId}`)
 
       for (const msg of messages) {
@@ -1119,6 +1164,28 @@ export class PiSession extends BaseSession {
             })
           }
         }
+      }
+
+      // Host-run subagent transcripts (ADR-089), after the parent's messages
+      // so each lands under the `agent` card that spawned it. Never into
+      // messageHistory: the judge and /btw read the parent's own turns only.
+      for (const [toolUseId, childMessages] of Object.entries(subagentMessages ?? {})) {
+        this.send('session:subagent-message-batch', { toolUseId, messages: childMessages })
+      }
+      // Their terminal events (ADR-089 S3), after the batches; the reducer
+      // folds them idempotently per (toolUseId, runIndex).
+      for (const notification of taskNotifications ?? []) {
+        this.send('session:task-notification', notification)
+      }
+      // ADR-089 S3b (G7): the depth-1 agents of earlier runs, so send_message
+      // can address (and resume) them across an app restart.
+      try {
+        for (const link of loadPiAgentLinks(sessionId)) this.subagents.adoptRecord(link)
+      } catch (err) {
+        logger.warn(
+          'PiSession',
+          `agent record rebuild failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+        )
       }
 
       // Seed the durable cost base from pi's own tally so totalCostUsd
@@ -1161,19 +1228,18 @@ export class PiSession extends BaseSession {
   /**
    * Build the ContentBlock[] for a locally-recorded user ChatMessage. pi has
    * no document/PDF input (unlike Claude/opencode) — non-image attachments
-   * are silently dropped, matching run()'s prompt-building rule.
+   * are silently dropped, matching run()'s prompt-building rule. Like every
+   * ChatMessage, the blocks carry blob refs, not bytes (ADR-087).
    */
-  private buildUserContent(
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): ContentBlock[] {
+  private buildUserContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
     const content: ContentBlock[] = []
-    for (const att of attachments ?? []) {
-      if (!att.mediaType.startsWith('image/')) continue // pi has no document input — PDFs silently dropped
+    const images = attachments?.filter((att) => att.mediaType.startsWith('image/')) // pi has no document input — PDFs silently dropped
+    for (const att of internAttachments(images) ?? []) {
       content.push({
         type: 'image',
-        mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: att.base64Data,
+        mediaType: att.mediaType as ImageMediaType,
+        blobId: att.blobId,
+        bytes: att.bytes,
         fileName: att.fileName
       })
     }
@@ -1181,10 +1247,26 @@ export class PiSession extends BaseSession {
     return content
   }
 
-  async run(
-    prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void> {
+  async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    // The bridge's commands are ClaudeUI's alone (ADR-089 S3): a typed
+    // `/cui-deliver …` would mint a row marked as an agent's message, and the
+    // plan commands are PiSession's own toggle channel (it sends them itself,
+    // not through run()). Every `/cui-` start is refused before anything else,
+    // so nothing is sent and no state moves.
+    if (prompt !== null && isReservedPiCommandText(prompt)) {
+      this.send('session:error', 'That command is reserved for ClaudeUI.')
+      // A queued copy is dropped after this one refusal (M-3): left queued, it
+      // would be retried — and refused again — at every boundary.
+      let dropped = false
+      for (const item of this.queue.pending()) {
+        if (item.text !== prompt) continue
+        this.queue.setState(item, 'recalled')
+        dropped = true
+      }
+      if (dropped) this.queue.emit()
+      return
+    }
+
     this.clearInactivityTimer()
     this._cancelled = false
 
@@ -1252,11 +1334,23 @@ export class PiSession extends BaseSession {
     if (wasBusy) command.streamingBehavior = 'steer'
 
     if (!wasBusy) this.mapperState.startTimeMs = Date.now()
+    // A fresh turn closes the user-stop window (ADR-090); a steer while the
+    // stopped turn drains keeps it.
+    if (!wasBusy) this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
+    // A run pi starts on its own while this ack is pending (M-1, see below).
+    const runsBefore = this.runStarts
 
     try {
-      const resp = await this.client.request(command)
+      // Kept while in flight (Fact S8): a delivery that started a run inside
+      // this prompt's pre-run awaits would make pi refuse it as "already
+      // processing", so deliverAgentMessage waits for this ack first.
+      const request = this.client.request(command)
+      this.promptInFlight = request
+      const resp = await request.finally(() => {
+        if (this.promptInFlight === request) this.promptInFlight = null
+      })
       if (!resp.success) {
         // wasBusy (steer path): the ORIGINAL turn is still streaming — a
         // rejected steer must not flip isProcessing back to false out from
@@ -1264,8 +1358,10 @@ export class PiSession extends BaseSession {
         // let a subsequent run() send a bare `prompt` with no
         // `streamingBehavior`, which pi rejects outright while still
         // streaming (README.md "Commands"). Only a non-busy failure (this
-        // WAS the turn) resets processing/the inactivity timer.
-        if (!wasBusy) {
+        // WAS the turn) resets processing/the inactivity timer. Nor when pi
+        // started a run of its own meanwhile (a delivery, ADR-089 S3): the
+        // refusal is then "already processing", and that run is live.
+        if (!wasBusy && this.runStarts === runsBefore) {
           this.isProcessing = false
           this.resetInactivityTimer()
         }
@@ -1278,14 +1374,81 @@ export class PiSession extends BaseSession {
       // and must still consume its item. A never-queued prompt is a no-op.
       this.onPromptDelivered(prompt)
     } catch (err) {
-      // Same wasBusy carve-out as the !resp.success branch above.
-      if (!wasBusy) {
+      // Same carve-outs as the !resp.success branch above.
+      if (!wasBusy && this.runStarts === runsBefore) {
         this.isProcessing = false
         this.resetInactivityTimer()
       }
       this.send('session:error', err instanceof Error ? err.message : String(err))
       this.sendStatus()
     }
+  }
+
+  /**
+   * Put an agent-authored message into this session (ADR-089 S3): a
+   * background agent's notification whose owner is the root, and (S3b) a
+   * `send_message` to `main`. The ONLY path is the bridge's `/cui-deliver`
+   * command (pi-delivery.ts, the marking rule): never run(), never a plain
+   * `prompt`, `steer` or `follow_up`. Nothing is recorded or emitted here —
+   * the row arrives as pi's own `custom` message through dispatchOutput, at
+   * the moment pi actually delivers it (a running turn gets it at its next
+   * tool boundary; an idle session appends it, and starts a turn when `wake`).
+   * Serialized FIFO; never throws.
+   */
+  deliverAgentMessage(payload: PiAgentDelivery): void {
+    this.deliveryChain = this.deliveryChain
+      .then(() => this.sendDelivery(payload))
+      .catch((err) => {
+        logger.warn(
+          'PiSession',
+          `delivery ${payload.deliveryId} failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+        )
+      })
+  }
+
+  private async sendDelivery(payload: PiAgentDelivery): Promise<void> {
+    const ids = `delivery ${payload.deliveryId} (agent ${payload.details.agentId})`
+    // No process: its children are already gone with it (cancel/exit dispose
+    // them), and respawning would open a fresh pi session. Dropped.
+    if (!this.client || this._cancelled) {
+      logger.info('PiSession', `${ids} dropped: the session has no pi process`)
+      return
+    }
+    // Fact S8: a user prompt whose ack is not in yet may still be in pi's
+    // pre-run awaits; once its ack is in, a delivery steers it.
+    if (this.promptInFlight) await this.promptInFlight.catch(() => {})
+    const client = this.client
+    if (!client || this._cancelled) {
+      logger.info('PiSession', `${ids} dropped: the session has no pi process`)
+      return
+    }
+    const waking = payload.wake && !this.isProcessing
+    if (waking) {
+      // pi starts the turn itself (P-S3): the session reads as running now.
+      this.wakePending = true
+      this.isProcessing = true
+      this.mapperState.startTimeMs = Date.now()
+      this.clearInactivityTimer()
+      this.sendStatus()
+    }
+    let ok = false
+    try {
+      const resp = await client.request({ type: 'prompt', message: deliveryCommand(payload) })
+      ok = resp.success
+    } catch {
+      ok = false
+    }
+    if (ok) return
+    logger.warn('PiSession', `${ids} was not accepted by pi`)
+    if (waking && this.wakePending) this.undoWake()
+  }
+
+  /** A woken delivery will start no run after all: back to idle (M-2). */
+  private undoWake(): void {
+    this.wakePending = false
+    this.isProcessing = false
+    this.resetInactivityTimer()
+    this.sendStatus()
   }
 
   private dispatchOutputs(outputs: PiMapperOutput[]): void {
@@ -1359,40 +1522,15 @@ export class PiSession extends BaseSession {
         break
 
       case 'usage': {
-        // ADR-071 §3: the account this vendor's turns run under, read from
-        // pi's own auth.json per turn.
-        const identity = piAuthProvider.accountIdentity(output.provider)
-        recordUsageEvent({
-          engineId: 'pi',
-          vendorId: output.provider,
-          // Mirrors OpencodeSession.recordTurnUsage's identical pattern
-          // (opencodeAuthProvider.buildAccountRef(...).accountId ?? null) —
-          // PiAuthProvider shipped in M3, so this is no longer the M1 gap the
-          // old comment here described.
-          accountId: piAuthProvider.buildPiAccountRef(output.provider)?.accountId ?? null,
-          accountUuid: null, // pi's auth.json has no OAuth account UUID field (same gap as opencode's)
-          modelId: output.modelId,
-          tokens: {
-            input: output.tokens.input,
-            output: output.tokens.output,
-            cacheWrite: output.tokens.cacheWrite,
-            cacheWrite1h: 0, // pi does not distinguish 1h-TTL cache writes
-            cacheRead: output.tokens.cacheRead
-          },
-          engineCostUsd: output.costUsd,
-          sessionId: this.piSessionId,
-          messageId: output.messageId,
-          source: 'live',
-          accountKey: identity.accountKey,
-          accountLabel: identity.accountLabel,
-          billingType: piAuthProvider.buildPiAccountRef(output.provider)?.billingType ?? 'unknown',
-          origin: 'session',
-          parentRoutingId: null,
-          // pi reports a LIST PRICE, not a charge: its catalog knows
-          // long-context tiers our table does not (S1b), but the figure is the
-          // same whether the credential is a subscription or an API key.
-          engineCostIsEquivalent: true
-        })
+        // The session's own row (the shared builder — ADR-089 D6: a
+        // subagent's row is the same shape with origin 'child').
+        recordUsageEvent(
+          piUsageEvent(output, {
+            sessionId: this.piSessionId,
+            origin: 'session',
+            parentRoutingId: null
+          })
+        )
         // ADR-071 §2: the headline follows the cost rule, so what this message
         // adds is its DISPLAY cost — pi's own figure only when the rule says
         // that is what the user was charged. The ledger row above keeps pi's
@@ -1409,12 +1547,9 @@ export class PiSession extends BaseSession {
         break
       }
 
-      case 'subagent_update':
-        this.handleSubagentUpdate(output.toolUseId, output.payload)
-        break
-
       case 'result':
         this.isProcessing = false
+        this.wakePending = false
         this.accTotalDurationMs += output.durationMs
         this.sendStatusLine()
         this.send('session:result', {
@@ -1429,6 +1564,8 @@ export class PiSession extends BaseSession {
         })
         this.sendStatus()
         this.resetInactivityTimer()
+        // The stopped turn (if any) has ended: the user-stop window closes (ADR-090).
+        this.endUserStop()
         // ADR-053: turn end is also a boundary — anything still held forwards
         // now as the next turn's prompt (isProcessing is already false, so
         // run() sends a bare `prompt` rather than a `steer`).
@@ -1462,7 +1599,47 @@ export class PiSession extends BaseSession {
       }
 
       case 'error':
+        // ADR-090: the teardown of a turn the user stopped is not news.
+        if (this.suppressedAfterUserStop('PiSession', output.message)) break
         this.send('session:error', output.message)
+        break
+
+      case 'turn_start':
+        this.runStarts++
+        this.wakePending = false
+        // A run pi started on its own (a delivery that landed while pi was
+        // settling, ADR-089 S3) must not read as idle. A run started by run()
+        // or a woken delivery already set this.
+        if (!this.isProcessing) {
+          this.isProcessing = true
+          this.mapperState.startTimeMs = Date.now()
+          this.clearInactivityTimer()
+          this.sendStatus()
+        }
+        break
+
+      case 'agent_delivery':
+        // The row itself came through `message`; nothing waits on this here.
+        logger.debug('PiSession', `delivery ${output.deliveryId} arrived`)
+        break
+
+      case 'delivery_error':
+        // The bridge refused a payload (M-2): no run will start for it, so a
+        // woken delivery must not leave the session reading "running".
+        logger.warn('PiSession', 'pi refused an agent delivery (cui-deliver failed)')
+        if (this.wakePending) this.undoWake()
+        break
+
+      case 'send_message_error':
+        // An extension's sendMessage failed asynchronously (review F3). While
+        // our woken delivery is pending it is that one: undo the wake. Any
+        // other extension's failure stays an ordinary error and undoes nothing.
+        if (this.wakePending) {
+          logger.warn('PiSession', 'a woken agent delivery failed inside pi')
+          this.undoWake()
+        } else {
+          this.send('session:error', output.message)
+        }
         break
 
       case 'ignore':
@@ -1476,94 +1653,18 @@ export class PiSession extends BaseSession {
     else this.messageHistory.push(message)
   }
 
-  /**
-   * In-pi subagents (M5b) — event-mapper.ts validated `payload.agents` and
-   * handed us the raw pi child messages verbatim; this converts them into
-   * the SAME `session:subagent-*` payload shapes cross-engine-dispatcher.ts's
-   * `forwardPiTargetMessage` emits (byte-matched, so TaskCard/SubagentMessages
-   * consume both engine-native and dispatch-target subagent streams
-   * identically): assistant messages -> `buildPiChatMessage` (the EXISTING
-   * helper — child messages are the same AssistantMessage wire shape) ->
-   * `session:subagent-message`; toolResult messages -> `session:subagent-tool-result`.
-   * `newMessages` is a DELTA per the extension's own contract (pi-subagent-
-   * source.ts's emitUpdate flushes `pendingNew` after every call) — no
-   * dedup needed here.
-   *
-   * Usage (one recordUsageEvent row per agent, on that agent's OWN
-   * done/error, never re-fired for the same agent slot — the subagent tool's
-   * FINAL result may re-carry the same terminal payload event-mapper.ts's
-   * `tool_execution_update` path already emitted once, per that file's doc
-   * comment) does NOT touch this session's own totalCostUsd/token sums —
-   * mirrors opencode's child-message attribution posture (a subagent's spend
-   * is its own accounting row, not folded into the parent's running total).
-   */
-  private handleSubagentUpdate(toolUseId: string, payload: PiSubagentUpdatePayload): void {
-    payload.agents.forEach((agent, index) => {
-      for (const msg of agent.newMessages) {
-        if (msg.role === 'assistant') {
-          const message = buildPiChatMessage(uuid(), msg.content)
-          this.send('session:subagent-message', { toolUseId, message })
-        } else if (msg.role === 'toolResult') {
-          // Same helpers as the own-turn path (event-mapper.ts) so a subagent's
-          // image-returning tool lights up its card the same way.
-          const images = piToolResultImages(msg.content)
-          this.send('session:subagent-tool-result', {
-            toolUseId,
-            toolResultToolUseId: msg.toolCallId,
-            result: piToolResultText(msg.content),
-            isError: msg.isError,
-            ...(images ? { images } : {})
-          })
-        }
-        // user/bashExecution: never emitted by the child's own JSON-mode
-        // event stream (README.md "Behavior gotchas" — mirrors why the main
-        // event-mapper's message_end never sees them either) — no case needed.
-      }
-
-      if ((agent.status === 'done' || agent.status === 'error') && agent.usage) {
-        const dedupeKey = `${toolUseId}:${index}`
-        if (this.recordedSubagentUsage.has(dedupeKey)) return
-        this.recordedSubagentUsage.add(dedupeKey)
-        if (this.recordedSubagentUsage.size > 256) {
-          const oldest = this.recordedSubagentUsage.values().next().value
-          if (oldest !== undefined) this.recordedSubagentUsage.delete(oldest)
-        }
-        const ref = engineMeta('pi').decodeModelValue(agent.model ?? this._model)
-        const identity = piAuthProvider.accountIdentity(ref.vendorId)
-        recordUsageEvent({
-          engineId: 'pi',
-          vendorId: ref.vendorId,
-          accountId: piAuthProvider.buildPiAccountRef(ref.vendorId)?.accountId ?? null,
-          accountUuid: null,
-          modelId: ref.modelId,
-          tokens: {
-            input: agent.usage.input,
-            output: agent.usage.output,
-            cacheWrite: agent.usage.cacheWrite,
-            cacheWrite1h: 0,
-            cacheRead: agent.usage.cacheRead
-          },
-          engineCostUsd: agent.usage.cost,
-          sessionId: this.piSessionId,
-          messageId: `subagent-${toolUseId}-${agent.agent}-${index}`,
-          source: 'live',
-          accountKey: identity.accountKey,
-          accountLabel: identity.accountLabel,
-          billingType: piAuthProvider.buildPiAccountRef(ref.vendorId)?.billingType ?? 'unknown',
-          // A subagent's spend is its own row, attributed back to the session
-          // that spawned it (ADR-071 §1).
-          origin: 'child',
-          parentRoutingId: this.routingId,
-          engineCostIsEquivalent: true
-        })
-      }
-    })
-  }
-
   async interrupt(): Promise<void> {
+    // ADR-090: open the user-stop window before anything else, and only for a
+    // live turn — pi can report the abort as a turn error (an aborted model
+    // request ends `stopReason: 'error'`, docs/protocol-pi) before the abort
+    // RPC even replies.
+    if (this.isProcessing) this.beginUserStop()
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
-    this.rejectAllPendingGates('Interrupted')
+    // Only the session's OWN cards (ADR-089 S3, Q9): a background agent's
+    // cards survive the interrupt with it, and every foreground child stopped
+    // below retracts its own.
+    this.rejectOwnPendingGates('Interrupted')
     // Audit-residual B fix: pi's own turn-abort (the `abort` RPC below) does
     // NOT cancel a `dispatch_agent` child this turn started — the bridge's
     // /hosted-tool handler is just a JS promise awaiting
@@ -1582,6 +1683,10 @@ export class PiSession extends BaseSession {
       crossEngineDispatcher.stopDispatch(id, this.routingId)
     }
     this.inFlightDispatchIds.clear()
+    // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
+    // background agents too): a foreground child belongs to the turn being
+    // aborted; a background one does not.
+    this.subagents.stopForeground('interrupt')
     if (!this.client) return
     try {
       await this.client.request({ type: 'abort' })
@@ -1595,8 +1700,11 @@ export class PiSession extends BaseSession {
     this.dispatchOutputs(finishPiMessage(this.mapperState))
     this._cancelled = true
     this.isProcessing = false
+    this.wakePending = false
     this.disconnected = false
+    this.endUserStop()
     this.rejectAllPendingGates('Interrupted')
+    this.subagents.stopAll('dispose')
     if (this.client) {
       this.client.dispose()
       this.client = null
@@ -1671,7 +1779,7 @@ export class PiSession extends BaseSession {
    *   3. Spawn a brand-new, fully isolated `pi --mode rpc --no-session
    *      --no-tools --no-extensions --no-skills --no-context-files
    *      --no-prompt-templates` process — the spawn shape model-discovery.ts's
-   *      `fetchPiModelCatalog` uses (locatePiLaunch, no `-e` bridge/subagent
+   *      `fetchPiModelCatalog` uses (locatePiLaunch, no `-e` bridge
    *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS the isolation
    *      flags below.
    *      TOOL EXECUTION DISABLED AT THE PROCESS LEVEL: `--no-tools` (pi
@@ -1852,16 +1960,66 @@ export class PiSession extends BaseSession {
    * ask are both evaluated before the allow tier, so filtering the allow tier
    * cannot change which of them answers).
    */
-  private gateToolCallInner = async (payload: PiToolCallPayload): Promise<GateDecision> => {
+  private gateToolCallInner = (payload: PiToolCallPayload): Promise<GateDecision> =>
+    this.decideToolCall(payload, null)
+
+  /**
+   * The gate for a host-run subagent's tool call (ADR-089 D2): the SAME ladder
+   * as the session's own calls (`decideToolCall`), parametrized by the child
+   * scope — the parent's LIVE mode narrowed by the definition (D3), the
+   * parent's rules and session allows, and the judge with the child's own
+   * trajectory, outcomes and denial caps.
+   */
+  gateChild(scope: PiChildScope, payload: PiToolCallPayload): Promise<GateDecision> {
+    return this.decideToolCall(payload, scope)
+  }
+
+  /**
+   * The one gate ladder (gateToolCallInner's body, shared with `gateChild`).
+   * `scope` null = this session's own call, byte-identical to before ADR-089.
+   * With a scope the mode is `narrowMode(parent mode, definition mode)`, read
+   * on EVERY call (live, owner ruling 1), and every deny reason uses it where
+   * the session's own call reads `this.permissionMode`.
+   */
+  private async decideToolCall(
+    payload: PiToolCallPayload,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> {
     const { toolName, input } = payload
+    const mode = this.gateMode(scope)
     const rules = this.currentRules()
-    const autoMode = this.isAutoMode(this.permissionMode)
+    const autoMode = this.isAutoMode(mode)
     const verdict = decideWithSource(toolName, input, {
-      mode: autoMode ? 'acceptEdits' : this.permissionMode,
+      mode: autoMode ? 'acceptEdits' : mode,
       rules: autoMode ? withoutAllowRules(rules) : rules,
       sessionAllows: this.sessionAllows,
       cwd: this.cwd
     })
+
+    // Spawn-call rung (ADR-089 Q1, Claude Code parity): launching an agent
+    // needs no card in any non-auto mode, plan included — every action the
+    // child takes is gated by this same live mode anyway. After the deny-rule
+    // check, before the mode base. In auto mode it falls through: the `task`
+    // kind under the `acceptEdits` base asks, and the judge decides.
+    // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
+    // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
+    // `send_message` takes the same rung (ADR-089 S3b, Q6): a message that
+    // resumes or redirects an agent is delegation, judged like a spawn in auto.
+    // (As above, the deny-rule guard cannot fire yet: no rule row maps a
+    // Claude tool to the `detail`/`note` kinds these two tools carry.)
+    if (
+      (toolName === 'agent' || toolName === 'send_message') &&
+      !autoMode &&
+      verdict.source !== 'deny-rule'
+    ) {
+      return { behavior: 'allow' }
+    }
+    // `task_stop` only stops work: allowed in every mode, auto included, with
+    // no judge call (Q6). Who may stop whom is the manager's check.
+    if (toolName === 'task_stop' && verdict.source !== 'deny-rule') {
+      return { behavior: 'allow' }
+    }
+
     const decision = verdict.decision
 
     if (decision === 'allow') return { behavior: 'allow' }
@@ -1875,14 +2033,14 @@ export class PiSession extends BaseSession {
       // mode until the extension's session_start hook hides it —
       // modeBaseDecision denies it and this attaches the distinct,
       // model-actionable reason (there is no plan mode to exit).
-      if (piToolKind(toolName) === 'plan' && this.permissionMode !== 'plan') {
+      if (piToolKind(toolName) === 'plan' && mode !== 'plan') {
         return { behavior: 'deny', reason: PLAN_EXIT_OUTSIDE_PLAN_REASON }
       }
       // Plan mode's own base denies (a mutating kind, or an unsafe bash
       // command — permission-engine.ts's planModeBaseDecision) carry a
       // distinct, model-actionable reason instead of the generic fallback
       // below — still beaten by an explicit user deny RULE, checked above.
-      if (this.permissionMode === 'plan') {
+      if (mode === 'plan') {
         return { behavior: 'deny', reason: PLAN_MODE_DENY_REASON }
       }
       return { behavior: 'deny', reason: 'Denied by permission rules' }
@@ -1892,12 +2050,19 @@ export class PiSession extends BaseSession {
     // cannot decide falls through to the human below, optionally explaining why
     // (the denial caps do).
     if (autoMode) {
-      const auto = await this.classifyAutoMode(payload, verdict)
+      const auto = await this.classifyAutoMode(payload, verdict, scope)
       if (auto.kind === 'decided') return auto.decision
-      return this.askHuman(payload, auto.reason)
+      return this.askHuman(payload, auto.reason, scope)
     }
 
-    return this.askHuman(payload)
+    return this.askHuman(payload, undefined, scope)
+  }
+
+  /** The mode a call is gated under: the session's, narrowed for a child (ADR-089 D3). */
+  private gateMode(scope: PiChildScope | null): string {
+    return scope
+      ? narrowMode(this.permissionMode, scope.definition.permissionMode)
+      : this.permissionMode
   }
 
   /**
@@ -1911,17 +2076,40 @@ export class PiSession extends BaseSession {
    * `PendingApproval.decisionReason`) — set on the denial-cap handoffs, where
    * "auto mode gave up on this" is not otherwise visible.
    */
-  private askHuman(payload: PiToolCallPayload, decisionReason?: string): Promise<GateDecision> {
+  private askHuman(
+    payload: PiToolCallPayload,
+    decisionReason?: string,
+    scope: PiChildScope | null = null
+  ): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
       const requestId = uuid()
-      this.pendingGates.set(requestId, { resolve, toolName, input, toolCallId })
+      // A child's card (ADR-089) is raised under THIS session with the
+      // child's own call id: it renders floating and on the nested card.
+      this.pendingGates.set(requestId, {
+        resolve,
+        toolName,
+        input,
+        toolCallId,
+        outcomes: scope ? scope.outcomes : this.toolOutcomes,
+        scope
+      })
       const suggestions = this.buildApprovalSuggestions(toolName, input)
       const approval: PendingApproval = {
         requestId,
         toolUseId: toolCallId,
         toolName,
         input,
+        // ADR-089 review F4: a child's card names the agent whose action it is.
+        ...(scope
+          ? {
+              agent: {
+                agentId: scope.agentId,
+                label: scope.label,
+                subagentType: scope.definition.name
+              }
+            }
+          : {}),
         ...(suggestions ? { suggestions } : {}),
         ...(decisionReason ? { decisionReason } : {})
       }
@@ -1957,24 +2145,15 @@ export class PiSession extends BaseSession {
   private gateToolCall = async (payload: PiToolCallPayload): Promise<GateDecision> => {
     const decision = await this.gateToolCallInner(payload)
     if (decision.behavior === 'allow' && PI_HOSTED_TOOL_NAMES.has(payload.toolName)) {
-      if (this.recentlyAbandonedToolCallIds.delete(payload.toolCallId)) {
-        // Consumed one-shot: this exact exchange was abandoned, so the allow
-        // is authority for a call pi will never make. A LATER exchange that
-        // legitimately reuses the id is unaffected. The decision itself is
-        // still returned unchanged — only the grant is withheld.
+      // A withheld mint (false) means this exact exchange was abandoned, so
+      // the allow is authority for a call pi will never make. A LATER
+      // exchange that legitimately reuses the id is unaffected. The decision
+      // itself is still returned unchanged — only the grant is withheld.
+      if (!this.hostedGrants.mint(payload.toolCallId, payload.toolName)) {
         logger.debug(
           'PiSession',
           `withholding the hosted-tool grant for ${payload.toolName} (${payload.toolCallId}) — pi abandoned that exchange before the gate resolved`
         )
-        return decision
-      }
-      this.hostedGrants.set(payload.toolCallId, payload.toolName)
-      // Bound the map — evict the OLDEST entry (Map iteration/insertion
-      // order) rather than letting an abandoned session's never-executed
-      // grants accumulate forever.
-      if (this.hostedGrants.size > 256) {
-        const oldestKey = this.hostedGrants.keys().next().value
-        if (oldestKey !== undefined) this.hostedGrants.delete(oldestKey)
       }
     }
     return decision
@@ -1995,6 +2174,21 @@ export class PiSession extends BaseSession {
   }
 
   /**
+   * interrupt()'s twin of {@link rejectAllPendingGates}: only the session's
+   * OWN cards (`scope === null`) are denied; host-run children's cards are
+   * left to their own stop (ADR-089 S3, Q9). hostedGrants (the session's own)
+   * are cleared as before.
+   */
+  private rejectOwnPendingGates(reason: string): void {
+    for (const [requestId, pending] of [...this.pendingGates]) {
+      if (pending.scope !== null) continue
+      this.pendingGates.delete(requestId)
+      pending.resolve({ behavior: 'deny', reason })
+    }
+    this.hostedGrants.clear()
+  }
+
+  /**
    * PiBridgeHost's `onAbandoned` (its "Long-poll protocol" section): the pi
    * child stopped polling a bridge exchange, so nothing on the other side is
    * waiting for our answer any more. Bound as a class field so a bare
@@ -2008,24 +2202,7 @@ export class PiSession extends BaseSession {
    */
   private handleBridgeAbandoned = (info: PiBridgeAbandoned): void => {
     if (info.route === 'tool-call') {
-      // pendingGates is keyed by requestId, so find the entry by its
-      // toolCallId. Resolving it (rather than just dropping it) is what
-      // releases whatever `gateToolCallInner` promise is still awaited.
-      let requestId: string | null = null
-      for (const [id, pending] of this.pendingGates) {
-        if (pending.toolCallId === info.toolCallId) {
-          requestId = id
-          break
-        }
-      }
-      if (requestId !== null) {
-        const pending = this.pendingGates.get(requestId)
-        this.pendingGates.delete(requestId)
-        pending?.resolve({ behavior: 'deny', reason: 'pi stopped waiting for this approval' })
-        // Same channel claude/opencode use to retract an approval the user can
-        // no longer usefully answer.
-        this.send('session:approval-dismiss', { requestId })
-      }
+      const requestId = this.retractPendingGate(info.toolCallId)
       // Auto-mode ground truth: the call never ran and nobody refused it. pi
       // reports it as a failed tool moments from now; `unanswered` is a
       // sticky decision outcome so that `error` cannot overwrite it, and the
@@ -2033,17 +2210,12 @@ export class PiSession extends BaseSession {
       // denied one (Transient Retry stays available).
       this.recordToolOutcome(info.toolCallId, 'unanswered')
       // A grant minted for this call (the allow may have landed just as pi
-      // gave up) must not survive as a usable /hosted-tool ticket…
-      this.hostedGrants.delete(info.toolCallId)
-      // …and one that has NOT been minted yet must never be. See
-      // `recentlyAbandonedToolCallIds`: an auto-mode-judged call has no
-      // pendingGates entry to force-deny above, so its 'allow' can arrive here
-      // seconds from now, after the host already dropped the exchange.
-      this.recentlyAbandonedToolCallIds.add(info.toolCallId)
-      if (this.recentlyAbandonedToolCallIds.size > 256) {
-        const oldest = this.recentlyAbandonedToolCallIds.values().next().value
-        if (oldest !== undefined) this.recentlyAbandonedToolCallIds.delete(oldest)
-      }
+      // gave up) must not survive as a usable /hosted-tool ticket, and one
+      // that has NOT been minted yet must never be: an auto-mode-judged call
+      // has no pendingGates entry to force-deny above, so its 'allow' can
+      // arrive seconds from now, after the host already dropped the exchange
+      // (see `hostedGrants`).
+      this.hostedGrants.abandon(info.toolCallId)
       logger.warn(
         'PiSession',
         `pi abandoned the /tool-call gate for ${info.toolName} (${info.toolCallId})` +
@@ -2057,10 +2229,52 @@ export class PiSession extends BaseSession {
       // has no consumer left, so letting it run would only burn tokens.
       crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
     }
+    // A host-run subagent (ADR-089) whose `agent` exchange pi stopped
+    // waiting for has no consumer either.
+    if (info.toolName === 'agent') this.subagents.stop(info.toolCallId, 'interrupt')
     logger.warn(
       'PiSession',
       `pi abandoned the /hosted-tool call for ${info.toolName} (${info.toolCallId})`
     )
+  }
+
+  /**
+   * Force-deny and retract the approval card parked for `toolCallId`, if any
+   * (pi stopped polling its `/tool-call` exchange). pendingGates is keyed by
+   * requestId, so the entry is found by its toolCallId; resolving it (rather
+   * than just dropping it) is what releases whatever gate promise is still
+   * awaited. Shared by the session's own bridge and its subagents' (ADR-089).
+   * Returns the retracted requestId, or null.
+   */
+  private retractPendingGate(toolCallId: string): string | null {
+    for (const [requestId, pending] of this.pendingGates) {
+      if (pending.toolCallId === toolCallId) {
+        this.retractGate(requestId, 'pi stopped waiting for this approval')
+        return requestId
+      }
+    }
+    return null
+  }
+
+  /**
+   * A host-run child was stopped (ADR-089): every card it still has open is
+   * retracted and its gate denied 'Agent stopped'.
+   */
+  private retractChildGates(scope: PiChildScope): void {
+    for (const [requestId, pending] of [...this.pendingGates]) {
+      if (pending.scope === scope) this.retractGate(requestId, 'Agent stopped')
+    }
+  }
+
+  /** Deny one parked gate and retract its card. */
+  private retractGate(requestId: string, reason: string): void {
+    const pending = this.pendingGates.get(requestId)
+    if (!pending) return
+    this.pendingGates.delete(requestId)
+    pending.resolve({ behavior: 'deny', reason })
+    // Same channel claude/opencode use to retract an approval the user can
+    // no longer usefully answer.
+    this.send('session:approval-dismiss', { requestId })
   }
 
   /** Lazily load (and cache) the merged user/project/local Claude permission rules for this session's cwd. */
@@ -2140,7 +2354,7 @@ export class PiSession extends BaseSession {
       // judge can get — it makes the Transient Retry exception inapplicable to
       // a re-attempt and turns the retry into a consent question. Only a reject
       // maps here; an allow leaves the call to report its own ok/error.
-      this.recordToolOutcome(pending.toolCallId, 'rejected-by-user')
+      recordToolOutcome(pending.outcomes, pending.toolCallId, 'rejected-by-user')
       pending.resolve({ behavior: 'deny', reason: answers?.feedback || 'User denied' })
       return
     }
@@ -2400,12 +2614,13 @@ export class PiSession extends BaseSession {
    * {@link askHuman}); only the denial caps set it, because "auto mode gave up
    * on this action" is not otherwise visible to the user.
    *
-   * Mirrors OpencodeSession.handleAutoModeApproval step for step; the one place
-   * pi does better is G9.
+   * G9 is pi's own (the one place pi does better than opencode); every step
+   * after it is the shared {@link runJudgePipeline} (ADR-088).
    */
   private async classifyAutoMode(
     payload: PiToolCallPayload,
-    verdict: PermissionVerdict
+    verdict: PermissionVerdict,
+    scope: PiChildScope | null = null
   ): Promise<AutoModeOutcome> {
     const { toolCallId, toolName, input } = payload
 
@@ -2424,139 +2639,95 @@ export class PiSession extends BaseSession {
       return ASK_HUMAN
     }
 
-    // Fast path — read-only/safe categories never need the judge.
+    // Everything after G9 is the shared pipeline (automode/judge-pipeline.ts,
+    // ADR-088), with pi's hooks. Notes specific to pi:
     //
     // G8, ANSWERED FOR pi (plan §7 Q2): pi's ask path does NOT fire for
-    // read/grep/find/ls under auto mode, so this check is defense in depth
-    // rather than a hot path. Verified by reading the evaluator rather than
-    // inheriting opencode's argument: with auto mode active the base is
-    // `acceptEdits` (see gateToolCallInner), whose `modeBaseDecision` allows
-    // fileRead and search outright; the only other route to 'ask' for those
-    // kinds is a user ask rule, which G9 above has already sent to the human.
-    // Note also that the shared allowlist speaks opencode's category vocabulary
-    // (`glob`/`list`), so pi's `find`/`ls` would not match it anyway — left
-    // alone deliberately: widening a SHARED allow set to cover a path that
-    // cannot be reached would be risk with no benefit.
-    if (isAutoModeFastPathAllowed(toolName)) return decided({ behavior: 'allow' })
-
-    // ADR-084 §1 — a plainly read-only shell command in the workspace needs no
-    // judge: allowed with a fixed review on the card, no recordAllow() (a
-    // static allow never resets the denial caps) and no usage row. Before the
-    // judge-model check, so it holds even when no judge model resolves. pi's
-    // `bash` has no `workdir` — it runs in the session cwd — so the gate
-    // refuses an input that carries one. `currentRules()` is the ruleset the
-    // permission engine just decided with, deny rules included.
-    const readOnly = await readOnlyGate({
-      action: { toolName, input },
-      cwd: this.cwd,
-      permissions: this.currentRules(),
-      autoModeActive: () => this.isAutoMode(this.permissionMode),
-      honoursWorkdir: false,
-      logSource: 'PiSession'
-    })
-    if (readOnly.allow) {
-      this.sendToolReview(toolCallId, 'read-only')
-      return decided({ behavior: 'allow' })
-    }
-
-    // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
-    // parity plus safety checks, allow-rule-skip.ts), also before the
-    // judge-model check. `currentRules()` in FULL: only the ladder's copy had
-    // its allow rules stripped (`withoutAllowRules`). Same bookkeeping as the
-    // read-only path: no recordAllow(), no usage row. The gate is synchronous,
-    // so no mode can change while it runs beyond its own `autoModeActive()`.
-    const action = allowRuleActionFor(toolName, input)
-    if (action) {
-      const gate = allowRuleGate({
-        action,
-        toolName,
+    // read/grep/find/ls under auto mode, so the pipeline's category fast path
+    // is defense in depth rather than a hot path. Verified by reading the
+    // evaluator rather than inheriting opencode's argument: with auto mode
+    // active the base is `acceptEdits` (see gateToolCallInner), whose
+    // `modeBaseDecision` allows fileRead and search outright; the only other
+    // route to 'ask' for those kinds is a user ask rule, which G9 above has
+    // already sent to the human. Note also that the shared allowlist speaks
+    // opencode's category vocabulary (`glob`/`list`), so pi's `find`/`ls` would
+    // not match it anyway — left alone deliberately: widening a SHARED allow set
+    // to cover a path that cannot be reached would be risk with no benefit.
+    //
+    // ADR-084 §1 read-only gate: pi's `bash` has no `workdir` — it runs in the
+    // session cwd — so the gate refuses an input that carries one
+    // (`honoursWorkdir: false`). `currentRules()` is the ruleset the permission
+    // engine just decided with, deny rules included; the ADR-085 §4 allow-rule
+    // gate reads it in FULL (only the ladder's copy had its allow rules
+    // stripped by `withoutAllowRules`).
+    //
+    // A host-run subagent's call (ADR-089 D2.4) changes only what is the
+    // child's: its header (`subagent`), its transcript — this session's (the
+    // ROOT, whose human turns are the only real authorisation) followed by
+    // the acting child's own assistant-only trajectory (D1; an intermediate
+    // agent's trajectory is not included: its prompts to the child are
+    // agent-authored, and the acting child's own calls are what is being
+    // judged) — its outcomes and denial caps, its narrowed live mode (G10
+    // re-reads it), and `stillPending` (a stopped or draining child). With no
+    // scope every hook is exactly what it was before ADR-089.
+    const childHooks = scope
+      ? {
+          subagent: {
+            type: scope.definition.name,
+            description: scope.description,
+            prompt: scope.prompt
+          },
+          messages: (): ChatMessage[] => [
+            ...this.messageHistory,
+            ...(scope.runner()?.trajectory.values() ?? [])
+          ],
+          outcomes: () => (scope.outcomes.size ? Object.fromEntries(scope.outcomes) : undefined),
+          recordOutcome: (id: string, result: ToolOutcome) =>
+            recordToolOutcome(scope.outcomes, id, result),
+          denials: scope.denials,
+          stillPending: () => !scope.stopped && !(scope.runner()?.draining ?? true)
+        }
+      : null
+    const outcome = await runJudgePipeline(
+      { toolUseId: toolCallId, toolName, input },
+      {
+        logSource: 'PiSession',
         cwd: this.cwd,
-        permissions: this.currentRules(),
-        autoModeActive: () => this.isAutoMode(this.permissionMode),
-        logSource: 'PiSession'
-      })
-      if (gate.allow) {
-        this.sendToolReview(toolCallId, { allowRule: gate.rule })
+        currentMode: () => this.gateMode(scope),
+        autoModeActive: () => this.isAutoMode(this.gateMode(scope)),
+        permissions: () => this.currentRules(),
+        honoursWorkdir: false,
+        allowRuleAction: allowRuleActionFor,
+        // A configured judge model that no longer exists fails CLOSED — never
+        // judged by a stand-in (see judgeModelUnavailable).
+        judgeAvailable: async () => !(await this.judgeModelUnavailable()),
+        judgeTransport: () => this.judgeTransport(),
+        messages: () => this.messageHistory,
+        environment: () => this.classifierEnvironment(),
+        captureActionMeta: (name, args) => this.captureActionMeta(name, args),
+        outcomes: () =>
+          this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
+        recordOutcome: (id, result) => this.recordToolOutcome(id, result),
+        denials: this.autoDenials,
+        twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
+        sendReview: (id, review) => this.sendToolReview(id, review),
+        ...childHooks
+      }
+    )
+    switch (outcome.kind) {
+      case 'allow':
         return decided({ behavior: 'allow' })
-      }
-    }
-
-    // A configured judge model that no longer exists fails CLOSED — never judged
-    // by a stand-in (see judgeModelUnavailable). Checked after the fast path so a
-    // stale judge does not start prompting for reads.
-    if (await this.judgeModelUnavailable()) return ASK_HUMAN
-
-    try {
-      // Ground truth. actionMeta FIRST: it is what resolves repo visibility,
-      // and classifierEnvironment picks the resolved value up on this same
-      // call rather than one approval later.
-      const actionMeta = await this.captureActionMeta(toolName, input)
-      const environment = await this.classifierEnvironment()
-      const result = await classify(
-        {
-          messages: this.messageHistory,
-          action: { toolName, input },
-          environment,
-          ...(actionMeta ? { actionMeta } : {}),
-          ...(this.toolOutcomes.size ? { outcomes: Object.fromEntries(this.toolOutcomes) } : {}),
-          twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
-        },
-        this.judgeTransport()
-      )
-
-      // G10 — the judge call is async and the user can switch autonomy mode
-      // while it is in flight (ref §3 step 5 / cli.js's
-      // `mode_changed_while_queued`). Re-read the CURRENT mode: if auto mode is
-      // no longer active the verdict is stale authority, so discard it and ask.
-      if (!this.isAutoMode(this.permissionMode)) {
-        logger.info(
-          'PiSession',
-          `auto-mode verdict discarded — permission mode changed to "${this.permissionMode}" while the judge ran`
-        )
-        return ASK_HUMAN
-      }
-
-      const verdictLine = formatVerdictLine(result, toolName)
-      if (result.stage === 'error') {
-        // stage=error means no verdict was obtained — a WARN with the
-        // transport's own message, because a bare `stage=error` line is
-        // undiagnosable (it is how the pi 0.84.3 new_session model reset hid
-        // for a whole release).
-        logger.warn('PiSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
-      } else {
-        logger.info('PiSession', verdictLine)
-      }
-      // Set only on a fail-closed unparseable verdict — the one block whose
-      // reason says nothing about WHY the judge's answer was unreadable.
-      if (result.raw !== undefined) {
-        logger.debug('PiSession', formatUnparseableJudgeReply(result))
-      }
-
-      if (result.unavailable) return ASK_HUMAN
-
-      if (result.block) {
-        // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
-        // blocks → hand control to the human, carrying the cap's own sentence as
-        // the approval card's decisionReason.
-        const capped = this.autoDenials.recordBlock(result.category)
-        if (capped) return { kind: 'human', reason: capped }
-        // Annotate the blocked call so a re-attempt is judged as a retry of
-        // something THIS monitor denied (post-block consent inheritance), not
-        // as a fresh proposal.
-        this.recordToolOutcome(toolCallId, 'automode-blocked')
-        this.sendToolReview(toolCallId, result)
-        return decided({ behavior: 'deny', reason: formatAutoModeDenyReason(result) })
-      }
-
-      this.autoDenials.recordAllow()
-      this.sendToolReview(toolCallId, result)
-      return decided({ behavior: 'allow' })
-    } catch (err) {
-      logger.warn(
-        'PiSession',
-        `auto-mode classify failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-      return ASK_HUMAN
+      case 'deny':
+        return decided({ behavior: 'deny', reason: outcome.reason })
+      case 'human':
+        return outcome.reason ? { kind: 'human', reason: outcome.reason } : ASK_HUMAN
+      case 'settled':
+        // A host-run subagent was stopped (or is draining) while its call was
+        // judged (ADR-089): refuse. For the session's own call this stays
+        // unreachable — no `stillPending` hook is passed (pi's gate is a
+        // single awaited HTTP request — nothing answers the call elsewhere
+        // while it is judged) — and fail-safe: ask the human.
+        return scope ? decided({ behavior: 'deny', reason: 'Agent stopped' }) : ASK_HUMAN
     }
   }
 
@@ -2627,16 +2798,8 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> => {
     const { toolName, input, toolCallId } = payload
 
-    const grantedName = this.hostedGrants.get(toolCallId)
-    if (grantedName === undefined || grantedName !== toolName) {
-      return {
-        content: [
-          { type: 'text', text: 'hosted tool call was not approved through the tool gate' }
-        ],
-        isError: true
-      }
-    }
-    this.hostedGrants.delete(toolCallId) // one-shot — consumed on first (matching) use.
+    // One-shot — consumed on first (matching) use.
+    if (!this.hostedGrants.consume(toolCallId, toolName)) return notApprovedHostedTool()
 
     switch (toolName) {
       case 'render_mermaid': {
@@ -2662,6 +2825,15 @@ export class PiSession extends BaseSession {
       case 'dispatch_agent':
         return this.handleDispatchAgent(input, toolCallId)
 
+      // Host-run subagents (ADR-089): this session is the parent (depth 0).
+      case 'agent':
+        return this.subagents.run(input, toolCallId, null)
+      // ADR-089 S3b: messaging and stopping, as the session (caller null).
+      case 'send_message':
+        return this.subagents.sendMessage(input, null)
+      case 'task_stop':
+        return this.subagents.taskStop(input, null)
+
       default:
         return unknownHostedTool(toolName)
     }
@@ -2675,7 +2847,7 @@ export class PiSession extends BaseSession {
    * side initiates — the dispatcher's own engine guard rejects 'pi' as
    * `req.engine` here. Mirrors collab-tool.ts's Claude-side
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
-   * autonomyMode/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
+   * getAutonomyMode/getMessages/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
    * directly. Result text formatting (the `[dispatch session_id: …]` success
    * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
@@ -2704,12 +2876,12 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> {
     const engine = input.engine
     const prompt = input.prompt
-    if ((engine !== 'claude' && engine !== 'opencode') || typeof prompt !== 'string') {
+    if (!canDispatchInto('pi', engine) || typeof prompt !== 'string') {
       return {
         content: [
           {
             type: 'text',
-            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode") and a string "prompt".'
+            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode"|"codex") and a string "prompt".'
           }
         ],
         isError: true
@@ -2726,7 +2898,10 @@ export class PiSession extends BaseSession {
       fromEngine: 'pi',
       fromRoutingId: this.routingId,
       cwd: this.cwd,
-      autonomyMode: this.getAutonomyMode(),
+      // Live (ADR-088): the target follows this session's mode switches, and
+      // the judge of a pi/opencode target reads this transcript.
+      getAutonomyMode: () => this.getAutonomyMode(),
+      getMessages: () => this.messageHistory,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),
@@ -2750,6 +2925,28 @@ export class PiSession extends BaseSession {
       content: [{ type: 'text', text }],
       ...(result.isError ? { isError: true } : {})
     }
+  }
+
+  /**
+   * ISession.backgroundTask — "Send to background" on a host-run subagent's
+   * TaskCard (ADR-089 S3b, Q7; `handlers-core.backgroundTask`, gated on
+   * `capabilities.backgroundTasks`): the waiting `agent` call returns the
+   * async-launched text now, and the run notifies when it ends.
+   */
+  async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    return this.subagents.background(toolUseId)
+  }
+
+  /**
+   * ISession.stopTask — the per-agent Stop on a host-run subagent's TaskCard
+   * (ADR-088; `handlers-core.stopTask`, gated on `capabilities.backgroundTasks`).
+   * Stops that agent and its descendants; its run returns "Agent stopped by
+   * user." to the parent. A run already past its end (closing) is not stopped.
+   */
+  async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    return this.subagents.stop(toolUseId)
+      ? { success: true }
+      : { success: false, error: 'No running agent for that card' }
   }
 
   async setModel(model: string): Promise<void> {

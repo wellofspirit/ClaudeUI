@@ -19,9 +19,11 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { useSessionStore } from '@renderer/stores/session-store'
 import { makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
+import { blobRefOf } from '@test/helpers/blob-refs'
+import { resetBlobCacheForTests } from '@renderer/lib/blob-cache'
 
 // Mock the leaf body components so we can assert which one rendered + with what.
 vi.mock('../../../../lib/diff', () => ({
@@ -64,9 +66,22 @@ import type { ToolView } from '../../../../../../shared/tool-kinds'
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
+/** What the fake host's blob store holds — `window.api.getBlob` answers from it. */
+const hostBlobs = new Map<string, { mediaType: string; base64Data: string }>()
+
+/** A ref for these base64 bytes, registered on the fake host. */
+function hostBlob(mediaType: string, base64Data: string): { blobId: string; bytes: number } {
+  const ref = blobRefOf(base64Data)
+  hostBlobs.set(ref.blobId, { mediaType, base64Data })
+  return ref
+}
+
 beforeEach(() => {
   resetFactoryCounter()
+  hostBlobs.clear()
+  resetBlobCacheForTests()
   ;(globalThis as any).window.api = {
+    getBlob: vi.fn(async (blobId: string) => hostBlobs.get(blobId) ?? null),
     logError: vi.fn(),
     respondApproval: vi.fn(),
     watchBackground: vi.fn(),
@@ -461,9 +476,10 @@ describe('ToolCard — approval', () => {
 })
 
 describe('ToolCard — tool-result images strip', () => {
-  const IMAGES = [
-    { mediaType: 'image/png' as const, base64Data: 'AAA', fileName: 'a.png' },
-    { mediaType: 'image/webp' as const, base64Data: 'BBB' }
+  // Built per test: `beforeEach` clears the fake host the refs register on.
+  const images = () => [
+    { mediaType: 'image/png' as const, ...hostBlob('image/png', 'AAA'), fileName: 'a.png' },
+    { mediaType: 'image/webp' as const, ...hostBlob('image/webp', 'BBB') }
   ]
 
   function imageResult(): ToolResultBlock {
@@ -472,11 +488,11 @@ describe('ToolCard — tool-result images strip', () => {
       toolUseId: 'tu-1',
       toolResult: '',
       isError: false,
-      images: IMAGES
+      images: images()
     }
   }
 
-  it('renders one thumb per image for a fileRead whose result text is empty', () => {
+  it('renders one thumb per image for a fileRead whose result text is empty', async () => {
     // FileReadBody hides its whole result section when toolResult is '' — the
     // strip lives in ToolCard, so an image-only Read still shows its images.
     render(
@@ -492,12 +508,15 @@ describe('ToolCard — tool-result images strip', () => {
     expect(screen.queryByTestId('CodeView')).toBeNull()
     const thumbs = screen.getAllByTestId('ToolResultImages.thumb')
     expect(thumbs).toHaveLength(2)
-    expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
-      'data:image/png;base64,AAA'
-    )
-    expect((thumbs[1].querySelector('img') as HTMLImageElement).src).toBe(
-      'data:image/webp;base64,BBB'
-    )
+    // Each thumb is a BlobImage: the bytes arrive through blob:get, typed by the ref.
+    await waitFor(() => {
+      expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,AAA'
+      )
+      expect((thumbs[1].querySelector('img') as HTMLImageElement).src).toBe(
+        'data:image/webp;base64,BBB'
+      )
+    })
   })
 
   it('stays visible while the card is COLLAPSED (the image is the result)', () => {

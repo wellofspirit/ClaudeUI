@@ -6,12 +6,24 @@
  */
 import { describe, it, expect } from 'vitest'
 import { SessionQueue } from '../session-queue'
-import type { QueuedItem } from '../../../shared/types'
+import type { AttachmentRef, AttachmentUpload, QueuedItem } from '../../../shared/types'
 
 function makeQueue(): { queue: SessionQueue; broadcasts: QueuedItem[][] } {
   const broadcasts: QueuedItem[][] = []
   const queue = new SessionQueue((items) => broadcasts.push(items))
   return { queue, broadcasts }
+}
+
+const UPLOAD: AttachmentUpload = {
+  mediaType: 'image/png',
+  base64Data: 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=',
+  fileName: 'shot.png'
+}
+const REF: AttachmentRef = {
+  mediaType: 'image/png',
+  blobId: 'c'.repeat(64),
+  bytes: 26,
+  fileName: 'shot.png'
 }
 
 describe('SessionQueue', () => {
@@ -25,10 +37,42 @@ describe('SessionQueue', () => {
 
   it('drops an empty attachment list rather than shipping `attachments: []`', () => {
     const { queue } = makeQueue()
-    expect(queue.add('bare', []).attachments).toBeUndefined()
-    expect(
-      queue.add('with', [{ mediaType: 'image/png', base64Data: 'A' }]).attachments
-    ).toHaveLength(1)
+    expect(queue.add('bare', [], []).attachments).toBeUndefined()
+    expect(queue.add('bare', undefined, undefined).attachments).toBeUndefined()
+    expect(queue.add('with', [UPLOAD], [REF]).attachments).toHaveLength(1)
+  })
+
+  // ADR-087: the item is BROADCAST and folded into canonical state, so it carries
+  // refs. The bytes the engine still needs are kept beside it, never on it.
+  it('broadcasts refs only, and keeps the upload bytes beside the item', () => {
+    const { queue, broadcasts } = makeQueue()
+    const item = queue.add('look', [UPLOAD], [REF])
+
+    expect(item.attachments).toEqual([REF])
+    expect(queue.uploadsFor(item)).toEqual([UPLOAD])
+
+    queue.emit()
+    expect(JSON.stringify(broadcasts)).not.toContain(UPLOAD.base64Data)
+    expect(broadcasts[0][0].attachments).toEqual([REF])
+    // Still pending, so the drain can still read its bytes after a broadcast.
+    expect(queue.uploadsFor(item)).toEqual([UPLOAD])
+  })
+
+  it('drops the upload bytes when the item goes terminal, not before', () => {
+    const { queue } = makeQueue()
+    const consumed = queue.add('a', [UPLOAD], [REF])
+    const recalled = queue.add('b', [UPLOAD], [REF])
+    const pending = queue.add('c', [UPLOAD], [REF])
+    queue.consumeById(consumed.itemId)
+    queue.recallById(recalled.itemId)
+
+    // Terminal but not yet broadcast: the terminal transition rides one more emit.
+    expect(queue.uploadsFor(consumed)).toBeDefined()
+    queue.emit()
+
+    expect(queue.uploadsFor(consumed)).toBeUndefined()
+    expect(queue.uploadsFor(recalled)).toBeUndefined()
+    expect(queue.uploadsFor(pending)).toEqual([UPLOAD])
   })
 
   it('consumeByText picks the FIRST matching pending item (duplicates are interchangeable)', () => {

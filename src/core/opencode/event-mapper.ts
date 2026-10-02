@@ -16,6 +16,7 @@ import type {
   ToolResultImage
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import { blobStore } from '../services/blob-store'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -397,7 +398,7 @@ function handleOwnEvent(
       // ctx.metadata also sets `input: args`). A tool that asks straight from
       // `execute` can beat it: the shell tool does (tool/shell.ts `execute` →
       // `ask`), and the part is then often still `pending` with `input: {}` —
-      // readOnlyBypass (OpencodeSession) waits for it rather than trusting
+      // readOnlyInput (OpencodeSession) waits for it rather than trusting
       // this snapshot. Fall back to `metadata` (populated for built-in tools)
       // then {}.
       const metadata = props.metadata as Record<string, unknown> | undefined
@@ -1176,8 +1177,9 @@ function decodeBase64DataUri(url: string, mime: string): string | null {
  *
  * Reuses the same gates as the user-attachment reader: an image mime in
  * `IMAGE_MEDIA_TYPES` and a genuine `data:<mime>;base64,` URI. PDFs and
- * `file://` urls are skipped (the gallery is images-only). Returns undefined
- * rather than [] when nothing survives.
+ * `file://` urls are skipped (the gallery is images-only). The bytes are
+ * interned into the blob store and the images carry refs (ADR-087). Returns
+ * undefined rather than [] when nothing survives.
  */
 function toolAttachmentImages(
   attachments: ToolAttachment[] | undefined
@@ -1189,8 +1191,9 @@ function toolAttachmentImages(
     const { mime, url, filename } = a
     if (!isImageMediaType(mime) || typeof url !== 'string') continue
     const base64Data = decodeBase64DataUri(url, mime)
-    if (!base64Data) continue
-    images.push({ mediaType: mime, base64Data, ...(filename ? { fileName: filename } : {}) })
+    const ref = base64Data ? blobStore.put(mime, base64Data) : null
+    if (!ref) continue
+    images.push({ mediaType: mime, ...ref, ...(filename ? { fileName: filename } : {}) })
   }
   return images.length > 0 ? images : undefined
 }
@@ -1209,11 +1212,12 @@ function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | nul
   const isImage = isImageMediaType(mime)
   if (!isImage && mime !== 'application/pdf') return null
   const base64Data = decodeBase64DataUri(url, mime)
-  if (!base64Data) return null
+  const ref = base64Data ? blobStore.put(mime, base64Data) : null
+  if (!ref) return null
   const fileName = filename ? { fileName: filename } : {}
   return isImage
-    ? { type: 'image', mediaType: mime, base64Data, ...fileName }
-    : { type: 'document', mediaType: 'application/pdf', base64Data, ...fileName }
+    ? { type: 'image', mediaType: mime, ...ref, ...fileName }
+    : { type: 'document', mediaType: 'application/pdf', ...ref, ...fileName }
 }
 
 /**
@@ -1276,7 +1280,7 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
   const content: ContentBlock[] = []
   // Attachments are hoisted ahead of the rest: ClaudeUI sends opencode
   // [text, ...fileParts] so they persist AFTER the prompt, while the live echo
-  // (session-store.ts addUserMessage / OpencodeSession.buildUserContent) puts
+  // (session-store.ts addUserMessage / BaseSession.userMessageContent) puts
   // them first. Replay must match the live order.
   const attachments: ContentBlock[] = []
 
@@ -1288,6 +1292,11 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
       const block = storedFilePartToAttachment(part)
       if (block) attachments.push(block)
     } else if (type === 'text') {
+      // An opencode-authored text part of a USER message is not something the
+      // user typed: never a user bubble, and never a `User:` line for the
+      // judge, which reads this replay (S4, Q9). opencode's own app skips it
+      // too (vendor packages/app/src/components/dialog-fork.tsx).
+      if (role === 'user' && part.synthetic === true) continue
       const text = part.text ?? ''
       if (text) content.push({ type: 'text', text })
     } else if (type === 'reasoning') {

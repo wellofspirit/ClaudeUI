@@ -139,13 +139,23 @@ export function piToolKind(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
-    // In-pi subagents (M5b): the subagent-discovery extension's OWN
-    // registered tool (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS)
-    // — reuses the SAME 'task' kind dispatch_agent does (TaskCard is
-    // engine-neutral). Mirrors PiEngineToolMap.kindOf's IDENTICAL case (the
-    // single-source guard test asserts the two tables agree).
+    // Host-run pi subagents (ADR-089): the bridge's own `agent` tool
+    // (pi-bridge-source.ts v9, gated on CLAUDEUI_PI_AGENT_TOOL) — the SAME
+    // 'task' kind dispatch_agent uses (TaskCard is engine-neutral). Mirrors
+    // PiEngineToolMap.kindOf's IDENTICAL case (single-source guard test).
+    case 'agent':
+      return 'task'
+    // `subagent`: legacy M5b transcripts (the retired in-pi extension) and
+    // pi's upstream example subagent extension a user may load themselves.
+    // Same 'task' kind; mirrored in PiEngineToolMap.kindOf.
     case 'subagent':
       return 'task'
+    // ADR-089 S3b: the bridge's `send_message` / `task_stop` — Claude's
+    // SendMessage / TaskStop row kinds. Mirrored in PiEngineToolMap.kindOf.
+    case 'send_message':
+      return 'detail'
+    case 'task_stop':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -177,10 +187,12 @@ export const PI_AUTO_ALLOW_HOSTED_TOOLS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * ALL FOUR tools registered via `pi.registerTool()` in the bridge extension
- * (M4a+b) — PI_AUTO_ALLOW_HOSTED_TOOLS above is a STRICT SUBSET (the three
- * auto-allowed ones; `dispatch_agent` gets normal mode-base gating instead,
- * see PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment for why). PiSession's
+ * EVERY tool registered via `pi.registerTool()` in the bridge extension that
+ * executes over `/hosted-tool` (M4a+b, plus ADR-088's `agent`) —
+ * PI_AUTO_ALLOW_HOSTED_TOOLS above is a STRICT SUBSET (the three auto-allowed
+ * ones; `dispatch_agent` and `agent` get normal gating instead, see
+ * PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment for why — `agent`'s gate is
+ * PiSession's spawn-call rung, ADR-089 Q1). PiSession's
  * gateToolCall wrapper checks THIS superset — not the auto-allow set — to
  * decide which allow decisions mint a one-shot `/hosted-tool` execution grant
  * (security fix: a call outside this set has no `/hosted-tool` counterpart to
@@ -190,7 +202,10 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'render_mermaid',
   'create_mockup',
   'show_mockup',
-  'dispatch_agent'
+  'dispatch_agent',
+  'agent',
+  'send_message',
+  'task_stop'
 ])
 
 // ---------------------------------------------------------------------------

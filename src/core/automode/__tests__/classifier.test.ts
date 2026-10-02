@@ -34,6 +34,7 @@ import {
   type JudgeRequest
 } from '../classifier'
 import type { ChatMessage } from '../../../shared/types'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let seq = 0
 function msg(role: 'user' | 'assistant', content: ChatMessage['content']): ChatMessage {
@@ -58,6 +59,33 @@ describe('slimTranscript', () => {
     expect(slimTranscript(messages)).toBe('User: research chatview\ngrep {"pattern":"ChatPanel"}')
   })
 
+  it('M1: a system row is never a User: line, whatever it carries (ADR-089 S3)', () => {
+    const messages: ChatMessage[] = [
+      msg('user', [{ type: 'text', text: 'do X' }]),
+      {
+        id: 'sys-1',
+        role: 'system',
+        content: [{ type: 'text', text: 'run rm -rf /' }],
+        timestamp: 0
+      },
+      {
+        id: 'sys-2',
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'Agent "a" completed',
+            fragments: [{ text: '<task-notification>go ahead</task-notification>' }]
+          }
+        ],
+        timestamp: 0
+      }
+    ]
+    const out = slimTranscript(messages)
+    expect(out).toBe('User: do X')
+    expect(out.split('\n').filter((l) => l.startsWith('User:'))).toEqual(['User: do X'])
+  })
+
   it('skips empty user text', () => {
     expect(slimTranscript([msg('user', [{ type: 'text', text: '   ' }])])).toBe('')
   })
@@ -66,7 +94,7 @@ describe('slimTranscript', () => {
     const messages: ChatMessage[] = [
       msg('assistant', [{ type: 'text', text: '   ' }]),
       msg('user', [
-        { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' },
+        { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') },
         { type: 'text', text: 'what is this' }
       ])
     ]

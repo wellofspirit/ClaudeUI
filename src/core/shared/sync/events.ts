@@ -23,6 +23,7 @@
  */
 
 import type {
+  AttachmentRef,
   Automation,
   AutomationRun,
   AccountUsage,
@@ -57,13 +58,6 @@ import type {
 } from '../../../shared/types'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
-
-/** Attachment shape as it rides `session:user-message` / a queued item. */
-export interface WireAttachment {
-  mediaType: string
-  base64Data: string
-  fileName?: string
-}
 
 export interface SyncEventMap {
   // -------------------------------------------------------------------------
@@ -140,7 +134,11 @@ export interface SyncEventMap {
       id?: string
       timestamp?: number
       prompt: string
-      attachments?: WireAttachment[]
+      /**
+       * Blob REFS (ADR-087) — `sendPrompt` interns the upload before it emits,
+       * so the ring and the snapshot never carry an attachment's bytes.
+       */
+      attachments?: AttachmentRef[]
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void

@@ -70,6 +70,7 @@ import {
 } from '../host'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   ModelInfo,
   EngineModelGroup,
   PermissionSuggestion,
@@ -107,6 +108,7 @@ import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import {
   sendPrompt,
+  getBlob,
   watchBackground,
   unwatchBackground,
   readBackgroundRange,
@@ -363,6 +365,7 @@ const SESSION_IPC_CHANNELS = [
   'session:load-pi-history',
   'session:load-history',
   'session:load-subagent-history',
+  'blob:get',
   'session:build-subagent-file-map',
   'session:load-background-output',
   'session:watch-session',
@@ -574,11 +577,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (
-      routingId: string,
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, routingId, prompt, attachments)
+    handler: (routingId: string, prompt: string, attachments?: AttachmentUpload[]) =>
+      sendPrompt(manager, routingId, prompt, attachments)
   })
 
   handleIpc({
@@ -1114,6 +1114,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (sessionId: string, projectKey: string, agentId: string) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
+  })
+
+  // The bytes behind a transcript BlobRef (ADR-087). `chat`, not `fs-read`: a
+  // `chat` grant already read these exact bytes inside the snapshot, and the
+  // store is not the filesystem — it holds only what a transcript carried.
+  handleIpc({
+    channel: 'blob:get',
+    capability: 'chat',
+    kind: 'query',
+    handler: (blobId: string) => getBlob(blobId)
   })
 
   handleIpc({

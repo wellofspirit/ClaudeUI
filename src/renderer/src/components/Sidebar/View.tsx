@@ -423,12 +423,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
                           ? () => onUnhideProject(group.projectKey)
                           : undefined
                       }
-                      onDelete={
-                        group.projectKey &&
-                        !group.sessions.some((session) => session.engineId === 'codex')
-                          ? () => onDeleteProject(group)
-                          : undefined
-                      }
+                      onDelete={group.projectKey ? () => onDeleteProject(group) : undefined}
                       hiddenSessionIds={hiddenSessionSet}
                       showHidden={showHidden}
                       onHideSession={onHideSession}
@@ -458,10 +453,11 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
           path={
             deleteTarget.kind !== 'session'
               ? `~/.claude/projects/${deleteTarget.projectKey}/`
-              : // A Codex thread has no file under `~/.claude/projects` — it
-                // lives in the app-server's own store — so naming one here
-                // would be a fabricated path. Its id is the honest detail.
-                deleteTarget.engineId === 'codex'
+              : // Only a Claude session has a file under `~/.claude/projects`:
+                // Codex and opencode keep theirs in the engine's own store, pi
+                // under `~/.pi`. Naming one here would be a fabricated path, so
+                // for every other engine the session id is the honest detail.
+                deleteTarget.engineId && deleteTarget.engineId !== 'claude'
                 ? deleteTarget.sessionId
                 : `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
           }

@@ -176,6 +176,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         agentId
       ) as ReturnType<ClaudeAPI['loadSubagentHistory']>,
 
+    getBlob: (blobId) => connection.invoke('blob:get', blobId) as ReturnType<ClaudeAPI['getBlob']>,
+
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
       connection.invoke(
         'session:build-subagent-file-map',

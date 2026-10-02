@@ -185,7 +185,10 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     if (!session || session.engineId !== 'opencode') return undefined
     return {
       cwd: session.cwd,
-      autonomyMode: session.getAutonomyMode?.() ?? 'default',
+      // Both read the LIVE session on every call (ADR-088): a target follows
+      // the caller's mode switches and the judge reads its current transcript.
+      getAutonomyMode: () => session.getAutonomyMode?.() ?? 'default',
+      getMessages: () => session.getMessages(),
       emit: (channel, data) => session.emit(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         session.addDispatchedCost(engineId, modelId, costUsd)

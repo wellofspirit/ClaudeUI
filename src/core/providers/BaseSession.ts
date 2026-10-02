@@ -1,6 +1,10 @@
 import type { HostWindowHandle } from '../host'
 import type {
+  AttachmentRef,
+  AttachmentUpload,
   ChatMessage,
+  ContentBlock,
+  ImageMediaType,
   SessionStatus,
   EngineId,
   ApprovalDecision,
@@ -11,6 +15,7 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
+import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
 import { emitEvent } from '../services/sync-host'
@@ -89,6 +94,9 @@ export abstract class BaseSession implements ISession {
    */
   private queueFlushRerun = false
 
+  /** The user-stop window (ADR-090) — see {@link beginUserStop}. */
+  private userStopPending = false
+
   constructor(routingId: string, win: HostWindowHandle | null, cwd: string) {
     this.routingId = routingId
     this.win = win
@@ -105,7 +113,7 @@ export abstract class BaseSession implements ISession {
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     clientUserMessageId?: string
   ): Promise<void>
   abstract interrupt(): Promise<void>
@@ -152,9 +160,10 @@ export abstract class BaseSession implements ISession {
 
   enqueuePrompt(
     text: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: AttachmentUpload[],
+    refs: AttachmentRef[] | undefined = internAttachments(attachments)
   ): void {
-    const item = this.queue.add(text, attachments)
+    const item = this.queue.add(text, attachments, refs)
     this.queue.emit()
     this.onPromptQueued(item)
   }
@@ -184,7 +193,16 @@ export abstract class BaseSession implements ISession {
    * item `queued` tells {@link flushQueuedItems} nothing landed.
    */
   protected forwardQueuedItem(item: QueuedItem): Promise<void> {
-    return this.run(item.text, item.attachments)
+    return this.run(item.text, this.queuedUploads(item))
+  }
+
+  /**
+   * The bytes a queued item's attachments were uploaded with. Every engine's
+   * drain path reads them HERE, never off `item.attachments`: the item is the
+   * broadcast shape and carries blob refs only (ADR-087).
+   */
+  protected queuedUploads(item: QueuedItem): AttachmentUpload[] | undefined {
+    return this.queue.uploadsFor(item)
   }
 
   /**
@@ -385,6 +403,68 @@ export abstract class BaseSession implements ISession {
       clearTimeout(this.inactivityTimer)
       this.inactivityTimer = null
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // A user stop is not an error (ADR-090)
+  // ---------------------------------------------------------------------------
+  //
+  // An engine tearing down a turn the user stopped may report the teardown as
+  // a turn error (pi's aborted model request, opencode's MessageAbortedError,
+  // a Codex turn that fails in a race with the interrupt). That is not news to
+  // the user who pressed Stop, so while the window is open the session's
+  // TURN-ERROR banner is not sent; the turn-end bookkeeping still runs.
+  // ClaudeSession's `wasInterrupted` is the reference rule (it predates this
+  // helper and keeps its own flag). A user stop is reached only through the
+  // `session:interrupt` IPC (→ `interrupt()`), so the window is user-initiated
+  // by construction. The helper never touches status or processing state, and
+  // it never covers auth, prompt-ack, transport-loss, guardian or judge banners.
+
+  /**
+   * `interrupt()`: open the window — only when a turn is live (a window opened
+   * at idle would swallow the NEXT turn's genuine error), and BEFORE the abort
+   * request is sent (the engine's error can arrive before the request's reply).
+   */
+  protected beginUserStop(): void {
+    this.userStopPending = true
+  }
+
+  /** The stopped turn ended, a fresh turn started, or the session went away. */
+  protected endUserStop(): void {
+    this.userStopPending = false
+  }
+
+  /**
+   * True while the window is open — the caller then sends no turn-error
+   * banner. The suppressed text (an engine error string) is logged at info.
+   */
+  protected suppressedAfterUserStop(tag: string, message: string): boolean {
+    if (!this.userStopPending) return false
+    logger.info(tag, `turn error after a user stop, not shown: ${message}`)
+    return true
+  }
+
+  /**
+   * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
+   * the renderer's optimistic addUserMessage (session-store.ts): attachments
+   * first (image/document blocks), then a trailing text block. Keeps
+   * getMessages() fidelity for image/PDF attachments (Claude and opencode; pi
+   * keeps its own image-only variant — it has no document input).
+   */
+  protected userMessageContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
+    const content: ContentBlock[] = []
+    // Like every ChatMessage, the blocks carry blob refs, not bytes (pre-release
+    // ADR-087, transcript blobs off the ring).
+    for (const att of internAttachments(attachments) ?? []) {
+      const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
+      if (att.mediaType === 'application/pdf') {
+        content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
+      } else {
+        content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
+      }
+    }
+    if (prompt) content.push({ type: 'text', text: prompt })
+    return content
   }
 
   /**

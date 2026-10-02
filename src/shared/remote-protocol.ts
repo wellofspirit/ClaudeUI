@@ -1075,6 +1075,15 @@ export interface PerSessionSnapshot {
    * host that predates slice 3 sends none, which reads as "nothing owed".
    */
   authRequired?: AuthRequiredState | null
+  /**
+   * `false` means this entry does NOT carry its transcript — `messages` and
+   * `subagentMessages` are empty because the host dropped them (ADR-087 §2) or has
+   * not read them yet (a resume's history read is in flight), not because the
+   * conversation is empty. With `sdkActive` false, read it from disk; with it true,
+   * fill it the way a follower of a resume does. Absent means "complete", which is
+   * also what a host that predates the field means.
+   */
+  seeded?: boolean
 }
 
 /**

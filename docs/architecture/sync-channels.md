@@ -175,6 +175,51 @@ comes from, not what it contains, so the web client works unmodified. The
 `session:created` addition does not change it either — the fields it carries are
 snapshot fields that already existed.
 
+### Image and document payloads are refs (ADR-087)
+
+Not a row, because it is not one channel's payload: it is every place a transcript can
+hold an image. `session:tool-result` and `session:subagent-tool-result` (`images[]`),
+`session:user-message` and `session:queue-changed` (`attachments[]`), and the `image` /
+`document` content blocks inside `session:message`, the subagent message channels and every
+history load carry a `BlobRef` `{blobId, bytes}` where they used to carry `base64Data`. The
+`blobId` is the SHA-256 of the decoded bytes, so one screenshot arriving from a live event, a
+transcript re-read and a subagent file is one entry in the host's in-memory, LRU-bounded
+`BlobStore`. This is the shrinking half of the rule above — a payload can lose what a client
+can fetch for itself — and it is what makes the ring's entry-count bound a real one: before,
+5000 entries could each carry a megabyte, and a snapshot (all of canonical state) carried every
+image in every session.
+
+The producers intern, not the reducer: the shared tool-result decoder, each engine's mapper,
+the history readers and `sendPrompt` hand the store the bytes and put the ref on the event. The
+reducer only moves ids, and no non-test file under `core/shared/sync/` may name `base64Data`
+(`no-inline-bytes.unit.test.ts`). `base64Data` survives on an UPLOAD — `AttachmentUpload`, the
+`session:send` argument an engine needs — which is an invoke argument and never ringed; a queued
+prompt keeps its upload beside the item inside `SessionQueue`, and the broadcast item carries
+refs only.
+
+The fetch is **`blob:get`**, a `chat` query returning `{mediaType, base64Data} | null`. It is an
+invoke on the WebSocket/IPC lane and deliberately NOT an HTTP route like `/sent-file`: on an E2E
+origin the bytes stay inside the encrypted channel, as they were inside the snapshot, and a
+screenshot of the operator's screen is conversation content rather than a deliberately delivered
+artifact. `null` is a legal answer (an LRU-evicted or unknown id) that clients render as "image
+unavailable"; the client-side cache remembers it for 60 s, not forever, because the host re-interns
+a blob whenever a transcript containing it is read again. A fetch that FAILS (socket down, timeout)
+is not "unavailable" — nothing was learned about the blob — so the image stays in its loading
+state and is retried with backoff (2 s doubling to 30 s) for as long as it is on screen. See
+[security.md](security.md) for the capability reasoning.
+
+### An exited session's transcript is not in the snapshot (ADR-087 §2)
+
+`PerSessionSnapshot.seeded?: boolean` is the one field the snapshot gained since 4b. `false`
+means "this entry does not carry its transcript — `messages` and `subagentMessages` are empty
+because the host dropped them, so read them from disk"; absent means complete, which is also
+what a host that predates the field means. `toSnapshot` emits it for EVERY unseeded session —
+one rule, "canonical does not hold this transcript" — which covers a dropped transcript and a
+resume whose history read is still in flight. Omitting the second would hand a client that syncs
+inside that window an empty transcript marked complete, with no `session:created` coming to fix
+it. The client tells the two apart by `sdkActive`. The reasons and the client's half are in
+§Eviction below.
+
 ## The table
 
 | Channel                          | Class                   | Ring | Canonical | Delta | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -545,13 +590,119 @@ being a blank screen.
 
 ## Eviction, and the removal that is not eviction
 
-Canonical does **not** evict on a timer, because no client does either:
-`evictLocalSessions` (stores/replica.ts) keeps the lightweight entry and strips the
-heavy arrays, marking it `seeded: false` so reselection re-hydrates from disk.
-Canonical therefore keeps its transcript. (Until 4c this section also said the shadow
-comparator treated "renderer transcript empty, canonical transcript non-empty" as
-eviction rather than drift — that comparator is **deleted**; the replica folds the
-shared reducer, so there is no second interpretation to mask.)
+Canonical evicts, but not on a timer and not through the reducer (ADR-087 §2). When a
+session has no live engine, `SyncCore.evictTranscript` drops its `messages`,
+`subagentMessages` and item streams and clears `seeded`, KEEPING the row and every light
+field (status, config, metering, todos, sentFiles, queue, tasks) — the host-side mirror of
+the client's `evictLocalSessions` (stores/replica.ts), which strips the same heavy arrays
+and marks the entry `seeded: false` so reselection re-hydrates from disk. Without it
+canonical held every transcript for the life of the process, so a snapshot grew with host
+uptime, worst on a headless server.
+
+**The rule.** Evict iff `sdkActive === false` and `status.state !== 'running'` — a live
+engine is still folding events into the transcript. Two triggers, both host-side:
+
+- **Engine exit.** Inside `SyncCore.process`, after a `session:status` whose state is
+  `disconnected`, under the POST-rekey id. Claude, opencode and Codex report exit that way,
+  and the funnel is the one place that sees every one. pi reports an unexpected process
+  death as `disconnected` too, but its own stop (`cancel()` / dispose) reports `idle` and
+  leaves canonical's `sdkActive` true — so a pi session the user stopped is not evicted by
+  this trigger. That is pi's existing status contract, not something eviction changes.
+- **A watch stops.** `session-watcher.ts` evicts when a watch entry is actually dropped
+  (`unwatchSession`, and the dead-watcher drop on an `fs.watch` error). A watched session
+  spawns nothing, so once nobody watches it nothing holds it on the host.
+
+A session whose transcript is already empty (spawned, never prompted, then exited) is left
+alone: it has nothing to drop, and marking it unseeded would tell a fresh client to read a
+conversation from disk that does not exist.
+
+**It is a cache decision, not an event.** A ringed `transcript-evicted` would strip every
+replica, including one showing the session, which would then refetch what it was already
+displaying. Eviction is a direct canonical write: nothing rings, nothing is delivered, and
+a connected replica keeps the transcript it already folded. Only a client that syncs from
+scratch is told, by `seeded: false` in its snapshot.
+
+**What the client does with `seeded: false`** (`hydrateReplica`):
+
+- A session with `seeded: false` and `sdkActive: false` that is NOT the one on screen
+  arrives empty and the store marks it `evicted` and `isHistorical` — the same view flag a
+  locally cold-evicted session carries, which is what makes the sidebar click
+  (`handleClickSession` takes its resident fast path unless `evicted`) reload from disk. A
+  click on an evicted entry that is idle loads in replace mode (strip and fill), so a
+  stale tail cannot survive it. A click on a LIVE evicted entry reads nothing: it opens the
+  entry, which the live fold and the client fill own (a load there would stamp it
+  historical, emptying the agent roster and hiding running state).
+- A session with `seeded: false` and `sdkActive: true` is a resume whose history read had
+  not landed when the snapshot was taken. It is NOT marked evicted; instead the client fills
+  it the way a follower of a resume does (`loadResumedTranscript`, shared with the
+  `session:created` observer: `loadSessionHistory` + the fill-only `seedColdSession`, no view
+  patch). If live events already folded into the entry the fill refuses, and because a
+  hydrate-filled entry was never marked evicted it stays a tail until the next resync
+  heals it (the observer path differs: its entry keeps `evicted`, and the next idle click
+  replaces it — see below). A forked resume's anchor is not in the snapshot, and
+  a fork's temporary id is not in the directory listing, so such a session is not filled.
+- Conversely, a session the snapshot says is live and carried has `evicted` cleared, so a
+  `session:created` missed in a gap cannot leave the flag on a running session.
+- The session on screen after a RESYNC keeps its local transcript under the snapshot's
+  light fields, so the chat does not blank. After every hydrate (fresh or resync), if the
+  active session's transcript was not carried, `reloadActiveTranscript`
+  (`lib/session-history-load.ts`) reads it from disk and REPLACES — strip and fill in one
+  synchronous step, so no empty frame is painted. The per-engine load is the one the sidebar
+  click uses (`loadSessionIntoStore`). A session absent from the replicated `directories`,
+  a read that fails, an empty read over a held transcript, and a session that went live or
+  stopped being the active one while the read was in flight all leave the view as it is —
+  and, unless the session went live, mark it evicted, so the transcript the resync kept on
+  screen is reloaded by the next click instead of being shown as complete forever.
+- While the active entry is `evicted` and empty, `ChatPanel` shows a loading state, never
+  `WelcomeState`, and the chat header is named from the same listing the sidebar row is.
+  When the reload bails because the session is not listed or the read failed, the entry is
+  flagged (`transcriptLoadFailed`, per-client view state beside `evicted`, cleared by any
+  load that lands) and the spinner becomes "Couldn't load this conversation — Retry", which
+  re-runs the reload.
+- Every lazy spawn treats an `evicted` (or `isHistorical`) entry as having a transcript to
+  resume (`hasResumableTranscript`), so a prompt typed before the read lands, or after it
+  failed, continues the conversation rather than starting a new one. A spawn from an
+  evicted, empty entry first waits for the reload still in flight
+  (`awaitReloadBeforeSpawn`): the host seeds its own transcript as soon as the engine
+  spawns, and a client read that is still open would then lose the race and show only the
+  new turn.
+- When the client's fill of a LIVE entry that WAS evicted (the `session:created` observer
+  path) is refused (live events already folded in, so the entry holds a tail), the entry
+  keeps its evicted flag and reads as unseeded rather than
+  complete: it still shows the tail, and the next click once it is idle replaces it from
+  disk. The same holds for a prompt sent on an evicted entry whose reload has already
+  FAILED — nothing is in flight to wait for, so it can still race the host's read; the
+  entry then stays evicted and the next idle click replaces it.
+- A session that is live again (`session:created` for a resident id) folds as always. When
+  the resident entry was an evicted, empty one, the client also loads the resumed history
+  the way a follower that had never seen the session does — the host's own seed is not an
+  event, so nothing else would bring it.
+
+**The seed race.** `SyncCore.seedSession` only FILLS an empty transcript, and
+`session:created` and the history read are separate steps, so a prompt that lands in
+between would be the whole transcript and the history a no-op. Every respawn of an evicted
+session starts empty, so the race is the common path, not a rarity. The read is
+registered with core (`SyncCore.trackSeed`, from `create-session.ts`) and
+`handlers-core.sendPrompt` — the one entry both transports use — waits on it before it emits
+`session:user-message`, enqueues or runs. The wait is conditional (a session with no read in
+flight still sends synchronously), every send waiting on the same read resumes in arrival
+order, and the entry clears when the read settles, success or failure.
+A Claude, opencode or pi session that exits (the inactivity timer, any `cancel()`) and then
+respawns IN PLACE has no `createSession` to seed canonical: the next prompt reaches the same
+session object, which resumes its engine session itself (a cancelled Codex object refuses to
+run again, so Codex always respawns through `createSession`). `sendPrompt` therefore seeds in that case too — canonical
+holds nothing for the session, did not drop an empty one, and the engine has a session id to
+resume — through the same `seedCanonicalTranscript` (`ipc/seed-canonical-transcript.ts`) and
+`trackSeed`, and waits on it. A prompt that would only queue behind a running turn does not.
+
+**Bounds.** A resumed session re-reads its transcript from disk on the host, once per
+respawn. A client resyncing onto an exited session shows its
+last-known transcript until the disk read lands. A history read that resolves AFTER a
+disconnect refills a session canonical had already evicted (`seedSession` fills any empty
+transcript); it is dropped again at the next exit. (Until 4c this section also said the
+shadow comparator treated "renderer transcript empty, canonical transcript non-empty" as
+eviction rather than drift — that comparator is **deleted**; the replica folds the shared
+reducer, so there is no second interpretation to mask.)
 
 `SyncCore.removeSession` is the explicit-removal path (delete session / delete
 project) — and it is **wired**, which it was not when this sentence was first written:

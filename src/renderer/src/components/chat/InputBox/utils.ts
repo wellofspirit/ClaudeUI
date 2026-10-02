@@ -3,7 +3,7 @@
  * picker utilities.
  */
 
-import type { FileAttachment } from '../../../../../shared/types'
+import type { AttachmentUpload, FileAttachment } from '../../../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Model picker filtering
@@ -118,16 +118,8 @@ export function dedupeResolvedModels<T extends ModelEntry>(
 export type SendAction =
   | { type: 'side-question'; question: string }
   | { type: 'clear-session' }
-  | {
-      type: 'queue-prompt'
-      prompt: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    }
-  | {
-      type: 'send-prompt'
-      prompt: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    }
+  | { type: 'queue-prompt'; prompt: string; attachments?: AttachmentUpload[] }
+  | { type: 'send-prompt'; prompt: string; attachments?: AttachmentUpload[] }
   | { type: 'noop' }
 
 export interface SendContext {

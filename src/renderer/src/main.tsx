@@ -6,6 +6,7 @@ import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { hydrateConfigFromDisk } from './stores/session-store'
 import { startReplica, hydrateReplica } from './stores/replica'
+import { finishHydrate } from './lib/session-history-load'
 import { startDesktopSync } from './sync/desktop-transport'
 import { installVerifierHooks } from './utils/verifier-hooks'
 import { startProjectionAudit } from './utils/projection-audit'
@@ -44,7 +45,9 @@ startReplica()
 // where the loss was seen.
 startProjectionAudit()
 startDesktopSync((snapshot, isResync) => {
-  hydrateReplica(snapshot, isResync)
+  // A snapshot does not always carry a transcript (ADR-087 §2); read what it left
+  // out from disk now rather than waiting for a click that will never come.
+  finishHydrate(hydrateReplica(snapshot, isResync))
 })
 
 // Real-app harness hooks — a no-op unless this launch opted in (see

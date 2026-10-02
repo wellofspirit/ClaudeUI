@@ -19,9 +19,9 @@
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import { blobStore } from '../services/blob-store'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type {
-  PiAgentMessage,
   PiAssistantContentBlock,
   PiAssistantMessage,
   PiEvent,
@@ -29,6 +29,8 @@ import type {
   PiTextContent,
   PiToolExecutionPartialResult
 } from './pi-protocol'
+import { piCustomMessageToChat } from './pi-custom-message'
+import { piAgentDeliveryDetails } from './pi-delivery'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -113,34 +115,6 @@ export interface PiUsageTokens {
   reasoning?: number
 }
 
-/**
- * One agent's status snapshot within a `subagent` tool's `cuiSubagent`
- * details payload (M5b — pi-subagent-source.ts's OWN streaming contract, not
- * the vendored example's `makeDetails`). `newMessages` is a DELTA — only the
- * child's raw pi messages appended since the PREVIOUS update for this exact
- * agent slot — so PiSession never needs to dedupe against what it already
- * forwarded as `session:subagent-message`/`session:subagent-tool-result`.
- */
-export interface PiSubagentAgentUpdate {
-  agent: string
-  model?: string
-  status: 'running' | 'done' | 'error'
-  newMessages: PiAgentMessage[]
-  usage?: {
-    input: number
-    output: number
-    cacheRead: number
-    cacheWrite: number
-    cost: number
-    turns: number
-  }
-}
-
-export interface PiSubagentUpdatePayload {
-  v: 1
-  agents: PiSubagentAgentUpdate[]
-}
-
 export type PiMapperOutput =
   | { kind: 'item_open'; target: ItemStreamTarget; message: ChatMessage; startedAt?: number }
   | { kind: 'item_delta'; target: ItemStreamTarget; chunk: string; message: ChatMessage }
@@ -174,10 +148,19 @@ export type PiMapperOutput =
    */
   | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
-  // M5b — in-pi subagents (pi-subagent-source.ts). Carries the `subagent`
-  // tool's `cuiSubagent` details, validated (never a raw pass-through of
-  // extension-supplied data — see parseCuiSubagentPayload).
-  | { kind: 'subagent_update'; toolUseId: string; payload: PiSubagentUpdatePayload }
+  /** pi started a run (`agent_start`), possibly one it started on its own for a delivery (ADR-089 S3). */
+  | { kind: 'turn_start' }
+  /** One of ClaudeUI's own agent messages reached the session (its custom message_end). */
+  | { kind: 'agent_delivery'; deliveryId: string }
+  /** The bridge's `cui-deliver` handler refused a payload (pi reports it as an extension error; the ack still succeeds, P-S4). */
+  | { kind: 'delivery_error'; message: string }
+  /**
+   * An extension's `pi.sendMessage` failed ASYNCHRONOUSLY: pi catches it and
+   * reports `extension_error` from `<runtime>` / `send_message`
+   * (agent-session.ts bindCore). Ours (a delivery) or another extension's —
+   * the consumer decides by whether a delivery of its own is pending.
+   */
+  | { kind: 'send_message_error'; message: string }
   | { kind: 'ignore' }
 
 // ---------------------------------------------------------------------------
@@ -456,23 +439,33 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
             ...(images ? { images } : {})
           }
         ]
-
-        // M5b — the subagent tool's FINAL return `{content, details}` lands
-        // here as this toolResult's `msg.details` (same carrier PiToolResultMessage
-        // already uses for edit's diff/patch) rather than through another
-        // `tool_execution_update` — the LAST live update during execution
-        // already went out that path (see the `tool_execution_update` case
-        // below); this covers the terminal one the model actually sees.
-        if (msg.toolName === 'subagent') {
-          const payload = parseCuiSubagentPayload(msg.details?.cuiSubagent)
-          if (payload) outputs.push({ kind: 'subagent_update', toolUseId: msg.toolCallId, payload })
-        }
         return outputs
       }
 
-      // user/bashExecution message_end never occurs per the verified event
-      // order (only assistant gets a message_start/end pair; toolResult only
-      // gets message_end) — defensive ignore for forward-compat.
+      if (msg.role === 'custom') {
+        // An extension's pi.sendMessage (probe P-S1: a message_start/end pair
+        // with role 'custom'). The SAME converter as history, so the row is
+        // identical live and on reload (ADR-089 S3, Q10). ClaudeUI's own
+        // deliveries are recognised by customType + details, never by text;
+        // their `agent_delivery` is what confirms a delivery (the RPC ack of
+        // the /cui-deliver prompt does not, P-S4).
+        const message = piCustomMessageToChat({
+          id: uuid(),
+          customType: msg.customType,
+          content: msg.content,
+          display: msg.display,
+          details: msg.details,
+          timestamp: Date.now()
+        })
+        const ours = piAgentDeliveryDetails(msg.customType, msg.details)
+        const outputs: PiMapperOutput[] = []
+        if (message) outputs.push({ kind: 'message', message })
+        if (ours) outputs.push({ kind: 'agent_delivery', deliveryId: ours.deliveryId })
+        return outputs.length > 0 ? outputs : [{ kind: 'ignore' }]
+      }
+
+      // user/bashExecution message_end: pi's own user prompt is rendered from
+      // run() (PiSession) — ignored here, as before.
       return [{ kind: 'ignore' }]
     }
 
@@ -507,7 +500,15 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     }
 
     case 'extension_error': {
-      const { error } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      const { error, extensionPath } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      // ClaudeUI's own delivery command failing is not a turn error: no turn
+      // ran, and the host undoes what it set up for one (ADR-089 S3).
+      if (extensionPath === 'command:cui-deliver')
+        return [{ kind: 'delivery_error', message: error }]
+      const { event } = ev as Extract<PiEvent, { type: 'extension_error' }>
+      if (extensionPath === '<runtime>' && event === 'send_message') {
+        return [{ kind: 'send_message_error', message: error }]
+      }
       return [{ kind: 'error', message: error }]
     }
 
@@ -523,17 +524,6 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         PiEvent,
         { type: 'tool_execution_update' }
       >
-      // M5b — in-pi subagents (pi-subagent-source.ts): the `subagent` tool's
-      // onUpdate({details: {cuiSubagent}}) payload surfaces VERBATIM as this
-      // ACCUMULATED partialResult.details (probed wire fact, M5b kickoff spec)
-      // — validated defensively (extension-supplied data) before ever
-      // reaching PiSession; a malformed/absent shape is silently ignored
-      // rather than crashing the mapper.
-      if (toolName === 'subagent') {
-        const payload = parseCuiSubagentPayload(partialResult?.details?.cuiSubagent)
-        if (!payload) return [{ kind: 'ignore' }]
-        return [{ kind: 'subagent_update', toolUseId: toolCallId, payload }]
-      }
       if (toolName !== 'bash') return [{ kind: 'ignore' }]
       return [
         {
@@ -544,7 +534,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       ]
     }
 
-    // agent_start/agent_end, turn_start/turn_end, tool_execution_start/end
+    case 'agent_start':
+      // A run began. PiSession knows of the runs it starts itself (run()), but
+      // a woken delivery starts one inside pi (ADR-089 S3), and the session
+      // must not read as idle through it.
+      return [{ kind: 'turn_start' }]
+
+    // agent_end, turn_start/turn_end, tool_execution_start/end
     // (start carries nothing new — the arguments are already in the
     // toolcall_end message_update above; end is fully covered by the
     // following toolResult message_end), queue_update, compaction_start,
@@ -827,7 +823,8 @@ export function piToolResultText(content: Array<PiTextContent | PiImageContent>)
  *
  * `mimeType` is a free-form string on the wire, so it is filtered through
  * `IMAGE_MEDIA_TYPES`; pi carries no filename, so `fileName` is omitted.
- * Returns undefined (not []) when there is nothing to carry.
+ * The bytes are interned into the blob store and the images carry refs
+ * (ADR-087). Returns undefined (not []) when there is nothing to carry.
  *
  * Shared with the stored-replay path in pi-session-list.ts.
  */
@@ -839,7 +836,8 @@ export function piToolResultImages(
   for (const b of content) {
     if (b.type !== 'image') continue
     if (!isImageMediaType(b.mimeType) || !b.data) continue
-    images.push({ mediaType: b.mimeType, base64Data: b.data })
+    const ref = blobStore.put(b.mimeType, b.data)
+    if (ref) images.push({ mediaType: b.mimeType, ...ref })
   }
   return images.length > 0 ? images : undefined
 }
@@ -856,58 +854,6 @@ function extractPartialResultText(partialResult: PiToolExecutionPartialResult): 
     .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
     .map((b) => b.text)
     .join('')
-}
-
-/**
- * Validate an unknown value as a `cuiSubagent` details payload (M5b) —
- * `v === 1` and a well-formed `agents` array, each entry with a string
- * `agent`, a recognized `status`, and a `newMessages` array (usage/model are
- * optional). Returns null on ANY structural mismatch — the mapper must never
- * crash on extension-supplied data (pi-subagent-source.ts is ClaudeUI's own
- * code today, but this boundary is treated as untrusted wire input, same
- * posture as every other partialResult/details field this file parses).
- */
-function parseCuiSubagentPayload(value: unknown): PiSubagentUpdatePayload | null {
-  if (!value || typeof value !== 'object') return null
-  const v = value as Record<string, unknown>
-  if (v.v !== 1 || !Array.isArray(v.agents)) return null
-
-  const agents: PiSubagentAgentUpdate[] = []
-  for (const entry of v.agents) {
-    if (!entry || typeof entry !== 'object') return null
-    const e = entry as Record<string, unknown>
-    if (typeof e.agent !== 'string') return null
-    if (e.status !== 'running' && e.status !== 'done' && e.status !== 'error') return null
-    if (!Array.isArray(e.newMessages)) return null
-    agents.push({
-      agent: e.agent,
-      model: typeof e.model === 'string' ? e.model : undefined,
-      status: e.status,
-      newMessages: e.newMessages as PiAgentMessage[],
-      usage: isPiSubagentUsage(e.usage) ? e.usage : undefined
-    })
-  }
-  return { v: 1, agents }
-}
-
-function isPiSubagentUsage(value: unknown): value is {
-  input: number
-  output: number
-  cacheRead: number
-  cacheWrite: number
-  cost: number
-  turns: number
-} {
-  if (!value || typeof value !== 'object') return false
-  const u = value as Record<string, unknown>
-  return (
-    typeof u.input === 'number' &&
-    typeof u.output === 'number' &&
-    typeof u.cacheRead === 'number' &&
-    typeof u.cacheWrite === 'number' &&
-    typeof u.cost === 'number' &&
-    typeof u.turns === 'number'
-  )
 }
 
 /**

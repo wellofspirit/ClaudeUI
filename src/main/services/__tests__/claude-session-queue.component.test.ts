@@ -342,12 +342,25 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 
 describe('ClaudeSession user frames — every one carries a uuid', () => {
   it('an ordinary send gets a fresh uuid; a queued item is sent under its itemId', async () => {
-    const { session, handle } = await startBusySession('r-queue-frame-uuid')
+    const { session, sent, handle } = await startBusySession('r-queue-frame-uuid')
 
     session.enqueuePrompt('also do this', [
       { mediaType: 'image/png', base64Data: 'AAAA', fileName: 'shot.png' }
     ])
     const [itemId] = session.queuedItems.map((i) => i.itemId)
+    // The wire frame below carries the engine's bytes; the item that is
+    // broadcast and folded into canonical state carries only the ref (ADR-087).
+    const broadcast = sent.filter(([channel]) => channel === 'session:queue-changed')
+    expect(broadcast).not.toHaveLength(0)
+    expect(JSON.stringify(broadcast)).not.toContain('AAAA')
+    expect(session.queuedItems[0].attachments).toEqual([
+      {
+        mediaType: 'image/png',
+        blobId: expect.stringMatching(/^[0-9a-f]{64}$/),
+        bytes: 3,
+        fileName: 'shot.png'
+      }
+    ])
     await vi.waitFor(() => expect(handle.frames).toHaveLength(2))
 
     const [first, queued] = handle.frames

@@ -28,7 +28,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 ## Commands
 
 - `bun run dev` — development mode with hot reload (main-process changes need an app restart)
-- `bun run build` — typecheck + build; `build:win` / `build:mac` for distributables
+- `bun run build` — build only (no typecheck — run `bun run typecheck` separately); `build:win` / `build:mac` for distributables
 - `bun run typecheck` / `bun run lint` / `bun run format`
 - `bun run rebuild:native` — **run after every `bun install`/`add`/`remove`**; bun leaves a Node-ABI `better-sqlite3` that crashes the app on boot (`ERR_DLOPEN_FAILED`)
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary; version pinned via `package.json#claudeCliVersion`

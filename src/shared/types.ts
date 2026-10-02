@@ -63,19 +63,50 @@ export interface FileDiff {
  * `tool_result` block that produced them, feed the image viewer's "Tool results"
  * gallery, and are never sent back up as prompt input.
  *
- * Field names are load-bearing — the gallery reader
- * (renderer/components/shared/ImageViewer/gallery.ts) builds
- * `data:<mediaType>;base64,<base64Data>` from them verbatim, so the media type
- * is narrowed to what an `<img src>` will actually render.
+ * The bytes are NOT here: a `BlobRef` into the host's blob store
+ * (`core/services/blob-store.ts`), fetched on demand through `blob:get`
+ * (ADR-087). The renderer builds `data:<mediaType>;base64,…` from the fetched
+ * bytes, so the media type is narrowed to what an `<img src>` will render.
  *
  * Producers must OMIT the carrying `images` key when there is nothing to carry
  * (never `images: []`) — the renderer's gallery/tab visibility is driven by
  * presence.
  */
-export interface ToolResultImage {
+export interface ToolResultImage extends BlobRef {
   mediaType: ImageMediaType
-  base64Data: string
   /** Only when the engine supplies one (opencode file parts); Claude transcripts carry none. */
+  fileName?: string
+}
+
+/**
+ * Content-addressed handle to bytes the host keeps out of band (ADR-087).
+ *
+ * Images and documents ride every transcript lane — events, the ring, the
+ * snapshot, history loads — as this handle instead of inline base64, so a
+ * screenshot-heavy session costs a few dozen bytes per image on the wire. A
+ * client fetches the bytes with `ClaudeAPI.getBlob`; the host may have evicted
+ * them (LRU), which a client renders as "unavailable", never as an error.
+ */
+export interface BlobRef {
+  /** Lowercase hex SHA-256 of the DECODED bytes. */
+  blobId: string
+  /** Decoded size — lets a client budget and label without fetching. */
+  bytes: number
+}
+
+/**
+ * What a client uploads with a prompt — an invoke ARGUMENT, never ringed, never
+ * snapshotted. Keeps base64 because the engine needs the bytes.
+ */
+export interface AttachmentUpload {
+  mediaType: string
+  base64Data: string
+  fileName?: string
+}
+
+/** The same attachment after the host interned it — what events, queue items and blocks carry. */
+export interface AttachmentRef extends BlobRef {
+  mediaType: string
   fileName?: string
 }
 
@@ -250,13 +281,16 @@ export type ContentBlock =
    * text loses the structure that makes it usable.
    */
   | { type: 'review_result'; text: string }
+  /** A user-attached image. The bytes live in the host's blob store (see {@link BlobRef}). */
+  | { type: 'image'; mediaType: ImageMediaType; blobId: string; bytes: number; fileName?: string }
+  /** A user-attached PDF. The bytes live in the host's blob store (see {@link BlobRef}). */
   | {
-      type: 'image'
-      mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
-      base64Data: string
+      type: 'document'
+      mediaType: 'application/pdf'
+      blobId: string
+      bytes: number
       fileName?: string
     }
-  | { type: 'document'; mediaType: 'application/pdf'; base64Data: string; fileName?: string }
 
 export interface FileAttachment {
   id: string
@@ -464,6 +498,13 @@ export interface PendingApproval {
    * evaluates child asks against the parent's rules on this marker.
    */
   subagent?: { sessionId: string; parentToolUseId: string }
+  /**
+   * pi only (ADR-089): set on a host-run child's ask — WHICH agent proposes the
+   * action, so the card can say so (the label is the agent's name, else its
+   * task description, sanitized). An "allow for this session" on such a card
+   * still allows for the whole session, children included (Claude Code parity).
+   */
+  agent?: { agentId: string; label: string; subagentType: string }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string
@@ -1178,7 +1219,11 @@ export interface SentFile {
 export interface QueuedItem {
   itemId: string
   text: string
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  /**
+   * Refs, never bytes: this item is broadcast and folded into canonical state.
+   * The engine-bound uploads stay private to the host's `SessionQueue`.
+   */
+  attachments?: AttachmentRef[]
   state: 'queued' | 'consumed' | 'recalled'
 }
 
@@ -1499,11 +1544,7 @@ interface SessionAPI {
     engineId: EngineId,
     messageIndex: number
   ): Promise<ForkAnchorResult>
-  sendPrompt(
-    routingId: string,
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void>
+  sendPrompt(routingId: string, prompt: string, attachments?: AttachmentUpload[]): Promise<void>
   cancelSession(routingId: string): Promise<void>
   /**
    * Reset a session's conversation in place ("start fresh"). Emits the
@@ -1565,6 +1606,12 @@ interface SessionAPI {
     projectKey: string,
     agentId: string
   ): Promise<ChatMessage[]>
+  /**
+   * The bytes behind a {@link BlobRef} (`blob:get`, ADR-087). `null` for an
+   * unknown, evicted or malformed id — a legal answer the caller renders as
+   * "unavailable".
+   */
+  getBlob(blobId: string): Promise<{ mediaType: string; base64Data: string } | null>
   buildSubagentFileMap(
     sessionId: string,
     projectKey: string,
@@ -3946,6 +3993,19 @@ export interface EngineHistoryLoad {
    * fallback in place.
    */
   lastModel?: ModelRef | null
+  /**
+   * Host-run pi subagent transcripts (ADR-089), by the parent `agent` call id
+   * — the key `session:subagent-message` uses live. pi only; absent when the
+   * session ran no agents.
+   */
+  subagentMessages?: Record<string, ChatMessage[]>
+  /**
+   * Host-run pi subagents' terminal events (ADR-089 S3), from the task
+   * notifications ClaudeUI delivered into the parent and child files — read
+   * from the stored message's `details`, never parsed from its text. A
+   * background launch with no notification reads `unfinished`. pi only.
+   */
+  taskNotifications?: TaskNotification[]
 }
 
 /**

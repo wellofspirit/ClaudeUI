@@ -26,6 +26,7 @@ import {
   hydrateReplica,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
+import { finishHydrate } from '../../renderer/src/lib/session-history-load'
 import type { SyncEventMap } from '../../core/shared/sync/events'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ClaudeAPI } from '../../shared/types'
@@ -135,6 +136,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
+    getBlob: (blobId) => ipcRenderer.invoke('blob:get', blobId),
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
       ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
     loadBackgroundOutput: (projectKey, taskId, outputFile?) =>
@@ -638,7 +640,8 @@ export async function bootTestApp(): Promise<TestApp> {
   syncClient.setFullStateHandler((state) => {
     const isResync = hasHydrated
     hasHydrated = true
-    hydrateReplica(state, isResync)
+    // Same follow-up the real entry points run (renderer main.tsx, web main.tsx).
+    finishHydrate(hydrateReplica(state, isResync))
   })
 
   return {

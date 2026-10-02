@@ -1251,7 +1251,8 @@ it.skipIf(!enabled)(
           fromEngine: 'codex',
           fromRoutingId: 'isolated-dispatch',
           cwd,
-          autonomyMode: 'default',
+          getAutonomyMode: expect.any(Function),
+          getMessages: expect.any(Function),
           toolUseId: card.toolUseId
         })
       )

@@ -9,8 +9,9 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, fireEvent, cleanup } from '@testing-library/react'
+import { render, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import { ImageViewerOverlay, type ViewerTab } from '../ImageViewerOverlay'
+import { resetBlobCacheForTests } from '../../../../lib/blob-cache'
 
 afterEach(cleanup)
 
@@ -666,6 +667,222 @@ describe('ImageViewerOverlay', () => {
       openMenu(getByTestId('ImageViewerOverlay.viewport'))
       fireEvent.click(getByTestId('ImageViewerOverlay.next'))
       expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+    })
+  })
+
+  // ADR-087 — a gallery entry from the transcript is a blob REF the viewer
+  // resolves itself; sent-file entries (a ready `src`) are the cases above.
+  describe('blob entries', () => {
+    const BLOB_TAB: ViewerTab = {
+      id: 'attachments',
+      label: 'Attachments',
+      images: ['a', 'b', 'c'].map((tag) => ({
+        blob: { blobId: tag.repeat(64), mediaType: 'image/png' },
+        fileName: `${tag}.png`
+      }))
+    }
+    const bytesById = (blobId: string): string => `BYTES-${blobId[0]}`
+
+    let getBlob: ReturnType<typeof vi.fn>
+    let release: Array<() => void>
+
+    beforeEach(() => {
+      resetBlobCacheForTests()
+      release = []
+      getBlob = vi.fn(async (blobId: string) => ({
+        mediaType: 'image/png',
+        base64Data: bytesById(blobId)
+      }))
+      window.api = { getBlob } as unknown as typeof window.api
+    })
+
+    it('shows a loading placeholder, then the resolved image, for the CURRENT entry', async () => {
+      let resolveFirst!: () => void
+      getBlob.mockImplementationOnce(
+        (blobId: string) =>
+          new Promise((resolve) => {
+            resolveFirst = () => resolve({ mediaType: 'image/png', base64Data: bytesById(blobId) })
+          })
+      )
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />
+      )
+
+      expect(queryByTestId('ImageViewerOverlay.image')).toBeNull()
+      expect(getByTestId('ImageViewerOverlay.placeholder').getAttribute('data-state')).toBe(
+        'loading'
+      )
+
+      resolveFirst()
+      await waitFor(() =>
+        expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+          'data:image/png;base64,BYTES-a'
+        )
+      )
+      expect(queryByTestId('ImageViewerOverlay.placeholder')).toBeNull()
+    })
+
+    it('says so when the host no longer holds the blob', async () => {
+      getBlob.mockResolvedValue(null)
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />)
+      await waitFor(() =>
+        expect(getByTestId('ImageViewerOverlay.placeholder').getAttribute('data-state')).toBe(
+          'missing'
+        )
+      )
+      expect(getByTestId('ImageViewerOverlay.placeholder').textContent).toBe('Image unavailable')
+      // The chrome around a missing image still works.
+      expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('1 / 3')
+    })
+
+    it('prefetches the neighbours so paging lands on a resolved image', async () => {
+      const { getByTestId } = render(
+        <ImageViewerOverlay tabs={[BLOB_TAB]} initialIndex={1} onClose={vi.fn()} />
+      )
+      await waitFor(() => expect(getBlob).toHaveBeenCalledTimes(3))
+      expect(getBlob.mock.calls.map(([id]) => id[0]).sort()).toEqual(['a', 'b', 'c'])
+
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      // Already cached: ready on the first render after the page, no new fetch.
+      expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+        'data:image/png;base64,BYTES-c'
+      )
+      expect(getBlob).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not show the previous image under the next entry while it loads', async () => {
+      getBlob.mockImplementation(
+        (blobId: string) =>
+          new Promise((resolve) => {
+            release.push(() => resolve({ mediaType: 'image/png', base64Data: bytesById(blobId) }))
+          })
+      )
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />
+      )
+      release.forEach((r) => r())
+      await waitFor(() => expect(queryByTestId('ImageViewerOverlay.image')).not.toBeNull())
+
+      // `b` was prefetched but not yet released a second time: force a fresh load.
+      resetBlobCacheForTests()
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(queryByTestId('ImageViewerOverlay.image')).toBeNull()
+      expect(getByTestId('ImageViewerOverlay.placeholder').getAttribute('data-id')).toBe('1')
+    })
+
+    it('ignores a zoom gesture on the loading placeholder, so the image does not land magnified', async () => {
+      getBlob.mockImplementation(
+        (blobId: string) =>
+          new Promise((resolve) => {
+            release.push(() => resolve({ mediaType: 'image/png', base64Data: bytesById(blobId) }))
+          })
+      )
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />)
+      expect(getByTestId('ImageViewerOverlay.placeholder')).toBeInTheDocument()
+
+      // Wheel-zoom in (deltaY < 0) while there is nothing to zoom.
+      fireEvent.wheel(getByTestId('ImageViewerOverlay.viewport'), {
+        deltaY: -400,
+        clientX: 300,
+        clientY: 200
+      })
+
+      release.forEach((r) => r())
+      await waitFor(() => expect(getByTestId('ImageViewerOverlay.image')).toBeInTheDocument())
+      expect(getByTestId('ImageViewerOverlay.image').style.transform).toContain('scale(1)')
+    })
+
+    it('recovers from a failed fetch without a remount: the entry stays loading, then lands', async () => {
+      vi.useFakeTimers()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        getBlob
+          .mockRejectedValueOnce(new Error('Not connected'))
+          .mockImplementation(async (blobId: string) => ({
+            mediaType: 'image/png',
+            base64Data: bytesById(blobId)
+          }))
+        const { getByTestId, queryByTestId } = render(
+          <ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />
+        )
+        const advance = (ms: number): Promise<void> =>
+          act(async () => {
+            await vi.advanceTimersByTimeAsync(ms)
+          })
+
+        await advance(0)
+        // A transport failure is not "unavailable".
+        expect(queryByTestId('ImageViewerOverlay.image')).toBeNull()
+        expect(getByTestId('ImageViewerOverlay.placeholder').getAttribute('data-state')).toBe(
+          'loading'
+        )
+
+        await advance(2_000)
+        expect(getByTestId('ImageViewerOverlay.image')).toBeInTheDocument()
+        expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+          'data:image/png;base64,BYTES-a'
+        )
+      } finally {
+        warn.mockRestore()
+        vi.useRealTimers()
+      }
+    })
+
+    describe('copy', () => {
+      class FakeClipboardItem {
+        constructor(readonly items: Record<string, Promise<Blob> | Blob>) {
+          for (const value of Object.values(items)) {
+            if (value instanceof Promise) value.catch(() => {})
+          }
+        }
+      }
+      const originalGetContext = HTMLCanvasElement.prototype.getContext
+      let written: unknown[]
+
+      beforeEach(() => {
+        HTMLCanvasElement.prototype.getContext = (() => null) as typeof originalGetContext
+        written = []
+        ;(globalThis as { ClipboardItem?: unknown }).ClipboardItem = FakeClipboardItem
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: {
+            write: async (items: unknown[]) => {
+              written.push(items)
+            },
+            writeText: async () => {}
+          }
+        })
+      })
+
+      afterEach(() => {
+        HTMLCanvasElement.prototype.getContext = originalGetContext
+      })
+
+      it('is a no-op while the entry is unresolved, and copies once it has landed', async () => {
+        getBlob.mockImplementation(
+          (blobId: string) =>
+            new Promise((resolve) => {
+              release.push(() => resolve({ mediaType: 'image/png', base64Data: bytesById(blobId) }))
+            })
+        )
+        const { getByTestId } = render(<ImageViewerOverlay tabs={[BLOB_TAB]} onClose={vi.fn()} />)
+
+        fireEvent.contextMenu(getByTestId('ImageViewerOverlay.viewport'), {
+          clientX: 10,
+          clientY: 10
+        })
+        fireEvent.click(getByTestId('ImageViewerOverlay.copyImage'))
+        expect(written).toHaveLength(0)
+
+        release.forEach((r) => r())
+        await waitFor(() => expect(getByTestId('ImageViewerOverlay.image')).toBeInTheDocument())
+        fireEvent.contextMenu(getByTestId('ImageViewerOverlay.viewport'), {
+          clientX: 10,
+          clientY: 10
+        })
+        fireEvent.click(getByTestId('ImageViewerOverlay.copyImage'))
+        expect(written).toHaveLength(1)
+      })
     })
   })
 

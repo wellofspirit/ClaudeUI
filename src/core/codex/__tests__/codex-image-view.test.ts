@@ -14,6 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { IMAGE_VIEW_MAX_BYTES, readCodexImageView } from '../codex-image-view'
+import { blobRefOf, storedBase64 } from '../../../test/helpers/blob-refs'
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
@@ -48,8 +49,14 @@ describe('readCodexImageView', () => {
   ])('reads %s as %s', async (name, bytes, mediaType) => {
     expect(await readCodexImageView(write(name, bytes))).toEqual({
       mediaType,
-      base64Data: bytes.toString('base64')
+      ...blobRefOf(bytes.toString('base64'))
     })
+  })
+
+  it('interns the bytes straight into the blob store, so the card carries a ref (ADR-087)', async () => {
+    const image = await readCodexImageView(write('shot.png', PNG))
+    expect(image).not.toHaveProperty('base64Data')
+    expect(storedBase64(image!.blobId)).toBe(PNG.toString('base64'))
   })
 
   it('is case-insensitive about the extension', async () => {

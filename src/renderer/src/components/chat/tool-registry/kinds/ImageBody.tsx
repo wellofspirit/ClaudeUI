@@ -2,8 +2,9 @@
  * Image kind body — Codex `imageGeneration` (no other harness has one).
  *
  * The PICTURE is not rendered here: it rides the shared `ToolResultImages`
- * strip `ToolCard` places for every standard kind, from the base64 PNG the
- * mapper hangs on the tool_result. What this body carries is the two things the
+ * strip `ToolCard` places for every standard kind, from the blob ref (ADR-087)
+ * the mapper hangs on the tool_result; the strip fetches the PNG's bytes on
+ * demand. What this body carries is the two things the
  * strip cannot say — the prompt the model actually sent after the backend
  * revised it, and where the file was written.
  *

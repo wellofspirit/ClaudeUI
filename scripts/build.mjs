@@ -11,6 +11,11 @@
  * errors survive quiet mode. On a failed stage the last lines of its output
  * are re-printed as context.
  *
+ * A `{ parallel: [stage, ...] }` entry runs independent stages concurrently.
+ * Their stdout and stderr are buffered per stage and flushed as each one
+ * finishes, so logs never interleave. Every member runs to completion (no
+ * fail-fast), so a failed build reports all broken stages at once.
+ *
  * Targets mirror the package.json scripts: build, build:mac, build:win,
  * build:linux, build:unpack, build:web, ensure-cli, update-cli,
  * ensure-opencode, update-opencode, ensure-pi, update-pi, ensure-codex,
@@ -76,7 +81,12 @@ const C = useColor
 const CHILD_ENV = { ...process.env, FORCE_COLOR: useColor ? '1' : '0' }
 
 // Stage step: [cmd, args, extra?] — extra can carry { env } for spawn().
-const typecheck = [{ label: 'typecheck', steps: [['bun', ['run', 'typecheck']]] }]
+// The two tsc projects are independent; calling the sub-scripts directly also
+// skips the `npm run` hop of the aggregate `typecheck` script.
+const typecheckStages = [
+  { label: 'typecheck:node', steps: [['bun', ['run', '--silent', 'typecheck:node']]] },
+  { label: 'typecheck:web', steps: [['bun', ['run', '--silent', 'typecheck:web']]] }
+]
 const electronViteBuild = [
   { label: 'electron-vite build', steps: [['bunx', ['electron-vite', 'build', ...LL]]] }
 ]
@@ -113,12 +123,28 @@ const ensureHarness = (id, update) => [
   }
 ]
 
+// Everything a package needs before electron-builder, as one parallel group.
+// The members share no outputs: typecheck is --noEmit, ensure-cli writes
+// vendor/claude-cli, electron-vite writes out/{main,preload,renderer} (each
+// target empties only its own dir), and the web build writes out/web.
+const prepare = ({ typecheck }) => [
+  {
+    parallel: [
+      ...(typecheck ? typecheckStages : []),
+      ...ensureCli(false),
+      ...electronViteBuild,
+      ...webBuild
+    ]
+  }
+]
+
 const TARGETS = {
-  build: [...typecheck, ...ensureCli(false), ...electronViteBuild],
+  // No typecheck: CI and the release workflows run `bun run typecheck` as their
+  // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
+  // never reads, so the two run side by side.
+  build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
   'build:mac': [
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --mac --dir',
       steps: [
@@ -147,29 +173,21 @@ const TARGETS = {
     }
   ],
   'build:win': [
-    ...typecheck,
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --win --dir',
       steps: [['bunx', ['electron-builder', '--win', '--dir']]]
     }
   ],
   'build:linux': [
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: false }),
     {
       label: 'electron-builder --linux',
       steps: [['bunx', ['electron-builder', '--linux']]]
     }
   ],
   'build:unpack': [
-    ...typecheck,
-    ...ensureCli(false),
-    ...electronViteBuild,
-    ...webBuild,
+    ...prepare({ typecheck: true }),
     {
       label: 'electron-builder --dir',
       steps: [['bunx', ['electron-builder', '--dir']]]
@@ -192,31 +210,40 @@ if (!stages) {
   process.exit(2)
 }
 
-function runStep(step) {
+// Streamed (sequential stage): stdout is echoed live and kept for the failure
+// tail, stderr is inherited. Buffered (parallel member): stdout and stderr are
+// both captured and nothing is written until the caller flushes.
+function runStep(step, { buffered = false } = {}) {
   return new Promise((resolve) => {
     const [cmd, stepArgs, extra = {}] = step
-    if (verbose) console.log(C.dim(`$ ${cmd} ${stepArgs.join(' ')}`))
+    let buf = ''
+    const header = `$ ${cmd} ${stepArgs.join(' ')}`
+    if (verbose) {
+      if (buffered) buf += C.dim(header) + '\n'
+      else console.log(C.dim(header))
+    }
     const child = spawn(cmd, stepArgs, {
-      stdio: ['inherit', 'pipe', 'inherit'],
+      stdio: buffered ? ['ignore', 'pipe', 'pipe'] : ['inherit', 'pipe', 'inherit'],
       env: { ...CHILD_ENV, ...(extra.env ?? {}) }
     })
-    let buf = ''
-    child.stdout.on('data', (d) => {
+    const collect = (d) => {
       buf += d.toString()
-      process.stdout.write(d)
-    })
+      if (!buffered) process.stdout.write(d)
+    }
+    child.stdout.on('data', collect)
+    child.stderr?.on('data', collect)
     child.on('error', (err) => {
-      console.error(`\n  ${C.red('✗')} could not start ${cmd}: ${err.message}`)
+      buf += `could not start ${cmd}: ${err.message}\n`
+      if (!buffered) console.error(`\n  ${C.red('✗')} could not start ${cmd}: ${err.message}`)
       resolve({ code: 1, buf })
     })
     child.on('close', (code) => resolve({ code: code ?? 1, buf }))
   })
 }
 
-const started = Date.now()
-for (let i = 0; i < stages.length; i++) {
-  const { label, steps } = stages[i]
-  console.log(`${C.dim(`[${i + 1}/${stages.length}]`)} ${label}`)
+const secs = (since) => `${((Date.now() - since) / 1000).toFixed(1)}s`
+
+async function runSequential({ label, steps }) {
   for (const step of steps) {
     const res = await runStep(step)
     if (res.code !== 0) {
@@ -226,9 +253,49 @@ for (let i = 0; i < stages.length; i++) {
         console.error(`  ${C.dim(`--- last ${lines.length} lines of ${label} output ---`)}`)
         for (const line of lines) console.error(`  ${line}`)
       }
-      process.exit(res.code)
+      return res.code
     }
   }
+  return 0
+}
+
+// Members run concurrently; each one's steps stay sequential. A member's whole
+// buffer is printed when it finishes: on failure that is the full error (stderr
+// was captured too, so nothing went to the terminal live), on success it is
+// whatever the tool printed despite quiet mode (warnings) or the -v log.
+async function runParallel(members) {
+  const codes = await Promise.all(
+    members.map(async ({ label, steps }) => {
+      const t0 = Date.now()
+      let out = ''
+      let code = 0
+      for (const step of steps) {
+        const res = await runStep(step, { buffered: true })
+        out += res.buf
+        code = res.code
+        if (code !== 0) break
+      }
+      const body = out.trimEnd()
+      if (code === 0) {
+        console.log(`  ${C.green('✓')} ${label} ${C.dim(`(${secs(t0)})`)}`)
+        if (body) console.log(body)
+      } else {
+        console.error(`  ${C.red('✗')} ${label} ${C.red(`failed (exit ${code})`)}`)
+        if (body) console.error(body)
+      }
+      return code
+    })
+  )
+  return codes.find((c) => c !== 0) ?? 0
+}
+
+const started = Date.now()
+for (let i = 0; i < stages.length; i++) {
+  const stage = stages[i]
+  const label = stage.parallel ? stage.parallel.map((m) => m.label).join(' ‖ ') : stage.label
+  console.log(`${C.dim(`[${i + 1}/${stages.length}]`)} ${label}`)
+  const code = stage.parallel ? await runParallel(stage.parallel) : await runSequential(stage)
+  if (code !== 0) process.exit(code)
 }
 
 console.log(

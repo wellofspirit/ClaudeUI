@@ -73,6 +73,8 @@ import { AUTONOMY_TO_PERMISSION } from '../../../shared/permission-modes'
 import type { PermissionMode, SessionStatus, WorktreeInfo } from '../../../shared/types'
 import {
   useSessionStore,
+  markViewEvicted,
+  clearViewEvicted,
   EMPTY_SESSION_STATE,
   DEFAULT_SETTINGS,
   applyTheme,
@@ -383,10 +385,44 @@ function persistRekeyedRegistry(newId: string): void {
  *    cannot carry them at all (`shared/sync/state.ts` records the gap). Keeping
  *    the current value is what stops a cold desktop boot from blanking the slash
  *    menu that `hydrateConfigFromDisk` just filled in.
+ *  - **A transcript the host did not carry** (`seeded: false`, ADR-087 §2). The
+ *    entry arrives empty, and the sidebar reloads a session from disk only when the
+ *    store marks it `evicted`, so every such session is marked — the same flag a
+ *    locally cold-evicted one carries, which is what makes a click take the same
+ *    path. The one exception is the session on screen on a RESYNC: its local
+ *    transcript stays under the snapshot's light fields so the chat does not blank,
+ *    and the caller replaces it from disk.
+ *
+ * Returns what the caller still has to read from disk ({@link HydrateOutcome}, run
+ * by `lib/session-history-load.ts` `finishHydrate`). A return value rather than a
+ * side effect: the reads need the replicated `directories` and `window.api`, and the
+ * entry points that call this are also the two places that know a hydrate just
+ * finished.
  */
-export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): void {
+export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): HydrateOutcome {
   const restored = fromSnapshotSafe(snapshot)
   const sessions = isResync ? { ...canonical.sessions, ...restored.sessions } : restored.sessions
+  const activeSessionId = resolveActiveSessionId(snapshot, sessions, isResync)
+  // `seeded: false` means canonical does not hold the transcript, for two different
+  // reasons that `sdkActive` tells apart: the engine is gone and the host dropped
+  // it (read it from disk), or a resume's history read is still in flight and live
+  // events are on their way (fill it, fold-style).
+  const uncarried = Object.keys(restored.sessions).filter(
+    (id) => restored.sessions[id].seeded === false
+  )
+  const fillResumed = uncarried.filter((id) => restored.sessions[id].sdkActive)
+  const dropped = uncarried.filter((id) => !restored.sessions[id].sdkActive)
+  const uncarriedId =
+    activeSessionId !== null && dropped.includes(activeSessionId) ? activeSessionId : null
+  const held = uncarriedId !== null && isResync ? canonical.sessions[uncarriedId] : undefined
+  const keptLocalId = held && held.messages.length > 0 ? uncarriedId : null
+  if (held && keptLocalId !== null) {
+    sessions[keptLocalId] = {
+      ...restored.sessions[keptLocalId],
+      messages: held.messages,
+      subagentMessages: held.subagentMessages
+    }
+  }
   const next: CanonicalState = {
     ...restored,
     sessions,
@@ -395,8 +431,31 @@ export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): v
     sdkSkillNames:
       restored.sdkSkillNames.length > 0 ? restored.sdkSkillNames : canonical.sdkSkillNames
   }
-  const activeSessionId = resolveActiveSessionId(snapshot, next, isResync)
   commit(next, { force: true, activeSessionId })
+  markViewEvicted(dropped.filter((id) => id !== keptLocalId))
+  // A session the snapshot says is live and complete cannot be evicted: a
+  // `session:created` missed in a gap would otherwise leave the flag on, and a
+  // click would then run `loadHistoricalSession` over a running session.
+  clearViewEvicted(
+    Object.keys(restored.sessions).filter((id) => {
+      const s = restored.sessions[id]
+      return s.seeded !== false && s.sdkActive
+    })
+  )
+  return { reloadActive: uncarriedId, fillResumed }
+}
+
+/**
+ * The disk reads a hydrate leaves to its caller.
+ *
+ *  - `reloadActive` — the session on screen, whose engine is gone and whose
+ *    transcript the snapshot did not carry: read it and REPLACE.
+ *  - `fillResumed` — live sessions whose snapshot entry is unseeded (the host's
+ *    history read was still in flight): fill-only, like a follower of a resume.
+ */
+export interface HydrateOutcome {
+  reloadActive: string | null
+  fillResumed: string[]
 }
 
 /**
@@ -432,13 +491,13 @@ function fromSnapshotSafe(snapshot: FullStateSnapshot): CanonicalState {
  */
 function resolveActiveSessionId(
   snapshot: FullStateSnapshot,
-  next: CanonicalState,
+  sessions: CanonicalState['sessions'],
   isResync: boolean
 ): string | null {
   const local = useSessionStore.getState().activeSessionId
   return (
     [isResync ? local : null, snapshot.activeSessionId, ...(snapshot.recentSessionIds ?? [])].find(
-      (id): id is string => !!id && !!next.sessions[id]
+      (id): id is string => !!id && !!sessions[id]
     ) ?? null
   )
 }
@@ -456,18 +515,22 @@ function resolveActiveSessionId(
  * arrives after live events have already streamed in records that it happened and
  * leaves the content alone. Without that, a slow `loadSessionHistory` resolving
  * mid-turn would blow away the turn.
+ *
+ * Returns whether the seed was APPLIED. `false` is the no-clobber refusal: the
+ * entry keeps what it holds, which is a tail, not the conversation — a caller that
+ * cares must not present it as complete.
  */
 export function seedColdSession(
   routingId: string,
   seed: Partial<CanonicalSessionState> & { cwd?: string }
-): void {
+): boolean {
   const existing = canonical.sessions[routingId]
   if (existing && existing.messages.length > 0 && (seed.messages?.length ?? 0) > 0) {
     commit({
       ...canonical,
       sessions: { ...canonical.sessions, [routingId]: { ...existing, seeded: true } }
     })
-    return
+    return false
   }
   const base = existing ?? emptySession(routingId, seed.cwd ?? '')
   commit({
@@ -477,6 +540,7 @@ export function seedColdSession(
       [routingId]: { ...base, ...seed, routingId, seeded: true }
     }
   })
+  return true
 }
 
 /**
@@ -551,10 +615,11 @@ export function dropLocalSessions(routingIds: readonly string[]): void {
  * Strip the heavy arrays of cold sessions — the renderer's heap bound (Opus B).
  *
  * Applied to the REPLICA rather than to the store, because a store-side strip
- * would be undone by the next projection. Canonical on the HOST deliberately does
- * not evict (`docs/architecture/sync-channels.md` §Eviction); this is a per-client
- * cache decision, and the entry keeps `seeded: false` so a later re-select
- * re-hydrates through {@link seedColdSession} instead of being treated as complete.
+ * would be undone by the next projection. This is a per-client cache decision,
+ * the mirror of the host's `SyncCore.evictTranscript` (`docs/architecture/
+ * sync-channels.md` §Eviction) — neither is an event, so neither reaches the
+ * other — and the entry keeps `seeded: false` so a later re-select re-hydrates
+ * through {@link seedColdSession} instead of being treated as complete.
  */
 export function evictLocalSessions(routingIds: readonly string[]): void {
   let sessions = canonical.sessions

@@ -6,10 +6,16 @@ import {
   bootstrapPermissionMode,
   engineDefaultModels,
   resolveEngineDefaultModel,
-  seedingModelPicks
+  seedingModelPicks,
+  hasResumableTranscript
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
-import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
+import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
+import type {
+  AttachmentUpload,
+  FileAttachment,
+  VoiceState as VoiceStateType
+} from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
@@ -651,12 +657,12 @@ export function InputBox(): React.JSX.Element {
   }
 
   const doSend = useCallback(
-    async (
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => {
+    async (prompt: string, attachments?: AttachmentUpload[]) => {
       if (!activeSessionId) return
       if (!sdkActive) {
+        // The host seeds its own transcript the moment the engine spawns; a client
+        // read still in flight would then lose the race and show only this turn.
+        await awaitReloadBeforeSpawn(activeSessionId)
         assertModelResolved(activeSessionId)
         const { sessions } = useSessionStore.getState()
         const session = sessions[activeSessionId]
@@ -681,7 +687,7 @@ export function InputBox(): React.JSX.Element {
           const isHistorical =
             session?.selectedEngineId === 'codex'
               ? !!(session.status.sessionId || session.isHistorical)
-              : session && session.messages.length > 0
+              : session && hasResumableTranscript(session)
           // For opencode sessions, always pass the routingId as resumeSessionId so
           // OpencodeSession can resume a prior session even when messages are empty
           // (history is replayed from the server, not preloaded into the store).
@@ -712,6 +718,7 @@ export function InputBox(): React.JSX.Element {
   const ensureSession = useCallback(async () => {
     if (!activeSessionId) return
     if (!sdkActive) {
+      await awaitReloadBeforeSpawn(activeSessionId)
       assertModelResolved(activeSessionId)
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
@@ -734,7 +741,7 @@ export function InputBox(): React.JSX.Element {
         const isHistorical =
           session?.selectedEngineId === 'codex'
             ? !!(session.status.sessionId || session.isHistorical)
-            : session && session.messages.length > 0 && !session.sdkActive
+            : session && hasResumableTranscript(session) && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
         await window.api.createSession(
           activeSessionId,
