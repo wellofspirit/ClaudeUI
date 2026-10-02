@@ -14,8 +14,10 @@
 import type { ChatMessage } from '../../shared/types'
 import type { PiImageContent, PiTextContent } from './pi-protocol'
 import { piAgentDeliveryDetails } from './pi-delivery'
+import { AGENT_NOTE_FRAGMENT_LABEL, agentNoteMessage } from '../services/agent-note'
 
-export const PI_AGENT_MESSAGE_FRAGMENT_LABEL = 'from an agent, not from you'
+/** The shared agent-note label (services/agent-note.ts), under pi's historical name. */
+export const PI_AGENT_MESSAGE_FRAGMENT_LABEL = AGENT_NOTE_FRAGMENT_LABEL
 
 const FALLBACK_TITLE = {
   'task-notification': 'Agent notification',
@@ -48,18 +50,12 @@ export function piCustomMessageToChat(input: PiCustomMessageInput): ChatMessage 
   if (!text) return null
   const ours = piAgentDeliveryDetails(input.customType, input.details)
   if (ours) {
-    return {
+    return agentNoteMessage({
       id: input.id,
-      role: 'system',
-      content: [
-        {
-          type: 'context_note',
-          title: ours.title || FALLBACK_TITLE[ours.kind],
-          fragments: [{ text, label: PI_AGENT_MESSAGE_FRAGMENT_LABEL }]
-        }
-      ],
+      title: ours.title || FALLBACK_TITLE[ours.kind],
+      text,
       timestamp: input.timestamp
-    }
+    })
   }
   return {
     id: input.id,

@@ -125,6 +125,13 @@ export interface StoredMessagePart {
   url?: string
   /** Present for `file` parts: the display filename, when opencode knows one. */
   filename?: string
+  /**
+   * Present on text parts opencode itself wrote into a USER message (the
+   * "Summarize the task tool output above…" nudge, "The following tool was
+   * executed by the user", the compaction continue prompt, @-file expansions
+   * that inline file content — vendor session/prompt.ts, compaction.ts).
+   */
+  synthetic?: boolean
   /** Part ids and message linkage */
   id?: string
   messageID?: string

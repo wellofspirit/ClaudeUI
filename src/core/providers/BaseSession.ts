@@ -3,6 +3,8 @@ import type {
   AttachmentRef,
   AttachmentUpload,
   ChatMessage,
+  ContentBlock,
+  ImageMediaType,
   SessionStatus,
   EngineId,
   ApprovalDecision,
@@ -440,6 +442,29 @@ export abstract class BaseSession implements ISession {
     if (!this.userStopPending) return false
     logger.info(tag, `turn error after a user stop, not shown: ${message}`)
     return true
+  }
+
+  /**
+   * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
+   * the renderer's optimistic addUserMessage (session-store.ts): attachments
+   * first (image/document blocks), then a trailing text block. Keeps
+   * getMessages() fidelity for image/PDF attachments (Claude and opencode; pi
+   * keeps its own image-only variant — it has no document input).
+   */
+  protected userMessageContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
+    const content: ContentBlock[] = []
+    // Like every ChatMessage, the blocks carry blob refs, not bytes (pre-release
+    // ADR-087, transcript blobs off the ring).
+    for (const att of internAttachments(attachments) ?? []) {
+      const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
+      if (att.mediaType === 'application/pdf') {
+        content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
+      } else {
+        content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
+      }
+    }
+    if (prompt) content.push({ type: 'text', text: prompt })
+    return content
   }
 
   /**

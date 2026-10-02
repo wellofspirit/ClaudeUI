@@ -32,7 +32,12 @@ import {
   readAgentSidecar,
   type AgentIdentity
 } from './agent-identity'
-import { parseTaskNotificationXml } from './task-notification-xml'
+import {
+  isTaskNotificationDelivery,
+  parseTaskNotificationXml,
+  taskNotificationNoteTitle
+} from './task-notification-xml'
+import { agentNoteMessage } from './agent-note'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
@@ -641,6 +646,7 @@ export class ClaudeSession extends BaseSession {
         content = blocks
       }
 
+      const messageUuid = wireUuid ?? uuid()
       sdkMessage = {
         type: 'user' as const,
         session_id: this.sessionId || '',
@@ -648,8 +654,16 @@ export class ClaudeSession extends BaseSession {
         parent_tool_use_id: null,
         // Without a uuid cli.js emits no command_lifecycle frames for the
         // message and cancel_async_message cannot name it (03 §3.21).
-        uuid: wireUuid ?? uuid()
+        uuid: messageUuid
       }
+      // The user's own turn in this session's transcript (ADR-087 D1: the
+      // judge of a target this session dispatches reads it as the only real
+      // authorisation; cli.js never echoes a prompt back). A queued item is
+      // recorded when cli.js takes it (recordConsumedPrompt), not now.
+      const queued = wireUuid
+        ? this.queue.pending().some((item) => item.itemId === wireUuid)
+        : false
+      if (prompt !== null && !queued) this.recordUserPrompt(messageUuid, prompt, attachments)
     }
 
     if (this.messageChannel && !this.messageChannel.isEnded) {
@@ -1543,9 +1557,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const itemId = msg.command_uuid
     if (typeof itemId !== 'string') return
     switch (msg.state) {
-      case 'started':
-        if (this.queue.consumeById(itemId)) this.queue.emit()
+      case 'started': {
+        const item = this.queue.consumeById(itemId)
+        if (!item) return
+        this.recordConsumedPrompt(item)
+        this.queue.emit()
         return
+      }
       case 'cancelled':
         if (this.queue.recallById(itemId)) this.queue.emit()
         return
@@ -2132,8 +2150,37 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private flushQueueAtTurnEnd(): void {
     const pending = this.queue.pending()
     if (pending.length === 0) return
-    for (const item of pending) this.queue.setState(item, 'consumed')
+    for (const item of pending) {
+      this.queue.setState(item, 'consumed')
+      this.recordConsumedPrompt(item)
+    }
     this.queue.emit()
+  }
+
+  /**
+   * Record one of the user's prompts in `messageHistory` (local only: the
+   * renderer adds the bubble itself from `session:user-message`, so nothing is
+   * emitted — OpencodeSession/PiSession follow the same rule). Keyed by the
+   * wire uuid and recorded once: a queued item's late `started` after the
+   * turn-end flush finds it already there.
+   */
+  private recordUserPrompt(id: string, prompt: string, attachments?: AttachmentUpload[]): void {
+    if (this.messageHistory.some((m) => m.id === id)) return
+    this.messageHistory.push({
+      id,
+      role: 'user',
+      content: this.userMessageContent(prompt, attachments),
+      timestamp: Date.now()
+    })
+  }
+
+  /**
+   * A queued prompt cli.js took (ADR-053): now it is part of the conversation.
+   * Its bytes come from `queuedUploads` (the item itself carries blob refs
+   * only); called before the queue's `emit()`, which drops them.
+   */
+  private recordConsumedPrompt(item: QueuedItem): void {
+    this.recordUserPrompt(item.itemId, item.text, this.queuedUploads(item))
   }
 
   /**
@@ -3079,10 +3126,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * Handle SDK user messages. Two cases:
    *
    * 1. Array content with tool_result blocks → extract tool results (normal flow)
-   * 2. String content with <task-notification> XML → background agent completed.
-   *    The SDK injects this as a synthetic user message so the model can respond.
-   *    We parse the notification, resolve the background task, and insert the
-   *    message into the conversation so the assistant's response has context.
+   * 2. A task notification (cli.js's own delivery, recognised by its `origin`
+   *    marker, else by its XML — isTaskNotificationDelivery) → a background
+   *    agent finished. cli.js injects it as a user message so the model can
+   *    respond. We parse it, resolve the background task, and insert it into
+   *    the conversation as an agent note so the assistant's response has
+   *    context — never as the user's bubble.
    */
   private async handleUserMessage(msg: Record<string, unknown>): Promise<void> {
     const messageParam = msg.message as Record<string, unknown> | undefined
@@ -3098,7 +3147,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
 
     // Case 2: String content — check for task notification
-    if (typeof content === 'string' && content.includes('<task-notification>')) {
+    if (typeof content === 'string' && isTaskNotificationDelivery(msg.origin, content)) {
       await this.handleTaskNotificationUserMessage(msg, content)
     }
   }
@@ -3201,14 +3250,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.send('session:task-notification', notification)
     }
 
-    // Insert the synthetic user message into the conversation so the
-    // assistant's response (which follows) has visible context
-    const chatMsg: ChatMessage = {
+    // Insert the notification into the conversation so the assistant's
+    // response (which follows) has visible context — as an agent note
+    // (`role: 'system'`), never the user's bubble, and never a `User:` line for
+    // ClaudeUI's judge of a dispatched target (ADR-087 D1, ADR-088). The text
+    // stays verbatim; the history loader builds the same row on reload.
+    const chatMsg = agentNoteMessage({
       id: (msg.uuid as string) || uuid(),
-      role: 'user',
-      content: [{ type: 'text', text: content }],
+      title: taskNotificationNoteTitle(parsed),
+      text: content,
       timestamp: Date.now()
-    }
+    })
     this.upsertMessage(chatMsg)
     this.send('session:message', chatMsg)
   }

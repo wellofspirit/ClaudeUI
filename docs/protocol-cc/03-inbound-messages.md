@@ -209,7 +209,15 @@ Per patch `team-streaming-B` (retired) at char `8648903`:
 
 - **`isSynthetic`** — true when message was synthesized by cli.js (e.g., MCP `setVisibleInTranscriptOnly` annotations).
 - **`tool_use_result`** — raw tool result payload (before wrapping in the tool_result block). For MCP tools, shape is `{content, ...mcpMeta}`.
-- **`origin`** — carried through from upstream (remote control path).
+- **`origin`** — carried through from upstream (remote control path). Also cli.js's authorship marker
+  on user messages (2.1.241+): `{kind: 'task-notification', …}` on a delivered `<task-notification>`
+  (the message converter `case"user"` → `…n.origin!==void 0&&{origin:n.origin}`, and the
+  `queued_command` attachment converter `Sur` → `…n.origin&&{origin:n.origin}` on its `isReplay`
+  frame), `{kind: 'human'}` on a typed prompt; other kinds include `auto-continuation`, `plugin`,
+  `peer`. On disk verified (2.1.285 transcripts: the turn-starting `user` line and the
+  `queued_command` attachment, with `commandMode: 'task-notification'`, both carry it); the live
+  frame's shape is inferred from the converters (not probed). ClaudeUI recognises a notification by
+  `origin.kind` first and by the XML only when `origin` is absent (S4, ADR-087 amendment).
 - **`isReplay`** — present and `true` only on replay/ack/queued-command paths. Absent on live synthetic tool_result messages.
 - **`parent_tool_use_id`** — null for top-level; non-null when the user message is inside a subagent's tool execution.
 

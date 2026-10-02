@@ -1280,7 +1280,7 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
   const content: ContentBlock[] = []
   // Attachments are hoisted ahead of the rest: ClaudeUI sends opencode
   // [text, ...fileParts] so they persist AFTER the prompt, while the live echo
-  // (session-store.ts addUserMessage / OpencodeSession.buildUserContent) puts
+  // (session-store.ts addUserMessage / BaseSession.userMessageContent) puts
   // them first. Replay must match the live order.
   const attachments: ContentBlock[] = []
 
@@ -1292,6 +1292,11 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
       const block = storedFilePartToAttachment(part)
       if (block) attachments.push(block)
     } else if (type === 'text') {
+      // An opencode-authored text part of a USER message is not something the
+      // user typed: never a user bubble, and never a `User:` line for the
+      // judge, which reads this replay (S4, Q9). opencode's own app skips it
+      // too (vendor packages/app/src/components/dialog-fork.tsx).
+      if (role === 'user' && part.synthetic === true) continue
       const text = part.text ?? ''
       if (text) content.push({ type: 'text', text })
     } else if (type === 'reasoning') {

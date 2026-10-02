@@ -444,3 +444,36 @@ describe('storedCompactionMessages', () => {
     expect(storedCompactionMessages(msg('assistant', [{ type: 'text', text: 'x' }]))).toEqual([])
   })
 })
+
+describe('convertStoredMessage — opencode-authored (synthetic) user text (S4, Q9)', () => {
+  it('drops a synthetic text part of a user message, keeps the typed one', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'what changed?' },
+        {
+          type: 'text',
+          text: 'Summarize the task tool output above and continue with your task.',
+          synthetic: true
+        }
+      ])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'what changed?' }])
+  })
+
+  it('an all-synthetic user message is no row at all', () => {
+    expect(
+      convertStoredMessage(
+        msg('user', [
+          { type: 'text', text: 'The following tool was executed by the user', synthetic: true }
+        ])
+      )
+    ).toBeNull()
+  })
+
+  it('an assistant message is unaffected', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [{ type: 'text', text: 'done', synthetic: true }])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'done' }])
+  })
+})

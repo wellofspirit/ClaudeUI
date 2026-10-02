@@ -2,7 +2,8 @@
  * The one reader of cli.js's `<task-notification>` XML — the form a task's
  * terminal event takes when it is fed to the parent model, and so the form the
  * transcript keeps. Two consumers: the history loader (every notification a
- * reopened session shows) and ClaudeSession's legacy user-message path.
+ * reopened session shows) and ClaudeSession's user-message path. Both show the
+ * delivery as an agent note (services/agent-note.ts), never a user bubble.
  *
  * Shape as of 2.1.280 (probed 2026-09-23):
  *
@@ -93,4 +94,47 @@ export function parseNotificationUsage(block: string): TaskNotification['usage']
     return undefined
   }
   return { totalTokens: totalTokens ?? 0, toolUses: toolUses ?? 0, durationMs: durationMs ?? 0 }
+}
+
+/**
+ * Whether a user frame (live) or transcript line (history) is a task
+ * notification cli.js delivered — never something the user typed.
+ *
+ * The marker is structural first: cli.js (2.1.241+) stamps every user message
+ * with an `origin` — `{kind: 'task-notification', …}` for a notification (on
+ * the wire through its stream converters, on disk on the user line and on the
+ * `queued_command` attachment), `{kind: 'human'}` for a typed prompt. A frame
+ * or line that carries an `origin` kind is decided by it alone. Only one
+ * without (a pre-2.1.241 transcript or frame) falls back to the text: a
+ * `<task-notification>` block that names a task AND a known status (the rule
+ * the history loader always applied).
+ */
+export function isTaskNotificationDelivery(origin: unknown, text: string): boolean {
+  const kind =
+    origin && typeof origin === 'object' ? (origin as { kind?: unknown }).kind : undefined
+  if (typeof kind === 'string') return kind === 'task-notification'
+  return parseTaskNotificationXml(text)?.status !== undefined
+}
+
+const NOTE_TITLE_MAX = 120
+
+/**
+ * The agent note's title for a delivered notification (live and history use
+ * the same one): the summary's first line, clipped; else the status; else a
+ * generic title. Derives nothing beyond what {@link parseTaskNotificationXml}
+ * already parsed.
+ */
+export function taskNotificationNoteTitle(parsed: ParsedTaskNotification | null): string {
+  const first = parsed?.summary.split('\n')[0].trim() ?? ''
+  if (first) return first.length > NOTE_TITLE_MAX ? `${first.slice(0, NOTE_TITLE_MAX - 1)}…` : first
+  switch (parsed?.status) {
+    case 'completed':
+      return 'Agent completed'
+    case 'failed':
+      return 'Agent failed'
+    case 'stopped':
+      return 'Agent was stopped'
+    default:
+      return 'Agent notification'
+  }
 }

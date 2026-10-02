@@ -179,7 +179,7 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
     expect(messages.map((m) => m.id)).toEqual(['real'])
   })
 
-  it('reads a task notification absorbed mid-turn as a notification, once', async () => {
+  it('reads a task notification absorbed mid-turn as a notification, once, shown as one agent note (S4)', async () => {
     const xml =
       '<task-notification>\n<task-id>bg42</task-id>\n<status>completed</status>\n' +
       '<summary>done</summary>\n</task-notification>'
@@ -191,7 +191,18 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
 
     const { messages, taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
 
-    expect(messages).toEqual([])
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'done',
+            fragments: [{ text: xml, label: 'from an agent, not from you' }]
+          }
+        ]
+      })
+    ])
     expect(taskNotifications).toEqual([
       expect.objectContaining({ taskId: 'bg42', status: 'completed', summary: 'done' })
     ])

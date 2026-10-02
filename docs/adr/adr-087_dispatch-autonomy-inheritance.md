@@ -114,6 +114,30 @@ test pins either):
   this, a system row with a text block (Codex's guardian notice) rendered as a `User:` line when a
   Codex session dispatched to a judged target. See [ADR-088](adr-088_pi-subagents-host-run.md)
   "Background runs and messaging".
+- **Amended (S4, 2026-10-02) — Claude's own task notifications are system rows too.** cli.js
+  delivers a background agent's `<task-notification>` as a `user` frame; ClaudeSession used to insert
+  it as a `role: 'user'` message, which `slimTranscript` rendered as `User:` and treated as the user's
+  reply to the assistant's last proposal. It is now the shared agent note (`services/agent-note.ts`:
+  `role: 'system'`, one `context_note` labelled "from an agent, not from you", text verbatim), live
+  and on reload alike (the history loader builds the same row where the notification was delivered —
+  a turn-starting `user` line or an absorbed `queued_command` attachment; the `queue-operation`
+  records add none). Recognition is structural first: cli.js's `origin.kind` (`'task-notification'`
+  for a notification, `'human'` for a typed prompt); only a frame or line without `origin` (pre
+  2.1.241) falls back to the XML with a known status. A typed prompt never becomes a system row.
+- **Amended (S4, 2026-10-02) — ClaudeSession records the user's prompts.** Before S4 its
+  `messageHistory` held no human turn at all (`run()` never recorded the prompt; the renderer adds
+  the bubble from `session:user-message`), so a Claude session's dispatched pi/opencode target was
+  judged with no `User:` line but cli.js's notifications. `run()` now records the prompt locally (no
+  `session:message`), keyed by the wire uuid; a queued item is recorded when cli.js takes it
+  (`command_lifecycle` `started`, or the turn-end flush), once. **Residual:** a RESUMED Claude
+  session starts with an empty `messageHistory` (nothing is replayed into it), so its dispatched
+  targets' judge sees only the turns of the current process.
+- **Amended (S4, 2026-10-02) — opencode's synthetic user text is not the user.** On replay
+  (`convertStoredMessage` → `messageHistory`, which the judge reads), a `text` part opencode itself
+  wrote into a user message (`synthetic: true`: the "Summarize the task tool output above…" nudge,
+  "The following tool was executed by the user", the compaction continue prompt, @-file expansions
+  that inline file content) is dropped; a user message left empty is no row (opencode's own app
+  skips them too).
 - **The action** is headed as the `dispatch:<engine>` subagent's, with the target's model as the
   description and the LATEST dispatch prompt as its task (`classifier.ts` `actionHeader`).
 - **Model:** the TARGET engine's `autoMode.judgeModel`, else the target's model; a configured model
@@ -164,6 +188,13 @@ The dispatcher reads the live mode through one helper that normalises the legacy
 - A Claude target's mid-turn switch takes effect at its next tool ask or next turn. A target running
   cli.js `auto` rarely calls `canUseTool` (its own judge decides first), so a mid-turn switch OUT of
   auto in practice binds at the next turn.
+- **Host/engine-authored `user` rows left as they are (S4 survey):** a Claude SUBAGENT transcript's
+  `external` user lines (the delegation prompt and messages sent to that agent) render as user rows
+  inside that agent's nested card — never in the root `messageHistory`, and Claude targets are judged
+  by cli.js; a third-party pi extension's `pi.sendUserMessage` is indistinguishable from a typed
+  prompt in pi's session file (ClaudeUI's own agent messages are `custom`, ADR-088). Codex filters
+  its own contextual user fragments out of `userMessage` items; the user's own prompts and steers
+  are real `user` rows everywhere.
 
 ## Consequences
 
