@@ -2339,11 +2339,12 @@ export class CodexSession extends BaseSession {
       cachedTokens: cacheRead,
       totalTokens: total,
       contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 },
+      // Whole percents, as pi's status line (the template prints the number as is).
       usedPercentage: usage.modelContextWindow
-        ? (usage.last.totalTokens / usage.modelContextWindow) * 100
+        ? Math.round((usage.last.totalTokens / usage.modelContextWindow) * 100)
         : null,
       remainingPercentage: usage.modelContextWindow
-        ? Math.max(0, 100 - (usage.last.totalTokens / usage.modelContextWindow) * 100)
+        ? Math.max(0, 100 - Math.round((usage.last.totalTokens / usage.modelContextWindow) * 100))
         : null
     })
     // AFTER the two sends: the meter is what the user is waiting on, the

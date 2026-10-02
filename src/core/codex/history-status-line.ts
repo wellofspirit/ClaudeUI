@@ -102,7 +102,7 @@ export function codexHistoryStatusLine(threadId: string): StatusLineData | null 
   const used = contextUsed ?? 0
   // UNROUNDED, and null when the window is unknown — the live rule, restated so
   // the meter does not jump a percent on reopen.
-  const usedPercentage = size > 0 ? (used / size) * 100 : null
+  const usedPercentage = size > 0 ? Math.round((used / size) * 100) : null
 
   return {
     totalCostUsd: costs.displayCostUsd,
