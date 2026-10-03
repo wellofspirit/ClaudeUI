@@ -361,6 +361,157 @@ export const MAX_REDIRECT_TARGETS = 20
 const TARGET_END = new Set([' ', '\t', '\n', '\r', ';', '|', '&', '<', '>', '(', ')'])
 
 /**
+ * Commands whose single-quoted arguments are inert text — a pattern, a filter,
+ * a literal — that never reaches a shell. Only a segment led by one of these
+ * may have its single-quoted spans skipped by the redirect scan. An allowlist on
+ * purpose: `git submodule foreach '…'`, `python -c '…'`, `make --eval '…'` all
+ * hand quoted text to a shell, and a list of those would never be complete.
+ */
+const INERT_QUOTE_COMMANDS: ReadonlySet<string> = new Set([
+  'sed',
+  'gsed',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'jq',
+  'yq',
+  'echo',
+  'printf',
+  'tr',
+  'cut'
+])
+
+/**
+ * Words that re-read text as shell — a shell, `eval`, a remote/elevated shell,
+ * an argument-to-command runner, an interpreter fed on stdin — plus awk, whose
+ * own `>` writes a file. Any of them ANYWHERE in the command (`echo '… > x' | sh`)
+ * keeps the whole scan quote-blind.
+ */
+const SHELL_REREADERS: ReadonlySet<string> = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'dash',
+  'ksh',
+  'mksh',
+  'ash',
+  'fish',
+  'csh',
+  'tcsh',
+  'pwsh',
+  'powershell',
+  'cmd',
+  'eval',
+  'ssh',
+  'su',
+  'sudo',
+  'doas',
+  'runuser',
+  'script',
+  'watch',
+  'xargs',
+  'parallel',
+  'osascript',
+  'tmux',
+  'screen',
+  'expect',
+  'busybox',
+  'python',
+  'python3',
+  'node',
+  'bun',
+  'deno',
+  'perl',
+  'ruby',
+  'php',
+  'awk',
+  'gawk',
+  'mawk',
+  'nawk'
+])
+
+/**
+ * The `[start, end)` ranges of single-quoted text the redirect scan may skip:
+ * bash reads single quotes literally, so a `>` inside `sed 's/a > b/c/'` is
+ * program text, not a redirect. Only spans in a segment led by an
+ * {@link INERT_QUOTE_COMMANDS} word qualify, and none at all when a
+ * {@link SHELL_REREADERS} word appears anywhere. Double quotes are never skipped —
+ * they host live `$(…)`, whose redirects are real.
+ *
+ * A rough lexer, not a shell parser; every imprecision here falls back to the
+ * quote-blind scan, i.e. at worst one extra escalation.
+ */
+function inertQuoteSpans(command: string): Array<[number, number]> {
+  interface Word {
+    text: string
+    spans: Array<[number, number]>
+  }
+  const segments: Word[][] = [[]]
+  let word: Word | null = null
+  let state: 'out' | 'sq' | 'dq' = 'out'
+  let sqStart = 0
+  const endWord = (): void => {
+    if (word) segments[segments.length - 1].push(word)
+    word = null
+  }
+  const cur = (): Word => (word ??= { text: '', spans: [] })
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (state === 'sq') {
+      if (ch === "'") {
+        cur().spans.push([sqStart, i])
+        state = 'out'
+      } else cur().text += ch
+      continue
+    }
+    if (state === 'dq') {
+      if (ch === '\\') cur().text += command[++i] ?? ''
+      else if (ch === '"') state = 'out'
+      else cur().text += ch
+      continue
+    }
+    if (ch === "'") {
+      cur()
+      sqStart = i + 1
+      state = 'sq'
+    } else if (ch === '"') {
+      cur()
+      state = 'dq'
+    } else if (ch === '\\') {
+      cur().text += command[++i] ?? ''
+    } else if (ch === ' ' || ch === '\t' || ch === '<' || ch === '>') {
+      endWord()
+    } else if (
+      ch === '&' &&
+      (command[i - 1] === '>' || command[i + 1] === '>' || command[i - 1] === '<')
+    ) {
+      endWord() // `2>&1`, `&>`, `<&3` — an operator, not a separator
+    } else if ('\n\r;|&()`'.includes(ch)) {
+      endWord()
+      segments.push([])
+    } else {
+      cur().text += ch
+    }
+  }
+  if (state !== 'out') return [] // unbalanced quote — read nothing as inert
+  endWord()
+
+  const base = (w: Word): string => w.text.slice(w.text.lastIndexOf('/') + 1).toLowerCase()
+  if (segments.some((seg) => seg.some((w) => SHELL_REREADERS.has(base(w))))) return []
+  const spans: Array<[number, number]> = []
+  for (const seg of segments) {
+    // The command word: the first word that is not a `NAME=value` assignment.
+    const head = seg.find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text))
+    if (head && INERT_QUOTE_COMMANDS.has(base(head))) {
+      for (const w of seg) spans.push(...w.spans)
+    }
+  }
+  return spans
+}
+
+/**
  * Pull the FILE targets out of a command's redirect operators.
  *
  * Handles `>`, `>>`, `N>`, `N>>`, `&>`, `&>>`, `>&file`, `>>&file`, with or
@@ -369,21 +520,30 @@ const TARGET_END = new Set([' ', '\t', '\n', '\r', ';', '|', '&', '<', '>', '(',
  * Input redirects and heredocs (`<`, `<<`) are reads — the scanner never
  * triggers on them.
  *
- * Deliberately QUOTE-BLIND outside a target token, matching {@link parseSegment}'s
- * convention and for the same reason inverted: a `>` inside a quoted string
- * yields a spurious target (an extra escalation), while honouring quotes would
- * let `bash -c "cmd > ~/.bashrc"` report zero redirects and so claim, wrongly,
+ * QUOTE-BLIND by default, matching {@link parseSegment}'s convention and for
+ * the same reason inverted: a `>` inside a quoted string yields a spurious
+ * target (an extra escalation), while honouring quotes would let
+ * `bash -c "cmd > ~/.bashrc"` report zero redirects and so claim, wrongly,
  * that this command redirects nothing dangerous. Over-reporting is the safe
- * error here. It also means segment splitting is unnecessary: a redirect
- * operator binds to the token after it regardless of which segment it sits in
- * (and {@link splitCommandSegments} would tear `2>&1` in half at the `&`).
+ * error here. The one exception is {@link inertQuoteSpans}: single-quoted
+ * program text of a command that never runs it as shell (`sed 's/a>b/c/'`),
+ * which otherwise produced phantom out-of-scope targets on every sed/grep
+ * pattern carrying a `>`. Segment splitting is otherwise unnecessary: a
+ * redirect operator binds to the token after it regardless of which segment it
+ * sits in (and {@link splitCommandSegments} would tear `2>&1` in half at the `&`).
  */
 function extractRedirectTargets(command: string): string[] {
   const out: string[] = []
+  const inert = inertQuoteSpans(command)
   let i = 0
   while (i < command.length) {
     const ch = command[i]
     if (ch !== '>' && !(ch === '&' && command[i + 1] === '>')) {
+      i++
+      continue
+    }
+    const at = i
+    if (inert.some(([start, end]) => at >= start && at < end)) {
       i++
       continue
     }
@@ -431,9 +591,16 @@ function protectedComponentsOf(components: readonly string[]): string[] {
 /**
  * The temp roots a redirect may legitimately write to. Read from the env rather
  * than hard-coded so a session running under a sandboxed `TMPDIR` is judged
- * against the temp dir it actually has.
+ * against the temp dir it actually has — plus the conventional `/tmp` on POSIX,
+ * because on macOS every env spelling points at the per-user `/var/folders/…/T`
+ * and `> /tmp/x`, the commonest scratch idiom there is, would otherwise always
+ * measure out-of-scope. `/private/tmp` too: `/tmp` is a symlink to it on macOS
+ * and scope matching compares spellings, never resolves links.
  */
-export function tempDirRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+export function tempDirRoots(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): string[] {
   let osTemp: string | undefined
   try {
     osTemp = tmpdir()
@@ -441,7 +608,9 @@ export function tempDirRoots(env: NodeJS.ProcessEnv = process.env): string[] {
     // Never throw out of the approval path for a missing temp dir; one fewer
     // scope root only ever costs an escalation.
   }
-  const candidates = [osTemp, env.TMPDIR, env.TEMP, env.TMP]
+  const conventional =
+    platform === 'win32' ? [] : platform === 'darwin' ? ['/tmp', '/private/tmp'] : ['/tmp']
+  const candidates = [osTemp, env.TMPDIR, env.TEMP, env.TMP, ...conventional]
   return [...new Set(candidates.filter((v): v is string => !!v && v.trim().length > 0))]
 }
 

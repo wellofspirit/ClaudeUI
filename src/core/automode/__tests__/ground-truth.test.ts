@@ -245,6 +245,47 @@ describe('analyzeRedirects', () => {
       expect(posix(`bun test ${atCap}`)?.targets).toHaveLength(MAX_REDIRECT_TARGETS)
     })
 
+    describe('single-quoted program text', () => {
+      // The phantom targets that blocked a real session: a `>` inside a sed/grep
+      // program is program text, not a redirect.
+      const inert: Array<[string, string[] | null]> = [
+        [`sed -i '' 's/foo 2>\\/dev\\/null/bar/' run.sh`, null],
+        [`sed -i '' 's/a > b/c/' f > out.txt`, ['out.txt']],
+        [`grep -rn 'a->b' . > hits.txt 2>&1`, ['hits.txt']],
+        [`FOO=1 /usr/bin/sed 's/>/x/' f`, null],
+        [`echo ok && sed 's/x>/y/' f >> log.txt`, ['log.txt']],
+        [`printf '%s > %s\\n' a b > out.txt`, ['out.txt']],
+        // The target itself may be single-quoted — it is still read.
+        [`sed 's/a>b/c/' f > 'out file.txt'`, ['out file.txt']]
+      ]
+      for (const [command, targets] of inert) {
+        it(`skips program text: ${command}`, () => {
+          expect(posix(command)?.targets ?? null).toEqual(targets)
+        })
+      }
+
+      // Anything that re-reads the text as shell keeps the scan quote-blind, so
+      // the dangerous target is still reported.
+      const live = [
+        `echo 'cat x > ~/.bashrc' | sh`,
+        `sed 's#^#make > /etc/p #' f | bash`,
+        `printf 'x > /etc/p' | xargs -I{} sh -c '{}'`,
+        `echo 'x > /etc/p' | python3`,
+        // awk's own `>` writes a file.
+        `awk '{ print > "/etc/p" }' in.txt`,
+        // Not an inert command: its quoted text runs as shell.
+        `git submodule foreach 'git log > /etc/p'`,
+        `bash -c 'make > /etc/p'`,
+        // Double quotes host live `$(…)` — never skipped.
+        `echo "$(date > /etc/p)"`
+      ]
+      for (const command of live) {
+        it(`still reports a target for: ${command}`, () => {
+          expect(posix(command)?.allInScope).toBe(false)
+        })
+      }
+    })
+
     it('drops null sinks — `> /dev/null` is not a file overwrite', () => {
       expect(posix('bun test > /dev/null 2>&1')).toBeNull()
       expect(win('bun test > NUL 2>&1')).toBeNull()
@@ -425,6 +466,21 @@ describe('tempDirRoots', () => {
     expect(roots).toContain('/tmp/a')
     expect(roots.filter((r) => r === '/tmp/a')).toHaveLength(1)
     expect(roots.every((r) => r.trim().length > 0)).toBe(true)
+  })
+
+  it('adds the conventional /tmp on POSIX — macOS env temp dirs never point there', () => {
+    const env = { TMPDIR: '/var/folders/x/T/' } as NodeJS.ProcessEnv
+    expect(tempDirRoots(env, 'darwin')).toEqual(expect.arrayContaining(['/tmp', '/private/tmp']))
+    expect(tempDirRoots(env, 'linux')).toContain('/tmp')
+    expect(tempDirRoots(env, 'linux')).not.toContain('/private/tmp')
+    expect(tempDirRoots(env, 'win32')).not.toContain('/tmp')
+  })
+
+  it('puts `> /tmp/x` in scope on macOS', () => {
+    const scope = { cwd: '/Users/x/repo', tempDirs: tempDirRoots({}, 'darwin') }
+    expect(analyzeRedirects('nc h 5900 > /tmp/dh.bin', scope, 'darwin')?.allInScope).toBe(true)
+    expect(analyzeRedirects('x > /private/tmp/a', scope, 'darwin')?.allInScope).toBe(true)
+    expect(analyzeRedirects('x > /tmp/../etc/p', scope, 'darwin')?.allInScope).toBe(false)
   })
 })
 
