@@ -22,6 +22,7 @@ import {
   type AgentRoster
 } from '../useAgentRoster'
 import type { ChatMessage } from '../../../../shared/types'
+import { PI_ASYNC_LAUNCHED_PREFIX } from '../../../../shared/pi-agent-result'
 import {
   A,
   A_BG_BASH,
@@ -62,6 +63,10 @@ function toolResult(id: string, toolUseId: string, isError = false): ChatMessage
     content: [{ type: 'tool_result', toolUseId, toolResult: 'done', isError }],
     timestamp: Date.now()
   } as ChatMessage
+}
+
+function withEngine(engineId: string): Record<string, unknown> {
+  return { status: { ...useSessionStore.getState().sessions[ROUTE].status, engineId } }
 }
 
 function setSession(patch: Record<string, unknown>): void {
@@ -355,9 +360,6 @@ describe('useAgentRoster', () => {
   // that never gets a result) or a pi/opencode child aborted mid-call reads
   // "running" forever.
   describe('a nested row with no lifecycle record', () => {
-    const withEngine = (engineId: string): Record<string, unknown> => ({
-      status: { ...useSessionStore.getState().sessions[ROUTE].status, engineId }
-    })
     const doneNotification = (toolUseId: string) => ({
       taskId: `task-${toolUseId}`,
       toolUseId,
@@ -483,6 +485,51 @@ describe('useAgentRoster', () => {
         [0, false],
         [1, true]
       ])
+    })
+  })
+
+  describe('a pi `agent` call with no lifecycle record', () => {
+    // pi reads "background" from the launch result (ADR-089): the roster must
+    // too, or a call refused before launch reads as a background run that
+    // never notifies — "running" with a Stop button forever.
+    const piResult = (toolUseId: string, toolResult: string, isError: boolean): ChatMessage =>
+      ({
+        id: `r-${toolUseId}`,
+        role: 'user',
+        content: [{ type: 'tool_result', toolUseId, toolResult, isError }],
+        timestamp: Date.now()
+      }) as ChatMessage
+
+    it('a judge-denied or failed-to-start spawn is settled and failed, not running', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-denied', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-denied', 'Auto mode blocked this call', true),
+          assistantWithTool('m2', 'tu-nomodel', 'agent', { description: 'd', prompt: 'go', model: 'x/y' }),
+          piResult('tu-nomodel', 'Model not found: x/y', true)
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.isRunning, r.isError])).toEqual([
+        [false, true],
+        [false, true]
+      ])
+      expect(seen?.runningCount).toBe(0)
+    })
+
+    it('a foreground run that returned is done; a launched one runs until notified', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-fg', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-fg', 'the answer', false),
+          assistantWithTool('m2', 'tu-bg', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-bg', `${PI_ASYNC_LAUNCHED_PREFIX} id=1`, false)
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.isRunning)).toEqual([false, true])
     })
   })
 

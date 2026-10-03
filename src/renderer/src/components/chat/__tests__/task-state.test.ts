@@ -53,6 +53,22 @@ describe('deriveTaskState', () => {
     ).toBe(false)
   })
 
+  it('a background spawn refused before launch (error result, no record) is settled', () => {
+    const s = deriveTaskState({
+      ...base,
+      isBackground: true,
+      hasResult: true,
+      resultIsError: true
+    })
+    expect(s.isRunning).toBe(false)
+    expect(s.isError).toBe(true)
+    // …but an armed record still outranks the result.
+    expect(
+      deriveTaskState({ ...base, isBackground: true, hasActiveTask: true, resultIsError: true })
+        .isRunning
+    ).toBe(true)
+  })
+
   it('a foreground task without a lifecycle record falls back to the result', () => {
     // The legacy heuristic, load-bearing for opencode / pi / Codex children.
     expect(deriveTaskState({ ...base }).isRunning).toBe(true)

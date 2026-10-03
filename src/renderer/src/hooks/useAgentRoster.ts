@@ -43,6 +43,7 @@ import {
 import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 type TaskView = Extract<ToolView, { kind: 'task' }>
 
 export interface AgentRosterRow {
@@ -150,7 +151,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   rosterScanStats.walks++
   const map = engineToolMap(engineId)
   const spawns: ToolUseBlock[] = []
-  const results = new Map<string, boolean>() // toolUseId → isError
+  const results = new Map<string, ToolResultBlock>()
   // Calls refused before they ran (a `permission_denial` block): the opencode
   // host's plan-mode refusal of a subagent spawn (ADR-085 §3), or a Claude
   // `Task` a deny rule refused. A refused spawn never became an agent, so it is
@@ -165,7 +166,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
       } else if (block.type === 'permission_denial' && msg.role === 'assistant') {
         refused.add(block.toolUseId)
       } else if (block.type === 'tool_result') {
-        results.set(block.toolUseId, !!block.isError)
+        results.set(block.toolUseId, block)
       }
     }
   }
@@ -173,7 +174,11 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   return spawns
     .filter((block) => !refused.has(block.toolUseId))
     .map((block) => {
-      const view = map.normalize('task', block.toolInput, undefined, block.toolName) as TaskView
+      // With the result, as TaskCard does: pi's background flag is decided by it
+      // (only a launch acknowledgement is a background run), so a spawn refused
+      // before launch must not read as a background run with no notification.
+      const result = results.get(block.toolUseId)
+      const view = map.normalize('task', block.toolInput, result, block.toolName) as TaskView
       const name = view?.name || view?.subagent || map.displayName(block.toolName)
       const badge = view?.subagent !== name ? view?.subagent : undefined
       return {
@@ -182,8 +187,8 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         name,
         ...(badge ? { badge } : {}),
         description: view?.description || view?.prompt || '',
-        hasResult: results.has(block.toolUseId),
-        resultIsError: results.get(block.toolUseId) ?? false,
+        hasResult: !!result,
+        resultIsError: !!result?.isError,
         // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
         isBackground: !!view?.background
       }

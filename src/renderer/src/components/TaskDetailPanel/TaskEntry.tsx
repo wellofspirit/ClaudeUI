@@ -8,6 +8,9 @@ import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../chat/task-state'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
+import type { ToolView } from '../../../../shared/tool-kinds'
+
+type TaskView = Extract<ToolView, { kind: 'task' }>
 
 function BashOutputPanel({
   output,
@@ -117,7 +120,18 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0
   const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
-  const isBackground = !!input.run_in_background
+  // The engine's normalized view, with the result — the same reading TaskCard
+  // and the roster use (pi decides background from the launch result), plus a
+  // lifecycle record's own word.
+  const isBackground =
+    !!(
+      engineToolMap(engineId).normalize(
+        'task',
+        input,
+        resultBlock ?? undefined,
+        taskBlock.toolName
+      ) as TaskView
+    ).background || activeTasks[toolUseId]?.isBackgrounded === true
   const progress = taskProgressMap[toolUseId]
   const hasResult = !!resultBlock
   const resultText =

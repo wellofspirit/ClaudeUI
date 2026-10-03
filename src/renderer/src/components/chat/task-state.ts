@@ -100,8 +100,11 @@ export function deriveTaskState({
         // synchronous task that notified may never post a tool_result.
         notification
         ? false
-        : isBackground
-          ? true
+        : // A background launch answers with a success result at once; an
+          // ERROR result means it never launched (a judge block, a start
+          // failure), so nothing will ever notify — it is settled, not running.
+          isBackground
+          ? !(hasResult && resultIsError)
           : !hasResult
 
   const unfinished = notification?.status === 'unfinished'
