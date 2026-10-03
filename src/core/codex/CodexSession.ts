@@ -3382,6 +3382,7 @@ export class CodexSession extends BaseSession {
       // Read live (ADR-088): the target follows this session's mode switches.
       getAutonomyMode: () => this.permissionMode,
       getMessages: () => this.messageHistory,
+      getQueuedUserTurns: () => this.queuedUserTurns(),
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),

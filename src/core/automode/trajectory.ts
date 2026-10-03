@@ -36,6 +36,18 @@ export function recordTrajectoryMessage(
 }
 
 /**
+ * A delegated call's judge transcript in time order (ADR-091 §4): the parent
+ * transcript, the parent's still-queued user turns and the acting agent's own
+ * assistant trajectory, merged by `timestamp`. A STABLE sort (Array#sort is
+ * stable), so ties keep the argument order. Before it the sources were
+ * concatenated, and a "go ahead" typed after a child's block sorted BEFORE the
+ * block it answered — post-block consent inheritance never applied.
+ */
+export function inTimeOrder(...sources: Iterable<ChatMessage>[]): ChatMessage[] {
+  return sources.flatMap((source) => [...source]).sort((a, b) => a.timestamp - b.timestamp)
+}
+
+/**
  * Collect the `tool_use` block IDS from a forwarded assistant message into the
  * per-turn set — the best-effort `toolUses` figure in `TaskNotification.usage`
  * (ADR-033 M4-B) is that set's size at turn end. A SET (not a counter) because

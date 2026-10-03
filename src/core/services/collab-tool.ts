@@ -17,6 +17,8 @@ export interface CollabServerContext {
   /** The session's live transcript (`getMessages()`), for the judge of a
    *  dispatched pi/opencode target's calls (ADR-088). */
   getMessages: () => ChatMessage[]
+  /** The session's still-queued user turns (ADR-091 §4), for the same judge. */
+  getQueuedUserTurns?: () => ChatMessage[]
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
@@ -116,6 +118,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               cwd: ctx.cwd,
               getAutonomyMode: ctx.getAutonomyMode,
               getMessages: ctx.getMessages,
+              ...(ctx.getQueuedUserTurns ? { getQueuedUserTurns: ctx.getQueuedUserTurns } : {}),
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
               toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,

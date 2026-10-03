@@ -82,6 +82,7 @@ import {
   type JudgeTransport
 } from '../automode/classifier'
 import { runJudgePipeline } from '../automode/judge-pipeline'
+import { armBlockHold } from '../automode/block-hold'
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
@@ -224,6 +225,11 @@ interface PendingAsk {
   approval: PendingApproval
   /** false when a user ask rule holds it for the human — a session allow must never sweep it. */
   sweepable: boolean
+  /**
+   * Set while the card holds an auto-mode judge block (ADR-091 §3): the
+   * judge's deny text a kept block answers with, and the expiry timer.
+   */
+  hold?: { reason: string; cancel: () => void }
 }
 
 /**
@@ -1006,6 +1012,7 @@ export class OpencodeSession extends BaseSession {
     }
     // No engine left to forward held items to (ADR-053 §engine death).
     this.recallQueuedOnEngineLoss()
+    this.dropBlockHolds()
     this.sendStatus()
   }
 
@@ -1402,7 +1409,7 @@ export class OpencodeSession extends BaseSession {
         // can't fire, and retract the (now-stale) card in the renderer via the
         // existing dismiss channel. All are no-ops if the request is unknown.
         const { requestId } = output
-        this.pendingApprovals.delete(requestId)
+        this.takePendingAsk(requestId)
         this.pendingQuestions.delete(requestId)
         this.send('session:approval-dismiss', { requestId })
         break
@@ -1738,6 +1745,7 @@ export class OpencodeSession extends BaseSession {
     }
     // Nothing left to serve the queue (ADR-053 §engine death).
     this.recallQueuedOnEngineLoss()
+    this.dropBlockHolds()
     this.sendStatus()
   }
 
@@ -1749,9 +1757,8 @@ export class OpencodeSession extends BaseSession {
   ): void {
     // Read BEFORE the delete: the record's approval carries the `always`
     // patterns an allow-for-session remembers (ADR-085 S2).
-    const pending = this.pendingApprovals.get(requestId)
+    const pending = this.takePendingAsk(requestId)
     const approvalToolUseId = pending?.toolUseId
-    this.pendingApprovals.delete(requestId)
     if (!this.client) return
 
     // ── Model-elicitation question (question.asked) ──────────────────────────
@@ -1799,6 +1806,24 @@ export class OpencodeSession extends BaseSession {
 
     // ── Permission approval (permission.asked) ───────────────────────────────
     const allow = decision === 'allow' || decision === 'allowForSession'
+
+    // A held auto-mode block (ADR-091 §3) — Keep blocked (or its expiry) /
+    // Approve anyway. An override of this ONE call: `once` either way, no
+    // session allow, no persisted rule.
+    if (pending?.hold) {
+      if (allow) {
+        // The user overrode the block: the streak it counted resets, and the
+        // call reports its own outcome when it runs.
+        this.autoDenials.recordAllow()
+        this.autoReply(requestId, 'once')
+      } else {
+        // The judge's refusal stands: the model reads the judge's own text,
+        // and the call is annotated as this monitor's block, not a human one.
+        if (approvalToolUseId) this.recordToolOutcome(approvalToolUseId, 'automode-blocked')
+        this.autoReply(requestId, 'reject', pending.hold.reason)
+      }
+      return
+    }
     // "always allow" = the user checked persist-rule suggestions in the dialog.
     const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
     // ADR-085 S2 — never `always`, for any category. opencode stores an
@@ -2927,9 +2952,6 @@ export class OpencodeSession extends BaseSession {
         captureActionMeta: (name, input) => this.captureActionMeta(name, input),
         outcomes: () =>
           this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
-        recordOutcome: (id, result) => {
-          if (approval.toolUseId) this.recordToolOutcome(id, result)
-        },
         denials: this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         // The allow-rule review waits for the tool part (sendAllowRuleReview);
@@ -2962,8 +2984,8 @@ export class OpencodeSession extends BaseSession {
       case 'allow':
         this.autoReply(approval.requestId, 'once')
         return
-      case 'deny':
-        this.autoReply(approval.requestId, 'reject', outcome.reason)
+      case 'hold':
+        this.holdBlock(judgedApproval, outcome.reason)
         return
       case 'human':
         this.fallbackToHuman(judgedApproval, outcome.reason)
@@ -3014,7 +3036,7 @@ export class OpencodeSession extends BaseSession {
    * turn survives the denial and the agent can see why it was blocked.
    */
   private autoReply(requestId: string, reply: 'once' | 'reject', message?: string): void {
-    this.pendingApprovals.delete(requestId)
+    this.takePendingAsk(requestId)
     const replied = message
       ? this.client?.replyPermission(requestId, reply, message)
       : this.client?.replyPermission(requestId, reply)
@@ -3039,6 +3061,63 @@ export class OpencodeSession extends BaseSession {
       'session:approval-request',
       decisionReason ? { ...approval, decisionReason } : approval
     )
+  }
+
+  /**
+   * A judge block held for the user (ADR-091 §3): the human card, flagged as
+   * an auto-mode block (Keep blocked / Approve anyway, no "always allow"
+   * suggestions), under the review the pipeline already sent. Unanswered, it
+   * resolves exactly as a Keep blocked click — through `resolveApproval` —
+   * after `AUTO_MODE_BLOCK_HOLD_MS`; the reject's `permission.replied` then
+   * withdraws the card, and the explicit dismiss covers a reply that never
+   * comes back (a lost connection). `reason` is the judge's deny text.
+   */
+  private holdBlock(approval: PendingApproval, reason: string): void {
+    const rec = this.pendingApprovals.get(approval.requestId)
+    // Settled between the verdict and here — nothing left to hold.
+    if (!rec) return
+    const { requestId } = approval
+    const timer = armBlockHold(() => {
+      this.resolveApproval(requestId, 'deny')
+      this.send('session:approval-dismiss', { requestId })
+    })
+    rec.hold = { reason, cancel: timer.cancel }
+    // A held block is never swept by a session allow: it is the human's call.
+    rec.sweepable = false
+    const { suggestions: _suggestions, ...card } = approval
+    this.send('session:approval-request', {
+      ...card,
+      autoModeBlock: { expiresAt: timer.expiresAt },
+      // The card states why it is held: the review strip sits on the tool
+      // card, which a floating approval may not be next to.
+      decisionReason: reason
+    } satisfies PendingApproval)
+  }
+
+  /**
+   * Remove one pending ask, disarming a held block's expiry (ADR-091 §3). The
+   * ONE way an entry leaves `pendingApprovals`, so no resolution path — a
+   * reply, the server's cascade, the human — leaks a timer.
+   */
+  private takePendingAsk(requestId: string): PendingAsk | undefined {
+    const rec = this.pendingApprovals.get(requestId)
+    if (!rec) return undefined
+    this.pendingApprovals.delete(requestId)
+    rec.hold?.cancel()
+    return rec
+  }
+
+  /**
+   * Teardown / connection loss: no reply can reach the engine any more, so
+   * every held block is disarmed and its card withdrawn (ADR-091 §3: no hold
+   * outlives the connection that would answer it).
+   */
+  private dropBlockHolds(): void {
+    for (const [requestId, rec] of [...this.pendingApprovals]) {
+      if (!rec.hold) continue
+      this.takePendingAsk(requestId)
+      this.send('session:approval-dismiss', { requestId })
+    }
   }
 
   /**

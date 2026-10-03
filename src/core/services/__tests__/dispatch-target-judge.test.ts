@@ -165,7 +165,7 @@ describe('DispatchTargetJudge', () => {
     })
   })
 
-  it('a block denies, and the blocked call is annotated on the next judgement', async () => {
+  it('a block holds (ADR-091 §3); the call is annotated only once the hold is kept', async () => {
     const { judge, call, replies, requests, trajectory } = setup()
     recordTrajectoryMessage(
       trajectory,
@@ -175,11 +175,26 @@ describe('DispatchTargetJudge', () => {
     )
     replies.push('<block>yes</block><reason>destroys the build</reason>')
     expect(await judge.judge(bash, call)).toEqual({
-      kind: 'deny',
+      kind: 'hold',
       reason: 'Auto mode blocked: destroys the build'
     })
+    // Still held: nothing refused it yet.
     await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)
-    expect(requests[1].user).toContain('automode-blocked')
+    expect(requests[1].user).not.toContain('automode-blocked')
+    // Kept (the dispatcher's resolveApproval records it).
+    judge.recordOutcome('oc-call-7', 'automode-blocked')
+    await judge.judge({ ...bash, toolUseId: 'oc-call-9' }, call)
+    expect(requests[2].user).toContain('automode-blocked')
+  })
+
+  it('an approved hold resets the denial streak — the next block holds instead of hitting the cap', async () => {
+    const { judge, call, replies } = setup()
+    replies.push('<block>yes</block>', '<block>yes</block>', '<block>yes</block>')
+    expect((await judge.judge(bash, call)).kind).toBe('hold')
+    expect((await judge.judge(bash, call)).kind).toBe('hold')
+    judge.recordHoldApproved()
+    // Without the reset this would be the 3rd consecutive block → the human.
+    expect((await judge.judge(bash, call)).kind).toBe('hold')
   })
 
   it('D1: the judge reads the parent transcript then the target’s own assistant trajectory — never a target user line', async () => {
@@ -209,6 +224,37 @@ describe('DispatchTargetJudge', () => {
     // The prompt still reaches the judge — as the subagent header's task.
     expect(user).toContain('"dispatch:opencode" subagent')
     expect(judge.judgeMessages().map((m) => m.id)).toEqual(['p1', 't1'])
+  })
+
+  it('ADR-091 §4: parent, queued user turns and the trajectory merge in time order (stable on ties)', async () => {
+    const at = (m: ChatMessage, timestamp: number): ChatMessage => ({ ...m, timestamp })
+    const { judge, call, requests, trajectory } = setup(undefined, {
+      messages: () => [
+        at(msg('p1', 'user', [{ type: 'text', text: 'set up the VM' }]), 100),
+        at(msg('p2', 'user', [{ type: 'text', text: 'go ahead, push it' }]), 300)
+      ],
+      queuedTurns: () => [
+        at(msg('q1', 'user', [{ type: 'text', text: 'yes, the queued go-ahead' }]), 250)
+      ]
+    })
+    // The child's blocked call (200) precedes the user's later consent (250, 300);
+    // a trajectory message tied with a parent one (100) stays after it.
+    recordTrajectoryMessage(
+      trajectory,
+      at(
+        msg('t1', 'assistant', [
+          { type: 'tool_use', toolUseId: 'blocked', toolName: 'bash', toolInput: bash.input }
+        ]),
+        200
+      )
+    )
+    recordTrajectoryMessage(trajectory, at(msg('t0', 'assistant', []), 100))
+    expect(judge.judgeMessages().map((m) => m.id)).toEqual(['p1', 't0', 't1', 'q1', 'p2'])
+    await judge.judge(bash, call)
+    const user = requests[0].user
+    expect(user.indexOf('rm -rf build')).toBeLessThan(
+      user.indexOf('User: yes, the queued go-ahead')
+    )
   })
 })
 

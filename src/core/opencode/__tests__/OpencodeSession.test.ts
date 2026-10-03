@@ -163,6 +163,19 @@ vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: mockResolveJud
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
 vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 
+// ADR-091 §3 — a judge block HOLDS for the user. The suite's block tests are
+// about what an unattended session does, so a hold expires at once by default
+// (resolving as Keep blocked, exactly as the real expiry does); the hold tests
+// set `holdMs.value` to the real window and drive the card themselves.
+const holdMs = vi.hoisted(() => ({ value: 0 }))
+vi.mock('../../automode/block-hold', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../automode/block-hold')>()
+  return {
+    ...actual,
+    armBlockHold: (onExpire: () => void) => actual.armBlockHold(onExpire, holdMs.value)
+  }
+})
+
 // Permission rules are loaded from Claude's settings; mock so the ruleset tests
 // are hermetic (no dependence on the dev's ~/.claude/settings.json). Default =
 // empty rules; individual tests override mockLoadClaudePermissions.
@@ -271,6 +284,7 @@ import {
   READ_ONLY_REVIEW_RATIONALE
 } from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
+import { AUTO_MODE_BLOCK_HOLD_MS } from '../../automode/block-hold'
 import { evaluateOpencodeRules } from '../wildcard'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { OpencodeEvent } from '../protocol/types'
@@ -1697,16 +1711,14 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     release()
 
     // 2nd block on the same rule: the human decides, and the card says why.
-    await vi.waitFor(() => {
-      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.find(
-        (c) => c[0] === 'session:approval-request'
+    // (The 1st block's card was a held one — `autoModeBlock` — that expired.)
+    const humanCard = () =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.find(
+        (c) => c[0] === 'session:approval-request' && !c[2].autoModeBlock
       )
-      expect(sent).toBeDefined()
-    })
+    await vi.waitFor(() => expect(humanCard()).toBeDefined())
     // send(channel, routingId, payload) — the approval is arg 2.
-    const approval = (win as unknown as MockWindow).webContents.send.mock.calls.find(
-      (c) => c[0] === 'session:approval-request'
-    )![2] as { requestId: string; decisionReason?: string }
+    const approval = humanCard()![2] as { requestId: string; decisionReason?: string }
     expect(approval.requestId).toBe('per_cat_2')
     expect(approval.decisionReason).toContain('Git Destructive')
     expect(approval.decisionReason).toContain('2 times')
@@ -1749,8 +1761,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
         expect.stringContaining('Network Exposure')
       )
     )
+    // Only the two held-block cards, which expired as kept — no human card.
     const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
-      (c) => c[0] === 'session:approval-request'
+      (c) => c[0] === 'session:approval-request' && !c[2].autoModeBlock
     )
     expect(sent).toBe(false)
     session.dispose()
@@ -3232,14 +3245,12 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     expect(mockJudge).toHaveBeenCalledTimes(2)
 
     push(permissionEvent('per_blk3', 'c_blk3', 'npm publish'))
-    await vi.waitFor(() =>
-      expect(win.webContents.send.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(
-        true
+    const humanCard = () =>
+      win.webContents.send.mock.calls.find(
+        (c) => c[0] === 'session:approval-request' && !c[2].autoModeBlock
       )
-    )
-    const approval = win.webContents.send.mock.calls.find(
-      (c) => c[0] === 'session:approval-request'
-    )![2] as { requestId: string; decisionReason?: string }
+    await vi.waitFor(() => expect(humanCard()).toBeDefined())
+    const approval = humanCard()![2] as { requestId: string; decisionReason?: string }
     expect(approval.requestId).toBe('per_blk3')
     expect(approval.decisionReason).toContain('3 actions in a row')
     session.dispose()
@@ -3260,6 +3271,126 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     })
     expect(mockJudge).not.toHaveBeenCalled()
     session.dispose()
+  })
+
+  describe('ADR-091 §3 — a judge block holds the ask for the user', () => {
+    beforeEach(() => {
+      holdMs.value = AUTO_MODE_BLOCK_HOLD_MS
+    })
+    afterEach(() => {
+      holdMs.value = 0
+      vi.useRealTimers()
+    })
+
+    type Card = { requestId: string; autoModeBlock?: { expiresAt: number }; suggestions?: unknown }
+    const cards = (win: MockWindow): Card[] =>
+      win.webContents.send.mock.calls
+        .filter((c) => c[0] === 'session:approval-request')
+        .map((c) => c[2] as Card)
+    const dismissals = (win: MockWindow): unknown[] =>
+      win.webContents.send.mock.calls
+        .filter((c) => c[0] === 'session:approval-dismiss')
+        .map((c) => c[2])
+
+    /** A session with one blocked `kubectl` ask, held on its card. */
+    async function heldAsk(id: string): Promise<{
+      session: OpencodeSession
+      win: MockWindow
+      push: (e: OpencodeEvent) => void
+    }> {
+      enableAutoMode()
+      mockJudge.mockResolvedValueOnce('<block>yes</block><reason>prod</reason>')
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const push = makeEventFeed()
+      const win = new MockWindow()
+      const session = new OpencodeSession(
+        'r_hold',
+        win as unknown as HostWindowHandle,
+        '/tmp/test-cwd',
+        { permissionMode: 'full' }
+      )
+      await session.run('go')
+      push(toolPartEvent(`c_${id}`, 'kubectl delete ns prod'))
+      push(permissionEvent(id, `c_${id}`, 'kubectl delete ns prod'))
+      await vi.waitFor(() => expect(cards(win).some((c) => c.requestId === id)).toBe(true))
+      return { session, win, push }
+    }
+
+    it('raises a held card with no standing-rule suggestions, and replies nothing until answered', async () => {
+      const { session, win } = await heldAsk('per_h1')
+      const [card] = cards(win)
+      expect(card.autoModeBlock!.expiresAt).toBeGreaterThan(Date.now() + 100_000)
+      expect(card.suggestions).toBeUndefined()
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      session.dispose()
+    })
+
+    it('Approve anyway → once; allowForSession remembers nothing', async () => {
+      const { session, win, push } = await heldAsk('per_h2')
+      session.resolveApproval('per_h2', 'allowForSession')
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_h2', 'once')
+      // The same command asks again and is judged again — no session allow.
+      push(permissionEvent('per_h2b', 'c_h2b', 'kubectl delete ns prod'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_h2b', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(2)
+      expect(cards(win)).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('Keep blocked → reject with the judge text, annotated `automode-blocked` (not rejected-by-user)', async () => {
+      const { session, push } = await heldAsk('per_h3')
+      session.resolveApproval('per_h3', 'deny')
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_h3',
+        'reject',
+        'Auto mode blocked: prod'
+      )
+      push(permissionEvent('per_h3b', 'c_h3b', 'kubectl delete ns prod'))
+      await vi.waitFor(() => expect(mockJudge).toHaveBeenCalledTimes(2))
+      expect(judgePrompt().user).toContain(
+        'bash {"command":"kubectl delete ns prod"}\n{"outcome":"automode-blocked"}'
+      )
+      expect(judgePrompt().user).not.toContain('rejected-by-user')
+      session.dispose()
+    })
+
+    it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const { session, win } = await heldAsk('per_h4')
+      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS - 1_000)
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_h4',
+        'reject',
+        'Auto mode blocked: prod'
+      )
+      expect(dismissals(win)).toContainEqual({ requestId: 'per_h4' })
+      session.dispose()
+    })
+
+    it('answered elsewhere (an interrupt’s server-side reject) or torn down, the expiry is disarmed', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const { session, win, push } = await heldAsk('per_h5')
+      // An interrupt: opencode rejects the pending ask itself → permission.replied.
+      push({
+        id: 'ev_replied',
+        type: 'permission.replied',
+        properties: { sessionID: SES, requestID: 'per_h5', reply: 'reject' }
+      } as OpencodeEvent)
+      await vi.waitFor(() => expect(dismissals(win)).toEqual([{ requestId: 'per_h5' }]))
+      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      expect(dismissals(win)).toHaveLength(1)
+      session.dispose()
+
+      const torn = await heldAsk('per_h6')
+      torn.session.dispose()
+      expect(dismissals(torn.win)).toEqual([{ requestId: 'per_h6' }])
+      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+      expect(mockReplyPermission).not.toHaveBeenCalled()
+      expect(dismissals(torn.win)).toHaveLength(1)
+    })
   })
 })
 

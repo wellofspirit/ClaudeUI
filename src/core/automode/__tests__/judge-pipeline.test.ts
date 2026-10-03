@@ -31,7 +31,6 @@ function setup(over: Partial<JudgePipelineHooks> = {}, replies: Array<string | E
     return next ?? '<block>no</block>'
   })
   const sendReview = vi.fn()
-  const recordOutcome = vi.fn()
   let mode = 'auto'
   const hooks: JudgePipelineHooks = {
     logSource: 'TestSource',
@@ -46,13 +45,12 @@ function setup(over: Partial<JudgePipelineHooks> = {}, replies: Array<string | E
     environment: async () => ({ cwd: '/repo' }),
     captureActionMeta: async () => undefined,
     outcomes: () => undefined,
-    recordOutcome,
     denials: new AutoModeDenialTracker(),
     twoStageMode: () => 'fast',
     sendReview,
     ...over
   }
-  return { hooks, judge, sendReview, recordOutcome, setMode: (m: string) => (mode = m) }
+  return { hooks, judge, sendReview, setMode: (m: string) => (mode = m) }
 }
 
 const bash = { toolUseId: 'call-1', toolName: 'bash', input: { command: 'rm -rf build' } }
@@ -81,34 +79,33 @@ describe('runJudgePipeline', () => {
     expect(mockLogger.info).toHaveBeenCalledWith('TestSource', expect.stringContaining('bash'))
   })
 
-  it('block: deny with the formatted reason, outcome recorded, review sent', async () => {
-    const { hooks, sendReview, recordOutcome } = setup({}, [
-      '<block>yes</block><reason>wipes the build</reason>'
-    ])
+  it('block (ADR-091 §3): held with the formatted reason, block counted, review sent, no allow', async () => {
+    const { hooks, sendReview } = setup({}, ['<block>yes</block><reason>wipes the build</reason>'])
+    const block = vi.spyOn(hooks.denials, 'recordBlock')
+    const allow = vi.spyOn(hooks.denials, 'recordAllow')
     expect(await runJudgePipeline(bash, hooks)).toEqual({
-      kind: 'deny',
+      kind: 'hold',
       reason: 'Auto mode blocked: wipes the build'
     })
-    expect(recordOutcome).toHaveBeenCalledWith('call-1', 'automode-blocked')
+    expect(block).toHaveBeenCalledTimes(1)
+    expect(allow).not.toHaveBeenCalled()
     expect(sendReview).toHaveBeenCalledWith('call-1', expect.objectContaining({ block: true }))
   })
 
   it('the third block in a row hands over to the human with the cap sentence, no review', async () => {
-    const { hooks, sendReview, recordOutcome } = setup({}, [
+    const { hooks, sendReview } = setup({}, [
       '<block>yes</block>',
       '<block>yes</block>',
       '<block>yes</block>'
     ])
-    expect((await runJudgePipeline(bash, hooks)).kind).toBe('deny')
-    expect((await runJudgePipeline(bash, hooks)).kind).toBe('deny')
+    expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
+    expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
     sendReview.mockClear()
-    recordOutcome.mockClear()
     expect(await runJudgePipeline(bash, hooks)).toEqual({
       kind: 'human',
       reason: 'Auto mode blocked 3 actions in a row — asking you instead.'
     })
     expect(sendReview).not.toHaveBeenCalled()
-    expect(recordOutcome).not.toHaveBeenCalled()
   })
 
   it('a transport failure is unavailable → human, warned with the cause, no review', async () => {

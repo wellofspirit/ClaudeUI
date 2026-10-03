@@ -76,6 +76,7 @@ import { editClearsAgentControl } from '../opencode/agent-control-gate'
 // ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
 // automode pipeline + the judge transport), no session class.
 import { DispatchTargetJudge } from './dispatch-target-judge'
+import { armBlockHold } from '../automode/block-hold'
 import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
 import type { JudgeTransport } from '../automode/classifier'
 import type { SessionJudgeOptions } from '../automode/session-judge'
@@ -241,6 +242,14 @@ export interface DispatchContext {
    * precedent: a delegated call is judged against the parent transcript).
    */
   getMessages: () => ChatMessage[]
+  /**
+   * The DISPATCHING session's still-queued user turns
+   * (`BaseSession.queuedUserTurns`), read live — merged in time order into
+   * that judge's transcript (ADR-091 §4): a "go ahead" typed while the parent
+   * waits on this dispatch is queued, not yet in `getMessages()`. Optional
+   * like `addDispatchedCost`; every production caller sets it.
+   */
+  getQueuedUserTurns?: () => ChatMessage[]
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
   emit: (channel: string, data: unknown) => void
   /**
@@ -1409,8 +1418,25 @@ interface CodexPendingApproval {
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
-type PendingForwardedApproval =
+/**
+ * A forwarded card that holds a pi/opencode target's auto-mode judge block
+ * (ADR-091 §3). `resolveApproval` turns the answer into the hold's semantics
+ * before the kind's own reply: Keep blocked (or the expiry) → the judge's deny
+ * text + `automode-blocked` on the target's outcomes; Approve anyway → allow +
+ * the target's denial streak reset.
+ */
+interface ForwardedBlockHold {
+  /** The judge's model-visible deny text. */
+  reason: string
+  /** The target-side call id the outcome annotates (the judged `toolUseId`). */
+  toolUseId: string
+  judge: DispatchTargetJudge
+  cancel: () => void
+}
+
+type PendingForwardedApproval = (
   OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
+) & { hold?: ForwardedBlockHold }
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
@@ -2407,18 +2433,33 @@ export class CrossEngineDispatcher {
     _updatedPermissions?: PermissionSuggestion[]
   ): boolean {
     if (!requestId.startsWith(XENG_REQUEST_PREFIX)) return false
-    const pending = this.pendingApprovals.get(requestId)
+    const pending = this.takePendingApproval(requestId)
     // Prefixed ids are exclusively dispatcher-owned: consume even when stale
     // (e.g. already cascade-rejected) so no session ever sees an xeng id.
     if (!pending) return true
-    this.pendingApprovals.delete(requestId)
+
+    // A held auto-mode block (ADR-091 §3): an override of this ONE call, so
+    // `allowForSession` is a plain allow; a deny answers with the judge's own
+    // text and records the block on the target's outcomes, never a human
+    // refusal.
+    let answer = { decision, answers }
+    if (pending.hold) {
+      const { hold } = pending
+      if (decision === 'deny') {
+        hold.judge.recordOutcome(hold.toolUseId, 'automode-blocked')
+        answer = { decision, answers: { feedback: hold.reason } }
+      } else {
+        hold.judge.recordHoldApproved()
+        answer = { decision: 'allow', answers: undefined }
+      }
+    }
 
     if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
-      pending.resolve(decision, answers)
+      pending.resolve(answer.decision, answer.answers)
       return true
     }
 
-    const allow = decision === 'allow' || decision === 'allowForSession'
+    const allow = answer.decision === 'allow' || answer.decision === 'allowForSession'
     // Never `always` (ADR-085 S2): opencode would store its patterns in an
     // INSTANCE-global list evaluated after every session's ruleset, so one
     // approval here would outrank the user's deny/ask rules for every chat in
@@ -2427,7 +2468,7 @@ export class CrossEngineDispatcher {
     const reply = allow ? 'once' : 'reject'
     // Deny feedback is model-visible (CorrectedError, non-fatal) — parity with
     // OpencodeSession.resolveApproval.
-    const message = !allow ? answers?.feedback || 'User denied' : undefined
+    const message = !allow ? answer.answers?.feedback || 'User denied' : undefined
     const replied = message
       ? pending.client.replyPermission(pending.permissionId, reply, message)
       : pending.client.replyPermission(pending.permissionId, reply)
@@ -3038,6 +3079,7 @@ export class CrossEngineDispatcher {
         model: () => entry.model,
         emit: () => entry.ctx.emit,
         messages: () => entry.ctx.getMessages(),
+        queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
         trajectory: () => entry.trajectory.values(),
         subagent: () => ({
           type: 'dispatch:opencode',
@@ -3514,9 +3556,8 @@ export class CrossEngineDispatcher {
       const owner = this.opencodeTargetForSession((props.sessionID as string | undefined) ?? '')
       owner?.judging.delete(requestID)
       const key = XENG_REQUEST_PREFIX + requestID
-      const pending = this.pendingApprovals.get(key)
+      const pending = this.takePendingApproval(key)
       if (!pending) return
-      this.pendingApprovals.delete(key)
       pending.emit('session:approval-dismiss', { requestId: key })
     }
   }
@@ -3594,7 +3635,11 @@ export class CrossEngineDispatcher {
    * surfaces share `requestId`). Absent on the wire for a non-tool-scoped ask;
    * never invent one — a wrong id binds the card to the wrong block, which is
    * worse than no inline card at all. `decisionReason` is auto mode's denial-cap
-   * sentence when the judge handed the call back (ADR-088).
+   * sentence when the judge handed the call back (ADR-088), or the judge's deny
+   * text on a held block. `blockReason` makes it a held judge block (ADR-091
+   * §3) — the deny text a kept block answers with; a kept
+   * block is annotated on the id the judge was given (`tool.callID`, else the
+   * permission id).
    */
   private forwardOpencodeTargetAsk(
     entry: OpencodeTargetEntry,
@@ -3603,14 +3648,27 @@ export class CrossEngineDispatcher {
     metadata: Record<string, unknown>,
     patterns: string[] | undefined,
     tool: { messageID?: string; callID?: string } | undefined,
-    decisionReason?: string
+    decisionReason?: string,
+    blockReason?: string
   ): void {
     const requestId = XENG_REQUEST_PREFIX + id
+    const held =
+      blockReason !== undefined
+        ? this.armForwardedHold(
+            requestId,
+            entry.ctx.emit,
+            entry.judge,
+            tool?.callID ?? id,
+            blockReason
+          )
+        : null
     const approval: PendingApproval = {
       requestId,
       ...(tool?.callID ? { toolUseId: tool.callID } : {}),
       toolName: `dispatch:${permission}`,
       input: { ...metadata, ...(patterns ? { patterns } : {}) },
+      agent: { agentId: entry.sessionId, label: entry.model, subagentType: 'dispatch:opencode' },
+      ...(held ? { autoModeBlock: held.autoModeBlock } : {}),
       ...(decisionReason ? { decisionReason } : {})
     }
     this.pendingApprovals.set(requestId, {
@@ -3620,7 +3678,8 @@ export class CrossEngineDispatcher {
       // watchdog's "parked on a human" check see it.
       targetSessionId: entry.sessionId,
       client: entry.client,
-      emit: entry.ctx.emit
+      emit: entry.ctx.emit,
+      ...(held ? { hold: held.hold } : {})
     })
     // The dispatching session's emit puts its own routingId on the wire, so
     // the approval card shows on the dispatching chat with zero renderer changes.
@@ -3641,8 +3700,9 @@ export class CrossEngineDispatcher {
    *    and then the read-only gate is skipped — nothing can vouch for the
    *    command's working directory. A task child's ask never has a part on
    *    the target's accumulators, so it is always the second case.
-   * 4. allow → `once`; deny → `reject` with the judge's reason; human → the
-   *    card (with the denial cap's sentence); settled (the ask was answered by
+   * 4. allow → `once`; hold → the card as a held block (ADR-091 §3: Keep
+   *    blocked / Approve anyway, Keep blocked on expiry); human → the card
+   *    (with the denial cap's sentence); settled (the ask was answered by
    *    opencode's cascade, or the target stopped / was disposed meanwhile) →
    *    nothing.
    *
@@ -3723,8 +3783,17 @@ export class CrossEngineDispatcher {
       case 'allow':
         reply('once')
         return
-      case 'deny':
-        reply('reject', outcome.reason)
+      case 'hold':
+        this.forwardOpencodeTargetAsk(
+          entry,
+          id,
+          permission,
+          metadata,
+          patterns,
+          tool,
+          outcome.reason,
+          outcome.reason
+        )
         return
       case 'human':
         this.forwardOpencodeTargetAsk(
@@ -4641,9 +4710,7 @@ export class CrossEngineDispatcher {
       opts.signal.addEventListener(
         'abort',
         () => {
-          const pending = this.pendingApprovals.get(requestId)
-          if (!pending) return
-          this.pendingApprovals.delete(requestId)
+          if (!this.takePendingApproval(requestId)) return
           entry.ctx.emit('session:approval-dismiss', { requestId })
           resolve({ behavior: 'deny', message: 'Dispatch cancelled' })
         },
@@ -4668,6 +4735,42 @@ export class CrossEngineDispatcher {
       if (pending.targetSessionId === targetSessionId) return true
     }
     return false
+  }
+
+  /**
+   * Remove one forwarded approval, disarming a held block's expiry (ADR-091
+   * §3). The ONE way an entry leaves `pendingApprovals`, so no resolution path
+   * — the human, the cascade, a stop, disposal — leaks a timer.
+   */
+  private takePendingApproval(requestId: string): PendingForwardedApproval | undefined {
+    const pending = this.pendingApprovals.get(requestId)
+    if (!pending) return undefined
+    this.pendingApprovals.delete(requestId)
+    pending.hold?.cancel()
+    return pending
+  }
+
+  /**
+   * Arm a forwarded card's held-block expiry (ADR-091 §3): unanswered, it
+   * resolves exactly as a Keep blocked click — through `resolveApproval` — and
+   * the card is withdrawn. Returns the pending entry's `hold` and the card's
+   * `autoModeBlock`.
+   */
+  private armForwardedHold(
+    requestId: string,
+    emit: (channel: string, data: unknown) => void,
+    judge: DispatchTargetJudge,
+    toolUseId: string,
+    reason: string
+  ): { hold: ForwardedBlockHold; autoModeBlock: { expiresAt: number } } {
+    const timer = armBlockHold(() => {
+      this.resolveApproval(requestId, 'deny')
+      emit('session:approval-dismiss', { requestId })
+    })
+    return {
+      hold: { reason, toolUseId, judge, cancel: timer.cancel },
+      autoModeBlock: { expiresAt: timer.expiresAt }
+    }
   }
 
   /**
@@ -4739,7 +4842,7 @@ export class CrossEngineDispatcher {
     if (target?.kind === 'opencode') target.judging.clear()
     for (const [key, pending] of [...this.pendingApprovals]) {
       if (pending.targetSessionId !== targetSessionId) continue
-      this.pendingApprovals.delete(key)
+      this.takePendingApproval(key)
       pending.emit('session:approval-dismiss', { requestId: key })
       if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
         pending.resolve('deny')
@@ -5187,6 +5290,7 @@ export class CrossEngineDispatcher {
       model: () => entry.model,
       emit: () => entry.ctx.emit,
       messages: () => entry.ctx.getMessages(),
+      queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
       trajectory: () => entry.runner.trajectory.values(),
       subagent: () => ({ type: 'dispatch:pi', description: entry.model, prompt: entry.lastPrompt }),
       loadEngineConfig: this.deps.loadEngineConfig,
@@ -5236,8 +5340,10 @@ export class CrossEngineDispatcher {
    * base, exactly as PiSession does for itself, and an 'ask' goes to
    * ClaudeUI's judge (`DispatchTargetJudge`, the shared pipeline) instead of
    * the human: a user ask rule (G9) still reaches the human with zero judge
-   * calls; the judge's allow/deny is the decision; anything it cannot decide
-   * (unavailable, denial cap, the mode left auto meanwhile) goes to the human.
+   * calls; the judge's allow is the decision, and its block is held on the
+   * forwarded card (ADR-091 §3: Keep blocked / Approve anyway, Keep blocked on
+   * expiry); anything it cannot decide (unavailable, denial cap, the mode left
+   * auto meanwhile) goes to the human.
    * With pi's judge disabled, auto stays the historical allow-all base.
    *
    * A 'deny' is either a user deny rule (reported with the rule) or the mode
@@ -5323,8 +5429,8 @@ export class CrossEngineDispatcher {
     switch (outcome.kind) {
       case 'allow':
         return { behavior: 'allow' }
-      case 'deny':
-        return { behavior: 'deny', reason: outcome.reason }
+      case 'hold':
+        return this.forwardPiTargetAsk(entry, payload, outcome.reason, outcome.reason)
       case 'human':
         return this.forwardPiTargetAsk(entry, payload, outcome.reason)
       case 'settled':
@@ -5335,26 +5441,44 @@ export class CrossEngineDispatcher {
   /**
    * A pi target's ask to the human: a card on the DISPATCHING session, mirrors
    * awaitClaudeTargetApproval. `decisionReason` is auto mode's denial-cap
-   * sentence when the judge handed the call back (ADR-088).
+   * sentence when the judge handed the call back (ADR-088), or the judge's deny
+   * text on a held block; `blockReason` makes it a held judge block (ADR-091
+   * §3) — the deny text a kept block answers with.
    */
   private forwardPiTargetAsk(
     entry: PiTargetEntry,
     payload: PiToolCallPayload,
-    decisionReason?: string
+    decisionReason?: string,
+    blockReason?: string
   ): Promise<GateDecision> {
     return new Promise((resolve) => {
       const requestId = XENG_REQUEST_PREFIX + uuidv4()
+      const held =
+        blockReason !== undefined
+          ? this.armForwardedHold(
+              requestId,
+              entry.ctx.emit,
+              entry.judge,
+              payload.toolCallId,
+              blockReason
+            )
+          : null
       const approval: PendingApproval = {
         requestId,
         toolUseId: payload.toolCallId,
         toolName: payload.toolName,
         input: payload.input,
+        ...(entry.sessionId
+          ? { agent: { agentId: entry.sessionId, label: entry.model, subagentType: 'dispatch:pi' } }
+          : {}),
+        ...(held ? { autoModeBlock: held.autoModeBlock } : {}),
         ...(decisionReason ? { decisionReason } : {})
       }
       this.pendingApprovals.set(requestId, {
         kind: 'pi',
         targetSessionId: entry.sessionId,
         emit: entry.ctx.emit,
+        ...(held ? { hold: held.hold } : {}),
         resolve: (decision, answers) => {
           if (decision === 'allow' || decision === 'allowForSession') {
             resolve({ behavior: 'allow' })

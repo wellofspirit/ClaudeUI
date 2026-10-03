@@ -52,6 +52,8 @@ export interface CallerSessionHandle {
   /** The caller's live transcript (ISession.getMessages), for the judge of a
    *  dispatched pi/opencode target's calls (ADR-088). */
   getMessages: () => ChatMessage[]
+  /** The caller's still-queued user turns (ISession.queuedUserTurns, ADR-091 §4). */
+  getQueuedUserTurns?: () => ChatMessage[]
   /** Re-emits an event under the caller session's routing (ISession.emit). */
   emit: (channel: string, data: unknown) => void
   /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
@@ -285,6 +287,7 @@ export function createOpencodeHostedToolsServer(
           cwd: caller.cwd,
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
+          ...(caller.getQueuedUserTurns ? { getQueuedUserTurns: caller.getQueuedUserTurns } : {}),
           emit: caller.emit,
           addDispatchedCost: caller.addDispatchedCost,
           toolUseId: __xeng_call_id,

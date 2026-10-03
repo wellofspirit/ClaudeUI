@@ -816,6 +816,7 @@ export class ClaudeSession extends BaseSession {
             cwd: this.cwd,
             getAutonomyMode: () => this.permissionMode,
             getMessages: () => this.getMessages(),
+            getQueuedUserTurns: () => this.queuedUserTurns(),
             emit: (channel, data) => this.send(channel, data),
             addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
               this.addDispatchedCost(engineId, modelId, costUsd)

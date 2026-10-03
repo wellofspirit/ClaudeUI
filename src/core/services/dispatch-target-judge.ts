@@ -10,11 +10,12 @@
  * the one-per-target banners — exactly what each session holds per session.
  *
  * What the judge reads (ADR-088, owner ruling D1): the DISPATCHING session's
- * transcript — the human turns there are the only real authorisation — then
- * the target's OWN assistant trajectory (its earlier calls, user-role messages
- * removed: the dispatch prompts are agent-authored, never the user's words),
- * with the action headed as the `dispatch:<engine>` subagent's, carrying the
- * latest dispatch prompt.
+ * transcript — the human turns there are the only real authorisation — and
+ * its still-queued user turns, with the target's OWN assistant trajectory (its
+ * earlier calls, user-role messages removed: the dispatch prompts are
+ * agent-authored, never the user's words), all merged in time order (ADR-091
+ * §4), with the action headed as the `dispatch:<engine>` subagent's, carrying
+ * the latest dispatch prompt.
  *
  * Imports no session class (the dispatcher's require-cycle rule): only the
  * automode leaves and type-only shared types.
@@ -65,6 +66,7 @@ import {
   makeSessionJudgeTransport,
   type SessionJudgeOptions
 } from '../automode/session-judge'
+import { inTimeOrder } from '../automode/trajectory'
 import { loadSharedAutoModeConfig } from './ui-config'
 
 // The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
@@ -86,6 +88,8 @@ export interface DispatchTargetJudgeOptions {
   emit: () => (channel: string, data: unknown) => void
   /** `entry.ctx.getMessages()` — the dispatching session's transcript, read live. */
   messages: () => ChatMessage[]
+  /** The dispatching session's still-queued user turns (ADR-091 §4), read live; omitted → none. */
+  queuedTurns?: () => ChatMessage[]
   /** The target's own assistant trajectory (see {@link recordTrajectoryMessage}), read live. */
   trajectory: () => Iterable<ChatMessage>
   /** `{ type: 'dispatch:<engine>', description?, prompt }`, read live (the latest dispatch prompt). */
@@ -152,6 +156,14 @@ export class DispatchTargetJudge {
   }
 
   /**
+   * The user approved a held block anyway (ADR-091 §3): the denial streak the
+   * block counted resets, exactly as a judge allow resets it.
+   */
+  recordHoldApproved(): void {
+    this.denials.recordAllow()
+  }
+
+  /**
    * Judge one target call. G9 (a user ask rule → the human) is the CALLER's,
    * run before this; there are no allow rules on a target, so the allow-rule
    * gate never runs (no `allowRuleAction` hook).
@@ -174,7 +186,6 @@ export class DispatchTargetJudge {
       captureActionMeta: (toolName, input) =>
         this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
       outcomes: () => (this.outcomes.size ? Object.fromEntries(this.outcomes) : undefined),
-      recordOutcome: (id, outcome) => this.recordOutcome(id, outcome),
       denials: this.denials,
       twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
       sendReview: (id, review) => this.sendReview(id, review),
@@ -182,10 +193,13 @@ export class DispatchTargetJudge {
     })
   }
 
-  /** Parent transcript, then the target's own assistant trajectory (ADR-088 D1). */
+  /**
+   * Parent transcript, its still-queued user turns and the target's own
+   * assistant trajectory (ADR-088 D1), merged in time order (ADR-091 §4).
+   */
   judgeMessages(): ChatMessage[] {
     const own = [...this.opts.trajectory()].filter((m) => m.role === 'assistant')
-    return [...this.opts.messages(), ...own]
+    return inTimeOrder(this.opts.messages(), this.opts.queuedTurns?.() ?? [], own)
   }
 
   /**

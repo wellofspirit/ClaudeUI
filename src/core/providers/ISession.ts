@@ -48,6 +48,13 @@ export interface ISession {
   readonly queuedItems: QueuedItem[]
 
   /**
+   * {@link queuedItems} as user turns stamped with their queue time, for a
+   * delegated judge's transcript (ADR-091 §4). Implemented in BaseSession;
+   * optional so a minimal test double need not carry it.
+   */
+  queuedUserTurns?(): ChatMessage[]
+
+  /**
    * Queue a prompt that arrived while the session was busy. Implemented once in
    * BaseSession for every engine; the only per-engine difference is WHEN the
    * item reaches the engine (claude pushes into cli.js's native queue

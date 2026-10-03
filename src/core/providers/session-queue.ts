@@ -33,8 +33,18 @@ export class SessionQueue {
    * the item when {@link emit} prunes it.
    */
   private uploads = new Map<string, AttachmentUpload[]>()
+  /**
+   * When each item was queued (epoch ms), by item id — what places a queued
+   * turn in time on a delegated judge's transcript (ADR-091 §4). Private like
+   * {@link forwarded}: a host-side detail, never on the wire. Dropped with the
+   * item when {@link emit} prunes it.
+   */
+  private queuedAtMs = new Map<string, number>()
 
-  constructor(private readonly broadcast: (items: QueuedItem[]) => void) {}
+  constructor(
+    private readonly broadcast: (items: QueuedItem[]) => void,
+    private readonly now: () => number = Date.now
+  ) {}
 
   /** Items still awaiting consumption, oldest first. Live references. */
   pending(): QueuedItem[] {
@@ -67,8 +77,14 @@ export class SessionQueue {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
     if (refs && refs.length > 0) item.attachments = refs
     if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
+    this.queuedAtMs.set(item.itemId, this.now())
     this.items.push(item)
     return item
+  }
+
+  /** When the item was queued (epoch ms); undefined once it has been pruned. */
+  queuedAt(item: QueuedItem): number | undefined {
+    return this.queuedAtMs.get(item.itemId)
   }
 
   /** The attachment bytes to hand the engine for this item, if it has any. */
@@ -133,6 +149,7 @@ export class SessionQueue {
       if (item.state === 'queued') continue
       this.forwarded.delete(item.itemId)
       this.uploads.delete(item.itemId)
+      this.queuedAtMs.delete(item.itemId)
     }
     this.items = this.items.filter((item) => item.state === 'queued')
   }

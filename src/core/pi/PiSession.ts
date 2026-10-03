@@ -109,6 +109,8 @@ import {
 import { effectiveShellCwd } from '../automode/read-only-gate'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { runJudgePipeline } from '../automode/judge-pipeline'
+import { armBlockHold } from '../automode/block-hold'
+import { inTimeOrder } from '../automode/trajectory'
 import {
   analyzeRedirects,
   captureGitConfigArmed,
@@ -180,7 +182,10 @@ function allowRuleActionFor(
  * null is easy to conflate with "no verdict yet".
  */
 type AutoModeOutcome =
-  { kind: 'decided'; decision: GateDecision } | { kind: 'human'; reason?: string }
+  | { kind: 'decided'; decision: GateDecision }
+  | { kind: 'human'; reason?: string }
+  /** A judge block held for the user (ADR-091 §3); `reason` is the model-visible deny text. */
+  | { kind: 'hold'; reason: string }
 
 /** The reasonless handoff — no cap fired, the card just asks as usual. */
 const ASK_HUMAN: AutoModeOutcome = { kind: 'human' }
@@ -373,6 +378,12 @@ export class PiSession extends BaseSession {
       outcomes: Map<string, ToolOutcome>
       /** The host-run child the card belongs to (ADR-089), or null for the session's own call. */
       scope: PiChildScope | null
+      /**
+       * Set when the card holds an auto-mode judge block (ADR-091 §3): the
+       * judge's deny text a kept block answers with, the denial caps an
+       * approval resets (the session's or the child's), and the expiry timer.
+       */
+      hold?: { reason: string; denials: AutoModeDenialTracker; cancel: () => void }
     }
   >()
   /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
@@ -2052,6 +2063,7 @@ export class PiSession extends BaseSession {
     if (autoMode) {
       const auto = await this.classifyAutoMode(payload, verdict, scope)
       if (auto.kind === 'decided') return auto.decision
+      if (auto.kind === 'hold') return this.askHuman(payload, auto.reason, scope, auto.reason)
       return this.askHuman(payload, auto.reason, scope)
     }
 
@@ -2074,16 +2086,32 @@ export class PiSession extends BaseSession {
    * `decisionReason` is the one-line explanation the approval card renders
    * above the buttons (ApprovalButtons / FloatingApproval read
    * `PendingApproval.decisionReason`) — set on the denial-cap handoffs, where
-   * "auto mode gave up on this" is not otherwise visible.
+   * "auto mode gave up on this" is not otherwise visible, and on a held block
+   * (the judge's deny text: the review strip sits on the tool card, which a
+   * floating approval may not be next to).
+   *
+   * `blockReason` makes the card a held auto-mode block (ADR-091 §3): Keep
+   * blocked / Approve anyway, no "always allow" suggestions (an override of
+   * one call, never a standing rule), and an expiry that resolves it exactly
+   * as a Keep blocked click — through `resolveApproval` — and withdraws the
+   * card. `blockReason` is the judge's deny text a kept block answers with.
    */
   private askHuman(
     payload: PiToolCallPayload,
     decisionReason?: string,
-    scope: PiChildScope | null = null
+    scope: PiChildScope | null = null,
+    blockReason?: string
   ): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
       const requestId = uuid()
+      const timer =
+        blockReason !== undefined
+          ? armBlockHold(() => {
+              this.resolveApproval(requestId, 'deny')
+              this.send('session:approval-dismiss', { requestId })
+            })
+          : null
       // A child's card (ADR-089) is raised under THIS session with the
       // child's own call id: it renders floating and on the nested card.
       this.pendingGates.set(requestId, {
@@ -2092,9 +2120,18 @@ export class PiSession extends BaseSession {
         input,
         toolCallId,
         outcomes: scope ? scope.outcomes : this.toolOutcomes,
-        scope
+        scope,
+        ...(timer
+          ? {
+              hold: {
+                reason: blockReason!,
+                denials: scope ? scope.denials : this.autoDenials,
+                cancel: timer.cancel
+              }
+            }
+          : {})
       })
-      const suggestions = this.buildApprovalSuggestions(toolName, input)
+      const suggestions = timer ? undefined : this.buildApprovalSuggestions(toolName, input)
       const approval: PendingApproval = {
         requestId,
         toolUseId: toolCallId,
@@ -2110,11 +2147,25 @@ export class PiSession extends BaseSession {
               }
             }
           : {}),
+        ...(timer ? { autoModeBlock: { expiresAt: timer.expiresAt } } : {}),
         ...(suggestions ? { suggestions } : {}),
         ...(decisionReason ? { decisionReason } : {})
       }
       this.send('session:approval-request', approval)
     })
+  }
+
+  /**
+   * Remove one parked gate, disarming a held block's expiry (ADR-091 §3). The
+   * ONE way an entry leaves `pendingGates`, so no resolution path — the human,
+   * an interrupt, abandonment, a stopped child, teardown — leaks a timer.
+   */
+  private takePendingGate(requestId: string) {
+    const pending = this.pendingGates.get(requestId)
+    if (!pending) return undefined
+    this.pendingGates.delete(requestId)
+    pending.hold?.cancel()
+    return pending
   }
 
   /**
@@ -2166,10 +2217,9 @@ export class PiSession extends BaseSession {
    * cancel racing an in-flight `/hosted-tool` POST).
    */
   private rejectAllPendingGates(reason: string): void {
-    for (const pending of this.pendingGates.values()) {
-      pending.resolve({ behavior: 'deny', reason })
+    for (const requestId of [...this.pendingGates.keys()]) {
+      this.takePendingGate(requestId)?.resolve({ behavior: 'deny', reason })
     }
-    this.pendingGates.clear()
     this.hostedGrants.clear()
   }
 
@@ -2182,7 +2232,7 @@ export class PiSession extends BaseSession {
   private rejectOwnPendingGates(reason: string): void {
     for (const [requestId, pending] of [...this.pendingGates]) {
       if (pending.scope !== null) continue
-      this.pendingGates.delete(requestId)
+      this.takePendingGate(requestId)
       pending.resolve({ behavior: 'deny', reason })
     }
     this.hostedGrants.clear()
@@ -2268,9 +2318,8 @@ export class PiSession extends BaseSession {
 
   /** Deny one parked gate and retract its card. */
   private retractGate(requestId: string, reason: string): void {
-    const pending = this.pendingGates.get(requestId)
+    const pending = this.takePendingGate(requestId)
     if (!pending) return
-    this.pendingGates.delete(requestId)
     pending.resolve({ behavior: 'deny', reason })
     // Same channel claude/opencode use to retract an approval the user can
     // no longer usefully answer.
@@ -2342,12 +2391,30 @@ export class PiSession extends BaseSession {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void {
-    const pending = this.pendingGates.get(requestId)
+    const pending = this.takePendingGate(requestId)
     if (!pending) {
       logger.warn('PiSession', `resolveApproval(${requestId}) called but no matching pending gate`)
       return
     }
-    this.pendingGates.delete(requestId)
+
+    // A held auto-mode block (ADR-091 §3) — Keep blocked (or its expiry) /
+    // Approve anyway. Either way an override of this ONE call: no session
+    // allow, no persisted rule.
+    if (pending.hold) {
+      if (decision === 'deny') {
+        // The judge's refusal stands: the model reads the judge's own text,
+        // and the call is annotated as THIS monitor's block (post-block
+        // consent inheritance), not as a human refusal.
+        recordToolOutcome(pending.outcomes, pending.toolCallId, 'automode-blocked')
+        pending.resolve({ behavior: 'deny', reason: pending.hold.reason })
+      } else {
+        // The user overrode the block: the streak it counted resets, and the
+        // call reports its own ok/error outcome when it runs.
+        pending.hold.denials.recordAllow()
+        pending.resolve({ behavior: 'allow' })
+      }
+      return
+    }
 
     if (decision === 'deny') {
       // Auto-mode ground truth: a HUMAN refusal is the strongest signal the
@@ -2663,13 +2730,15 @@ export class PiSession extends BaseSession {
     //
     // A host-run subagent's call (ADR-089 D2.4) changes only what is the
     // child's: its header (`subagent`), its transcript — this session's (the
-    // ROOT, whose human turns are the only real authorisation) followed by
-    // the acting child's own assistant-only trajectory (D1; an intermediate
-    // agent's trajectory is not included: its prompts to the child are
-    // agent-authored, and the acting child's own calls are what is being
-    // judged) — its outcomes and denial caps, its narrowed live mode (G10
-    // re-reads it), and `stillPending` (a stopped or draining child). With no
-    // scope every hook is exactly what it was before ADR-089.
+    // ROOT, whose human turns are the only real authorisation), its
+    // still-queued user turns, and the acting child's own assistant-only
+    // trajectory, merged in time order (ADR-091 §4, so a "go ahead" typed
+    // after a block follows it; D1: an intermediate agent's trajectory is not
+    // included: its prompts to the child are agent-authored, and the acting
+    // child's own calls are what is being judged) — its outcomes and denial
+    // caps, its narrowed live mode (G10 re-reads it), and `stillPending` (a
+    // stopped or draining child). With no scope every hook is exactly what it
+    // was before ADR-089.
     const childHooks = scope
       ? {
           subagent: {
@@ -2677,13 +2746,13 @@ export class PiSession extends BaseSession {
             description: scope.description,
             prompt: scope.prompt
           },
-          messages: (): ChatMessage[] => [
-            ...this.messageHistory,
-            ...(scope.runner()?.trajectory.values() ?? [])
-          ],
+          messages: (): ChatMessage[] =>
+            inTimeOrder(
+              this.messageHistory,
+              this.queuedUserTurns(),
+              scope.runner()?.trajectory.values() ?? []
+            ),
           outcomes: () => (scope.outcomes.size ? Object.fromEntries(scope.outcomes) : undefined),
-          recordOutcome: (id: string, result: ToolOutcome) =>
-            recordToolOutcome(scope.outcomes, id, result),
           denials: scope.denials,
           stillPending: () => !scope.stopped && !(scope.runner()?.draining ?? true)
         }
@@ -2707,7 +2776,6 @@ export class PiSession extends BaseSession {
         captureActionMeta: (name, args) => this.captureActionMeta(name, args),
         outcomes: () =>
           this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
-        recordOutcome: (id, result) => this.recordToolOutcome(id, result),
         denials: this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         sendReview: (id, review) => this.sendToolReview(id, review),
@@ -2717,8 +2785,8 @@ export class PiSession extends BaseSession {
     switch (outcome.kind) {
       case 'allow':
         return decided({ behavior: 'allow' })
-      case 'deny':
-        return decided({ behavior: 'deny', reason: outcome.reason })
+      case 'hold':
+        return { kind: 'hold', reason: outcome.reason }
       case 'human':
         return outcome.reason ? { kind: 'human', reason: outcome.reason } : ASK_HUMAN
       case 'settled':
@@ -2902,6 +2970,7 @@ export class PiSession extends BaseSession {
       // the judge of a pi/opencode target reads this transcript.
       getAutonomyMode: () => this.getAutonomyMode(),
       getMessages: () => this.messageHistory,
+      getQueuedUserTurns: () => this.queuedUserTurns(),
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),

@@ -189,6 +189,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       // the caller's mode switches and the judge reads its current transcript.
       getAutonomyMode: () => session.getAutonomyMode?.() ?? 'default',
       getMessages: () => session.getMessages(),
+      getQueuedUserTurns: () => session.queuedUserTurns?.() ?? [],
       emit: (channel, data) => session.emit(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         session.addDispatchedCost(engineId, modelId, costUsd)

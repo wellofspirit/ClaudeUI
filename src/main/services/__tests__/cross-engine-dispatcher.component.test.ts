@@ -100,7 +100,14 @@ import type { SessionJudgeOptions } from '../../../core/automode/session-judge'
 import type { JudgeRequest } from '../../../core/automode/classifier'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { BillingType, ChatMessage, EngineConfig, EngineId } from '../../../shared/types'
+import type {
+  BillingType,
+  ChatMessage,
+  EngineConfig,
+  EngineId,
+  PendingApproval
+} from '../../../shared/types'
+import { AUTO_MODE_BLOCK_HOLD_MS } from '../../../core/automode/block-hold'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
@@ -10270,19 +10277,129 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
       await t.finish()
     })
 
-    it('T2: a block rejects with the judge’s reason and a denied review', async () => {
-      const t = await start()
-      t.judge.replies.push('<block>yes</block><reason>wipes the build</reason>')
-      t.ask(RM)
-      await flush()
-      expect(t.client.replyPermission).toHaveBeenCalledWith(
-        'perm-rm',
-        'reject',
-        'Auto mode blocked: wipes the build'
-      )
-      expect(reviews(t.ctx)[0].review).toMatchObject({ decision: 'denied' })
-      expect(approvals(t.ctx)).toHaveLength(0)
-      await t.finish()
+    describe('T2 / ADR-091 §3: a block holds on an agent-labelled card', () => {
+      const BLOCK = '<block>yes</block><reason>wipes the build</reason>'
+      const dismissals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+        ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-dismiss').map((c) => c[1])
+      /** The target's own `call-rm` tool part, so an outcome on it reaches the judge. */
+      function pushRmPart(t: Awaited<ReturnType<typeof start>>): void {
+        t.stream.push('message.updated', {
+          sessionID: 'oc-sess-1',
+          info: { id: 'msg-1', role: 'assistant' }
+        })
+        t.stream.push('message.part.updated', {
+          sessionID: 'oc-sess-1',
+          part: {
+            id: 'part-rm',
+            messageID: 'msg-1',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'call-rm',
+            state: { status: 'running', input: { command: 'rm -rf build' } }
+          }
+        })
+      }
+      async function heldCard(t: Awaited<ReturnType<typeof start>>): Promise<PendingApproval> {
+        t.judge.replies.push(BLOCK)
+        t.ask(RM)
+        await flush()
+        const card = (approvals(t.ctx) as PendingApproval[]).at(-1)!
+        expect(card.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-rm`)
+        return card
+      }
+
+      it('raises a held card under the denied review — no reply yet', async () => {
+        const t = await start()
+        const card = await heldCard(t)
+        expect(t.client.replyPermission).not.toHaveBeenCalled()
+        expect(reviews(t.ctx)[0].review).toMatchObject({ decision: 'denied' })
+        expect(card).toMatchObject({
+          requestId: `${XENG_REQUEST_PREFIX}perm-rm`,
+          toolUseId: 'call-rm',
+          agent: { agentId: 'oc-sess-1', subagentType: 'dispatch:opencode' }
+        })
+        expect(card.autoModeBlock!.expiresAt).toBeGreaterThan(
+          Date.now() + AUTO_MODE_BLOCK_HOLD_MS - 10_000
+        )
+        await t.finish()
+      })
+
+      it('Keep blocked → reject with the judge’s text, and the call is `automode-blocked` to the next judgement', async () => {
+        const t = await start()
+        pushRmPart(t)
+        await tick()
+        const card = await heldCard(t)
+        expect(t.dispatcher.resolveApproval(card.requestId, 'deny')).toBe(true)
+        expect(t.client.replyPermission).toHaveBeenCalledWith(
+          'perm-rm',
+          'reject',
+          'Auto mode blocked: wipes the build'
+        )
+        t.ask({ ...RM, id: 'perm-rm-2', tool: { messageID: 'msg-2', callID: 'call-rm-2' } })
+        await flush()
+        expect(t.judge.requests[1].user).toContain('{"outcome":"automode-blocked"}')
+        await t.finish()
+      })
+
+      it('Approve anyway (allowForSession included) → once, no outcome, and the streak resets', async () => {
+        const t = await start()
+        pushRmPart(t)
+        await tick()
+        // Two blocks, the second approved: without the reset a third block
+        // would be the 3rd in a row and go to the human un-held.
+        t.judge.replies.push(BLOCK)
+        t.ask({ ...RM, id: 'perm-0', tool: { messageID: 'msg-0', callID: 'call-0' } })
+        await flush()
+        t.dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-0`, 'deny')
+        const card = await heldCard(t)
+        t.dispatcher.resolveApproval(card.requestId, 'allowForSession')
+        expect(t.client.replyPermission).toHaveBeenCalledWith('perm-rm', 'once')
+        t.judge.replies.push(BLOCK)
+        t.ask({ ...RM, id: 'perm-rm-3', tool: { messageID: 'msg-3', callID: 'call-rm-3' } })
+        await flush()
+        expect(t.judge.requests[2].user).not.toContain('"outcome"')
+        const last = (approvals(t.ctx) as PendingApproval[]).at(-1)!
+        expect(last.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-rm-3`)
+        expect(last.autoModeBlock).toBeDefined()
+        await t.finish()
+      })
+
+      it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const card = await heldCard(t)
+          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS - 1)
+          expect(t.client.replyPermission).not.toHaveBeenCalled()
+          await vi.advanceTimersByTimeAsync(1)
+          expect(t.client.replyPermission).toHaveBeenCalledWith(
+            'perm-rm',
+            'reject',
+            'Auto mode blocked: wipes the build'
+          )
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+        } finally {
+          vi.useRealTimers()
+        }
+        await t.finish()
+      })
+
+      it('a disposal while held withdraws the card and disarms the expiry', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const card = await heldCard(t)
+          t.dispatcher.disposeFor('routing-1')
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          expect(
+            t.client.replyPermission.mock.calls.filter((c) => c[0] === 'perm-rm')
+          ).toHaveLength(0)
+          expect(dismissals(t.ctx)).toHaveLength(1)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
     })
 
     it('T3: an unavailable judge forwards the ask to the human, no reply', async () => {
@@ -10539,19 +10656,101 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         review: { reviewer: 'auto-mode', decision: 'approved' }
       })
 
+      // A block holds on the forwarded card (ADR-091 §3); Keep blocked answers
+      // with the judge's own text.
       t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
-      expect(await t.gate('pi-call-2', 'bash', { command: 'rm -rf y' })).toEqual({
+      const blocked = t.gate('pi-call-2', 'bash', { command: 'rm -rf y' })
+      await flush()
+      const [card] = approvals(t.ctx) as PendingApproval[]
+      expect(card).toMatchObject({
+        toolUseId: 'pi-call-2',
+        autoModeBlock: { expiresAt: expect.any(Number) },
+        agent: { agentId: 'pi-target-1', subagentType: 'dispatch:pi' }
+      })
+      t.dispatcher.resolveApproval(card.requestId, 'deny')
+      expect(await blocked).toEqual({
         behavior: 'deny',
         reason: 'Auto mode blocked: destroys data'
       })
 
       expect(await t.gate('pi-call-3', 'read', { path: 'a.txt' })).toEqual({ behavior: 'allow' })
       expect(t.judge.requests).toHaveLength(2)
-      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(approvals(t.ctx)).toHaveLength(1)
       expect(t.judge.opts[0]).toMatchObject({ engine: 'pi', routingId: 'routing-1' })
       expect(t.judge.opts[0].sessionId()).toBe('pi-target-1')
       expect(t.judge.opts[0].modelValue()).toBe('openai-codex/gpt-5.6-luna')
       await t.finish()
+    })
+
+    describe('ADR-091 §3: a held block', () => {
+      const BLOCK = '<block>yes</block><reason>destroys data</reason>'
+      const dismissals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+        ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-dismiss').map((c) => c[1])
+      async function hold(t: Awaited<ReturnType<typeof start>>, id: string) {
+        t.judge.replies.push(BLOCK)
+        const decision = t.gate(id, 'bash', { command: 'rm -rf y' })
+        await flush()
+        const card = (approvals(t.ctx) as PendingApproval[]).at(-1)!
+        expect(card.toolUseId).toBe(id)
+        expect(card.autoModeBlock).toBeDefined()
+        return { decision, card }
+      }
+
+      it('Approve anyway runs the exact call; Keep blocked is annotated for the next judgement', async () => {
+        const t = await start()
+        t.target.pushEvent(
+          piAssistantMessageEnd({
+            toolUse: { id: 'pi-kept', name: 'bash', input: { command: 'rm -rf y' } }
+          })
+        )
+        await tick()
+        const kept = await hold(t, 'pi-kept')
+        t.dispatcher.resolveApproval(kept.card.requestId, 'deny')
+        expect(await kept.decision).toEqual({
+          behavior: 'deny',
+          reason: 'Auto mode blocked: destroys data'
+        })
+        const approved = await hold(t, 'pi-approved')
+        expect(t.judge.requests[1].user).toContain('{"outcome":"automode-blocked"}')
+        t.dispatcher.resolveApproval(approved.card.requestId, 'allow')
+        expect(await approved.decision).toEqual({ behavior: 'allow' })
+        await t.finish()
+      })
+
+      it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const { decision, card } = await hold(t, 'pi-timeout')
+          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          expect(await decision).toEqual({
+            behavior: 'deny',
+            reason: 'Auto mode blocked: destroys data'
+          })
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+        } finally {
+          vi.useRealTimers()
+        }
+        await t.finish()
+      })
+
+      it('a stop while held force-denies it as before and disarms the expiry', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const { decision, card } = await hold(t, 'pi-stopped')
+          expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+          // The stop's own abort grace runs on the (faked) clock too.
+          await vi.advanceTimersByTimeAsync(10_000)
+          expect(await decision).toEqual({ behavior: 'deny', reason: 'User denied' })
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          expect(dismissals(t.ctx)).toHaveLength(1)
+        } finally {
+          vi.useRealTimers()
+        }
+        t.target.pushEvent(PI_AGENT_SETTLED)
+      })
     })
 
     it('T7: the target’s own earlier call is on the judge’s transcript (D1 trajectory)', async () => {

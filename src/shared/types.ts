@@ -499,12 +499,22 @@ export interface PendingApproval {
    */
   subagent?: { sessionId: string; parentToolUseId: string }
   /**
-   * pi only (ADR-089): set on a host-run child's ask — WHICH agent proposes the
+   * pi (ADR-089): set on a host-run child's ask — WHICH agent proposes the
    * action, so the card can say so (the label is the agent's name, else its
    * task description, sanitized). An "allow for this session" on such a card
    * still allows for the whole session, children included (Claude Code parity).
+   * Also set on a pi/opencode dispatch target's forwarded ask (ADR-091 §3): the
+   * target's session id, its model as the label, `dispatch:<engine>` as the type.
    */
   agent?: { agentId: string; label: string; subagentType: string }
+  /**
+   * Set when the card holds an auto-mode judge BLOCK for the user (ADR-091 §3;
+   * pi, opencode and their dispatch targets): the card offers Keep blocked /
+   * Approve anyway, never a standing rule. `expiresAt` (epoch ms) is when the
+   * host resolves it as Keep blocked and withdraws the card. Engine-neutral,
+   * unlike Codex's after-the-fact `codex.guardianOverride`.
+   */
+  autoModeBlock?: { expiresAt: number }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string

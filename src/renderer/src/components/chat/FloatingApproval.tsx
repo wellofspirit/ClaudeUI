@@ -3,6 +3,7 @@ import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
+import { HoldCountdown } from './ApprovalButtons'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
 
 // ---------------------------------------------------------------------------
@@ -37,7 +38,10 @@ export function ApprovalCardView({
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox
-  const hasSuggestions = (approval.suggestions?.length ?? 0) > 0
+  // A held auto-mode block (ADR-091 §3) — see ApprovalButtons: Keep blocked /
+  // Approve anyway, never a standing rule or a session allow.
+  const heldBlock = approval.autoModeBlock
+  const hasSuggestions = !heldBlock && (approval.suggestions?.length ?? 0) > 0
 
   // Render a useful summary based on tool type
   let summary: React.JSX.Element
@@ -125,6 +129,12 @@ export function ApprovalCardView({
           >
             {toolName}
           </span>
+          {heldBlock && (
+            <HoldCountdown
+              expiresAt={heldBlock.expiresAt}
+              testid="ApprovalCardView.holdCountdown"
+            />
+          )}
         </div>
         {approval.agent && (
           <p
@@ -148,7 +158,7 @@ export function ApprovalCardView({
           </p>
         )}
         {summary}
-        {isSandboxEscape && (
+        {isSandboxEscape && !heldBlock && (
           <label className="flex items-center gap-2 mt-2 cursor-default select-none">
             <input
               data-testid="ApprovalCardView.alwaysAllowOutsideSandbox"
@@ -177,9 +187,9 @@ export function ApprovalCardView({
           onClick={() => onRespond('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
-          Deny
+          {heldBlock ? 'Keep blocked' : 'Deny'}
         </button>
-        {showAllowForSession && (
+        {showAllowForSession && !heldBlock && (
           <>
             <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
             <button
@@ -197,7 +207,7 @@ export function ApprovalCardView({
           onClick={() => onRespond('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
         >
-          Allow
+          {heldBlock ? 'Approve anyway' : 'Allow'}
         </button>
       </div>
     </div>
@@ -267,7 +277,14 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
     // If allowing with "always allow" checked, add command to excluded list
-    if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
+    // A held auto-mode block overrides ONE call (ADR-091 §3) — never a standing rule.
+    if (
+      decision === 'allow' &&
+      alwaysAllow &&
+      isSandboxEscape &&
+      !approval.autoModeBlock &&
+      approval.input?.command
+    ) {
       const cmd = String(approval.input.command)
       const currentExcluded = sandboxSettings?.excludedCommands ?? []
       if (!currentExcluded.includes(cmd)) {

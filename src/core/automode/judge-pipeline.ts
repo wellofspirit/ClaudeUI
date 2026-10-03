@@ -19,7 +19,9 @@
  *   BEFORE calling {@link runJudgePipeline}.
  * - Engine-specific fast paths that precede the shared ones (opencode's
  *   agent-control edit clear, ADR-084 §3).
- * - Turning the outcome into the engine's reply.
+ * - Turning the outcome into the engine's reply, including holding a block on
+ *   the engine's human path (`hold`, ADR-091 §3; the timer is
+ *   `block-hold.ts`'s).
  *
  * Stage order: fast path → read-only gate (on `inputFor('read-only')` when
  * given, else `action.input`) + settled check → allow-rule gate (+ settled
@@ -102,7 +104,11 @@ export interface JudgePipelineHooks {
   ) => Promise<Record<string, unknown> | undefined>
   /** How prior calls ended, or `undefined` when none are recorded. */
   outcomes: () => Record<string, ToolOutcome> | undefined
-  recordOutcome: (toolUseId: string, outcome: ToolOutcome) => void
+  /**
+   * The denial caps. The pipeline counts a block (`recordBlock`) and an
+   * allow (`recordAllow`); a held block's caller calls `recordAllow()` when the
+   * user approves it anyway (ADR-091 §3).
+   */
   denials: AutoModeDenialTracker
   twoStageMode: () => 'both' | 'fast' | 'thinking'
   sendReview: (toolUseId: string, review: JudgePipelineReview) => void
@@ -134,8 +140,16 @@ export type JudgePipelineStage = 'read-only' | 'allow-rule' | 'judge' | 'error'
 
 export type JudgePipelineOutcome =
   | { kind: 'allow' }
-  /** `reason` = `formatAutoModeDenyReason(result)`, the model-visible deny text. */
-  | { kind: 'deny'; reason: string }
+  /**
+   * The judge blocked and no denial cap tripped (ADR-091 §3): the caller holds
+   * the call on its human path as an auto-mode block — Keep blocked / Approve
+   * anyway, resolved as Keep blocked after `AUTO_MODE_BLOCK_HOLD_MS`. `reason` =
+   * `formatAutoModeDenyReason(result)`, the model-visible deny text a kept
+   * block answers with. The review is already sent and the block counted
+   * (`recordBlock`); the CALLER records `automode-blocked` when the hold
+   * resolves as kept, and `recordAllow()` when it is approved.
+   */
+  | { kind: 'hold'; reason: string }
   /** `reason` = the denial cap's sentence → `PendingApproval.decisionReason`. */
   | { kind: 'human'; reason?: string }
   | { kind: 'settled' }
@@ -282,11 +296,13 @@ export async function runJudgePipeline(
       // decisionReason.
       const capped = hooks.denials.recordBlock(result.category)
       if (capped) return { kind: 'human', reason: capped }
-      // Annotate the blocked call so a re-attempt is judged as a retry of
-      // something THIS monitor denied (post-block consent inheritance).
-      hooks.recordOutcome(toolUseId, 'automode-blocked')
+      // ADR-091 §3 — the block holds for the user rather than going straight
+      // back to the engine. The review goes out now, so the verdict shows on
+      // the card the hold raises. No `automode-blocked` yet: the caller
+      // annotates the call (post-block consent inheritance) only once the
+      // hold resolves as kept — an approved call ran, and was never refused.
       hooks.sendReview(toolUseId, result)
-      return { kind: 'deny', reason: formatAutoModeDenyReason(result) }
+      return { kind: 'hold', reason: formatAutoModeDenyReason(result) }
     }
 
     hooks.denials.recordAllow()

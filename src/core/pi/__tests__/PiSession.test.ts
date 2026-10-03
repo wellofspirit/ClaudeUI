@@ -408,6 +408,7 @@ import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
+import { AUTO_MODE_BLOCK_HOLD_MS } from '../../automode/block-hold'
 import {
   FAKE_JUDGE_ACCOUNT,
   FAKE_JUDGE_SAMPLE,
@@ -585,6 +586,57 @@ async function gate(
     reason?: string
     updatedInput?: Record<string, unknown>
   }>
+}
+
+/**
+ * ADR-091 §3 — settle `pending` (a gate whose judge may block), answering every
+ * held-block card raised meanwhile with Keep blocked, as the user (or the
+ * hold's expiry) would. Returns the gate's decision.
+ */
+async function keepHolds<T>(
+  session: { resolveApproval: (requestId: string, decision: 'deny') => void },
+  win: MockWindow,
+  pending: Promise<T>
+): Promise<T> {
+  let settled = false
+  const done = pending.finally(() => {
+    settled = true
+  })
+  const answered = new Set<string>()
+  while (!settled) {
+    for (const card of sentPayloads(win, 'session:approval-request') as Array<{
+      requestId: string
+      autoModeBlock?: unknown
+    }>) {
+      if (!card.autoModeBlock || answered.has(card.requestId)) continue
+      answered.add(card.requestId)
+      session.resolveApproval(card.requestId, 'deny')
+    }
+    await new Promise((r) => setImmediate(r))
+  }
+  return done
+}
+
+/** {@link gate} with every held block kept (see {@link keepHolds}). */
+function gateKept(
+  session: { resolveApproval: (requestId: string, decision: 'deny') => void },
+  win: MockWindow,
+  toolCallId: string,
+  toolName: string,
+  input: Record<string, unknown>
+): ReturnType<typeof gate> {
+  return keepHolds(session, win, gate(toolCallId, toolName, input))
+}
+
+/** Approval cards that are NOT held judge blocks — the plain human asks. */
+function humanCards(win: MockWindow): Array<{ requestId: string; decisionReason?: string }> {
+  return (
+    sentPayloads(win, 'session:approval-request') as Array<{
+      requestId: string
+      decisionReason?: string
+      autoModeBlock?: unknown
+    }>
+  ).filter((card) => !card.autoModeBlock)
 }
 
 /** Call the LAST captured hosted-tool handler (PiBridgeHost's SECOND constructor arg, M4a+b) directly — bypasses real HTTP, mirroring what the bridge extension's execute() would POST to /hosted-tool. */
@@ -2756,13 +2808,15 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-block', win)
 
-    const decision = await gate('call_a2', 'bash', { command: 'git push origin main' })
+    const decision = await gateKept(session, win, 'call_a2', 'bash', {
+      command: 'git push origin main'
+    })
 
     expect(decision).toEqual({
       behavior: 'deny',
       reason: 'Auto mode blocked: ships uncommitted secrets'
     })
-    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(humanCards(win)).toEqual([])
     session.dispose()
   })
 
@@ -2808,7 +2862,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       ]
       const win = new MockWindow()
       const session = await autoSession('rid-review-block', win)
-      await gate('call_r2', 'bash', { command: 'git push origin main' })
+      await gateKept(session, win, 'call_r2', 'bash', { command: 'git push origin main' })
       expect(reviews(win)).toHaveLength(1)
       expect(reviews(win)[0].review).toMatchObject({
         reviewer: 'auto-mode',
@@ -2836,7 +2890,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-outcome', win)
 
-    await gate('call_a3', 'bash', { command: 'rm -rf build' })
+    await gateKept(session, win, 'call_a3', 'bash', { command: 'rm -rf build' })
     // The blocked call is now part of the visible transcript — a retry must be
     // judged as a retry of something THIS monitor denied, not a fresh proposal.
     pushToolCall(session, 'call_a3', 'bash', { command: 'rm -rf build' })
@@ -2976,14 +3030,16 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     // `Bash(git:*)` is broader than the deny, so it is not usable: every git
     // command the deny does not hit is judged, as before ADR-085.
-    expect(await gate('call_al1', 'bash', { command: 'git rebase main' })).toEqual({
+    expect(
+      await gateKept(session, win, 'call_al1', 'bash', { command: 'git rebase main' })
+    ).toEqual({
       behavior: 'deny',
       reason: 'Auto mode blocked: rewrites pushed history'
     })
     expect(judgeCalls).toHaveLength(1)
     // Not a downgrade to a human interruption either — the allow rule still
     // means "don't ask me", it just does not mean "skip the monitor" here.
-    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(humanCards(win)).toEqual([])
     session.dispose()
   })
 
@@ -3279,10 +3335,14 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-caps', win)
 
-    expect((await gate('call_b1', 'bash', { command: 'a' })).behavior).toBe('deny')
-    expect((await gate('call_b2', 'bash', { command: 'b' })).behavior).toBe('deny')
+    expect((await gateKept(session, win, 'call_b1', 'bash', { command: 'a' })).behavior).toBe(
+      'deny'
+    )
+    expect((await gateKept(session, win, 'call_b2', 'bash', { command: 'b' })).behavior).toBe(
+      'deny'
+    )
     void gate('call_b3', 'bash', { command: 'c' })
-    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
     session.dispose()
   })
 
@@ -3298,13 +3358,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-caps-category', win)
 
-    expect((await gate('call_b4', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
+    expect(
+      (await gateKept(session, win, 'call_b4', 'bash', { command: 'git push --force' })).behavior
+    ).toBe('deny')
     void gate('call_b5', 'bash', { command: 'git push -f origin main' })
 
-    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
-      { decisionReason?: string }
-    ]
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    const [approval] = humanCards(win)
     expect(approval.decisionReason).toContain('Git Destructive')
     expect(approval.decisionReason).toContain('2 times')
     session.dispose()
@@ -3319,9 +3379,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-caps-category-neg', win)
 
-    expect((await gate('call_b6', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
-    expect((await gate('call_b7', 'bash', { command: 'ngrok http 3000' })).behavior).toBe('deny')
-    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(
+      (await gateKept(session, win, 'call_b6', 'bash', { command: 'git push --force' })).behavior
+    ).toBe('deny')
+    expect(
+      (await gateKept(session, win, 'call_b7', 'bash', { command: 'ngrok http 3000' })).behavior
+    ).toBe('deny')
+    expect(humanCards(win)).toEqual([])
     session.dispose()
   })
 
@@ -3335,7 +3399,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     // Without the rule name the agent cannot tell WHICH bar it hit, and so
     // cannot ask the user for the consent that would clear it.
-    expect(await gate('call_b8', 'bash', { command: 'git push --force' })).toEqual({
+    expect(
+      await gateKept(session, win, 'call_b8', 'bash', { command: 'git push --force' })
+    ).toEqual({
       behavior: 'deny',
       reason: 'Auto mode blocked: [Git Destructive] would drop pushed commits'
     })
@@ -3353,14 +3419,142 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-caps-reset', win)
 
-    expect((await gate('call_c1', 'bash', { command: 'a' })).behavior).toBe('deny')
-    expect((await gate('call_c2', 'bash', { command: 'b' })).behavior).toBe('allow')
-    expect((await gate('call_c3', 'bash', { command: 'c' })).behavior).toBe('deny')
+    const kept = (id: string, command: string) =>
+      gateKept(session, win, id, 'bash', { command }).then((d) => d.behavior)
+    expect(await kept('call_c1', 'a')).toBe('deny')
+    expect(await kept('call_c2', 'b')).toBe('allow')
+    expect(await kept('call_c3', 'c')).toBe('deny')
     // Without the reset this 4th call would be the 3rd consecutive block and
     // would escalate to the human; with it, it is only the 2nd.
-    expect((await gate('call_c4', 'bash', { command: 'd' })).behavior).toBe('deny')
-    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(await kept('call_c4', 'd')).toBe('deny')
+    expect(humanCards(win)).toEqual([])
     session.dispose()
+  })
+
+  describe('ADR-091 §3 — a judge block holds the call for the user', () => {
+    type Card = {
+      requestId: string
+      toolUseId?: string
+      autoModeBlock?: { expiresAt: number }
+      suggestions?: unknown[]
+    }
+    const heldCards = (win: MockWindow): Card[] =>
+      (sentPayloads(win, 'session:approval-request') as Card[]).filter((c) => c.autoModeBlock)
+    const dismissals = (win: MockWindow) => sentPayloads(win, 'session:approval-dismiss')
+    async function held(win: MockWindow, toolUseId: string): Promise<Card> {
+      await vi.waitFor(() =>
+        expect(heldCards(win).some((c) => c.toolUseId === toolUseId)).toBe(true)
+      )
+      return heldCards(win).find((c) => c.toolUseId === toolUseId)!
+    }
+    afterEach(() => vi.useRealTimers())
+
+    it('raises a held card (no standing-rule suggestions); Approve anyway runs the exact call', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>yes</block><reason>pushes to main</reason>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-hold-approve', win)
+
+      const pending = gate('call_h1', 'bash', { command: 'git push origin main' })
+      const card = await held(win, 'call_h1')
+      expect(card.autoModeBlock!.expiresAt).toBeGreaterThan(Date.now() + 100_000)
+      expect(card.suggestions).toBeUndefined()
+      session.resolveApproval(card.requestId, 'allow')
+      expect(await pending).toEqual({ behavior: 'allow' })
+      session.dispose()
+    })
+
+    it('Keep blocked answers with the judge text and records `automode-blocked`, not `rejected-by-user`', async () => {
+      enableAutoMode()
+      judgeScript.replies = [
+        '<block>yes</block><reason>pushes to main</reason>',
+        '<block>no</block>'
+      ]
+      const win = new MockWindow()
+      const session = await autoSession('rid-hold-keep', win)
+
+      const pending = gate('call_h2', 'bash', { command: 'git push origin main' })
+      session.resolveApproval((await held(win, 'call_h2')).requestId, 'deny')
+      expect(await pending).toEqual({
+        behavior: 'deny',
+        reason: 'Auto mode blocked: pushes to main'
+      })
+      pushToolCall(session, 'call_h2', 'bash', { command: 'git push origin main' })
+      await gate('call_h3', 'bash', { command: 'npm test' })
+      const prompt = judgeCalls.at(-1)!.user
+      expect(prompt).toContain('{"outcome":"automode-blocked"}')
+      expect(prompt).not.toContain('rejected-by-user')
+      session.dispose()
+    })
+
+    it('Approve anyway resets the denial streak, records no outcome, and an allowForSession adds no session allow', async () => {
+      enableAutoMode()
+      judgeScript.replies = [
+        '<block>yes</block>',
+        '<block>yes</block>',
+        '<block>yes</block>',
+        '<block>no</block>'
+      ]
+      const win = new MockWindow()
+      const session = await autoSession('rid-hold-streak', win)
+
+      expect((await gateKept(session, win, 'call_s1', 'bash', { command: 'a' })).behavior).toBe(
+        'deny'
+      )
+      const second = gate('call_s2', 'bash', { command: 'b' })
+      session.resolveApproval((await held(win, 'call_s2')).requestId, 'allowForSession')
+      expect(await second).toEqual({ behavior: 'allow' })
+      // Without the reset this 3rd block would be the 3rd in a row → an
+      // un-held human card; with it, it holds again.
+      const third = gate('call_s3', 'bash', { command: 'c' })
+      session.resolveApproval((await held(win, 'call_s3')).requestId, 'deny')
+      await third
+      expect(humanCards(win)).toEqual([])
+      // The approved call carries no outcome, and `b` was not session-allowed:
+      // it is judged again.
+      pushToolCall(session, 'call_s2', 'bash', { command: 'b' })
+      await gate('call_s4', 'bash', { command: 'b' })
+      expect(judgeCalls).toHaveLength(4)
+      expect(judgeCalls.at(-1)!.user).toContain('bash {"command":"b"}\n</transcript>')
+      session.dispose()
+    })
+
+    it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>yes</block><reason>pushes to main</reason>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-hold-timeout', win)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+      const pending = gate('call_h4', 'bash', { command: 'git push origin main' })
+      // (`held` polls with vi.waitFor, which advances fake time a little.)
+      const card = await held(win, 'call_h4')
+      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS - 1_000)
+      expect(dismissals(win)).toEqual([])
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(await pending).toEqual({
+        behavior: 'deny',
+        reason: 'Auto mode blocked: pushes to main'
+      })
+      expect(dismissals(win)).toEqual([{ requestId: card.requestId }])
+      session.dispose()
+    })
+
+    it('an interrupt force-denies a held call and disarms its expiry', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>yes</block><reason>pushes to main</reason>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-hold-interrupt', win)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+      const pending = gate('call_h5', 'bash', { command: 'git push origin main' })
+      await held(win, 'call_h5')
+      await session.interrupt()
+      expect(await pending).toEqual({ behavior: 'deny', reason: 'Interrupted' })
+      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+      expect(dismissals(win)).toEqual([])
+      session.dispose()
+    })
   })
 
   it('G10 — switching out of auto while the judge is thinking discards the verdict and asks the human', async () => {
@@ -3425,11 +3619,11 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-agent-control-block', win)
 
-    expect(await gate('call_ac3', 'edit', { path: '/cwd/.git/config' })).toEqual({
+    expect(await gateKept(session, win, 'call_ac3', 'edit', { path: '/cwd/.git/config' })).toEqual({
       behavior: 'deny',
       reason: 'Auto mode blocked: arms core.fsmonitor'
     })
-    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(humanCards(win)).toEqual([])
     session.dispose()
   })
 
@@ -3689,7 +3883,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       const win = new MockWindow()
       const session = await autoSession('rid-ro-armed', win)
 
-      expect((await gate('call_ro4', 'bash', { command: 'git diff' })).behavior).toBe('deny')
+      expect(
+        (await gateKept(session, win, 'call_ro4', 'bash', { command: 'git diff' })).behavior
+      ).toBe('deny')
       expect(judgeCalls[0].user).toContain(
         '{"meta":{"gitConfigArmed":["core.fsmonitor"]}}\nProposed next action:'
       )
@@ -3737,16 +3933,18 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       const win = new MockWindow()
       const session = await autoSession('rid-ro-cap', win)
 
-      expect((await gate('call_ro7', 'bash', { command: 'a' })).behavior).toBe('deny')
-      expect((await gate('call_ro8', 'bash', { command: 'b' })).behavior).toBe('deny')
+      expect((await gateKept(session, win, 'call_ro7', 'bash', { command: 'a' })).behavior).toBe(
+        'deny'
+      )
+      expect((await gateKept(session, win, 'call_ro8', 'bash', { command: 'b' })).behavior).toBe(
+        'deny'
+      )
       expect(await gate('call_ro9', 'bash', { command: 'ls' })).toEqual({ behavior: 'allow' })
       expect(judgeCalls).toHaveLength(2)
       void gate('call_ro10', 'bash', { command: 'c' })
 
-      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
-        { decisionReason?: string }
-      ]
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+      const [approval] = humanCards(win)
       expect(approval.decisionReason).toContain('3 actions in a row')
       session.dispose()
     })
@@ -3807,7 +4005,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-redirect-rc', win)
 
-    await gate('call_r3', 'bash', { command: 'echo malicious >> ~/.bashrc' })
+    await gateKept(session, win, 'call_r3', 'bash', { command: 'echo malicious >> ~/.bashrc' })
 
     const prompt = judgeCalls[0].user
     expect(prompt).toContain('"protectedHits":[".bashrc"]')
@@ -5745,11 +5943,15 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     ]
     for (const id of ['cb-1', 'cb-2']) {
       expect(
-        await child.opts.gateHandler({
-          toolCallId: id,
-          toolName: 'bash',
-          input: { command: 'git push origin main' }
-        })
+        await keepHolds(
+          session,
+          win,
+          child.opts.gateHandler({
+            toolCallId: id,
+            toolName: 'bash',
+            input: { command: 'git push origin main' }
+          })
+        )
       ).toMatchObject({ behavior: 'deny' })
     }
     // A human reject of a child card.
@@ -5805,13 +6007,13 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       })
     }
     judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
-    const parentDecision = await gate('p-block', 'bash', { command: 'git push origin main' })
+    const parentDecision = await gateKept(session, win, 'p-block', 'bash', {
+      command: 'git push origin main'
+    })
     expect(parentDecision).toMatchObject({ behavior: 'deny' })
     expect(judgeCalls.at(-1)!.user).not.toContain('"outcome"')
     expect(
-      (sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>).some(
-        (a) => a.toolUseId === 'p-block'
-      )
+      (humanCards(win) as Array<{ toolUseId?: string }>).some((a) => a.toolUseId === 'p-block')
     ).toBe(false)
 
     child.push({ type: 'agent_settled' })
@@ -5840,13 +6042,85 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(judgeCalls).toHaveLength(1)
     judgeScript.replies = ['<block>yes</block><reason>no nesting</reason>']
     expect(
-      await child.opts.gateHandler({
-        toolCallId: 'f8-nested',
-        toolName: 'agent',
-        input: { description: 'd', prompt: 'deeper' }
-      })
+      await keepHolds(
+        session,
+        win,
+        child.opts.gateHandler({
+          toolCallId: 'f8-nested',
+          toolName: 'agent',
+          input: { description: 'd', prompt: 'deeper' }
+        })
+      )
     ).toEqual({ behavior: 'deny', reason: 'Auto mode blocked: no nesting' })
     expect(judgeCalls).toHaveLength(2)
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it("ADR-091 §3: a child's block holds on its agent-labelled card; Approve anyway runs it", async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-hold', win, 'auto')
+    const { result, child } = await launch(kids, 'call-hold')
+    judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
+    const decision = child.opts.gateHandler({
+      toolCallId: 'ch-1',
+      toolName: 'bash',
+      input: { command: 'git push origin main' }
+    })
+    const card = (await cardFor(win, 'ch-1')) as {
+      requestId: string
+      autoModeBlock?: unknown
+      agent?: { subagentType: string }
+    }
+    expect(card.autoModeBlock).toBeDefined()
+    expect(card.agent).toMatchObject({ subagentType: expect.any(String) })
+    session.resolveApproval(card.requestId, 'allow')
+    expect(await decision).toEqual({ behavior: 'allow' })
+    child.push({ type: 'agent_settled' })
+    await result
+    session.dispose()
+  })
+
+  it("ADR-091 §4: the child's judge reads a later user turn — delivered or still queued — AFTER the block it answers", async () => {
+    enableAutoMode()
+    // A controlled clock, so no two sources can tie by accident.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_000_000)
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-sub-order', win, 'auto')
+    const { result, child } = await launch(kids, 'call-order')
+
+    // The child's blocked call lands on its trajectory…
+    vi.setSystemTime(2_000_000)
+    child.push({ type: 'message_start', message: { role: 'assistant', content: [] } } as PiEvent)
+    child.push(childAssistantToolCall('ch-push', 'bash', { command: 'git push origin main' }))
+    // …then the user answers it: one turn still queued behind the parent's
+    // busy turn, one in the transcript (as a steer would land).
+    vi.setSystemTime(3_000_000)
+    session.enqueuePrompt('QUEUED-CONSENT: really, go ahead')
+    session.getMessages().push({
+      id: 'later-user',
+      role: 'user',
+      content: [{ type: 'text', text: 'DELIVERED-CONSENT: yes push it' }],
+      timestamp: 4_000_000
+    })
+    vi.useRealTimers()
+
+    judgeScript.replies = ['<block>no</block>']
+    await child.opts.gateHandler({
+      toolCallId: 'ch-retry',
+      toolName: 'bash',
+      input: { command: 'git push --set-upstream origin main' }
+    })
+    const user = judgeCalls.at(-1)!.user
+    const blockedAt = user.indexOf('git push origin main')
+    expect(blockedAt).toBeGreaterThan(user.indexOf('PARENT-INTENT'))
+    expect(user.indexOf('User: QUEUED-CONSENT: really, go ahead')).toBeGreaterThan(blockedAt)
+    expect(user.indexOf('User: DELIVERED-CONSENT: yes push it')).toBeGreaterThan(blockedAt)
     child.push({ type: 'agent_settled' })
     await result
     session.dispose()

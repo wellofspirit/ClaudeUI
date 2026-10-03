@@ -561,6 +561,55 @@ describe('FloatingApproval rendered component', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  // ADR-091 §3 — a held judge block floats (a subagent's or dispatch target's
+  // call) with the same one-call override as the inline card: Keep blocked /
+  // Approve anyway, a countdown, and no standing rule.
+  it('a held auto-mode block floats as Keep blocked / Approve anyway with a countdown, no suggestions', async () => {
+    const approval = setup({
+      toolName: 'bash',
+      input: { command: 'git push origin main' },
+      autoModeBlock: { expiresAt: Date.now() + 90_000 },
+      suggestions: [
+        {
+          type: 'addRules',
+          destination: 'projectSettings',
+          rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+        }
+      ]
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.deny')).toHaveTextContent('Keep blocked')
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Approve anyway')
+    expect(screen.getByTestId('ApprovalCardView.holdCountdown')).toHaveTextContent(
+      /blocks in 1:\d\d/
+    )
+    expect(screen.queryByText(/Permission rules/i)).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ApprovalCardView.allow'))
+    })
+    expect(lastApprovalResponse).toMatchObject({
+      requestId: approval.requestId,
+      decision: 'allow',
+      suggestions: undefined
+    })
+  })
+
+  it('a held sandbox-escape block offers no "always allow outside sandbox" standing rule', () => {
+    setup({
+      toolName: 'Bash',
+      input: { command: 'curl example.com', dangerouslyDisableSandbox: true },
+      autoModeBlock: { expiresAt: Date.now() + 90_000 }
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Approve anyway')
+    expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
+  })
+
   it('renders nothing when there are no pending approvals', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })

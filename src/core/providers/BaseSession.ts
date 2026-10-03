@@ -158,6 +158,22 @@ export abstract class BaseSession implements ISession {
     return this.queue.pending()
   }
 
+  /**
+   * The still-queued prompts as ordinary user turns, stamped with the time
+   * they were queued — what a delegated judge (a pi child, a pi/opencode
+   * dispatch target) reads beside this session's transcript (ADR-091 §4). A
+   * prompt typed while this session waits on a foreground child is the
+   * user's own word, merely not delivered to this session's model yet.
+   */
+  queuedUserTurns(): ChatMessage[] {
+    return this.queue.pending().map((item) => ({
+      id: `queued:${item.itemId}`,
+      role: 'user',
+      content: [{ type: 'text', text: item.text }],
+      timestamp: this.queue.queuedAt(item) ?? Date.now()
+    }))
+  }
+
   enqueuePrompt(
     text: string,
     attachments?: AttachmentUpload[],

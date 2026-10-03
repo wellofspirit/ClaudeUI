@@ -168,4 +168,23 @@ describe('SessionQueue', () => {
     queue.emit()
     expect(queue.isForwarded(item)).toBe(false)
   })
+
+  it('stamps each item with its queue time off the wire, and forgets it once terminal (ADR-091 §4)', () => {
+    let now = 1_000
+    const queue = new SessionQueue(
+      () => {},
+      () => now
+    )
+    const first = queue.add('first')
+    now = 2_000
+    const second = queue.add('second')
+    expect(queue.queuedAt(first)).toBe(1_000)
+    expect(queue.queuedAt(second)).toBe(2_000)
+    expect(first).not.toHaveProperty('queuedAt')
+
+    queue.consumeByText('first')
+    queue.emit()
+    expect(queue.queuedAt(first)).toBeUndefined()
+    expect(queue.queuedAt(second)).toBe(2_000)
+  })
 })

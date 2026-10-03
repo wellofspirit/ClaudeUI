@@ -1,6 +1,6 @@
 # ADR-091: Judge blocks hold for the user; session-booted targets are local
 
-**Status:** Accepted (2026-10-03). Parts 1–2 built (`1aca99e8`, `1a6ee251`); parts 3–4 in progress.
+**Status:** Accepted (2026-10-03). Built (all four parts) on branch `pre-release`.
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (rule corpus),
 [ADR-088](adr-088_dispatch-autonomy-inheritance.md) and [ADR-089](adr-089_pi-subagents-host-run.md)
 (what a delegated call's judge reads). **Relates to:** [ADR-067](adr-067_codex-shared-permission-model.md)
@@ -34,7 +34,7 @@ The causes fall into four groups:
 
 ## Decision
 
-### 1. Redirect measurement (built, `1aca99e8`)
+### 1. Redirect measurement
 
 - `tempDirRoots()` adds `/tmp` on POSIX and `/private/tmp` on darwin. Scope matching compares
   spellings and does not resolve symlinks, so both are needed.
@@ -48,7 +48,7 @@ The causes fall into four groups:
   complete (`git submodule foreach '…'`, `python -c '…'`). Double quotes are never skipped, since
   they host live `$(…)`. Every imprecision falls back to today's over-report.
 
-### 2. Rule corpus (built, `1a6ee251`)
+### 2. Rule corpus
 
 - **Remote Host Writes / Local Operations.** A VM or container this session itself created or
   booted is local scratch infrastructure, like a dev container. One that pre-dates the session
