@@ -120,7 +120,12 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      # Not on Windows: extracting the ~700 MB cache (hundreds of thousands of
+      # small files) took 161-223 s, and `bun install` from a warm cache was no
+      # faster than a fresh download (~170 s either way, measured 2026-10-03 on
+      # windows-2022; Defender real-time scanning made no difference).
       - name: Cache bun install
+        if: runner.os != 'Windows'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
