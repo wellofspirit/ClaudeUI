@@ -26,7 +26,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
 import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
-import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
+import type { EngineId, PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
 import { ApprovalCardView, FloatingApproval } from '../FloatingApproval'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -608,6 +608,54 @@ describe('FloatingApproval rendered component', () => {
 
     expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Approve anyway')
     expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
+  })
+
+  describe('summary — normalized by the engine that made the call', () => {
+    const onEngine = (engineId: EngineId): void => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            status: { ...state.sessions[ROUTE].status, engineId }
+          }
+        }
+      }))
+    }
+
+    it('renders a pi `bash` call as a command, not raw JSON', () => {
+      setup({ toolName: 'bash', input: { command: 'git push origin main' } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(
+        /^\$ git push origin main$/
+      )
+    })
+
+    it('renders a pi `edit` call by its `path`', () => {
+      setup({ toolName: 'edit', input: { path: 'src/auth.py', oldText: 'a', newText: 'b' } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(/^src\/auth\.py$/)
+    })
+
+    it("reads a dispatch target's card with the TARGET's map (pi target under a Claude session)", () => {
+      setup({
+        toolName: 'bash',
+        input: { command: 'ls -la' },
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:pi' }
+      })
+      onEngine('claude')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(/^\$ ls -la$/)
+    })
+
+    it('keeps the raw input for a tool the map does not know', () => {
+      setup({ toolName: 'mystery_tool', input: { a: 1 } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('"a": 1')
+    })
   })
 
   it('renders nothing when there are no pending approvals', () => {
