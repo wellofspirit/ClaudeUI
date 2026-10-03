@@ -114,6 +114,35 @@ describe('the ADR-083 real-case gaps', () => {
   })
 })
 
+describe('ADR-091 — session-provisioned targets and delegated credentials', () => {
+  const soft = (slug: string): string => SOFT_RULES.find((x) => x.slug === slug)?.text ?? ''
+
+  it('the HARD rule soft-lands a user-typed credential delegated to a harness engine', () => {
+    const hard = HARD_RULES[0].text
+    expect(hard).toContain('a credential the USER typed into this conversation')
+    expect(hard).toContain('routes to the SOFT rule "Credential Leakage"')
+    // The carve-out is provenance-bound, not consent-bound: consent still never clears it.
+    expect(hard).toContain('Credentials the agent obtained itself')
+    expect(hard).toContain('NOTHING clears a hard block')
+    expect(deriveCategorySet().has('credential_leakage')).toBe(true)
+  })
+
+  it('a VM or container this session booted is local, not a remote host or an exposure', () => {
+    expect(soft('remote_host_writes')).toContain('this session itself created or booted')
+    expect(soft('remote_host_writes')).toContain('pre-dates the session stays in scope')
+    expect(soft('network_exposure')).toContain('host-only virtual network')
+    expect(soft('network_exposure')).toContain('--net-softnet-allow')
+    expect(ALLOW_RULES.find((a) => a.slug === 'local_operations')?.text).toContain(
+      'VMs or containers this session itself created or booted'
+    )
+  })
+
+  it("a user-named tool's canonical channel meets Untrusted Code Integration's bar", () => {
+    expect(soft('untrusted_code_integration')).toContain("that project's own canonical channel")
+    expect(soft('untrusted_code_integration')).toContain('look-alike name')
+  })
+})
+
 describe('ADR-084 — repo-armed git config', () => {
   it('Unauthorized Persistence names the git config keys that make git run a program', () => {
     const r = SOFT_RULES.find((x) => x.slug === 'unauthorized_persistence')
