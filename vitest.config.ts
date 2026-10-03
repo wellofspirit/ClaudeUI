@@ -19,6 +19,46 @@ const sharedAlias = {
   'better-sqlite3': resolve(__dirname, 'src/test/stubs/better-sqlite3-stub.ts')
 }
 
+/**
+ * Unit tests of non-renderer code run in plain Node: building a jsdom window
+ * per file was the single largest cost of the suite (~85 s of CPU over these
+ * ~430 files) and none of them touches the DOM. Renderer, web and anything
+ * else stay on jsdom in `unit`.
+ */
+const NODE_UNIT_DIRS = [
+  'src/main/**',
+  'src/core/**',
+  'src/shared/**',
+  'src/server/**',
+  'src/preload/**'
+]
+
+/** What `unit` and `unit-node` share; they differ only in environment and folders. */
+const unitTest = {
+  // Read-only, for the few unit tests that run a real installed binary
+  // (rules-sync's execpolicy parser) and skip without it. Deliberately
+  // not CLAUDEUI_HARNESS_STORE: unit tests that install or collect keep
+  // writing to the throwaway home.
+  env: { CLAUDEUI_TEST_HARNESS_STORE: realHarnessStore },
+  include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'src/**/__tests__/**/*.unit.test.{ts,tsx}'],
+  // Git-backed filesystem tests are slow (real simple-git subprocess
+  // calls on Windows cost ~150-200ms each). They live in their own
+  // `git` project so the default `bun run test` can stay snappy; they
+  // still run in CI and on-demand via `bun run test:git` /
+  // `bun run test:git:changed`.
+  exclude: [
+    '**/node_modules/**',
+    '**/dist/**',
+    '**/.{idea,git,cache,output,temp}/**',
+    // `*.test.*` above also matches `*.component.test.*`; those belong
+    // to the `component` project alone, or every one runs twice.
+    '**/*.component.test.{ts,tsx}',
+    'src/main/services/__tests__/git-service*.test.ts',
+    'src/main/services/__tests__/worktree.test.ts'
+  ],
+  testTimeout: 5000
+}
+
 export default defineConfig({
   resolve: { alias: sharedAlias },
   test: {
@@ -35,31 +75,21 @@ export default defineConfig({
           environment: 'jsdom',
           globals: true,
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
-          // Read-only, for the few unit tests that run a real installed binary
-          // (rules-sync's execpolicy parser) and skip without it. Deliberately
-          // not CLAUDEUI_HARNESS_STORE: unit tests that install or collect keep
-          // writing to the throwaway home.
-          env: { CLAUDEUI_TEST_HARNESS_STORE: realHarnessStore },
-          include: [
-            'src/**/__tests__/**/*.test.{ts,tsx}',
-            'src/**/__tests__/**/*.unit.test.{ts,tsx}'
-          ],
-          // Git-backed filesystem tests are slow (real simple-git subprocess
-          // calls on Windows cost ~150-200ms each). They live in their own
-          // `git` project so the default `bun run test` can stay snappy; they
-          // still run in CI and on-demand via `bun run test:git` /
-          // `bun run test:git:changed`.
-          exclude: [
-            '**/node_modules/**',
-            '**/dist/**',
-            '**/.{idea,git,cache,output,temp}/**',
-            // `*.test.*` above also matches `*.component.test.*`; those belong
-            // to the `component` project alone, or every one runs twice.
-            '**/*.component.test.{ts,tsx}',
-            'src/main/services/__tests__/git-service*.test.ts',
-            'src/main/services/__tests__/worktree.test.ts'
-          ],
-          testTimeout: 5000
+          ...unitTest,
+          exclude: [...unitTest.exclude, ...NODE_UNIT_DIRS]
+        }
+      },
+      {
+        resolve: { alias: sharedAlias },
+        test: {
+          name: 'unit-node',
+          environment: 'node',
+          globals: true,
+          setupFiles: ['./src/test/setup/node.setup.ts'],
+          ...unitTest,
+          include: NODE_UNIT_DIRS.flatMap((dir) =>
+            unitTest.include.map((glob) => glob.replace('src/**', dir))
+          )
         }
       },
       {

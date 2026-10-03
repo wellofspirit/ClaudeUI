@@ -47,6 +47,10 @@ Tests are organized into four layers that target different concerns:
 - Business logic (event handling, state transitions, IPC routing)
 - Side effects (IPC calls, navigation, timers)
 
+**Environment:** two vitest projects share Layer 1 and differ only in environment. `unit-node` runs the unit tests under `src/{main,core,shared,server,preload}` in plain Node, with `src/test/setup/node.setup.ts`; `unit` runs every other unit test under jsdom. A jsdom window per file was the largest single cost of the suite, and the non-renderer code never touches the DOM. A unit test placed in those folders gets no `window` or `document`; give it a `// @vitest-environment jsdom` docblock if it really needs one.
+
+**Never switch the pool to `threads`.** Inside a worker thread, the setup files' `process.env.USERPROFILE`/`HOME` redirect changes only the thread's copy of the environment, while `os.homedir()` reads the real process environment, so tests would reach the developer's real `~/.claude`. The default `forks` pool keeps one process per worker.
+
 **How to write:**
 
 ```typescript
@@ -266,7 +270,7 @@ describe('factory validation', () => {
 
 **Running:** `CLAUDE_INTEGRATION_TESTS=1 bun run test:integration`
 
-**Engine binaries.** Claude Code comes from `vendor/claude-cli`. opencode, pi and Codex are not vendored (ADR-082 §8): the suites run the ones in ClaudeUI's managed store, `~/.claude/ui/harnesses` (`postinstall`, or `bun run ensure-<id>`, installs the tested versions). The project's setup moves HOME to a throwaway directory, so `vitest.config.ts` names the real store through `CLAUDEUI_HARNESS_STORE` for the `integration` project only; set it yourself to run against another store. A suite whose engine is not installed skips. The `unit` project gets the same store read-only as `CLAUDEUI_TEST_HARNESS_STORE`, for the one unit test that runs a real binary (`rules-sync.test.ts` against Codex's `execpolicy` parser); every other unit test keeps the throwaway store.
+**Engine binaries.** Claude Code comes from `vendor/claude-cli`. opencode, pi and Codex are not vendored (ADR-082 §8): the suites run the ones in ClaudeUI's managed store, `~/.claude/ui/harnesses` (`postinstall`, or `bun run ensure-<id>`, installs the tested versions). The project's setup moves HOME to a throwaway directory, so `vitest.config.ts` names the real store through `CLAUDEUI_HARNESS_STORE` for the `integration` project only; set it yourself to run against another store. A suite whose engine is not installed skips. The `unit` and `unit-node` projects get the same store read-only as `CLAUDEUI_TEST_HARNESS_STORE`, for the one unit test that runs a real binary (`rules-sync.test.ts` against Codex's `execpolicy` parser); every other unit test keeps the throwaway store.
 
 **The Codex fixture provider.** The real-binary Codex suites (`src/integration/codex/*.integration.test.ts`, gated by `CODEX_INTEGRATION=1`) never talk to a paid provider: they run against one shared localhost Responses server, `src/integration/codex/fixture-provider.ts`, which also writes the isolated `CODEX_HOME` (`config.toml`, `auth.json`) the child reads. `scripts/codex-fixture-provider.mjs` is a thin CLI wrapper around the same module, so a real-app drive and the integration suites exercise the identical fixture — there is deliberately no second copy. Its `chatgpt` mode serves a drive under an INJECTED ChatGPT identity (ADR-068 §1): `chatgpt_base_url` is pointed at the fixture, the binary's own backend calls are answered 404 and recorded, any bearer is accepted, and `writeFabricatedVault()` mints the scratch vault it comes from (it refuses `os.homedir()`). On the CLI: `--chatgpt --vault-home <home> --accounts <n>`, or `scripts/codex-render-stress.mjs --accounts <n>`. The module's own guards are `src/integration/codex/__tests__/fixture-provider.test.ts`, which runs everywhere — the suites it serves do not.
 

@@ -39,7 +39,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 
 ## Testing
 
-- `bun run test` — default local run: unit + component + e2e (~15 s)
+- `bun run test` — default local run: unit + component + e2e (~100 s on a 16-core Windows box)
 - `bun run test:ci` — adds the slow git project (what CI runs)
 - `bun run test:git:changed` — after touching git-service/worktree code
 - `bun run test:integration` — gated, real engine binaries (Claude Code from `vendor/`, the others from the managed store; a suite skips when its engine is not installed)
