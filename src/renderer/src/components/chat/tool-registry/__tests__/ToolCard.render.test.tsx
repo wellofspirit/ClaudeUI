@@ -702,6 +702,99 @@ describe('ToolCard — review verdict', () => {
     expect(screen.queryByTestId('MarkdownRenderer')).not.toBeInTheDocument()
   })
 
+  describe('ADR-091 part 6 — Approve after an auto-mode block', () => {
+    const blocked = (over: Partial<ToolReviewBlock> = {}): ToolReviewBlock => ({
+      type: 'tool_review',
+      toolUseId: 'tu-1',
+      reviewId: 'rv-b',
+      reviewer: 'auto-mode',
+      decision: 'denied',
+      rule: 'Remote Host Writes',
+      rationale: 'Pushes to a shared branch.',
+      ...over
+    })
+    function renderBlocked(
+      review: ToolReviewBlock,
+      over: Partial<ToolCardProps> = {}
+    ): { onApproveBlocked: ReturnType<typeof vi.fn> } {
+      const onApproveBlocked = vi.fn()
+      render(
+        <ToolCard
+          {...baseProps({
+            kind: 'command',
+            view: { kind: 'command', command: 'git push' },
+            block: block('Bash', { command: 'git push' }),
+            review,
+            onApproveBlocked,
+            ...over
+          })}
+        />
+      )
+      return { onApproveBlocked }
+    }
+
+    it('the strip offers Approve beside the rule and reason; a click approves without toggling the card', () => {
+      const { onApproveBlocked } = renderBlocked(blocked())
+      const strip = screen.getByTestId('ToolCard.review')
+      expect(strip).toHaveTextContent('Remote Host Writes')
+      fireEvent.click(screen.getByTestId('ToolReview.approve'))
+      expect(onApproveBlocked).toHaveBeenCalledTimes(1)
+      // Still expanded: the strip is still there.
+      expect(screen.getByTestId('ToolCard.review')).toBeInTheDocument()
+      // Expanded → no second, compact button.
+      expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    })
+
+    it('collapsed, a compact Approve sits by the chip', () => {
+      const { onApproveBlocked } = renderBlocked(blocked(), { expandToolCalls: false })
+      expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('ToolReview.approveCompact'))
+      expect(onApproveBlocked).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+    })
+
+    it('once approved: "approved by you", where the nudge went, and no button', () => {
+      renderBlocked(blocked({ overriddenByUser: true, nudgedTo: 'the main agent' }))
+      expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
+        'Auto mode · blocked · approved by you'
+      )
+      expect(screen.getByTestId('ToolCard.review')).toHaveTextContent(
+        'Auto mode blocked this action — you approved it'
+      )
+      expect(screen.getByTestId('ToolReview.nudgedTo')).toHaveTextContent('Sent to the main agent')
+      expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    })
+
+    it.each([
+      ['an allowed verdict', blocked({ decision: 'approved' }), {}],
+      [
+        "Codex's own review (it keeps its native Approve anyway)",
+        blocked({ reviewer: 'codex-auto-review' }),
+        {}
+      ],
+      ['a historical session', blocked(), { isHistorical: true }],
+      [
+        'a call with a card still pending (the held block answers it)',
+        blocked(),
+        {
+          approval: {
+            requestId: 'req-1',
+            toolUseId: 'tu-1',
+            toolName: 'Bash',
+            input: { command: 'git push' },
+            autoModeBlock: { expiresAt: Date.now() + 60_000 }
+          }
+        }
+      ],
+      ['no handler wired', blocked(), { onApproveBlocked: undefined }]
+    ] as const)('offers no Approve for %s', (_name, review, over) => {
+      renderBlocked(review, over as Partial<ToolCardProps>)
+      expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    })
+  })
+
   it('renders neither chip nor strip when no verdict was reached', () => {
     render(
       <ToolCard

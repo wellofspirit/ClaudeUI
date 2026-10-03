@@ -588,6 +588,58 @@ describe('session.ipc', () => {
   })
 
   // -------------------------------------------------------------------------
+  // ADR-091 part 6 — approve an auto-mode block after the fact
+  // -------------------------------------------------------------------------
+
+  describe('session:approve-blocked', () => {
+    afterEach(() => {
+      delete sessionStub.approveBlocked
+      sessionStub.willQueue = false
+    })
+
+    it('is a chat command on the session it names, like session:approval-response', () => {
+      expect(commandRegistry.declaration('session:approve-blocked')).toMatchObject({
+        capability: 'chat',
+        kind: 'command'
+      })
+      expect(commandRegistry.declaration('session:approve-blocked')).toMatchObject(
+        commandRegistry.declaration('session:approval-response')!
+      )
+    })
+
+    it("an idle session: the nudge is sent through the composer's path (a user message)", async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'I approve the bash call …' }))
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      expect(sessionStub.approveBlocked).toHaveBeenCalledWith('call-9')
+      expect(sessionStub.run).toHaveBeenCalledWith('I approve the bash call …', undefined)
+      expect(events[0][1]).toMatchObject({ prompt: 'I approve the bash call …' })
+    })
+
+    it('a busy session: the nudge is queued', async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'nudge' }))
+      sessionStub.willQueue = true
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('nudge', undefined, undefined)
+      expect(sessionStub.run).not.toHaveBeenCalled()
+    })
+
+    it('a nudge a live subagent took, an unknown call, or an engine without the method sends nothing', async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: null }))
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      sessionStub.approveBlocked = vi.fn(() => undefined)
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      delete sessionStub.approveBlocked
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      sessionManagerSpies.get.mockReturnValueOnce(undefined as any)
+      await harness.call('session:approve-blocked', 'missing', 'call-9')
+      expect(sessionStub.run).not.toHaveBeenCalled()
+      expect(sessionStub.enqueuePrompt).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Stop routing — dispatch toolUseIds → cross-engine dispatcher (ADR-033 M3)
   // -------------------------------------------------------------------------
 

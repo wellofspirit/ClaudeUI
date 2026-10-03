@@ -127,6 +127,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         answers,
         updatedPermissions
       ),
+    approveBlocked: (routingId, toolUseId) =>
+      ipcRenderer.invoke('session:approve-blocked', routingId, toolUseId),
     minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
     maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
     closeWindow: () => ipcRenderer.invoke('window:close'),

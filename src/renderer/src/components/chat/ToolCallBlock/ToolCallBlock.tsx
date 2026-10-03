@@ -126,6 +126,15 @@ export const ToolCallBlock = memo(function ToolCallBlock({
     dismissApproval(activeSessionId, approval.requestId)
   }
 
+  // ADR-091 part 6 — the host grants, marks and nudges; the marked review it
+  // re-sends is what hides the button (ToolCard), on every client.
+  const handleApproveBlocked = (): void => {
+    if (!activeSessionId || !toolUseId) return
+    window.api.approveBlocked(activeSessionId, toolUseId).catch((err: unknown) => {
+      window.api.logError('ToolCallBlock', `Failed to approve blocked call: ${String(err)}`)
+    })
+  }
+
   const handleBackgroundTask = async (): Promise<void> => {
     if (!activeSessionId) return
     setIsBackgrounding(true)
@@ -189,6 +198,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       displayName={toolDisplayName}
       toolOutputMaxChars={toolOutputMaxChars}
       onApproval={handleApproval}
+      onApproveBlocked={handleApproveBlocked}
       onBackgroundTask={handleBackgroundTask}
       onStopTask={handleStopTask}
       onOpenTaskPanel={handleOpenTaskPanel}

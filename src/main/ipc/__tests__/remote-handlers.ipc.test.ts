@@ -489,6 +489,17 @@ describe('registerRemoteHandlers', () => {
     expect(sessionStub.resolveApproval).not.toHaveBeenCalled()
   })
 
+  it('routes an after-the-fact block approval to the session, and its nudge through the send path (ADR-091 part 6)', async () => {
+    sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'nudge' }))
+    try {
+      await dispatcher.handle(makeRequest('session:approve-blocked', 'rid-1', 'call-1'), remoteConn)
+      expect(sessionStub.approveBlocked).toHaveBeenCalledWith('call-1')
+      expect(sessionStub.run).toHaveBeenCalledWith('nudge', undefined)
+    } finally {
+      delete sessionStub.approveBlocked
+    }
+  })
+
   it('routes ordinary approval responses to the session', async () => {
     await dispatcher.handle(
       makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'),
@@ -1417,6 +1428,9 @@ describe('registerRemoteHandlers', () => {
 //   - `session:recall-queued` (phase 3 / ADR-053) — the itemized replacement
 //     for `session:dequeue-message`, same `chat` capability as the channel it
 //     supersedes, so the effective remote surface is unchanged in substance.
+//   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
+//     block after the fact; a `chat` command on the named session, gated
+//     exactly like `session:approval-response`, which it extends.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1463,6 +1477,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'pi:auth-status',
   'pi:binary-path',
   'session:approval-response',
+  'session:approve-blocked',
   'session:ask-side-question',
   'session:background-task',
   'session:build-subagent-file-map',

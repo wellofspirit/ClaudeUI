@@ -3,7 +3,8 @@ import type {
   ContentBlock,
   PendingApproval,
   PermissionDenialBlock,
-  PermissionSuggestion
+  PermissionSuggestion,
+  ToolReviewBlock
 } from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
@@ -13,6 +14,7 @@ import { SubagentOutputBody } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
+import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -41,6 +43,13 @@ interface Props {
    * `failed` — the tool_result is the error.
    */
   denial?: PermissionDenialBlock
+  /**
+   * The auto-mode judge's verdict on THIS task call — a delegation the judge
+   * reviewed (pi `agent` / `dispatch_agent`, opencode `task`). Shown as
+   * ToolCard shows one, including the after-the-fact Approve on a block
+   * (ADR-091 part 6): a blocked delegation is the commonest subagent block.
+   */
+  review?: ToolReviewBlock
 }
 
 export interface ParsedUsage {
@@ -140,7 +149,14 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-export function TaskCard({ block, result, view, approval, denial }: Props): React.JSX.Element {
+export function TaskCard({
+  block,
+  result,
+  view,
+  approval,
+  denial,
+  review
+}: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -158,6 +174,16 @@ export function TaskCard({ block, result, view, approval, denial }: Props): Reac
 
   const toolUseId = block.toolUseId
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  // ADR-091 part 6 — the host grants, marks and nudges; the marked review it
+  // re-sends is what hides the button, on every client.
+  const approveBlocked = canApproveBlock(review, { isHistorical, pending: !!approval })
+    ? (): void => {
+        if (!activeSessionId) return
+        window.api.approveBlocked(activeSessionId, toolUseId).catch((err: unknown) => {
+          window.api.logError('TaskCard', `Failed to approve blocked call: ${String(err)}`)
+        })
+      }
+    : undefined
   const hasResult = !!result
   const msgs = useMemo(
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
@@ -409,6 +435,13 @@ export function TaskCard({ block, result, view, approval, denial }: Props): Reac
           {description}
         </span>
         {denial && <PermissionDenialChip denial={denial} testIdPrefix="TaskCard" />}
+        {review && (
+          <ToolReviewChip
+            review={review}
+            onApprove={expanded ? undefined : approveBlocked}
+            testIdPrefix="TaskCard"
+          />
+        )}
         {elapsed !== undefined && (
           <span
             data-testid="TaskCard.elapsed"
@@ -525,6 +558,9 @@ export function TaskCard({ block, result, view, approval, denial }: Props): Reac
       {expanded && (
         <>
           {denial && <PermissionDenialStrip denial={denial} testIdPrefix="TaskCard" />}
+          {review && (
+            <ToolReviewStrip review={review} onApprove={approveBlocked} testIdPrefix="TaskCard" />
+          )}
           {/* Instructions */}
           {prompt && (
             <div className="border-t border-border px-3 py-2">

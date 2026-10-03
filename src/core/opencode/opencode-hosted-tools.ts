@@ -29,6 +29,7 @@ import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId } from '../../shared/types'
+import type { BlockedCallLedger } from '../automode/blocked-calls'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
@@ -54,6 +55,8 @@ export interface CallerSessionHandle {
   getMessages: () => ChatMessage[]
   /** The caller's still-queued user turns (ISession.queuedUserTurns, ADR-091 §4). */
   getQueuedUserTurns?: () => ChatMessage[]
+  /** The caller's approvable blocks and grants (ISession.blockedCalls, ADR-091 part 6). */
+  blockedCalls?: BlockedCallLedger
   /** Re-emits an event under the caller session's routing (ISession.emit). */
   emit: (channel: string, data: unknown) => void
   /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
@@ -288,6 +291,7 @@ export function createOpencodeHostedToolsServer(
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
           ...(caller.getQueuedUserTurns ? { getQueuedUserTurns: caller.getQueuedUserTurns } : {}),
+          ...(caller.blockedCalls ? { blockedCalls: caller.blockedCalls } : {}),
           emit: caller.emit,
           addDispatchedCost: caller.addDispatchedCost,
           toolUseId: __xeng_call_id,

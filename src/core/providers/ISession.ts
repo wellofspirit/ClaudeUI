@@ -11,6 +11,7 @@ import type {
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
+import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
@@ -53,6 +54,23 @@ export interface ISession {
    * optional so a minimal test double need not carry it.
    */
   queuedUserTurns?(): ChatMessage[]
+
+  /**
+   * This session's auto-mode blocks the user can approve after the fact, and
+   * the one-shot grants approving them made (ADR-091 part 6) — shared with its
+   * children and its pi/opencode dispatch targets. Implemented in BaseSession;
+   * optional so a minimal test double need not carry it.
+   */
+  readonly blockedCalls?: BlockedCallLedger
+
+  /**
+   * Approve one auto-mode block after the fact (ADR-091 part 6): grant, route
+   * the nudge, mark the review approved. `prompt` is the nudge the caller
+   * sends this session's agent as a user prompt, or `null` when a live agent
+   * below the root already took it. `undefined` → unknown, already approved or
+   * still held: nothing happened.
+   */
+  approveBlocked?(toolUseId: string): { prompt: string | null } | undefined
 
   /**
    * Queue a prompt that arrived while the session was busy. Implemented once in

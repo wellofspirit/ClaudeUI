@@ -190,6 +190,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       getAutonomyMode: () => session.getAutonomyMode?.() ?? 'default',
       getMessages: () => session.getMessages(),
       getQueuedUserTurns: () => session.queuedUserTurns?.() ?? [],
+      ...(session.blockedCalls ? { blockedCalls: session.blockedCalls } : {}),
       emit: (channel, data) => session.emit(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         session.addDispatchedCost(engineId, modelId, costUsd)

@@ -151,6 +151,8 @@ const api: ClaudeAPI = {
       answers,
       updatedPermissions
     ),
+  approveBlocked: (routingId: string, toolUseId: string) =>
+    ipcRenderer.invoke('session:approve-blocked', routingId, toolUseId),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),

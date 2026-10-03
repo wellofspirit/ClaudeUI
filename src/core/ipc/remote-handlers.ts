@@ -148,7 +148,8 @@ import {
   deleteProject,
   codexDeletePlanFor,
   clearConversation,
-  judgeModelSupport
+  judgeModelSupport,
+  approveBlocked
 } from './handlers-core'
 
 /**
@@ -486,6 +487,16 @@ export function registerRemoteHandlers(
       }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
+  })
+
+  // ADR-091 part 6 — gated exactly like `session:approval-response`.
+  handleRemote({
+    channel: 'session:approve-blocked',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, toolUseId: string) =>
+      approveBlocked(manager, routingId, toolUseId)
   })
 
   // -------------------------------------------------------------------------

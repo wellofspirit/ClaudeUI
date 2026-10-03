@@ -41,7 +41,7 @@ import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
 import { BackgroundBashOutput } from './kinds/bash-output'
 import { ToolResultImages } from './ToolResultImages'
-import { ToolReviewChip, ToolReviewStrip } from './ToolReview'
+import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './ToolReview'
 import { PermissionDenialChip, PermissionDenialStrip } from './PermissionDenial'
 import type { BashOutputSlice, BgOutputSlice } from './kinds/types'
 
@@ -113,6 +113,12 @@ export interface ToolCardProps {
     decision: 'allow' | 'deny',
     selectedSuggestions?: PermissionSuggestion[]
   ) => Promise<void>
+  /**
+   * Approve an auto-mode block after the fact (ADR-091 part 6). Offered only on
+   * a live card whose review is an auto-mode block not yet approved, and not
+   * while a card for the call is pending (a held block's own card answers it).
+   */
+  onApproveBlocked?: () => void
   onBackgroundTask: () => Promise<void>
   onStopTask: () => Promise<void>
   onOpenTaskPanel: () => void
@@ -144,6 +150,7 @@ export function ToolCard({
   displayName,
   toolOutputMaxChars,
   onApproval,
+  onApproveBlocked,
   onBackgroundTask,
   onStopTask,
   onOpenTaskPanel
@@ -174,6 +181,10 @@ export function ToolCard({
   // array must not render an empty bordered strip.
   const resultImages = result?.images?.length ? result.images : undefined
   const isPendingApproval = !isHistorical && !!approval
+  const approveBlocked =
+    onApproveBlocked && canApproveBlock(review, { isHistorical, pending: !!approval })
+      ? onApproveBlocked
+      : undefined
 
   const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
   const isCommand = kind === 'command'
@@ -315,7 +326,9 @@ export function ToolCard({
             {chip.label}
           </span>
         ))}
-        {review && <ToolReviewChip review={review} />}
+        {review && (
+          <ToolReviewChip review={review} onApprove={expanded ? undefined : approveBlocked} />
+        )}
         {denial && <PermissionDenialChip denial={denial} />}
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">
@@ -372,7 +385,7 @@ export function ToolCard({
 
       {/* The verdict sits between the header and the body, in the approval
           card's own vocabulary — it is a permission decision, not reasoning. */}
-      {expanded && review && <ToolReviewStrip review={review} />}
+      {expanded && review && <ToolReviewStrip review={review} onApprove={approveBlocked} />}
       {expanded && denial && <PermissionDenialStrip denial={denial} />}
 
       {expanded && (

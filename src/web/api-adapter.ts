@@ -136,6 +136,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         updatedPermissions
       ) as Promise<void>,
 
+    approveBlocked: (routingId: string, toolUseId: string) =>
+      connection.invoke('session:approve-blocked', routingId, toolUseId) as Promise<void>,
+
     // Window controls — no-op on web
     minimizeWindow: async () => {},
     maximizeWindow: async () => {},

@@ -3383,6 +3383,7 @@ export class CodexSession extends BaseSession {
       getAutonomyMode: () => this.permissionMode,
       getMessages: () => this.messageHistory,
       getQueuedUserTurns: () => this.queuedUserTurns(),
+      blockedCalls: this.blockedCalls,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),

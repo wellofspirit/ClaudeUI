@@ -40,6 +40,12 @@ import { join } from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import { AutoModeDenialTracker } from '../automode/denial-tracker'
 import { recordToolOutcome, type ToolOutcome } from '../automode/ground-truth'
+import {
+  blockApprovalNotice,
+  blockedCallDelivery,
+  nearestLiveAgent,
+  type BlockedCall
+} from '../automode/blocked-calls'
 import { logger } from '../services/logger'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
@@ -1064,6 +1070,53 @@ export class PiSubagentManager {
     return entry && entry.runner && !entry.stopReason && !entry.closing && !entry.runner.draining
       ? entry.runner
       : null
+  }
+
+  /**
+   * ADR-091 part 6 — route the user's after-the-fact approval of a child's
+   * blocked call (`originToolUseId` = the blocked agent's): to the nearest LIVE
+   * agent on the path from it up its spawner chain (`nearestLiveAgent`) — the
+   * blocked agent itself if it still runs, else a live ancestor — at its next
+   * tool round (the `send_message` steer path), marked as ClaudeUI's on the
+   * user's behalf. A finished agent is never resumed for it. Returns who took
+   * it (`"<label>"`), or null: nobody below the root is live, and the caller
+   * nudges the root agent instead.
+   */
+  deliverBlockApproval(originToolUseId: string, call: BlockedCall): string | null {
+    const byOrigin = (id: string | null): PiAgentRecord | null => {
+      if (id === null) return null
+      for (const r of this.records.values()) if (r.originToolUseId === id) return r
+      return null
+    }
+    const blocked = byOrigin(originToolUseId)
+    const target = nearestLiveAgent(
+      blocked,
+      (r) => (r.spawnerAgentId ? (this.records.get(r.spawnerAgentId) ?? null) : null),
+      (r) => this.liveRunner(r.originToolUseId) !== null
+    )
+    const runner = target ? this.liveRunner(target.originToolUseId) : null
+    if (!target || !runner) return null
+    const payload: PiAgentDelivery = {
+      v: 1,
+      deliveryId: uuidv4(),
+      kind: 'agent-message',
+      // The host's own envelope, never an `<agent-message>` (see blockApprovalNotice).
+      text: blockApprovalNotice(blockedCallDelivery(call, target === blocked)),
+      wake: true,
+      title: 'Message from you',
+      details: {
+        agentId: target.agentId,
+        toolUseId: target.originToolUseId,
+        from: 'user',
+        fromId: 'user'
+      }
+    }
+    logger.info(
+      'PiSubagents',
+      `agent-message ${payload.deliveryId} user → ${target.agentId} (steer)`
+    )
+    void runner.deliver(payload)
+    return `"${target.label}"`
   }
 
   /** Resolve `send_message.to` / `task_stop.task_id`: exact agent id, then exact name. */

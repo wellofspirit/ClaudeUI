@@ -27,6 +27,7 @@ import {
   type DispatchTargetJudgeOptions
 } from '../dispatch-target-judge'
 import type { SessionJudgeOptions } from '../../automode/session-judge'
+import { BlockedCallLedger, blockGrantKey } from '../../automode/blocked-calls'
 import type { JudgeRequest } from '../../automode/classifier'
 import type { ChatMessage, EngineConfig, EngineModelGroup } from '../../../shared/types'
 
@@ -89,6 +90,32 @@ describe('DispatchTargetJudge', () => {
     expect(opts.sessionId()).toBe('target-session')
     // No judgeModel configured → the target's own model.
     expect(opts.modelValue()).toBe('anthropic/target-model')
+  })
+
+  it("ADR-091 part 6: the dispatching session's grant clears the target's exact call once, in its own cwd only", async () => {
+    const ledger = new BlockedCallLedger(() => {})
+    const review = {
+      type: 'tool_review' as const,
+      toolUseId: 'x',
+      reviewId: 'r',
+      reviewer: 'auto-mode' as const,
+      decision: 'denied' as const
+    }
+    // Approved in the TARGET's cwd: the grant for this target's call.
+    ledger.record(
+      'x',
+      { ...bash, review, grantKey: blockGrantKey('opencode', 'bash', bash.input, '/repo', true) },
+      false
+    )
+    ledger.approve('x')
+    const { judge, call, requests } = setup(undefined, { blockedCalls: () => ledger })
+    // Same command with a workdir elsewhere: another action — judged.
+    await judge.judge({ ...bash, input: { ...bash.input, workdir: '/elsewhere' } }, call)
+    expect(requests).toHaveLength(1)
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+    expect(requests).toHaveLength(1)
+    await judge.judge(bash, call)
+    expect(requests).toHaveLength(2)
   })
 
   it('modelValue is the TARGET engine’s autoMode.judgeModel when set', async () => {
@@ -176,7 +203,9 @@ describe('DispatchTargetJudge', () => {
     replies.push('<block>yes</block><reason>destroys the build</reason>')
     expect(await judge.judge(bash, call)).toEqual({
       kind: 'hold',
-      reason: 'Auto mode blocked: destroys the build'
+      reason: 'Auto mode blocked: destroys the build',
+      // The review it sent rides along (ADR-091 part 6).
+      review: expect.objectContaining({ toolUseId: 'oc-call-7', decision: 'denied' })
     })
     // Still held: nothing refused it yet.
     await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)

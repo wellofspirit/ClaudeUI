@@ -297,6 +297,33 @@ describe('load/saveSharedAutoModeConfig', () => {
     expect(readJsonFile(sharedFile())).toEqual({})
   })
 
+  it('stores blockHoldSeconds as whole seconds in [0, 600]; 0, the default, as an absent key (ADR-091 part 6)', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 120 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 120 })
+    const second = await freshModule()
+    expect(second.loadSharedAutoModeConfig()).toEqual({ blockHoldSeconds: 120 })
+
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 9_999 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 600 })
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 29.6 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 30 })
+    for (const off of [0, -5, Number.NaN, '60' as unknown as number, undefined]) {
+      mod.saveSharedAutoModeConfig({ blockHoldSeconds: off })
+      expect(readJsonFile(sharedFile()), String(off)).toEqual({})
+    }
+  })
+
+  it('normalizeBlockHoldSeconds: absent or garbage is 0 (no hold), clamped otherwise', async () => {
+    const { normalizeBlockHoldSeconds } = await freshModule()
+    expect(normalizeBlockHoldSeconds(undefined)).toBe(0)
+    expect(normalizeBlockHoldSeconds('120')).toBe(0)
+    expect(normalizeBlockHoldSeconds(Infinity)).toBe(0)
+    expect(normalizeBlockHoldSeconds(-1)).toBe(0)
+    expect(normalizeBlockHoldSeconds(300)).toBe(300)
+    expect(normalizeBlockHoldSeconds(601)).toBe(600)
+  })
+
   it('round-trips through the file, not through memory', async () => {
     const first = await freshModule()
     first.saveSharedAutoModeConfig({ protectedPatterns: ['acme-live-*'] })

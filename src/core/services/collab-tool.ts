@@ -6,6 +6,7 @@ import { loadEngineConfig } from './ui-config'
 import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
 import type { ChatMessage, EngineId } from '../../shared/types'
+import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 export interface CollabServerContext {
   engineId: EngineId
@@ -19,6 +20,8 @@ export interface CollabServerContext {
   getMessages: () => ChatMessage[]
   /** The session's still-queued user turns (ADR-091 §4), for the same judge. */
   getQueuedUserTurns?: () => ChatMessage[]
+  /** The session's approvable blocks and grants (ADR-091 part 6), for the same judge. */
+  blockedCalls?: BlockedCallLedger
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
@@ -119,6 +122,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               getAutonomyMode: ctx.getAutonomyMode,
               getMessages: ctx.getMessages,
               ...(ctx.getQueuedUserTurns ? { getQueuedUserTurns: ctx.getQueuedUserTurns } : {}),
+              ...(ctx.blockedCalls ? { blockedCalls: ctx.blockedCalls } : {}),
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
               toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,

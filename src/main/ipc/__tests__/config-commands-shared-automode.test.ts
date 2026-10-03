@@ -211,6 +211,19 @@ describe('config:save-shared-automode', () => {
     expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
   })
 
+  it('accepts blockHoldSeconds as a finite number only (ADR-091 part 6; the service clamps)', () => {
+    invoke('config:save-shared-automode', { blockHoldSeconds: 120 })
+    invoke('config:save-shared-automode', { blockHoldSeconds: 9_999 })
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+    for (const bad of ['120', null, Number.NaN, Infinity, true]) {
+      expect(
+        () => invoke('config:save-shared-automode', { blockHoldSeconds: bad }),
+        String(bad)
+      ).toThrow(/"blockHoldSeconds" must be a number/)
+    }
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+  })
+
   it('refuses an unknown key rather than writing it into the judge environment', () => {
     expect(() =>
       invoke('config:save-shared-automode', { trustedDomains: [], enabled: false })

@@ -79,6 +79,7 @@ vi.mock('../../../main/auth/ClaudeAuthProvider', () => ({
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../claude-session'
+import { blockGrantKey } from '../../automode/blocked-calls'
 import { applyEvent } from '../../shared/sync/reducer'
 import { emptyCanonicalState, type CanonicalSessionState } from '../../shared/sync/state'
 import type { BrowserWindow } from 'electron'
@@ -456,5 +457,53 @@ describe('a cli.js permission decision reaches the card it is about', () => {
     expect(blocks.filter((b) => b.type === 'permission_denial')).toEqual([])
     expect(channels).not.toContain('session:tool-review')
     expect(channels).not.toContain('session:permission-denial')
+  })
+})
+
+/**
+ * ADR-091 part 6 — a Claude classifier block is approvable after the fact, as
+ * a message only: cli.js owns the judge, so no grant can clear the retry.
+ */
+describe('approving a Claude auto-mode block after the fact', () => {
+  it('nudges the main agent, marks the review "approved by you", and records no grant', async () => {
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle(
+        decidedTurn(
+          deniedFrame({
+            decision_reason_type: 'classifier',
+            decision_reason: '[Git Destructive] Rewrites published history.'
+          })
+        )
+      )
+    )
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-approve', win, '/tmp/proj')
+    liveSessions.push(session)
+    await session.run('push it')
+
+    expect(session.approveBlocked('toolu_1')).toEqual({
+      prompt:
+        'I approve the Bash call auto mode blocked: git push --force. Run it again exactly as it was.'
+    })
+    // Double press: nothing.
+    expect(session.approveBlocked('toolu_1')).toBeUndefined()
+
+    const messages = foldCanonical('routing-approve', sent)
+    const reviews = messages
+      .flatMap((m) => m.content)
+      .filter((b) => b.type === 'tool_review' && b.toolUseId === 'toolu_1')
+    expect(reviews.at(-1)).toMatchObject({
+      reviewId: 'frame-1:approved',
+      overriddenByUser: true,
+      nudgedTo: 'the main agent'
+    })
+    // No grant: Claude's retry is cli.js's to judge.
+    for (const engine of ['claude', 'pi', 'opencode']) {
+      expect(
+        session.blockedCalls.consumeGrant(
+          blockGrantKey(engine, 'Bash', { command: 'git push --force' }, '/tmp/proj')
+        )
+      ).toBe(false)
+    }
   })
 })

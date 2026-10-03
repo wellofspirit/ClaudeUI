@@ -194,6 +194,28 @@ function deliverPrompt(
   if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }
 
+/**
+ * `session:approve-blocked` — approve an auto-mode block after the fact
+ * (ADR-091 part 6). The session grants the call's next identical attempt once
+ * and routes the nudge (`BaseSession.approveBlocked`); a nudge for this
+ * session's own agent then goes through {@link sendPrompt}, the composer's own
+ * path, so it lands in the transcript as the user's message, or queues behind
+ * a busy turn. A nudge a live agent below the root took is not sent again. An unknown session, a
+ * malformed or unknown id, or one already approved is a silent no-op: a
+ * historical card's click has nothing to answer it.
+ */
+export function approveBlocked(
+  manager: SessionManager,
+  routingId: string,
+  toolUseId: string
+): void | Promise<void> {
+  if (typeof toolUseId !== 'string' || toolUseId === '') return
+  const session = manager.get(routingId)
+  const nudge = session?.approveBlocked?.(toolUseId)
+  if (!nudge?.prompt) return
+  return sendPrompt(manager, routingId, nudge.prompt)
+}
+
 /** A blob id is a lowercase hex SHA-256 — anything else cannot name a blob. */
 const BLOB_ID_RE = /^[0-9a-f]{64}$/
 

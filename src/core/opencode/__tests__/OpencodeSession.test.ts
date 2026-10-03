@@ -163,18 +163,10 @@ vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: mockResolveJud
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
 vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 
-// ADR-091 §3 — a judge block HOLDS for the user. The suite's block tests are
-// about what an unattended session does, so a hold expires at once by default
-// (resolving as Keep blocked, exactly as the real expiry does); the hold tests
-// set `holdMs.value` to the real window and drive the card themselves.
-const holdMs = vi.hoisted(() => ({ value: 0 }))
-vi.mock('../../automode/block-hold', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../automode/block-hold')>()
-  return {
-    ...actual,
-    armBlockHold: (onExpire: () => void) => actual.armBlockHold(onExpire, holdMs.value)
-  }
-})
+// ADR-091 §3 / part 6 — a judge block HOLDS for the user only when the shared
+// `blockHoldSeconds` says so; absent (the default) keeps it at once, which is
+// what the suite's block tests are about. The hold tests set the window.
+const sharedAutoMode = vi.hoisted(() => ({ value: {} as Record<string, unknown> }))
 
 // Permission rules are loaded from Claude's settings; mock so the ruleset tests
 // are hermetic (no dependence on the dev's ~/.claude/settings.json). Default =
@@ -188,11 +180,13 @@ vi.mock('../../services/claude-settings', () => ({
 const mockAutoModeFlags = vi.hoisted(() => ({ value: { classifyAllShell: false } }))
 
 // Engine config drives auto-mode (full); mock so tests control it hermetically.
-vi.mock('../../services/ui-config', () => ({
+vi.mock('../../services/ui-config', async (importOriginal) => ({
   loadEngineConfig: mockLoadEngineConfig,
   // The engine-SHARED trust lists (ADR-065 phase 4) — a session derives them
   // into its classifier environment, so the module double has to offer them.
-  loadSharedAutoModeConfig: () => ({})
+  loadSharedAutoModeConfig: () => sharedAutoMode.value,
+  normalizeBlockHoldSeconds: (await importOriginal<typeof import('../../services/ui-config')>())
+    .normalizeBlockHoldSeconds
 }))
 
 // Model-discovery provides context-window sizes + per-model capabilities;
@@ -284,7 +278,8 @@ import {
   READ_ONLY_REVIEW_RATIONALE
 } from '../../automode/denial-tracker'
 import { agentControlEditPatterns } from '../../automode/agent-control-paths'
-import { AUTO_MODE_BLOCK_HOLD_MS } from '../../automode/block-hold'
+/** The hold window the held-card tests set (`blockHoldSeconds: 120`). */
+const HOLD_MS = 120_000
 import { evaluateOpencodeRules } from '../wildcard'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { OpencodeEvent } from '../protocol/types'
@@ -3275,10 +3270,10 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
   describe('ADR-091 §3 — a judge block holds the ask for the user', () => {
     beforeEach(() => {
-      holdMs.value = AUTO_MODE_BLOCK_HOLD_MS
+      sharedAutoMode.value = { blockHoldSeconds: HOLD_MS / 1000 }
     })
     afterEach(() => {
-      holdMs.value = 0
+      sharedAutoMode.value = {}
       vi.useRealTimers()
     })
 
@@ -3357,7 +3352,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const { session, win } = await heldAsk('per_h4')
-      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS - 1_000)
+      await vi.advanceTimersByTimeAsync(HOLD_MS - 1_000)
       expect(mockReplyPermission).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1_000)
       expect(mockReplyPermission).toHaveBeenCalledWith(
@@ -3379,7 +3374,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
         properties: { sessionID: SES, requestID: 'per_h5', reply: 'reject' }
       } as OpencodeEvent)
       await vi.waitFor(() => expect(dismissals(win)).toEqual([{ requestId: 'per_h5' }]))
-      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+      await vi.advanceTimersByTimeAsync(HOLD_MS)
       expect(mockReplyPermission).not.toHaveBeenCalled()
       expect(dismissals(win)).toHaveLength(1)
       session.dispose()
@@ -3387,9 +3382,204 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       const torn = await heldAsk('per_h6')
       torn.session.dispose()
       expect(dismissals(torn.win)).toEqual([{ requestId: 'per_h6' }])
-      await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+      await vi.advanceTimersByTimeAsync(HOLD_MS)
       expect(mockReplyPermission).not.toHaveBeenCalled()
       expect(dismissals(torn.win)).toHaveLength(1)
+    })
+  })
+
+  describe('ADR-091 part 6 — the hold window and approve-after-block', () => {
+    afterEach(() => {
+      sharedAutoMode.value = {}
+      vi.useRealTimers()
+    })
+
+    const cards = (win: MockWindow): Array<{ autoModeBlock?: { expiresAt: number } }> =>
+      win.webContents.send.mock.calls
+        .filter((c) => c[0] === 'session:approval-request')
+        .map((c) => c[2] as { autoModeBlock?: { expiresAt: number } })
+    const reviewsFor = (
+      win: MockWindow,
+      toolUseId: string
+    ): Array<{ overriddenByUser?: true; nudgedTo?: string }> =>
+      win.webContents.send.mock.calls
+        .filter((c) => c[0] === 'session:tool-review' && c[2].toolUseId === toolUseId)
+        .map((c) => c[2].review)
+
+    async function autoSession(id: string): Promise<{
+      session: OpencodeSession
+      win: MockWindow
+      push: (e: OpencodeEvent) => void
+    }> {
+      enableAutoMode()
+      const push = makeEventFeed()
+      const win = new MockWindow()
+      const session = new OpencodeSession(id, win as unknown as HostWindowHandle, '/tmp/test-cwd', {
+        permissionMode: 'full'
+      })
+      await session.run('go')
+      return { session, win, push }
+    }
+
+    /** One `bash` ask with its tool part (the judged input carries the part's `workdir`). */
+    function ask(
+      push: (e: OpencodeEvent) => void,
+      id: string,
+      command: string,
+      workdir?: string
+    ): void {
+      push({
+        id: `ev_part_${id}`,
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: `p_${id}`,
+            messageID: `msg_${id}`,
+            type: 'tool',
+            tool: 'bash',
+            callID: `c_${id}`,
+            state: { status: 'running', input: { command, ...(workdir ? { workdir } : {}) } }
+          }
+        }
+      } as OpencodeEvent)
+      push(permissionEvent(id, `c_${id}`, command))
+    }
+
+    it('no hold (the default): rejected at once with the judge text, `automode-blocked`, no card', async () => {
+      mockJudge.mockResolvedValueOnce('<block>yes</block><reason>prod</reason>')
+      mockJudge.mockResolvedValue('<block>no</block>')
+      const { session, win, push } = await autoSession('r_p6_nohold')
+      ask(push, 'per_n1', 'kubectl delete ns prod')
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_n1',
+          'reject',
+          'Auto mode blocked: prod'
+        )
+      )
+      expect(cards(win)).toEqual([])
+      ask(push, 'per_n2', 'npm test')
+      await vi.waitFor(() => expect(mockJudge).toHaveBeenCalledTimes(2))
+      expect(judgePrompt().user).toContain('{"outcome":"automode-blocked"}')
+      session.dispose()
+    })
+
+    it('a hold of N seconds arms the card for N seconds', async () => {
+      sharedAutoMode.value = { blockHoldSeconds: 30 }
+      mockJudge.mockResolvedValue('<block>yes</block><reason>prod</reason>')
+      const { session, win, push } = await autoSession('r_p6_hold30')
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      ask(push, 'per_h30', 'kubectl delete ns prod')
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      const left = cards(win)[0].autoModeBlock!.expiresAt - Date.now()
+      expect(left).toBeLessThanOrEqual(30_000)
+      expect(left).toBeGreaterThan(25_000)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_h30',
+        'reject',
+        'Auto mode blocked: prod'
+      )
+      session.dispose()
+    })
+
+    it('Approve: the identical retry is `once` with no judge call, once; another workdir or command is judged', async () => {
+      mockJudge.mockResolvedValue('<block>yes</block><reason>prod</reason>')
+      const { session, win, push } = await autoSession('r_p6_grant')
+      ask(push, 'per_g1', 'kubectl delete ns prod')
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_g1', 'reject', expect.any(String))
+      )
+      expect(session.approveBlocked('c_per_g1')).toEqual({
+        prompt:
+          'I approve the bash call auto mode blocked: kubectl delete ns prod. Run it again exactly as it was.'
+      })
+      expect(session.approveBlocked('c_per_g1')).toBeUndefined()
+      expect(reviewsFor(win, 'c_per_g1').at(-1)).toMatchObject({
+        overriddenByUser: true,
+        nudgedTo: 'the main agent'
+      })
+
+      // Same command in another working directory: a different action.
+      ask(push, 'per_g2', 'kubectl delete ns prod', 'sub')
+      await vi.waitFor(() => expect(mockJudge).toHaveBeenCalledTimes(2))
+      ask(push, 'per_g3', 'kubectl delete ns prod')
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_g3', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(2)
+      // Spent.
+      ask(push, 'per_g4', 'kubectl delete ns prod')
+      await vi.waitFor(() => expect(mockJudge).toHaveBeenCalledTimes(3))
+      session.dispose()
+    })
+
+    it("a task child's block is approved at the root: the nudge names the subagent, and the child's retry spends the grant", async () => {
+      mockJudge.mockResolvedValue('<block>yes</block><reason>prod</reason>')
+      const { session, push } = await autoSession('r_p6_child')
+      const CHILD = 'ses_child_p6'
+      push({
+        id: 'ev_task_p6',
+        type: 'message.part.updated',
+        properties: {
+          sessionID: SES,
+          part: {
+            id: 'p_task_p6',
+            messageID: 'msg_task_p6',
+            type: 'tool',
+            tool: 'task',
+            callID: 'call_task_p6',
+            state: {
+              status: 'running',
+              input: { subagent_type: 'explore', description: 'Check prod', prompt: 'p' },
+              metadata: { sessionId: CHILD }
+            }
+          }
+        }
+      } as OpencodeEvent)
+      const childAsk = (id: string): OpencodeEvent =>
+        ({
+          id: `ev_${id}`,
+          type: 'permission.asked',
+          properties: {
+            sessionID: CHILD,
+            id,
+            permission: 'bash',
+            patterns: ['kubectl get ns'],
+            metadata: { command: 'kubectl get ns' },
+            tool: { callID: `c_${id}`, messageID: `msg_c_${id}` }
+          }
+        }) as OpencodeEvent
+      push(childAsk('per_ch1'))
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith(
+          'per_ch1',
+          'reject',
+          'Auto mode blocked: prod'
+        )
+      )
+      expect(session.approveBlocked('c_per_ch1')?.prompt).toBe(
+        'I approve the bash call auto mode blocked for the "Check prod" subagent: kubectl get ns. ' +
+          'Run it again exactly as it was — yourself, or by sending it back to that subagent.'
+      )
+      push(childAsk('per_ch2'))
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_ch2', 'once'))
+      expect(mockJudge).toHaveBeenCalledTimes(1)
+      session.dispose()
+    })
+
+    it('Approve anyway on a held card marks the review approved with no nudge target', async () => {
+      sharedAutoMode.value = { blockHoldSeconds: 120 }
+      mockJudge.mockResolvedValue('<block>yes</block><reason>prod</reason>')
+      const { session, win, push } = await autoSession('r_p6_held')
+      ask(push, 'per_ha', 'kubectl delete ns prod')
+      await vi.waitFor(() => expect(cards(win)).toHaveLength(1))
+      expect(session.approveBlocked('c_per_ha')).toBeUndefined()
+      session.resolveApproval('per_ha', 'allow')
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_ha', 'once')
+      const last = reviewsFor(win, 'c_per_ha').at(-1)!
+      expect(last.overriddenByUser).toBe(true)
+      expect(last.nudgedTo).toBeUndefined()
+      session.dispose()
     })
   })
 })

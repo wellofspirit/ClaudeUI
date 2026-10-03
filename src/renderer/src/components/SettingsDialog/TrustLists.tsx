@@ -24,6 +24,9 @@
  * Above them sits one switch, the ADR-084 read-only bypass: plainly read-only
  * shell commands in the workspace skip the judge. It is on by default and
  * stored only as `readOnlyBypass: false`, so "on" has one encoding (absent).
+ * Beside it, the ADR-091 part 6 hold window: how long a judge block waits on
+ * a Keep blocked / Approve anyway card before it stands. No hold (0) is the
+ * default and the absent key; a hand-edited value off the menu still shows.
  *
  * An emptied list is saved as an ABSENT key, never `[]`: the sessions read the
  * lists behind `?.length`, so the two are indistinguishable downstream and a
@@ -42,6 +45,7 @@ import {
 } from '../../../../shared/judge-guidance'
 import {
   SandboxListSetting,
+  SelectField,
   SettingRow,
   SettingsToggle,
   type ListEntryRules
@@ -118,6 +122,18 @@ const READ_ONLY_BYPASS_LABEL = 'Skip the judge for read-only commands'
 const READ_ONLY_BYPASS_DESCRIPTION =
   'Plainly read-only commands in your workspace (git status, ls, reading source files) run without a judge call. Commands that touch secrets, other folders, the network or anything else still go to the judge; to review a read yourself, add an Ask rule.'
 
+/** The ADR-091 part 6 hold window's copy and menu (seconds; 0 = no hold). */
+const BLOCK_HOLD_LABEL = 'Hold blocked actions for'
+const BLOCK_HOLD_DESCRIPTION =
+  'No hold: a blocked action is denied at once and the agent carries on; approve it afterwards from the blocked summary.'
+const BLOCK_HOLD_OPTIONS = [
+  { value: '0', label: 'No hold' },
+  { value: '30', label: '30 s' },
+  { value: '60', label: '1 min' },
+  { value: '120', label: '2 min' },
+  { value: '300', label: '5 min' }
+]
+
 /** Shown when a save is rejected; the section has already reloaded the file. */
 const SAVE_ERROR = "Couldn't save that change — showing what is saved."
 
@@ -191,6 +207,15 @@ export function TrustListsSection(): React.JSX.Element {
     save(next)
   }
 
+  const holdSeconds = typeof cfg.blockHoldSeconds === 'number' ? cfg.blockHoldSeconds : 0
+  const setBlockHold = (value: string): void => {
+    const next: SharedAutoModeConfig = { ...cfg }
+    const seconds = Number(value)
+    if (seconds > 0) next.blockHoldSeconds = seconds
+    else delete next.blockHoldSeconds
+    save(next)
+  }
+
   return (
     <div data-testid="TrustListsSection" className="divide-y divide-border/55">
       <SettingsToggle
@@ -200,6 +225,19 @@ export function TrustListsSection(): React.JSX.Element {
         checked={cfg.readOnlyBypass !== false}
         onChange={setReadOnlyBypass}
       />
+      <SettingRow
+        testid="TrustListsSection.blockHold"
+        label={BLOCK_HOLD_LABEL}
+        description={BLOCK_HOLD_DESCRIPTION}
+      >
+        <SelectField
+          testid="TrustListsSection.blockHold.select"
+          value={String(holdSeconds)}
+          options={BLOCK_HOLD_OPTIONS}
+          placeholder={`${holdSeconds} s`}
+          onChange={setBlockHold}
+        />
+      </SettingRow>
       {TRUST_LISTS.map((f) => (
         <SandboxListSetting
           key={f.key}

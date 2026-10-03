@@ -25,7 +25,8 @@ import type {
   StatusLineData,
   SkillInfo,
   ModelCostEntry,
-  TaskNotification
+  TaskNotification,
+  ToolReviewBlock
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import {
@@ -82,7 +83,8 @@ import {
   type JudgeTransport
 } from '../automode/classifier'
 import { runJudgePipeline } from '../automode/judge-pipeline'
-import { armBlockHold } from '../automode/block-hold'
+import { armBlockHold, blockHoldMs } from '../automode/block-hold'
+import { blockGrantKey } from '../automode/blocked-calls'
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
@@ -1812,15 +1814,14 @@ export class OpencodeSession extends BaseSession {
     // session allow, no persisted rule.
     if (pending?.hold) {
       if (allow) {
-        // The user overrode the block: the streak it counted resets, and the
-        // call reports its own outcome when it runs.
+        // The user overrode the block: the streak it counted resets, the
+        // review reads "approved by you", and the call reports its own
+        // outcome when it runs.
         this.autoDenials.recordAllow()
+        if (approvalToolUseId) this.blockedCalls.approveHeld(approvalToolUseId)
         this.autoReply(requestId, 'once')
       } else {
-        // The judge's refusal stands: the model reads the judge's own text,
-        // and the call is annotated as this monitor's block, not a human one.
-        if (approvalToolUseId) this.recordToolOutcome(approvalToolUseId, 'automode-blocked')
-        this.autoReply(requestId, 'reject', pending.hold.reason)
+        this.keepBlocked(requestId, approvalToolUseId, pending.hold.reason)
       }
       return
     }
@@ -2395,7 +2396,9 @@ export class OpencodeSession extends BaseSession {
    */
   private sendAllowRuleReview(toolUseId: string | undefined, rule: string): void {
     if (!toolUseId) return
-    const send = (): void => this.sendToolReview(toolUseId, { allowRule: rule })
+    const send = (): void => {
+      this.sendToolReview(toolUseId, { allowRule: rule })
+    }
     if (this.hasToolPart(toolUseId)) {
       send()
       return
@@ -2961,6 +2964,10 @@ export class OpencodeSession extends BaseSession {
           typeof review === 'object' && 'allowRule' in review
             ? this.sendAllowRuleReview(approval.toolUseId, review.allowRule)
             : this.sendToolReview(approval.toolUseId, review),
+        // ADR-091 part 6 — the user approved an earlier block of this exact
+        // call (own or a task child's): allowed once, no judge call.
+        consumeGrant: (name, input) =>
+          this.blockedCalls.consumeGrant(blockGrantKey('opencode', name, input, this.cwd, true)),
         // ADR-085 S2 — the ask may have been settled meanwhile: a session-allow
         // sweep answered it `once`, or a server-side cascade
         // (`approval-resolved`) dropped it. Replying now would 404 and paint a
@@ -2985,7 +2992,7 @@ export class OpencodeSession extends BaseSession {
         this.autoReply(approval.requestId, 'once')
         return
       case 'hold':
-        this.holdBlock(judgedApproval, outcome.reason)
+        this.holdBlock(judgedApproval, outcome.reason, outcome.review)
         return
       case 'human':
         this.fallbackToHuman(judgedApproval, outcome.reason)
@@ -3016,18 +3023,17 @@ export class OpencodeSession extends BaseSession {
   private sendToolReview(
     toolUseId: string | undefined,
     result: ClassifyResult | 'read-only' | { allowRule: string }
-  ): void {
-    if (!toolUseId) return
+  ): ToolReviewBlock | undefined {
+    if (!toolUseId) return undefined
     const reviewId = uuid()
-    this.send('session:tool-review', {
-      toolUseId,
-      review:
-        result === 'read-only'
-          ? readOnlyReviewBlock(toolUseId, reviewId)
-          : 'allowRule' in result
-            ? allowRuleReviewBlock(toolUseId, reviewId, result.allowRule)
-            : autoModeReviewBlock(toolUseId, reviewId, result)
-    })
+    const review =
+      result === 'read-only'
+        ? readOnlyReviewBlock(toolUseId, reviewId)
+        : 'allowRule' in result
+          ? allowRuleReviewBlock(toolUseId, reviewId, result.allowRule)
+          : autoModeReviewBlock(toolUseId, reviewId, result)
+    this.send('session:tool-review', { toolUseId, review })
+    return review
   }
 
   /**
@@ -3064,23 +3070,48 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
-   * A judge block held for the user (ADR-091 §3): the human card, flagged as
+   * A judge block (ADR-091 §3), recorded first so the user can approve it
+   * after the fact (ADR-091 part 6). The user's live hold window decides the
+   * rest: zero — kept at once through {@link keepBlocked}, the path a Keep
+   * blocked click and the expiry take; above zero — the human card, flagged as
    * an auto-mode block (Keep blocked / Approve anyway, no "always allow"
    * suggestions), under the review the pipeline already sent. Unanswered, it
    * resolves exactly as a Keep blocked click — through `resolveApproval` —
-   * after `AUTO_MODE_BLOCK_HOLD_MS`; the reject's `permission.replied` then
-   * withdraws the card, and the explicit dismiss covers a reply that never
-   * comes back (a lost connection). `reason` is the judge's deny text.
+   * when the window passes; the reject's `permission.replied` then withdraws
+   * the card, and the explicit dismiss covers a reply that never comes back
+   * (a lost connection). `reason` is the judge's deny text.
    */
-  private holdBlock(approval: PendingApproval, reason: string): void {
+  private holdBlock(approval: PendingApproval, reason: string, review?: ToolReviewBlock): void {
     const rec = this.pendingApprovals.get(approval.requestId)
     // Settled between the verdict and here — nothing left to hold.
     if (!rec) return
     const { requestId } = approval
+    const ms = blockHoldMs()
+    // No `deliver`: a task child cannot take a delivery, so the nudge goes to
+    // this session's queue, which flushes once the child's task call returns.
+    if (review && approval.toolUseId) {
+      const task = approval.subagent ? this.subagentTask(approval.subagent) : undefined
+      const agentLabel = approval.subagent ? (task?.description ?? task?.type) : undefined
+      this.blockedCalls.record(
+        approval.toolUseId,
+        {
+          toolName: approval.toolName,
+          input: approval.input,
+          review,
+          grantKey: blockGrantKey('opencode', approval.toolName, approval.input, this.cwd, true),
+          ...(agentLabel ? { agentLabel } : {})
+        },
+        ms > 0
+      )
+    }
+    if (ms === 0) {
+      this.keepBlocked(requestId, approval.toolUseId, reason)
+      return
+    }
     const timer = armBlockHold(() => {
       this.resolveApproval(requestId, 'deny')
       this.send('session:approval-dismiss', { requestId })
-    })
+    }, ms)
     rec.hold = { reason, cancel: timer.cancel }
     // A held block is never swept by a session allow: it is the human's call.
     rec.sweepable = false
@@ -3095,15 +3126,29 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
+   * A judge block that stands — Keep blocked, its expiry, or no hold at all
+   * (ADR-091 §3 / part 6): the model reads the judge's own text, and the call
+   * is annotated as this monitor's block, not a human one.
+   */
+  private keepBlocked(requestId: string, toolUseId: string | undefined, reason: string): void {
+    if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked')
+    this.autoReply(requestId, 'reject', reason)
+  }
+
+  /**
    * Remove one pending ask, disarming a held block's expiry (ADR-091 §3). The
    * ONE way an entry leaves `pendingApprovals`, so no resolution path — a
-   * reply, the server's cascade, the human — leaks a timer.
+   * reply, the server's cascade, the human — leaks a timer, and every one of
+   * them leaves the block approvable after the fact (part 6).
    */
   private takePendingAsk(requestId: string): PendingAsk | undefined {
     const rec = this.pendingApprovals.get(requestId)
     if (!rec) return undefined
     this.pendingApprovals.delete(requestId)
-    rec.hold?.cancel()
+    if (rec.hold) {
+      rec.hold.cancel()
+      if (rec.toolUseId) this.blockedCalls.settle(rec.toolUseId)
+    }
     return rec
   }
 

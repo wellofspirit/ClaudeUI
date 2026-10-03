@@ -817,6 +817,7 @@ export class ClaudeSession extends BaseSession {
             getAutonomyMode: () => this.permissionMode,
             getMessages: () => this.getMessages(),
             getQueuedUserTurns: () => this.queuedUserTurns(),
+            blockedCalls: this.blockedCalls,
             emit: (channel, data) => this.send(channel, data),
             addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
               this.addDispatchedCost(engineId, modelId, costUsd)
@@ -1672,6 +1673,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * call), and every stdout line is handled synchronously and in order, so the
    * call is already in `subagentMessages` when the frame folds.
    */
+  /** A top-level call's input, for the after-the-fact approval's nudge (ADR-091 part 6). */
+  private toolInputOf(toolUseId: string): Record<string, unknown> | undefined {
+    for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+      for (const b of this.messageHistory[i].content) {
+        if (b.type === 'tool_use' && b.toolUseId === toolUseId) return b.toolInput
+      }
+    }
+    return undefined
+  }
+
   private handlePermissionDecision(msg: SystemMessage): void {
     const frame = readPermissionDecisionFrame(msg as unknown as Record<string, unknown>)
     if (!frame) {
@@ -1695,6 +1706,22 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         `auto-mode BLOCK${block.rule ? ` (rule=${block.rule})` : ''} ${msg.tool_name ?? '?'}`
       )
       this.send('session:tool-review', { toolUseId: frame.toolUseId, review: block })
+      // ADR-091 part 6 — approvable after the fact, as a nudge only: cli.js
+      // owns this judge, so no grant can clear the retry (ADR-076); the
+      // user's own message is what its judge reads.
+      if (block.decision === 'denied') {
+        const label = frame.agentId ? this.taskDescriptions.get(frame.agentId)?.description : ''
+        this.blockedCalls.record(
+          frame.toolUseId,
+          {
+            toolName: msg.tool_name ?? 'tool',
+            input: this.toolInputOf(frame.toolUseId) ?? {},
+            review: block,
+            ...(label ? { agentLabel: label } : {})
+          },
+          false
+        )
+      }
       return
     }
 

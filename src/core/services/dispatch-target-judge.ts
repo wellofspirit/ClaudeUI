@@ -27,7 +27,8 @@ import type {
   ClaudePermissions,
   EngineConfig,
   EngineModelGroup,
-  SharedAutoModeConfig
+  SharedAutoModeConfig,
+  ToolReviewBlock
 } from '../../shared/types'
 import type { ClassifierAction, EnvironmentInfo, JudgeTransport } from '../automode/classifier'
 import {
@@ -67,6 +68,7 @@ import {
   type SessionJudgeOptions
 } from '../automode/session-judge'
 import { inTimeOrder } from '../automode/trajectory'
+import { blockGrantKey, type BlockedCallLedger } from '../automode/blocked-calls'
 import { loadSharedAutoModeConfig } from './ui-config'
 
 // The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
@@ -90,6 +92,12 @@ export interface DispatchTargetJudgeOptions {
   messages: () => ChatMessage[]
   /** The dispatching session's still-queued user turns (ADR-091 §4), read live; omitted → none. */
   queuedTurns?: () => ChatMessage[]
+  /**
+   * `entry.ctx.blockedCalls` — the dispatching session's grants (ADR-091 part
+   * 6), read live: an approved block of this exact call clears it once,
+   * before the judge. Omitted / undefined → no grants.
+   */
+  blockedCalls?: () => BlockedCallLedger | undefined
   /** The target's own assistant trajectory (see {@link recordTrajectoryMessage}), read live. */
   trajectory: () => Iterable<ChatMessage>
   /** `{ type: 'dispatch:<engine>', description?, prompt }`, read live (the latest dispatch prompt). */
@@ -189,6 +197,12 @@ export class DispatchTargetJudge {
       denials: this.denials,
       twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
       sendReview: (id, review) => this.sendReview(id, review),
+      consumeGrant: (toolName, input) =>
+        this.opts
+          .blockedCalls?.()
+          ?.consumeGrant(
+            blockGrantKey(this.opts.engine, toolName, input, this.opts.cwd, call.honoursWorkdir)
+          ) ?? false,
       ...(call.stillPending ? { stillPending: call.stillPending } : {})
     })
   }
@@ -330,17 +344,16 @@ export class DispatchTargetJudge {
    * tool id: the reducer searches every subagent bucket for it, so it lands on
    * the TaskCard's inner card (`attachToToolUse`).
    */
-  private sendReview(toolUseId: string, review: JudgePipelineReview): void {
-    if (!toolUseId) return
+  private sendReview(toolUseId: string, review: JudgePipelineReview): ToolReviewBlock | undefined {
+    if (!toolUseId) return undefined
     const reviewId = uuid()
-    this.opts.emit()('session:tool-review', {
-      toolUseId,
-      review:
-        review === 'read-only'
-          ? readOnlyReviewBlock(toolUseId, reviewId)
-          : 'allowRule' in review
-            ? allowRuleReviewBlock(toolUseId, reviewId, review.allowRule)
-            : autoModeReviewBlock(toolUseId, reviewId, review)
-    })
+    const block =
+      review === 'read-only'
+        ? readOnlyReviewBlock(toolUseId, reviewId)
+        : 'allowRule' in review
+          ? allowRuleReviewBlock(toolUseId, reviewId, review.allowRule)
+          : autoModeReviewBlock(toolUseId, reviewId, review)
+    this.opts.emit()('session:tool-review', { toolUseId, review: block })
+    return block
   }
 }

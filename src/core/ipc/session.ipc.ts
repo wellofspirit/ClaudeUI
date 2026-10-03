@@ -138,7 +138,8 @@ import {
   deleteProject,
   codexDeletePlanFor,
   clearConversation,
-  judgeModelSupport
+  judgeModelSupport,
+  approveBlocked
 } from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
@@ -329,6 +330,7 @@ const SESSION_IPC_CHANNELS = [
   'session:cancel',
   'session:interrupt',
   'session:approval-response',
+  'session:approve-blocked',
   'session:watch-background',
   'session:unwatch-background',
   'session:read-background-range',
@@ -622,6 +624,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
+  })
+
+  // ADR-091 part 6 — gated exactly like the approval it extends: a `chat`
+  // command on the session it names.
+  handleIpc({
+    channel: 'session:approve-blocked',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, toolUseId: string) => approveBlocked(manager, routingId, toolUseId)
   })
 
   handleIpc({

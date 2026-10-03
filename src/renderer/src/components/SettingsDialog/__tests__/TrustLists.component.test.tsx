@@ -21,6 +21,8 @@
  *      never shows an entry that is not on disk
  *  10. The read-only bypass switch (ADR-084 §1) sits above the lists, is ON when
  *      the key is absent, and saves only an explicit `false`
+ *  11. The block hold window (ADR-091 part 6) sits beside it: No hold when
+ *      absent, saves the chosen seconds, and No hold as an absent key
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
@@ -143,6 +145,7 @@ describe('TrustListsSection — judge guidance rows (ADR-083 §4)', () => {
       .map((el) => el.getAttribute('data-testid'))
     expect(rows).toEqual([
       'TrustListsSection.readOnlyBypass',
+      'TrustListsSection.blockHold',
       'TrustListsSection.trustedDomains',
       'TrustListsSection.trustedRegistries',
       'TrustListsSection.protectedPatterns',
@@ -259,6 +262,58 @@ describe('TrustListsSection — read-only bypass switch (ADR-084 §1)', () => {
     addItem('trustedDomains', 'files.acme.com')
 
     expect(saved[0].readOnlyBypass).toBe(false)
+  })
+})
+
+describe('TrustListsSection — the block hold window (ADR-091 part 6)', () => {
+  const SELECT = 'TrustListsSection.blockHold.select'
+  const choose = (value: string): void => {
+    fireEvent.click(screen.getByTestId(`${SELECT}.trigger`))
+    const option = screen
+      .getAllByTestId(`${SELECT}.option`)
+      .find((o) => o.getAttribute('data-id') === value)
+    if (!option) throw new Error(`no option ${value}`)
+    fireEvent.click(option)
+  }
+
+  it('renders with its label and help, reading No hold when the key is absent', async () => {
+    await renderLoaded()
+    const row = screen.getByTestId('TrustListsSection.blockHold')
+    expect(row.textContent).toContain('Hold blocked actions for')
+    expect(row.textContent).toContain(
+      'No hold: a blocked action is denied at once and the agent carries on; approve it afterwards from the blocked summary.'
+    )
+    expect(screen.getByTestId(SELECT).getAttribute('data-value')).toBe('0')
+    expect(screen.getByTestId(`${SELECT}.trigger`).textContent).toContain('No hold')
+    fireEvent.click(screen.getByTestId(`${SELECT}.trigger`))
+    expect(
+      screen
+        .getAllByTestId(`${SELECT}.option`)
+        .map((o) => [o.getAttribute('data-id'), o.textContent])
+    ).toEqual([
+      ['0', 'No hold'],
+      ['30', '30 s'],
+      ['60', '1 min'],
+      ['120', '2 min'],
+      ['300', '5 min']
+    ])
+  })
+
+  it('saves the chosen seconds alongside the lists, and No hold as an absent key', async () => {
+    await renderLoaded()
+    choose('120')
+    expect(saved[0]).toEqual({ ...BASE, blockHoldSeconds: 120 })
+    expect(screen.getByTestId(SELECT).getAttribute('data-value')).toBe('120')
+    choose('0')
+    expect('blockHoldSeconds' in saved[1]).toBe(false)
+  })
+
+  it('shows a hand-edited value that is not on the menu', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({ ...structuredClone(BASE), blockHoldSeconds: 45 }))
+    })
+    await renderLoaded()
+    expect(screen.getByTestId(`${SELECT}.trigger`).textContent).toContain('45 s')
   })
 })
 

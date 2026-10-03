@@ -387,6 +387,34 @@ describe('MessageBubble', () => {
       )
     })
 
+    it('ADR-091 part 6: the overridden copy of an auto-mode block wins — "approved by you", no Approve', () => {
+      const blocked = review('toolu_a', {
+        reviewId: 'rv-1',
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        riskLevel: undefined
+      })
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Bash', { command: 'git push' }, 'toolu_a'),
+          blocked,
+          {
+            ...blocked,
+            reviewId: 'rv-1:approved',
+            overriddenByUser: true,
+            nudgedTo: 'the main agent'
+          }
+        ]
+      })
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
+      expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
+        'Auto mode · blocked · approved by you'
+      )
+      expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    })
+
     it('renders no stray row for the verdict block itself', () => {
       const msg = makeChatMessage({
         role: 'assistant',

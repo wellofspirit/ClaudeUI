@@ -14,6 +14,7 @@
  *   4. onBackgroundTask → backgroundTask IPC
  *   5. onStopTask → stopTask IPC + setTaskStopping
  *   6. onOpenTaskPanel → openTaskPanel store action
+ *   7. onApproveBlocked → session:approve-blocked IPC (ADR-091 part 6)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -130,6 +131,21 @@ describe('ToolCallBlock FC', () => {
       render(React.createElement(ToolCallBlock, props as any))
     })
   }
+
+  it('onApproveBlocked sends session:approve-blocked for this call on the active session (ADR-091 part 6)', async () => {
+    const approveCalls: Array<{ routingId: string; toolUseId: string }> = []
+    app.bridge.ipcMain.handle(
+      'session:approve-blocked',
+      async (_e, routingId: string, toolUseId: string) => {
+        approveCalls.push({ routingId, toolUseId })
+      }
+    )
+    await renderFC({ block: makeToolUseBlock({ toolUseId: 'tu-blocked' }) })
+    await act(async () => {
+      viewProps.onApproveBlocked!()
+    })
+    expect(approveCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-blocked' }])
+  })
 
   it('onApproval allow calls respondApproval IPC and removes pending', async () => {
     const approval = makePendingApproval({ requestId: 'req-1' })

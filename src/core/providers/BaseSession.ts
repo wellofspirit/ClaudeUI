@@ -15,6 +15,11 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
+import {
+  BlockedCallLedger,
+  blockedCallNudge,
+  NUDGED_TO_MAIN_AGENT
+} from '../automode/blocked-calls'
 import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
@@ -85,6 +90,16 @@ export abstract class BaseSession implements ISession {
     this.send('session:queue-changed', { items })
   )
 
+  /**
+   * Auto-mode blocks the user can approve after the fact (ADR-091 part 6),
+   * and the one-shot grants approving them made — this session's, its
+   * children's and its dispatch targets' (`DispatchContext.blockedCalls`).
+   * Memory only: a grant never outlives this object.
+   */
+  readonly blockedCalls = new BlockedCallLedger((toolUseId, review) =>
+    this.send('session:tool-review', { toolUseId, review })
+  )
+
   /** Serializes {@link flushQueuedItems} against overlapping boundary signals. */
   private flushingQueue = false
 
@@ -143,6 +158,22 @@ export abstract class BaseSession implements ISession {
    */
   async askSideQuestion(_question: string): Promise<string | null> {
     return null
+  }
+
+  /**
+   * Approve one auto-mode block after the fact (ADR-091 part 6). The ledger
+   * grants the call's next identical attempt once; the nudge goes to the
+   * nearest live agent on the path from the blocked agent up (the engine
+   * family's `deliver`), else to this session's own agent — returned as the
+   * `prompt` the caller sends through the composer's path, so it queues behind
+   * a busy turn. The review is then marked with where the nudge went.
+   */
+  approveBlocked(toolUseId: string): { prompt: string | null } | undefined {
+    const call = this.blockedCalls.approve(toolUseId)
+    if (!call) return undefined
+    const deliveredTo = call.deliver?.(call) ?? null
+    this.blockedCalls.markApproved(toolUseId, call.review, deliveredTo ?? NUDGED_TO_MAIN_AGENT)
+    return { prompt: deliveredTo ? null : blockedCallNudge(call) }
   }
 
   setInactivityTimeout(ms: number): void {

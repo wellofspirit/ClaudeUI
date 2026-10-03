@@ -76,7 +76,14 @@ import { editClearsAgentControl } from '../opencode/agent-control-gate'
 // ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
 // automode pipeline + the judge transport), no session class.
 import { DispatchTargetJudge } from './dispatch-target-judge'
-import { armBlockHold } from '../automode/block-hold'
+import { armBlockHold, blockHoldMs } from '../automode/block-hold'
+import {
+  blockApprovalNotice,
+  blockedCallDelivery,
+  blockGrantKey,
+  type BlockedCall,
+  type BlockedCallLedger
+} from '../automode/blocked-calls'
 import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
 import type { JudgeTransport } from '../automode/classifier'
 import type { SessionJudgeOptions } from '../automode/session-judge'
@@ -194,7 +201,8 @@ import type {
   EngineId,
   FileDiff,
   PendingApproval,
-  PermissionSuggestion
+  PermissionSuggestion,
+  ToolReviewBlock
 } from '../../shared/types'
 
 /**
@@ -250,6 +258,14 @@ export interface DispatchContext {
    * like `addDispatchedCost`; every production caller sets it.
    */
   getQueuedUserTurns?: () => ChatMessage[]
+  /**
+   * The DISPATCHING session's approvable blocks and grants
+   * (`BaseSession.blockedCalls`, ADR-091 part 6): a pi/opencode target's judge
+   * block is recorded there, so the user approves it from the dispatching
+   * chat, and that session's grants clear the target's next identical call.
+   * Optional like `getQueuedUserTurns`; every production caller sets it.
+   */
+  blockedCalls?: BlockedCallLedger
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
   emit: (channel: string, data: unknown) => void
   /**
@@ -1431,12 +1447,72 @@ interface ForwardedBlockHold {
   /** The target-side call id the outcome annotates (the judged `toolUseId`). */
   toolUseId: string
   judge: DispatchTargetJudge
+  /** The dispatching session's ledger the block is recorded in (ADR-091 part 6). */
+  ledger?: BlockedCallLedger
   cancel: () => void
 }
 
 type PendingForwardedApproval = (
   OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
 ) & { hold?: ForwardedBlockHold }
+
+/**
+ * A pi/opencode target's judge block that stands — Keep blocked, its expiry,
+ * or no hold at all (ADR-091 §3 / part 6): the block is annotated on the
+ * target's outcomes (post-block consent inheritance), never as a human
+ * refusal, and the judge's own deny text is what the target's model reads —
+ * returned for the caller's reply.
+ */
+function keepTargetBlock(judge: DispatchTargetJudge, toolUseId: string, reason: string): string {
+  judge.recordOutcome(toolUseId, 'automode-blocked')
+  return reason
+}
+
+/**
+ * Record a target's judge block at the DISPATCHING session (ADR-091 part 6),
+ * so the user can approve it from there: the grant clears the target's next
+ * identical call (keyed on the target's cwd), and the nudge goes to the target
+ * itself while it can take one (`deliver`, a pi target in flight), else to the
+ * dispatching agent, told the target's session id so it can dispatch the call
+ * back. No review (the call had no tool block to bind one to) → nothing to
+ * approve from.
+ */
+function recordTargetBlock(
+  ctx: DispatchContext,
+  toolUseId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  review: ToolReviewBlock | undefined,
+  target: {
+    engine: 'pi' | 'opencode'
+    label: string
+    cwd: string
+    sessionId: string | null
+    held: boolean
+    deliver?: (call: BlockedCall) => string | null
+  }
+): void {
+  if (!review || !ctx.blockedCalls) return
+  ctx.blockedCalls.record(
+    toolUseId,
+    {
+      toolName,
+      input,
+      review,
+      grantKey: blockGrantKey(
+        target.engine,
+        toolName,
+        input,
+        target.cwd,
+        target.engine === 'opencode'
+      ),
+      agentLabel: target.label,
+      ...(target.sessionId ? { dispatchSessionId: target.sessionId } : {}),
+      ...(target.deliver ? { deliver: target.deliver } : {})
+    },
+    target.held
+  )
+}
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
@@ -2446,10 +2522,14 @@ export class CrossEngineDispatcher {
     if (pending.hold) {
       const { hold } = pending
       if (decision === 'deny') {
-        hold.judge.recordOutcome(hold.toolUseId, 'automode-blocked')
-        answer = { decision, answers: { feedback: hold.reason } }
+        answer = {
+          decision,
+          answers: { feedback: keepTargetBlock(hold.judge, hold.toolUseId, hold.reason) }
+        }
       } else {
         hold.judge.recordHoldApproved()
+        // The review reads "approved by you" (ADR-091 part 6).
+        hold.ledger?.approveHeld(hold.toolUseId)
         answer = { decision: 'allow', answers: undefined }
       }
     }
@@ -3080,6 +3160,7 @@ export class CrossEngineDispatcher {
         emit: () => entry.ctx.emit,
         messages: () => entry.ctx.getMessages(),
         queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
+        blockedCalls: () => entry.ctx.blockedCalls,
         trajectory: () => entry.trajectory.values(),
         subagent: () => ({
           type: 'dispatch:opencode',
@@ -3636,8 +3717,8 @@ export class CrossEngineDispatcher {
    * never invent one — a wrong id binds the card to the wrong block, which is
    * worse than no inline card at all. `decisionReason` is auto mode's denial-cap
    * sentence when the judge handed the call back (ADR-088), or the judge's deny
-   * text on a held block. `blockReason` makes it a held judge block (ADR-091
-   * §3) — the deny text a kept block answers with; a kept
+   * text on a held block. `block` makes it a held judge block (ADR-091 §3)
+   * — the deny text a kept block answers with, and the hold window; a kept
    * block is annotated on the id the judge was given (`tool.callID`, else the
    * permission id).
    */
@@ -3649,19 +3730,12 @@ export class CrossEngineDispatcher {
     patterns: string[] | undefined,
     tool: { messageID?: string; callID?: string } | undefined,
     decisionReason?: string,
-    blockReason?: string
+    block?: { reason: string; ms: number }
   ): void {
     const requestId = XENG_REQUEST_PREFIX + id
-    const held =
-      blockReason !== undefined
-        ? this.armForwardedHold(
-            requestId,
-            entry.ctx.emit,
-            entry.judge,
-            tool?.callID ?? id,
-            blockReason
-          )
-        : null
+    const held = block
+      ? this.armForwardedHold(requestId, entry.ctx, entry.judge, tool?.callID ?? id, block)
+      : null
     const approval: PendingApproval = {
       requestId,
       ...(tool?.callID ? { toolUseId: tool.callID } : {}),
@@ -3783,7 +3857,24 @@ export class CrossEngineDispatcher {
       case 'allow':
         reply('once')
         return
-      case 'hold':
+      case 'hold': {
+        // ADR-091 part 6 — recorded at the dispatching session; with no hold
+        // window it is kept at once, through the Keep blocked path.
+        const toolUseId = tool?.callID ?? id
+        const ms = blockHoldMs()
+        // An opencode target takes no delivery: the nudge goes to the
+        // dispatching agent.
+        recordTargetBlock(entry.ctx, toolUseId, permission, input, outcome.review, {
+          engine: 'opencode',
+          label: entry.model,
+          cwd: entry.cwd,
+          sessionId: entry.sessionId,
+          held: ms > 0
+        })
+        if (ms === 0) {
+          reply('reject', keepTargetBlock(entry.judge, toolUseId, outcome.reason))
+          return
+        }
         this.forwardOpencodeTargetAsk(
           entry,
           id,
@@ -3792,9 +3883,13 @@ export class CrossEngineDispatcher {
           patterns,
           tool,
           outcome.reason,
-          outcome.reason
+          {
+            reason: outcome.reason,
+            ms
+          }
         )
         return
+      }
       case 'human':
         this.forwardOpencodeTargetAsk(
           entry,
@@ -4746,29 +4841,40 @@ export class CrossEngineDispatcher {
     const pending = this.pendingApprovals.get(requestId)
     if (!pending) return undefined
     this.pendingApprovals.delete(requestId)
-    pending.hold?.cancel()
+    if (pending.hold) {
+      pending.hold.cancel()
+      // Approvable after the fact from here on (ADR-091 part 6).
+      pending.hold.ledger?.settle(pending.hold.toolUseId)
+    }
     return pending
   }
 
   /**
-   * Arm a forwarded card's held-block expiry (ADR-091 §3): unanswered, it
-   * resolves exactly as a Keep blocked click — through `resolveApproval` — and
-   * the card is withdrawn. Returns the pending entry's `hold` and the card's
-   * `autoModeBlock`.
+   * Arm a forwarded card's held-block expiry (ADR-091 §3), `block.ms` away:
+   * unanswered, it resolves exactly as a Keep blocked click — through
+   * `resolveApproval` — and the card is withdrawn. Returns the pending entry's
+   * `hold` and the card's `autoModeBlock`.
    */
   private armForwardedHold(
     requestId: string,
-    emit: (channel: string, data: unknown) => void,
+    ctx: DispatchContext,
     judge: DispatchTargetJudge,
     toolUseId: string,
-    reason: string
+    block: { reason: string; ms: number }
   ): { hold: ForwardedBlockHold; autoModeBlock: { expiresAt: number } } {
+    const { emit } = ctx
     const timer = armBlockHold(() => {
       this.resolveApproval(requestId, 'deny')
       emit('session:approval-dismiss', { requestId })
-    })
+    }, block.ms)
     return {
-      hold: { reason, toolUseId, judge, cancel: timer.cancel },
+      hold: {
+        reason: block.reason,
+        toolUseId,
+        judge,
+        ...(ctx.blockedCalls ? { ledger: ctx.blockedCalls } : {}),
+        cancel: timer.cancel
+      },
       autoModeBlock: { expiresAt: timer.expiresAt }
     }
   }
@@ -5291,6 +5397,7 @@ export class CrossEngineDispatcher {
       emit: () => entry.ctx.emit,
       messages: () => entry.ctx.getMessages(),
       queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
+      blockedCalls: () => entry.ctx.blockedCalls,
       trajectory: () => entry.runner.trajectory.values(),
       subagent: () => ({ type: 'dispatch:pi', description: entry.model, prompt: entry.lastPrompt }),
       loadEngineConfig: this.deps.loadEngineConfig,
@@ -5429,8 +5536,36 @@ export class CrossEngineDispatcher {
     switch (outcome.kind) {
       case 'allow':
         return { behavior: 'allow' }
-      case 'hold':
-        return this.forwardPiTargetAsk(entry, payload, outcome.reason, outcome.reason)
+      case 'hold': {
+        // ADR-091 part 6 — recorded at the dispatching session; with no hold
+        // window it is kept at once, through the Keep blocked path.
+        const ms = blockHoldMs()
+        recordTargetBlock(
+          entry.ctx,
+          payload.toolCallId,
+          payload.toolName,
+          payload.input,
+          outcome.review,
+          {
+            engine: 'pi',
+            label: entry.model,
+            cwd: entry.cwd,
+            sessionId: entry.sessionId,
+            held: ms > 0,
+            deliver: (call) => this.deliverToPiTarget(entry, call)
+          }
+        )
+        if (ms === 0) {
+          return {
+            behavior: 'deny',
+            reason: keepTargetBlock(entry.judge, payload.toolCallId, outcome.reason)
+          }
+        }
+        return this.forwardPiTargetAsk(entry, payload, outcome.reason, {
+          reason: outcome.reason,
+          ms
+        })
+      }
       case 'human':
         return this.forwardPiTargetAsk(entry, payload, outcome.reason)
       case 'settled':
@@ -5439,30 +5574,62 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * ADR-091 part 6 — the user approved one of a pi target's blocked calls
+   * after the fact. While that dispatch is still in flight the target takes
+   * the nudge itself, through its runner's `/cui-deliver` (the pi child
+   * delivery path), at its next tool round; returns who took it. Null once
+   * the dispatch finished (or is stopping): the dispatching agent is nudged
+   * instead, and can dispatch the call back with the same session id.
+   */
+  private deliverToPiTarget(entry: PiTargetEntry, call: BlockedCall): string | null {
+    if (
+      !entry.busy ||
+      entry.runner.draining ||
+      entry.sessionId === null ||
+      this.targets.get(entry.sessionId) !== entry
+    ) {
+      return null
+    }
+    const deliveryId = uuidv4()
+    logger.info(
+      'CrossEngineDispatcher',
+      `pi target: block approval ${deliveryId} → ${entry.sessionId}`
+    )
+    void entry.runner.deliver({
+      v: 1,
+      deliveryId,
+      kind: 'agent-message',
+      text: blockApprovalNotice(blockedCallDelivery(call, true)),
+      wake: true,
+      title: 'Message from you',
+      details: {
+        agentId: entry.sessionId,
+        toolUseId: entry.ctx.toolUseId ?? '',
+        from: 'user',
+        fromId: 'user'
+      }
+    })
+    return `"${entry.model}"`
+  }
+
+  /**
    * A pi target's ask to the human: a card on the DISPATCHING session, mirrors
    * awaitClaudeTargetApproval. `decisionReason` is auto mode's denial-cap
    * sentence when the judge handed the call back (ADR-088), or the judge's deny
-   * text on a held block; `blockReason` makes it a held judge block (ADR-091
-   * §3) — the deny text a kept block answers with.
+   * text on a held block; `block` makes it a held judge block (ADR-091 §3) —
+   * the deny text a kept block answers with, and the hold window.
    */
   private forwardPiTargetAsk(
     entry: PiTargetEntry,
     payload: PiToolCallPayload,
     decisionReason?: string,
-    blockReason?: string
+    block?: { reason: string; ms: number }
   ): Promise<GateDecision> {
     return new Promise((resolve) => {
       const requestId = XENG_REQUEST_PREFIX + uuidv4()
-      const held =
-        blockReason !== undefined
-          ? this.armForwardedHold(
-              requestId,
-              entry.ctx.emit,
-              entry.judge,
-              payload.toolCallId,
-              blockReason
-            )
-          : null
+      const held = block
+        ? this.armForwardedHold(requestId, entry.ctx, entry.judge, payload.toolCallId, block)
+        : null
       const approval: PendingApproval = {
         requestId,
         toolUseId: payload.toolCallId,

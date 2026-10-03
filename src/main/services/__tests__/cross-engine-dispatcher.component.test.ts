@@ -107,7 +107,12 @@ import type {
   EngineId,
   PendingApproval
 } from '../../../shared/types'
-import { AUTO_MODE_BLOCK_HOLD_MS } from '../../../core/automode/block-hold'
+import { loadSharedAutoModeConfig } from '../../../core/services/ui-config'
+import { BlockedCallLedger } from '../../../core/automode/blocked-calls'
+import type { ToolReviewBlock } from '../../../shared/types'
+
+/** The hold window the ADR-091 §3 held-card tests run under (`blockHoldSeconds: 120`). */
+const HOLD_MS = 120_000
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
@@ -10157,6 +10162,15 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
+  // ADR-091 part 6: no hold unless `blockHoldSeconds` says so. These suites
+  // were written for the held card, so they run with a 2-minute window; the
+  // part 6 suites below set their own.
+  beforeEach(() => {
+    vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: HOLD_MS / 1000 })
+  })
+  afterEach(() => {
+    vi.mocked(loadSharedAutoModeConfig).mockReturnValue({})
+  })
   /** Enough turns of the event loop for the pipeline's awaits to settle. */
   const flush = async (): Promise<void> => {
     for (let i = 0; i < 8; i++) await tick()
@@ -10187,7 +10201,12 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
 
   describe('opencode target', () => {
     async function start(
-      opts: { rules?: MergedClaudeRules; autoMode?: EngineConfig['autoMode']; prompt?: string } = {}
+      opts: {
+        rules?: MergedClaudeRules
+        autoMode?: EngineConfig['autoMode']
+        prompt?: string
+        blockedCalls?: BlockedCallLedger
+      } = {}
     ) {
       const judge = makeScriptedJudge()
       const h = makeHarness({
@@ -10200,7 +10219,8 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
       const ctx = makeCtx({
         toolUseId: 'toolu_oc_auto',
         getAutonomyMode: () => mode,
-        getMessages: () => PARENT
+        getMessages: () => PARENT,
+        ...(opts.blockedCalls ? { blockedCalls: opts.blockedCalls } : {})
       })
       const pending = h.dispatcher.dispatch(
         { engine: 'opencode', prompt: opts.prompt ?? 'remove the build dir' },
@@ -10318,9 +10338,7 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
           toolUseId: 'call-rm',
           agent: { agentId: 'oc-sess-1', subagentType: 'dispatch:opencode' }
         })
-        expect(card.autoModeBlock!.expiresAt).toBeGreaterThan(
-          Date.now() + AUTO_MODE_BLOCK_HOLD_MS - 10_000
-        )
+        expect(card.autoModeBlock!.expiresAt).toBeGreaterThan(Date.now() + HOLD_MS - 10_000)
         await t.finish()
       })
 
@@ -10369,7 +10387,7 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
         try {
           const card = await heldCard(t)
-          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS - 1)
+          await vi.advanceTimersByTimeAsync(HOLD_MS - 1)
           expect(t.client.replyPermission).not.toHaveBeenCalled()
           await vi.advanceTimersByTimeAsync(1)
           expect(t.client.replyPermission).toHaveBeenCalledWith(
@@ -10391,7 +10409,7 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
           const card = await heldCard(t)
           t.dispatcher.disposeFor('routing-1')
           expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
-          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          await vi.advanceTimersByTimeAsync(HOLD_MS)
           expect(
             t.client.replyPermission.mock.calls.filter((c) => c[0] === 'perm-rm')
           ).toHaveLength(0)
@@ -10399,6 +10417,59 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         } finally {
           vi.useRealTimers()
         }
+      })
+    })
+
+    describe('ADR-091 part 6: no hold, and approve-after-block', () => {
+      beforeEach(() => {
+        vi.mocked(loadSharedAutoModeConfig).mockReturnValue({})
+      })
+      function ledger(): { l: BlockedCallLedger; sent: ToolReviewBlock[] } {
+        const sent: ToolReviewBlock[] = []
+        return { l: new BlockedCallLedger((_id, review) => sent.push(review)), sent }
+      }
+
+      it('no hold: rejected at once with the judge text, no card; recorded at the dispatching session', async () => {
+        const { l } = ledger()
+        const t = await start({ blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>wipes the build</reason>')
+        t.ask(RM)
+        await flush()
+        expect(t.client.replyPermission).toHaveBeenCalledWith(
+          'perm-rm',
+          'reject',
+          'Auto mode blocked: wipes the build'
+        )
+        expect(approvals(t.ctx)).toHaveLength(0)
+        const call = l.approve('call-rm')!
+        expect(call).toMatchObject({ agentLabel: 'openai/gpt-5', dispatchSessionId: 'oc-sess-1' })
+        // An opencode target takes no delivery: the dispatching agent is nudged.
+        expect(call.deliver).toBeUndefined()
+
+        // The grant clears the target's identical retry, once, with no judge call.
+        t.ask({ ...RM, id: 'perm-rm-2', tool: { messageID: 'msg-2', callID: 'call-rm-2' } })
+        await flush()
+        expect(t.client.replyPermission).toHaveBeenCalledWith('perm-rm-2', 'once')
+        expect(t.judge.requests).toHaveLength(1)
+        t.ask({ ...RM, id: 'perm-rm-3', tool: { messageID: 'msg-3', callID: 'call-rm-3' } })
+        await flush()
+        expect(t.judge.requests).toHaveLength(2)
+        await t.finish()
+      })
+
+      it('a held card settles into an approvable block; Approve anyway marks the review', async () => {
+        vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: 120 })
+        const { l, sent } = ledger()
+        const t = await start({ blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>wipes the build</reason>')
+        t.ask(RM)
+        await flush()
+        const card = (approvals(t.ctx) as PendingApproval[]).at(-1)!
+        expect(l.approve('call-rm')).toBeUndefined()
+        t.dispatcher.resolveApproval(card.requestId, 'allow')
+        expect(sent.at(-1)).toMatchObject({ overriddenByUser: true })
+        expect(l.approve('call-rm')).toBeUndefined()
+        await t.finish()
       })
     })
 
@@ -10616,7 +10687,10 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
   })
 
   describe('pi target', () => {
-    async function start(autoMode: EngineConfig['autoMode'] = {}) {
+    async function start(
+      autoMode: EngineConfig['autoMode'] = {},
+      extra: Partial<DispatchContext> = {}
+    ) {
       const target = makeFakePiTarget()
       const judge = makeScriptedJudge()
       const { dispatcher } = makeHarness({
@@ -10629,7 +10703,8 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         fromEngine: 'claude',
         toolUseId: 'toolu_pi_auto',
         getAutonomyMode: () => mode,
-        getMessages: () => PARENT
+        getMessages: () => PARENT,
+        ...extra
       })
       const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'remove the build dir' }, ctx)
       await tick()
@@ -10722,7 +10797,7 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
         try {
           const { decision, card } = await hold(t, 'pi-timeout')
-          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          await vi.advanceTimersByTimeAsync(HOLD_MS)
           expect(await decision).toEqual({
             behavior: 'deny',
             reason: 'Auto mode blocked: destroys data'
@@ -10744,12 +10819,60 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
           await vi.advanceTimersByTimeAsync(10_000)
           expect(await decision).toEqual({ behavior: 'deny', reason: 'User denied' })
           expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
-          await vi.advanceTimersByTimeAsync(AUTO_MODE_BLOCK_HOLD_MS)
+          await vi.advanceTimersByTimeAsync(HOLD_MS)
           expect(dismissals(t.ctx)).toHaveLength(1)
         } finally {
           vi.useRealTimers()
         }
         t.target.pushEvent(PI_AGENT_SETTLED)
+      })
+    })
+
+    describe('ADR-091 part 6: no hold, and approve-after-block', () => {
+      beforeEach(() => {
+        vi.mocked(loadSharedAutoModeConfig).mockReturnValue({})
+      })
+      const delivered = (t: Awaited<ReturnType<typeof start>>): string[] =>
+        t.target.client.request.mock.calls
+          .map((c) => c[0] as { type: string; message?: string })
+          .filter((c) => c.type === 'prompt' && String(c.message).startsWith('/cui-deliver '))
+          .map((c) =>
+            Buffer.from(String(c.message).slice('/cui-deliver '.length), 'base64').toString('utf8')
+          )
+
+      it('no hold: denied at once; approving while the dispatch runs nudges the TARGET, and its retry spends the grant', async () => {
+        const l = new BlockedCallLedger(() => {})
+        const t = await start({}, { blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+        expect(await t.gate('pi-b1', 'bash', { command: 'rm -rf y' })).toEqual({
+          behavior: 'deny',
+          reason: 'Auto mode blocked: destroys data'
+        })
+        expect(approvals(t.ctx)).toHaveLength(0)
+        const call = l.approve('pi-b1')!
+        expect(call.deliver!(call)).toBe('"openai-codex/gpt-5.6-luna"')
+        await flush()
+        expect(delivered(t)).toHaveLength(1)
+        expect(delivered(t)[0]).toContain(
+          '[ClaudeUI] The user approved your blocked bash call: rm -rf y.'
+        )
+        expect(await t.gate('pi-b2', 'bash', { command: 'rm -rf y' })).toEqual({
+          behavior: 'allow'
+        })
+        expect(t.judge.requests).toHaveLength(1)
+        await t.finish()
+      })
+
+      it('once the dispatch finished, the target takes no delivery — the dispatching agent is nudged', async () => {
+        const l = new BlockedCallLedger(() => {})
+        const t = await start({}, { blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+        await t.gate('pi-f1', 'bash', { command: 'rm -rf y' })
+        await t.finish()
+        const call = l.approve('pi-f1')!
+        expect(call.deliver!(call)).toBeNull()
+        expect(delivered(t)).toHaveLength(0)
+        expect(call.dispatchSessionId).toBe('pi-target-1')
       })
     })
 

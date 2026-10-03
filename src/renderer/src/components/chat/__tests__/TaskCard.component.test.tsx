@@ -18,7 +18,11 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
-import type { ContentBlock, PermissionDenialBlock } from '../../../../../shared/types'
+import type {
+  ContentBlock,
+  PermissionDenialBlock,
+  ToolReviewBlock
+} from '../../../../../shared/types'
 
 vi.mock('../MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
@@ -820,6 +824,121 @@ describe('TaskCard — a permission denial of the task call', () => {
     expect(screen.queryByTestId('TaskCard.denialChip')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
     expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A judge-blocked delegation (ADR-091 part 6 — the commonest subagent block)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — an auto-mode review of the task call', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const blocked: ToolReviewBlock = {
+    type: 'tool_review',
+    toolUseId: 'call_task_1',
+    reviewId: 'r1',
+    reviewer: 'auto-mode',
+    decision: 'denied',
+    rule: 'Git Destructive',
+    rationale: 'This delegates deleting three remote branches.'
+  }
+  const blockedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Auto mode blocked: Git Destructive: …',
+    isError: true
+  }
+
+  it('shows the chip with a compact Approve, and the strip with Approve once expanded', async () => {
+    const calls: Array<[string, string]> = []
+    app.bridge.ipcMain.handle(
+      'session:approve-blocked',
+      async (_e, routingId: string, toolUseId: string) => {
+        calls.push([routingId, toolUseId])
+      }
+    )
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={blocked}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toHaveTextContent('Auto mode · blocked')
+    expect(screen.getByTestId('ToolReview.approveCompact')).toBeInTheDocument()
+    // ToolCard's ids are not borrowed.
+    expect(screen.queryByTestId('ToolCard.reviewChip')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('TaskCard.review')).toHaveTextContent(
+      'This delegates deleting three remote branches.'
+    )
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ToolReview.approve'))
+    })
+    expect(calls).toEqual([[ROUTE, 'call_task_1']])
+  })
+
+  it('reads "approved by you" with no button once the host marks it', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={{
+          ...blocked,
+          reviewId: 'r1:approved',
+          overriddenByUser: true,
+          nudgedTo: 'the main agent'
+        }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toHaveTextContent('approved by you')
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('ToolReview.nudgedTo')).toHaveTextContent('Sent to the main agent')
+    expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+  })
+
+  it('offers no Approve on an allowed review or in a historical session', () => {
+    const { unmount } = render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={{ ...blocked, decision: 'approved' }}
+      />
+    )
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    unmount()
+    useSessionStore.setState((state) => ({
+      sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={blocked}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toBeInTheDocument()
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
   })
 })
 

@@ -25,7 +25,8 @@
  *
  * Stage order: fast path → read-only gate (on `inputFor('read-only')` when
  * given, else `action.input`) + settled check → allow-rule gate (+ settled
- * check before its review) → `inputFor('judge')` → judge available → ground
+ * check before its review) → `inputFor('judge')` → the user's one-shot grant
+ * (ADR-091 part 6) → judge available → ground
  * truth + classify (on the judged input) → settled → G10 → verdict, caps,
  * review → on a throw: settled, else the human. `inputFor` exists for engines
  * whose ask can precede its tool input (opencode, ADR-084 §1 / ADR-085 §3);
@@ -36,7 +37,7 @@
  * Log line texts are byte-identical to what the two sessions logged before the
  * extraction; `logSource` is the only variable.
  */
-import type { ChatMessage, ClaudePermissions } from '../../shared/types'
+import type { ChatMessage, ClaudePermissions, ToolReviewBlock } from '../../shared/types'
 import { logger } from '../services/logger'
 import {
   classify,
@@ -111,7 +112,16 @@ export interface JudgePipelineHooks {
    */
   denials: AutoModeDenialTracker
   twoStageMode: () => 'both' | 'fast' | 'thinking'
-  sendReview: (toolUseId: string, review: JudgePipelineReview) => void
+  /** Returns the block it sent, when it sent one — a held block's outcome carries it. */
+  sendReview: (toolUseId: string, review: JudgePipelineReview) => ToolReviewBlock | void
+  /**
+   * ADR-091 part 6 — spend the user's one-shot grant for this exact call, made
+   * by approving an earlier block of it (`blocked-calls.ts`). Asked on the
+   * judged input, after the static paths and before the judge: true → allowed
+   * with no judge call. The caller's deny/ask rules ran before the pipeline,
+   * so they still win. Omitted → no grants.
+   */
+  consumeGrant?: (toolName: string, input: Record<string, unknown>) => boolean
   /**
    * Checked after every await (the read-only gate, the judge call, a thrown
    * error) and once more after an allow-rule allow, before its review. `false`
@@ -143,13 +153,15 @@ export type JudgePipelineOutcome =
   /**
    * The judge blocked and no denial cap tripped (ADR-091 §3): the caller holds
    * the call on its human path as an auto-mode block — Keep blocked / Approve
-   * anyway, resolved as Keep blocked after `AUTO_MODE_BLOCK_HOLD_MS`. `reason` =
+   * anyway, resolved as Keep blocked when the hold window passes. `reason` =
    * `formatAutoModeDenyReason(result)`, the model-visible deny text a kept
    * block answers with. The review is already sent and the block counted
    * (`recordBlock`); the CALLER records `automode-blocked` when the hold
-   * resolves as kept, and `recordAllow()` when it is approved.
+   * resolves as kept, and `recordAllow()` when it is approved. Whether it
+   * holds at all is the caller's (`blockHoldMs()`, ADR-091 part 6: 0 → kept
+   * at once). `review` is the block's review, as sent.
    */
-  | { kind: 'hold'; reason: string }
+  | { kind: 'hold'; reason: string; review?: ToolReviewBlock }
   /** `reason` = the denial cap's sentence → `PendingApproval.decisionReason`. */
   | { kind: 'human'; reason?: string }
   | { kind: 'settled' }
@@ -229,6 +241,18 @@ export async function runJudgePipeline(
   if (judged === 'settled') return SETTLED
   const judgeInput = judged ?? input
 
+  // ADR-091 part 6 — the user approved an earlier block of this exact call.
+  // Spent here, before the judge-model check: the user's word needs no judge.
+  // The streak the block counted resets, as an approval anyway resets it.
+  if (hooks.consumeGrant?.(toolName, judgeInput)) {
+    logger.info(
+      hooks.logSource,
+      `auto-mode: ${toolName} allowed by the user's approval of its block`
+    )
+    hooks.denials.recordAllow()
+    return ALLOW
+  }
+
   // A configured judge model that no longer exists fails CLOSED — never judged
   // by a stand-in. Checked after the static paths so a stale judge does not
   // start prompting for reads.
@@ -301,8 +325,12 @@ export async function runJudgePipeline(
       // the card the hold raises. No `automode-blocked` yet: the caller
       // annotates the call (post-block consent inheritance) only once the
       // hold resolves as kept — an approved call ran, and was never refused.
-      hooks.sendReview(toolUseId, result)
-      return { kind: 'hold', reason: formatAutoModeDenyReason(result) }
+      const review = hooks.sendReview(toolUseId, result)
+      return {
+        kind: 'hold',
+        reason: formatAutoModeDenyReason(result),
+        ...(review ? { review } : {})
+      }
     }
 
     hooks.denials.recordAllow()

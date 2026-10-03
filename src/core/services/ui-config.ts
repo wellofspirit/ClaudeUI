@@ -309,7 +309,8 @@ export function loadSharedAutoModeConfig(): import('../../shared/types').SharedA
 /**
  * Replaces the shared trust and guidance lists and the read-only bypass switch.
  * An empty list is written as an ABSENT key, and so is `readOnlyBypass: true`
- * (the default): only an explicit `false` is stored. The object is REBUILT from
+ * (the default): only an explicit `false` is stored. `blockHoldSeconds` is
+ * clamped to whole seconds in [0, 600], and 0 (the default) is absent too. The object is REBUILT from
  * the known keys rather than spread, so a key missing from
  * {@link SHARED_AUTOMODE_LIST_KEYS} (or not handled below) is dropped on save —
  * which is why the guidance lists have to be named there.
@@ -328,7 +329,23 @@ export function saveSharedAutoModeConfig(
   // Boolean only: anything else (a hand-edited "false" string) is not an
   // opt-out and is dropped, leaving the bypass at its default.
   if (config.readOnlyBypass === false) next.readOnlyBypass = false
+  // ADR-091 part 6 — the default (0, no hold) is the absent key.
+  const holdSeconds = normalizeBlockHoldSeconds(config.blockHoldSeconds)
+  if (holdSeconds > 0) next.blockHoldSeconds = holdSeconds
   writeJson(SHARED_AUTOMODE_FILE, next)
+}
+
+/** The longest a judge block may hold for the user (ADR-091 part 6). */
+export const BLOCK_HOLD_MAX_SECONDS = 600
+
+/**
+ * `SharedAutoModeConfig.blockHoldSeconds` as the hold uses it: whole seconds in
+ * [0, {@link BLOCK_HOLD_MAX_SECONDS}]. Anything that is not a finite number —
+ * an absent key, a hand-edited string — is 0, the default: no hold.
+ */
+export function normalizeBlockHoldSeconds(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.min(BLOCK_HOLD_MAX_SECONDS, Math.max(0, Math.round(value)))
 }
 
 export function loadSettings(): UISettings {

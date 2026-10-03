@@ -164,6 +164,21 @@ export type ToolReviewBlock = {
   /** ClaudeUI's judge only — the corpus rule name behind a block. */
   rule?: string
   rationale?: string
+  /**
+   * ADR-091 part 6 — the user overrode this auto-mode BLOCK: Approve anyway on
+   * its held card, or Approve on the blocked review afterwards. The host
+   * re-sends the review with this set (a new `reviewId`, so the reducer's
+   * last-one-wins shows it and it replicates like any review); the card then
+   * reads "approved by you" and offers no Approve. Never set by Codex.
+   */
+  overriddenByUser?: true
+  /**
+   * With {@link overriddenByUser} after an after-the-fact Approve: who the
+   * host sent the "run it again" nudge to, as the card says it — "the main
+   * agent", or a live subagent's quoted label. Absent after Approve anyway (the
+   * held call simply ran).
+   */
+  nudgedTo?: string
 }
 
 /**
@@ -1138,6 +1153,14 @@ export interface SharedAutoModeConfig {
    * the default and "on" are one encoding, as for the lists above.
    */
   readOnlyBypass?: boolean
+  /**
+   * ADR-091 part 6: how long a judge block holds for the user (Keep blocked /
+   * Approve anyway) before it resolves as Keep blocked, in whole seconds,
+   * clamped to [0, 600]. 0 — the default, stored as an ABSENT key — holds
+   * nothing: the block is denied at once and the user can approve it
+   * afterwards from the blocked review. Read live when a block arrives.
+   */
+  blockHoldSeconds?: number
 }
 
 export interface VendorConfig {
@@ -1570,6 +1593,13 @@ interface SessionAPI {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): Promise<void>
+  /**
+   * Approve an auto-mode block after the fact (ADR-091 part 6): the host grants
+   * the next identical call once (pi, opencode, their dispatch targets), marks
+   * the review approved, and sends the agent a user prompt to run it again.
+   * An unknown or already-approved `toolUseId` is a no-op.
+   */
+  approveBlocked(routingId: string, toolUseId: string): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>

@@ -18,7 +18,8 @@ import type {
   ApprovalDecision,
   PermissionSuggestion,
   PendingApproval,
-  StatusLineData
+  StatusLineData,
+  ToolReviewBlock
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
@@ -109,7 +110,8 @@ import {
 import { effectiveShellCwd } from '../automode/read-only-gate'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { runJudgePipeline } from '../automode/judge-pipeline'
-import { armBlockHold } from '../automode/block-hold'
+import { armBlockHold, blockHoldMs } from '../automode/block-hold'
+import { blockGrantKey, type BlockedCall } from '../automode/blocked-calls'
 import { inTimeOrder } from '../automode/trajectory'
 import {
   analyzeRedirects,
@@ -184,8 +186,11 @@ function allowRuleActionFor(
 type AutoModeOutcome =
   | { kind: 'decided'; decision: GateDecision }
   | { kind: 'human'; reason?: string }
-  /** A judge block held for the user (ADR-091 §3); `reason` is the model-visible deny text. */
-  | { kind: 'hold'; reason: string }
+  /**
+   * A judge block held for the user (ADR-091 §3); `reason` is the model-visible
+   * deny text, `review` the block's review as sent.
+   */
+  | { kind: 'hold'; reason: string; review?: ToolReviewBlock }
 
 /** The reasonless handoff — no cap fired, the card just asks as usual. */
 const ASK_HUMAN: AutoModeOutcome = { kind: 'human' }
@@ -2063,7 +2068,7 @@ export class PiSession extends BaseSession {
     if (autoMode) {
       const auto = await this.classifyAutoMode(payload, verdict, scope)
       if (auto.kind === 'decided') return auto.decision
-      if (auto.kind === 'hold') return this.askHuman(payload, auto.reason, scope, auto.reason)
+      if (auto.kind === 'hold') return this.holdBlock(payload, auto, scope)
       return this.askHuman(payload, auto.reason, scope)
     }
 
@@ -2090,28 +2095,28 @@ export class PiSession extends BaseSession {
    * (the judge's deny text: the review strip sits on the tool card, which a
    * floating approval may not be next to).
    *
-   * `blockReason` makes the card a held auto-mode block (ADR-091 §3): Keep
+   * `block` makes the card a held auto-mode block (ADR-091 §3): Keep
    * blocked / Approve anyway, no "always allow" suggestions (an override of
-   * one call, never a standing rule), and an expiry that resolves it exactly
-   * as a Keep blocked click — through `resolveApproval` — and withdraws the
-   * card. `blockReason` is the judge's deny text a kept block answers with.
+   * one call, never a standing rule), and an expiry `block.ms` away that
+   * resolves it exactly as a Keep blocked click — through `resolveApproval` —
+   * and withdraws the card. `block.reason` is the judge's deny text a kept
+   * block answers with.
    */
   private askHuman(
     payload: PiToolCallPayload,
     decisionReason?: string,
     scope: PiChildScope | null = null,
-    blockReason?: string
+    block?: { reason: string; ms: number }
   ): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
       const requestId = uuid()
-      const timer =
-        blockReason !== undefined
-          ? armBlockHold(() => {
-              this.resolveApproval(requestId, 'deny')
-              this.send('session:approval-dismiss', { requestId })
-            })
-          : null
+      const timer = block
+        ? armBlockHold(() => {
+            this.resolveApproval(requestId, 'deny')
+            this.send('session:approval-dismiss', { requestId })
+          }, block.ms)
+        : null
       // A child's card (ADR-089) is raised under THIS session with the
       // child's own call id: it renders floating and on the nested card.
       this.pendingGates.set(requestId, {
@@ -2121,10 +2126,10 @@ export class PiSession extends BaseSession {
         toolCallId,
         outcomes: scope ? scope.outcomes : this.toolOutcomes,
         scope,
-        ...(timer
+        ...(timer && block
           ? {
               hold: {
-                reason: blockReason!,
+                reason: block.reason,
                 denials: scope ? scope.denials : this.autoDenials,
                 cancel: timer.cancel
               }
@@ -2156,15 +2161,76 @@ export class PiSession extends BaseSession {
   }
 
   /**
+   * A judge block (ADR-091 §3). Recorded first, so the user can approve it
+   * after the fact (ADR-091 part 6) — a child's block at this, the ROOT,
+   * session, routed to the nearest live agent from that child up
+   * (`deliverBlockApproval`), else to this session's agent. Then the user's live
+   * hold window decides: above zero, the held card ({@link askHuman}); zero,
+   * kept at once through {@link keepBlocked}, the path a Keep blocked click
+   * and the expiry take.
+   */
+  private holdBlock(
+    payload: PiToolCallPayload,
+    block: { reason: string; review?: ToolReviewBlock },
+    scope: PiChildScope | null
+  ): Promise<GateDecision> | GateDecision {
+    const { toolCallId, toolName, input } = payload
+    const ms = blockHoldMs()
+    if (block.review) {
+      this.blockedCalls.record(
+        toolCallId,
+        {
+          toolName,
+          input,
+          review: block.review,
+          // Children run in this session's cwd (pi's bash has no workdir).
+          grantKey: blockGrantKey('pi', toolName, input, this.cwd),
+          ...(scope
+            ? {
+                agentLabel: scope.label,
+                deliver: (call: BlockedCall) =>
+                  this.subagents.deliverBlockApproval(scope.toolUseId, call)
+              }
+            : {})
+        },
+        ms > 0
+      )
+    }
+    if (ms === 0) {
+      return this.keepBlocked(scope ? scope.outcomes : this.toolOutcomes, toolCallId, block.reason)
+    }
+    return this.askHuman(payload, block.reason, scope, { reason: block.reason, ms })
+  }
+
+  /**
+   * A judge block that stands — Keep blocked, its expiry, or no hold at all
+   * (ADR-091 §3 / part 6): the model reads the judge's own text, and the call
+   * is annotated as THIS monitor's block (post-block consent inheritance), not
+   * as a human refusal.
+   */
+  private keepBlocked(
+    outcomes: Map<string, ToolOutcome>,
+    toolCallId: string,
+    reason: string
+  ): GateDecision {
+    recordToolOutcome(outcomes, toolCallId, 'automode-blocked')
+    return { behavior: 'deny', reason }
+  }
+
+  /**
    * Remove one parked gate, disarming a held block's expiry (ADR-091 §3). The
    * ONE way an entry leaves `pendingGates`, so no resolution path — the human,
-   * an interrupt, abandonment, a stopped child, teardown — leaks a timer.
+   * an interrupt, abandonment, a stopped child, teardown — leaks a timer, and
+   * every one of them leaves the block approvable after the fact (part 6).
    */
   private takePendingGate(requestId: string) {
     const pending = this.pendingGates.get(requestId)
     if (!pending) return undefined
     this.pendingGates.delete(requestId)
-    pending.hold?.cancel()
+    if (pending.hold) {
+      pending.hold.cancel()
+      this.blockedCalls.settle(pending.toolCallId)
+    }
     return pending
   }
 
@@ -2402,15 +2468,13 @@ export class PiSession extends BaseSession {
     // allow, no persisted rule.
     if (pending.hold) {
       if (decision === 'deny') {
-        // The judge's refusal stands: the model reads the judge's own text,
-        // and the call is annotated as THIS monitor's block (post-block
-        // consent inheritance), not as a human refusal.
-        recordToolOutcome(pending.outcomes, pending.toolCallId, 'automode-blocked')
-        pending.resolve({ behavior: 'deny', reason: pending.hold.reason })
+        pending.resolve(this.keepBlocked(pending.outcomes, pending.toolCallId, pending.hold.reason))
       } else {
-        // The user overrode the block: the streak it counted resets, and the
-        // call reports its own ok/error outcome when it runs.
+        // The user overrode the block: the streak it counted resets, the
+        // review reads "approved by you", and the call reports its own
+        // ok/error outcome when it runs.
         pending.hold.denials.recordAllow()
+        this.blockedCalls.approveHeld(pending.toolCallId)
         pending.resolve({ behavior: 'allow' })
       }
       return
@@ -2779,6 +2843,10 @@ export class PiSession extends BaseSession {
         denials: this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         sendReview: (id, review) => this.sendToolReview(id, review),
+        // ADR-091 part 6 — the user approved an earlier block of this exact
+        // call (by any agent of this session): allowed once, no judge call.
+        consumeGrant: (name, args) =>
+          this.blockedCalls.consumeGrant(blockGrantKey('pi', name, args, this.cwd)),
         ...childHooks
       }
     )
@@ -2786,7 +2854,7 @@ export class PiSession extends BaseSession {
       case 'allow':
         return decided({ behavior: 'allow' })
       case 'hold':
-        return { kind: 'hold', reason: outcome.reason }
+        return { kind: 'hold', reason: outcome.reason, review: outcome.review }
       case 'human':
         return outcome.reason ? { kind: 'human', reason: outcome.reason } : ASK_HUMAN
       case 'settled':
@@ -2819,17 +2887,16 @@ export class PiSession extends BaseSession {
   private sendToolReview(
     toolCallId: string,
     result: ClassifyResult | 'read-only' | { allowRule: string }
-  ): void {
+  ): ToolReviewBlock {
     const reviewId = uuid()
-    this.send('session:tool-review', {
-      toolUseId: toolCallId,
-      review:
-        result === 'read-only'
-          ? readOnlyReviewBlock(toolCallId, reviewId)
-          : 'allowRule' in result
-            ? allowRuleReviewBlock(toolCallId, reviewId, result.allowRule)
-            : autoModeReviewBlock(toolCallId, reviewId, result)
-    })
+    const review =
+      result === 'read-only'
+        ? readOnlyReviewBlock(toolCallId, reviewId)
+        : 'allowRule' in result
+          ? allowRuleReviewBlock(toolCallId, reviewId, result.allowRule)
+          : autoModeReviewBlock(toolCallId, reviewId, result)
+    this.send('session:tool-review', { toolUseId: toolCallId, review })
+    return review
   }
 
   // ── Hosted tools + cross-engine dispatch (M4a+b) ─────────────────────────────
@@ -2971,6 +3038,7 @@ export class PiSession extends BaseSession {
       getAutonomyMode: () => this.getAutonomyMode(),
       getMessages: () => this.messageHistory,
       getQueuedUserTurns: () => this.queuedUserTurns(),
+      blockedCalls: this.blockedCalls,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),

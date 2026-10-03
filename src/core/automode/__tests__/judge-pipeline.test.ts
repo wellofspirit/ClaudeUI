@@ -92,6 +92,48 @@ describe('runJudgePipeline', () => {
     expect(sendReview).toHaveBeenCalledWith('call-1', expect.objectContaining({ block: true }))
   })
 
+  it('block: the hold carries the review the caller sent (ADR-091 part 6)', async () => {
+    const review = {
+      type: 'tool_review' as const,
+      toolUseId: 'call-1',
+      reviewId: 'r',
+      reviewer: 'auto-mode' as const,
+      decision: 'denied' as const
+    }
+    const { hooks } = setup({ sendReview: vi.fn(() => review) }, ['<block>yes</block>'])
+    expect(await runJudgePipeline(bash, hooks)).toMatchObject({ kind: 'hold', review })
+  })
+
+  it("ADR-091 part 6: the user's grant allows on the JUDGED input before the judge-model check, and resets the streak", async () => {
+    const judged = { command: 'rm -rf JUDGED' }
+    const judgeAvailable = vi.fn(() => true)
+    const consumeGrant = vi.fn(() => true)
+    const { hooks, judge, sendReview } = setup({
+      inputFor: async (stage) => (stage === 'judge' ? judged : null),
+      judgeAvailable,
+      consumeGrant
+    })
+    const allow = vi.spyOn(hooks.denials, 'recordAllow')
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'allow' })
+    expect(consumeGrant).toHaveBeenCalledWith('bash', judged)
+    expect(judgeAvailable).not.toHaveBeenCalled()
+    expect(judge).not.toHaveBeenCalled()
+    expect(sendReview).not.toHaveBeenCalled()
+    expect(allow).toHaveBeenCalledTimes(1)
+  })
+
+  it('ADR-091 part 6: no grant → judged as usual; the read-only gate still runs first', async () => {
+    mockReadOnlyGate.mockResolvedValue({ allow: true })
+    const consumeGrant = vi.fn(() => true)
+    const { hooks } = setup({ consumeGrant })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'allow' })
+    expect(consumeGrant).not.toHaveBeenCalled()
+    mockReadOnlyGate.mockResolvedValue({ allow: false, reason: 'not-read-only' })
+    const { hooks: h2, judge } = setup({ consumeGrant: () => false }, ['<block>no</block>'])
+    expect(await runJudgePipeline(bash, h2)).toEqual({ kind: 'allow' })
+    expect(judge).toHaveBeenCalledTimes(1)
+  })
+
   it('the third block in a row hands over to the human with the cap sentence, no review', async () => {
     const { hooks, sendReview } = setup({}, [
       '<block>yes</block>',

@@ -120,6 +120,7 @@ function renderToolBlock(
         view={view}
         approval={approval}
         denial={decision?.type === 'permission_denial' ? decision : undefined}
+        review={decision?.type === 'tool_review' ? decision : undefined}
       />
     )
   }
