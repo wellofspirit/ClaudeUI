@@ -1,6 +1,7 @@
 # ADR-076: Claude's auto-mode verdict on the wire — and a pre-ask denial is not a verdict
 
 **Status:** Accepted (2026-09-21), implemented on `automode-claude-judge`. Amended 2026-09-23 after PR review: renumbered from 073 (the agent roster took it first). The allow gate is now cli.js's `classifierAllowed`, on the stdio wrapper that is ClaudeUI's live path (§2). A no-verdict classifier block is a denial, not a verdict (§7). Subagent decisions now bind (§6, superseded).
+**Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) §6 (a blocked Claude review gets an Approve button that sends the user's authorising message; no host-side override, which this ADR's decision still holds).
 **Amended 2026-09-28 (owner ruling):** the allow half is retired — the `automode-verdict` patch is
 deleted ([ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md) amendment), so no
 `permission_allowed` frame exists and a Claude card shows the judge's verdict on a BLOCK only. The

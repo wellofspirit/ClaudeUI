@@ -141,10 +141,64 @@ Pooled results on the final prompt (old prompt in brackets where it was run):
 The source-trust cases (#2, N5) stay noisy under every wording tried. They rest on judge knowledge;
 the hold card (part 3) is their backstop.
 
+### 6. Amendment (2026-10-03): the hold is optional; approve after the block
+
+Part 3 held every block for two minutes. That fits a watched session, but an unattended run pays the
+delay on every block, and an override only existed while the card was up.
+
+- **`blockHoldSeconds`** (shared auto-mode config, Settings; 0–600 s) sets the hold.
+  - **Default 0, no hold:** a block is denied at once, exactly as Keep blocked would be, and the
+    agent carries on.
+  - **Above 0:** the part 3 held card, with that timeout.
+- **Approve after the fact.** The blocked review strip (reviewer `auto-mode`, decision `denied`, live
+  session, not yet approved) carries an **Approve** button. A click does two things:
+  1. It records a **one-shot, exact-match grant**. The next identical call by any agent of the root
+     session (the parent, a child, a dispatch target) runs before the judge, and the grant is
+     consumed. User deny/ask rules still win (ADR-085). The grant covers HARD blocks too: like
+     Approve anyway, it is the user's direct review. It is never persisted and never matches a
+     different input.
+  2. It sends a **nudge**: an ordinary user prompt ("I approve the … call auto mode blocked: …. Run
+     it again exactly as it was."), queued if the agent is busy. If the blocked call came from a pi
+     child that is still running, the nudge goes to that child.
+
+  The grant is the authority and the message is only the trigger. If the agent alters the call, the
+  grant does not match, and the judge sees the user's own message naming the command, which is
+  Path A consent.
+
+- **Subagents.** The button also shows in a subagent's own view, and the click must reach the right
+  agent.
+  - **One grant store, owned by the root session.** The root's own gate, every pi child at any depth,
+    opencode task children and pi/opencode dispatch targets (through `DispatchContext`) all consult
+    it.
+  - **The key includes the call's effective working directory.** The same command in a child's
+    worktree is a different action.
+  - **Lifetime:** one-shot, with a 15-minute TTL from the click, so a grant nobody uses cannot skip
+    the judge much later.
+  - **The nudge goes to the nearest agent, from the blocked one up to the root, that is still
+    running:**
+
+    | Where the block came from              | The nudge goes to                                                                                                                                          |
+    | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+    | A running pi child or grandchild       | That agent. Delivered as a `[ClaudeUI]` note, which is never a `User:` line; the grant, not the note, is the authority.                                    |
+    | A finished pi child (not auto-resumed) | Its live parent, else the root, as a user prompt naming the subagent. The parent may re-run the call or `send_message` the child; the grant serves either. |
+    | An opencode task child                 | The root's prompt queue                                                                                                                                    |
+    | A dispatch target still in flight      | The target, if its runner takes deliveries                                                                                                                 |
+    | A dispatch target that has finished    | The dispatching agent                                                                                                                                      |
+    | A Claude subagent                      | The main Claude agent (message only)                                                                                                                       |
+
+  - **Feedback where you clicked.** The review records the override and where the nudge went
+    ("approved by you · Sent to the main agent"). A second click on another surface showing the same
+    call does nothing.
+- **Claude** gets the button, message only. cli.js owns that judge, so no grant is possible; its own
+  classifier decides the retry. This narrows ADR-076's "considered and not built" to "no host-side
+  override", which still stands. **Codex** keeps its native Approve anyway.
+- After either override (Approve anyway on a held card, or Approve afterwards) the review is marked
+  `overriddenByUser`, and the chip reads "Auto mode · blocked · approved by you".
+
 ## Consequences
 
-- An unattended auto-mode run pauses up to two minutes at each non-capped block. That is the price
-  of a usable override. The constant is the knob if it proves too long.
+- With a hold set (part 6), an unattended run pauses that long at each non-capped block. The default
+  (0) never pauses; the override then lives on the blocked summary.
 - An agent can no longer reword its way around a block while the card is up. The hold also closes
   the window that the Auto-Mode Bypass rule exists to police.
 - The corpus carve-outs (part 2) rely on the judge model recognising a session-booted VM and a
