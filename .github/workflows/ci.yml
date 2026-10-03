@@ -35,81 +35,16 @@ permissions:
   contents: read
 
 jobs:
+  # Typecheck, lint, format and the build gates in one job; the tests run beside
+  # it in `tests`, split three ways. The wall time is the slower of the two
+  # instead of their sum (one serial job took ~9.5 min, ~6 of it tests).
   gates:
-    name: Typecheck, lint, format & tests
+    name: Typecheck, lint, format & build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v7
-        with:
-          # Pinned to 24.15.0 to match the release workflows: Node 24.16.0 ships a
-          # libuv that aborts on Windows when fs.watch() targets a single file,
-          # cascading vitest workers to "failed". Kept identical here for parity.
-          node-version: 24.15.0
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Cache bun install
-        uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Read claude CLI version
-        id: cli-version
-        shell: bash
-        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
-
-      - name: Cache claude CLI source binary
-        uses: actions/cache@v6
-        with:
-          path: .cache/claude-cli
-          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
-
-      - name: Read codex CLI version
-        id: codex-version
-        shell: bash
-        run: echo "version=$(node -p "require('./src/shared/harness-manifests/codex.json').tested")" >> "$GITHUB_OUTPUT"
-
-      # postinstall installs the tested opencode, pi and Codex into ClaudeUI's
-      # managed store (ADR-082 §8). Codex is the large one (two ~100 MB
-      # archives), so its version directory is cached; a restored directory
-      # with a valid install.json satisfies ensure-codex without a download.
-      # No restore-keys: another pin's directory is never this pin's.
-      - name: Cache codex harness
-        uses: actions/cache@v6
-        with:
-          path: ~/.claude/ui/harnesses/codex/${{ steps.codex-version.outputs.version }}
-          key: ${{ runner.os }}-${{ runner.arch }}-codex-harness-${{ steps.codex-version.outputs.version }}
-
-      - name: Cache Electron binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/electron
-            ~/.cache/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-electron-
-
-      # Full install (runs postinstall: install-app-deps + ensure-cli, and
-      # ensure-opencode/pi/codex into the runner's managed store), mirroring the
-      # release workflows. postinstall's ensure-cli also proves the
-      # cli.js patches still APPLY against the pinned claudeCliVersion — a patch
-      # that no longer applies fails the install and turns CI red. (Behavioural
-      # correctness of the applied patches is a separate, live-only concern:
-      # `bun run test:patch` locally, with real Claude credentials — deliberately
-      # not a CI job.)
-      - name: Install dependencies
-        run: bun install
-
-      # bun can leave a Node-ABI better-sqlite3 behind; install-app-deps (run
-      # again explicitly, idempotent) rebuilds native modules for the Electron ABI.
-      - name: Rebuild native modules
-        run: bun run rebuild:native
+      - uses: ./.github/actions/setup-workspace
 
       - name: Typecheck
         run: bun run typecheck
@@ -120,12 +55,8 @@ jobs:
       - name: Format check
         run: bun run format:check
 
-      - name: Tests (unit + component + e2e + git)
-        run: bun run test:ci
-
-      # Typecheck already ran above, so this is the raw bundler pass the release
-      # workflows' "Build app" step runs — not `bun run build`, which would
-      # typecheck a second time.
+      # The raw bundler pass the release workflows' "Build app" step runs. Not
+      # `bun run build`: that also rebuilds the CLI, which install already did.
       - name: Build (electron + web)
         run: |
           bunx electron-vite build
@@ -139,3 +70,21 @@ jobs:
           bun run build:server
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
+
+  tests:
+    name: Tests (shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    strategy:
+      # Every shard reports: a failure in one must not cancel the others and
+      # hide their results.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-workspace
+
+      # unit + unit-node + component + e2e + git, split by file across shards.
+      - name: Tests (unit + component + e2e + git)
+        run: bun run test:ci --shard=${{ matrix.shard }}/3
