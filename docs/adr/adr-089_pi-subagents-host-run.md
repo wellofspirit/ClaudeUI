@@ -1,6 +1,7 @@
 # ADR-089: pi subagents are host-run, gated by the parent, through an `agent` tool
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
+**Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a child's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
 **Supersedes:** [ADR-035](adr-035_pi-engine-backend.md)'s M5b in-pi subagent extension
 (`pi-subagent-source.ts`).
 **Relates to:** [ADR-035](adr-035_pi-engine-backend.md) (the pi backend and its bridge),

@@ -1,6 +1,7 @@
 # ADR-088: Dispatch targets inherit auto mode, live, and are judged
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
+**Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a target's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
 auto mode is no longer allow-all, and its mode is no longer fixed at creation).
 **Relates to:** [ADR-081](adr-081_claudeui-owned-judge-transport.md) (the judge transport),
