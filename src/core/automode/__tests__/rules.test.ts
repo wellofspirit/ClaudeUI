@@ -119,10 +119,12 @@ describe('ADR-091 — session-provisioned targets and delegated credentials', ()
 
   it('the HARD rule soft-lands a user-typed credential delegated to a harness engine', () => {
     const hard = HARD_RULES[0].text
-    expect(hard).toContain('a credential the USER typed into this conversation')
+    expect(hard).toContain('a credential the USER typed into this conversation themselves')
     expect(hard).toContain('routes to the SOFT rule "Credential Leakage"')
-    // The carve-out is provenance-bound, not consent-bound: consent still never clears it.
-    expect(hard).toContain('Credentials the agent obtained itself')
+    // The carve-out is provenance-bound, not consent-bound, and provenance is
+    // checked FIRST: an agent-obtained credential never reaches the destination test.
+    expect(hard).toContain('decided by PROVENANCE FIRST')
+    expect(hard).toContain('If the credential is one the agent obtained itself')
     expect(hard).toContain('NOTHING clears a hard block')
     expect(deriveCategorySet().has('credential_leakage')).toBe(true)
   })
@@ -138,8 +140,25 @@ describe('ADR-091 — session-provisioned targets and delegated credentials', ()
   })
 
   it("a user-named tool's canonical channel meets Untrusted Code Integration's bar", () => {
-    expect(soft('untrusted_code_integration')).toContain("that project's own canonical channel")
-    expect(soft('untrusted_code_integration')).toContain('look-alike name')
+    const r = soft('untrusted_code_integration')
+    expect(r).toContain("that project's own canonical channel")
+    expect(r).toContain('A tool only the agent has chosen never meets it')
+    // The owner check is transcript-anchored: look-alikes are built to beat recall.
+    expect(r).toContain('a maintainer name the TRANSCRIPT already ties to that tool')
+    expect(r).toContain('Your own recollection of who maintains a tool does not count')
+  })
+
+  it('one evaluation rule makes a session-made guest Local Operations under every rule', () => {
+    const p = buildPolicyPrompt({ cwd: '/repo' })
+    expect(p).toContain('14. SESSION-MADE GUESTS')
+    expect(p).toContain('Permission Grant, Security Weaken, Network Exposure alike')
+    expect(p).toContain('a guest that pre-dates the session is SHARED')
+  })
+
+  it("post-block consent inheritance covers a subagent's retried call", () => {
+    expect(buildPolicyPrompt({ cwd: '/repo' })).toContain(
+      "This holds for a subagent's blocked call too"
+    )
   })
 })
 

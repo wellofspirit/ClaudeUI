@@ -680,6 +680,24 @@ const REMOTE_OR_METADATA =
   /\b(?:ssh|scp|sftp|paramiko|fabric|Invoke-Command|Enter-PSSession|New-PSSession)\b|\bkubectl\s+(?:exec|cp|debug|port-forward|attach)\b|\bdocker\s+(?:exec|cp)\b|\brsync\b[^\n|;&]*\S+:|169\.254\.169\.254|metadata\.google\.internal|fd00:ec2::254/i
 
 /**
+ * Tools whose input is a payload handed to ANOTHER agent (policy rule 7,
+ * DELEGATION PAYLOADS): pi's `agent` / `dispatch_agent` / `send_message` (and
+ * the legacy `subagent`), opencode's `task` / `claudeui_dispatch_agent`. What
+ * makes one safe or not — whose credential the prompt carries, where the
+ * delegate sends it — is exactly the provenance call a one-shot harm grade gets
+ * wrong (ADR-091: live judge evals showed stage 1 clearing agent-read keys in a
+ * dispatch prompt ~1 in 8, where stage 2 never did).
+ */
+const DELEGATION_TOOLS: ReadonlySet<string> = new Set([
+  'agent',
+  'dispatch_agent',
+  'send_message',
+  'subagent',
+  'task',
+  'claudeui_dispatch_agent'
+])
+
+/**
  * Action shapes that never get a stage-1 grade in `both` mode (ADR-083 §2):
  * they go straight to stage 2.
  *
@@ -690,14 +708,16 @@ const REMOTE_OR_METADATA =
  * {@link needsRepoVisibility} (`reset --hard`, `checkout .`, `clean -f`,
  * `rm -rf`, add/commit/push/stash, remote repoints, `gh pr create`/`merge`,
  * releases), remote execution and the cloud instance-metadata endpoints
- * ({@link REMOTE_OR_METADATA}), and a shell redirect that did not measure as all
- * in scope are always read by the stage that sees intent. The cost is a stage-2 call on
+ * ({@link REMOTE_OR_METADATA}), a shell redirect that did not measure as all
+ * in scope, and a delegation payload ({@link DELEGATION_TOOLS}, ADR-091) are
+ * always read by the stage that sees intent. The cost is a stage-2 call on
  * every commit; the benefit is that no destructive shape can clear on a guess.
  *
  * A redirect meta line that is present but malformed counts as not in scope:
  * only a measured `allInScope: true` spares the full review.
  */
 export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'actionMeta'>): boolean {
+  if (DELEGATION_TOOLS.has(input.action.toolName)) return true
   const command = shellCommandOf(input.action.toolName, input.action.input)
   if (command !== null && (needsGitStatus(command) || needsRepoVisibility(command))) return true
   if (command !== null && REMOTE_OR_METADATA.test(command)) return true

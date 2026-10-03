@@ -591,6 +591,20 @@ describe('requiresFullReview (ADR-083 §2)', () => {
   const bash = (command: string, actionMeta?: Record<string, unknown>): boolean =>
     requiresFullReview({ action: { toolName: 'bash', input: { command } }, actionMeta })
 
+  it('sends every delegation payload to stage 2 (ADR-091)', () => {
+    for (const toolName of [
+      'agent',
+      'dispatch_agent',
+      'send_message',
+      'subagent',
+      'task',
+      'claudeui_dispatch_agent'
+    ]) {
+      expect(requiresFullReview({ action: { toolName, input: { prompt: 'hi' } } })).toBe(true)
+    }
+    expect(requiresFullReview({ action: { toolName: 'read', input: { path: 'a' } } })).toBe(false)
+  })
+
   it('flags the destructive and shipping shapes ground truth singles out', () => {
     expect(bash('git reset --hard')).toBe(true)
     expect(bash('git checkout -- .')).toBe(true)
