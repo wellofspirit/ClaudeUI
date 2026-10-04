@@ -1362,7 +1362,7 @@ describe('PiSession.interrupt — propagates into an in-flight dispatch_agent tu
 })
 
 describe('PiSession.cancel', () => {
-  it('disposes the client AND the bridge host, and returns state to idle', async () => {
+  it('disposes the client AND the bridge host, and reports disconnected', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-8', win as never, '/cwd', {})
     await session.run('hi')
@@ -1371,8 +1371,23 @@ describe('PiSession.cancel', () => {
 
     expect(mockDispose).toHaveBeenCalledTimes(1)
     expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
-    expect(session.status.state).toBe('idle')
+    // 'disconnected' is what clears the renderer's sdkActive — 'idle' would
+    // leave the session looking live after a Disconnect / idle timeout.
+    expect(session.status.state).toBe('disconnected')
+    const statuses = sentPayloads(win, 'session:status') as Array<{ state: string }>
+    expect(statuses[statuses.length - 1].state).toBe('disconnected')
     expect(session.willQueue).toBe(false)
+  })
+
+  it('a run() after cancel() respawns and is no longer disconnected', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-8b', win as never, '/cwd', {})
+    await session.run('hi')
+    session.cancel()
+
+    await session.run('again')
+
+    expect(session.status.state).not.toBe('disconnected')
   })
 
   it('denies any pending gate instead of leaving it hanging forever', async () => {

@@ -1717,7 +1717,12 @@ export class PiSession extends BaseSession {
     this._cancelled = true
     this.isProcessing = false
     this.wakePending = false
-    this.disconnected = false
+    // A deliberate teardown (Disconnect, idle timeout) is a disconnect as far as
+    // the renderer is concerned: 'disconnected' is the only status that clears
+    // `sdkActive` (sync reducer, ADR-045). Reporting 'idle' left the sidebar
+    // dot green and the Disconnect item offered for a dead process. Mirrors
+    // ClaudeSession/OpencodeSession.cancel(); doStart() clears it on respawn.
+    this.disconnected = true
     this.endUserStop()
     this.rejectAllPendingGates('Interrupted')
     this.subagents.stopAll('dispose')
