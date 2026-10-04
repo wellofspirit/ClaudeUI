@@ -238,6 +238,8 @@ vi.mock('../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   invalidatePiModelCache: vi.fn(),
+  // Boot subscribes it to the sync funnel (core-services.ts).
+  onPiCatalogRecovered: vi.fn(() => () => {}),
   resolvePiSpawnModel: vi.fn(async (m?: string) => m),
   getPiModelCatalog: vi.fn(async () => []),
   effortLevelsFromModel: vi.fn(() => [])

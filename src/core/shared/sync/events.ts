@@ -344,6 +344,14 @@ export interface SyncEventMap {
   /** A managed install's progress (ADR-082 §4), at most four a second per install. */
   'harness:install-progress': (progress: HarnessInstallProgress) => void
   /**
+   * An engine's model catalog became available after main had answered a
+   * client with a degraded empty one (today: pi's probe failed, or boot's
+   * invalidations kept killing it, and a later probe filled it). A nudge:
+   * `session:get-engine-models` is the shape, and a client reloads its models.
+   * Never fired by a warm-cache read, so that reload cannot loop.
+   */
+  'engine:models-changed': (data: { engineId: EngineId }) => void
+  /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
    * credential is good now", so every auth surface invented its own clear

@@ -1066,6 +1066,21 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
+  describe('engine:models-changed', () => {
+    it('reloads every model list (the nonce) and re-reads the provider registry', async () => {
+      // Main answered a degraded [] for pi earlier (a failed boot probe); the
+      // composer's model pill only re-reads models off this nonce.
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { listProviderRegistry })
+      const before = useSessionStore.getState().modelReloadNonce
+
+      app.emit('engine:models-changed', { engineId: 'pi' })
+
+      expect(useSessionStore.getState().modelReloadNonce).toBe(before + 1)
+      await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
+    })
+  })
+
   describe('usage:block-data', () => {
     it('stores block usage data', () => {
       const blockData: BlockUsageData = {

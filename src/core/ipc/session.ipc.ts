@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { discoverCodexModels } from '../codex/model-discovery'
 import { codexCommands, CODEX_CHANNELS } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as path from 'path'
@@ -81,7 +80,6 @@ import type {
   ClaudePermissions
 } from '../../shared/types'
 import {
-  discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -90,7 +88,8 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
+import { getPiModelCatalogGroups } from '../pi/model-discovery'
+import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
@@ -844,34 +843,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<EngineModelGroup[]> => {
-      // Claude models as a flat group. supportedModels() returns bare ModelInfo
-      // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
-      // pick to the 'claude' engine. Without this, picking a Claude model while on
-      // an opencode session leaves engineId undefined and the pick is mis-recorded
-      // under the session's current engine (e.g. "opencode/default").
-      const claudeModels = (await fetchModels().catch(() => [])).map((m) => ({
-        ...m,
-        engineId: 'claude' as const,
-        vendorId: 'anthropic'
-      }))
-      const claudeGroup: EngineModelGroup = {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: claudeModels
-      }
-      // opencode models — returns [] if binary not present or discovery fails
-      const opencodeGroups = await discoverOpencodeModels()
-      // pi models — returns [] if binary not present, no auth configured, or discovery fails
-      const piGroups = await discoverPiModels()
-      return [
-        claudeGroup,
-        ...opencodeGroups,
-        ...piGroups,
-        ...(await discoverCodexModels().catch(() => []))
-      ]
-    }
+    // Concurrent across engines, shared with the remote twin (engine-models.ts).
+    handler: (): Promise<EngineModelGroup[]> => listEngineModels(fetchModels)
   })
 
   // Which judge-picker values ClaudeUI can call for the auto-mode judge

@@ -10,7 +10,7 @@
  * Each probe is its own fake client whose answer the test releases, so the
  * interleavings are explicit rather than timing-dependent.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 interface FakeProbe {
   answer: (models: unknown[]) => void
@@ -76,10 +76,22 @@ const ids = (models: Array<{ id: string }>): string[] => models.map((m) => m.id)
 /** Let every queued microtask (probe bodies, `.finally`s) run. */
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
+let previous: { cancelPiRecoveryProbeForTests: () => void } | null = null
+
 async function importFresh() {
+  // A failure or an exhausted retry arms a background re-probe; the instance
+  // being discarded must not spawn it into a later test's `probes`.
+  previous?.cancelPiRecoveryProbeForTests()
   vi.resetModules()
-  return import('../model-discovery')
+  const fresh = await import('../model-discovery')
+  previous = fresh
+  return fresh
 }
+
+afterEach(() => {
+  previous?.cancelPiRecoveryProbeForTests()
+  vi.useRealTimers()
+})
 
 beforeEach(() => {
   probes.length = 0
@@ -208,6 +220,61 @@ describe('pi discovery across an invalidation', () => {
     expect(await caller).toEqual([])
     // One probe per generation it tried: the first and two retries.
     expect(probes).toHaveLength(3)
+  })
+
+  it('the [] it gives up with is degraded: a background probe heals it and says so once', async () => {
+    // Boot's shape: credential sync and harness detection invalidate while the
+    // composer's first models read waits, until it gives up with []. Nobody
+    // asks again, so without the re-probe the pill shows a raw model value.
+    vi.useFakeTimers()
+    const d = await importFresh()
+    const recovered = vi.fn()
+    d.onPiCatalogRecovered(recovered)
+    const caller = d.getPiModelCatalog()
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(0)
+      probes[i].dispose.mockImplementation(() => {})
+      d.invalidatePiModelCache()
+      probes[i].answer(OLD)
+    }
+    expect(await caller).toEqual([])
+    expect(probes).toHaveLength(3)
+
+    control.autoAnswer = NEW
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(probes).toHaveLength(4)
+    expect(recovered).toHaveBeenCalledTimes(1)
+    expect(ids(await d.getPiModelCatalog())).toEqual(['gpt-6-sol', 'gpt-6.1-sol'])
+    expect(probes).toHaveLength(4)
+  })
+
+  it('an invalidation kills an in-flight recovery probe, and its late answer is not announced', async () => {
+    vi.useFakeTimers()
+    const d = await importFresh()
+    const recovered = vi.fn()
+    d.onPiCatalogRecovered(recovered)
+    const caller = d.getPiModelCatalog()
+    await vi.advanceTimersByTimeAsync(0)
+    probes[0].fail(new Error('timed out'))
+    expect(await caller).toEqual([])
+
+    // The recovery probe starts, then an invalidation overtakes it.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(probes).toHaveLength(2)
+    probes[1].dispose.mockImplementation(() => {})
+    d.invalidatePiModelCache()
+    expect(probes[1].dispose).toHaveBeenCalled()
+    probes[1].answer(OLD)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(recovered).not.toHaveBeenCalled()
+    expect(d.peekPiCatalogCounts()).toBeNull()
+
+    // The invalidation re-armed it for the new generation, which does recover.
+    control.autoAnswer = NEW
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(probes).toHaveLength(3)
+    expect(recovered).toHaveBeenCalledTimes(1)
+    expect(d.peekPiCatalogCounts()).toEqual({ 'openai-codex': 2 })
   })
 
   it.each([

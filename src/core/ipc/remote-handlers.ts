@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { discoverCodexModels } from '../codex/model-discovery'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as os from 'os'
@@ -24,7 +23,6 @@ import {
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import {
-  discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -33,7 +31,8 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
+import { getPiModelCatalogGroups } from '../pi/model-discovery'
+import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
@@ -640,34 +639,14 @@ export function registerRemoteHandlers(
     handler: async () => claudeSupportedModels()
   })
 
-  // Cross-engine model catalog (Claude + opencode + pi) for the model picker.
-  // Mirrors session.ipc.ts's get-engine-models minus the desktop-only
-  // auth-source reporting side effects.
+  // Cross-engine model catalog (Claude + opencode + pi + Codex) for the model
+  // picker: the same `listEngineModels` as session.ipc.ts's, minus the
+  // desktop-only auth-source reporting side effects of its Claude read.
   handleRemote({
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<EngineModelGroup[]> => {
-      const claudeModels = (await claudeSupportedModels().catch(() => [])).map((m) => ({
-        ...m,
-        engineId: 'claude' as const,
-        vendorId: 'anthropic'
-      }))
-      const claudeGroup: EngineModelGroup = {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: claudeModels
-      }
-      const opencodeGroups = await discoverOpencodeModels()
-      const piGroups = await discoverPiModels()
-      return [
-        claudeGroup,
-        ...opencodeGroups,
-        ...piGroups,
-        ...(await discoverCodexModels().catch(() => []))
-      ]
-    }
+    handler: (): Promise<EngineModelGroup[]> => listEngineModels(claudeSupportedModels)
   })
 
   // Which judge-picker values ClaudeUI can call for the auto-mode judge
