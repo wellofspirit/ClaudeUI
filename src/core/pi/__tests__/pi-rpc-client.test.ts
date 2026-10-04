@@ -6,8 +6,9 @@
  * chunk-split lines, CRLF stripping, id correlation, request timeout, and
  * non-JSON line tolerance (never crashes).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { PI_DISPOSE_GRACE_MS } from '../PiRpcClient'
 
 const { mockSpawn } = vi.hoisted(() => ({ mockSpawn: vi.fn() }))
 
@@ -37,10 +38,16 @@ function makeFakeProc(): any {
   // client can attach an 'error' listener (and tests can emit teardown errors).
   const stdin = new EventEmitter() as EventEmitter & {
     writable: boolean
+    destroyed: boolean
     write: ReturnType<typeof vi.fn>
+    end: ReturnType<typeof vi.fn>
   }
   stdin.writable = true
+  stdin.destroyed = false
   stdin.write = vi.fn()
+  stdin.end = vi.fn(() => {
+    stdin.writable = false
+  })
   proc.stdin = stdin
   proc.pid = 4242
   proc.kill = vi.fn()
@@ -277,35 +284,130 @@ describe('PiRpcClient — dispose / onExit', () => {
     expect(exits).toEqual([[0, null]])
   })
 
-  it('dispose() terminates the process (SIGTERM off-Windows, taskkill tree-kill on Windows)', async () => {
-    const { client, proc } = await startClient()
-    mockSpawn.mockClear() // isolate any taskkill spawn from the initial pi spawn
-    client.dispose()
-    if (process.platform === 'win32') {
-      // Windows: taskkill reaps the whole tree (M-PI3); it fires 'exit' itself.
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'taskkill',
-        ['/pid', String(proc.pid), '/T', '/F'],
-        expect.objectContaining({ stdio: 'ignore' })
-      )
-    } else {
-      expect(proc.kill).toHaveBeenCalledWith('SIGTERM')
-    }
-  })
+  // Graceful-first (pi startup lock leak): a signal during pi's startup kills
+  // it holding proper-lockfile's lock dir on ~/.pi/agent/models-store.json,
+  // stalling every pi started in the next 30s. dispose() closes stdin instead
+  // and only tree-kills a process still alive after the grace.
+  describe('graceful dispose', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
 
-  it('dispose() on Windows tree-kills via taskkill and does NOT pre-empt with proc.kill (M-PI3)', async () => {
-    if (process.platform !== 'win32') return
-    const { client, proc } = await startClient()
-    mockSpawn.mockClear() // isolate the taskkill spawn call from the initial pi spawn
-    client.dispose()
-    expect(mockSpawn).toHaveBeenCalledWith(
-      'taskkill',
-      ['/pid', String(proc.pid), '/T', '/F'],
-      expect.objectContaining({ stdio: 'ignore' })
-    )
-    // The whole point of M-PI3: proc.kill() must NOT run before taskkill (it
-    // would kill the root synchronously and orphan the tree).
-    expect(proc.kill).not.toHaveBeenCalled()
+    /** The kill dispose()'s fallback issues: taskkill /T on Windows (M-PI3), SIGTERM elsewhere. */
+    function killCount(proc: ReturnType<typeof makeFakeProc>): number {
+      if (process.platform !== 'win32') return proc.kill.mock.calls.length
+      return mockSpawn.mock.calls.filter(([cmd]) => cmd === 'taskkill').length
+    }
+
+    it('ends stdin and does NOT signal immediately', async () => {
+      const { client, proc } = await startClient()
+      vi.useFakeTimers()
+      mockSpawn.mockClear() // isolate any taskkill spawn from the initial pi spawn
+      client.dispose()
+      expect(proc.stdin.end).toHaveBeenCalledTimes(1)
+      expect(killCount(proc)).toBe(0)
+      expect(proc.kill).not.toHaveBeenCalled()
+    })
+
+    it('a child that exits within the grace is never killed', async () => {
+      const { client, proc } = await startClient()
+      vi.useFakeTimers()
+      mockSpawn.mockClear()
+      client.dispose()
+      vi.advanceTimersByTime(PI_DISPOSE_GRACE_MS / 2)
+      proc.emit('exit', 0, null)
+      vi.advanceTimersByTime(PI_DISPOSE_GRACE_MS * 2)
+      expect(killCount(proc)).toBe(0)
+      expect(proc.kill).not.toHaveBeenCalled()
+    })
+
+    it('a child still alive after the grace is tree-killed (SIGTERM off-Windows, taskkill on Windows)', async () => {
+      const { client, proc } = await startClient()
+      vi.useFakeTimers()
+      mockSpawn.mockClear()
+      client.dispose()
+      vi.advanceTimersByTime(PI_DISPOSE_GRACE_MS - 1)
+      expect(killCount(proc)).toBe(0)
+      vi.advanceTimersByTime(1)
+      if (process.platform === 'win32') {
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'taskkill',
+          ['/pid', String(proc.pid), '/T', '/F'],
+          expect.objectContaining({ stdio: 'ignore' })
+        )
+        // M-PI3: proc.kill() must NOT pre-empt taskkill (it would kill the
+        // root synchronously and orphan the tree).
+        expect(proc.kill).not.toHaveBeenCalled()
+      } else {
+        expect(proc.kill).toHaveBeenCalledWith('SIGTERM')
+      }
+    })
+
+    it('dispose() twice arms one timer and kills at most once', async () => {
+      const { client, proc } = await startClient()
+      vi.useFakeTimers()
+      mockSpawn.mockClear()
+      client.dispose()
+      client.dispose()
+      expect(proc.stdin.end).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(1)
+      vi.advanceTimersByTime(PI_DISPOSE_GRACE_MS * 3)
+      expect(killCount(proc)).toBe(1)
+    })
+
+    it('dispose() after the process already exited is a no-op', async () => {
+      const { client, proc } = await startClient()
+      proc.emit('exit', 0, null)
+      vi.useFakeTimers()
+      mockSpawn.mockClear()
+      client.dispose()
+      expect(proc.stdin.end).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('rejects pending requests at dispose(), without waiting for the exit', async () => {
+      const { client, proc } = await startClient()
+      const promise = client.request({ type: 'get_available_models' })
+      const id = lastWrittenCommand(proc).id as string
+      client.dispose()
+      await expect(promise).rejects.toThrow(/disposed/)
+      // A response that still makes it out during pi's shutdown changes nothing.
+      expect(() =>
+        proc.stdout.emit(
+          'data',
+          JSON.stringify({ type: 'response', id, command: 'get_available_models', success: true }) +
+            '\n'
+        )
+      ).not.toThrow()
+    })
+
+    it('delivers no events after dispose(), but still reports the exit', async () => {
+      const { client, proc } = await startClient()
+      const events: unknown[] = []
+      const exits: Array<number | null> = []
+      client.onEvent((ev) => events.push(ev))
+      client.onExit((code) => exits.push(code))
+      client.dispose()
+      proc.stdout.emit('data', JSON.stringify({ type: 'agent_end', messages: [] }) + '\n')
+      expect(events).toEqual([])
+      proc.emit('exit', 0, null)
+      expect(exits).toEqual([0])
+    })
+
+    it('request() after dispose() rejects without writing to the closing stdin', async () => {
+      const { client, proc } = await startClient()
+      client.dispose()
+      await expect(client.request({ type: 'get_state' })).rejects.toThrow(/not running/)
+      expect(proc.stdin.write).not.toHaveBeenCalled()
+    })
+
+    it('start() after dispose() refuses rather than spawn an orphan', async () => {
+      const { PiRpcClient } = await import('../PiRpcClient')
+      const client = new PiRpcClient('/fake/pi', { cwd: '/tmp', args: ['--mode', 'rpc'] })
+      client.dispose()
+      await expect(client.start()).rejects.toThrow(/disposed/)
+      expect(mockSpawn).not.toHaveBeenCalled()
+    })
   })
 })
 
