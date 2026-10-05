@@ -28,6 +28,15 @@ export interface CreateSessionArgs {
   resumeSessionAt?: string
   forkSession?: boolean
   engineId?: EngineId
+  /**
+   * The values every replica adopts as this session's own on the birth event.
+   * `effort`: a string = announce the positional spawn effort; `null` = the
+   * client knows the model takes none (clears); absent/`undefined` = the client
+   * does not know the model, announce nothing. `thinkingMode`: the raw pick
+   * (`null` = no pick). Optional because older clients (a cached phone bundle)
+   * omit it, and a WS client's JSON may carry `null` for it or for either field.
+   */
+  announce?: { effort?: string | null; thinkingMode?: string | null }
 }
 
 /**
@@ -57,7 +66,8 @@ export async function prepareAndCreateSession(
     thinkingMode,
     resumeSessionAt,
     forkSession,
-    engineId
+    engineId,
+    announce
   } = args
 
   // engineId ?? 'claude' is the legacy default at the IPC/WS boundary (old callers
@@ -100,17 +110,52 @@ export async function prepareAndCreateSession(
   // this session just spawned with, including the RESOLVED model, so no client
   // has to guess.
   //
-  // `effort` / `thinkingMode` are deliberately NOT announced even though they are
-  // right here in scope: the values that reach this function are already RESOLVED
-  // spawn args (the renderer's `resolveSessionSdkOptions` substitutes the model's
-  // default when the session's own value is `null`), while canonical's `effort` /
-  // `thinkingMode` mean "the user explicitly picked this" — `null` is unset, and
-  // `session:config-changed` only ever announces an accepted explicit pick.
-  // Folding a resolved default in as an explicit one would freeze it: the effort
-  // ladder is `session pick > per-model user default > engine heuristic`, so a
-  // later change to the per-model default would stop reaching this session. Every
-  // client already derives the same display default from `availableModels`, so
-  // there is nothing to replicate here.
+  // `effort` / `thinkingMode` ride the event from `announce`, which only a
+  // current client sends (an old one omits it, `null` over WS JSON): with no
+  // `announce` the event carries NEITHER and every replica leaves its value
+  // alone, exactly as before. With one, the event ALWAYS carries both — a string
+  // or `null` — so a spawn can also CLEAR a value (a model that takes no effort,
+  // a thinking pick that was reset); an absent field could only ever set.
+  //
+  // The announced `effort` is the POSITIONAL `effort` this process is spawned
+  // with, not the value the client put in `announce` — the host announces what
+  // it actually runs, so replicas cannot show a value the process does not have.
+  // `announce.effort === null` is the renderer's "this model takes no effort"
+  // signal and announces `null`; a string only says "announce the spawn effort".
+  // `thinkingMode` is the client's RAW pick (the spawn arg beside it is a
+  // resolved default).
+  //
+  // Canonical `effort` is null only BEFORE a session's first spawn — then the
+  // per-model starting effort applies, and every client derives it from the
+  // replicated `modelEffortDefaults`. At spawn the starting effort becomes the
+  // session's OWN: this event hands it to every replica. Freezing it is the
+  // intent: the per-model value is "Starting effort per model", and the display
+  // must show what the process runs, so a later change to it (another session's
+  // pick rewrites it) affects only sessions that have not started, never one
+  // already running at the old value. The freeze lasts for the HOST RUN:
+  // canonical `effort` is not persisted, so after a host restart a resumed
+  // session re-resolves against the current per-model value — and, as it is
+  // respawned with that value, still shows what its process runs. The same event
+  // covers a Claude pick (a local write plus a respawn, with no setter that
+  // emits `session:config-changed`) and a PRE-spawn session (no live session for
+  // `emitConfigChanged` to reach).
+  // `announce.effort` has three states. A string: announce the positional spawn
+  // effort. `null`: the client KNOWS the model takes no effort, so announce
+  // `null` (clears). Absent / `undefined`: the client does not know the model
+  // (empty or failed catalog), so announce NOTHING and every replica keeps the
+  // effort it has — a `null` here would wipe a pick the process is still running
+  // at. Electron's structured clone keeps an `undefined`-valued key and WS JSON
+  // drops it; `!== undefined` treats both as absent. `thinkingMode` needs no such
+  // state: it is the raw pick, where `null` correctly means "no pick".
+  const announcedConfig =
+    announce != null
+      ? {
+          ...(announce.effort !== undefined
+            ? { effort: typeof announce.effort === 'string' ? (effort ?? null) : null }
+            : {}),
+          thinkingMode: typeof announce.thinkingMode === 'string' ? announce.thinkingMode : null
+        }
+      : {}
   emitEvent('session:created', [
     routingId,
     {
@@ -142,7 +187,8 @@ export async function prepareAndCreateSession(
       // replica just because a caller (e.g. a lazy re-spawn) didn't name one.
       // A real request that got swapped IS announced: converging the picker on
       // what actually spawned is the point.
-      ...(model != null && resolvedModel != null ? { model: resolvedModel } : {})
+      ...(model != null && resolvedModel != null ? { model: resolvedModel } : {}),
+      ...announcedConfig
     }
   ])
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript

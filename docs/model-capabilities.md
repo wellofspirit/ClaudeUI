@@ -59,6 +59,15 @@ A saved **Starting effort per model** (Settings › Models & providers › Defau
 models) overrides this. An alias row saves under the alias's own name, so the
 setting follows the alias to its next model (ADR-074 §8).
 
+The setting is Claude-only and is also **remembered per model**: picking an effort
+in the composer on a Claude model saves it as that model's starting effort (pi and
+opencode models neither read nor write it). The starting effort **freezes into the
+session at spawn**: a session shows, on every client, the effort its process runs,
+and a later change to the per-model value only affects sessions that have not
+started. A model switch on a session that has not started drops its effort so the
+new model's starting effort applies; a running session keeps its effort, coerced to
+what the new model accepts.
+
 ## Capability matrix
 
 Status as of SDK version `2.1.112` (April 2026).

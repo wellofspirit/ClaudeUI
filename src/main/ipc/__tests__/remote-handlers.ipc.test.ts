@@ -1218,7 +1218,8 @@ describe('registerRemoteHandlers', () => {
           null, // thinkingMode
           null, // resumeSessionAt
           null, // forkSession
-          null // engineId
+          null, // engineId
+          null // announce
         ),
         remoteConn
       )
@@ -1233,7 +1234,8 @@ describe('registerRemoteHandlers', () => {
         'thinkingMode',
         'resumeSessionAt',
         'forkSession',
-        'engineId'
+        'engineId',
+        'announce'
       ] as const) {
         expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
       }
@@ -1255,7 +1257,8 @@ describe('registerRemoteHandlers', () => {
           'think',
           'anchor-1',
           false,
-          'opencode'
+          'opencode',
+          { effort: 'xhigh', thinkingMode: null }
         ),
         remoteConn
       )
@@ -1271,7 +1274,8 @@ describe('registerRemoteHandlers', () => {
         resumeSessionAt: 'anchor-1',
         // `false` is a real value, not "unset" — `?? undefined` must not eat it.
         forkSession: false,
-        engineId: 'opencode'
+        engineId: 'opencode',
+        announce: { effort: 'xhigh', thinkingMode: null }
       })
     })
 

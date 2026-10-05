@@ -91,7 +91,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       thinkingMode?,
       resumeSessionAt?,
       forkSession?,
-      engineId?
+      engineId?,
+      announce?
     ) =>
       connection.invoke(
         'session:create',
@@ -104,7 +105,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       ) as Promise<void>,
 
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>

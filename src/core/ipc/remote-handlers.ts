@@ -74,7 +74,7 @@ import { query as sdkQuery } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
 import { remoteVoice } from '../services/remote-voice'
 import {
@@ -387,7 +387,8 @@ export function registerRemoteHandlers(
       thinkingMode?: string | null,
       resumeSessionAt?: string | null,
       forkSession?: boolean | null,
-      engineId?: EngineId | null
+      engineId?: EngineId | null,
+      announce?: CreateSessionArgs['announce'] | null
     ) => {
       // Every optional argument through `opt` — see its doc comment. `effort`
       // is the one that broke in the field; the rest are the same shape and
@@ -402,7 +403,8 @@ export function registerRemoteHandlers(
         thinkingMode: opt(thinkingMode),
         resumeSessionAt: opt(resumeSessionAt),
         forkSession: opt(forkSession),
-        engineId: opt(engineId)
+        engineId: opt(engineId),
+        announce: opt(announce)
       })
     }
   })

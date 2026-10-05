@@ -84,7 +84,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       thinkingMode?,
       resumeSessionAt?,
       forkSession?,
-      engineId?
+      engineId?,
+      announce?
     ) =>
       ipcRenderer.invoke(
         'session:create',
@@ -97,7 +98,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       ),
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
       ipcRenderer.invoke(

@@ -269,6 +269,36 @@ describe('ReviewBar FC — rendered', () => {
     expect(createCalls[0][3]).toBe(FC_ROUTE)
   })
 
+  it("onSend spawns at the model's saved starting effort, not a hardcoded 'medium'", async () => {
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5',
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      settings: { ...s.settings, modelEffortDefaults: { opus: 'high' } },
+      sessions: {
+        ...s.sessions,
+        [FC_ROUTE]: { ...s.sessions[FC_ROUTE], selectedModel: 'opus', effort: null }
+      }
+    }))
+    render(React.createElement(ReviewBar, { comments: [makeDiffComment()] }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // createSession args: routingId, cwd, effort, ..., engineId, announce
+    expect(createCalls[0][2]).toBe('high')
+    expect(createCalls[0][10]).toEqual({ effort: 'high', thinkingMode: null })
+  })
+
   it('onSend skips session creation when already active', async () => {
     // Mark SDK as already active
     useSessionStore.getState().markSdkActive(FC_ROUTE)

@@ -75,9 +75,15 @@ export interface SyncEventMap {
    * except the originator (and canonical itself, hence every snapshot) folded
    * `emptySession()`'s default/claude/default over the session's real config.
    *
-   * `effort` / `thinkingMode` are NOT here on purpose: the spawn args carrying
-   * them are already resolved model defaults, whereas the canonical fields mean
-   * "explicitly picked" — see the emit site's note.
+   * `effort` / `thinkingMode` are present ONLY when the spawning client sent an
+   * `announce`. `thinkingMode` is then ALWAYS present (the client's raw pick; `null`
+   * clears). `effort` is present when the client named it — the effort the host
+   * spawned the process with, or `null` for a model known to take none (clears) —
+   * and absent when the client did not know the model, which leaves the value
+   * alone. They become the session's OWN, so a later change to the per-model
+   * starting effort cannot re-label it; canonical `effort` is null only before the
+   * first spawn (see the emit site's note). Absent leaves the existing value
+   * alone, like every other optional field here.
    */
   'session:created': (
     routingId: string,
@@ -93,6 +99,8 @@ export interface SyncEventMap {
       permissionMode?: PermissionMode
       engineId?: EngineId
       model?: string
+      effort?: string | null
+      thinkingMode?: string | null
     }
   ) => void
   /**

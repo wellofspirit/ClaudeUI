@@ -418,6 +418,7 @@ function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
  */
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
+import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -522,11 +523,14 @@ export interface AppSettings {
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   /**
-   * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-4-7`,
-   * `claude-opus-4-8`, `claude-fable-5`). When set, overrides the
-   * cli.js-derived default for that model; a per-session explicit pick
-   * still wins.
+   * Per-model STARTING effort — Claude only (a pi / opencode model never reads or
+   * writes it). Keyed by `claudeEffortKey` (`shared/model-capabilities`): the
+   * family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
+   * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
+   * composer effort pick ("remembered per model"). When set, overrides the
+   * cli.js-derived default for a session that has not started; at spawn the
+   * resolved value freezes into the session's own `effort`, so a later change here
+   * does not touch a running session.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
   /**
@@ -923,10 +927,12 @@ export interface PerSessionState {
   needsAttention: boolean
   permissionMode: PermissionMode
   /**
-   * null = use model default; non-null = user explicitly chose this tier.
-   * Canonical `effort` is `string | null` (sync/state.ts): Claude's five rungs
-   * for Claude/opencode/pi, an engine-native tier (Codex's `minimal`…`xhigh`)
-   * for Codex.
+   * null = not started yet, so the model's starting effort applies (Claude's
+   * per-model `modelEffortDefaults`, else the cli.js default); non-null = the
+   * tier the session runs at — the user's pick, or the starting effort frozen at
+   * spawn (the birth event's `announce`). Canonical `effort` is `string | null`
+   * (sync/state.ts): Claude's five rungs for Claude/opencode/pi, an engine-native
+   * tier (Codex's `minimal`…`xhigh`) for Codex.
    */
   effort: string | null
   /** null = use model default; non-null = user explicitly chose this mode */
@@ -2996,9 +3002,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   // Effort / thinking / reasoning-variant picks. Applied through the replica
-  // because for effort + thinking there is NO event at all: the desktop picker
-  // restarts the session instead of pushing a live setter, so the value's only
-  // home until the respawn reads it is this client (see InputBox.restartSdkSession).
+  // because for effort + thinking there is no live setter: the desktop picker
+  // restarts the session instead, so until the respawn the value's only home is
+  // this client (see InputBox.restartSdkSession). The respawn (and a first send)
+  // is `session:create`, whose `announce` argument puts the values on the birth
+  // event, which is how they reach every other replica.
   // Where an IPC setter DOES exist (reasoning variant, model), its
   // `session:config-changed` echo re-applies the same per-field replace.
   setEffort: (effort, routingId) => {
@@ -3444,7 +3452,9 @@ export const useSessionStore = create<SessionState>((set) => ({
           )
           ? (session.effort ?? undefined)
           : undefined
-        : (session.effort ?? undefined)
+        : // The composer's own resolver: a null pick falls to the per-model
+          // starting effort, not to cli.js's heuristic by way of `undefined`.
+          sessionSpawnEffort(useSessionStore.getState(), session)
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -3455,7 +3465,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       session.thinkingMode ?? undefined,
       undefined,
       undefined,
-      session.selectedEngineId
+      session.selectedEngineId,
+      spawnAnnouncement(useSessionStore.getState(), session, effort)
     )
     patchLocalSession(routingId, { sdkActive: true })
     await window.api.sendPrompt(routingId, prompt)

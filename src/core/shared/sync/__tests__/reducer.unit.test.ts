@@ -184,11 +184,45 @@ describe('reducer — session registry', () => {
     expect(session.permissionMode).toBe('plan')
     expect(session.selectedEngineId).toBe('pi')
     expect(session.selectedModel).toBe('gpt-5-codex')
-    // Reasoning config is NOT part of the birth payload: what the emitter has at
-    // spawn is a RESOLVED model default, and these fields mean "explicitly
-    // picked" (null = unset, which drives the effort precedence ladder).
+    // Reasoning config rides the birth event only when the spawning client
+    // announced a value; an event without them leaves `null` (= not started yet,
+    // so the per-model starting effort still applies).
     expect(session.effort).toBeNull()
     expect(session.thinkingMode).toBeNull()
+  })
+
+  it('folds the effort / thinking mode a birth event announces', () => {
+    const s = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'high', thinkingMode: 'disabled' }]
+    ])
+    expect(s.sessions['rid'].effort).toBe('high')
+    expect(s.sessions['rid'].thinkingMode).toBe('disabled')
+  })
+
+  it('a birth event carrying null CLEARS the value (key presence decides, not the value)', () => {
+    const picked = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'xhigh', thinkingMode: 'enabled' }]
+    ])
+    const cleared = applyEvent(picked, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo', effort: null, thinkingMode: null }],
+      seq: 2
+    })
+    expect(cleared.sessions['rid'].effort).toBeNull()
+    expect(cleared.sessions['rid'].thinkingMode).toBeNull()
+  })
+
+  it('a birth event WITHOUT picks leaves an existing pick alone (a respawn, an old client)', () => {
+    const picked = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'xhigh', thinkingMode: 'enabled' }]
+    ])
+    const respawned = applyEvent(picked, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo' }],
+      seq: 2
+    })
+    expect(respawned.sessions['rid'].effort).toBe('xhigh')
+    expect(respawned.sessions['rid'].thinkingMode).toBe('enabled')
   })
 
   it('keeps the empty-session defaults for an OLD-SHAPE birth event', () => {

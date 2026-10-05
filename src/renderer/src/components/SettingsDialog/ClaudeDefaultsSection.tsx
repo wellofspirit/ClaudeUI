@@ -7,6 +7,7 @@ import {
   claudeLegacyEffortKey,
   claudeResolvedModelId,
   modelDefaultEffort,
+  withSavedEffort,
   modelSupportedEffortLevels,
   type EffortLevel
 } from '../../../../shared/model-capabilities'
@@ -174,11 +175,7 @@ export function ClaudeDefaultsSection({
     row: Pick<ClaudeEffortRow, 'key' | 'legacyKey'>,
     next: EffortLevel | undefined
   ): void => {
-    const map = { ...efforts }
-    if (row.legacyKey) delete map[row.legacyKey]
-    if (next === undefined) delete map[row.key]
-    else map[row.key] = next
-    update({ modelEffortDefaults: map })
+    update({ modelEffortDefaults: withSavedEffort(efforts, row, next) })
   }
 
   const override = effectiveModelOverride(vendorConfig.modelOverride)

@@ -19,6 +19,9 @@ import {
   claudeEffortKey,
   claudeLegacyEffortKey,
   claudeSavedEffort,
+  resolveDesiredEffort,
+  resolveSpawnEffort,
+  withSavedEffort,
   resolveContextWindow,
   resolveClaudeCapabilities,
   claudeModelCapabilities,
@@ -836,5 +839,93 @@ describe('resolvePiCapabilitiesFromModel', () => {
 
   it('isAgentCapable is true (toolCalling always true for pi)', () => {
     expect(resolvePiCapabilitiesFromModel(undefined).isAgentCapable).toBe(true)
+  })
+})
+
+describe('resolveDesiredEffort / resolveSpawnEffort — the one effort ladder', () => {
+  const OPUS = {
+    value: 'opus',
+    resolvedModel: 'claude-opus-5-5', // built-in default: medium
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const
+  }
+  const DEFAULT_ROW = { ...OPUS, value: 'default' }
+  const catalog = [DEFAULT_ROW, OPUS]
+  const args = (over: Partial<Parameters<typeof resolveDesiredEffort>[0]> = {}) => ({
+    explicit: null,
+    modelInfo: OPUS,
+    engineModels: catalog,
+    modelEffortDefaults: undefined,
+    ...over
+  })
+
+  it('falls back to the built-in default with nothing saved and no pick', () => {
+    expect(resolveDesiredEffort(args())).toBe('medium')
+  })
+  it("the model's saved starting effort beats the built-in default", () => {
+    expect(resolveDesiredEffort(args({ modelEffortDefaults: { opus: 'high' } }))).toBe('high')
+  })
+  it('an explicit pick beats the saved starting effort', () => {
+    expect(
+      resolveDesiredEffort(args({ explicit: 'low', modelEffortDefaults: { opus: 'high' } }))
+    ).toBe('low')
+  })
+  it('reads the alias key for `default` too', () => {
+    expect(
+      resolveDesiredEffort(args({ modelInfo: DEFAULT_ROW, modelEffortDefaults: { opus: 'max' } }))
+    ).toBe('max')
+  })
+  it('still reads a v3.5 value saved under the resolved model id', () => {
+    expect(resolveDesiredEffort(args({ modelEffortDefaults: { 'claude-opus-5-5': 'low' } }))).toBe(
+      'low'
+    )
+  })
+  it('a non-Claude engine never reads the saved rung, even for a Claude-looking model id', () => {
+    // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
+    // row owns (its legacy key); pi must not read it.
+    const piRow = { ...OPUS, value: 'anthropic/claude-opus-5-5', resolvedModel: undefined }
+    const saved = { 'claude-opus-5-5': 'low', opus: 'low' } as const
+    expect(
+      resolveDesiredEffort(
+        args({
+          engineId: 'pi',
+          modelInfo: piRow,
+          engineModels: [piRow],
+          modelEffortDefaults: saved
+        })
+      )
+    ).toBe(modelDefaultEffort(piRow))
+    expect(
+      resolveDesiredEffort(args({ engineId: 'pi', explicit: 'max', modelEffortDefaults: saved }))
+    ).toBe('max')
+    // Claude (or an engine-less call) still reads it.
+    expect(resolveDesiredEffort(args({ engineId: 'claude', modelEffortDefaults: saved }))).toBe(
+      'low'
+    )
+  })
+  it('spawn effort clamps a saved value the model does not offer', () => {
+    const noMax = { ...OPUS, supportedEffortLevels: ['low', 'medium', 'high'] as const }
+    expect(
+      resolveSpawnEffort(args({ modelInfo: noMax, modelEffortDefaults: { opus: 'max' } }))
+    ).toBe('medium')
+  })
+  it('spawn effort keeps the desired value for a model with no effort support', () => {
+    const none = { value: 'x', supportsEffort: false }
+    expect(resolveSpawnEffort(args({ modelInfo: none, explicit: 'high' }))).toBe('high')
+  })
+})
+
+describe('withSavedEffort', () => {
+  it('writes the key, drops the legacy key, and does not mutate the input', () => {
+    const before = { 'claude-opus-5-5': 'low', haiku: 'low' } as const
+    const after = withSavedEffort(before, { key: 'opus', legacyKey: 'claude-opus-5-5' }, 'high')
+    expect(after).toEqual({ opus: 'high', haiku: 'low' })
+    expect(before).toEqual({ 'claude-opus-5-5': 'low', haiku: 'low' })
+  })
+  it('clears the key when next is undefined', () => {
+    expect(withSavedEffort({ opus: 'high' }, { key: 'opus' }, undefined)).toEqual({})
+  })
+  it('accepts an unset map', () => {
+    expect(withSavedEffort(undefined, { key: 'opus' }, 'low')).toEqual({ opus: 'low' })
   })
 })

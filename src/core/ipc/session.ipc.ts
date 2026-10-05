@@ -98,7 +98,7 @@ import {
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
@@ -528,7 +528,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       thinkingMode?: string,
       resumeSessionAt?: string,
       forkSession?: boolean,
-      engineId?: EngineId
+      engineId?: EngineId,
+      announce?: CreateSessionArgs['announce']
     ) => {
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
@@ -540,7 +541,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       })
     }
   })

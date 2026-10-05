@@ -556,6 +556,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         permissionMode?: string
         engineId?: EngineId
         model?: string
+        effort?: string | null
+        thinkingMode?: string | null
       }>(event, 1)
       const existing = state.sessions[routingId]
       const base = existing ?? emptySession(routingId)
@@ -573,9 +575,15 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             // the originator, whose `createNewSession` already seeded the same
             // values into `base`.
             //
-            // `effort` / `thinkingMode` are absent by design, not by omission: the
-            // spawn args carrying them are RESOLVED model defaults, and these
-            // fields mean "explicitly picked" (`null` = unset). See the emit site.
+            // `effort` / `thinkingMode` ride the event only when the spawning client
+            // announced: the effort the process starts with becomes the session's
+            // own from here on (a later change to the per-model starting effort
+            // must not re-label it), and `null` CLEARS (a model that takes none).
+            // KEY presence decides, not value: absent = "leave it alone", which
+            // keeps an old-shape event and an old client's respawn as they were.
+            effort: data && 'effort' in data ? (data.effort ?? null) : base.effort,
+            thinkingMode:
+              data && 'thinkingMode' in data ? (data.thinkingMode ?? null) : base.thinkingMode,
             permissionMode: data?.permissionMode ?? base.permissionMode,
             selectedEngineId: data?.engineId ?? base.selectedEngineId,
             selectedModel: data?.model ?? (data?.engineId === 'codex' ? '' : base.selectedModel),

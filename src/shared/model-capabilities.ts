@@ -254,6 +254,80 @@ export function modelResolveEffort(
   return modelDefaultEffort(model)
 }
 
+/**
+ * `efforts` with one row's starting effort written (or cleared, `next ===
+ * undefined`). Writing moves a v3.5 value off its legacy key so it cannot
+ * resurface. The ONE writer of `modelEffortDefaults`: the Settings table and the
+ * composer's remembered pick both go through it, so they cannot disagree about
+ * which key a row lives under.
+ */
+export function withSavedEffort(
+  efforts: Partial<Record<string, EffortLevel>> | undefined,
+  row: { key: string; legacyKey?: string },
+  next: EffortLevel | undefined
+): Partial<Record<string, EffortLevel>> {
+  const map = { ...efforts }
+  if (row.legacyKey) delete map[row.legacyKey]
+  if (next === undefined) delete map[row.key]
+  else map[row.key] = next
+  return map
+}
+
+/**
+ * Does this engine have a per-model starting effort (`modelEffortDefaults`)?
+ * Claude only. The map is keyed by `claudeEffortKey` — Claude's alias / resolved
+ * model id — so another engine's model that merely embeds a Claude id (pi's
+ * `anthropic/claude-opus-5-5`) would read and write a Claude row's key. The ONE
+ * place that engine check lives: the resolver's read and the composer's
+ * remember-on-pick write both go through it.
+ */
+export function engineRemembersEffort(engineId: string | undefined): boolean {
+  return (engineId ?? 'claude') === 'claude'
+}
+
+/**
+ * The effort a non-native-effort session (Claude / opencode / pi) WANTS, before
+ * any clamp to the model's levels: its own explicit pick, else — for Claude only
+ * (`engineRemembersEffort`) — the user's per-model starting effort, else cli.js's
+ * own heuristic default.
+ *
+ * The ONE statement of that ladder. The composer's pill and every spawn site
+ * (first send, respawn after a pick, retry, plan "start fresh", review) read it,
+ * so what the pill says is what the process is started with by construction. A
+ * display that skipped the middle rung showed `medium` on a session that really
+ * ran the user's configured `high`.
+ */
+export function resolveDesiredEffort(args: {
+  /** The session's own pick (`session.effort`); `null`/absent = unset. */
+  explicit: string | null | undefined
+  /** The session's engine; absent = Claude. Non-Claude engines skip the saved rung. */
+  engineId?: string
+  modelInfo: ModelCapabilityInput | undefined | null
+  /** The catalog the row's `claudeEffortKey` is judged against (its engine's). */
+  engineModels: readonly ClaudeEffortRowInput[]
+  modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
+}): EffortLevel {
+  // Not the native branch: the only values a non-native session's pick can hold
+  // are the Claude rungs, the only ones its picker offers.
+  return (
+    (args.explicit as EffortLevel | null | undefined) ??
+    (engineRemembersEffort(args.engineId)
+      ? claudeSavedEffort(args.modelEffortDefaults, args.modelInfo, args.engineModels)
+      : undefined) ??
+    modelDefaultEffort(args.modelInfo)
+  )
+}
+
+/**
+ * {@link resolveDesiredEffort} clamped to what the model accepts — the value a
+ * spawn sends and the pill shows. A model that takes no effort at all (`null`
+ * from the clamp) keeps the desired value, as the spawn always has.
+ */
+export function resolveSpawnEffort(args: Parameters<typeof resolveDesiredEffort>[0]): EffortLevel {
+  const desired = resolveDesiredEffort(args)
+  return modelResolveEffort(args.modelInfo, desired) ?? desired
+}
+
 // ---------------------------------------------------------------------------
 // Id-based heuristics — used when SDK capability fields are absent.
 // Kept exported for tests and for future models the SDK hasn't labelled yet.

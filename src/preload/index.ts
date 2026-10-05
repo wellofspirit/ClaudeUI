@@ -100,7 +100,8 @@ const api: ClaudeAPI = {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    engineId?: import('../shared/types').EngineId
+    engineId?: import('../shared/types').EngineId,
+    announce?: { effort?: string | null; thinkingMode?: string | null }
   ) =>
     ipcRenderer.invoke(
       'session:create',
@@ -113,7 +114,8 @@ const api: ClaudeAPI = {
       thinkingMode,
       resumeSessionAt,
       forkSession,
-      engineId
+      engineId,
+      announce
     ),
   resolveForkAnchor: (
     sessionId: string,

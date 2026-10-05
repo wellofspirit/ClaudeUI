@@ -26,8 +26,16 @@ import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
 import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
-import { resolveCodexCapabilities } from '../../../../../../shared/model-capabilities'
-import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
+import {
+  resolveCodexCapabilities,
+  type EffortLevel
+} from '../../../../../../shared/model-capabilities'
+import {
+  seed,
+  emitSync,
+  mirrorStoreIntoReplica,
+  resetReplicaSeam
+} from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // View mock — captures whatever props the FC passes to InputBoxView
@@ -1827,6 +1835,294 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.thinkingMode).toBe('disabled')
   })
 
+  // ── Effort is remembered per model, and the pill tells the truth ────────
+  //
+  // The pill and every spawn read ONE resolver (`resolveSpawnEffort`):
+  // explicit pick > the model's saved starting effort > cli.js's heuristic.
+
+  const opusRow = (): ModelInfo => ({
+    value: 'opus',
+    resolvedModel: 'claude-opus-5-5', // cli.js defaults Opus 5.5 to 'medium'
+    displayName: 'Opus 5.5',
+    description: '',
+    engineId: 'claude',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    supportsAdaptiveThinking: true
+  })
+
+  function opusSession(
+    effort: string | null,
+    modelEffortDefaults: Record<string, EffortLevel>
+  ): void {
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus', effort }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it("the pill shows the model's saved starting effort when the session has no pick", async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.effort).toBe('high') // not Opus 5.5's built-in 'medium'
+  })
+
+  it('a session pick still outranks the saved starting effort in the pill', async () => {
+    opusSession('low', { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.effort).toBe('low')
+  })
+
+  it('the pill and the first spawn agree on the saved starting effort', async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    const shown = viewProps.effort
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    // The starting effort freezes into the session, equal to what was sent.
+    expect(ipcCalls['session:create'][0][10]).toEqual({ effort: shown, thinkingMode: null })
+  })
+
+  it('a started session keeps displaying what it runs when the per-model effort changes', async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    await sendDraft()
+    const announce = ipcCalls['session:create'][0][10] as { effort: string | null }
+    expect(announce.effort).toBe('high')
+
+    // Core's birth event hands the announced effort to every replica.
+    await act(async () => {
+      emitSync('session:created', [FC_ROUTE, { cwd: '/test/cwd', effort: announce.effort }])
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+
+    // Another session's pick rewrites the per-model value.
+    await act(async () => {
+      useSessionStore.getState().updateSettings({ modelEffortDefaults: { opus: 'max' } })
+    })
+    // Pre-fix the session stayed `null` and this read the NEW map: 'max'.
+    expect(viewProps.effort).toBe('high')
+  })
+
+  it('announces exactly the effort sent positionally on a respawn after a pick too', async () => {
+    opusSession(null, { opus: 'high' })
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('low')
+    })
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('low')
+    expect((args[10] as { effort: string }).effort).toBe(args[2])
+  })
+
+  it('a pi effort pick writes nothing to modelEffortDefaults (a Claude row must survive)', async () => {
+    // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
+    // row owns; filing a pi pick there would clobber or orphan it.
+    const piRow = { ...opusRow(), value: 'anthropic/claude-opus-5-5', engineId: 'pi' as const }
+    delete (piRow as Partial<ModelInfo>).resolvedModel
+    fcClaudeModels = [opusRow()]
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        vendorName: 'Anthropic',
+        models: fcClaudeModels
+      },
+      { engineId: 'pi', vendorId: 'pi', vendorName: 'pi', models: [piRow] }
+    ])
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { opus: 'low' } },
+      availableModels: [opusRow(), piRow],
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: piRow.value,
+          effort: null
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('max')
+    })
+    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'low' })
+    // The session still carries its own pick.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('max')
+  })
+
+  it('a model missing from the catalog: the pill shows exactly what spawn sends', async () => {
+    // Pre-fix the pill resolved from the picker's synthetic "missing selection"
+    // row (which keyed the saved 'low'), spawn from no model at all ('high').
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-4-7': 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-opus-4-7', effort: null }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    const shown = viewProps.effort
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    // Unknown model: nothing is announced about effort.
+    expect('effort' in (ipcCalls['session:create'][0][10] as object)).toBe(false)
+  })
+
+  it('an EMPTY catalog respawn keeps the session pick: no effort announced, still low after the fold (GUARD)', async () => {
+    // The catalog is emptied on every cwd change until the fetch lands; pi has no
+    // failure fallback. Announcing `null` there would wipe the pick on every
+    // replica, this one included, and the next respawn would send the heuristic.
+    fcClaudeModels = []
+    useSessionStore.setState((state) => ({
+      availableModels: [],
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus', effort: 'low' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('low')
+    const announce = args[10] as Record<string, unknown>
+    expect('effort' in announce).toBe(false)
+    expect(announce.thinkingMode).toBe('disabled')
+    await act(async () => {
+      emitSync('session:created', [FC_ROUTE, { cwd: '/test/cwd', ...announce }])
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('low')
+  })
+
+  it('onSelectModel (spawned, thread id not reported yet): keeps the frozen effort, coerced', () => {
+    opusSession('xhigh', {})
+    fcClaudeModels = [
+      opusRow(),
+      {
+        ...opusRow(),
+        value: 'sonnet',
+        resolvedModel: 'claude-sonnet-4-6',
+        supportedEffortLevels: ['low', 'medium', 'high', 'max']
+      }
+    ]
+    useSessionStore.setState({ availableModels: fcClaudeModels })
+    useSessionStore.getState().markSdkActive(FC_ROUTE) // process running, no `sessionId` yet
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    viewProps.onSelectModel('sonnet')
+
+    // Pre-fix `!started` alone cleared it though the process runs at 'xhigh'.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+  })
+
+  it('announces no effort for a model that accepts none', async () => {
+    fcClaudeModels = [
+      {
+        ...opusRow(),
+        value: 'haiku',
+        resolvedModel: 'claude-haiku-4-5',
+        supportsEffort: false,
+        supportedEffortLevels: []
+      }
+    ]
+    useSessionStore.setState((state) => ({
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'haiku', effort: 'high' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    await sendDraft()
+    expect((ipcCalls['session:create'][0][10] as { effort: unknown }).effort).toBeNull()
+  })
+
+  it("picking an effort remembers it as the model's starting effort and keeps the session pick", async () => {
+    opusSession(null, {})
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'xhigh' })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+  })
+
+  it('picking moves a v3.5 legacy-keyed value to the new key instead of leaving both', async () => {
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-5-5': 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('max')
+    })
+    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'max' })
+  })
+
+  it('a respawn after an effort pick announces the pick to createSession', async () => {
+    opusSession(null, {})
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('xhigh')
+    expect(args[10]).toEqual({ effort: 'xhigh', thinkingMode: null })
+  })
+
+  it('a thinking-mode pick is announced raw on the respawn too', async () => {
+    opusSession(null, {})
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    // Effort is the resolved starting effort (Opus 5.5's built-in 'medium').
+    expect(ipcCalls['session:create'][0][10]).toEqual({
+      effort: 'medium',
+      thinkingMode: 'disabled'
+    })
+  })
+
   it('derives capability props from selectedModel: opus-4-7 → adaptive + xhigh + max', () => {
     useSessionStore.setState((state) => ({
       sessions: {
@@ -2405,12 +2701,15 @@ describe('InputBox FC — rendered', () => {
     expect(session.effort).toBeNull() // effort unsupported → explicit pick cleared
   })
 
-  it('onSelectModel: switching to a model with adaptive but no xhigh coerces xhigh → high', () => {
+  it('onSelectModel (started): a model with adaptive but no xhigh coerces xhigh → high', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
         [FC_ROUTE]: {
           ...state.sessions[FC_ROUTE],
+          // Started: the live process keeps its effort across `setModel`, so the
+          // pick is coerced, not cleared.
+          status: { ...state.sessions[FC_ROUTE].status, sessionId: 'started' },
           selectedModel: 'default',
           thinkingMode: 'adaptive',
           effort: 'xhigh'
@@ -2445,6 +2744,22 @@ describe('InputBox FC — rendered', () => {
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
     expect(session.effort).toBe('high') // xhigh coerced to model's default
+  })
+
+  it('onSelectModel (not started): clears the effort so the new model remembered starting effort applies', () => {
+    opusSession('low', { opus: 'high', sonnet: 'max' })
+    fcClaudeModels = [
+      opusRow(),
+      { ...opusRow(), value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' }
+    ]
+    useSessionStore.setState({ availableModels: fcClaudeModels })
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    viewProps.onSelectModel('sonnet')
+
+    // Pre-fix `low` was kept (it is valid on the new model) and shown for it.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBeNull()
   })
 
   // -------------------------------------------------------------------------

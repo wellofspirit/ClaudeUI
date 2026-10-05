@@ -81,8 +81,8 @@ import { describeJudgeModels } from '../automode/judge-route'
 //    on this list for exactly that reason; they stopped being single-line the
 //    moment a delete had to cancel the live session and replicate the removal,
 //    so they moved into this module — see §Deletion.
-//  - `session:set-reasoning-variant` — desktop-only, no remote counterpart,
-//    nothing to dedup.
+// (`session:set-reasoning-variant` used to be listed here as desktop-only. It is
+// registered on both surfaces, and `setReasoningVariant` below is its one copy.)
 
 // ---------------------------------------------------------------------------
 // Session control
