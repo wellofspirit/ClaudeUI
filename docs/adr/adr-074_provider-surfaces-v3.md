@@ -1,6 +1,6 @@
 # ADR-074 — Provider surfaces v3: subscriptions vs API providers, one key and one model list per provider, pi curation that works
 
-**Status:** Implemented (2026-09-23, slices 1–10 — see § As built; §12 amended 2026-10-01); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
+**Status:** Implemented (2026-09-23, slices 1–10 — see § As built; §12 amended 2026-10-01; §8 amended 2026-10-05); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) § "Providers: one list" (one list becomes two groups; the Accounts group folds into Subscriptions; the Anthropic endpoint leaves Models & providers) · [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §2 as amended by F14 (accounts move from the Accounts group onto each subscription card; the workspace explainer row becomes a tooltip)
 **Amended by:** [ADR-086](adr-086_custom-endpoint-model-details-and-detect.md) (2026-09-30) — the custom-endpoint form (§7 "Endpoint (custom)") edits each model's context window, max output, vision and reasoning, with provenance badges, and a Detect button fills them from vLLM and SGLang; this is how the capabilities §11 projects into opencode get set.
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — the boot sync is idempotent: an unchanged key or token writes and invalidates nothing, removing an absent key is a no-op.
@@ -159,6 +159,41 @@ as orphaned, and moves to the alias key when the row is edited (`claudeSavedEffo
 `claudeLegacyEffortKey` in `src/shared/model-capabilities.ts`). The unset default is cli.js's
 catalog `default_effort` for the resolved model (`medium` on Opus 5.5 and Sonnet 5.5).
 
+**Amended 2026-10-05 (owner ruling), effort is remembered per model and is what the session runs.**
+The owner set Opus to start at High and still saw new sessions, and remote clients watching a
+session that ran High, read Medium: the composer's effort read `effort ?? modelDefaultEffort` and
+skipped the starting effort that spawn applied, and an effort pick (a local write plus a respawn)
+never reached canonical state. Four rules replace that:
+
+- **One ladder.** A session's own effort, else the model's starting effort, else cli.js's
+  `default_effort`, clamped to the model's levels (`resolveDesiredEffort` / `resolveSpawnEffort`
+  in `src/shared/model-capabilities.ts`, `sessionSpawnEffort` in
+  `src/renderer/src/lib/session-effort.ts`). The composer and every spawn path (first send,
+  respawn, retry, plan "start fresh", review) read it over the same inputs. Automations run and
+  display the same ladder (`resolveAutomationEffort`), judged against the Claude catalog the
+  host last fetched on any transport; a model the catalog lacks is judged as the model its
+  alias names.
+- **A pick is remembered for its model.** Picking an effort in the composer also saves it as that
+  model's starting effort, so the next session on the model starts there and Starting effort per
+  model shows it. Claude writes the row this table edits (`modelEffortDefaults`, keys as above).
+  pi remembers too, in its own map (`engineEffortDefaults.pi`, keyed by the model value as pi
+  names it), because pi's `provider/model` values would otherwise land on Claude's keys. opencode
+  (no effort) and Codex (native tiers, set live) do not remember. Like the model (§10), this
+  follows "New sessions start on": with `configured-default` a pick changes only its session, the
+  table stays as configured, and pi's remembered values (which have no table to show or clear
+  them) are not applied (`carriesPicksIntoNewSessions`).
+- **The starting effort is fixed at spawn.** `session:create` takes an optional `announce`; the
+  host announces on `session:created` the effort the process is actually spawned with (`null` for
+  a model known to take no effort, nothing for a model not yet in the catalog), and every replica
+  adopts it as the session's own. A later change to a model's starting effort, by another
+  session's pick or by this table, affects only sessions that have not started; one already
+  running keeps showing what it runs. Canonical effort is not persisted, so after a host restart
+  a resumed session re-resolves against the current starting effort (and runs it). A client that
+  omits `announce` behaves as before.
+- **Switching model.** Before a session has a process, switching model clears its effort so the
+  new model's starting effort applies. A running session keeps its own, adjusted to the new
+  model's levels.
+
 ### 9. The Anthropic endpoint moves to the Claude page
 
 `vendors/anthropic.json`'s endpoint and model mapping become **Claude › Endpoint**: first "Claude
@@ -204,7 +239,7 @@ What the build changed about the decision:
 6. **Models in the picker is a summary + a stacked editor** in the Manage sheet (mockup D), which re-reads
    the definition after every write so a split list never reopens as one.
 7. **Removal logging**: every `removeVendorAuth` logs the vendor id and call path (never the key), after
-    an unexplained loss of the owner's pi OpenRouter key during the arc.
+   an unexplained loss of the owner's pi OpenRouter key during the arc.
 
 **Amended 2026-10-01, stale rows and live model identity.** API providers' Remove action can remove
 disabled-only stale opencode entries by clearing their native veto and ClaudeUI curation.

@@ -1,12 +1,17 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
-import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import {
+  carriesPicksIntoNewSessions,
+  codexPublishesEffort,
+  resolveClaudeCapabilities
+} from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
+import type { CanonicalState } from '../../../core/shared/sync/state'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -418,6 +423,7 @@ function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
  */
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
+import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -437,10 +443,13 @@ export function seedingModelPicks(state: {
   settings: Pick<AppSettings, 'newSessionModel'>
   lastSelectedModelByEngine: Partial<Record<EngineId, string>>
 }): Readonly<Partial<Record<EngineId, string>>> {
-  return state.settings.newSessionModel === 'configured-default'
-    ? NO_SEEDING_PICKS
-    : state.lastSelectedModelByEngine
+  return carriesPicksIntoNewSessions(state.settings)
+    ? state.lastSelectedModelByEngine
+    : NO_SEEDING_PICKS
 }
+
+/** The `newSessionModel` rule as a predicate — defined once, in `shared/model-capabilities`. */
+export { carriesPicksIntoNewSessions }
 
 /**
  * The model a session on `engineId` starts with: the user's last pick on that
@@ -522,19 +531,38 @@ export interface AppSettings {
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   /**
-   * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-4-7`,
-   * `claude-opus-4-8`, `claude-fable-5`). When set, overrides the
-   * cli.js-derived default for that model; a per-session explicit pick
-   * still wins.
+   * Per-model STARTING effort — Claude's (pi keeps its own in
+   * `engineEffortDefaults`; opencode and Codex remember none). Keyed by
+   * `claudeEffortKey` (`shared/model-capabilities`): the family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
+   * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
+   * composer effort pick ("remembered per model"). When set, overrides the
+   * cli.js-derived default for a session that has not started; at spawn the
+   * resolved value freezes into the session's own `effort`, so a later change here
+   * does not touch a running session.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
+  /**
+   * The same starting effort for every other remembering engine (pi), keyed by
+   * engine id then by the model's picker VALUE verbatim (pi's `provider/model` is
+   * unique per provider, so no normalisation — and no collision with Claude's
+   * `claudeEffortKey` namespace in `modelEffortDefaults`). Written by a composer
+   * effort pick only, and only while `newSessionModel` is not `'configured-default'`
+   * (there is no Settings table for it); read and written ONLY
+   * through `savedEffortFor` / `rememberEffortPatch` (`shared/model-capabilities`),
+   * which decide which engines remember. A session freezes the resolved value at
+   * spawn, exactly as for Claude.
+   */
+  engineEffortDefaults: Partial<Record<EngineId, Partial<Record<string, EffortLevel>>>>
   /**
    * What a NEW session starts on, per engine (providers-v3 slice 9, owner
    * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
    * behaviour: the model last picked on that engine wins over its configured
    * default. `'configured-default'` ignores that pick for seeding (it is still
    * recorded), so the configured default — or the engine's built-in one — seeds.
+   * The same switch governs the effort a composer pick remembers
+   * (`modelEffortDefaults` / `engineEffortDefaults`): under `'configured-default'`
+   * an effort pick changes only its own session and writes neither map
+   * (`carriesPicksIntoNewSessions`).
    */
   newSessionModel?: NewSessionModel
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
@@ -604,6 +632,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
   modelEffortDefaults: {},
+  engineEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: '',
@@ -664,6 +693,75 @@ function saveSessionConfig(
     hiddenProjects: merged.hiddenProjectKeys,
     sessionEngines: merged.sessionEngines
   })
+}
+
+/**
+ * Every id-keyed row of the persisted session registry, dropped for `ids` — the one
+ * definition of "forget this session" behind a delete, a project delete and the
+ * empty-session cleanup. It is the same set the reducer's `session:removed` drops
+ * (recents, pins, hidden, titles, worktree info, and the engine/model row), so a
+ * session removed on one path cannot leave a row the others would have cleared.
+ *
+ * Returns only the fields that changed (identity-stable for the rest), or null when
+ * no registry row mentions any of `ids`.
+ *
+ * `keepWorktreeInfo`: `worktreeInfoMap` is not an orphan row, it is the handle on an
+ * on-disk resource (the worktree dir and its branch) that the before-quit
+ * worktree prompt reads. A delete removes it; an abandoned empty session must not,
+ * or its worktree would leak with nothing left to offer to remove it.
+ */
+function scrubSessionRegistry(
+  state: PersistedSessionFields,
+  ids: readonly string[],
+  opts: { keepWorktreeInfo?: boolean } = {}
+): Partial<PersistedSessionFields> | null {
+  const gone = new Set(ids)
+  const patch: Partial<PersistedSessionFields> = {}
+  const dropFromList = (list: string[]): string[] | null => {
+    const kept = list.filter((id) => !gone.has(id))
+    return kept.length === list.length ? null : kept
+  }
+  const dropFromMap = <T>(map: Record<string, T>): Record<string, T> | null => {
+    if (!ids.some((id) => id in map)) return null
+    const kept = { ...map }
+    for (const id of ids) delete kept[id]
+    return kept
+  }
+  const recentSessionIds = dropFromList(state.recentSessionIds)
+  if (recentSessionIds) patch.recentSessionIds = recentSessionIds
+  const pinnedSessionIds = dropFromList(state.pinnedSessionIds)
+  if (pinnedSessionIds) patch.pinnedSessionIds = pinnedSessionIds
+  const hiddenSessionIds = dropFromList(state.hiddenSessionIds)
+  if (hiddenSessionIds) patch.hiddenSessionIds = hiddenSessionIds
+  const customTitles = dropFromMap(state.customTitles)
+  if (customTitles) patch.customTitles = customTitles
+  const worktreeInfoMap = opts.keepWorktreeInfo ? null : dropFromMap(state.worktreeInfoMap)
+  if (worktreeInfoMap) patch.worktreeInfoMap = worktreeInfoMap
+  // The persisted engine/model row is keyed by routingId too — left behind it
+  // survives the session and accumulates forever (RN8).
+  const sessionEngines = dropFromMap(state.sessionEngines)
+  if (sessionEngines) patch.sessionEngines = sessionEngines
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+/**
+ * Write a registry patch to BOTH homes of the registry: the replica (canonical's
+ * names — `hiddenSessions` / `hiddenProjects`) and the saved config. `canonicalOnly`
+ * carries fields only canonical holds (the sidebar's `directories`).
+ */
+function applyRegistryPatch(
+  state: PersistedSessionFields,
+  patch: Partial<PersistedSessionFields>,
+  canonicalOnly: Partial<Omit<CanonicalState, 'sessions'>> = {}
+): void {
+  const { hiddenSessionIds, hiddenProjectKeys, ...shared } = patch
+  patchLocalApp({
+    ...shared,
+    ...(hiddenSessionIds ? { hiddenSessions: hiddenSessionIds } : {}),
+    ...(hiddenProjectKeys ? { hiddenProjects: hiddenProjectKeys } : {}),
+    ...canonicalOnly
+  })
+  saveSessionConfig(state, patch)
 }
 
 /**
@@ -868,6 +966,19 @@ function cleanupEmptySession(
   }
 }
 
+/**
+ * Forget a session {@link cleanupEmptySession} dropped: out of the replica AND out
+ * of every registry row it had (`createNewSession` wrote its engine/model row and a
+ * recents slot up front) — recents alone left the `sessionEngines` row behind on
+ * every abandoned "New session". Its worktree entry stays (see
+ * {@link scrubSessionRegistry}).
+ */
+function forgetDroppedSession(state: PersistedSessionFields, routingId: string): void {
+  dropLocalSessions([routingId])
+  const scrub = scrubSessionRegistry(state, [routingId], { keepWorktreeInfo: true })
+  if (scrub) applyRegistryPatch(state, scrub)
+}
+
 /** Per-session state — everything that varies between sessions */
 export interface PerSessionState {
   cwd: string
@@ -923,10 +1034,13 @@ export interface PerSessionState {
   needsAttention: boolean
   permissionMode: PermissionMode
   /**
-   * null = use model default; non-null = user explicitly chose this tier.
-   * Canonical `effort` is `string | null` (sync/state.ts): Claude's five rungs
-   * for Claude/opencode/pi, an engine-native tier (Codex's `minimal`…`xhigh`)
-   * for Codex.
+   * null = not started yet, so the model's starting effort applies (Claude's
+   * per-model `modelEffortDefaults`, pi's `engineEffortDefaults`, else the cli.js
+   * default); non-null = the
+   * tier the session runs at — the user's pick, or the starting effort frozen at
+   * spawn (the birth event's `announce`). Canonical `effort` is `string | null`
+   * (sync/state.ts): Claude's five rungs for Claude/opencode/pi, an engine-native
+   * tier (Codex's `minimal`…`xhigh`) for Codex.
    */
   effort: string | null
   /** null = use model default; non-null = user explicitly chose this mode */
@@ -1972,11 +2086,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       activeView: { type: 'chat' } as ActiveView,
       sessions: cleaned.sessions
     })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
   },
 
   switchSession: (routingId) => {
@@ -2001,12 +2111,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     let sessions = updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false }))
     for (const id of cold) sessions = updateSession(sessions, id, evictedViewPatch)
     set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView, sessions })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
     if (cold.length > 0) evictLocalSessions(cold)
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
   },
 
   createNewSession: (routingId, cwd, switchTo = true) => {
@@ -2631,17 +2737,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
     const state = useSessionStore.getState()
-    const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
-    const customTitles = { ...state.customTitles }
-    delete customTitles[sessionId]
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    delete worktreeInfoMap[sessionId]
-    // The persisted engine/model row is keyed by routingId too — without this
-    // it survives every delete and accumulates forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    delete sessionEngines[sessionId]
     // Drop the session from its directory group; drop the group itself if now empty
     const directories = state.directories
       .map((g) =>
@@ -2659,23 +2754,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([sessionId])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(state, scrubSessionRegistry(state, [sessionId]) ?? {}, { directories })
   },
 
   deleteProject: async (projectKey) => {
@@ -2697,20 +2776,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         if (sess.cwd === projectCwd) projectSessionIds.add(id)
       }
     }
-    const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
     const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-    const customTitles = { ...state.customTitles }
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    // Persisted engine/model rows are keyed by routingId — purge them with the
-    // rest of the project's state so they can't accumulate forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    for (const id of projectSessionIds) {
-      delete customTitles[id]
-      delete worktreeInfoMap[id]
-      delete sessionEngines[id]
-    }
     const directories = state.directories.filter((g) => g.projectKey !== projectKey)
     set((s) => {
       const sessions = { ...s.sessions }
@@ -2722,25 +2788,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([...projectSessionIds])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      hiddenProjectKeys: hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(
+      state,
+      {
+        ...scrubSessionRegistry(state, [...projectSessionIds]),
+        hiddenProjectKeys: hiddenProjects
+      },
+      { directories }
+    )
   },
 
   dismissApproval: (routingId, requestId) => {
@@ -2996,9 +3051,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   // Effort / thinking / reasoning-variant picks. Applied through the replica
-  // because for effort + thinking there is NO event at all: the desktop picker
-  // restarts the session instead of pushing a live setter, so the value's only
-  // home until the respawn reads it is this client (see InputBox.restartSdkSession).
+  // because for effort + thinking there is no live setter: the desktop picker
+  // restarts the session instead, so until the respawn the value's only home is
+  // this client (see InputBox.restartSdkSession). The respawn (and a first send)
+  // is `session:create`, whose `announce` argument puts the values on the birth
+  // event, which is how they reach every other replica.
   // Where an IPC setter DOES exist (reasoning variant, model), its
   // `session:config-changed` echo re-applies the same per-field replace.
   setEffort: (effort, routingId) => {
@@ -3444,7 +3501,9 @@ export const useSessionStore = create<SessionState>((set) => ({
           )
           ? (session.effort ?? undefined)
           : undefined
-        : (session.effort ?? undefined)
+        : // The composer's own resolver: a null pick falls to the per-model
+          // starting effort, not to cli.js's heuristic by way of `undefined`.
+          sessionSpawnEffort(useSessionStore.getState(), session)
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -3455,7 +3514,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       session.thinkingMode ?? undefined,
       undefined,
       undefined,
-      session.selectedEngineId
+      session.selectedEngineId,
+      spawnAnnouncement(useSessionStore.getState(), session, effort)
     )
     patchLocalSession(routingId, { sdkActive: true })
     await window.api.sendPrompt(routingId, prompt)

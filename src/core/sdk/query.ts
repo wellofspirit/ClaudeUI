@@ -3,6 +3,8 @@
  * returns an async-iterable with queryHandle methods attached.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { Readable, Writable } from 'node:stream'
 import type {
   CanUseTool,
   CanUseToolResult,
@@ -96,6 +98,38 @@ function claudeLaunch(options: QueryOptions): HarnessLaunch {
   return extra.length ? { ...base, args: [...extra, ...base.args] } : base
 }
 
+/**
+ * A child that never was: valid stdio, no process. `kill()` ends it the way a
+ * terminated one ends (`exit` then `close`, SIGTERM), so the protocol plumbing
+ * built around a real child finishes normally instead of needing a second path.
+ */
+function inertChild(): ChildProcess {
+  const stdout = new Readable({
+    read() {
+      /* nothing to pull: ended by kill() */
+    }
+  })
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new Writable({ write: (_chunk, _enc, cb): void => cb() }),
+    stdout,
+    stderr: new Readable({
+      read() {
+        /* nothing to pull: ended by kill() */
+      }
+    }),
+    pid: undefined,
+    kill: (): boolean => {
+      setImmediate(() => {
+        stdout.push(null)
+        child.emit('exit', null, 'SIGTERM')
+        child.emit('close', null, 'SIGTERM')
+      })
+      return true
+    }
+  })
+  return child as unknown as ChildProcess
+}
+
 export function query(input: QueryInput): QueryHandle {
   const callerOptions: QueryOptions = input.options ?? {}
   // When `standaloneExecutable` (default for the Bun binary pipeline) is true,
@@ -141,22 +175,32 @@ export function query(input: QueryInput): QueryHandle {
   const { sdkServers } = splitMcpServers(options.mcpServers)
   const mcpHost = new McpHost(sdkServers)
 
+  // A caller that was cancelled before it got here (an awaited token refresh or
+  // catalog fetch in between) hands over an ALREADY-aborted signal, and the abort
+  // listener below never fires for one. Spawning anyway would run the whole
+  // prompt of a run the user cancelled, so nothing is spawned: an inert child
+  // stands in and is killed straight away, which ends the stream the way an abort
+  // mid-run does (a clean finish, pending control requests rejected).
+  const preAborted = options.abortController?.signal.aborted === true
+  //
   // Custom spawn hook override — SDK parity. Lets embedders swap the default
   // child_process.spawn (e.g. for containerized launches).
-  const child: ChildProcess = options.spawnClaudeCodeProcess
-    ? options.spawnClaudeCodeProcess({
-        command: executable,
-        args,
-        cwd: options.cwd,
-        env,
-        signal: options.abortController?.signal
-      })
-    : spawn(executable, args, {
-        cwd: options.cwd,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true
-      })
+  const child: ChildProcess = preAborted
+    ? inertChild()
+    : options.spawnClaudeCodeProcess
+      ? options.spawnClaudeCodeProcess({
+          command: executable,
+          args,
+          cwd: options.cwd,
+          env,
+          signal: options.abortController?.signal
+        })
+      : spawn(executable, args, {
+          cwd: options.cwd,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true
+        })
 
   if (!child.stdin || !child.stdout || !child.stderr) {
     throw new Error('Failed to attach stdio to cli.js subprocess')
@@ -439,6 +483,7 @@ export function query(input: QueryInput): QueryHandle {
   if (options.abortController) {
     options.abortController.signal.addEventListener('abort', onAbort, { once: true })
   }
+  if (preAborted) killChild()
 
   // Terminal-message drain (M-CL1). `'exit'` fires as soon as the process
   // dies, but stdout may still hold un-read bytes — the final `result`, crash

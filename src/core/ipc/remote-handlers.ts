@@ -16,7 +16,7 @@ import {
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { accountState } from '../host'
+import { accountState, hostAppVersion } from '../host'
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
@@ -67,14 +67,16 @@ import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
+import { getCliVersion } from '../sdk/harness'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
+import { queryClaudeModels } from '../services/claude-model-catalog'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
 import { remoteVoice } from '../services/remote-voice'
 import {
@@ -174,13 +176,6 @@ function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'remote' })
 }
 
-/**
- * True once registerRemoteHandlers has run. `registerRemoteVersionInfo` is
- * called later in the app bootstrap and must stay a no-op when the remote
- * surface was never set up (it was previously gated on the captured dispatcher).
- */
-let remoteHandlersRegistered = false
-
 /** What `app:version-info` answers. */
 export interface VersionInfo {
   appVersion: string
@@ -188,21 +183,37 @@ export interface VersionInfo {
 }
 
 /**
- * Register the `app:version-info` channel on the remote transport. Called from
- * the main bootstrap once the build versions are known (they're computed after
- * registerRemoteHandlers runs). No-op if remote handlers aren't set up.
+ * What `app:version-info` serves unless a host overrides it
+ * ({@link registerRemoteVersionInfo}): the version the host published
+ * (`setHostAppVersion`, which the desktop sets from `app.getVersion()` and
+ * claudeui-server from its package manifest, `unknown` when it has none) and the
+ * Claude Code version of the harness that would spawn — read per call, since the
+ * harness selection can change while the host runs (ADR-082).
+ */
+const defaultVersionInfo = (): VersionInfo => ({
+  appVersion: hostAppVersion(),
+  cliVersion: getCliVersion()
+})
+
+let versionInfoSource: () => VersionInfo = defaultVersionInfo
+
+/** Test seam: drop any override, so `app:version-info` serves the host's defaults again. */
+export function resetRemoteVersionInfoForTests(): void {
+  versionInfoSource = defaultVersionInfo
+}
+
+/**
+ * Override what `app:version-info` answers. Order-independent: the channel itself
+ * is registered by {@link registerRemoteHandlers} (so every host that serves the
+ * remote surface — the desktop AND claudeui-server — serves it), and this only
+ * replaces its source, whether it runs before or after that. The desktop passes
+ * its display-form version.
  *
  * A function is read per call: the Claude Code version follows the harness
- * selection (ADR-082), so the desktop passes one that asks `getCliVersion()`.
+ * selection, so the desktop passes one that asks `getCliVersion()`.
  */
 export function registerRemoteVersionInfo(versionInfo: VersionInfo | (() => VersionInfo)): void {
-  if (!remoteHandlersRegistered) return
-  handleRemote({
-    channel: 'app:version-info',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => (typeof versionInfo === 'function' ? versionInfo() : versionInfo)
-  })
+  versionInfoSource = typeof versionInfo === 'function' ? versionInfo : () => versionInfo
 }
 
 /**
@@ -223,26 +234,12 @@ async function withGit<T>(
   }
 }
 
-/** Uncached claude model list via a throwaway SDK query (no auth-source side
- *  effects — those are desktop-only; see handlers-core.ts rationale). */
+/** Uncached claude model list (no auth-source side effects — those are
+ *  desktop-only; see handlers-core.ts rationale). Goes through the shared query
+ *  that also records the host's model catalog, so a remote picker fetch feeds
+ *  automation runs the way a desktop one does. */
 async function claudeSupportedModels(): Promise<ModelInfo[]> {
-  const abort = new AbortController()
-  await ensureHostTokenFresh()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort,
-      // Init-only: killed right after the initialize response.
-      reloadPlugins: false
-    }
-  })
-  try {
-    return await (q as unknown as { supportedModels(): Promise<ModelInfo[]> }).supportedModels()
-  } finally {
-    abort.abort()
-  }
+  return queryClaudeModels()
 }
 
 // Title/commit-message generation. Kept behaviorally identical to the desktop
@@ -366,7 +363,15 @@ export function registerRemoteHandlers(
    */
   authDeps?: AuthCommandDeps
 ): void {
-  remoteHandlersRegistered = true
+  // Registered here, not by `registerRemoteVersionInfo`, so the channel exists
+  // whatever order a host calls them in (the desktop calls the latter BEFORE
+  // `bootCore` gets here; claudeui-server never calls it).
+  handleRemote({
+    channel: 'app:version-info',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => versionInfoSource()
+  })
 
   // -------------------------------------------------------------------------
   // Session lifecycle
@@ -387,7 +392,8 @@ export function registerRemoteHandlers(
       thinkingMode?: string | null,
       resumeSessionAt?: string | null,
       forkSession?: boolean | null,
-      engineId?: EngineId | null
+      engineId?: EngineId | null,
+      announce?: CreateSessionArgs['announce'] | null
     ) => {
       // Every optional argument through `opt` — see its doc comment. `effort`
       // is the one that broke in the field; the rest are the same shape and
@@ -402,7 +408,8 @@ export function registerRemoteHandlers(
         thinkingMode: opt(thinkingMode),
         resumeSessionAt: opt(resumeSessionAt),
         forkSession: opt(forkSession),
-        engineId: opt(engineId)
+        engineId: opt(engineId),
+        announce: opt(announce)
       })
     }
   })

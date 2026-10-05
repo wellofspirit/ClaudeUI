@@ -1554,7 +1554,19 @@ interface SessionAPI {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    engineId?: EngineId
+    engineId?: EngineId,
+    /**
+     * The values every replica adopts as this session's OWN on the birth event
+     * (`session:created`). `effort` has three states: a string = announce the
+     * effort the process is spawned with (the positional `effort`); `null` = the
+     * model is KNOWN to take none (clears); absent / `undefined` = the model is
+     * unknown to this client (empty or failed catalog), announce nothing so no
+     * replica loses a pick. `thinkingMode` is the raw pick (`null` = no pick). A
+     * replica thus shows what the process runs, and a later change to the per-model
+     * starting effort cannot re-label a session already started. Omitted by older
+     * clients (and `null` over WS JSON): nothing is announced.
+     */
+    announce?: { effort?: string | null; thinkingMode?: string | null }
   ): Promise<void>
   /**
    * `rekeySession` was DELETED in SyncCore phase 4c. Core owns the rekey: it

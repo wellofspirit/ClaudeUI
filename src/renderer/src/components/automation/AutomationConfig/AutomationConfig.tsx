@@ -39,6 +39,14 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     [fetchedModels, automation.model]
   )
 
+  // The run judges its starting effort against the full catalog and the saved
+  // per-model efforts; hand the screen the same inputs.
+  const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
+  const effortDefaults = useMemo(
+    () => ({ catalog: fetchedModels, modelEffortDefaults }),
+    [fetchedModels, modelEffortDefaults]
+  )
+
   const runs = useAutomationStore((s) => s.runs[automation.id])
   const detailTab = useAutomationStore((s) => s.detailTab)
   const setDetailTab = useAutomationStore((s) => s.setDetailTab)
@@ -162,6 +170,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     <AutomationConfigView
       automation={automation}
       models={models}
+      effortDefaults={effortDefaults}
       globalPerms={globalPerms}
       hasRunningRun={hasRunningRun}
       runs={runs}

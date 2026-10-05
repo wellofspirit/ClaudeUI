@@ -7,6 +7,7 @@ import {
   engineDefaultModels,
   resolveEngineDefaultModel,
   seedingModelPicks,
+  carriesPicksIntoNewSessions,
   hasResumableTranscript
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
@@ -19,6 +20,12 @@ import type {
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
+import {
+  catalogFor,
+  rememberedEffortPatch,
+  sessionSpawnEffort,
+  spawnAnnouncement
+} from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
@@ -36,9 +43,7 @@ import {
   claudeModelCapabilities,
   modelResolveThinkingMode,
   modelResolveEffort,
-  modelDefaultEffort,
   modelDefaultThinkingMode,
-  claudeSavedEffort,
   type EffortLevel,
   type ThinkingMode,
   codexPublishesEffort
@@ -272,6 +277,9 @@ export function InputBox(): React.JSX.Element {
   } = useFileMention({ cwd, text, setText, textareaRef })
 
   const availableModels = useSessionStore((s) => s.availableModels)
+  const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
+  const engineEffortDefaults = useSessionStore((s) => s.settings.engineEffortDefaults)
+  const newSessionModel = useSessionStore((s) => s.settings.newSessionModel)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const setEngineModels = useSessionStore((s) => s.setEngineModels)
   const models = useMemo(
@@ -619,29 +627,20 @@ export function InputBox(): React.JSX.Element {
       const effort = picked ?? (fresh ? codexDefaultEffortFor(state, model, catalog) : undefined)
       return { model, ...(effort ? { effort } : {}) }
     }
-    const modelInfo = state.availableModels.find(
-      (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
-    )
+    const { modelInfo } = catalogFor(state, {
+      selectedModel: session?.selectedModel ?? '',
+      selectedEngineId: engineId
+    })
     const desiredThinking: ThinkingMode =
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
-    // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
-    // Keyed by `claudeEffortKey` — the rule the Default models table writes
-    // with — so an alias reads the alias's setting and `default` the setting of
-    // the alias that resolves where it does.
-    const userDefault = claudeSavedEffort(
-      state.settings.modelEffortDefaults,
-      modelInfo,
-      state.availableModels.filter((m) => (m.engineId ?? 'claude') === engineId)
-    )
-    // Not the codex branch (returned above): here the store's pick is one of
-    // the Claude rungs, the only values the non-native picker can set.
-    const desiredEffort: EffortLevel =
-      (session?.effort as EffortLevel | null | undefined) ??
-      userDefault ??
-      modelDefaultEffort(modelInfo)
+    // Effort precedence (explicit pick > Claude's per-model starting effort >
+    // cli.js heuristic, clamped to the model): `sessionSpawnEffort`, the SAME
+    // function — fed the same inputs — as the pill and the retry / plan / review
+    // spawns. Not the codex branch (returned above).
+    const effort = session ? sessionSpawnEffort(state, session) : undefined
     return {
       model: session?.selectedModel,
-      effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
+      effort,
       thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
     }
   }
@@ -709,7 +708,8 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             fork.anchorUuid,
             true,
-            session?.selectedEngineId
+            session?.selectedEngineId,
+            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
           )
         } else {
           const isHistorical =
@@ -733,7 +733,8 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             undefined,
             undefined,
-            session?.selectedEngineId
+            session?.selectedEngineId,
+            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
           )
         }
         markSdkActive(activeSessionId)
@@ -763,7 +764,8 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           fork.anchorUuid,
           true,
-          session?.selectedEngineId
+          session?.selectedEngineId,
+          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
         )
       } else {
         const isHistorical =
@@ -781,7 +783,8 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           undefined,
           undefined,
-          session?.selectedEngineId
+          session?.selectedEngineId,
+          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
         )
       }
       markSdkActive(activeSessionId)
@@ -1072,7 +1075,17 @@ export function InputBox(): React.JSX.Element {
             !codexPublishesEffort(codexCatalogOf(state.availableModels), value, session.effort)
           )
             setEffort(null)
+        } else if (!started && !session.sdkActive) {
+          // Not started and nothing running: no process holds this effort, so it
+          // is no one's value to keep. (A session spawned but not yet initialised
+          // has `sdkActive` and no id: its process runs the frozen effort, so it
+          // takes the coerce path below.) Clear it and the NEW model's remembered starting effort applies
+          // (the pick that made the old one stuck was remembered for the old
+          // model, not this one).
+          setEffort(null)
         } else {
+          // Started: the live process keeps its effort across `setModel`, so the
+          // session keeps showing it, coerced to what the new model accepts.
           const coerced = modelResolveEffort(newModel, session.effort as EffortLevel)
           // Effort unsupported on new model → clear the user's pick (fall back to default).
           if (coerced === null) setEffort(null)
@@ -1119,7 +1132,8 @@ export function InputBox(): React.JSX.Element {
       opts.thinkingMode,
       undefined,
       undefined,
-      session?.selectedEngineId
+      session?.selectedEngineId,
+      spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
@@ -1141,6 +1155,22 @@ export function InputBox(): React.JSX.Element {
         return
       }
       setEffort(level as EffortLevel)
+      // Effort is remembered PER MODEL (Claude and pi — `rememberedEffortPatch`
+      // writes nothing for another engine): the pick also becomes the model's
+      // starting effort (Claude: the Settings table's own row; pi: its own
+      // per-engine map), so the next session on it starts at — and displays —
+      // what was last chosen. The session keeps its own pick
+      // too: another open session on the same model must go on showing what IT
+      // runs, not follow this one.
+      const state = useSessionStore.getState()
+      const session = activeSessionId ? state.sessions[activeSessionId] : undefined
+      // Only while composer picks carry into new sessions (`newSessionModel`): with
+      // "configured default" the pick changes this session alone.
+      const remembered =
+        session && carriesPicksIntoNewSessions(state.settings)
+          ? rememberedEffortPatch(state, session, level as EffortLevel)
+          : undefined
+      if (remembered) state.updateSettings(remembered)
       await restartSdkSession()
     },
     [activeSessionId, nativeEffortOptions, liveBackend, setEffort, restartSdkSession]
@@ -1330,8 +1360,46 @@ export function InputBox(): React.JSX.Element {
           liveBackend
           ? (status.codex?.reasoningEffort ?? effort ?? selectedModel.nativeDefaultEffort ?? '')
           : (effort ?? status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
-        : (effort ?? modelDefaultEffort(selectedModel)),
-    [effort, selectedModel, nativeEffortOptions, liveBackend, status.codex?.reasoningEffort]
+        : // The SPAWN's own function over the SAME inputs, so the pill names the
+          // effort the process starts with — Claude's per-model starting effort
+          // included, and a model missing from the catalog resolved exactly as
+          // spawn resolves it (this used to feed the picker's synthetic
+          // "missing selection" row instead and disagree). With a session, the
+          // inputs are the session's own model and engine; only the welcome
+          // screen, which has no session, resolves from the picker's model.
+          sessionSpawnEffort(
+            {
+              availableModels,
+              settings: { modelEffortDefaults, engineEffortDefaults, newSessionModel }
+            },
+            activeSessionId
+              ? {
+                  selectedModel: requestedModelValue,
+                  selectedEngineId: sessionEngineId,
+                  effort: effort ?? null
+                }
+              : {
+                  selectedModel: selectedModel.value,
+                  selectedEngineId: effectiveEngineId,
+                  effort: null
+                }
+          ),
+    [
+      effort,
+      selectedModel.value,
+      selectedModel.nativeDefaultEffort,
+      availableModels,
+      activeSessionId,
+      requestedModelValue,
+      sessionEngineId,
+      effectiveEngineId,
+      modelEffortDefaults,
+      engineEffortDefaults,
+      newSessionModel,
+      nativeEffortOptions,
+      liveBackend,
+      status.codex?.reasoningEffort
+    ]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),
