@@ -9,6 +9,19 @@
  * with a file-tree guide (ADR-073 §7). A context row is a finished ancestor
  * the Running filter keeps so a running row never floats without its parent:
  * dimmed, no Stop, still opens on click.
+ *
+ * One DOM, two shapes (ADR-073 §9), chosen by the roster's own width
+ * (`@container/roster` in AgentRosterList) and never by the viewport. Wide, the
+ * row is a single line in the order dot · name · badge · resumed · description ·
+ * metrics · Stop, and it must never overflow: Stop and the metrics keep their
+ * size, the description gives way first (down to a floor), then the badge, then
+ * the name. Narrow (< 480px), the same elements regroup into two lines:
+ * name · resumed · metrics over badge · description, with Stop centred at the
+ * right. There the name keeps a floor and the metrics shorten before it does,
+ * the badge stays whole and the description gives way, and under 400px the
+ * metrics also leave out the current tool. Both shapes come from CSS alone; the
+ * wide order is carried by `order-*`, which is also what puts each element on
+ * its own narrow line in the right place.
  */
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
@@ -17,6 +30,14 @@ import type { AgentRosterRow } from '../../hooks/useAgentRoster'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
 const INDENT_PX = 14
+/**
+ * A narrow roster's line: the wrapper is `display: contents` (its children sit
+ * straight in the row's flex line) until the roster is narrower than 480px, then
+ * a flex line of its own. Whole class names: Tailwind reads source text.
+ */
+const LINE =
+  'contents @max-[480px]/roster:flex @max-[480px]/roster:items-center @max-[480px]/roster:gap-1.5 @max-[480px]/roster:min-w-0'
+
 /** The x of a level's guide: the dot column of the row one level up. */
 const guideLeft = (level: number): number => 13 + INDENT_PX * (level - 1)
 
@@ -141,12 +162,13 @@ export function AgentRow({
   }
 
   // Trailing metrics, most specific first. Elapsed is the only one every engine
-  // can supply; tokens and the current tool are Claude's task_progress.
-  const metrics = [
-    row.lastToolName,
+  // can supply; tokens and the current tool are Claude's task_progress. The tool
+  // is rendered on its own so a very narrow roster can drop it.
+  const figures = [
     row.elapsedSeconds !== undefined ? formatElapsed(row.elapsedSeconds) : undefined,
     row.usage?.totalTokens ? formatTokens(row.usage.totalTokens) : undefined
   ].filter(Boolean)
+  const hasMetrics = !!row.lastToolName || figures.length > 0
 
   return (
     <div
@@ -165,37 +187,64 @@ export function AgentRow({
     >
       {row.depth > 0 && guide && <TreeGuide depth={row.depth} guide={guide} />}
       <StatusDot row={row} />
-      <span className="text-[12px] text-text-primary shrink-0 max-w-[140px] truncate">
-        {row.name}
-      </span>
-      {row.badge && (
-        <span className="text-[10px] font-mono px-1 py-px rounded bg-bg-tertiary text-text-secondary border border-border shrink-0">
-          {row.badge}
-        </span>
-      )}
-      {row.runIndex > 1 && (
-        <span
-          data-testid="AgentRow.resumed"
-          className="text-[10px] font-mono px-1 py-px rounded bg-accent/10 text-accent border border-accent/25 shrink-0"
-          title="This agent was sent a message after it finished, and ran again"
-        >
-          resumed ×{row.runIndex - 1}
-        </span>
-      )}
-      <span className="text-[11px] text-text-secondary truncate flex-1 min-w-0">
-        {row.description}
-      </span>
-      {metrics.length > 0 && (
-        <span className="text-[10px] font-mono text-text-muted shrink-0 whitespace-nowrap">
-          {metrics.join(' · ')}
-        </span>
-      )}
+      <div className="contents @max-[480px]/roster:flex @max-[480px]/roster:flex-col @max-[480px]/roster:flex-1 @max-[480px]/roster:min-w-0 @max-[480px]/roster:gap-0.5">
+        <div className={LINE}>
+          <span
+            data-testid="AgentRow.name"
+            className="order-1 text-[12px] text-text-primary min-w-0 max-w-[140px] @max-[480px]/roster:max-w-none @max-[480px]/roster:min-w-[4.5rem] truncate"
+          >
+            {row.name}
+          </span>
+          {row.runIndex > 1 && (
+            <span
+              data-testid="AgentRow.resumed"
+              className="order-3 text-[10px] font-mono px-1 py-px rounded bg-accent/10 text-accent border border-accent/25 shrink-0 whitespace-nowrap"
+              title="This agent was sent a message after it finished, and ran again"
+            >
+              <span className="@max-[480px]/roster:hidden">resumed ×{row.runIndex - 1}</span>
+              <span className="hidden @max-[480px]/roster:inline">↻{row.runIndex - 1}</span>
+            </span>
+          )}
+          {hasMetrics && (
+            <span
+              data-testid="AgentRow.metrics"
+              className="order-5 text-[10px] font-mono text-text-muted shrink-0 whitespace-nowrap @max-[480px]/roster:ml-auto @max-[480px]/roster:min-w-[3rem] @max-[480px]/roster:shrink-[10000] @max-[480px]/roster:truncate"
+            >
+              {row.lastToolName && (
+                <span data-testid="AgentRow.metrics.tool" className="@max-[400px]/roster:hidden">
+                  {row.lastToolName}
+                  {figures.length > 0 ? ' · ' : ''}
+                </span>
+              )}
+              {figures.join(' · ')}
+            </span>
+          )}
+        </div>
+        {(row.badge || row.description) && (
+          <div className={LINE}>
+            {row.badge && (
+              <span
+                data-testid="AgentRow.badge"
+                className="order-2 text-[10px] font-mono px-1 py-px rounded bg-bg-tertiary text-text-secondary border border-border min-w-0 shrink-[10] truncate @max-[480px]/roster:shrink-0"
+              >
+                {row.badge}
+              </span>
+            )}
+            <span
+              data-testid="AgentRow.description"
+              className="order-4 text-[11px] text-text-secondary truncate grow shrink-[10000] min-w-[3rem]"
+            >
+              {row.description}
+            </span>
+          </div>
+        )}
+      </div>
       {row.isRunning && !isContext && (row.depth === 0 || hasLifecycle) && (
         <button
           data-testid="AgentRow.stop"
           onClick={handleStop}
           disabled={isStopping}
-          className="text-[10px] px-1.5 py-px rounded border border-border-bright text-text-muted hover:text-danger hover:border-danger transition-colors cursor-default shrink-0 disabled:opacity-50"
+          className="order-6 text-[10px] px-1.5 py-px @max-[480px]/roster:px-2 @max-[480px]/roster:py-1 rounded border border-border-bright text-text-muted hover:text-danger hover:border-danger transition-colors cursor-default shrink-0 disabled:opacity-50"
         >
           {isStopping ? 'Stopping' : 'Stop'}
         </button>

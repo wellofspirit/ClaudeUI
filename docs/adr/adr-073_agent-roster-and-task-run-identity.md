@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -424,6 +424,65 @@ callID.
 **The failure reason is shown.** A failed TaskCard with subagent output shows the tool result's
 error text in `TaskCard.failureSummary`. The result body still shows the subagent's output. Before,
 the reason was only visible when the subagent produced nothing.
+
+### 9. The roster on a narrow screen (amendment, 2026-10-06)
+
+On the owner's phone (Samsung S25 Ultra, Edge, 412 x 728 CSS px, `uiFontScale` 1.1) the overlay hung 15px
+off the left edge, each row lost its description, and Stop was clipped. Two causes, both layout, neither
+visible to jsdom. The rule that came out of the first is [ADR-092](adr-092_zoom-trap-no-viewport-units.md).
+
+**The zoom trap.** The overlay was `w-[min(420px,calc(100vw-32px))]`. SessionView renders the app under
+CSS `zoom: uiFontScale`, and inside a zoomed subtree `vw` lengths are multiplied by the zoom: that box
+measured 380px at zoom 1, 418px at 1.1 and 570px at 1.5, on a 412px screen. It is now
+`w-[420px] max-w-full`: a percentage resolves against the composer, which is already laid out in zoomed
+px (`shared/use-anchored-menu.ts` has the long account of the same trap). `max-w-full` is relative to
+the composer box because that is the overlay's containing block (the nearest positioned ancestor,
+`InputBox/View.tsx`).
+
+**A row has two shapes, chosen by the roster's own width.** `AgentRosterList` is a named container
+(`@container/roster`). Below **480px** of roster width a row is two lines: status dot, then a column
+holding name, resumed chip and metrics over badge and description, then Stop, centred at the right with a
+taller touch target. At 480px and above it is one line. The threshold was first 400, which left the
+420px desktop overlay on one line; in the real app a Claude row (name, badge, resumed chip, `Bash · 2m 15s ·
+8720.9k`, Stop) cannot be read there, and the shrink weights left a name of "m13…" and a badge of "g.". So the
+420px overlay is two-line too, and only a panel wider than 480px keeps one line. It is a container query, not
+a viewport one, so the zoom cannot fool it and the panel's roster, which can also be narrow, gets the same
+behaviour.
+
+**What each shape protects.** Narrow, line 1 gives the name a floor (`min-w-[4.5rem]`) and lets the metrics
+truncate before the name does (to a 3rem floor, so a 43-character name cannot take the clock and the tokens too); line 2 keeps the badge whole and lets the description give way; under
+**400px** the metrics also drop the current tool (`Bash`, `Read`), leaving `2m 15s · 2270.0k` (every phone list is under 400px: about 350px at uiFontScale 1.1, where the token count was being cut to `872…`; the 420px overlay keeps the tool), as one
+`AgentRow.metrics` element with the tool in its own hidden-when-narrow span. Wide, Stop and the metrics never
+shrink and the description gives way first (to a 3rem floor), then the badge, then the name (still capped at
+140px). These are flex-shrink weights (description 10000, badge 10, name 1), large enough apart that the
+description absorbs the cut before the badge loses a pixel.
+
+**Option A, not "drop by priority".** The alternative was to keep one line on the phone and drop the
+badge, the current tool and the Stop label. It is denser but throws information away and leaves a
+20px Stop. Two lines keep everything, and the dot stays vertically centred so the nested rows' tree
+elbow (`h-1/2`) still meets it.
+
+**One DOM, CSS only.** Both shapes come from the same elements: no `ResizeObserver`, no measured widths,
+no element rendered twice with one copy hidden. The exceptions are text variants inside one element: the
+`resumed x N` text has a `↻N` variant inside the same chip, and the metrics' tool name is its own span. Line
+wrappers are `display: contents` when wide, and the wide order is carried by `order-*`, which also puts each
+element on its own narrow line.
+
+The Task card has the same trap and the same cure (`@container/taskcard`, 480px): its header sheds the word
+"Task" under 480px and the clock under 300px (one row, never wrapped; under 300px the description floor drops from 3rem to 2rem, which a blocked review's chip plus Approve needs), and its footer turns "Open in panel" into
+an icon and keeps the model chip at least 5rem wide. Narrow, the footer may wrap whole chips; `flex-wrap` breaks
+a line on the items' basis sizes before anything shrinks, so the model chip's basis is its 5rem floor
+(`basis-[5rem] grow max-w-fit`), not its text.
+
+**Two zooms, two surfaces.** The roster (the composer's overlay, the panel) lives under the app zoom,
+`uiFontScale`. A Task card lives in the chat's message list, which ChatPanel zooms again by
+`chatFontScale / uiFontScale`, so the card's own zoom is `chatFontScale` and `uiFontScale` does not touch it.
+The card is also narrower than the window by more than a margin: scroller `mr-2`, column `px-3`, and, when a
+message holds two or more tool calls, the bordered `p-2` group. On a 412px phone that is
+`(412 - 8) / chatFontScale - 42` CSS px: 362, 325, 282 and 228px at chat scale 1, 1.1, 1.25 and 1.5. A layout
+test uses the zoom and the container chain of the surface it tests. The browser layout tests (`docs/testing-strategy.md`,
+Layer 2b) assert readability, not just containment: the roster at uiFontScale 1, 1.1, 1.25 and 1.5, the card
+at the same four values of chatFontScale.
 
 ## Consequences
 
