@@ -315,6 +315,14 @@ function piNormalize(
       if (typeof inp.summary === 'string' && inp.summary !== '') {
         fields.push({ label: 'summary', value: inp.summary })
       }
+      // A refused send_message shows WHY (the host's answer); the message it
+      // tried to send moves into the fields.
+      if (result?.isError === true) {
+        if (typeof inp.message === 'string' && inp.message !== '') {
+          fields.push({ label: 'message', value: inp.message })
+        }
+        return { kind: 'detail', fields, text: result.toolResult }
+      }
       const text = typeof inp.message === 'string' ? inp.message : result?.toolResult
       return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
     }

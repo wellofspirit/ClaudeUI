@@ -563,6 +563,28 @@ describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () =
     })
   })
 
+  it('send_message refused: the host answer is the text, the attempted message a field', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'detail',
+        { to: 'nobody-here', message: 'hello' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'No agent "nobody-here" in this session. Agents: (none)',
+          isError: true
+        }
+      )
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'nobody-here' },
+        { label: 'message', value: 'hello' }
+      ],
+      text: 'No agent "nobody-here" in this session. Agents: (none)'
+    })
+  })
+
   it('task_stop: once the host answered, the row says what it said (a refusal is not a stop)', () => {
     expect(
       PiEngineToolMap.normalize(
