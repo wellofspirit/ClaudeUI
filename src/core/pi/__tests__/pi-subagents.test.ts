@@ -266,7 +266,7 @@ describe('buildPiSubagentChildArgs', () => {
     )
     expect(
       buildPiSubagentChildArgs({ ...base, definition: def({}), childCanSpawn: false }).slice(6)
-    ).toEqual(['--exclude-tools', 'agent'])
+    ).toEqual(['--exclude-tools', 'agent,list_models'])
   })
 
   it('an explicit tool list keeps agent only when the child may spawn; disallowed and thinking pass through', () => {
@@ -278,7 +278,7 @@ describe('buildPiSubagentChildArgs', () => {
       }).slice(6)
     ).toEqual([
       '--tools',
-      'read,agent,send_message,task_stop',
+      'read,agent,send_message,task_stop,list_models',
       '--exclude-tools',
       'bash',
       '--thinking',
@@ -413,7 +413,7 @@ describe('PiSubagentManager.run', () => {
     expect(general.opts.args!.slice(6)).toEqual([])
     const deep = byId('call-deep')
     expect(deep.env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
-    expect(deep.opts.args!.slice(6)).toEqual(['--exclude-tools', 'agent'])
+    expect(deep.opts.args!.slice(6)).toEqual(['--exclude-tools', 'agent,list_models'])
     for (const c of fake.children) await settle(c)
     await Promise.all(runs)
   })
@@ -2791,5 +2791,250 @@ describe('PiSubagentManager — S2: identity in the system prompt, foreground ch
     fg.push({ type: 'agent_settled' })
     await fgRun
     lead.push({ type: 'agent_settled' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S3 — model resolution and list_models
+// ---------------------------------------------------------------------------
+
+describe('PiSubagentManager — S3: model resolution and list_models', () => {
+  const entry = (provider: string, id: string, name = id) => ({
+    provider,
+    id,
+    name,
+    contextWindow: 200_000,
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }
+  })
+  const CATALOG = [
+    entry('anthropic', 'claude-opus-4-5-20251101', 'Claude Opus 4.5'),
+    entry('anthropic', 'claude-sonnet-4-5', 'Claude Sonnet 4.5'),
+    entry('openai-codex', 'gpt-5.6-luna', 'GPT-5.6 Luna')
+  ]
+  function mgrWith(
+    fake: ReturnType<typeof makeFakeSpawn>,
+    host: PiSubagentHost,
+    catalog?: () => Promise<typeof CATALOG>,
+    registry: PiAgentRegistry = builtins()
+  ) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry,
+      sessionsRoot: root,
+      ...(catalog ? { catalog } : {})
+    })
+  }
+  const setModelOf = (child: FakeChild): string =>
+    String(child.commands().find((c) => c.type === 'set_model')?.modelId)
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+
+  it('an alias resolves against the catalog: the child and the record carry the RESOLVED value', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => CATALOG)
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', model: 'opus', name: 'w', run_in_background: false },
+      'call-w',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    const child = fake.children[0]
+    await settle(child)
+    await pending
+    expect(setModelOf(child)).toBe('claude-opus-4-5-20251101')
+    expect(mgr.record(agentIdOf(child))!.model).toBe('anthropic/claude-opus-4-5-20251101')
+  })
+
+  it('details.cuiAgent.model of a foreground and a background launch is the resolved value', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => CATALOG)
+    const bg = await mgr.run({ description: 'd', prompt: 'p', model: 'sonnet' }, 'call-bg', null)
+    expect(bg.details).toMatchObject({ cuiAgent: { model: 'anthropic/claude-sonnet-4-5' } })
+    const fg = mgr.run(
+      { description: 'd', prompt: 'p', model: 'GPT-5.6-LUNA', run_in_background: false },
+      'call-fg',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    await settle(fake.children[1])
+    await settle(fake.children[0])
+    expect((await fg).details).toMatchObject({
+      cuiAgent: { model: 'openai-codex/gpt-5.6-luna' }
+    })
+  })
+
+  it('an unknown model refuses the launch: an error result, no spawn, no record', async () => {
+    const fake = makeFakeSpawn()
+    const { host, sent } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => CATALOG)
+    expect(
+      await mgr.run({ description: 'd', prompt: 'p', model: 'gpt-9', name: 'w' }, 'call-w', null)
+    ).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: 'Unknown model "gpt-9". Call list_models to see the models available to agents.'
+        }
+      ],
+      isError: true
+    })
+    expect(fake.spawn).not.toHaveBeenCalled()
+    expect(mgr.liveCount).toBe(0)
+    expect(sent.some(([c]) => c === 'session:task-started')).toBe(false)
+    expect((await mgr.sendMessage({ to: 'w', message: 'x' }, null)).content[0].text).toMatch(
+      /^No agent "w"/
+    )
+  })
+
+  it("a definition's own model goes through the resolver too; the parent's live model fallback is NOT re-validated", async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const def: PiAgentDefinition = {
+      ...builtins().resolve('general-purpose')!,
+      name: 'pinned',
+      model: 'anthropic/claude-gone'
+    }
+    const mgr = mgrWith(fake, host, async () => CATALOG, registryWith([def]))
+    const refused = await mgr.run(
+      { description: 'd', prompt: 'p', subagent_type: 'pinned' },
+      'call-1',
+      null
+    )
+    expect(refused.isError).toBe(true)
+    expect(refused.content[0].text).toContain('Unknown model "anthropic/claude-gone"')
+    expect(fake.spawn).not.toHaveBeenCalled()
+
+    // No explicit model: the parent's model (not in the catalog at all) is used as is.
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-2', null)
+    expect(mgr.record(agentIdOf(fake.children[0]))!.model).toBe('openai-codex/parent-model')
+    await settle(fake.children[0])
+  })
+
+  it('an empty catalog, or a discovery that throws, passes the model through unchanged and never throws out of run()', async () => {
+    for (const catalog of [
+      async () => [],
+      async (): Promise<typeof CATALOG> => {
+        throw new Error('probe failed')
+      }
+    ]) {
+      const fake = makeFakeSpawn()
+      const { host } = makeOrderedHost()
+      const mgr = mgrWith(fake, host, catalog)
+      const r = await mgr.run(
+        { description: 'd', prompt: 'p', model: 'opus', name: 'w' },
+        'call-w',
+        null
+      )
+      expect(r.isError).toBeUndefined()
+      expect(mgr.record(agentIdOf(fake.children[0]))!.model).toBe('opus')
+      await settle(fake.children[0])
+    }
+  })
+
+  it('two parallel agent calls with the SAME name and a model to resolve: exactly one spawns (uniqueness is checked after the catalog await)', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    let release: (c: typeof CATALOG) => void = () => {}
+    const gate = new Promise<typeof CATALOG>((r) => (release = r))
+    const mgr = mgrWith(fake, host, () => gate)
+    const first = mgr.run(
+      { description: 'd', prompt: 'p', name: 'dup', model: 'opus' },
+      'call-1',
+      null
+    )
+    const second = mgr.run(
+      { description: 'd', prompt: 'p', name: 'dup', model: 'opus' },
+      'call-2',
+      null
+    )
+    // Both calls are parked on the catalog read; neither has claimed the name.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(fake.spawn).not.toHaveBeenCalled()
+    release(CATALOG)
+    const results = await Promise.all([first, second])
+    expect(fake.spawn).toHaveBeenCalledTimes(1)
+    const refused = results.filter((r) => r.isError)
+    expect(refused).toHaveLength(1)
+    expect(refused[0].content[0].text).toBe('An agent named "dup" already exists in this session.')
+    await settle(fake.children[0])
+  })
+
+  it('a resume reuses the stored resolved model unchanged', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => CATALOG)
+    await mgr.run({ description: 'd', prompt: 'p', model: 'opus', name: 'w' }, 'call-w', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await mgr.sendMessage({ to: 'w', message: 'again' }, null)
+    expect(setModelOf(fake.children[1])).toBe('claude-opus-4-5-20251101')
+    fake.children[1].push({ type: 'agent_start' })
+    fake.children[1].push(deliveredEvent(deliveriesOn(fake.children[1])[0]))
+    fake.children[1].push({ type: 'agent_settled' })
+  })
+
+  it('listModels: the session model first, the filter, the cap, zero matches', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const many = Array.from({ length: 120 }, (_, i) =>
+      entry('p', `model-${String(i).padStart(3, '0')}`)
+    )
+    const mgr = mgrWith(fake, host, async () => [...CATALOG, ...many])
+    const all = (await mgr.listModels({})).content[0].text.split('\n')
+    expect(all[0]).toBe('Current session model: openai-codex/parent-model')
+    expect(all[1]).toBe(
+      'anthropic/claude-opus-4-5-20251101 — Claude Opus 4.5 · 200k ctx · $3/$15 per M tokens'
+    )
+    expect(all).toHaveLength(1 + 100 + 1)
+    expect(all[all.length - 1]).toBe('… 23 more — pass query to narrow.')
+
+    const filtered = (await mgr.listModels({ query: 'SONNET' })).content[0].text
+    expect(filtered.split('\n')).toEqual([
+      'Current session model: openai-codex/parent-model',
+      'anthropic/claude-sonnet-4-5 — Claude Sonnet 4.5 · 200k ctx · $3/$15 per M tokens'
+    ])
+    expect((await mgr.listModels({ query: 'zzz' })).content[0].text).toContain('No model matches')
+    expect(await mgr.listModels({ query: 3 })).toEqual({
+      content: [{ type: 'text', text: 'list_models "query" must be a string.' }],
+      isError: true
+    })
+  })
+
+  it('listModels degrades to the empty-catalog text when discovery throws', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => {
+      throw new Error('probe failed')
+    })
+    const r = await mgr.listModels({})
+    expect(r.isError).toBeUndefined()
+    expect(r.content[0].text).toContain('No models could be listed')
+  })
+
+  it('a child calls list_models through its own gate grant, and without one is refused', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host, async () => CATALOG)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    expect(
+      (await lead.opts.hostedToolHandler!({ toolName: 'list_models', input: {}, toolCallId: 'x' }))
+        .isError
+    ).toBe(true)
+    await lead.opts.gateHandler({ toolCallId: 'call-LM', toolName: 'list_models', input: {} })
+    const r = await lead.opts.hostedToolHandler!({
+      toolName: 'list_models',
+      input: { query: 'luna' },
+      toolCallId: 'call-LM'
+    })
+    expect(r.content[0].text).toContain('openai-codex/gpt-5.6-luna')
+    await settle(lead)
   })
 })

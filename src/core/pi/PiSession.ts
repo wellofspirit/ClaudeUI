@@ -43,7 +43,12 @@ import type {
   PiGetStateData,
   PiRpcCommand
 } from './pi-protocol'
-import { getPiModelCatalog, discoverPiModels, effortLevelsFromModel } from './model-discovery'
+import {
+  getPiModelCatalog,
+  getPiAllowedModelCatalog,
+  discoverPiModels,
+  effortLevelsFromModel
+} from './model-discovery'
 import {
   findPiSessionFile,
   loadPiAgentLinks,
@@ -557,7 +562,9 @@ export class PiSession extends BaseSession {
       },
       {
         ...(deps.spawnPiChild ? { spawn: deps.spawnPiChild } : {}),
-        ...(deps.subagentsRoot ? { sessionsRoot: deps.subagentsRoot } : {})
+        ...(deps.subagentsRoot ? { sessionsRoot: deps.subagentsRoot } : {}),
+        // The `agent` tool's model resolution and `list_models` (ADR-089 S3).
+        catalog: () => getPiAllowedModelCatalog()
       }
     )
     // sandboxConfig/thinkingMode are intentionally unread — Claude-only
@@ -2981,6 +2988,9 @@ export class PiSession extends BaseSession {
         return this.subagents.sendMessage(input, null)
       case 'task_stop':
         return this.subagents.taskStop(input, null)
+      // The models an `agent` call may name (read-only; auto-allowed).
+      case 'list_models':
+        return this.subagents.listModels(input)
 
       default:
         return unknownHostedTool(toolName)

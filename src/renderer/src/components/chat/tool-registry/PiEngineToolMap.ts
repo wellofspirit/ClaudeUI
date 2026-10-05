@@ -118,6 +118,10 @@ function piKindOf(toolName: string): ToolKind {
       return 'detail'
     case 'task_stop':
       return 'note'
+    // The bridge's read-only `list_models`: a one-line note. Mirrors
+    // permission-engine.ts's piToolKind.
+    case 'list_models':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -309,9 +313,23 @@ function piNormalize(
       return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
     }
 
-    // task_stop (ADR-089 S3b): the host's own answer once there is one — a
-    // refusal or "not running" must not read as a stop.
-    case 'note':
+    // Both pi 'note' tools, told apart by input shape (piNormalize never sees
+    // the tool name): task_stop always carries `task_id`; list_models takes at
+    // most a `query`.
+    case 'note': {
+      // list_models: the result is a long list the model reads — the row says
+      // only what was asked (a FAILED call still shows what came back, as
+      // every note row does).
+      if (!('task_id' in inp)) {
+        const query = typeof inp.query === 'string' ? inp.query.trim() : ''
+        return {
+          kind: 'note',
+          icon: 'search',
+          text: query ? `Listed models matching "${query}"` : 'Listed the available models'
+        }
+      }
+      // task_stop (ADR-089 S3b): the host's own answer once there is one — a
+      // refusal or "not running" must not read as a stop.
       return {
         kind: 'note',
         icon: 'stop',
@@ -320,6 +338,7 @@ function piNormalize(
             ? result.toolResult
             : `Stopped agent ${typeof inp.task_id === 'string' ? inp.task_id : ''}`.trim()
       }
+    }
 
     case 'mcp':
       return { kind: 'mcp', input: inp }
@@ -351,7 +370,8 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   show_mockup: 'Mockup',
   dispatch_agent: 'Dispatch',
   agent: 'Agent',
-  subagent: 'Subagent'
+  subagent: 'Subagent',
+  list_models: 'Models'
 }
 
 function piDisplayName(toolName: string): string {

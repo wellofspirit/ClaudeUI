@@ -459,7 +459,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
   it('registers agent ONLY under CLAUDEUI_PI_AGENT_TOOL=1 with bridge creds, independently of CLAUDEUI_PI_HOSTED_TOOLS', () => {
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, () => {
       // task_stop rides in the agent block (bridge v11).
-      expect([...runExtension().tools.keys()]).toEqual(['agent', 'task_stop'])
+      // task_stop and list_models (v12) ride in the same block.
+      expect([...runExtension().tools.keys()]).toEqual(['agent', 'task_stop', 'list_models'])
     })
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, () => {
       expect(runExtension().tools.has('agent')).toBe(false)
@@ -481,6 +482,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
       expect([...runExtension().tools.keys()].sort()).toEqual([
         'agent',
         'create_mockup',
+        'list_models',
         'render_mermaid',
         'show_mockup',
         'task_stop'
@@ -579,10 +581,57 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1', CLAUDEUI_PI_SEND_MESSAGE: '1' }, () => {
       expect([...runExtension().tools.keys()].sort()).toEqual([
         'agent',
+        'list_models',
         'send_message',
         'task_stop'
       ])
     })
+  })
+
+  it('v12: list_models registers ONLY in the agent block, with an optional query, and executes through /hosted-tool', async () => {
+    const bodies: unknown[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'ok' }] })
+      } as Response
+    }) as typeof fetch
+    try {
+      withEnv(
+        { ...BRIDGE_CREDS, CLAUDEUI_PI_SEND_MESSAGE: '1', CLAUDEUI_PI_HOSTED_TOOLS: '1' },
+        () => {
+          expect(runExtension().tools.has('list_models')).toBe(false)
+        }
+      )
+      await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, async () => {
+        const tool = runExtension().tools.get('list_models')!
+        expect(tool.parameters).toEqual({
+          type: 'object',
+          properties: { query: { type: 'string', description: expect.any(String) } }
+        })
+        expect(tool.description).toContain('opus, sonnet, haiku and fable')
+        expect(tool.description).toContain("preferring this session's provider")
+        await tool.execute('c-lm', { query: 'son' })
+        // The agent tool's model parameter points at it.
+        expect(
+          (
+            runExtension().tools.get('agent')!.parameters as {
+              properties: { model: { description: string } }
+            }
+          ).properties.model.description
+        ).toContain(
+          'A model from list_models (provider/id), a bare model id, or an alias opus/sonnet/haiku/fable'
+        )
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+    expect(bodies).toEqual([
+      { toolName: 'list_models', input: { query: 'son' }, toolCallId: 'c-lm' }
+    ])
   })
 
   it('v12: send_message describes running vs finished agents, replying by from-id, main, stopped and failed agents', () => {

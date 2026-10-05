@@ -39,6 +39,8 @@ describe('PiEngineToolMap.kindOf', () => {
     ['agent', 'task'],
     // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
+    // The bridge's read-only list_models (ADR-089 S3): a one-line note.
+    ['list_models', 'note'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
     // Unknown tool names fall through gracefully.
@@ -482,6 +484,29 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
       background: false
     })
     expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+  })
+})
+
+describe('PiEngineToolMap — list_models row (ADR-089 S3)', () => {
+  it('a one-line note naming the query; the (long) result list is not the row text; task_stop is unchanged', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 't',
+      toolResult: ['Current session model: a/b', 'x/y — Y'].join('\n'),
+      isError: false
+    }
+    expect(PiEngineToolMap.normalize('note', {}, result)).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed the available models'
+    })
+    expect(PiEngineToolMap.normalize('note', { query: ' sonnet ' })).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed models matching "sonnet"'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toMatchObject({ icon: 'stop' })
+    expect(PiEngineToolMap.displayName('list_models')).toBe('Models')
   })
 })
 

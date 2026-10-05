@@ -156,6 +156,9 @@ export function piToolKind(toolName: string): ToolKind {
       return 'detail'
     case 'task_stop':
       return 'note'
+    // The bridge's `list_models` (read-only; a one-line note row).
+    case 'list_models':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -173,7 +176,8 @@ export function piToolKind(toolName: string): ToolKind {
  * silent `{*:allow}` baseline for the same tools. Checked in decide() AFTER
  * deny rules (a user's explicit deny still wins — see decide()'s doc
  * comment) but BEFORE ask/sessionAllows/allow/mode-base, so these three
- * never prompt or fall through the ladder.
+ * never prompt or fall through the ladder. `list_models` (ADR-089: the models
+ * an `agent` call may name) rides the same rung: read-only, so never a card.
  *
  * `dispatch_agent` is deliberately NOT in this set: it gets NORMAL gating
  * (falls through to mode base), matching Claude routing dispatch_agent
@@ -183,7 +187,9 @@ export function piToolKind(toolName: string): ToolKind {
 export const PI_AUTO_ALLOW_HOSTED_TOOLS: ReadonlySet<string> = new Set([
   'render_mermaid',
   'create_mockup',
-  'show_mockup'
+  'show_mockup',
+  // Read-only: lists the models an `agent` call may name (a deny rule still wins).
+  'list_models'
 ])
 
 /**
@@ -205,7 +211,8 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch_agent',
   'agent',
   'send_message',
-  'task_stop'
+  'task_stop',
+  'list_models'
 ])
 
 // ---------------------------------------------------------------------------

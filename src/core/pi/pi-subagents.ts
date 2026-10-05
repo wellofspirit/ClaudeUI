@@ -69,6 +69,7 @@ import {
   type SpawnPiChildFn
 } from './pi-child-runner'
 import { piUsageEvent } from './usage-row'
+import { formatPiModelList, resolvePiAgentModel, type PiAgentModelEntry } from './pi-agent-model'
 import {
   classifyPiAgentFailure,
   failureSummary,
@@ -237,18 +238,20 @@ export function buildPiSubagentChildArgs(opts: {
   if (def.tools !== 'inherit') {
     // `--tools` is an allowlist over built-in AND extension tools (P3), so the
     // bridge's own tools have to be named to stay active: send_message always,
-    // agent and task_stop only when the child may spawn.
+    // agent, task_stop and list_models only when the child may spawn.
     const tools = def.tools.filter(
-      (t) => t !== 'agent' && t !== 'send_message' && t !== 'task_stop'
+      (t) => t !== 'agent' && t !== 'send_message' && t !== 'task_stop' && t !== 'list_models'
     )
     if (childCanSpawn) tools.push('agent')
     tools.push('send_message')
-    if (childCanSpawn) tools.push('task_stop')
+    if (childCanSpawn) tools.push('task_stop', 'list_models')
     args.push('--tools', tools.join(','))
   }
   const exclude = [...def.disallowedTools]
   // Belt and braces: the env gate already withholds the registration.
-  if (!childCanSpawn && def.tools === 'inherit' && !exclude.includes('agent')) exclude.push('agent')
+  if (!childCanSpawn && def.tools === 'inherit') {
+    for (const t of ['agent', 'list_models']) if (!exclude.includes(t)) exclude.push(t)
+  }
   if (exclude.length > 0) args.push('--exclude-tools', exclude.join(','))
   if (def.thinking) args.push('--thinking', def.thinking)
   return args
@@ -501,6 +504,8 @@ export class PiSubagentManager {
   private readonly spawn: SpawnPiChildFn
   private readonly sessionsRoot: string
   private readonly now: () => number
+  /** The allowlisted, authenticated model catalog (empty: nothing to validate against). */
+  private readonly catalog: () => Promise<readonly PiAgentModelEntry[]>
   /** Every live run (all depths), keyed by its agent's origin call id. */
   private readonly live = new Map<string, LiveChild>()
   /** Every agent this session ran (G1), by agent id. */
@@ -513,12 +518,15 @@ export class PiSubagentManager {
       registry?: PiAgentRegistry
       sessionsRoot?: string
       now?: () => number
+      /** PiSession passes model discovery; the default (no catalog) validates nothing. */
+      catalog?: () => Promise<readonly PiAgentModelEntry[]>
     } = {}
   ) {
     this.spawn = deps.spawn ?? defaultSpawnPiChild
     this.registry = deps.registry ?? null
     this.sessionsRoot = deps.sessionsRoot ?? piSubagentSessionsRoot()
     this.now = deps.now ?? Date.now
+    this.catalog = deps.catalog ?? (async () => [])
   }
 
   /** PiSession loads the registry at every spawn (a spawn-time snapshot). */
@@ -595,6 +603,33 @@ export class PiSubagentManager {
         `Agent type "${definition.name}" has no tools (tools: []) and cannot be launched.`
       )
     }
+    // Model: the call's > the definition's > the parent's live model. An
+    // EXPLICIT reference (the call's or the definition's) is resolved against
+    // the allowlisted catalog — aliases, bare ids — and one that does not
+    // resolve refuses the launch: never a substitution (owner ruling
+    // 2026-08-21). The parent's live model is not re-validated. Resolved
+    // BEFORE the cap checks: discovery may await, and nothing may await
+    // between those checks and `launch` taking the slot.
+    const explicitModel =
+      str(input.model)?.trim() || (definition.model !== 'inherit' ? definition.model : '')
+    let model = this.host.currentModel()
+    if (explicitModel) {
+      const resolved = resolvePiAgentModel(
+        explicitModel,
+        await this.readCatalog(),
+        this.host.currentModel()
+      )
+      if (!resolved.ok) return errorResult(resolved.error)
+      model = resolved.value
+    }
+    // Uniqueness again, AFTER the last await: two parallel `agent` calls with
+    // one name both passed the early check while parked on the catalog read.
+    // From here to `newRecord` nothing awaits, so the name is claimed
+    // atomically with the cap checks below.
+    if (name !== undefined) {
+      const nameError = this.nameError(name)
+      if (nameError) return errorResult(nameError)
+    }
     if (this.live.size >= MAX_CONCURRENT_PI_SUBAGENTS) {
       return errorResult(
         `Too many agents running (${MAX_CONCURRENT_PI_SUBAGENTS} at most) — wait for one to finish.`
@@ -612,13 +647,6 @@ export class PiSubagentManager {
     const dir = join(this.sessionsRoot, agentId)
     // Written by launch() from the definition, at every run (F8).
     const promptFile = join(dir, 'system-prompt.md')
-
-    // Model: the call's > the definition's > the parent's live model (Q9: any
-    // model pi's set_model accepts; a refusal comes back as pi's message).
-    const model =
-      str(input.model) ||
-      (definition.model !== 'inherit' ? definition.model : '') ||
-      this.host.currentModel()
 
     const spawnerRecord = parent ? this.records.get(parent.agentId) : undefined
     const record = this.newRecord({
@@ -718,6 +746,33 @@ export class PiSubagentManager {
   private foregroundChannelRefusal(caller: PiChildScope): PiHostedToolResult | null {
     const live = this.live.get(caller.toolUseId)
     return live && live.record.background ? null : errorResult(FOREGROUND_CHANNEL_REFUSAL)
+  }
+
+  /** The catalog for resolution and listing; a discovery failure is an empty one, never a throw. */
+  private async readCatalog(): Promise<readonly PiAgentModelEntry[]> {
+    try {
+      return await this.catalog()
+    } catch (err) {
+      logger.warn(
+        'PiSubagents',
+        `model catalog unavailable: ${err instanceof Error ? err.constructor.name : 'Error'}`
+      )
+      return []
+    }
+  }
+
+  /** `list_models`: the models an `agent` call's `model` may name (the session's own catalog). */
+  async listModels(input: Record<string, unknown>): Promise<PiHostedToolResult> {
+    if (input.query !== undefined && typeof input.query !== 'string') {
+      return errorResult('list_models "query" must be a string.')
+    }
+    return textResult(
+      formatPiModelList({
+        catalog: await this.readCatalog(),
+        query: str(input.query),
+        currentModel: this.host.currentModel()
+      })
+    )
   }
 
   /** G2: a name's first failing rule, or null. */
@@ -1625,6 +1680,8 @@ export class PiSubagentManager {
           return this.sendMessage(payload.input, scope)
         case 'task_stop':
           return this.taskStop(payload.input, scope)
+        case 'list_models':
+          return this.listModels(payload.input)
         default:
           return errorResult(`Unknown hosted tool "${payload.toolName}"`)
       }
@@ -1676,7 +1733,7 @@ function failureInput(
 }
 
 /** The hosted tools a child may call (each needs a gate grant). */
-const CHILD_HOSTED_TOOLS = new Set(['agent', 'send_message', 'task_stop'])
+const CHILD_HOSTED_TOOLS = new Set(['agent', 'send_message', 'task_stop', 'list_models'])
 
 /** Whether an agent of `definition` at `depth` may launch agents (D4). */
 function childCanSpawnAt(depth: number, definition: PiAgentDefinition): boolean {

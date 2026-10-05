@@ -139,8 +139,12 @@
  *    and says how agents that must cooperate are named; `send_message`
  *    describes running vs finished agents, replying to an <agent-message> by
  *    its from-id, `main`, and when a stopped or failed agent can be resumed.
- *    The slices that follow (list_models, the dispatch description) extend
- *    this entry.
+ *    S3 ADDED `list_models` in the SAME block as `agent`/`task_stop` (only an
+ *    agent that may launch agents gets it: it exists to pick the `agent`
+ *    tool's `model`), and rewrote that parameter's description: the host now
+ *    resolves a provider/id value, a bare id or a Claude Code alias against
+ *    the allowlisted catalog. The slice that follows (the dispatch
+ *    description) extends this entry.
  */
 
 export const PI_BRIDGE_VERSION = '12'
@@ -452,7 +456,7 @@ export default function (pi) {
           description: { type: 'string', description: 'A short (3-5 word) description of the task' },
           prompt: { type: 'string', description: 'The complete task for the agent' },
           subagent_type: { type: 'string', description: 'The agent type; omit for general-purpose' },
-          model: { type: 'string', description: "A pi model value provider/id; omit to use the agent's or this session's model" },
+          model: { type: 'string', description: "A model from list_models (provider/id), a bare model id, or an alias opus/sonnet/haiku/fable; omit to use the agent type's or this session's model." },
           name: { type: 'string', description: 'A short name for this agent, unique in this session; send_message can address it by this name.' },
           run_in_background: { type: 'boolean', description: 'Run the agent in the background (the default). The call returns at once and you are notified automatically when it completes. Set false only when your very next action depends on the result.' }
         },
@@ -478,6 +482,23 @@ export default function (pi) {
       },
       execute: async function (toolCallId, params) {
         return postHostedTool('task_stop', params, toolCallId);
+      }
+    });
+
+    // list_models (bridge v12): the models the agent tool's model parameter
+    // accepts. Same block as agent: it exists to pick that model.
+    pi.registerTool({
+      name: 'list_models',
+      label: 'List Models',
+      description: "List the models you can give the agent tool's model parameter: each line is provider/id with its display name, context window, price per million tokens and capabilities. The aliases opus, sonnet, haiku and fable resolve to the newest matching model, preferring this session's provider. Pass query to filter by a substring of the id or name.",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'A case-insensitive substring of the model id or display name' }
+        }
+      },
+      execute: async function (toolCallId, params) {
+        return postHostedTool('list_models', params, toolCallId);
       }
     });
   }

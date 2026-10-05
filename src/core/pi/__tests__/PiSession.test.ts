@@ -326,6 +326,8 @@ vi.mock('../model-discovery', async () => {
   return {
     ...actual,
     getPiModelCatalog: mockGetPiModelCatalog,
+    // The allowlisted raw rows (list_models, the agent tool's model): the same double.
+    getPiAllowedModelCatalog: mockGetPiModelCatalog,
     discoverPiModels: mockDiscoverPiModels
   }
 })
@@ -6859,6 +6861,47 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       /^Async agent launched successfully\./
     )
     expect(await session.backgroundTask('call-g1')).toMatchObject({ success: false })
+    child.push({ type: 'agent_settled' })
+    session.dispose()
+  })
+
+  it('S3 (session): list_models is auto-allowed with no card and answers from the allowlisted catalog; the agent tool resolves aliases and refuses an unknown model with no spawn', async () => {
+    const row = (provider: string, id: string, name: string) => ({
+      provider,
+      id,
+      name,
+      contextWindow: 200_000,
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }
+    })
+    mockGetPiModelCatalog.mockResolvedValue([
+      row('openai-codex', 'gpt-5.6-luna', 'GPT-5.6 Luna'),
+      row('anthropic', 'claude-sonnet-4-5', 'Claude Sonnet 4.5')
+    ])
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-s3-models', win)
+    expect(await gate('lm-1', 'list_models', { query: 'son' })).toEqual({ behavior: 'allow' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect((await hostedTool('list_models', { query: 'son' }, 'lm-1')).content[0].text).toBe(
+      [
+        'Current session model: openai-codex/gpt-5.6-luna',
+        'anthropic/claude-sonnet-4-5 — Claude Sonnet 4.5 · 200k ctx · $3/$15 per M tokens'
+      ].join('\n')
+    )
+
+    const bad = { ...AGENT_INPUT, model: 'gpt-9' }
+    await gate('ag-bad', 'agent', bad)
+    const refused = await hostedTool('agent', bad, 'ag-bad')
+    expect(refused.isError).toBe(true)
+    expect(refused.content[0].text).toContain('Unknown model "gpt-9"')
+    expect(kids.children).toHaveLength(0)
+
+    const { child } = await launch(kids, 'ag-ok', { ...AGENT_INPUT, model: 'sonnet' })
+    expect(child.commands().find((c) => c.type === 'set_model')).toMatchObject({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-5'
+    })
     child.push({ type: 'agent_settled' })
     session.dispose()
   })
