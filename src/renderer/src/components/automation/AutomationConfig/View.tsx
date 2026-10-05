@@ -36,8 +36,9 @@ import {
   modelSupportsEffort,
   modelSupportedEffortLevels,
   modelDefaultEffort,
-  modelDefaultThinkingMode,
   modelResolveThinkingMode,
+  resolveAutomationEffort,
+  resolveThinkingMode,
   modelResolveEffort,
   type EffortLevel,
   type ThinkingMode
@@ -60,6 +61,16 @@ export interface InheritedPerms {
 export interface AutomationConfigViewProps {
   automation: Automation
   models: ModelOption[]
+  /**
+   * What the starting effort is judged against: the UNDEDUPED Claude catalog (the
+   * picker's `models` collapses `default` with its concrete twin, which can drop
+   * the alias row `claudeEffortKey` looks for) and the saved per-model efforts.
+   * Absent = the picker models and nothing saved.
+   */
+  effortDefaults?: {
+    catalog: readonly ModelOption[]
+    modelEffortDefaults?: Partial<Record<string, EffortLevel>>
+  }
   globalPerms: InheritedPerms | null
   hasRunningRun: boolean
   runs: AutomationRun[] | undefined
@@ -86,6 +97,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   const {
     automation,
     models,
+    effortDefaults,
     globalPerms,
     hasRunningRun,
     runs,
@@ -141,13 +153,26 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     () => modelSupportedEffortLevels(selectedModel),
     [selectedModel]
   )
+  // What a run will use, from the SAME functions the host's run reads: the
+  // automation's own value, else (effort) the model's saved starting effort, else
+  // the model default. The run passes `automation.model || 'default'`, so that is
+  // the value judged here too — not the picker's `models[0]` fallback.
+  const runModelValue = model || 'default'
   const effectiveEffort = useMemo<EffortLevel>(
-    () => effort || modelDefaultEffort(selectedModel),
-    [effort, selectedModel]
+    () =>
+      resolveAutomationEffort({
+        explicit: effort || undefined,
+        modelValue: runModelValue,
+        catalog: effortDefaults?.catalog ?? models,
+        modelEffortDefaults: effortDefaults?.modelEffortDefaults
+      }) ?? modelDefaultEffort(selectedModel),
+    [effort, runModelValue, effortDefaults, models, selectedModel]
   )
+  // The run defaults an unset thinking mode to 'enabled' (not the model's adaptive
+  // default) and coerces it with the id heuristic; show exactly that.
   const effectiveThinking = useMemo<ThinkingMode>(
-    () => thinkingMode || modelDefaultThinkingMode(selectedModel),
-    [thinkingMode, selectedModel]
+    () => resolveThinkingMode(runModelValue, thinkingMode || 'enabled'),
+    [thinkingMode, runModelValue]
   )
 
   const isDirty = useMemo(

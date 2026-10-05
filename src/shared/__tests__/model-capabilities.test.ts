@@ -23,6 +23,8 @@ import {
   resolveSpawnEffort,
   withSavedEffort,
   savedEffortFor,
+  resolveAutomationEffort,
+  type EffortLevel,
   rememberEffortPatch,
   engineRemembersEffort,
   type EffortDefaultsSlice,
@@ -1025,5 +1027,63 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
     const claudePatch = rememberEffortPatch({}, 'claude', OPUS, [OPUS], 'high')
     expect(savedEffortFor(claudePatch, 'claude', OPUS, [OPUS])).toBe('high')
     expect(savedEffortFor(claudePatch, 'pi', PI, [PI])).toBeUndefined()
+  })
+})
+
+describe('resolveAutomationEffort', () => {
+  const ids = [
+    'default',
+    'opus',
+    'claude-opus-5-5',
+    'claude-opus-4-7',
+    'claude-opus-4-5',
+    'claude-sonnet-4-6',
+    'claude-3-5-sonnet',
+    'claude-haiku-4-5'
+  ]
+
+  it('with no catalog and nothing saved, equals the id-heuristic ladder automations used before', () => {
+    for (const v of ids) {
+      for (const explicit of [undefined, 'low', 'max'] as const) {
+        const before = resolveEffort(v, (explicit as EffortLevel | undefined) ?? defaultEffort(v))
+        expect(
+          resolveAutomationEffort({
+            explicit,
+            modelValue: v,
+            catalog: [],
+            modelEffortDefaults: undefined
+          }),
+          `${v} / ${explicit}`
+        ).toBe(before)
+      }
+    }
+  })
+
+  it('a saved starting effort sits between the explicit pick and the model default', () => {
+    const catalog = [
+      {
+        value: 'opus',
+        resolvedModel: 'claude-opus-5-5',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const
+      }
+    ]
+    const base = { modelValue: 'opus', catalog, modelEffortDefaults: { opus: 'high' } as const }
+    expect(resolveAutomationEffort({ ...base, explicit: undefined })).toBe('high')
+    expect(resolveAutomationEffort({ ...base, explicit: 'low' })).toBe('low')
+    expect(
+      resolveAutomationEffort({ ...base, explicit: undefined, modelEffortDefaults: undefined })
+    ).toBe('medium')
+  })
+
+  it('is null for a model that takes no effort', () => {
+    expect(
+      resolveAutomationEffort({
+        explicit: 'high',
+        modelValue: 'claude-3-5-sonnet',
+        catalog: [],
+        modelEffortDefaults: { 'claude-3-5-sonnet': 'high' }
+      })
+    ).toBeNull()
   })
 })

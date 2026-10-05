@@ -773,6 +773,89 @@ describe('AutomationManager — scheduling & runtime', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The starting effort a run uses follows the sessions' ladder: the automation's
+// own effort > Claude's saved per-model starting effort > the model default,
+// clamped. The config screen reads the same function (View.unit.test.tsx pins
+// the same inputs to the same values).
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — per-model starting effort', () => {
+  function saveStartingEfforts(modelEffortDefaults: Record<string, string>): void {
+    const dir = nodePath.join(TEMP_HOME, '.claude', 'ui')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(nodePath.join(dir, 'settings.json'), JSON.stringify({ modelEffortDefaults }))
+  }
+
+  async function runWith(overrides: Partial<Automation>, catalog?: any[]): Promise<any> {
+    const { mgr } = await freshManager()
+    if (catalog) {
+      const { setCachedClaudeModels } = await import('../../../core/services/claude-model-catalog')
+      setCachedClaudeModels(catalog)
+    }
+    mgr.load()
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    const base = makeAutomation({ id: 'start-effort', ...overrides })
+    // makeAutomation defaults effort to 'medium'; drop it unless the test sets one.
+    const { effort: _effort, ...rest } = base
+    mgr.upsert(('effort' in overrides ? base : rest) as any)
+    await mgr.runNow('start-effort')
+    mgr.stopAll()
+    return lastSdkParams?.options
+  }
+
+  const OPUS_ROWS = [
+    {
+      value: 'default',
+      resolvedModel: 'claude-opus-5-5',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    },
+    {
+      value: 'opus',
+      resolvedModel: 'claude-opus-5-5',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    }
+  ]
+
+  it('uses the saved starting effort when the automation has none (GUARD)', async () => {
+    saveStartingEfforts({ opus: 'high' })
+    // Pre-fix: the id heuristic's 'medium' for Opus 5.5.
+    expect((await runWith({ model: 'opus' }, OPUS_ROWS)).effort).toBe('high')
+  })
+
+  it('`default` reads the key of the alias that resolves where it does, via the catalog (GUARD)', async () => {
+    saveStartingEfforts({ opus: 'max' })
+    expect((await runWith({ model: 'default' }, OPUS_ROWS)).effort).toBe('max')
+  })
+
+  it('with NO catalog cached it keys the saved effort by the model value', async () => {
+    // Judged from the value alone, as the config screen does for a missing row.
+    saveStartingEfforts({ 'claude-opus-4-7': 'low' })
+    expect((await runWith({ model: 'claude-opus-4-7' })).effort).toBe('low')
+  })
+
+  it('an explicit automation effort is unchanged and wins over the saved one', async () => {
+    saveStartingEfforts({ opus: 'high' })
+    expect((await runWith({ model: 'opus', effort: 'low' }, OPUS_ROWS)).effort).toBe('low')
+  })
+
+  it('clamps a saved starting effort the model does not offer', async () => {
+    saveStartingEfforts({ 'claude-opus-4-7': 'max' })
+    const row = {
+      value: 'claude-opus-4-7',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high']
+    }
+    expect((await runWith({ model: 'claude-opus-4-7' }, [row])).effort).toBe('high')
+  })
+
+  it('with nothing saved the model default stands, as before', async () => {
+    expect((await runWith({ model: 'claude-opus-4-7' })).effort).toBe('xhigh')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // M-AU1 — an edit during a run must not be clobbered by run-completion save
 // M-AU2 — deleting a running automation must not resurrect it
 // ---------------------------------------------------------------------------

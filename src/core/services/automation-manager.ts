@@ -14,11 +14,12 @@ import { isPathInside } from './path-containment'
 import { isValidAutomationId } from './automation-id'
 import {
   resolveThinkingMode,
-  resolveEffort,
-  defaultEffort,
+  resolveAutomationEffort,
   type EffortLevel,
   type ThinkingMode
 } from '../../shared/model-capabilities'
+import { cachedClaudeModels } from './claude-model-catalog'
+import { loadSettings } from './ui-config'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 import type { HostNotifier } from '../host'
 
@@ -641,9 +642,22 @@ export class AutomationManager {
           : thinkingMode === 'adaptive'
             ? { type: 'adaptive' as const, display: 'summarized' as const }
             : { type: 'enabled' as const, display: 'summarized' as const, budgetTokens: 10000 }
-      const desiredEffort =
-        (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
-      const resolvedEffort = resolveEffort(modelValue, desiredEffort) ?? undefined
+      // The same ladder as a session (the automation's own effort, else Claude's
+      // saved starting effort for the model, else the model default), through the
+      // function the config screen shows its value from. The catalog is what
+      // cli.js last reported (empty before the first fetch — the model is then
+      // judged from its value alone, as the screen does for a missing row), and
+      // the settings are read per run so a starting effort saved a minute ago
+      // applies to the next one.
+      const resolvedEffort =
+        resolveAutomationEffort({
+          explicit: automation.effort,
+          modelValue,
+          catalog: cachedClaudeModels(),
+          modelEffortDefaults: (
+            loadSettings() as { modelEffortDefaults?: Record<string, EffortLevel> }
+          ).modelEffortDefaults
+        }) ?? undefined
 
       // Multi-account: renew the active account's token, or fail the run with
       // HostTokenUnavailableError (executeRun records its message as the run's

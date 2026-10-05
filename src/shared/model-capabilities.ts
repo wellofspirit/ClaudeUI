@@ -392,6 +392,41 @@ export function resolveSpawnEffort(args: Parameters<typeof resolveDesiredEffort>
   return modelResolveEffort(args.modelInfo, desired) ?? desired
 }
 
+/**
+ * The effort an AUTOMATION runs at — and the config screen shows: the
+ * automation's own effort, else Claude's saved starting effort for the model
+ * (`modelEffortDefaults` through {@link savedEffortFor}), else the model's
+ * default, clamped to what the model accepts; `null` when it takes none (the run
+ * then sends no `effort`). The sessions' ladder ({@link resolveSpawnEffort}) for
+ * a headless Claude run, in ONE function so the screen and the run cannot
+ * disagree.
+ *
+ * `catalog` is the Claude model list the caller has (the renderer's picker
+ * models; the host's last `supportedModels()` result). When it has no row for
+ * `modelValue` — nothing fetched yet, a curated-away model — the model is judged
+ * from its value alone: a bare `{value}` row, which is exactly the id-heuristic
+ * judgement automations used before this ladder, and the same answer the other
+ * side gets for the same missing row.
+ */
+export function resolveAutomationEffort(args: {
+  /** `automation.effort`; unset = follow the ladder. */
+  explicit: string | null | undefined
+  /** `automation.model || 'default'` — the value the run passes to sdkQuery. */
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+  modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
+}): EffortLevel | null {
+  const row = args.catalog.find((m) => m.value === args.modelValue) ?? { value: args.modelValue }
+  const desired = resolveDesiredEffort({
+    explicit: args.explicit,
+    engineId: 'claude',
+    modelInfo: row,
+    engineModels: args.catalog,
+    effortDefaults: { modelEffortDefaults: args.modelEffortDefaults }
+  })
+  return modelResolveEffort(row, desired)
+}
+
 // ---------------------------------------------------------------------------
 // Id-based heuristics — used when SDK capability fields are absent.
 // Kept exported for tests and for future models the SDK hasn't labelled yet.

@@ -1383,6 +1383,7 @@ export function InputBox(): React.JSX.Element {
     [
       effort,
       selectedModel.value,
+      selectedModel.nativeDefaultEffort,
       availableModels,
       activeSessionId,
       requestedModelValue,

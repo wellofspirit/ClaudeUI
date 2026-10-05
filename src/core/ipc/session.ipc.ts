@@ -99,6 +99,7 @@ import {
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
+import { freshClaudeModels, setCachedClaudeModels } from '../services/claude-model-catalog'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
@@ -155,7 +156,6 @@ import {
 // a cold cache. A short TTL lets a subsequent picker fetch (the renderer re-fetches
 // on cwd change / a model reload) pick them up without an app restart.
 const MODELS_CACHE_TTL_MS = 2 * 60_000
-let cachedModels: { models: ModelInfo[]; at: number } | null = null
 
 const COMMIT_MSG_SYSTEM_PROMPT =
   'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
@@ -268,9 +268,8 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
 }
 
 async function fetchModels(): Promise<ModelInfo[]> {
-  if (cachedModels && Date.now() - cachedModels.at < MODELS_CACHE_TTL_MS) {
-    return cachedModels.models
-  }
+  const fresh = freshClaudeModels(MODELS_CACHE_TTL_MS)
+  if (fresh) return fresh
 
   const abort = new AbortController()
   await ensureHostTokenFresh()
@@ -291,7 +290,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
       initializationResult(): Promise<Record<string, unknown>>
     }
     const models = await handle.supportedModels()
-    cachedModels = { models, at: Date.now() }
+    setCachedClaudeModels(models)
     // The same initialize response carries the user's account — report login
     // status at app load so the sign-in banner is accurate before any chat
     // session is opened. Resolves immediately (init already completed). ADR-014.
