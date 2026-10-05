@@ -49,9 +49,13 @@ export function resetCachedClaudeModels(): void {
  * omits it.
  */
 export async function queryClaudeModels(
-  onInit?: (init: Record<string, unknown>) => void
+  onInit?: (init: Record<string, unknown>) => void,
+  signal?: AbortSignal
 ): Promise<ModelInfo[]> {
   const abort = new AbortController()
+  // A caller that stops waiting (see ensureClaudeModels) must not leave cli.js running.
+  if (signal?.aborted) abort.abort()
+  else signal?.addEventListener('abort', () => abort.abort(), { once: true })
   await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
@@ -69,7 +73,9 @@ export async function queryClaudeModels(
       initializationResult(): Promise<Record<string, unknown>>
     }
     const models = await handle.supportedModels()
-    setCachedClaudeModels(models)
+    // An aborted query (a timed-out catalog wait) answers `[]` without asking
+    // cli.js; caching that would serve an empty picker for the whole TTL.
+    if (!abort.signal.aborted && models.length > 0) setCachedClaudeModels(models)
     if (onInit) {
       try {
         onInit(await handle.initializationResult())
@@ -80,5 +86,51 @@ export async function queryClaudeModels(
     return models
   } finally {
     abort.abort()
+  }
+}
+
+/** Longest a run waits for a cold cli.js init: past this the run goes ahead value-only. */
+const ENSURE_TIMEOUT_MS = 15_000
+
+let inFlight: Promise<ModelInfo[]> | null = null
+
+/**
+ * The catalog for a reader that may be the first thing to need it: a headless host
+ * (claudeui-server) boots with no picker ever having fetched, so an automation run
+ * would judge `default`/`opus` from the bare value. Returns what is cached (any
+ * age) without a query; else populates it through {@link queryClaudeModels} —
+ * without `onInit`, so no login/status side effects — bounded by `timeoutMs`.
+ * Concurrent callers share ONE query. Never throws: a failure or timeout resolves
+ * `[]` (the caller's value-only judgement), the failure reported through `onError`.
+ */
+export async function ensureClaudeModels(
+  onError: (err: unknown) => void,
+  timeoutMs = ENSURE_TIMEOUT_MS
+): Promise<ModelInfo[]> {
+  const have = cachedClaudeModels()
+  if (have.length > 0) return have
+  if (!inFlight) {
+    const abort = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Claude model catalog query timed out after ${timeoutMs}ms`))
+        abort.abort()
+      }, timeoutMs)
+    })
+    const query = queryClaudeModels(undefined, abort.signal)
+    // The race loser's rejection (abort kills the child) must not go unhandled.
+    query.catch(() => {})
+    const flight = Promise.race([query, timeout]).finally(() => {
+      clearTimeout(timer)
+      if (inFlight === flight) inFlight = null
+    })
+    inFlight = flight
+  }
+  try {
+    return await inFlight
+  } catch (err) {
+    onError(err)
+    return []
   }
 }

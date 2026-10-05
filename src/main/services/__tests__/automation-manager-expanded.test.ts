@@ -56,11 +56,17 @@ type SdkMode =
 let sdkMode: SdkMode = { kind: 'events', events: [] }
 let lastAbortObserved = false
 let lastSdkParams: any = null
+/** Every query the SDK stub was asked for — the catalog's init-only one and the run's own. */
+let sdkCalls: any[] = []
 let lastGeneratorReturned = false
+/** What the stub's `supportedModels()` does — the catalog's init-only query. */
+let supportedModelsImpl: (signal?: AbortSignal) => Promise<unknown[]> = async () => []
+let supportedModelsCalls = 0
 
 vi.mock('../../../core/sdk', () => ({
   query: (params: any) => {
     lastSdkParams = params
+    sdkCalls.push(params)
     const ac: AbortController | undefined = params?.options?.abortController
     const mode = sdkMode
 
@@ -101,6 +107,10 @@ vi.mock('../../../core/sdk', () => ({
     }
     const g = gen() as any
     g.setPermissionMode = vi.fn(async () => {})
+    g.supportedModels = async () => {
+      supportedModelsCalls++
+      return supportedModelsImpl(ac?.signal)
+    }
     return g
   }
 }))
@@ -180,7 +190,10 @@ beforeEach(() => {
   sdkMode = { kind: 'events', events: [] }
   lastAbortObserved = false
   lastSdkParams = null
+  sdkCalls = []
   lastGeneratorReturned = false
+  supportedModelsImpl = async () => []
+  supportedModelsCalls = 0
 })
 
 afterEach(() => {
@@ -860,6 +873,135 @@ describe('AutomationManager — per-model starting effort', () => {
 
   it('with nothing saved the model default stands, as before', async () => {
     expect((await runWith({ model: 'claude-opus-4-7' })).effort).toBe('xhigh')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A host nothing has fetched the Claude catalog on (fresh claudeui-server) fills it
+// before the run resolves effort/thinking — bounded, single-flight, never fatal.
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — run waits for the Claude catalog', () => {
+  const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+  const OPUS_ROWS = ['default', 'opus'].map((value) => ({
+    value,
+    resolvedModel: 'claude-opus-5-5',
+    supportsEffort: true,
+    supportedEffortLevels: LEVELS
+  }))
+
+  function saveStartingEfforts(modelEffortDefaults: Record<string, string>): void {
+    const dir = nodePath.join(TEMP_HOME, '.claude', 'ui')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(nodePath.join(dir, 'settings.json'), JSON.stringify({ modelEffortDefaults }))
+  }
+
+  async function setup(ids: string[]): Promise<AutomationManagerT> {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    for (const id of ids) {
+      const { effort: _e, ...rest } = makeAutomation({ id, model: 'default' })
+      mgr.upsert(rest as any)
+    }
+    return mgr
+  }
+
+  /** The mocked logger's `warn`, re-imported after freshManager's module reset. */
+  const warned = async (): Promise<ReturnType<typeof vi.fn>> =>
+    (await import('../../../core/services/logger')).logger.warn as any
+
+  it('an empty catalog is fetched once and the run judges `default` by the fetched row (GUARD)', async () => {
+    saveStartingEfforts({ opus: 'max' })
+    supportedModelsImpl = async () => OPUS_ROWS
+    const mgr = await setup(['w1'])
+    await mgr.runNow('w1')
+    mgr.stopAll()
+    expect(supportedModelsCalls).toBe(1)
+    // Value-only, `default` cannot find the `opus` alias's saved effort ('xhigh' default).
+    expect(lastSdkParams?.options?.effort).toBe('max')
+  })
+
+  it('a populated catalog is not queried again (GUARD)', async () => {
+    const mgr = await setup(['w2'])
+    // After setup: freshManager resets the module graph, and the cache lives in it.
+    const { setCachedClaudeModels } = await import('../../../core/services/claude-model-catalog')
+    setCachedClaudeModels(OPUS_ROWS as any)
+    await mgr.runNow('w2')
+    mgr.stopAll()
+    expect(supportedModelsCalls).toBe(0)
+  })
+
+  it('a failing query logs and the run proceeds value-only', async () => {
+    saveStartingEfforts({ opus: 'max' })
+    supportedModelsImpl = async () => {
+      throw new Error('init exploded')
+    }
+    const mgr = await setup(['w3'])
+    await mgr.runNow('w3')
+    mgr.stopAll()
+    expect(lastSdkParams?.options?.model).toBe('default')
+    expect(lastSdkParams?.options?.effort).not.toBe('max')
+    expect((await warned()).mock.calls.some((c: any[]) => /catalog unavailable/.test(c[1]))).toBe(
+      true
+    )
+  })
+
+  it('a hung query times out, is aborted, and the run proceeds (GUARD)', async () => {
+    vi.useFakeTimers()
+    try {
+      let aborted = false
+      supportedModelsImpl = (signal) =>
+        new Promise(() => {
+          signal?.addEventListener('abort', () => (aborted = true))
+        })
+      const mgr = await setup(['w4'])
+      const run = mgr.runNow('w4')
+      await vi.advanceTimersByTimeAsync(15_001)
+      await run
+      mgr.stopAll()
+      expect(aborted).toBe(true)
+      expect(lastSdkParams?.options?.model).toBe('default')
+      expect(
+        (await warned()).mock.calls.some((c: any[]) => /timed out/.test(String(c[2]?.message)))
+      ).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a run cancelled during the catalog wait never starts its query (GUARD)', async () => {
+    let release!: (rows: unknown[]) => void
+    supportedModelsImpl = () => new Promise((r) => (release = r))
+    const mgr = await setup(['x1'])
+    const run = mgr.runNow('x1')
+    await vi.waitFor(() => expect(supportedModelsCalls).toBe(1))
+
+    mgr.cancelRun('x1')
+    release(OPUS_ROWS)
+    await run
+    mgr.stopAll()
+
+    // Pre-fix the run's own query was spawned with an already-aborted signal and
+    // (the real spawn path ignores an aborted signal) ran its whole prompt.
+    expect(sdkCalls.filter((c) => c?.prompt === 'do the thing')).toEqual([])
+    const runs = mgr.listRuns('x1')
+    expect(runs).toHaveLength(1)
+    expect(runs[0].status).not.toBe('running')
+    expect(runs[0].finishedAt).toBeTruthy()
+    expect((mgr as any).activeRuns.has('x1')).toBe(false)
+  })
+
+  it('concurrent runs with an empty catalog share one query (GUARD)', async () => {
+    let release!: (rows: unknown[]) => void
+    supportedModelsImpl = () => new Promise((r) => (release = r))
+    const mgr = await setup(['c1', 'c2', 'c3'])
+    const runs = [mgr.runNow('c1'), mgr.runNow('c2'), mgr.runNow('c3')]
+    await vi.waitFor(() => expect(supportedModelsCalls).toBe(1))
+    release(OPUS_ROWS)
+    await Promise.all(runs)
+    mgr.stopAll()
+    expect(supportedModelsCalls).toBe(1)
   })
 })
 

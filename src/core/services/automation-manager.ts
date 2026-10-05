@@ -18,7 +18,7 @@ import {
   type EffortLevel,
   type ThinkingMode
 } from '../../shared/model-capabilities'
-import { cachedClaudeModels } from './claude-model-catalog'
+import { ensureClaudeModels } from './claude-model-catalog'
 import { loadSettings } from './ui-config'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 import type { HostNotifier } from '../host'
@@ -636,8 +636,18 @@ export class AutomationManager {
       // Both the thinking mode and the effort are judged on the row the config screen
       // judges (`automationModelRow`): the catalog cli.js last reported, else the
       // model the value names — so a bare alias (`opus`) is not read as "no effort,
-      // no adaptive thinking". Empty before the first model fetch on any transport.
-      const catalog = cachedClaudeModels()
+      // no adaptive thinking". A host nothing has fetched the catalog on yet (a fresh
+      // claudeui-server) populates it first; a failure or timeout is logged and the
+      // run goes ahead judging the model from its value alone.
+      const catalog = await ensureClaudeModels((err) =>
+        logger.warn(
+          'AutomationManager',
+          `Claude model catalog unavailable for ${automation.name}; judging "${modelValue}" by value`,
+          err
+        )
+      )
+      // Cancelled during the catalog wait: skip the token refresh too.
+      if (abortController.signal.aborted) return { costUsd: 0, lastText: '' }
       const thinkingMode = resolveAutomationThinking({
         explicit: automation.thinkingMode as ThinkingMode | undefined,
         modelValue,
@@ -670,6 +680,12 @@ export class AutomationManager {
       // HostTokenUnavailableError (executeRun records its message as the run's
       // error). A no-op in single-account mode.
       await ensureHostTokenFresh()
+
+      // Both awaits above can outlast a cancel/delete (the catalog wait is up to
+      // 15 s). The run's abort already fired, so nothing would ever wake the
+      // query's listener: end the run here the way a cancel mid-run ends it — the
+      // stream finishes with no result, which executeRun records as a finished run.
+      if (abortController.signal.aborted) return { costUsd: 0, lastText: '' }
 
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.
