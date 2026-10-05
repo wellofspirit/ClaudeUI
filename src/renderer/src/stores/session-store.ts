@@ -11,6 +11,7 @@ import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
+import type { CanonicalState } from '../../../core/shared/sync/state'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -695,6 +696,75 @@ function saveSessionConfig(
 }
 
 /**
+ * Every id-keyed row of the persisted session registry, dropped for `ids` — the one
+ * definition of "forget this session" behind a delete, a project delete and the
+ * empty-session cleanup. It is the same set the reducer's `session:removed` drops
+ * (recents, pins, hidden, titles, worktree info, and the engine/model row), so a
+ * session removed on one path cannot leave a row the others would have cleared.
+ *
+ * Returns only the fields that changed (identity-stable for the rest), or null when
+ * no registry row mentions any of `ids`.
+ *
+ * `keepWorktreeInfo`: `worktreeInfoMap` is not an orphan row, it is the handle on an
+ * on-disk resource (the worktree dir and its branch) that the before-quit
+ * worktree prompt reads. A delete removes it; an abandoned empty session must not,
+ * or its worktree would leak with nothing left to offer to remove it.
+ */
+function scrubSessionRegistry(
+  state: PersistedSessionFields,
+  ids: readonly string[],
+  opts: { keepWorktreeInfo?: boolean } = {}
+): Partial<PersistedSessionFields> | null {
+  const gone = new Set(ids)
+  const patch: Partial<PersistedSessionFields> = {}
+  const dropFromList = (list: string[]): string[] | null => {
+    const kept = list.filter((id) => !gone.has(id))
+    return kept.length === list.length ? null : kept
+  }
+  const dropFromMap = <T>(map: Record<string, T>): Record<string, T> | null => {
+    if (!ids.some((id) => id in map)) return null
+    const kept = { ...map }
+    for (const id of ids) delete kept[id]
+    return kept
+  }
+  const recentSessionIds = dropFromList(state.recentSessionIds)
+  if (recentSessionIds) patch.recentSessionIds = recentSessionIds
+  const pinnedSessionIds = dropFromList(state.pinnedSessionIds)
+  if (pinnedSessionIds) patch.pinnedSessionIds = pinnedSessionIds
+  const hiddenSessionIds = dropFromList(state.hiddenSessionIds)
+  if (hiddenSessionIds) patch.hiddenSessionIds = hiddenSessionIds
+  const customTitles = dropFromMap(state.customTitles)
+  if (customTitles) patch.customTitles = customTitles
+  const worktreeInfoMap = opts.keepWorktreeInfo ? null : dropFromMap(state.worktreeInfoMap)
+  if (worktreeInfoMap) patch.worktreeInfoMap = worktreeInfoMap
+  // The persisted engine/model row is keyed by routingId too — left behind it
+  // survives the session and accumulates forever (RN8).
+  const sessionEngines = dropFromMap(state.sessionEngines)
+  if (sessionEngines) patch.sessionEngines = sessionEngines
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+/**
+ * Write a registry patch to BOTH homes of the registry: the replica (canonical's
+ * names — `hiddenSessions` / `hiddenProjects`) and the saved config. `canonicalOnly`
+ * carries fields only canonical holds (the sidebar's `directories`).
+ */
+function applyRegistryPatch(
+  state: PersistedSessionFields,
+  patch: Partial<PersistedSessionFields>,
+  canonicalOnly: Partial<Omit<CanonicalState, 'sessions'>> = {}
+): void {
+  const { hiddenSessionIds, hiddenProjectKeys, ...shared } = patch
+  patchLocalApp({
+    ...shared,
+    ...(hiddenSessionIds ? { hiddenSessions: hiddenSessionIds } : {}),
+    ...(hiddenProjectKeys ? { hiddenProjects: hiddenProjectKeys } : {}),
+    ...canonicalOnly
+  })
+  saveSessionConfig(state, patch)
+}
+
+/**
  * Hydrate the store from ~/.claude/ui/ config files.
  * Called once at startup; migrates from localStorage on first run.
  */
@@ -894,6 +964,19 @@ function cleanupEmptySession(
     recentSessionIds: recentSessionIds.filter((id) => id !== routingId),
     dropped: routingId
   }
+}
+
+/**
+ * Forget a session {@link cleanupEmptySession} dropped: out of the replica AND out
+ * of every registry row it had (`createNewSession` wrote its engine/model row and a
+ * recents slot up front) — recents alone left the `sessionEngines` row behind on
+ * every abandoned "New session". Its worktree entry stays (see
+ * {@link scrubSessionRegistry}).
+ */
+function forgetDroppedSession(state: PersistedSessionFields, routingId: string): void {
+  dropLocalSessions([routingId])
+  const scrub = scrubSessionRegistry(state, [routingId], { keepWorktreeInfo: true })
+  if (scrub) applyRegistryPatch(state, scrub)
 }
 
 /** Per-session state — everything that varies between sessions */
@@ -2003,11 +2086,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       activeView: { type: 'chat' } as ActiveView,
       sessions: cleaned.sessions
     })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
   },
 
   switchSession: (routingId) => {
@@ -2032,12 +2111,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     let sessions = updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false }))
     for (const id of cold) sessions = updateSession(sessions, id, evictedViewPatch)
     set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView, sessions })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
     if (cold.length > 0) evictLocalSessions(cold)
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
   },
 
   createNewSession: (routingId, cwd, switchTo = true) => {
@@ -2662,17 +2737,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
     const state = useSessionStore.getState()
-    const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
-    const customTitles = { ...state.customTitles }
-    delete customTitles[sessionId]
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    delete worktreeInfoMap[sessionId]
-    // The persisted engine/model row is keyed by routingId too — without this
-    // it survives every delete and accumulates forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    delete sessionEngines[sessionId]
     // Drop the session from its directory group; drop the group itself if now empty
     const directories = state.directories
       .map((g) =>
@@ -2690,23 +2754,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([sessionId])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(state, scrubSessionRegistry(state, [sessionId]) ?? {}, { directories })
   },
 
   deleteProject: async (projectKey) => {
@@ -2728,20 +2776,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         if (sess.cwd === projectCwd) projectSessionIds.add(id)
       }
     }
-    const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
     const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-    const customTitles = { ...state.customTitles }
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    // Persisted engine/model rows are keyed by routingId — purge them with the
-    // rest of the project's state so they can't accumulate forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    for (const id of projectSessionIds) {
-      delete customTitles[id]
-      delete worktreeInfoMap[id]
-      delete sessionEngines[id]
-    }
     const directories = state.directories.filter((g) => g.projectKey !== projectKey)
     set((s) => {
       const sessions = { ...s.sessions }
@@ -2753,25 +2788,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([...projectSessionIds])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      hiddenProjectKeys: hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(
+      state,
+      {
+        ...scrubSessionRegistry(state, [...projectSessionIds]),
+        hiddenProjectKeys: hiddenProjects
+      },
+      { directories }
+    )
   },
 
   dismissApproval: (routingId, requestId) => {
