@@ -260,3 +260,25 @@ describe('collectAgentLinkRecords — failure (ADR-089 S1b)', () => {
     expect('failure' in old).toBe(false)
   })
 })
+
+describe('collectAgentLinkRecords — an isError agent result (V1a)', () => {
+  it('a failed foreground agent whose toolResult is NOW marked isError still yields its link, status and failure', () => {
+    const entry = agentResult('call-1', {
+      v: 1,
+      agentId: A,
+      subagentType: 'g',
+      status: 'failed',
+      failure: 'permanent',
+      failureMessage: 'prompt is too long'
+    }) as unknown as { message: { isError: boolean } }
+    entry.message.isError = true
+    expect(collectAgentLinkRecords([entry as unknown as PiSessionEntry])).toEqual([
+      expect.objectContaining({
+        agentId: A,
+        status: 'failed',
+        failure: 'permanent',
+        failureMessage: 'prompt is too long'
+      })
+    ])
+  })
+})

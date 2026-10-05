@@ -56,7 +56,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
-import { isPiAsyncLaunchResult } from '../../../../../shared/pi-agent-result'
+import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -245,13 +245,19 @@ function piNormalize(
             ? inp.subagent_type
             : undefined
         const name = typeof inp.name === 'string' && inp.name !== '' ? inp.name : type
+        const resolvedModel =
+          (result ? piAgentResultModel(result) : undefined) ||
+          (typeof inp.model === 'string' && inp.model !== '' ? inp.model : undefined)
         return {
           kind: 'task',
           description: inp.description,
           prompt: inp.prompt,
           subagent: type ?? 'general-purpose',
           ...(name ? { name } : {}),
-          ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {}),
+          // The model the host resolved the request to (an alias or bare id is
+          // not what runs), once the result says; until then, and for a refused
+          // call, what was asked for.
+          ...(resolvedModel ? { model: resolvedModel } : {}),
           // Once a result exists it decides (ADR-089 S3): only the host's
           // launch acknowledgement means a background run. A call refused
           // before any spawn (validation, start failure, a deny) is settled,

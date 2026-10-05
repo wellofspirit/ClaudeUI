@@ -6947,7 +6947,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(
       (await hostedTool('send_message', { to: 'earlier', message: 'one more' }, 'sm-g2')).content[0]
         .text
-    ).toBe('Resuming agent earlier. You will be notified when it completes.')
+    ).toBe('Resuming agent "earlier". You will be notified when it completes.')
     expect(kids.children).toHaveLength(1)
     const args = kids.children[0].opts.args!
     expect(args[args.indexOf('--session-id') + 1]).toBe(id)
@@ -7003,7 +7003,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const resumed = await resume('sm-g2s-3')
     expect(resumed).toEqual({
       isError: undefined,
-      text: 'Resuming agent halted. You will be notified when it completes.'
+      text: 'Resuming agent "halted". You will be notified when it completes.'
     })
     expect(kids.children).toHaveLength(1)
     session.dispose()

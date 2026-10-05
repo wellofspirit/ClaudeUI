@@ -148,6 +148,16 @@
  *    the host passes it in CLAUDEUI_PI_DISPATCH_DESCRIPTION (set wherever
  *    CLAUDEUI_PI_DISPATCH_ENABLED=1 is; '' for every child), and the short
  *    static text stays as the fallback when the variable is empty.
+ *    V1 (live-verification fix, same version: writeBridgeExtension rewrites
+ *    the file whenever its CONTENT differs, whatever the version): pi sets a
+ *    tool result's isError only when execute() throws, so the isError a
+ *    /hosted-tool response carried never reached pi (a refused `agent` call
+ *    read as a green, completed one). postHostedTool now remembers a host
+ *    error by toolCallId and ONE `tool_result` handler (registered with the
+ *    bridge creds) returns `{ isError: true }` for exactly that id, once.
+ *    Content and details are untouched (pi merges `details:
+ *    afterResult.details ?? result.details`), so a failed foreground agent
+ *    keeps details.cuiAgent.
  */
 
 export const PI_BRIDGE_VERSION = '12'
@@ -334,8 +344,15 @@ export default function (pi) {
   // tool (bridge v9). Defined whenever the bridge creds are set; every block
   // that uses it is itself gated on them.
   var postHostedTool = null;
+  // V1 (bridge v12): pi marks a tool result as an error ONLY when execute()
+  // throws; the isError the host's response carries is ignored. Throwing would
+  // replace the content and drop details (a failed foreground agent's
+  // details.cuiAgent), so a host error is remembered here and the single
+  // tool_result handler below flips the result's isError instead (the hook may
+  // return isError; content and details are left as the tool returned them).
+  var hostedErrorIds = new Set();
   if (bridgeUrl && bridgeToken) {
-    postHostedTool = async function (toolName, input, toolCallId) {
+    var postHostedToolRaw = async function (toolName, input, toolCallId) {
       try {
         // Long-polled (bridge v6): a dispatch_agent run can outlive any single
         // request, so bridgeExchange re-polls bridgeUrl + '/hosted-tool/wait'
@@ -364,6 +381,18 @@ export default function (pi) {
         };
       }
     };
+    postHostedTool = async function (toolName, input, toolCallId) {
+      var hosted = await postHostedToolRaw(toolName, input, toolCallId);
+      if (hosted && hosted.isError === true) hostedErrorIds.add(toolCallId);
+      return hosted;
+    };
+    // The ONE tool_result handler: only a call ClaudeUI's host answered with
+    // an error is touched (once, by its toolCallId); every other tool's
+    // result passes through unchanged.
+    pi.on('tool_result', function (event) {
+      if (event && hostedErrorIds.delete(event.toolCallId)) return { isError: true };
+      return undefined;
+    });
   }
 
   if (process.env.CLAUDEUI_PI_HOSTED_TOOLS === '1' && bridgeUrl && bridgeToken) {

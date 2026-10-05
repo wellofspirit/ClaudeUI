@@ -466,6 +466,33 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
     )
   })
 
+  it('V1b: the model chip shows the RESOLVED model once the result says it, else what was asked for', () => {
+    const asked = { ...input, model: 'opus' }
+    // No result yet, a refusal, or a result without the host line: the request.
+    expect(PiEngineToolMap.normalize('task', asked)).toMatchObject({ model: 'opus' })
+    expect(
+      PiEngineToolMap.normalize('task', asked, result('Unknown model "opus".', true))
+    ).toMatchObject({ model: 'opus' })
+    // The host's launch acknowledgement and foreground trailer carry the resolved value.
+    const launchedWithModel = result(
+      "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: anthropic/claude-opus-4-5-20251101\nThe agent is working in the background."
+    )
+    expect(PiEngineToolMap.normalize('task', asked, launchedWithModel)).toMatchObject({
+      model: 'anthropic/claude-opus-4-5-20251101',
+      background: true
+    })
+    const foreground = result(
+      "the report\n\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: openai/o3\n<usage>total_tokens: 1\ntool_uses: 0\nduration_ms: 5</usage>"
+    )
+    expect(PiEngineToolMap.normalize('task', asked, foreground)).toMatchObject({
+      model: 'openai/o3'
+    })
+    // No model asked and none resolved: no chip.
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).not.toHaveProperty(
+      'model'
+    )
+  })
+
   it('an async-launched result is background: running until its notification', () => {
     const view = PiEngineToolMap.normalize('task', input, launched)
     expect(view).toMatchObject({ background: true })

@@ -664,6 +664,61 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
     ])
   })
 
+  it('V1: a host isError reaches pi through ONE tool_result handler — for exactly that call id, once, content and details untouched', async () => {
+    const originalFetch = globalThis.fetch
+    const answers: Record<string, unknown> = {
+      refused: {
+        content: [{ type: 'text', text: 'Unknown model "x".' }],
+        isError: true,
+        details: { cuiAgent: { status: 'failed' } }
+      },
+      fine: {
+        content: [{ type: 'text', text: 'ok' }],
+        details: { cuiAgent: { status: 'completed' } }
+      }
+    }
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      const id = (JSON.parse(String(init.body)) as { toolCallId: string }).toolCallId
+      return { ok: true, status: 200, json: async () => answers[id] } as Response
+    }) as typeof fetch
+    try {
+      await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1' }, async () => {
+        const { tools, events } = runExtension()
+        const onResult = events.get('tool_result')!
+        expect(onResult).toBeTypeOf('function')
+        // Nothing recorded yet: no tool is touched.
+        expect(onResult({ toolCallId: 'refused', toolName: 'agent' })).toBeUndefined()
+
+        const refused = (await tools.get('agent')!.execute('refused', { prompt: 'p' })) as {
+          content: unknown
+          details: unknown
+        }
+        // execute() itself neither throws nor rewrites the host's answer.
+        expect(refused.content).toEqual([{ type: 'text', text: 'Unknown model "x".' }])
+        expect(refused.details).toEqual({ cuiAgent: { status: 'failed' } })
+        await tools.get('agent')!.execute('fine', { prompt: 'p' })
+
+        // Another id, and another tool's result, are not touched.
+        expect(onResult({ toolCallId: 'fine', toolName: 'agent' })).toBeUndefined()
+        expect(onResult({ toolCallId: 'someone-else', toolName: 'bash' })).toBeUndefined()
+        // The refused call's id flips isError — once, and ONLY isError (no content/details keys).
+        expect(onResult({ toolCallId: 'refused', toolName: 'agent' })).toEqual({ isError: true })
+        expect(onResult({ toolCallId: 'refused', toolName: 'agent' })).toBeUndefined()
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('V1: the tool_result handler exists only with the bridge creds', () => {
+    withEnv({ CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: undefined }, () => {
+      expect(runExtension().events.has('tool_result')).toBe(false)
+    })
+    withEnv({ ...BRIDGE_CREDS }, () => {
+      expect(runExtension().events.has('tool_result')).toBe(true)
+    })
+  })
+
   it('v12: send_message describes running vs finished agents, replying by from-id, main, stopped and failed agents', () => {
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SEND_MESSAGE: '1' }, () => {
       const d = runExtension().tools.get('send_message')!.description

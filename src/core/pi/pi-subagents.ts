@@ -79,7 +79,7 @@ import {
 import { isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
 import type { ChatMessage, TaskTerminalStatus } from '../../shared/types'
-import { PI_ASYNC_LAUNCHED_PREFIX } from '../../shared/pi-agent-result'
+import { PI_ASYNC_LAUNCHED_PREFIX, piAgentModelLine } from '../../shared/pi-agent-result'
 // `~/.claude/ui/pi-subagents` — where every child's session dir lives (the
 // store derives the `~/.claude/ui` root locally, without the vault's graph).
 import { piSubagentSessionsRoot, type PiAgentLinkRecord } from './pi-subagent-store'
@@ -404,10 +404,11 @@ const continueLine = (agentId: string, handle: string): string =>
   `agentId: ${agentId} (use send_message with to: '${handle}' to continue this agent.)`
 
 /** CC's background launch text (cli.js 2.1.285, adapted; kickoff CC1). */
-export function asyncLaunchedText(agentId: string, handle: string): string {
+export function asyncLaunchedText(agentId: string, handle: string, model: string): string {
   return (
     `${PI_ASYNC_LAUNCHED_PREFIX}\n` +
     `${continueLine(agentId, handle)}\n` +
+    `${piAgentModelLine(model)}\n` +
     'The agent is working in the background. You will be notified automatically when it ' +
     'completes. You know nothing about its results until that notification arrives — do not ' +
     'report, assume, or predict them; continue other work or respond to the user in the meantime.'
@@ -688,7 +689,7 @@ export class PiSubagentManager {
     }
     const handle = name || agentId
     const asyncResult = (): PiHostedToolResult => ({
-      content: [{ type: 'text', text: asyncLaunchedText(agentId, handle) }],
+      content: [{ type: 'text', text: asyncLaunchedText(agentId, handle, model) }],
       details: { cuiAgent: { ...cuiAgent, background: true, status: 'async_launched' } }
     })
 
@@ -1100,7 +1101,8 @@ export class PiSubagentManager {
           status: 'completed',
           text:
             `${safeForegroundReport(report)}\n\n` +
-            `${continueLine(record.agentId, record.name || record.agentId)}\n${usageBlock(usage)}`,
+            `${continueLine(record.agentId, record.name || record.agentId)}\n` +
+            `${piAgentModelLine(record.model)}\n${usageBlock(usage)}`,
           report,
           failure: null,
           usage
@@ -1470,7 +1472,7 @@ export class PiSubagentManager {
       : target.spawnerAgentId === null
         ? 'The main session will be notified when it completes.'
         : `The agent that launched it (${target.spawnerLabel ?? 'its launcher'}) will be notified when it completes, or the main session once that agent has finished.`
-    return textResult(`Resuming agent ${target.label}. ${who}`)
+    return textResult(`Resuming agent "${target.label}". ${who}`)
   }
 
   /** `task_stop` (G4), from the session (`caller` null: any agent) or a child (its descendants only). */

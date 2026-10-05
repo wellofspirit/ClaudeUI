@@ -490,6 +490,7 @@ describe('PiSubagentManager.run', () => {
     expect(result.content[0].text).toMatch(
       new RegExp(
         `^report 1\\n\\nagentId: ${String(started.taskId)} \\(use send_message with to: 'scout' to continue this agent\\.\\)\\n` +
+          'model: openai-codex/parent-model\\n' +
           '<usage>total_tokens: 15\\ntool_uses: 1\\nduration_ms: \\d+</usage>$'
       )
     )
@@ -876,6 +877,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     expect(result.content[0].text).toBe(
       'Async agent launched successfully.\n' +
         `agentId: ${String(started.taskId)} (use send_message with to: 'scout' to continue this agent.)\n` +
+        'model: openai-codex/parent-model\n' +
         'The agent is working in the background. You will be notified automatically when it completes. ' +
         'You know nothing about its results until that notification arrives — do not report, assume, ' +
         'or predict them; continue other work or respond to the user in the meantime.'
@@ -1342,7 +1344,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
     const r = await mgr.sendMessage({ to: 'worker', message: 'one more thing' }, null)
     expect(r).toEqual({
       content: [
-        { type: 'text', text: 'Resuming agent worker. You will be notified when it completes.' }
+        { type: 'text', text: 'Resuming agent "worker". You will be notified when it completes.' }
       ]
     })
     expect(fake.children).toHaveLength(2)
@@ -1597,7 +1599,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
       status: 'completed'
     })
     expect((await mgr.sendMessage({ to: id, message: 'again' }, null)).content[0].text).toBe(
-      'Resuming agent old. You will be notified when it completes.'
+      'Resuming agent "old". You will be notified when it completes.'
     )
     const child = fake.children[0]
     expect(agentIdOf(child)).toBe(id)
@@ -1687,7 +1689,7 @@ describe('PiSubagentManager — S3b review round 1', () => {
     expect('stoppedBy' in delivered[0].details).toBe(false)
     expect(
       (await mgr.sendMessage({ to: 'worker', message: 'more' }, null)).content[0].text
-    ).toMatch(/^Resuming agent worker\./)
+    ).toMatch(/^Resuming agent "worker"\./)
     expect(fake.children).toHaveLength(2)
   })
 
@@ -1711,7 +1713,7 @@ describe('PiSubagentManager — S3b review round 1', () => {
     expect(fake.spawn).not.toHaveBeenCalled()
     mgr.userTurn()
     expect((await mgr.sendMessage({ to: 'halted', message: 'go' }, null)).content[0].text).toBe(
-      'Resuming agent halted. You will be notified when it completes.'
+      'Resuming agent "halted". You will be notified when it completes.'
     )
     expect(fake.spawn).toHaveBeenCalledTimes(1)
     fake.children[0].push({ type: 'agent_start' })
@@ -1809,7 +1811,7 @@ describe('PiSubagentManager — S3b review round 1', () => {
     await mgr.run({ description: 'd', prompt: 'p', name: 'other' }, 'call-o', null)
     const otherScope = await scopeOf(host, fake.children[1])
     expect((await mgr.sendMessage({ to: 'done', message: 'x' }, otherScope)).content[0].text).toBe(
-      'Resuming agent done. The main session will be notified when it completes.'
+      'Resuming agent "done". The main session will be notified when it completes.'
     )
   })
 
@@ -2147,7 +2149,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     mgr.userTurn()
     expect(record.userStopHold).toBe(false)
     expect((await mgr.sendMessage({ to: 'worker', message: 'go on' }, null)).content[0].text).toBe(
-      'Resuming agent worker. You will be notified when it completes.'
+      'Resuming agent "worker". You will be notified when it completes.'
     )
     expect(fake.children).toHaveLength(2)
     await finishResume(fake.children[1])
@@ -2172,7 +2174,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     await vi.waitFor(() => expect(delivered).toHaveLength(1))
     expect(record).toMatchObject({ status: 'stopped', stoppedBy: 'user', userStopHold: false })
     expect((await mgr.sendMessage({ to: 'worker', message: 'x' }, null)).content[0].text).toMatch(
-      /^Resuming agent worker\./
+      /^Resuming agent "worker"\./
     )
     await finishResume(fake.children[1])
   })
@@ -2213,7 +2215,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     expect(grandRec.userStopHold).toBe(false)
     expect(leadRec.userStopHold).toBe(false)
     expect((await mgr.sendMessage({ to: 'grand', message: 'x' }, null)).content[0].text).toMatch(
-      /^Resuming agent grand\./
+      /^Resuming agent "grand"\./
     )
     await finishResume(fake.children[2])
   })
@@ -2231,7 +2233,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     const bgRec = mgr.record(agentIdOf(fake.children[0]))!
     expect(bgRec).toMatchObject({ stoppedBy: 'agent', userStopHold: false })
     expect((await mgr.sendMessage({ to: 'bg', message: 'again' }, null)).content[0].text).toMatch(
-      /^Resuming agent bg\./
+      /^Resuming agent "bg"\./
     )
     await finishResume(fake.children[1])
 
@@ -2249,7 +2251,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     const fgRec = mgr.record(agentIdOf(fake.children[2]))!
     expect(fgRec).toMatchObject({ stoppedBy: 'interrupt', userStopHold: false })
     expect((await mgr.sendMessage({ to: 'fg', message: 'again' }, null)).content[0].text).toMatch(
-      /^Resuming agent fg\./
+      /^Resuming agent "fg"\./
     )
     await finishResume(fake.children[3])
   })
@@ -2271,7 +2273,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     expect(mgr.record('88888888-8888-4888-8888-888888888888')!.userStopHold).toBe(true)
     expect(mgr.record('99999999-9999-4999-8999-999999999999')!.userStopHold).toBe(false)
     expect((await mgr.sendMessage({ to: 'a', message: 'x' }, null)).content[0].text).toMatch(
-      /^Resuming agent a\./
+      /^Resuming agent "a"\./
     )
     await finishResume(fake.children[0])
   })
@@ -2339,7 +2341,7 @@ describe('PiSubagentManager — S1b: failure classification', () => {
     const record = mgr.record(agentIdOf(fake.children[0]))!
     expect(record).toMatchObject({ status: 'failed', failure: 'transient' })
     expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
-      /^Resuming agent w\./
+      /^Resuming agent "w"\./
     )
     expect(fake.children).toHaveLength(2)
     // The new run clears the failure while it runs.
@@ -2365,7 +2367,7 @@ describe('PiSubagentManager — S1b: failure classification', () => {
       failureMessage: auth
     })
     expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
-      /^Resuming agent w\./
+      /^Resuming agent "w"\./
     )
     await finishResume(fake.children[1])
   })
@@ -2384,7 +2386,7 @@ describe('PiSubagentManager — S1b: failure classification', () => {
       failureMessage: 'pi child process exited unexpectedly'
     })
     expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
-      /^Resuming agent w\./
+      /^Resuming agent "w"\./
     )
     await finishResume(fake.children[1])
   })
@@ -2463,7 +2465,7 @@ describe('PiSubagentManager — S1b: failure classification', () => {
     })
     // Transient: the next resume is allowed (child 3 starts).
     expect((await mgr.sendMessage({ to: 'w', message: 'again' }, null)).content[0].text).toMatch(
-      /^Resuming agent w\./
+      /^Resuming agent "w"\./
     )
     await finishResume(fake.children[2])
 
@@ -2509,7 +2511,7 @@ describe('PiSubagentManager — S1b: failure classification', () => {
     })
     expect(mgr.record(old)).toMatchObject({ status: 'failed', failure: 'transient' })
     expect((await mgr.sendMessage({ to: 'old', message: 'x' }, null)).content[0].text).toMatch(
-      /^Resuming agent old\./
+      /^Resuming agent "old"\./
     )
     expect(await mgr.sendMessage({ to: 'perm', message: 'x' }, null)).toEqual({
       content: [
@@ -2714,7 +2716,7 @@ describe('PiSubagentManager — S2: identity in the system prompt, foreground ch
     fs.writeFileSync(mgr.record(agentIdOf(grand))!.promptFile, 'stale')
     expect(
       (await mgr.sendMessage({ to: 'grand', message: 'again' }, null)).content[0].text
-    ).toMatch(/^Resuming agent grand\./)
+    ).toMatch(/^Resuming agent "grand"\./)
     expect(promptOf(mgr, fake.children[2])).toContain(
       `Your agent id is ${agentIdOf(grand)} and your name is "grand". You were launched by agent "lead".`
     )

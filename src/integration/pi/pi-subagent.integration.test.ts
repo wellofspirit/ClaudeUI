@@ -153,7 +153,7 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         null
       )
       expect(resumed.content[0].text).toBe(
-        'Resuming agent echoer. You will be notified when it completes.'
+        'Resuming agent "echoer". You will be notified when it completes.'
       )
       await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 120_000, interval: 250 })
       expect(delivered[1].details).toMatchObject({ runIndex: 2, status: 'completed' })
