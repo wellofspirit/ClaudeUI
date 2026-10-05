@@ -480,6 +480,23 @@ describe('caching', () => {
     expect(changed).toHaveLength(5)
   })
 
+  it('does not keep a resolution made before the host wired its app path', () => {
+    // A module-level caller (the `usageFetcher` singleton) resolves before
+    // `src/main/index.ts` reaches `setHostPaths`: the lookup falls back to the
+    // cwd, which in a packaged app holds no `vendor/claude-cli`.
+    const bin = writeHarnessPayload(vendorDir('claude'), 'claude')
+    setHostPaths(null)
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(path.join(tmp, 'elsewhere'))
+    try {
+      expect(resolveHarness('claude').path).toBeNull()
+    } finally {
+      cwd.mockRestore()
+    }
+    setHostPaths({ getAppPath: () => appPath })
+    expect(resolveHarness('claude')).toMatchObject({ path: bin, source: 'bundled' })
+    expect(harnessAvailable('claude')).toBe(true)
+  })
+
   it('returns a frozen resolution callers cannot corrupt', () => {
     expect(Object.isFrozen(resolveHarness('claude'))).toBe(true)
   })
