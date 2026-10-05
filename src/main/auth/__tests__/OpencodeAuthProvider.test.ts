@@ -529,15 +529,48 @@ describe('OpencodeAuthProvider — removeVendorAuth()', () => {
   beforeEach(setupMocks)
 
   it('calls DELETE /auth/{vendorId}', async () => {
+    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
     const provider = makeProvider()
     await provider.removeVendorAuth('openai')
     expect(mockRemoveAuth).toHaveBeenCalledWith('openai')
   })
 
   it('invalidates model cache after removal', async () => {
+    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
     const provider = makeProvider()
     await provider.removeVendorAuth('openai')
     expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+  })
+
+  // The shared-provider sync removes the key of every provider whose opencode
+  // route is off, at each boot, mostly where there is none. Removing nothing
+  // must not start a server, drop the model cache (killing the probe in flight)
+  // or recycle the pool.
+  it.each([
+    ['the vendor has no entry', JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } })],
+    ['auth.json does not exist', null]
+  ])('does nothing when %s', async (_label, contents) => {
+    if (contents !== null) writeAuthJson(contents)
+    await makeProvider().removeVendorAuth('openrouter')
+    expect(mockAcquire).not.toHaveBeenCalled()
+    expect(mockRemoveAuth).not.toHaveBeenCalled()
+    expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'the vendor has an entry',
+      JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } })
+    ],
+    // Unreadable is not "absent": opencode's own DELETE decides, as before.
+    ['auth.json is unparseable', '{"openrouter":{"type":"api"']
+  ])('removes through the server as before when %s', async (_label, contents) => {
+    writeAuthJson(contents)
+    await makeProvider().removeVendorAuth('openrouter')
+    expect(mockRemoveAuth).toHaveBeenCalledWith('openrouter')
+    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -569,6 +602,7 @@ describe('OpencodeAuthProvider — recycles pooled servers on auth mutations', (
   })
 
   it('removeVendorAuth success recycles; a failed DELETE does not', async () => {
+    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
     await makeProvider().removeVendorAuth('openai')
     expect(mockRecycleAll).toHaveBeenCalledTimes(1)
 

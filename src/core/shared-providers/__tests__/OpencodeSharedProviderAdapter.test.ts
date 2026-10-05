@@ -268,8 +268,9 @@ describe('OpencodeSharedProviderAdapter', () => {
     })
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('openai')
-    // The removal only: the feed invalidates in the auth target, when it writes.
-    expect(invalidateModelCache).toHaveBeenCalledTimes(1)
+    // Neither: the feed and the removal invalidate in the auth target, and only
+    // when they change the stored credential.
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   it('fails closed when API-key and OAuth credentials target the wrong provider kind', async () => {
@@ -283,13 +284,16 @@ describe('OpencodeSharedProviderAdapter', () => {
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
-  it('vends API keys through the auth target and invalidates after a removal', async () => {
+  // The sync removes the key of every provider whose opencode route is off at
+  // each boot, mostly where there is none; the auth target skips an absent entry
+  // and invalidates only when it removes one, so the adapter must not add its own.
+  it('vends and removes API keys through the auth target, adding no invalidation', async () => {
     const { adapter, authTarget, invalidateModelCache } = setup()
     await adapter.vendApiKey(definition, 'secret')
     await adapter.removeCredential(definition)
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(1)
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   // The shared-provider sync re-vends every key at each boot. The auth target

@@ -56,14 +56,20 @@ export async function readOpencodeCredentialTypes(): Promise<Record<string, 'api
  * real change be skipped.
  *
  * Answers a boolean, so this module still hands out no key material. A missing
- * or unreadable file, or an absent entry, is `false`: the caller writes as it
- * would have, through whatever corrupt-file discipline its own path has.
+ * file is an empty store: it matches only `entry === undefined` ("no entry",
+ * what a remover asks). An unreadable file is `false` whatever is asked: the
+ * caller goes on as it would have, through whatever corrupt-file discipline its
+ * own path has.
  */
 export async function opencodeAuthEntryEquals(vendorId: string, entry: unknown): Promise<boolean> {
+  let raw: string
   try {
-    const parsed: unknown = JSON.parse(
-      await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
-    )
+    raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' && entry === undefined
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
     return isPlainObject(parsed) && deepEqual(parsed[vendorId], entry)
   } catch {
     return false

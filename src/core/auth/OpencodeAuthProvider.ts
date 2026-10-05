@@ -309,6 +309,12 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   }
 
   async removeVendorAuth(vendorId: string): Promise<void> {
+    // No entry to remove: no server to start, no cache to drop, no pool to
+    // recycle, and no removal to log. The shared-provider sync removes the key
+    // of every provider whose opencode route is off at each boot, mostly where
+    // there never was one. An unreadable file is not "absent" — it takes the
+    // server path as before.
+    if (await opencodeAuthEntryEquals(vendorId, undefined)) return
     // See PiAuthProvider.removeVendorAuth: a removal always leaves a trace.
     logger.info('OpencodeAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
