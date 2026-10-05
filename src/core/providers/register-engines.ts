@@ -11,6 +11,7 @@ import { codexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
 import { harnessUnavailableMessage } from '../harness/resolve'
 import { syncCodexRulesFile } from '../codex/rules-sync'
+import { ensureDerivedCodexHome } from '../codex/codex-home'
 import { engineRegistry } from './EngineRegistry'
 import { claudeSpawnPrep } from './claude-spawn-prep'
 import { opencodeSpawnPrep } from '../opencode/opencode-spawn-prep'
@@ -49,6 +50,16 @@ spawnPrepRegistry.register('codex', async (model) => {
   // so this is the last moment a user permission edit made OUTSIDE ClaudeUI can
   // still reach the session about to start. A no-op (one read + a hash compare)
   // when nothing changed, and it never throws.
+  //
+  // A first-time user has no Codex home yet, and the sync skips a missing one.
+  // The session's app-server would create it moments later — after this point,
+  // so its first thread would start without the user's rules. Create it here,
+  // best effort, exactly as the transport does (`ensureDerivedCodexHome`).
+  try {
+    ensureDerivedCodexHome(undefined)
+  } catch {
+    // The transport retries it and warns; Codex reports anything still wrong.
+  }
   syncCodexRulesFile()
   return { resolvedModel: model || undefined }
 })
