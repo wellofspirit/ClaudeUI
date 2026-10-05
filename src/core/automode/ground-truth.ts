@@ -603,7 +603,9 @@ export function tempDirRoots(
 ): string[] {
   let osTemp: string | undefined
   try {
-    osTemp = tmpdir()
+    // The host's temp dir only describes the host's platform: asked about
+    // another one (tests do), it would answer `/tmp` for win32 on a Linux box.
+    if (platform === process.platform) osTemp = tmpdir()
   } catch {
     // Never throw out of the approval path for a missing temp dir; one fewer
     // scope root only ever costs an escalation.
