@@ -398,6 +398,24 @@ export function loadSessionConfig(): UISessionConfig {
   return config
 }
 
+/**
+ * False when sessions.json exists but does not parse. {@link loadSessionConfig}
+ * degrades that to an empty config, which is fine for a UI that just shows nothing
+ * but not for a caller deciding that NOTHING references some id. A missing file is
+ * a genuinely empty registry and reads as readable.
+ */
+export function sessionConfigIsReadable(): boolean {
+  try {
+    if (!fs.existsSync(SESSIONS_FILE)) return true
+    // An object, as `loadSessionConfig` reads it: `null` or an array would load
+    // as `{}` too, and must not read as "nothing is referenced".
+    const parsed: unknown = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+  } catch {
+    return false
+  }
+}
+
 export function saveSessionConfig(config: UISessionConfig): void {
   // Persist sessionEngines to the DB, not the JSON file.
   // The renderer sends the full UISessionConfig (including sessionEngines) so we

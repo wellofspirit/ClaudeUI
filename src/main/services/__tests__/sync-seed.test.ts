@@ -17,6 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const {
+  pruneOrphanClaudeSessionMeta,
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
@@ -26,6 +27,7 @@ const {
   listPiSessionsGlobal,
   listCodexSessions
 } = vi.hoisted(() => ({
+  pruneOrphanClaudeSessionMeta: vi.fn(),
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(),
@@ -41,6 +43,7 @@ vi.mock('../../../core/services/ui-config', () => ({
   loadSessionConfig,
   loadSlashCommands
 }))
+vi.mock('../../../core/services/session-meta-prune', () => ({ pruneOrphanClaudeSessionMeta }))
 vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
 vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
@@ -164,6 +167,25 @@ describe('seedCanonicalAppState', () => {
     expect(syncCore.getCanonicalState().sdkSkillNames).toEqual([])
     // slashCommands, by contrast, IS a cached list the renderer loads at boot.
     expect(syncCore.getCanonicalState().slashCommands).toEqual([{ name: '/compact' }])
+  })
+
+  it('prunes orphan registry rows BEFORE it reads the session config (GUARD)', async () => {
+    const order: string[] = []
+    pruneOrphanClaudeSessionMeta.mockImplementation(() => order.push('prune'))
+    loadSessionConfig.mockImplementation(() => {
+      order.push('load')
+      return {}
+    })
+    await seedCanonicalAppState()
+    expect(order).toEqual(['prune', 'load'])
+  })
+
+  it('a failing prune does not cost the registry seed', async () => {
+    pruneOrphanClaudeSessionMeta.mockImplementation(() => {
+      throw new Error('db locked')
+    })
+    await expect(seedCanonicalAppState()).resolves.toBeUndefined()
+    expect(syncCore.getSnapshot().recentSessionIds).toEqual(['rid-a', 'rid-b'])
   })
 
   it('degrades to empty (never throws) when a source is unreadable', async () => {

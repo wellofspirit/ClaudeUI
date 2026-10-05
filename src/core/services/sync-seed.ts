@@ -33,6 +33,7 @@
  */
 
 import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
+import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
@@ -264,6 +265,14 @@ export async function seedCanonicalAppState(): Promise<void> {
     syncCore.setAppState({ settings: loadSettings() as Record<string, unknown> })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'settings seed failed', err)
+  }
+
+  try {
+    // Before the read below, so the snapshot never carries a row for a session that
+    // never ran. Its own guard: a failed prune must not cost the registry seed.
+    pruneOrphanClaudeSessionMeta()
+  } catch (err) {
+    logger.warn(LOG_SOURCE, 'orphan session-registry prune failed', err)
   }
 
   try {

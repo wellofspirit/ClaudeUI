@@ -1861,6 +1861,26 @@ export function allSessionMeta(): Record<string, SessionMeta> {
 }
 
 /**
+ * Ids of the rows that name Claude AND carry no context reading — the only rows the
+ * orphan prune ({@link pruneOrphanClaudeSessionMeta}) may consider.
+ *
+ * Read from the raw column, not through {@link allSessionMeta}: `rowToMeta` clamps
+ * an engine this build does not know (a newer build's, after a downgrade) to
+ * `claude`, and a clamped row must never look like a Claude one here. The context
+ * filter is a belt, not a proof of anything: only CodexSession writes a context
+ * reading (v24), so a Claude row never has one today and the filter excludes none.
+ */
+export function claudeUnmeteredSessionIds(db: Db = getDb()): string[] {
+  const rows = db
+    .prepare(
+      `SELECT session_id FROM session_meta
+       WHERE engine_id = 'claude' AND context_used IS NULL AND context_window IS NULL`
+    )
+    .all() as Array<{ session_id: string }>
+  return rows.map((r) => r.session_id)
+}
+
+/**
  * How many sessions this profile has per `engine_id`, as stored (the harness
  * upgrade sheet's "N sessions", ADR-082 §8). Engines with none are absent.
  */
