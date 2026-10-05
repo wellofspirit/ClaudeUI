@@ -30,7 +30,12 @@
  */
 import type { DynamicToolSpec } from './protocol/v2/DynamicToolSpec'
 import type { ToolResultContent } from '../sdk/types'
-import type { EngineId } from '../../shared/types'
+import {
+  dispatchAgentDescription,
+  joinDispatchHints,
+  OWN_SUBAGENT_TOOL,
+  type DispatchTargetEngine
+} from '../../shared/dispatch-agent-description'
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
@@ -54,7 +59,7 @@ export const CODEX_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
  * dispatcher has no Codex target factory, and a same-engine dispatch is
  * rejected by its own engine guard regardless.
  */
-const DISPATCH_TARGETS: readonly EngineId[] = ['claude', 'opencode', 'pi']
+const DISPATCH_TARGETS: readonly DispatchTargetEngine[] = ['claude', 'opencode', 'pi']
 
 /**
  * The `dynamicTools` param for `thread/start`, in the CANONICAL tagged form
@@ -156,13 +161,11 @@ function dispatchAgentSpec(): DynamicToolSpec {
   return {
     type: 'function',
     name: 'dispatch_agent',
-    description:
-      'Delegate a task to an agent running on a DIFFERENT engine — claude, opencode or pi. The ' +
-      'agent runs headless in the same working directory and its final answer is returned as this ' +
-      'tool result. The result includes a session_id — pass it back as `session_id` to continue ' +
-      'the same agent with its context intact (multi-turn collaboration). The available model ' +
-      "list is user-configured per target engine; omit `model` to use that engine's configured " +
-      `default. ${hints.map((hint) => `For ${hint.targetEngine}: ${hint.long}`).join(' ')}`,
+    description: dispatchAgentDescription({
+      targets: DISPATCH_TARGETS,
+      ownSubagentTool: OWN_SUBAGENT_TOOL.codex,
+      hints: joinDispatchHints(hints)
+    }),
     inputSchema: {
       type: 'object',
       properties: {

@@ -204,6 +204,7 @@ export function buildPiSubagentChildEnv(
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
+    CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
     CLAUDEUI_PI_PLAN_TOOLS: '',
     CLAUDEUI_PI_AGENT_TOOL: opts.childCanSpawn ? '1' : '',
     CLAUDEUI_PI_AGENT_LISTING: opts.childCanSpawn ? opts.listing : '',

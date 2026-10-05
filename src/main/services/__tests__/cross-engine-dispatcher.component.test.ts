@@ -6837,6 +6837,8 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
+    // S4: nor the dispatch description the bridge would register it with.
+    expect(env.CLAUDEUI_PI_DISPATCH_DESCRIPTION).toBe('')
     expect(env.CLAUDEUI_PI_SKILL_DIRS).toBe('')
     // ADR-089: a dispatch target never gets the `agent` tool either.
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
@@ -6844,11 +6846,12 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
-    // Exactly these seven keys — nothing else sneaks in either.
+    // Exactly these eight keys — nothing else sneaks in either.
     expect(Object.keys(env).sort()).toEqual([
       'CLAUDEUI_PI_AGENT_TOOL',
       'CLAUDEUI_PI_BRIDGE_TOKEN',
       'CLAUDEUI_PI_BRIDGE_URL',
+      'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
       'CLAUDEUI_PI_DISPATCH_ENABLED',
       'CLAUDEUI_PI_HOSTED_TOOLS',
       'CLAUDEUI_PI_SEND_MESSAGE',

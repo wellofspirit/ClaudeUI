@@ -127,6 +127,21 @@ import type {
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
+import {
+  dispatchAgentPromptSection,
+  OWN_SUBAGENT_TOOL
+} from '../../shared/dispatch-agent-description'
+
+/**
+ * The system-prompt section for the `claude-ui-collab` dispatch tool, from the
+ * shared constants (the same targets and steer as its tool description in
+ * collab-tool.ts — ADR-033, ADR-089 messaging v2).
+ */
+const CROSS_ENGINE_DISPATCH_SECTION = dispatchAgentPromptSection({
+  toolName: 'mcp__claude-ui-collab__dispatch_agent',
+  targets: ['opencode', 'pi', 'codex'],
+  ownSubagentTool: OWN_SUBAGENT_TOOL.claude
+})
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -873,7 +888,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 ? `
 
 ## Cross-Engine Agent Dispatch
-You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task to an agent on a different engine (opencode, fronting non-Anthropic models such as GPT or Gemini). Useful when the user asks for another model's perspective (e.g. a second review of a diff). The result includes a session_id — pass it back to continue the same agent. The model list is user-configured; requires user approval per call.`
+${CROSS_ENGINE_DISPATCH_SECTION}`
                 : ''
             }`
           },

@@ -749,6 +749,7 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+          CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
           CLAUDEUI_PI_PLAN_TOOLS: '1',
           CLAUDEUI_PI_AGENT_TOOL: '1',
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
@@ -4600,6 +4601,16 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('1')
+    // S4: the shared description reaches the bridge, steering to pi's own `agent` tool,
+    // listing every OTHER engine (never pi itself).
+    const description = env.CLAUDEUI_PI_DISPATCH_DESCRIPTION as string
+    expect(description).toContain('use your own agent tool instead')
+    expect(description).toContain('claude (Anthropic')
+    expect(description).toContain('opencode (')
+    expect(description).toContain('codex (')
+    expect(description).not.toContain('pi (an alternative')
+    expect(description).toContain('For claude:')
+    expect(description).toContain('For codex:')
   })
 
   it('omits CLAUDEUI_PI_DISPATCH_ENABLED (but keeps CLAUDEUI_PI_HOSTED_TOOLS) when crossEngineDispatchAvailable("pi") is false', async () => {
@@ -4610,6 +4621,7 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
     expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_DESCRIPTION')
   })
 
   it('sets CLAUDEUI_PI_PLAN_TOOLS=1 by default (plan is a static-true engine capability, M5a)', async () => {

@@ -86,7 +86,8 @@ function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.Process
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
-    CLAUDEUI_PI_DISPATCH_ENABLED: ''
+    CLAUDEUI_PI_DISPATCH_ENABLED: '',
+    CLAUDEUI_PI_DISPATCH_DESCRIPTION: ''
   }
 }
 

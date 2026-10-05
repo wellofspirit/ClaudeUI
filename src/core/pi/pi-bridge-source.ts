@@ -143,8 +143,11 @@
  *    agent that may launch agents gets it: it exists to pick the `agent`
  *    tool's `model`), and rewrote that parameter's description: the host now
  *    resolves a provider/id value, a bare id or a Claude Code alias against
- *    the allowlisted catalog. The slice that follows (the dispatch
- *    description) extends this entry.
+ *    the allowlisted catalog. S4 made the `dispatch_agent` description come
+ *    from ClaudeUI's one shared builder (src/shared/dispatch-agent-description.ts):
+ *    the host passes it in CLAUDEUI_PI_DISPATCH_DESCRIPTION (set wherever
+ *    CLAUDEUI_PI_DISPATCH_ENABLED=1 is; '' for every child), and the short
+ *    static text stays as the fallback when the variable is empty.
  */
 
 export const PI_BRIDGE_VERSION = '12'
@@ -423,7 +426,10 @@ export default function (pi) {
       pi.registerTool({
         name: 'dispatch_agent',
         label: 'Dispatch Agent',
-        description: 'Delegate a task to an agent running on a DIFFERENT engine (claude, opencode or codex). The agent runs headless in the same working directory and its final answer is returned as this tool result. The result includes a session_id -- pass it back as session_id to continue the same agent with its context intact.',
+        // The description is ClaudeUI's shared one (dispatch-agent-description.ts),
+        // handed over in CLAUDEUI_PI_DISPATCH_DESCRIPTION; this short static text
+        // only covers a host that did not send it.
+        description: process.env.CLAUDEUI_PI_DISPATCH_DESCRIPTION || 'Delegate a task to an agent running on a DIFFERENT engine (claude, opencode or codex), only when the user asks for a different engine or model vendor; for ordinary delegation use the agent tool. The agent runs headless in the same working directory and its final answer is returned as this tool result. The result includes a session_id -- pass it back as session_id to continue the same agent with its context intact.',
         parameters: {
           type: 'object',
           properties: {

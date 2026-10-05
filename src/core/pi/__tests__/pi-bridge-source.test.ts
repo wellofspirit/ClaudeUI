@@ -259,6 +259,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_SKILL_DIRS',
   'CLAUDEUI_PI_HOSTED_TOOLS',
   'CLAUDEUI_PI_DISPATCH_ENABLED',
+  'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
@@ -356,6 +357,35 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         expect(events.has('tool_call')).toBe(true)
       }
     )
+  })
+
+  it('v12 (S4): dispatch_agent takes its description from CLAUDEUI_PI_DISPATCH_DESCRIPTION; empty or unset falls back to a short static text that still steers to the agent tool', () => {
+    const shared = 'SHARED DESCRIPTION from the host'
+    withEnv(
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_HOSTED_TOOLS: '1',
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+        CLAUDEUI_PI_DISPATCH_DESCRIPTION: shared
+      },
+      () => expect(runExtension().tools.get('dispatch_agent')!.description).toBe(shared)
+    )
+    for (const empty of ['', undefined]) {
+      withEnv(
+        {
+          ...BRIDGE_CREDS,
+          CLAUDEUI_PI_HOSTED_TOOLS: '1',
+          CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+          CLAUDEUI_PI_DISPATCH_DESCRIPTION: empty
+        },
+        () => {
+          const d = runExtension().tools.get('dispatch_agent')!.description
+          expect(d).toContain('DIFFERENT engine')
+          expect(d).toContain('use the agent tool')
+          expect(d).toContain('session_id')
+        }
+      )
+    }
   })
 
   it('an ambient CLAUDEUI_PI_* env (as set by a currently-running ClaudeUI process) does not leak into a run that opts into NONE of it', () => {
