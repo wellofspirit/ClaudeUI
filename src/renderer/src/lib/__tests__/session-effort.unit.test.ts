@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { rememberedModelEfforts, sessionSpawnEffort, spawnAnnouncement } from '../session-effort'
+import { rememberedEffortPatch, sessionSpawnEffort, spawnAnnouncement } from '../session-effort'
 import type { ModelInfo } from '../../../../shared/types'
 
 const OPUS: ModelInfo = {
@@ -12,7 +12,7 @@ const OPUS: ModelInfo = {
   supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
 }
 
-describe('sessionSpawnEffort / rememberedModelEfforts', () => {
+describe('sessionSpawnEffort / rememberedEffortPatch', () => {
   const session = { selectedModel: 'opus', selectedEngineId: 'claude', effort: null }
   const state = (modelEffortDefaults = {}) => ({
     availableModels: [OPUS],
@@ -24,13 +24,13 @@ describe('sessionSpawnEffort / rememberedModelEfforts', () => {
     expect(sessionSpawnEffort(state(), session)).toBe('medium')
   })
   it('remembers a pick under the Settings table key, replacing a legacy key', () => {
-    expect(rememberedModelEfforts(state({ 'claude-opus-5-5': 'low' }), session, 'max')).toEqual({
-      opus: 'max'
+    expect(rememberedEffortPatch(state({ 'claude-opus-5-5': 'low' }), session, 'max')).toEqual({
+      modelEffortDefaults: { opus: 'max' }
     })
   })
   it('refuses to file a pick under "" when the model is not in the catalog', () => {
     expect(
-      rememberedModelEfforts(state(), { ...session, selectedModel: 'gone' }, 'high')
+      rememberedEffortPatch(state(), { ...session, selectedModel: 'gone' }, 'high')
     ).toBeUndefined()
   })
 })
@@ -89,20 +89,20 @@ describe('spawnAnnouncement', () => {
   })
 })
 
-describe('per-model effort is Claude-only', () => {
+describe('pi remembers effort in its own map', () => {
   // A pi model embedding a Claude id canonicalises onto the key Claude's own `opus`
-  // row owns as its legacy key.
+  // row owns as its legacy key; the two must stay apart.
   const PI_OPUS: ModelInfo = {
     value: 'anthropic/claude-opus-5-5',
     displayName: 'Opus (pi)',
     description: '',
     engineId: 'pi',
     supportsEffort: true,
-    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    supportedEffortLevels: ['low', 'medium', 'high']
   }
-  const state = (modelEffortDefaults: Record<string, 'low' | 'max'> = {}) => ({
+  const state = (settings: Record<string, unknown> = {}) => ({
     availableModels: [OPUS, PI_OPUS],
-    settings: { modelEffortDefaults }
+    settings
   })
   const piSession = {
     selectedModel: PI_OPUS.value,
@@ -111,18 +111,52 @@ describe('per-model effort is Claude-only', () => {
     thinkingMode: null
   }
 
-  it('a pi pick writes nothing (it must not clobber or orphan a Claude row)', () => {
+  it('a pi pick writes engineEffortDefaults.pi[<value>] and nothing in modelEffortDefaults', () => {
+    const patch = rememberedEffortPatch(
+      state({ modelEffortDefaults: { 'claude-opus-5-5': 'low' } }),
+      piSession,
+      'high'
+    )
+    expect(patch).toEqual({
+      engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+    })
+  })
+  it('a pi pick on a model not in the catalog writes nothing', () => {
     expect(
-      rememberedModelEfforts(state({ 'claude-opus-5-5': 'low' }), piSession, 'max')
+      rememberedEffortPatch(state(), { ...piSession, selectedModel: 'gone/model' }, 'high')
     ).toBeUndefined()
   })
+  it('opencode and codex picks write nothing', () => {
+    for (const selectedEngineId of ['opencode', 'codex']) {
+      const row = { ...PI_OPUS, engineId: selectedEngineId as 'opencode' | 'codex' }
+      expect(
+        rememberedEffortPatch(
+          { availableModels: [row], settings: {} },
+          { ...piSession, selectedEngineId },
+          'high'
+        )
+      ).toBeUndefined()
+    }
+  })
+  it('a new pi session on that model spawns (and so displays) the remembered effort', () => {
+    const settings = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } }
+    expect(sessionSpawnEffort(state(settings), piSession)).toBe('low')
+  })
+  it('a remembered value the model does not offer is clamped at spawn', () => {
+    // PI_OPUS offers low/medium/high only.
+    const settings = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } }
+    expect(sessionSpawnEffort(state(settings), piSession)).toBe('medium')
+  })
   it('a pi session does not read a Claude key', () => {
-    expect(sessionSpawnEffort(state({ 'claude-opus-5-5': 'low' }), piSession)).toBe(
-      sessionSpawnEffort(state(), piSession)
-    )
+    expect(
+      sessionSpawnEffort(
+        state({ modelEffortDefaults: { 'claude-opus-5-5': 'low', opus: 'low' } }),
+        piSession
+      )
+    ).toBe(sessionSpawnEffort(state(), piSession))
     // ...but the same map still serves Claude's own row.
     expect(
-      sessionSpawnEffort(state({ opus: 'low' }), {
+      sessionSpawnEffort(state({ modelEffortDefaults: { opus: 'low' } }), {
         selectedModel: 'opus',
         selectedEngineId: 'claude',
         effort: null

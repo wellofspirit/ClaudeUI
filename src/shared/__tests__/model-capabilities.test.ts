@@ -22,6 +22,10 @@ import {
   resolveDesiredEffort,
   resolveSpawnEffort,
   withSavedEffort,
+  savedEffortFor,
+  rememberEffortPatch,
+  engineRemembersEffort,
+  type EffortDefaultsSlice,
   resolveContextWindow,
   resolveClaudeCapabilities,
   claudeModelCapabilities,
@@ -855,7 +859,7 @@ describe('resolveDesiredEffort / resolveSpawnEffort — the one effort ladder', 
     explicit: null,
     modelInfo: OPUS,
     engineModels: catalog,
-    modelEffortDefaults: undefined,
+    effortDefaults: undefined,
     ...over
   })
 
@@ -863,50 +867,103 @@ describe('resolveDesiredEffort / resolveSpawnEffort — the one effort ladder', 
     expect(resolveDesiredEffort(args())).toBe('medium')
   })
   it("the model's saved starting effort beats the built-in default", () => {
-    expect(resolveDesiredEffort(args({ modelEffortDefaults: { opus: 'high' } }))).toBe('high')
+    expect(
+      resolveDesiredEffort(args({ effortDefaults: { modelEffortDefaults: { opus: 'high' } } }))
+    ).toBe('high')
   })
   it('an explicit pick beats the saved starting effort', () => {
     expect(
-      resolveDesiredEffort(args({ explicit: 'low', modelEffortDefaults: { opus: 'high' } }))
+      resolveDesiredEffort(
+        args({ explicit: 'low', effortDefaults: { modelEffortDefaults: { opus: 'high' } } })
+      )
     ).toBe('low')
   })
   it('reads the alias key for `default` too', () => {
     expect(
-      resolveDesiredEffort(args({ modelInfo: DEFAULT_ROW, modelEffortDefaults: { opus: 'max' } }))
+      resolveDesiredEffort(
+        args({ modelInfo: DEFAULT_ROW, effortDefaults: { modelEffortDefaults: { opus: 'max' } } })
+      )
     ).toBe('max')
   })
   it('still reads a v3.5 value saved under the resolved model id', () => {
-    expect(resolveDesiredEffort(args({ modelEffortDefaults: { 'claude-opus-5-5': 'low' } }))).toBe(
-      'low'
-    )
-  })
-  it('a non-Claude engine never reads the saved rung, even for a Claude-looking model id', () => {
-    // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
-    // row owns (its legacy key); pi must not read it.
-    const piRow = { ...OPUS, value: 'anthropic/claude-opus-5-5', resolvedModel: undefined }
-    const saved = { 'claude-opus-5-5': 'low', opus: 'low' } as const
     expect(
       resolveDesiredEffort(
-        args({
-          engineId: 'pi',
-          modelInfo: piRow,
-          engineModels: [piRow],
-          modelEffortDefaults: saved
-        })
+        args({ effortDefaults: { modelEffortDefaults: { 'claude-opus-5-5': 'low' } } })
       )
-    ).toBe(modelDefaultEffort(piRow))
-    expect(
-      resolveDesiredEffort(args({ engineId: 'pi', explicit: 'max', modelEffortDefaults: saved }))
-    ).toBe('max')
-    // Claude (or an engine-less call) still reads it.
-    expect(resolveDesiredEffort(args({ engineId: 'claude', modelEffortDefaults: saved }))).toBe(
-      'low'
-    )
+    ).toBe('low')
+  })
+  describe('pi remembers in its OWN map, never in the Claude namespace', () => {
+    // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
+    // row owns (its legacy key); pi must neither read nor write it.
+    const piRow = {
+      value: 'anthropic/claude-opus-5-5',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high'] as const
+    }
+    const piArgs = (effortDefaults: EffortDefaultsSlice, over = {}) =>
+      args({ engineId: 'pi', modelInfo: piRow, engineModels: [piRow], effortDefaults, ...over })
+
+    it('reads engineEffortDefaults.pi[<model value>]', () => {
+      expect(
+        resolveDesiredEffort(
+          piArgs({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } })
+        )
+      ).toBe('low')
+    })
+    it('never reads a Claude key, even one the model id canonicalises onto', () => {
+      const saved: EffortDefaultsSlice = {
+        modelEffortDefaults: { 'claude-opus-5-5': 'low', opus: 'low' }
+      }
+      expect(resolveDesiredEffort(piArgs(saved))).toBe(modelDefaultEffort(piRow))
+    })
+    it('does not read another engine entry or another pi model entry', () => {
+      expect(
+        resolveDesiredEffort(
+          piArgs({
+            engineEffortDefaults: {
+              opencode: { 'anthropic/claude-opus-5-5': 'low' },
+              pi: { 'other/model': 'low' }
+            }
+          })
+        )
+      ).toBe(modelDefaultEffort(piRow))
+    })
+    it('an explicit pick still wins', () => {
+      expect(
+        resolveDesiredEffort(
+          piArgs(
+            { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } },
+            { explicit: 'high' }
+          )
+        )
+      ).toBe('high')
+    })
+    it('the spawn clamp holds a saved pi value to the model levels', () => {
+      expect(
+        resolveSpawnEffort(
+          piArgs({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } })
+        )
+      ).toBe(modelDefaultEffort(piRow))
+    })
+  })
+  it('opencode and Codex remember nothing: neither reads either map', () => {
+    const row = { value: 'x/y', supportsEffort: true }
+    const saved: EffortDefaultsSlice = {
+      engineEffortDefaults: { opencode: { 'x/y': 'low' }, codex: { 'x/y': 'low' } }
+    }
+    for (const engineId of ['opencode', 'codex'])
+      expect(
+        resolveDesiredEffort(
+          args({ engineId, modelInfo: row, engineModels: [row], effortDefaults: saved })
+        )
+      ).toBe(modelDefaultEffort(row))
   })
   it('spawn effort clamps a saved value the model does not offer', () => {
     const noMax = { ...OPUS, supportedEffortLevels: ['low', 'medium', 'high'] as const }
     expect(
-      resolveSpawnEffort(args({ modelInfo: noMax, modelEffortDefaults: { opus: 'max' } }))
+      resolveSpawnEffort(
+        args({ modelInfo: noMax, effortDefaults: { modelEffortDefaults: { opus: 'max' } } })
+      )
     ).toBe('medium')
   })
   it('spawn effort keeps the desired value for a model with no effort support', () => {
@@ -927,5 +984,46 @@ describe('withSavedEffort', () => {
   })
   it('accepts an unset map', () => {
     expect(withSavedEffort(undefined, { key: 'opus' }, 'low')).toEqual({ opus: 'low' })
+  })
+})
+
+describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () => {
+  const OPUS = { value: 'opus', resolvedModel: 'claude-opus-5-5' }
+  const PI = { value: 'anthropic/claude-opus-5-5' }
+
+  it('only claude and pi remember', () => {
+    expect(['claude', 'pi', undefined].map(engineRemembersEffort)).toEqual([true, true, true])
+    expect(['opencode', 'codex'].map(engineRemembersEffort)).toEqual([false, false])
+  })
+  it('claude writes modelEffortDefaults under claudeEffortKey, moving a legacy key', () => {
+    const settings = { modelEffortDefaults: { 'claude-opus-5-5': 'low' } } as const
+    expect(rememberEffortPatch(settings, 'claude', OPUS, [OPUS], 'max')).toEqual({
+      modelEffortDefaults: { opus: 'max' }
+    })
+  })
+  it('pi writes engineEffortDefaults.pi[<value>] and leaves modelEffortDefaults out of the patch', () => {
+    const settings = {
+      modelEffortDefaults: { opus: 'low' },
+      engineEffortDefaults: { pi: { 'other/m': 'high' } }
+    } as const
+    const patch = rememberEffortPatch(settings, 'pi', PI, [PI], 'max')
+    expect(patch).toEqual({
+      engineEffortDefaults: { pi: { 'other/m': 'high', 'anthropic/claude-opus-5-5': 'max' } }
+    })
+    expect(patch && 'modelEffortDefaults' in patch).toBe(false)
+  })
+  it('writes nothing for opencode, codex, or a model not in the catalog', () => {
+    expect(rememberEffortPatch({}, 'opencode', PI, [PI], 'low')).toBeUndefined()
+    expect(rememberEffortPatch({}, 'codex', PI, [PI], 'low')).toBeUndefined()
+    expect(rememberEffortPatch({}, 'pi', undefined, [], 'low')).toBeUndefined()
+    expect(rememberEffortPatch({}, 'claude', null, [], 'low')).toBeUndefined()
+  })
+  it('savedEffortFor reads what rememberEffortPatch wrote, per engine', () => {
+    const piPatch = rememberEffortPatch({}, 'pi', PI, [PI], 'low')
+    expect(savedEffortFor(piPatch, 'pi', PI, [PI])).toBe('low')
+    expect(savedEffortFor(piPatch, 'claude', PI, [PI])).toBeUndefined()
+    const claudePatch = rememberEffortPatch({}, 'claude', OPUS, [OPUS], 'high')
+    expect(savedEffortFor(claudePatch, 'claude', OPUS, [OPUS])).toBe('high')
+    expect(savedEffortFor(claudePatch, 'pi', PI, [PI])).toBeUndefined()
   })
 })

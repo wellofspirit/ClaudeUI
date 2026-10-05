@@ -127,7 +127,7 @@ export async function prepareAndCreateSession(
   //
   // Canonical `effort` is null only BEFORE a session's first spawn — then the
   // per-model starting effort applies, and every client derives it from the
-  // replicated `modelEffortDefaults`. At spawn the starting effort becomes the
+  // replicated `modelEffortDefaults` / `engineEffortDefaults`. At spawn the starting effort becomes the
   // session's OWN: this event hands it to every replica. Freezing it is the
   // intent: the per-model value is "Starting effort per model", and the display
   // must show what the process runs, so a later change to it (another session's
@@ -136,7 +136,7 @@ export async function prepareAndCreateSession(
   // canonical `effort` is not persisted, so after a host restart a resumed
   // session re-resolves against the current per-model value — and, as it is
   // respawned with that value, still shows what its process runs. The same event
-  // covers a Claude pick (a local write plus a respawn, with no setter that
+  // covers a Claude / pi pick (a local write plus a respawn, with no setter that
   // emits `session:config-changed`) and a PRE-spawn session (no live session for
   // `emitConfigChanged` to reach).
   // `announce.effort` has three states. A string: announce the positional spawn

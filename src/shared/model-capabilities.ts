@@ -274,22 +274,88 @@ export function withSavedEffort(
 }
 
 /**
- * Does this engine have a per-model starting effort (`modelEffortDefaults`)?
- * Claude only. The map is keyed by `claudeEffortKey` — Claude's alias / resolved
- * model id — so another engine's model that merely embeds a Claude id (pi's
- * `anthropic/claude-opus-5-5`) would read and write a Claude row's key. The ONE
- * place that engine check lives: the resolver's read and the composer's
- * remember-on-pick write both go through it.
+ * The settings slice the per-model starting effort lives in. Two maps, because
+ * two namespaces: Claude's `modelEffortDefaults` is keyed by `claudeEffortKey`
+ * (alias / resolved id, with v3.5 legacy keys), while every other remembering
+ * engine uses `engineEffortDefaults[engineId][modelValue]` — the picker value
+ * VERBATIM (pi's `provider/model` is already unique per provider). Keeping them
+ * apart is what stops pi's `anthropic/claude-opus-5-5` from landing on the key
+ * Claude's own `opus` row owns.
+ */
+export interface EffortDefaultsSlice {
+  modelEffortDefaults?: Partial<Record<string, EffortLevel>>
+  engineEffortDefaults?: Partial<Record<string, Partial<Record<string, EffortLevel>>>>
+}
+
+/**
+ * Does this engine remember a per-model starting effort? Claude and pi. opencode
+ * models take no effort (reasoning variants instead) and Codex's tiers are native
+ * and applied over a live setter, so neither remembers. The ONE predicate:
+ * {@link savedEffortFor} (the resolver's middle rung) and
+ * {@link rememberEffortPatch} (the composer's write) both gate on it.
  */
 export function engineRemembersEffort(engineId: string | undefined): boolean {
-  return (engineId ?? 'claude') === 'claude'
+  const id = engineId ?? 'claude'
+  return id === 'claude' || id === 'pi'
+}
+
+/**
+ * The starting effort saved for a model, or undefined. THE reader of both maps:
+ * Claude through `modelEffortDefaults` and `claudeEffortKey` (legacy keys
+ * included), pi through `engineEffortDefaults.pi[modelValue]`. Not clamped here:
+ * the spawn clamp ({@link resolveSpawnEffort}) holds a saved value to the model's
+ * levels.
+ */
+export function savedEffortFor(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[]
+): EffortLevel | undefined {
+  if (!settings || !model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  if (id === 'claude') return claudeSavedEffort(settings.modelEffortDefaults, model, engineModels)
+  return settings.engineEffortDefaults?.[id]?.[model.value]
+}
+
+/**
+ * The settings PATCH that remembers `level` as the model's starting effort, or
+ * undefined — write nothing — for an engine that does not remember, or a model
+ * not in the catalog (no row to key it under; a pick must not be filed under
+ * `''`). THE writer, the twin of {@link savedEffortFor}: `{modelEffortDefaults}`
+ * for Claude (through {@link withSavedEffort}, so a legacy key moves to the new
+ * one), `{engineEffortDefaults}` for the rest.
+ */
+export function rememberEffortPatch(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[],
+  level: EffortLevel
+): EffortDefaultsSlice | undefined {
+  if (!model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  if (id === 'claude') {
+    return {
+      modelEffortDefaults: withSavedEffort(
+        settings?.modelEffortDefaults,
+        {
+          key: claudeEffortKey(model, engineModels),
+          legacyKey: claudeLegacyEffortKey(model, engineModels)
+        },
+        level
+      )
+    }
+  }
+  const all = settings?.engineEffortDefaults ?? {}
+  return { engineEffortDefaults: { ...all, [id]: { ...all[id], [model.value]: level } } }
 }
 
 /**
  * The effort a non-native-effort session (Claude / opencode / pi) WANTS, before
- * any clamp to the model's levels: its own explicit pick, else — for Claude only
- * (`engineRemembersEffort`) — the user's per-model starting effort, else cli.js's
- * own heuristic default.
+ * any clamp to the model's levels: its own explicit pick, else — for an engine
+ * that remembers (Claude, pi; {@link savedEffortFor}) — the user's per-model
+ * starting effort, else cli.js's own heuristic default.
  *
  * The ONE statement of that ladder. The composer's pill and every spawn site
  * (first send, respawn after a pick, retry, plan "start fresh", review) read it,
@@ -300,20 +366,18 @@ export function engineRemembersEffort(engineId: string | undefined): boolean {
 export function resolveDesiredEffort(args: {
   /** The session's own pick (`session.effort`); `null`/absent = unset. */
   explicit: string | null | undefined
-  /** The session's engine; absent = Claude. Non-Claude engines skip the saved rung. */
+  /** The session's engine; absent = Claude. */
   engineId?: string
   modelInfo: ModelCapabilityInput | undefined | null
   /** The catalog the row's `claudeEffortKey` is judged against (its engine's). */
   engineModels: readonly ClaudeEffortRowInput[]
-  modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
+  effortDefaults: EffortDefaultsSlice | undefined
 }): EffortLevel {
   // Not the native branch: the only values a non-native session's pick can hold
   // are the Claude rungs, the only ones its picker offers.
   return (
     (args.explicit as EffortLevel | null | undefined) ??
-    (engineRemembersEffort(args.engineId)
-      ? claudeSavedEffort(args.modelEffortDefaults, args.modelInfo, args.engineModels)
-      : undefined) ??
+    savedEffortFor(args.effortDefaults, args.engineId, args.modelInfo, args.engineModels) ??
     modelDefaultEffort(args.modelInfo)
   )
 }

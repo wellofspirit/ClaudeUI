@@ -1,11 +1,9 @@
 import type { ModelInfo } from '../../../shared/types'
 import {
-  claudeEffortKey,
-  claudeLegacyEffortKey,
-  engineRemembersEffort,
   modelResolveEffort,
+  rememberEffortPatch,
   resolveSpawnEffort,
-  withSavedEffort,
+  type EffortDefaultsSlice,
   type EffortLevel
 } from '../../../shared/model-capabilities'
 
@@ -20,7 +18,7 @@ import {
 /** The slice of the store these read. */
 export interface EffortState {
   availableModels: readonly ModelInfo[]
-  settings: { modelEffortDefaults?: Partial<Record<string, EffortLevel>> }
+  settings: EffortDefaultsSlice
 }
 
 /** The slice of a session these read. */
@@ -57,35 +55,30 @@ export function sessionSpawnEffort(state: EffortState, session: EffortSession): 
     engineId: session.selectedEngineId,
     modelInfo,
     engineModels,
-    modelEffortDefaults: state.settings.modelEffortDefaults
+    effortDefaults: state.settings
   })
 }
 
 /**
- * `modelEffortDefaults` with the session's model's starting effort set to
- * `level` — "effort is remembered per model" (Claude only,
- * `engineRemembersEffort`: the map is keyed by Claude's `claudeEffortKey`, and a
- * pi model embedding a Claude id would otherwise clobber that Claude row).
- * Keyed by `claudeEffortKey`, the rule the Settings table writes with, so the
- * pick shows up in that table and the next session on the model starts there.
- * `undefined` — write nothing — for another engine, or when the model is not in
- * the catalog (not loaded yet / curated away): there is no row to key it under,
- * and a pick must not be filed under `''`.
+ * The settings patch that remembers a composer effort pick as the session's
+ * model's starting effort — "effort is remembered per model" (Claude's
+ * `modelEffortDefaults`, pi's `engineEffortDefaults`; `rememberEffortPatch`, the
+ * writer twin of the resolver's read). Pass it to `updateSettings`, so a pick
+ * shows up in the Settings table (Claude) and the next session on the model
+ * starts there. `undefined` — write nothing — for an engine that does not remember
+ * (opencode, Codex) or a model not in the catalog (not loaded yet / curated away).
  */
-export function rememberedModelEfforts(
+export function rememberedEffortPatch(
   state: EffortState,
   session: EffortSession,
   level: EffortLevel
-): Partial<Record<string, EffortLevel>> | undefined {
-  if (!engineRemembersEffort(session.selectedEngineId)) return undefined
+): EffortDefaultsSlice | undefined {
   const { modelInfo, engineModels } = catalogFor(state, session)
-  if (!modelInfo) return undefined
-  return withSavedEffort(
-    state.settings.modelEffortDefaults,
-    {
-      key: claudeEffortKey(modelInfo, engineModels),
-      legacyKey: claudeLegacyEffortKey(modelInfo, engineModels)
-    },
+  return rememberEffortPatch(
+    state.settings,
+    session.selectedEngineId,
+    modelInfo,
+    engineModels,
     level
   )
 }

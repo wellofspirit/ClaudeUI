@@ -438,9 +438,23 @@ export function seedingModelPicks(state: {
   settings: Pick<AppSettings, 'newSessionModel'>
   lastSelectedModelByEngine: Partial<Record<EngineId, string>>
 }): Readonly<Partial<Record<EngineId, string>>> {
-  return state.settings.newSessionModel === 'configured-default'
-    ? NO_SEEDING_PICKS
-    : state.lastSelectedModelByEngine
+  return carriesPicksIntoNewSessions(state.settings)
+    ? state.lastSelectedModelByEngine
+    : NO_SEEDING_PICKS
+}
+
+/**
+ * Do composer picks carry into NEW sessions? The `newSessionModel` rule as a
+ * predicate (`'last-picked'`, or absent, does; `'configured-default'` does not).
+ * The model pick follows it through {@link seedingModelPicks}, and so does the
+ * composer's remembered effort — the one place that decides to write it — so a
+ * user who chose "new sessions start on the configured default" is not handed the
+ * last effort they picked either.
+ */
+export function carriesPicksIntoNewSessions(
+  settings: Pick<AppSettings, 'newSessionModel'>
+): boolean {
+  return settings.newSessionModel !== 'configured-default'
 }
 
 /**
@@ -523,9 +537,9 @@ export interface AppSettings {
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   /**
-   * Per-model STARTING effort — Claude only (a pi / opencode model never reads or
-   * writes it). Keyed by `claudeEffortKey` (`shared/model-capabilities`): the
-   * family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
+   * Per-model STARTING effort — Claude's (pi keeps its own in
+   * `engineEffortDefaults`; opencode and Codex remember none). Keyed by
+   * `claudeEffortKey` (`shared/model-capabilities`): the family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
    * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
    * composer effort pick ("remembered per model"). When set, overrides the
    * cli.js-derived default for a session that has not started; at spawn the
@@ -534,11 +548,27 @@ export interface AppSettings {
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
   /**
+   * The same starting effort for every other remembering engine (pi), keyed by
+   * engine id then by the model's picker VALUE verbatim (pi's `provider/model` is
+   * unique per provider, so no normalisation — and no collision with Claude's
+   * `claudeEffortKey` namespace in `modelEffortDefaults`). Written by a composer
+   * effort pick only, and only while `newSessionModel` is not `'configured-default'`
+   * (there is no Settings table for it); read and written ONLY
+   * through `savedEffortFor` / `rememberEffortPatch` (`shared/model-capabilities`),
+   * which decide which engines remember. A session freezes the resolved value at
+   * spawn, exactly as for Claude.
+   */
+  engineEffortDefaults: Partial<Record<EngineId, Partial<Record<string, EffortLevel>>>>
+  /**
    * What a NEW session starts on, per engine (providers-v3 slice 9, owner
    * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
    * behaviour: the model last picked on that engine wins over its configured
    * default. `'configured-default'` ignores that pick for seeding (it is still
    * recorded), so the configured default — or the engine's built-in one — seeds.
+   * The same switch governs the effort a composer pick remembers
+   * (`modelEffortDefaults` / `engineEffortDefaults`): under `'configured-default'`
+   * an effort pick changes only its own session and writes neither map
+   * (`carriesPicksIntoNewSessions`).
    */
   newSessionModel?: NewSessionModel
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
@@ -608,6 +638,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
   modelEffortDefaults: {},
+  engineEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: '',

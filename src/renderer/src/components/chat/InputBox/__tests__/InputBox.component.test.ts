@@ -469,7 +469,12 @@ describe('InputBox FC — rendered', () => {
       opencodeDefaultModelConfigured: false,
       piDefaultModel: '',
       piDefaultModelConfigured: false,
-      settings: { ...state.settings, modelEffortDefaults: {} }
+      settings: {
+        ...state.settings,
+        modelEffortDefaults: {},
+        engineEffortDefaults: {},
+        newSessionModel: undefined
+      }
     }))
     mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
@@ -1927,43 +1932,96 @@ describe('InputBox FC — rendered', () => {
     expect((args[10] as { effort: string }).effort).toBe(args[2])
   })
 
-  it('a pi effort pick writes nothing to modelEffortDefaults (a Claude row must survive)', async () => {
+  describe('pi remembers effort in its own map', () => {
     // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
-    // row owns; filing a pi pick there would clobber or orphan it.
-    const piRow = { ...opusRow(), value: 'anthropic/claude-opus-5-5', engineId: 'pi' as const }
-    delete (piRow as Partial<ModelInfo>).resolvedModel
-    fcClaudeModels = [opusRow()]
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [
-      {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: fcClaudeModels
-      },
-      { engineId: 'pi', vendorId: 'pi', vendorName: 'pi', models: [piRow] }
-    ])
-    useSessionStore.setState((state) => ({
-      settings: { ...state.settings, modelEffortDefaults: { opus: 'low' } },
-      availableModels: [opusRow(), piRow],
-      sessions: {
-        ...state.sessions,
-        [FC_ROUTE]: {
-          ...state.sessions[FC_ROUTE],
-          selectedEngineId: 'pi',
-          selectedModel: piRow.value,
-          effort: null
-        }
-      }
-    }))
-    mirrorStoreIntoReplica()
-    renderFC()
-    await act(async () => {})
-    await act(async () => {
-      await viewProps.onSelectEffort('max')
+    // row owns; the two maps must stay apart.
+    const piRow = (): ModelInfo => ({
+      ...opusRow(),
+      value: 'anthropic/claude-opus-5-5',
+      resolvedModel: undefined,
+      engineId: 'pi',
+      supportedEffortLevels: ['low', 'medium', 'high']
     })
-    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'low' })
-    // The session still carries its own pick.
-    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('max')
+
+    function piSession(settings: Record<string, unknown>, effort: string | null = null): void {
+      fcClaudeModels = [opusRow()]
+      app.bridge.ipcMain.handle('session:get-engine-models', () => [
+        {
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          vendorName: 'Anthropic',
+          models: fcClaudeModels
+        },
+        { engineId: 'pi', vendorId: 'pi', vendorName: 'pi', models: [piRow()] }
+      ])
+      useSessionStore.setState((state) => ({
+        settings: { ...state.settings, ...settings },
+        availableModels: [opusRow(), piRow()],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: 'pi',
+            selectedModel: piRow().value,
+            effort
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+
+    it('a pi pick writes engineEffortDefaults.pi[<value>] and leaves modelEffortDefaults alone', async () => {
+      piSession({ modelEffortDefaults: { opus: 'low' } })
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('high')
+      })
+      const settings = useSessionStore.getState().settings
+      expect(settings.modelEffortDefaults).toEqual({ opus: 'low' })
+      expect(settings.engineEffortDefaults).toEqual({
+        pi: { 'anthropic/claude-opus-5-5': 'high' }
+      })
+      // The session still carries its own pick.
+      expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    })
+
+    it('a new pi session on that model displays AND spawns the remembered effort', async () => {
+      piSession({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } })
+      renderFC()
+      await act(async () => {})
+      expect(viewProps.effort).toBe('low')
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe('low')
+    })
+
+    it('a remembered value the pi model does not offer is clamped, pill and spawn alike', async () => {
+      piSession({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } })
+      renderFC()
+      await act(async () => {})
+      const shown = viewProps.effort
+      expect(['low', 'medium', 'high']).toContain(shown)
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    })
+
+    it('a pi pick on a model not in the catalog writes nothing', async () => {
+      piSession({})
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'ghost/model' }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('high')
+      })
+      expect(useSessionStore.getState().settings.engineEffortDefaults).toEqual({})
+      expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({})
+    })
   })
 
   it('a model missing from the catalog: the pill shows exactly what spawn sends', async () => {
@@ -2063,6 +2121,51 @@ describe('InputBox FC — rendered', () => {
     await sendDraft()
     expect((ipcCalls['session:create'][0][10] as { effort: unknown }).effort).toBeNull()
   })
+
+  it.each(['claude', 'pi'] as const)(
+    'newSessionModel "configured-default": a %s effort pick writes neither map, the session still gets it',
+    async (engine) => {
+      const piModel = {
+        ...opusRow(),
+        value: 'anthropic/claude-opus-5-5',
+        resolvedModel: undefined,
+        engineId: 'pi' as const
+      }
+      fcClaudeModels = [opusRow()]
+      app.bridge.ipcMain.handle('session:get-engine-models', () => [
+        { engineId: 'claude', vendorId: 'a', vendorName: 'A', models: fcClaudeModels },
+        { engineId: 'pi', vendorId: 'p', vendorName: 'P', models: [piModel] }
+      ])
+      useSessionStore.setState((state) => ({
+        settings: {
+          ...state.settings,
+          newSessionModel: 'configured-default',
+          modelEffortDefaults: { opus: 'low' },
+          engineEffortDefaults: {}
+        },
+        availableModels: [opusRow(), piModel],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: engine === 'pi' ? piModel.value : 'opus',
+            effort: null
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('xhigh')
+      })
+      const settings = useSessionStore.getState().settings
+      expect(settings.modelEffortDefaults).toEqual({ opus: 'low' })
+      expect(settings.engineEffortDefaults).toEqual({})
+      expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+    }
+  )
 
   it("picking an effort remembers it as the model's starting effort and keeps the session pick", async () => {
     opusSession(null, {})

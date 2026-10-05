@@ -1780,6 +1780,14 @@ describe('applyExternalSettings', () => {
     expect(store().settings.maxRecentSessions).toBe(5)
   })
 
+  it('keeps the per-engine starting-effort map a remote client wrote, and defaults it to {}', () => {
+    const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+    seed.settings({ theme: 'light', engineEffortDefaults })
+    expect(store().settings.engineEffortDefaults).toEqual(engineEffortDefaults)
+    seed.settings({ theme: 'light' })
+    expect(store().settings.engineEffortDefaults).toEqual({})
+  })
+
   it('does not call saveSettings (no disk write)', () => {
     seed.settings({ theme: 'light' })
     expect((window.api as any).saveSettings).not.toHaveBeenCalled()

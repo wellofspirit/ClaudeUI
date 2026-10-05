@@ -686,10 +686,11 @@ background reconnect catches up without a `sync-full`.
   `announce` (cached phone bundles; WS JSON `null`) sends neither field and behaves as
   before. Canonical `effort` is therefore null only BEFORE a session's first spawn, when
   the per-model starting effort still applies and every client derives it from the
-  replicated `settings.modelEffortDefaults` (Claude only: the map is keyed by
-  `claudeEffortKey`, so pi / opencode models neither read nor write it); at spawn that
+  replicated settings (Claude: `modelEffortDefaults`, keyed by `claudeEffortKey`; pi:
+  `engineEffortDefaults.pi`, keyed by the model value — kept apart so a pi model embedding
+  a Claude id cannot hit a Claude row; opencode and Codex remember none); at spawn that
   effort becomes the session's own. Freezing is the intent: a later change to the
-  per-model value (the composer's Claude effort pick also rewrites it, "remembered per
+  per-model value (the composer's effort pick also rewrites it, "remembered per
   model") affects only sessions that have not started, and every replica shows what the
   process runs rather than the current map. The freeze lasts for the host run: canonical
   `effort` is not persisted, so after a host restart a resumed session re-resolves

@@ -1372,6 +1372,25 @@ describe('registerRemoteHandlers', () => {
         expect.not.objectContaining({ sandbox: expect.anything() })
       )
     })
+
+    it('keeps the per-engine starting-effort map through save and broadcast', async () => {
+      // `engineEffortDefaults` is an ordinary UI setting, not engine/vendor-owned:
+      // no strip list may eat it, and every client (the desktop included) must be
+      // handed it back on `config:settings-changed`.
+      const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+      await dispatcher.handle(
+        makeRequest('config:save-settings', { theme: 'light', engineEffortDefaults }),
+        remoteConn
+      )
+
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ engineEffortDefaults })
+      )
+      expect(win.webContents.send).toHaveBeenCalledWith(
+        'config:settings-changed',
+        expect.objectContaining({ engineEffortDefaults })
+      )
+    })
   })
   // LOW-RW3 — session:write-custom-title interpolates both caller-supplied
   // identifiers straight into ~/.claude/projects/<projectKey>/<sessionId>.jsonl.

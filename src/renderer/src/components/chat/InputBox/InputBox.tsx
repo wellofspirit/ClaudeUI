@@ -7,6 +7,7 @@ import {
   engineDefaultModels,
   resolveEngineDefaultModel,
   seedingModelPicks,
+  carriesPicksIntoNewSessions,
   hasResumableTranscript
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
@@ -21,7 +22,7 @@ import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLa
 import { recallQueuedInto } from './recall-queued'
 import {
   catalogFor,
-  rememberedModelEfforts,
+  rememberedEffortPatch,
   sessionSpawnEffort,
   spawnAnnouncement
 } from '../../../lib/session-effort'
@@ -277,6 +278,7 @@ export function InputBox(): React.JSX.Element {
 
   const availableModels = useSessionStore((s) => s.availableModels)
   const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
+  const engineEffortDefaults = useSessionStore((s) => s.settings.engineEffortDefaults)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const setEngineModels = useSessionStore((s) => s.setEngineModels)
   const models = useMemo(
@@ -1152,18 +1154,22 @@ export function InputBox(): React.JSX.Element {
         return
       }
       setEffort(level as EffortLevel)
-      // Effort is remembered PER MODEL (Claude only — `rememberedModelEfforts`
+      // Effort is remembered PER MODEL (Claude and pi — `rememberedEffortPatch`
       // writes nothing for another engine): the pick also becomes the model's
-      // starting effort (the Settings table's own row), so the next session on it
-      // starts at — and displays — what was last chosen. The session keeps its own pick
+      // starting effort (Claude: the Settings table's own row; pi: its own
+      // per-engine map), so the next session on it starts at — and displays —
+      // what was last chosen. The session keeps its own pick
       // too: another open session on the same model must go on showing what IT
       // runs, not follow this one.
       const state = useSessionStore.getState()
       const session = activeSessionId ? state.sessions[activeSessionId] : undefined
-      const remembered = session
-        ? rememberedModelEfforts(state, session, level as EffortLevel)
-        : undefined
-      if (remembered) state.updateSettings({ modelEffortDefaults: remembered })
+      // Only while composer picks carry into new sessions (`newSessionModel`): with
+      // "configured default" the pick changes this session alone.
+      const remembered =
+        session && carriesPicksIntoNewSessions(state.settings)
+          ? rememberedEffortPatch(state, session, level as EffortLevel)
+          : undefined
+      if (remembered) state.updateSettings(remembered)
       await restartSdkSession()
     },
     [activeSessionId, nativeEffortOptions, liveBackend, setEffort, restartSdkSession]
@@ -1361,7 +1367,7 @@ export function InputBox(): React.JSX.Element {
           // inputs are the session's own model and engine; only the welcome
           // screen, which has no session, resolves from the picker's model.
           sessionSpawnEffort(
-            { availableModels, settings: { modelEffortDefaults } },
+            { availableModels, settings: { modelEffortDefaults, engineEffortDefaults } },
             activeSessionId
               ? {
                   selectedModel: requestedModelValue,
@@ -1383,6 +1389,7 @@ export function InputBox(): React.JSX.Element {
       sessionEngineId,
       effectiveEngineId,
       modelEffortDefaults,
+      engineEffortDefaults,
       nativeEffortOptions,
       liveBackend,
       status.codex?.reasoningEffort
