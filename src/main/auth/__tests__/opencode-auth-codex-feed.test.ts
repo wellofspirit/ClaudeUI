@@ -126,6 +126,55 @@ describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
       expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
     })
 
+    // CredentialSync re-feeds the active credential at every boot. A write of
+    // what is already there invalidated the model cache, killing the opencode
+    // model probe in flight. The test file is compact JSON and the writer
+    // indents, so an unchanged raw string proves no write happened.
+    describe('an unchanged credential', () => {
+      const stored = {
+        openai: { type: 'oauth', refresh: 'r1', access: 'a1', expires: 12345, accountId: 'acct-1' },
+        anthropic: { type: 'api', key: 'sk-fixture' }
+      }
+      const cred = { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' }
+
+      it('writes nothing and invalidates nothing', async () => {
+        writeAuthJson(stored)
+        const raw = fs.readFileSync(authJsonPath(), 'utf-8')
+        await provider.feedOauthCredential('openai', cred)
+        expect(fs.readFileSync(authJsonPath(), 'utf-8')).toBe(raw)
+        expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
+      })
+
+      it('is unchanged with unknown fields on the entry, which the merge would keep anyway', async () => {
+        writeAuthJson({ openai: { ...stored.openai, enterpriseUrl: 'https://x.test' } })
+        const raw = fs.readFileSync(authJsonPath(), 'utf-8')
+        await provider.feedOauthCredential('openai', cred)
+        expect(fs.readFileSync(authJsonPath(), 'utf-8')).toBe(raw)
+        expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
+      })
+
+      it.each([
+        ['a rotated token', { ...cred, access: 'a2', refresh: 'r2', expires: 23456 }],
+        ['a new expiry alone', { ...cred, expires: 99999 }],
+        ['a changed accountId', { ...cred, accountId: 'acct-2' }]
+      ])('writes and invalidates for %s', async (_label, changed) => {
+        writeAuthJson(stored)
+        await provider.feedOauthCredential('openai', changed)
+        expect(readAuthJsonRaw()).toEqual({
+          openai: { type: 'oauth', ...changed },
+          anthropic: stored.anthropic
+        })
+        expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+      })
+
+      it('writes over an api entry under the same vendor id', async () => {
+        writeAuthJson({ openai: { type: 'api', key: 'sk-fixture' } })
+        await provider.feedOauthCredential('openai', cred)
+        expect(readAuthJsonRaw().openai).toMatchObject({ type: 'oauth', refresh: 'r1' })
+        expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+      })
+    })
+
     it('refreshes listVendorCredentialIds so it reports openai as oauth-credentialed after a feed', async () => {
       await provider.feedOauthCredential('openai', { access: 'a1', refresh: 'r1', expires: 12345 })
       expect(await provider.listVendorCredentialIds()).toEqual({ openai: 'oauth' })

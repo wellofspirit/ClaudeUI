@@ -15,7 +15,11 @@
  */
 
 import fs from 'fs'
-import { resolveOpencodeAuthJsonPath, readOpencodeCredentialTypes } from '../opencode/auth-store'
+import {
+  resolveOpencodeAuthJsonPath,
+  readOpencodeCredentialTypes,
+  opencodeAuthEntryEquals
+} from '../opencode/auth-store'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -28,6 +32,7 @@ import type { AccountIdentity } from '../../shared/account-key'
 import { AuthFileIdentityCache } from './account-identity'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
+import { deepEqual } from '../../shared/opencode-config-diff'
 import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
 
 // Path resolution + the credential-type read live in opencode/auth-store.ts so
@@ -209,6 +214,12 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   }
 
   async setVendorApiKey(vendorId: string, key: string): Promise<void> {
+    // The same key already stored: nothing to write, so no server to start, no
+    // cache to drop and no pool to recycle. The shared-provider sync re-vends
+    // every key at each boot, and the invalidation alone killed the model probe
+    // in flight. `{ type: 'api', key }` is the entry opencode's own `Auth.set`
+    // stores for this PUT — it replaces the entry wholesale.
+    if (await opencodeAuthEntryEquals(vendorId, { type: 'api', key })) return
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
     let mutated = false
@@ -375,6 +386,11 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       expires: cred.expires
     }
     if (cred.accountId) entry.accountId = cred.accountId
+    // Re-fed at every boot (and on every resync): the same credential is no
+    // change, and invalidating the model cache for it killed the probe in flight.
+    // Compared with the file as read just now, never a remembered copy: opencode
+    // rewrites this entry itself when it refreshes, and that is a difference.
+    if (deepEqual(entry, existing)) return
     file[vendorId] = entry
 
     writeJsonAtomic(filePath, file, { indent: 2 })

@@ -357,6 +357,77 @@ describe('OpencodeAuthProvider — setVendorApiKey()', () => {
   })
 })
 
+// The shared-provider sync re-vends every key at each boot. Re-storing a key
+// opencode already holds used to start a server for the PUT, invalidate the
+// model cache (killing the probe in flight) and recycle every opencode server.
+describe('OpencodeAuthProvider — setVendorApiKey() with the key already stored', () => {
+  beforeEach(setupMocks)
+
+  function expectNoMutation(): void {
+    expect(mockAcquire).not.toHaveBeenCalled()
+    expect(mockSetAuth).not.toHaveBeenCalled()
+    expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+  }
+
+  function expectMutation(key: string): void {
+    expect(mockSetAuth).toHaveBeenCalledWith('openrouter', { type: 'api', key })
+    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
+  }
+
+  it('starts no server, writes nothing, invalidates nothing and recycles nothing', async () => {
+    writeAuthJson(
+      JSON.stringify({
+        openrouter: { type: 'api', key: 'sk-fixture-1' },
+        openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1 }
+      })
+    )
+    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
+    expectNoMutation()
+  })
+
+  it('keeps the probe cache: the next probe() does not re-fetch', async () => {
+    writeAuthJson(JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } }))
+    const provider = makeProvider()
+    await provider.probe()
+    await provider.setVendorApiKey('openrouter', 'sk-fixture-1')
+    await provider.probe()
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+  })
+
+  it('stores a different key exactly as before', async () => {
+    writeAuthJson(JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } }))
+    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-2')
+    expectMutation('sk-fixture-2')
+  })
+
+  it.each([
+    ['the vendor has no entry', { openai: { type: 'api', key: 'sk-fixture-1' } }],
+    ['the vendor holds an oauth entry', { openrouter: { type: 'oauth', access: 'sk-fixture-1' } }],
+    // opencode's PUT replaces the entry whole, so a field beyond {type, key}
+    // is something it would drop: that is a change, not a match.
+    [
+      'the entry carries more than the PUT would store',
+      { openrouter: { type: 'api', key: 'sk-fixture-1', metadata: { a: 'b' } } }
+    ]
+  ])('stores the key when %s', async (_label, file) => {
+    writeAuthJson(JSON.stringify(file))
+    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
+    expectMutation('sk-fixture-1')
+  })
+
+  it.each([
+    ['missing', null],
+    ['unparseable', '{"openrouter":{"type":"api","key":"sk-fixture-1"'],
+    ['not an object', '["openrouter"]']
+  ])('goes through the server as before when auth.json is %s', async (_label, contents) => {
+    if (contents !== null) writeAuthJson(contents)
+    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
+    expectMutation('sk-fixture-1')
+  })
+})
+
 describe('OpencodeAuthProvider — oauthAuthorize()', () => {
   beforeEach(setupMocks)
 

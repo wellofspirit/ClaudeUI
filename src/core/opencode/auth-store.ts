@@ -13,6 +13,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { deepEqual, isPlainObject } from '../../shared/opencode-config-diff'
 
 /**
  * opencode's auth store path. The data dir mirrors opencode's own resolution —
@@ -44,6 +45,28 @@ export async function readOpencodeCredentialTypes(): Promise<Record<string, 'api
     return parseCredentialTypes(raw)
   } catch {
     return {}
+  }
+}
+
+/**
+ * Whether `vendorId`'s stored entry is already exactly `entry` — so a writer can
+ * skip a write that would change nothing (and the model-cache invalidation and
+ * server recycle that come with it). Read at call time, never cached: opencode
+ * itself rewrites this file (an OAuth refresh), and an old copy would let a
+ * real change be skipped.
+ *
+ * Answers a boolean, so this module still hands out no key material. A missing
+ * or unreadable file, or an absent entry, is `false`: the caller writes as it
+ * would have, through whatever corrupt-file discipline its own path has.
+ */
+export async function opencodeAuthEntryEquals(vendorId: string, entry: unknown): Promise<boolean> {
+  try {
+    const parsed: unknown = JSON.parse(
+      await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
+    )
+    return isPlainObject(parsed) && deepEqual(parsed[vendorId], entry)
+  } catch {
+    return false
   }
 }
 

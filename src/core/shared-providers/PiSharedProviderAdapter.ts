@@ -152,10 +152,12 @@ export class PiSharedProviderAdapter {
       throw new Error(`Pi provider changed outside ClaudeUI: ${providerId}`)
     }
 
-    file.providers = {
-      ...providers,
-      [providerId]: mergeProvider(existing, compiled)
-    }
+    const target = mergeProvider(existing, compiled)
+    // Re-applied at every boot: an entry already in shape writes nothing, since
+    // every write invalidates pi's model cache and that killed the probe in
+    // flight (the opencode adapter's applyDefinitionRoute skips the same way).
+    if (sameJson(existing, target)) return
+    file.providers = { ...providers, [providerId]: target }
     this.writeModelsFile(file)
   }
 

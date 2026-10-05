@@ -268,7 +268,8 @@ describe('OpencodeSharedProviderAdapter', () => {
     })
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('openai')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    // The removal only: the feed invalidates in the auth target, when it writes.
+    expect(invalidateModelCache).toHaveBeenCalledTimes(1)
   })
 
   it('fails closed when API-key and OAuth credentials target the wrong provider kind', async () => {
@@ -282,13 +283,24 @@ describe('OpencodeSharedProviderAdapter', () => {
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
-  it('vends API keys through the auth target and invalidates after credential mutations', async () => {
+  it('vends API keys through the auth target and invalidates after a removal', async () => {
     const { adapter, authTarget, invalidateModelCache } = setup()
     await adapter.vendApiKey(definition, 'secret')
     await adapter.removeCredential(definition)
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    expect(invalidateModelCache).toHaveBeenCalledTimes(1)
+  })
+
+  // The shared-provider sync re-vends every key at each boot. The auth target
+  // invalidates the model cache itself, and only when the stored credential
+  // changed; a second invalidation here killed the model probe in flight even
+  // when nothing had.
+  it('adds no invalidation of its own after a vend — the auth target owns it', async () => {
+    const { adapter, invalidateModelCache } = setup()
+    await adapter.vendApiKey(definition, 'secret')
+    await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   describe('diagnoseZeroModels', () => {
