@@ -35,10 +35,10 @@ import {
   modelSupportsAdaptiveThinking,
   modelSupportsEffort,
   modelSupportedEffortLevels,
-  modelDefaultEffort,
   modelResolveThinkingMode,
+  automationModelRow,
   resolveAutomationEffort,
-  resolveThinkingMode,
+  resolveAutomationThinking,
   modelResolveEffort,
   type EffortLevel,
   type ThinkingMode
@@ -144,35 +144,44 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     return { value: '', displayName: 'Default', shortName: 'Default' }
   }, [models, model])
 
-  const adaptiveSupported = useMemo(
-    () => modelSupportsAdaptiveThinking(selectedModel),
-    [selectedModel]
+  // The effort and thinking controls and their values are judged on the ONE row
+  // the run judges: `model || 'default'` in the undeduped catalog, else the model
+  // the value names (`automationModelRow`). Not the picker's `selectedModel`, whose
+  // `models[0]` fallback is only a label for a model the catalog lacks.
+  const runModelValue = model || 'default'
+  const effortCatalog = effortDefaults?.catalog ?? models
+  const runRow = useMemo(
+    () => automationModelRow(runModelValue, effortCatalog),
+    [runModelValue, effortCatalog]
   )
-  const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
-  const allowedEffortLevels = useMemo(
-    () => modelSupportedEffortLevels(selectedModel),
-    [selectedModel]
-  )
+  const adaptiveSupported = useMemo(() => modelSupportsAdaptiveThinking(runRow), [runRow])
+  const effortSupported = useMemo(() => modelSupportsEffort(runRow), [runRow])
+  const allowedEffortLevels = useMemo(() => modelSupportedEffortLevels(runRow), [runRow])
   // What a run will use, from the SAME functions the host's run reads: the
   // automation's own value, else (effort) the model's saved starting effort, else
-  // the model default. The run passes `automation.model || 'default'`, so that is
-  // the value judged here too — not the picker's `models[0]` fallback.
-  const runModelValue = model || 'default'
+  // the model default. `null` means the model takes no effort — the run sends none
+  // and `effortSupported` is false, so the control is not shown at all; the
+  // placeholder below is never displayed.
   const effectiveEffort = useMemo<EffortLevel>(
     () =>
       resolveAutomationEffort({
         explicit: effort || undefined,
         modelValue: runModelValue,
-        catalog: effortDefaults?.catalog ?? models,
+        catalog: effortCatalog,
         modelEffortDefaults: effortDefaults?.modelEffortDefaults
-      }) ?? modelDefaultEffort(selectedModel),
-    [effort, runModelValue, effortDefaults, models, selectedModel]
+      }) ?? 'high',
+    [effort, runModelValue, effortCatalog, effortDefaults?.modelEffortDefaults]
   )
   // The run defaults an unset thinking mode to 'enabled' (not the model's adaptive
-  // default) and coerces it with the id heuristic; show exactly that.
+  // default) and coerces it for the model; show exactly that.
   const effectiveThinking = useMemo<ThinkingMode>(
-    () => resolveThinkingMode(runModelValue, thinkingMode || 'enabled'),
-    [thinkingMode, runModelValue]
+    () =>
+      resolveAutomationThinking({
+        explicit: thinkingMode || undefined,
+        modelValue: runModelValue,
+        catalog: effortCatalog
+      }),
+    [thinkingMode, runModelValue, effortCatalog]
   )
 
   const isDirty = useMemo(

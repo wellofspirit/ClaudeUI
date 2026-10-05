@@ -276,6 +276,10 @@ vi.mock('../../../core/ipc/create-session', async (importOriginal) => {
 })
 
 // Import AFTER mocks.
+import {
+  cachedClaudeModels,
+  resetCachedClaudeModels
+} from '../../../core/services/claude-model-catalog'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
   registerRemoteHandlers,
@@ -1371,6 +1375,19 @@ describe('registerRemoteHandlers', () => {
         'config:settings-changed',
         expect.not.objectContaining({ sandbox: expect.anything() })
       )
+    })
+
+    it('a remote model-picker fetch feeds the host catalog automation runs read (GUARD)', async () => {
+      // Headless / remote hosts never run the desktop `fetchModels`; their picker
+      // fetch is the only thing that can tell an automation run which rows exist.
+      resetCachedClaudeModels()
+      expect(cachedClaudeModels()).toEqual([])
+      await dispatcher.handle(makeRequest('session:get-models'), remoteConn)
+      expect(cachedClaudeModels()).toEqual([{ value: 'sonnet', description: '' }])
+
+      resetCachedClaudeModels()
+      await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
+      expect(cachedClaudeModels()).toEqual([{ value: 'sonnet', description: '' }])
     })
 
     it('keeps the per-engine starting-effort map through save and broadcast', async () => {

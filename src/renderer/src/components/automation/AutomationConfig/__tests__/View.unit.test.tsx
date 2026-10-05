@@ -189,6 +189,30 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
       expect(el).toHaveTextContent('low')
     })
 
+    it('judges the controls on the RUN model, not the picker fallback, when the model is not in the catalog (GUARD)', () => {
+      // `models[0]` is a legacy model with no effort and no adaptive thinking; the
+      // run judges `opus` as the model it names, so the screen must too.
+      const el = effortOf({
+        automation: makeAutomation({ model: 'opus', thinkingMode: 'adaptive' }),
+        models: [legacySonnet],
+        effortDefaults: { catalog: [], modelEffortDefaults: { opus: 'high' } }
+      })
+      expect(el).toHaveTextContent('high')
+      expect(screen.getByTitle('Thinking mode')).toHaveTextContent('adaptive')
+    })
+
+    it('shows no effort control when the run model takes none', () => {
+      render(
+        <AutomationConfigView
+          {...makeProps({
+            automation: makeAutomation({ model: 'claude-3-5-sonnet' }),
+            models: [opus47, legacySonnet]
+          })}
+        />
+      )
+      expect(screen.queryByTitle('Effort level')).toBeNull()
+    })
+
     it('clamps a saved value the model does not offer', () => {
       const row: ModelOption = {
         ...opus47,

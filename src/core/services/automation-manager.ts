@@ -13,7 +13,7 @@ import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { isValidAutomationId } from './automation-id'
 import {
-  resolveThinkingMode,
+  resolveAutomationThinking,
   resolveAutomationEffort,
   type EffortLevel,
   type ThinkingMode
@@ -633,9 +633,16 @@ export class AutomationManager {
       const canUseTool = buildCanUseTool()
 
       const modelValue = automation.model || 'default'
-      const desiredThinking: ThinkingMode =
-        (automation.thinkingMode as ThinkingMode | undefined) ?? 'enabled'
-      const thinkingMode = resolveThinkingMode(modelValue, desiredThinking)
+      // Both the thinking mode and the effort are judged on the row the config screen
+      // judges (`automationModelRow`): the catalog cli.js last reported, else the
+      // model the value names — so a bare alias (`opus`) is not read as "no effort,
+      // no adaptive thinking". Empty before the first model fetch on any transport.
+      const catalog = cachedClaudeModels()
+      const thinkingMode = resolveAutomationThinking({
+        explicit: automation.thinkingMode as ThinkingMode | undefined,
+        modelValue,
+        catalog
+      })
       const thinkingConfig =
         thinkingMode === 'disabled'
           ? { type: 'disabled' as const }
@@ -646,14 +653,14 @@ export class AutomationManager {
       // saved starting effort for the model, else the model default), through the
       // function the config screen shows its value from. The catalog is what
       // cli.js last reported (empty before the first fetch — the model is then
-      // judged from its value alone, as the screen does for a missing row), and
+      // judged as the model its value names, as the screen does for a missing row), and
       // the settings are read per run so a starting effort saved a minute ago
       // applies to the next one.
       const resolvedEffort =
         resolveAutomationEffort({
           explicit: automation.effort,
           modelValue,
-          catalog: cachedClaudeModels(),
+          catalog,
           modelEffortDefaults: (
             loadSettings() as { modelEffortDefaults?: Record<string, EffortLevel> }
           ).modelEffortDefaults

@@ -99,7 +99,7 @@ import {
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
-import { freshClaudeModels, setCachedClaudeModels } from '../services/claude-model-catalog'
+import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
@@ -267,53 +267,42 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   }
 }
 
+/** Has a desktop model fetch reported login status from cli.js's init yet? */
+let loginStatusReported = false
+
+/** Test seam: forget that a desktop fetch has reported, so the next one queries again. */
+export function resetLoginStatusReportedForTests(): void {
+  loginStatusReported = false
+}
+
 async function fetchModels(): Promise<ModelInfo[]> {
-  const fresh = freshClaudeModels(MODELS_CACHE_TTL_MS)
+  // A remote picker fetch fills the same catalog, so a fresh one need not be
+  // ours: the desktop's FIRST fetch still queries, because only it reports login
+  // status from the init response (the remote path has no auth side effects).
+  const fresh = loginStatusReported ? freshClaudeModels(MODELS_CACHE_TTL_MS) : null
   if (fresh) return fresh
 
-  const abort = new AbortController()
-  await ensureHostTokenFresh()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort,
-      // Init-only: killed right after the initialize response.
-      reloadPlugins: false
-    }
-  })
-
-  try {
-    const handle = q as unknown as {
-      supportedModels(): Promise<ModelInfo[]>
-      initializationResult(): Promise<Record<string, unknown>>
-    }
-    const models = await handle.supportedModels()
-    setCachedClaudeModels(models)
+  const models = await queryClaudeModels((init) => {
     // The same initialize response carries the user's account — report login
     // status at app load so the sign-in banner is accurate before any chat
-    // session is opened. Resolves immediately (init already completed). ADR-014.
-    try {
-      const init = await handle.initializationResult()
-      // reportLoginStatus broadcasts session:auth-source to the window (legacy
-      // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
-      // a no-op with no host wired.
-      reportHostLoginStatus(init?.account)
-      // Also update the ClaudeAuthProvider probe cache so probe() and session.account
-      // are accurate from the first model-fetch, before any chat session opens.
-      // The same signal the banner reads (claude-login-state.ts).
-      if (init?.account) {
-        const { loggedIn, account } = claudeLoginSignal(init.account)
-        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
-      }
-    } catch {
-      /* non-fatal — per-session init will still report status */
+    // session is opened. ADR-014.
+    // reportLoginStatus broadcasts session:auth-source to the window (legacy
+    // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
+    // a no-op with no host wired.
+    reportHostLoginStatus(init?.account)
+    // Also update the ClaudeAuthProvider probe cache so probe() and session.account
+    // are accurate from the first model-fetch, before any chat session opens.
+    // The same signal the banner reads (claude-login-state.ts).
+    if (init?.account) {
+      const { loggedIn, account } = claudeLoginSignal(init.account)
+      updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
     }
-    return models
-  } finally {
-    abort.abort()
-  }
+  })
+  // Set once the query answered, whether or not its init could be read: a
+  // failed read is non-fatal (per-session init reports status too), and must not
+  // send every later fetch past the cache.
+  loginStatusReported = true
+  return models
 }
 
 const SESSION_IPC_CHANNELS = [

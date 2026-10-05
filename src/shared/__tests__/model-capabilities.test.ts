@@ -25,7 +25,9 @@ import {
   savedEffortFor,
   carriesPicksIntoNewSessions,
   resolveAutomationEffort,
+  resolveAutomationThinking,
   type EffortLevel,
+  type ThinkingMode,
   rememberEffortPatch,
   engineRemembersEffort,
   type EffortDefaultsSlice,
@@ -1054,9 +1056,8 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
 })
 
 describe('resolveAutomationEffort', () => {
-  const ids = [
+  const canonicalIds = [
     'default',
-    'opus',
     'claude-opus-5-5',
     'claude-opus-4-7',
     'claude-opus-4-5',
@@ -1064,9 +1065,10 @@ describe('resolveAutomationEffort', () => {
     'claude-3-5-sonnet',
     'claude-haiku-4-5'
   ]
+  const aliases = ['opus', 'opus[1m]', 'sonnet', 'haiku']
 
-  it('with no catalog and nothing saved, equals the id-heuristic ladder automations used before', () => {
-    for (const v of ids) {
+  it('with no catalog and nothing saved, a canonical id equals the id-heuristic ladder automations used before', () => {
+    for (const v of canonicalIds) {
       for (const explicit of [undefined, 'low', 'max'] as const) {
         const before = resolveEffort(v, (explicit as EffortLevel | undefined) ?? defaultEffort(v))
         expect(
@@ -1080,6 +1082,38 @@ describe('resolveAutomationEffort', () => {
         ).toBe(before)
       }
     }
+  })
+
+  it('with no catalog, an ALIAS is judged as the model it names, not as an opaque string', () => {
+    for (const v of aliases) {
+      const named = canonicalizeModelValue(v)
+      for (const explicit of [undefined, 'low'] as const) {
+        const expected = resolveEffort(
+          named,
+          (explicit as EffortLevel | undefined) ?? defaultEffort(named)
+        )
+        const got = resolveAutomationEffort({
+          explicit,
+          modelValue: v,
+          catalog: [],
+          modelEffortDefaults: undefined
+        })
+        expect(got, `${v} / ${explicit}`).toBe(expected)
+        // The bug this pins: the raw value read as "takes no effort" and dropped it.
+        if (named.includes('opus-5')) expect(got).not.toBeNull()
+      }
+    }
+  })
+
+  it('a bare alias keeps its alias key for the saved starting effort', () => {
+    expect(
+      resolveAutomationEffort({
+        explicit: undefined,
+        modelValue: 'opus',
+        catalog: [],
+        modelEffortDefaults: { opus: 'high' }
+      })
+    ).toBe('high')
   })
 
   it('a saved starting effort sits between the explicit pick and the model default', () => {
@@ -1108,5 +1142,30 @@ describe('resolveAutomationEffort', () => {
         modelEffortDefaults: { 'claude-3-5-sonnet': 'high' }
       })
     ).toBeNull()
+  })
+})
+
+describe('resolveAutomationThinking', () => {
+  const think = (explicit: ThinkingMode | undefined, modelValue: string) =>
+    resolveAutomationThinking({ explicit, modelValue, catalog: [] })
+
+  it('an unset pick is enabled, whatever the model could do', () => {
+    expect(think(undefined, 'claude-opus-4-7')).toBe('enabled')
+    expect(think(undefined, 'opus')).toBe('enabled')
+  })
+  it('a picked Adaptive on a bare alias stays Adaptive (the alias is judged as its model)', () => {
+    expect(think('adaptive', 'opus')).toBe('adaptive')
+  })
+  it('Adaptive on a model without it is coerced to enabled', () => {
+    expect(think('adaptive', 'claude-3-5-sonnet')).toBe('enabled')
+  })
+  it('disabled is kept', () => {
+    expect(think('disabled', 'opus')).toBe('disabled')
+  })
+  it('a catalog row wins over the heuristics', () => {
+    const row = { value: 'opus', supportsAdaptiveThinking: false }
+    expect(
+      resolveAutomationThinking({ explicit: 'adaptive', modelValue: 'opus', catalog: [row] })
+    ).toBe('enabled')
   })
 })

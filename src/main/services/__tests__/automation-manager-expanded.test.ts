@@ -835,6 +835,14 @@ describe('AutomationManager — per-model starting effort', () => {
     expect((await runWith({ model: 'claude-opus-4-7' })).effort).toBe('low')
   })
 
+  it('a bare alias with no catalog is judged as its model: effort is sent, Adaptive runs (GUARD)', async () => {
+    // Pre-fix `opus` was judged by its raw value: "takes no effort", adaptive
+    // downgraded to enabled.
+    const opts = await runWith({ model: 'opus', thinkingMode: 'adaptive' })
+    expect(opts.effort).toBe('medium')
+    expect(opts.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+  })
+
   it('an explicit automation effort is unchanged and wins over the saved one', async () => {
     saveStartingEfforts({ opus: 'high' })
     expect((await runWith({ model: 'opus', effort: 'low' }, OPUS_ROWS)).effort).toBe('low')

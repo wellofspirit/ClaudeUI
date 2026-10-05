@@ -420,20 +420,43 @@ export function resolveSpawnEffort(args: Parameters<typeof resolveDesiredEffort>
 }
 
 /**
+ * The model row an AUTOMATION is judged on — its run and its config screen both:
+ * `modelValue` (`automation.model || 'default'`) in the Claude `catalog` the caller
+ * has (the renderer's undeduped picker models; the host's last
+ * `supportedModels()`), else a row built from the model the value NAMES.
+ *
+ * The fallback matters because a bare alias judged by its raw value is opaque to
+ * the id heuristics (`opus` → "no effort, no adaptive thinking"). So the missing
+ * row's capabilities come from {@link canonicalizeModelValue}'s model, while its
+ * `value` stays the alias, which is what the starting-effort key is derived from.
+ * For a canonical id nothing changes (it canonicalises to itself); `default` has no
+ * mapping and stays heuristic-judged, as before.
+ */
+export function automationModelRow(
+  modelValue: string,
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+): ModelCapabilityInput & ClaudeEffortRowInput {
+  const found = catalog.find((m) => m.value === modelValue)
+  if (found) return found
+  const canonical = canonicalizeModelValue(modelValue)
+  return {
+    value: modelValue,
+    resolvedModel: canonical,
+    supportsEffort: supportsEffort(canonical),
+    supportedEffortLevels: supportedEffortLevels(canonical),
+    supportsAdaptiveThinking: supportsAdaptiveThinking(canonical)
+  }
+}
+
+/**
  * The effort an AUTOMATION runs at — and the config screen shows: the
  * automation's own effort, else Claude's saved starting effort for the model
  * (`modelEffortDefaults` through {@link savedEffortFor}), else the model's
  * default, clamped to what the model accepts; `null` when it takes none (the run
- * then sends no `effort`). The sessions' ladder ({@link resolveSpawnEffort}) for
- * a headless Claude run, in ONE function so the screen and the run cannot
- * disagree.
- *
- * `catalog` is the Claude model list the caller has (the renderer's picker
- * models; the host's last `supportedModels()` result). When it has no row for
- * `modelValue` — nothing fetched yet, a curated-away model — the model is judged
- * from its value alone: a bare `{value}` row, which is exactly the id-heuristic
- * judgement automations used before this ladder, and the same answer the other
- * side gets for the same missing row.
+ * then sends no `effort`, and the screen shows no effort control). The sessions'
+ * ladder ({@link resolveSpawnEffort}) for a headless Claude run, in ONE function
+ * so the screen and the run cannot disagree. The model is judged on
+ * {@link automationModelRow}.
  */
 export function resolveAutomationEffort(args: {
   /** `automation.effort`; unset = follow the ladder. */
@@ -443,7 +466,7 @@ export function resolveAutomationEffort(args: {
   catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
   modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
 }): EffortLevel | null {
-  const row = args.catalog.find((m) => m.value === args.modelValue) ?? { value: args.modelValue }
+  const row = automationModelRow(args.modelValue, args.catalog)
   const desired = resolveDesiredEffort({
     explicit: args.explicit,
     engineId: 'claude',
@@ -452,6 +475,22 @@ export function resolveAutomationEffort(args: {
     effortDefaults: { modelEffortDefaults: args.modelEffortDefaults }
   })
   return modelResolveEffort(row, desired)
+}
+
+/**
+ * The thinking mode an AUTOMATION runs with — and the config screen shows. An
+ * unset pick is `'enabled'` (not the model's adaptive default), and any pick is
+ * coerced to what the model supports, on {@link automationModelRow}.
+ */
+export function resolveAutomationThinking(args: {
+  explicit: ThinkingMode | null | undefined
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+}): ThinkingMode {
+  return modelResolveThinkingMode(
+    automationModelRow(args.modelValue, args.catalog),
+    args.explicit ?? 'enabled'
+  )
 }
 
 // ---------------------------------------------------------------------------

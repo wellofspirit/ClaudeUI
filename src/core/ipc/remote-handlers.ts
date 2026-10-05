@@ -71,6 +71,7 @@ import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
+import { queryClaudeModels } from '../services/claude-model-catalog'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
@@ -223,26 +224,12 @@ async function withGit<T>(
   }
 }
 
-/** Uncached claude model list via a throwaway SDK query (no auth-source side
- *  effects — those are desktop-only; see handlers-core.ts rationale). */
+/** Uncached claude model list (no auth-source side effects — those are
+ *  desktop-only; see handlers-core.ts rationale). Goes through the shared query
+ *  that also records the host's model catalog, so a remote picker fetch feeds
+ *  automation runs the way a desktop one does. */
 async function claudeSupportedModels(): Promise<ModelInfo[]> {
-  const abort = new AbortController()
-  await ensureHostTokenFresh()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort,
-      // Init-only: killed right after the initialize response.
-      reloadPlugins: false
-    }
-  })
-  try {
-    return await (q as unknown as { supportedModels(): Promise<ModelInfo[]> }).supportedModels()
-  } finally {
-    abort.abort()
-  }
+  return queryClaudeModels()
 }
 
 // Title/commit-message generation. Kept behaviorally identical to the desktop
