@@ -190,7 +190,7 @@ export function resolveSystemInstall(
       }
     }
     // Name why the install the user most likely means (the newest one) is not
-    // usable, so the fallback explains itself ("2.1.198 is older than 2.1.275").
+    // usable, so the fallback explains itself ("2.1.198 is older than <floor>").
     const newest = [...current]
       .filter((i) => i.reason !== undefined)
       .sort((a, b) => compareVersions(b.version ?? '0.0.0', a.version ?? '0.0.0'))[0]

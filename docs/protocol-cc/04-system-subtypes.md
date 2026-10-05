@@ -19,37 +19,38 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 
 ## 4.1 Quick catalog
 
-| Subtype                   | Gate                                             | Emitter path                     |
-| ------------------------- | ------------------------------------------------ | -------------------------------- |
-| `init`                    | Always (first turn)                              | Main generator                   |
-| `status`                  | Varies per variant                               | Main generator / control channel |
-| `task_notification`       | Always                                           | vT queue                         |
-| `task_started`            | Always                                           | vT queue                         |
-| `task_updated`            | Always                                           | vT queue                         |
-| `task_progress`           | Always                                           | vT queue                         |
-| `compact_boundary`        | On conversation compaction                       | Main generator                   |
-| `api_retry`               | On API error + auto-retry                        | Main generator                   |
-| `queued_command_consumed` | Retired with patch `queue-control` (§4.10)       | —                                |
-| `hook_started`            | `--include-hook-events`                          | Hook subscriber                  |
-| `hook_progress`           | `--include-hook-events`                          | Hook subscriber                  |
-| `hook_response`           | `--include-hook-events`                          | Hook subscriber                  |
-| `bridge_state`            | `remote_control` active                          | Control channel                  |
-| `session_state_changed`   | `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`        | Direct emit                      |
-| `notification`            | Error conditions                                 | vT queue                         |
-| `memory_recall`           | Memory feature returns results                   | Main generator                   |
-| `plugin_install`          | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1`              | Main generator                   |
-| `post_turn_summary`       | @internal background summarizer                  | Main generator                   |
-| `model_refusal_fallback`  | On unless `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` | Main generator (§4.20)           |
-| `model_fallback`          | Fallback model configured + availability error   | Main generator (§4.21)           |
-| `thinking_tokens`         | Thinking deltas during streaming                 | Main generator (§4.22)           |
-| `commands_changed`        | Mid-session slash-command list change            | stream-json module (§4.23)       |
-| `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
-| `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
-| `permission_allowed`      | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
-| `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
-| `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
-| `session_title_changed`   | Session has / gets a user-set name (2.1.285)     | Title subscription (§4.29)       |
-| `per_turn_effort_changed` | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
+| Subtype                    | Gate                                             | Emitter path                     |
+| -------------------------- | ------------------------------------------------ | -------------------------------- |
+| `init`                     | Always (first turn)                              | Main generator                   |
+| `status`                   | Varies per variant                               | Main generator / control channel |
+| `task_notification`        | Always                                           | vT queue                         |
+| `task_started`             | Always                                           | vT queue                         |
+| `task_updated`             | Always                                           | vT queue                         |
+| `task_progress`            | Always                                           | vT queue                         |
+| `compact_boundary`         | On conversation compaction                       | Main generator                   |
+| `api_retry`                | On API error + auto-retry                        | Main generator                   |
+| `queued_command_consumed`  | Retired with patch `queue-control` (§4.10)       | —                                |
+| `hook_started`             | `--include-hook-events`                          | Hook subscriber                  |
+| `hook_progress`            | `--include-hook-events`                          | Hook subscriber                  |
+| `hook_response`            | `--include-hook-events`                          | Hook subscriber                  |
+| `bridge_state`             | `remote_control` active                          | Control channel                  |
+| `session_state_changed`    | `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`        | Direct emit                      |
+| `notification`             | Error conditions                                 | vT queue                         |
+| `memory_recall`            | Memory feature returns results                   | Main generator                   |
+| `plugin_install`           | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1`              | Main generator                   |
+| `post_turn_summary`        | @internal background summarizer                  | Main generator                   |
+| `model_refusal_fallback`   | On unless `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` | Main generator (§4.20)           |
+| `model_fallback`           | Fallback model configured + availability error   | Main generator (§4.21)           |
+| `thinking_tokens`          | Thinking deltas during streaming                 | Main generator (§4.22)           |
+| `commands_changed`         | Mid-session slash-command list change            | stream-json module (§4.23)       |
+| `elicitation_complete`     | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
+| `permission_denied`        | Tool call auto-denied without prompt             | Control channel (§4.25)          |
+| `permission_allowed`       | Not emitted — retired patch `automode-verdict`   | — (§4.25)                        |
+| `mirror_error`             | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
+| `dev_intent`               | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
+| `session_title_changed`    | Session has / gets a user-set name (2.1.285)     | Title subscription (§4.29)       |
+| `per_turn_effort_changed`  | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
+| `instruction_size_warning` | Instruction files exceed size limits (2.1.289)   | Main generator (§4.31)           |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -1140,3 +1141,28 @@ only by `system/init`. Relevant to models whose catalog entry carries the
 `per_turn_effort` capability (Sonnet 5.5 among them, 13 §13.5).
 
 **Consumer note.** Not consumed; unknown subtypes are no-ops.
+
+## 4.31 `instruction_size_warning`
+
+**Added in 2.1.289.** Emitted when loaded instruction files exceed the active
+per-file or aggregate character limits, behind cli.js's instruction-warning gate.
+
+```json
+{
+  "type": "system",
+  "subtype": "instruction_size_warning",
+  "total_chars": 123456,
+  "total_limit_chars": 100000,
+  "file_count": 4,
+  "largest_chars": 80000,
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+`largest_chars` is optional and appears when more than one file is loaded and
+the largest alone exceeds the aggregate limit. The static builder is `gS` in
+the 2.1.289 darwin-arm64 concat at char `~27236553`; it returns `null` when
+there is no aggregate-limit warning or the gate is off. ClaudeUI does not
+consume this subtype; its permissive system-message handling makes it a no-op
+rather than a break.

@@ -234,11 +234,13 @@ describe('a usable System install', () => {
   })
 
   it('picks the newest usable install, as bestSystemInstall does', () => {
-    const older = nativeInstall('claude', '2.1.276', { verdict: 'untested' })
+    // Newer than the pin, so it stays usable whatever the floor is (floor = tested).
+    const [major, minor, patch] = CLAUDE_TESTED.split('.').map(Number)
+    const newer = nativeInstall('claude', `${major}.${minor}.${patch + 1}`, { verdict: 'untested' })
     const tested = nativeInstall('claude', CLAUDE_TESTED)
-    saveDetectionCache([detection('claude', [older, tested])])
+    saveDetectionCache([detection('claude', [tested, newer])])
     writeSelections({ claude: { source: 'system' } })
-    expect(resolveHarness('claude').path).toBe(tested.realPath)
+    expect(resolveHarness('claude').path).toBe(newer.realPath)
   })
 })
 
@@ -371,7 +373,9 @@ describe('an unusable System install', () => {
       source: 'bundled',
       // The fallback names why, in this build's terms (the cached reason was the old label's).
       reason: expect.stringMatching(
-        /^No usable System Claude Code found: Claude Code 2\.1\.270 is older than 2\.1\.275, the oldest ClaudeUI supports/
+        new RegExp(
+          `^No usable System Claude Code found: Claude Code 2\\.1\\.270 is older than ${harnessManifest('claude').floor.replaceAll('.', '\\.')}, the oldest ClaudeUI supports`
+        )
       )
     })
     expect(requested).toEqual([])

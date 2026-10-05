@@ -30,6 +30,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { resolveSuccessResponseHelper } from './anchors.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
 const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
@@ -321,12 +323,14 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   // Step 5: Find the success response function
   //
-  // Search globally for every `X(MSG,{})` reply site and require them all to
-  // name one helper in the anchor's chunk (five sites at 2.1.280, where the
-  // single `,X(MSG,{})}catch` site of older versions is gone — README "2.1.280
-  // reply-helper anchor"). A windowed search around the anchor broke when other
-  // patches injected at the same anchor (background-task, usage-relay; both
-  // deleted at 2.1.280) and pushed the site out of the lookback window.
+  // Search globally for every `X(MSG,{})` reply site, retain the sites in the
+  // anchor's chunk, and require those to name one helper (five sites at 2.1.280,
+  // where the single `,X(MSG,{})}catch` site of older versions is gone — README
+  // "2.1.280 reply-helper anchor"). The chunk filter matters as of 2.1.289:
+  // another chunk calls an unrelated helper with the same single-letter MSG
+  // variable and `{}` argument. A windowed search around the anchor broke when
+  // other patches injected at the same anchor (background-task, usage-relay;
+  // both deleted at 2.1.280) and pushed the site out of the lookback window.
   //
   // 2.1.261: `let Xe=function(f,M){wt.enqueue(A5(f.request_id,M))}` — success;
   //          `let Be=function(f,M){wt.enqueue(_B(f.request_id,M))}` — error
@@ -334,33 +338,15 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Extracting success response function ---')
 
-  const escMsg = msgVar.replace(/\$/g, '\\$')
-  const successRe = new RegExp(`(${V})\\(${escMsg},\\{\\}\\)`, 'g')
-  const successMatches = [...src.matchAll(successRe)]
-  if (successMatches.length === 0) {
-    console.error('ERROR: Cannot find success response helper')
+  let successHelper
+  try {
+    successHelper = resolveSuccessResponseHelper(src, msgVar, anchorChunk.spec, chunkAt)
+  } catch (error) {
+    console.error(`ERROR: ${error.message}`)
     process.exit(1)
   }
-  // Multiple match sites are fine as long as they all reference the same helper.
-  const successNames = new Set(successMatches.map((m) => m[1]))
-  if (successNames.size > 1) {
-    console.error(
-      `ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`
-    )
-    process.exit(1)
-  }
-  const successFn = successMatches[0][1]
-  // All success sites must be in the anchor's chunk, or the name we captured is
-  // some other module's helper that merely looks the same.
-  for (const m of successMatches) {
-    if (chunkAt(m.index).spec !== anchorChunk.spec) {
-      console.error(
-        `ERROR: success helper site at ${m.index} is in ${chunkAt(m.index).spec}, not the anchor chunk ${anchorChunk.spec}`
-      )
-      process.exit(1)
-    }
-  }
-  console.log(`  Success response function: ${successFn} (${successMatches.length} call sites)`)
+  const successFn = successHelper.name
+  console.log(`  Success response function: ${successFn} (${successHelper.callSites} call sites)`)
 
   // -------------------------------------------------------------------------
   // Step 6: Inject voice_server_start and voice_server_stop handlers
