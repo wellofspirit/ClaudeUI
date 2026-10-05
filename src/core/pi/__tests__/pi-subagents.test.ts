@@ -32,6 +32,7 @@ import {
   narrowMode,
   PI_SUBAGENT_SUFFIX,
   agentMessageText,
+  piAgentIdentityBlock,
   PiSubagentManager,
   type PiChildScope,
   type PiSubagentHost
@@ -324,7 +325,8 @@ describe('PiSubagentManager.run', () => {
     ])
     const promptText = fs.readFileSync(path.join(dir, 'system-prompt.md'), 'utf-8')
     expect(promptText).toBe(
-      `${builtins().resolve('general-purpose')!.prompt}\n\n${PI_SUBAGENT_SUFFIX}`
+      `${builtins().resolve('general-purpose')!.prompt}\n\n${PI_SUBAGENT_SUFFIX}\n\n` +
+        piAgentIdentityBlock({ agentId, spawner: null })
     )
     await vi.waitFor(() => expect(child.commands().length).toBeGreaterThan(1))
     expect(child.commands()[1]).toMatchObject({
@@ -1959,7 +1961,8 @@ describe('PiSubagentManager — Fable arc review', () => {
     fs.writeFileSync(promptFile, 'tampered', 'utf-8')
     await mgr.sendMessage({ to: 'worker', message: 'again' }, null)
     expect(fs.readFileSync(promptFile, 'utf-8')).toBe(
-      `${builtins().resolve('general-purpose')!.prompt}\n\n${PI_SUBAGENT_SUFFIX}`
+      `${builtins().resolve('general-purpose')!.prompt}\n\n${PI_SUBAGENT_SUFFIX}\n\n` +
+        piAgentIdentityBlock({ agentId: agentIdOf(first), name: 'worker', spawner: null })
     )
     const second = fake.children[1]
     second.push({ type: 'agent_start' })
@@ -2605,5 +2608,188 @@ describe('PiSubagentManager — S1b: failure classification', () => {
           'Launch a new agent for the task if it is still needed.'
       )
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S2 — identity block and the foreground channel rule
+// ---------------------------------------------------------------------------
+
+describe('piAgentIdentityBlock (S2)', () => {
+  const ID = '11111111-1111-4111-8111-111111111111'
+  const TAIL =
+    'Messages from other agents arrive inside <agent-message from="…" from-id="…"> tags; reply ' +
+    'with send_message to that from-id. An agent you message that has already finished is ' +
+    'resumed with your message, which costs a new run: message agents only when it helps the task.'
+
+  it('depth 1: launched by the main session, handle main; the name is optional', () => {
+    expect(piAgentIdentityBlock({ agentId: ID, spawner: null })).toBe(
+      [
+        `Your agent id is ${ID}. You were launched by the main session.`,
+        "To message the agent that launched you while you run in the background, use send_message with to: 'main'. " +
+          'In the foreground your final report is your only channel to it.',
+        TAIL
+      ].join('\n')
+    )
+    expect(piAgentIdentityBlock({ agentId: ID, name: 'scout', spawner: null })).toContain(
+      `Your agent id is ${ID} and your name is "scout". You were launched by the main session.`
+    )
+  })
+
+  it('depth 2: launched by an agent, addressed by its handle (name or id); the label is cleaned', () => {
+    const named = piAgentIdentityBlock({
+      agentId: ID,
+      name: 'grand',
+      spawner: { label: 'lead "boss"\nx', handle: 'lead' }
+    })
+    expect(named).toContain(`and your name is "grand". You were launched by agent "lead  boss  x".`)
+    expect(named).toContain("to: 'lead'.")
+    const unnamed = piAgentIdentityBlock({
+      agentId: ID,
+      spawner: { label: 'Scan the repo', handle: '22222222-2222-4222-8222-222222222222' }
+    })
+    expect(unnamed).toContain(`Your agent id is ${ID}. You were launched by agent "Scan the repo".`)
+    expect(unnamed).toContain("to: '22222222-2222-4222-8222-222222222222'.")
+    expect(unnamed).not.toContain('your name is')
+  })
+})
+
+describe('PiSubagentManager — S2: identity in the system prompt, foreground channel', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  async function scopeOf(host: PiSubagentHost, child: FakeChild): Promise<PiChildScope> {
+    const probe = `probe-${Math.random()}`
+    await child.opts.gateHandler({ toolCallId: probe, toolName: 'read', input: { path: 'x' } })
+    return vi.mocked(host.gateChild).mock.calls.find(([, p]) => p.toolCallId === probe)![0]
+  }
+  const promptOf = (mgr: PiSubagentManager, child: FakeChild): string =>
+    fs.readFileSync(mgr.record(agentIdOf(child))!.promptFile, 'utf-8')
+  const REFUSAL =
+    'You are running in the foreground; your final report is returned to the agent that launched you.'
+
+  it('every launch appends the identity block to system-prompt.md: depth 1 and depth 2, and a resume rewrites it', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const leadId = agentIdOf(lead)
+    const text = promptOf(mgr, lead)
+    expect(text).toContain(PI_SUBAGENT_SUFFIX)
+    expect(text).toContain(
+      `Your agent id is ${leadId} and your name is "lead". You were launched by the main session.\n` +
+        "To message the agent that launched you while you run in the background, use send_message with to: 'main'. " +
+        'In the foreground your final report is your only channel to it.\n' +
+        'Messages from other agents arrive inside <agent-message from="…" from-id="…"> tags; reply '
+    )
+
+    // Depth 2: a named grandchild, addressed through its spawner's NAME.
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const grand = fake.children[1]
+    const grandText = promptOf(mgr, grand)
+    expect(grandText).toContain(
+      `Your agent id is ${agentIdOf(grand)} and your name is "grand". You were launched by agent "lead".`
+    )
+    expect(grandText).toContain("use send_message with to: 'lead'.")
+
+    // Finish everything, then resume `grand`: the file is rewritten (still carrying the block).
+    grand.push({ type: 'agent_settled' })
+    lead.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+    await vi.waitFor(() => expect(delivered.length).toBeGreaterThan(0))
+    fs.writeFileSync(mgr.record(agentIdOf(grand))!.promptFile, 'stale')
+    expect(
+      (await mgr.sendMessage({ to: 'grand', message: 'again' }, null)).content[0].text
+    ).toMatch(/^Resuming agent grand\./)
+    expect(promptOf(mgr, fake.children[2])).toContain(
+      `Your agent id is ${agentIdOf(grand)} and your name is "grand". You were launched by agent "lead".`
+    )
+    fake.children[2].push({ type: 'agent_start' })
+    fake.children[2].push(deliveredEvent(deliveriesOn(fake.children[2])[0]))
+    fake.children[2].push({ type: 'agent_settled' })
+  })
+
+  it('an unnamed spawner is addressed by its id', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'Scan the repo', prompt: 'p' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const input = { description: 'g', prompt: 'q' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const grandText = promptOf(mgr, fake.children[1])
+    expect(grandText).toContain(`You were launched by agent "Scan the repo".`)
+    expect(grandText).toContain(`use send_message with to: '${agentIdOf(lead)}'.`)
+    expect(grandText).not.toContain('your name is')
+    fake.children[1].push({ type: 'agent_settled' })
+    lead.push({ type: 'agent_settled' })
+  })
+
+  it('a FOREGROUND child is refused when it messages its launcher by id or by name; a BACKGROUND one steers it', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const leadId = agentIdOf(lead)
+
+    const fgInput = { description: 'f', prompt: 'q', name: 'fg', run_in_background: false }
+    await lead.opts.gateHandler({ toolCallId: 'call-F', toolName: 'agent', input: fgInput })
+    const fgRun = lead.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input: fgInput,
+      toolCallId: 'call-F'
+    })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const fg = fake.children[1]
+    await promptedWith(fg)
+    const fgScope = await scopeOf(host, fg)
+    for (const to of ['lead', leadId]) {
+      expect(await mgr.sendMessage({ to, message: 'hi' }, fgScope)).toEqual({
+        content: [{ type: 'text', text: REFUSAL }],
+        isError: true
+      })
+    }
+    expect(deliveriesOn(lead)).toHaveLength(0)
+    // Only its launcher is off limits: itself keeps its own rule.
+    expect((await mgr.sendMessage({ to: 'fg', message: 'me' }, fgScope)).content[0].text).toBe(
+      'You cannot send a message to yourself.'
+    )
+
+    const bgInput = { description: 'b', prompt: 'q', name: 'bg' }
+    await lead.opts.gateHandler({ toolCallId: 'call-B', toolName: 'agent', input: bgInput })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input: bgInput, toolCallId: 'call-B' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    const bg = fake.children[2]
+    await promptedWith(bg)
+    const bgScope = await scopeOf(host, bg)
+    expect((await mgr.sendMessage({ to: 'lead', message: 'found it' }, bgScope)).isError).toBe(
+      undefined
+    )
+    expect(deliveriesOn(lead)).toHaveLength(1)
+    expect(deliveriesOn(lead)[0]).toMatchObject({ details: { from: 'bg' } })
+
+    lead.push(deliveredEvent(deliveriesOn(lead)[0]))
+    bg.push({ type: 'agent_settled' })
+    fg.push({ type: 'agent_settled' })
+    await fgRun
+    lead.push({ type: 'agent_settled' })
   })
 })

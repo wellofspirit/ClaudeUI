@@ -152,6 +152,10 @@ export interface PiChildScope {
   stopped: boolean
 }
 
+/** A foreground child messaging its launcher: its channel is its final report. */
+const FOREGROUND_CHANNEL_REFUSAL =
+  'You are running in the foreground; your final report is returned to the agent that launched you.'
+
 /** The refusal for an `agent` call from a child that may not launch agents. */
 export const CANNOT_SPAWN_REASON = 'This agent cannot launch agents'
 
@@ -452,6 +456,32 @@ const attr = (v: string): string => v.replace(/["<>\r\n]/g, ' ')
  */
 const cleanLabel = (v: string): string => attr(v).trim().slice(0, 64) || 'agent'
 
+/**
+ * The identity block appended to every launch's system prompt (S2): who the
+ * agent is, who launched it and how to reach it, and how agent messages look.
+ * Built from host state only. The spawner is `main` at depth 1 (the main
+ * session), otherwise the launching agent, addressed by its name when it has
+ * one, else its id (the two handles `send_message` resolves).
+ */
+export function piAgentIdentityBlock(opts: {
+  agentId: string
+  name?: string
+  /** null: the main session launched it. */
+  spawner: { label: string; handle: string } | null
+}): string {
+  const who = opts.name ? ` and your name is "${opts.name}"` : ''
+  const spawner = opts.spawner ? `agent "${cleanLabel(opts.spawner.label)}"` : 'the main session'
+  const handle = opts.spawner ? opts.spawner.handle : 'main'
+  return [
+    `Your agent id is ${opts.agentId}${who}. You were launched by ${spawner}.`,
+    `To message the agent that launched you while you run in the background, use send_message with to: '${handle}'. ` +
+      'In the foreground your final report is your only channel to it.',
+    'Messages from other agents arrive inside <agent-message from="…" from-id="…"> tags; reply ' +
+      'with send_message to that from-id. An agent you message that has already finished is ' +
+      'resumed with your message, which costs a new run: message agents only when it helps the task.'
+  ].join('\n')
+}
+
 /** The model-facing text of a `send_message` delivery (G3). The message is data inside it, never a prompt. */
 export function agentMessageText(opts: {
   fromLabel: string
@@ -664,6 +694,32 @@ export class PiSubagentManager {
     }
   }
 
+  /** The identity block for `record`'s system prompt (S2), from the host's own records. */
+  private identityBlock(record: PiAgentRecord): string {
+    const spawner = record.spawnerAgentId ? this.records.get(record.spawnerAgentId) : undefined
+    return piAgentIdentityBlock({
+      agentId: record.agentId,
+      name: record.name,
+      spawner: record.spawnerAgentId
+        ? {
+            label: record.spawnerLabel ?? spawner?.label ?? 'agent',
+            handle: spawner?.name ?? record.spawnerAgentId
+          }
+        : null
+    })
+  }
+
+  /**
+   * The ONE rule that a FOREGROUND child cannot message its launcher (the main
+   * session or the spawning agent): it is blocked inside the `agent` call and
+   * only sees a message after the final report, which is its channel. Null when
+   * `caller` runs in the background.
+   */
+  private foregroundChannelRefusal(caller: PiChildScope): PiHostedToolResult | null {
+    const live = this.live.get(caller.toolUseId)
+    return live && live.record.background ? null : errorResult(FOREGROUND_CHANNEL_REFUSAL)
+  }
+
   /** G2: a name's first failing rule, or null. */
   private nameError(name: string): string | null {
     if (name.length === 0 || name.length > 64) {
@@ -769,10 +825,11 @@ export class PiSubagentManager {
     // F8: the prompt file always matches the definition the flags come from.
     try {
       mkdirSync(record.dir, { recursive: true, mode: 0o700 })
-      writeFileSync(record.promptFile, `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}`, {
-        encoding: 'utf-8',
-        mode: 0o600
-      })
+      writeFileSync(
+        record.promptFile,
+        `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}\n\n${this.identityBlock(record)}`,
+        { encoding: 'utf-8', mode: 0o600 }
+      )
     } catch (err) {
       return {
         ok: false,
@@ -1239,12 +1296,8 @@ export class PiSubagentManager {
           'You are the main conversation — "main" addresses you. Send to a named agent instead.'
         )
       }
-      const live = this.live.get(caller.toolUseId)
-      if (!live || !live.record.background) {
-        return errorResult(
-          'You are running in the foreground; your final report is returned to the agent that launched you.'
-        )
-      }
+      const refusal = this.foregroundChannelRefusal(caller)
+      if (refusal) return refusal
       const deliveryId = uuidv4()
       logger.info('PiSubagents', `agent-message ${deliveryId} ${fromId} → main (wake)`)
       this.host.deliverToSession({
@@ -1272,6 +1325,12 @@ export class PiSubagentManager {
     }
     if (caller && target.agentId === caller.agentId) {
       return errorResult('You cannot send a message to yourself.')
+    }
+    // The launcher of a foreground agent is blocked on its report (the same
+    // rule as `main`, resolved first so an id and a name are both caught).
+    if (caller && sender?.spawnerAgentId === target.agentId) {
+      const refusal = this.foregroundChannelRefusal(caller)
+      if (refusal) return refusal
     }
     const payload: PiAgentDelivery = {
       v: 1,
