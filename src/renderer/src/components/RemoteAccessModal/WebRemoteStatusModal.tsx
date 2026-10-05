@@ -125,7 +125,7 @@ export default function WebRemoteStatusModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={handleOverlayClick}
     >
-      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[440px] max-w-[calc(100vw-2rem)] max-h-[90vh] overflow-hidden flex flex-col animate-fade-in">
+      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[440px] max-w-[calc(100%-2rem)] max-h-[90%] overflow-hidden flex flex-col animate-fade-in">
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2.5">

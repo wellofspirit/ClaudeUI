@@ -776,6 +776,7 @@ export function DirectoryBrowserDialog({
       }}
       onKeyDown={rootKeyDown}
     >
+      {/* eslint-disable-next-line no-restricted-syntax -- portalled to document.body: outside the zoomed root */}
       <div className="w-[min(640px,calc(100vw-2rem))] h-[min(430px,80vh)] bg-bg-tertiary border border-border-bright rounded-xl shadow-2xl flex overflow-hidden">
         {/* Places rail. Narrow viewports never reach this branch — the phone
             layout lives in the `isMobile` fork above. */}

@@ -430,7 +430,8 @@ export function PermissionsDialogView({
     >
       <div
         className="bg-bg-primary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
-        style={{ width: 680, maxHeight: '80vh' }}
+        // % of the fixed backdrop: vh/vw would be multiplied by the zoom (ADR-092)
+        style={{ width: 680, maxHeight: '80%' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

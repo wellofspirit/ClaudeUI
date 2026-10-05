@@ -716,6 +716,7 @@ function AppContent(): React.JSX.Element {
 
   if (!App) {
     return (
+      // eslint-disable-next-line no-restricted-syntax -- the loading screen renders before (outside) SessionView's zoom
       <div className="flex items-center justify-center h-screen text-text-secondary">
         Loading...
       </div>

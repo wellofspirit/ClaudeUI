@@ -204,7 +204,8 @@ export function SkillsDialogView({
     >
       <div
         className="bg-bg-primary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
-        style={{ width: 900, height: 560, maxHeight: '85vh', maxWidth: '95vw' }}
+        // % of the fixed backdrop: vh/vw would be multiplied by the zoom (ADR-092)
+        style={{ width: 900, height: 560, maxHeight: '85%', maxWidth: '95%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-b border-border">

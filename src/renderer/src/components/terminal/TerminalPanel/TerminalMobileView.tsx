@@ -121,6 +121,7 @@ export function TerminalMobileView({
       // The dvh fallback is for a host with no visualViewport (jsdom, an old
       // WebView) — full height is the right answer when nothing can be known
       // about a keyboard.
+      // eslint-disable-next-line no-restricted-syntax -- hosted outside the zoomed root (SessionView), so real px
       style={{ height: visualHeight ? `${visualHeight}px` : '100dvh' }}
       className="fixed left-0 right-0 top-0 z-[100] bg-bg-primary flex flex-col animate-fade-in"
     >
