@@ -6,6 +6,11 @@ import { loadEngineConfig } from './ui-config'
 import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
 import type { ChatMessage, EngineId } from '../../shared/types'
+import {
+  dispatchAgentDescription,
+  joinDispatchHints,
+  OWN_SUBAGENT_TOOL
+} from '../../shared/dispatch-agent-description'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 export interface CollabServerContext {
@@ -78,14 +83,15 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
     tools: [
       tool(
         'dispatch_agent',
-        'Delegate a task to an agent running on a DIFFERENT engine — opencode (fronts ' +
-          'non-Anthropic model vendors, e.g. GPT or Gemini models), pi (an alternative coding-agent ' +
-          "harness) or codex (OpenAI's own coding agent). The agent runs headless in the same working " +
-          'directory and its final answer is returned as this tool result. The result includes a ' +
-          'session_id — pass it back as `session_id` to continue the same agent with its context ' +
-          'intact (multi-turn collaboration). The available model list is user-configured per target ' +
-          "engine; omit `model` to use that engine's configured default. " +
-          `For opencode: ${modelHint.long} For pi: ${piModelHint.long} For codex: ${codexModelHint.long}`,
+        dispatchAgentDescription({
+          targets: ['opencode', 'pi', 'codex'],
+          ownSubagentTool: OWN_SUBAGENT_TOOL.claude,
+          hints: joinDispatchHints([
+            { targetEngine: 'opencode', long: modelHint.long },
+            { targetEngine: 'pi', long: piModelHint.long },
+            { targetEngine: 'codex', long: codexModelHint.long }
+          ])
+        }),
         {
           // 'opencode', 'pi' (ADR-033 M4c) and 'codex' (slice H) are listed:
           // dispatching to 'claude' from a Claude session is same-engine and

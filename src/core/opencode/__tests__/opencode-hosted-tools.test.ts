@@ -424,6 +424,18 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     expect(def.inputSchema.shape.model.description).toContain('sonnet')
   })
 
+  it('steers opencode to its own task tool first (S4) and lists claude, pi and codex as targets', () => {
+    vi.mocked(loadEngineConfig).mockReturnValue({})
+    const { description } = getDispatchToolDef(tmp)
+    expect(description).toContain(
+      'Use this only when the user asks for a different engine or model vendor'
+    )
+    expect(description).toContain('use your own task tool instead')
+    expect(description).toContain(
+      "claude (Anthropic's models), pi (an alternative coding-agent harness) or codex"
+    )
+  })
+
   it('falls back to the generic Claude-alias hint when nothing is configured', () => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
     const def = getDispatchToolDef(tmp)

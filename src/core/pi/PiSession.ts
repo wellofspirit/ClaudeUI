@@ -43,7 +43,12 @@ import type {
   PiGetStateData,
   PiRpcCommand
 } from './pi-protocol'
-import { getPiModelCatalog, discoverPiModels, effortLevelsFromModel } from './model-discovery'
+import {
+  getPiModelCatalog,
+  getPiAllowedModelCatalog,
+  discoverPiModels,
+  effortLevelsFromModel
+} from './model-discovery'
 import {
   findPiSessionFile,
   loadPiAgentLinks,
@@ -132,6 +137,13 @@ import {
 import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
+import { describeDispatchModels } from '../services/dispatch-model-hint'
+import {
+  dispatchAgentDescription,
+  joinDispatchHints,
+  OWN_SUBAGENT_TOOL,
+  type DispatchTargetEngine
+} from '../../shared/dispatch-agent-description'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 // Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
@@ -139,6 +151,35 @@ import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 // in (verified — takes a caller-supplied emit callback and ambient
 // setTimeout/clearTimeout only).
 import { BashStreamGate } from '../opencode/bash-stream-gate'
+
+/** The engines pi's `dispatch_agent` can target (never pi itself). */
+const PI_DISPATCH_TARGETS: readonly DispatchTargetEngine[] = ['claude', 'opencode', 'codex']
+
+/**
+ * The `dispatch_agent` description for the bridge (`CLAUDEUI_PI_DISPATCH_DESCRIPTION`):
+ * the shared builder plus a spawn-time snapshot of each target's configured
+ * model hint, as the other engines build theirs. (Opencode's cached-model peek
+ * is not consulted: config only.)
+ */
+function piDispatchDescription(): string {
+  return dispatchAgentDescription({
+    targets: PI_DISPATCH_TARGETS,
+    ownSubagentTool: OWN_SUBAGENT_TOOL.pi,
+    hints: joinDispatchHints(
+      PI_DISPATCH_TARGETS.map((targetEngine) => {
+        const dispatch = loadEngineConfig(targetEngine).dispatch
+        return {
+          targetEngine,
+          ...describeDispatchModels({
+            targetEngine,
+            allowedModels: dispatch?.allowedModels,
+            defaultModel: dispatch?.defaultModel
+          })
+        }
+      })
+    )
+  })
+}
 
 /** Fail-closed default for an unrecognized /hosted-tool toolName (defense in depth — the bridge extension only ever sends the five names it registers, but handleHostedTool must never crash on an unexpected one). */
 function unknownHostedTool(toolName: string): PiHostedToolResult {
@@ -557,7 +598,9 @@ export class PiSession extends BaseSession {
       },
       {
         ...(deps.spawnPiChild ? { spawn: deps.spawnPiChild } : {}),
-        ...(deps.subagentsRoot ? { sessionsRoot: deps.subagentsRoot } : {})
+        ...(deps.subagentsRoot ? { sessionsRoot: deps.subagentsRoot } : {}),
+        // The `agent` tool's model resolution and `list_models` (ADR-089 S3).
+        catalog: () => getPiAllowedModelCatalog()
       }
     )
     // sandboxConfig/thinkingMode are intentionally unread — Claude-only
@@ -839,7 +882,12 @@ export class PiSession extends BaseSession {
           CLAUDEUI_PI_BRIDGE_URL: bridge.url,
           CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
-          ...(this.capabilities.crossEngineDispatch ? { CLAUDEUI_PI_DISPATCH_ENABLED: '1' } : {}),
+          ...(this.capabilities.crossEngineDispatch
+            ? {
+                CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+                CLAUDEUI_PI_DISPATCH_DESCRIPTION: piDispatchDescription()
+              }
+            : {}),
           // Plan mode (M5a): registers exit_plan + the cui-plan-enter/exit
           // commands in the bridge extension (inactive until entered) —
           // gated on the STATIC capability, mirroring hostedMcp above, NOT
@@ -1314,6 +1362,14 @@ export class PiSession extends BaseSession {
       this.resetInactivityTimer()
       return
     }
+
+    // The user has spoken (ADR-089 S1a): lift every user-stop hold so the
+    // model may resume an agent the user stopped. THE one place a user-authored
+    // prompt reaches pi — a typed prompt, a queued one flushed later and a steer
+    // all come through here; agent deliveries (deliverAgentMessage), the plan
+    // toggles and the judge's ephemeral asks never do. After `ensureStarted`,
+    // which on a resume rebuilds the records this must clear.
+    this.subagents.userTurn()
 
     // M-PI1: read the busy state AFTER `await ensureStarted()`, never before.
     // Two run()s landing during the spawn window both awaited the SAME
@@ -2973,6 +3029,9 @@ export class PiSession extends BaseSession {
         return this.subagents.sendMessage(input, null)
       case 'task_stop':
         return this.subagents.taskStop(input, null)
+      // The models an `agent` call may name (read-only; auto-allowed).
+      case 'list_models':
+        return this.subagents.listModels(input)
 
       default:
         return unknownHostedTool(toolName)

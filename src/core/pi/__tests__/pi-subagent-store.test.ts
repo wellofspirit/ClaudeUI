@@ -8,6 +8,9 @@ import type { PiSessionEntry } from '../pi-protocol'
 
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
+const C = '33333333-3333-4333-8333-333333333333'
+const D = '44444444-4444-4444-8444-444444444444'
+const E = '55555555-5555-4555-8555-555555555555'
 
 let seq = 0
 const base = () => ({ id: `e${seq++}`, parentId: null, timestamp: '2024-01-01T00:00:00.000Z' })
@@ -155,5 +158,127 @@ describe('collectAgentLinkRecords — the task (ADR-089 review F8)', () => {
       agentResult('call-1', { v: 1, agentId: A, subagentType: 'g', status: 'completed' })
     ])
     expect(link).toMatchObject({ prompt: 'THE TASK', description: 'Scan the repo' })
+  })
+})
+
+describe('collectAgentLinkRecords — failure (ADR-089 S1b)', () => {
+  it('reads details.cuiAgent.failure; a failed link WITHOUT it stays absent (the manager treats it as transient)', () => {
+    const [withField, without] = collectAgentLinkRecords([
+      agentResult('call-1', {
+        v: 1,
+        agentId: A,
+        subagentType: 'g',
+        status: 'failed',
+        failure: 'permanent'
+      }),
+      agentResult('call-2', { v: 1, agentId: B, subagentType: 'g', status: 'failed' })
+    ])
+    expect(withField.failure).toBe('permanent')
+    expect('failure' in without).toBe(false)
+  })
+
+  it('reads failureMessage beside failure, capped to one line of at most 200 characters; absent without a failure or when not a string', () => {
+    const base = { v: 1, subagentType: 'g', status: 'failed' }
+    const [ok, crafted, noFailure, notString, empty] = collectAgentLinkRecords([
+      agentResult('c1', { ...base, agentId: A, failure: 'permanent', failureMessage: 'too long' }),
+      agentResult('c2', {
+        ...base,
+        agentId: B,
+        failure: 'permanent',
+        failureMessage: ['x'.repeat(500), 'second line'].join('\n')
+      }),
+      agentResult('c3', { ...base, agentId: C, failureMessage: 'orphan' }),
+      agentResult('c4', { ...base, agentId: D, failure: 'permanent', failureMessage: 42 }),
+      agentResult('c5', { ...base, agentId: E, failure: 'transient', failureMessage: '  ' })
+    ])
+    expect(ok.failureMessage).toBe('too long')
+    expect(crafted.failureMessage).toBe('x'.repeat(200))
+    expect('failureMessage' in noFailure).toBe(false)
+    expect('failureMessage' in notString).toBe(false)
+    expect('failureMessage' in empty).toBe(false)
+  })
+
+  it('validates the value: anything but transient/permanent is absent', () => {
+    for (const bad of ['bogus', 3, null, {}, 'PERMANENT']) {
+      const [link] = collectAgentLinkRecords([
+        agentResult('call-1', {
+          v: 1,
+          agentId: A,
+          subagentType: 'g',
+          status: 'failed',
+          failure: bad
+        })
+      ])
+      expect('failure' in link, String(bad)).toBe(false)
+    }
+  })
+
+  it('a notification carries the latest run failure; a later non-failed notification clears it', () => {
+    const launch = agentResult('call-1', {
+      v: 1,
+      agentId: A,
+      subagentType: 'g',
+      background: true,
+      status: 'async_launched'
+    })
+    const [failed] = collectAgentLinkRecords([
+      launch,
+      notification({ agentId: A, toolUseId: 'call-1', status: 'failed', failure: 'transient' })
+    ])
+    expect(failed).toMatchObject({ status: 'failed', failure: 'transient' })
+    const [withMsg] = collectAgentLinkRecords([
+      launch,
+      notification({
+        agentId: A,
+        toolUseId: 'call-1',
+        status: 'failed',
+        failure: 'permanent',
+        failureMessage: ['nope', 'more'].join('\n')
+      })
+    ])
+    expect(withMsg).toMatchObject({ failure: 'permanent', failureMessage: 'nope' })
+    const [resumed] = collectAgentLinkRecords([
+      launch,
+      notification({
+        agentId: A,
+        toolUseId: 'call-1',
+        status: 'failed',
+        failure: 'permanent',
+        failureMessage: 'nope'
+      }),
+      notification({ agentId: A, toolUseId: 'call-1', status: 'completed', runIndex: 2 })
+    ])
+    expect(resumed.status).toBe('completed')
+    expect('failure' in resumed).toBe(false)
+    expect('failureMessage' in resumed).toBe(false)
+    // An old failed notification with no field leaves the link without one.
+    const [old] = collectAgentLinkRecords([
+      launch,
+      notification({ agentId: A, toolUseId: 'call-1', status: 'failed' })
+    ])
+    expect(old.status).toBe('failed')
+    expect('failure' in old).toBe(false)
+  })
+})
+
+describe('collectAgentLinkRecords — an isError agent result (V1a)', () => {
+  it('a failed foreground agent whose toolResult is NOW marked isError still yields its link, status and failure', () => {
+    const entry = agentResult('call-1', {
+      v: 1,
+      agentId: A,
+      subagentType: 'g',
+      status: 'failed',
+      failure: 'permanent',
+      failureMessage: 'prompt is too long'
+    }) as unknown as { message: { isError: boolean } }
+    entry.message.isError = true
+    expect(collectAgentLinkRecords([entry as unknown as PiSessionEntry])).toEqual([
+      expect.objectContaining({
+        agentId: A,
+        status: 'failed',
+        failure: 'permanent',
+        failureMessage: 'prompt is too long'
+      })
+    ])
   })
 })

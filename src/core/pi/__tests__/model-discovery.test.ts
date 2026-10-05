@@ -124,6 +124,26 @@ describe('discoverPiModels', () => {
     ).toEqual(['openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'])
   })
 
+  it('getPiAllowedModelCatalog returns the RAW rows discoverPiModels shows (one filter), never throws on failure', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: { anthropic: ['claude-sonnet-4-6'], 'openai-codex': [] } }
+    })
+    const { discoverPiModels, getPiAllowedModelCatalog } = await importFresh()
+    const raw = await getPiAllowedModelCatalog()
+    expect(raw.map((m) => `${m.provider}/${m.id}`)).toEqual(['anthropic/claude-sonnet-4-6'])
+    // The fields the picker's ModelInfo drops are there.
+    expect(raw[0]).toMatchObject({ contextWindow: expect.any(Number), cost: expect.any(Object) })
+    expect(
+      (await discoverPiModels()).flatMap((group) => group.models.map((model) => model.value))
+    ).toEqual(raw.map((m) => `${m.provider}/${m.id}`))
+
+    // A failed probe is an empty catalog.
+    mockRequest.mockRejectedValue(new Error('boom'))
+    const fresh = await importFresh()
+    expect(await fresh.getPiAllowedModelCatalog()).toEqual([])
+  })
+
   it('treats an empty list under a provider key as none of that provider', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     mockLoadEngineConfig.mockReturnValue({

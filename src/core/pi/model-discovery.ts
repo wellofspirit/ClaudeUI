@@ -317,16 +317,33 @@ export function discoverPiModels(): Promise<EngineModelGroup[]> {
       if (models.length === 0) return []
       // Per provider (ADR-074 §1): a provider with no key shows every model it
       // reports, so one curated provider no longer hides every other one.
-      const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
-      const groups = groupPiModels(
-        models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id))
-      )
+      const groups = groupPiModels(filterAllowedPiModels(models))
       cachedGroups = groups
       return groups
     },
     [],
     () => cachedGroups
   )
+}
+
+/**
+ * The raw catalog rows the picker shows: authenticated, and let through by the
+ * per-provider allowlist (ADR-074 §1). THE one place that filter lives —
+ * `discoverPiModels` groups exactly these rows.
+ */
+function filterAllowedPiModels(models: PiModel[]): PiModel[] {
+  const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
+  return models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id))
+}
+
+/**
+ * The allowlisted raw `PiModel` rows (cost, context window, reasoning, input
+ * kinds), for callers that need more than the picker's `ModelInfo` — the
+ * `list_models` tool and the `agent` tool's model resolver (ADR-089). Same
+ * rows `discoverPiModels` shows; `[]` on any discovery failure.
+ */
+export function getPiAllowedModelCatalog(): Promise<PiModel[]> {
+  return currentCatalog(filterAllowedPiModels, [])
 }
 
 /** Unfiltered authenticated catalog for model-management UI. */

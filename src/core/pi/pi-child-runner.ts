@@ -86,7 +86,8 @@ function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.Process
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
-    CLAUDEUI_PI_DISPATCH_ENABLED: ''
+    CLAUDEUI_PI_DISPATCH_ENABLED: '',
+    CLAUDEUI_PI_DISPATCH_DESCRIPTION: ''
   }
 }
 
@@ -127,7 +128,17 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
 /** What a pi child turn settles with — see `PiChildRunner.settled`. */
 export type PiTurnOutcome =
   | { kind: 'ok'; totalCostUsd: number; durationMs: number; sessionId: string | null }
-  | { kind: 'error'; message: string }
+  | {
+      kind: 'error'
+      message: string
+      /**
+       * Not pi's own turn error: `exit` — the child process died or the RPC
+       * transport failed under the turn; `refused` — a `/cui-` prompt the runner
+       * would not send. The subagent manager classifies a failed run from it
+       * (pi-agent-failure.ts) without matching message text.
+       */
+      cause?: 'exit' | 'refused'
+    }
 
 export interface PiChildRunnerOpts {
   cwd: string
@@ -366,7 +377,8 @@ export class PiChildRunner {
       this.settled = null
       settle?.({
         kind: 'error',
-        message: this.opts.exitMessage ?? 'pi child process exited unexpectedly'
+        message: this.opts.exitMessage ?? 'pi child process exited unexpectedly',
+        cause: 'exit'
       })
       this.bridgeHost.dispose()
       this.opts.onExit?.()
@@ -414,7 +426,8 @@ export class PiChildRunner {
     if (isReservedPiCommandText(prompt)) {
       return Promise.resolve({
         kind: 'error',
-        message: `A prompt may not start with "${PI_RESERVED_COMMAND_PREFIX}".`
+        message: `A prompt may not start with "${PI_RESERVED_COMMAND_PREFIX}".`,
+        cause: 'refused'
       })
     }
     return this.sendTurn(prompt)
@@ -453,9 +466,15 @@ export class PiChildRunner {
           }
         },
         (err) => {
+          // `request` rejects only when the transport itself failed (the
+          // process is gone, stdin closed, no response in time).
           if (this.settled === resolve) {
             this.settled = null
-            resolve({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
+            resolve({
+              kind: 'error',
+              message: err instanceof Error ? err.message : String(err),
+              cause: 'exit'
+            })
           }
         }
       )
@@ -651,6 +670,14 @@ export class PiChildRunner {
       }
       out = { kind: 'error', message: out.message }
     }
+    // A rejected credential (401/403) is the mapper's `auth-required`, not an
+    // `error` — the sign-in dialog is the ROOT session's business. For a child
+    // it is simply how its turn failed: without this it would never settle as an
+    // error, `agent_settled` would then report the run `ok`, and a dead
+    // credential would read as a completed agent (and an empty dispatch
+    // success). The message keeps pi's own 401/403 text, so the failure
+    // classifier (pi-agent-failure.ts) sees it.
+    if (out.kind === 'auth-required') out = { kind: 'error', message: out.message }
     if (out.kind === 'turn_start') {
       this.runActive = true
       return

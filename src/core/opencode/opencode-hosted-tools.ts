@@ -27,6 +27,11 @@ import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
+import {
+  dispatchAgentDescription,
+  joinDispatchHints,
+  OWN_SUBAGENT_TOOL
+} from '../../shared/dispatch-agent-description'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
@@ -210,14 +215,15 @@ export function createOpencodeHostedToolsServer(
   server.registerTool(
     'dispatch_agent',
     {
-      description:
-        "Delegate a task to an agent running on a DIFFERENT engine — Claude (Anthropic's models), " +
-        "pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). The agent " +
-        'runs headless in the same working directory and its final answer is returned as this tool ' +
-        'result. The result includes a session_id — pass it back as `session_id` to continue the same ' +
-        'agent with its context intact (multi-turn collaboration). The available model list is ' +
-        "user-configured per target engine; omit `model` to use that engine's configured default. " +
-        `For claude: ${modelHint.long} For pi: ${piModelHint.long} For codex: ${codexModelHint.long}`,
+      description: dispatchAgentDescription({
+        targets: ['claude', 'pi', 'codex'],
+        ownSubagentTool: OWN_SUBAGENT_TOOL.opencode,
+        hints: joinDispatchHints([
+          { targetEngine: 'claude', long: modelHint.long },
+          { targetEngine: 'pi', long: piModelHint.long },
+          { targetEngine: 'codex', long: codexModelHint.long }
+        ])
+      }),
       inputSchema: buildDispatchAgentInputSchema(
         modelHint.short,
         piModelHint.short,
