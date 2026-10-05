@@ -129,6 +129,12 @@ function toolResultEnd(toolCallId: string, text: string): Cmd {
 
 const SETTLED = { type: 'agent_settled' }
 
+/** pi's errored assistant message_end (stopReason 'error'); a 401/403 text is the mapper's auth-required. */
+function erroredAssistantEnd(errorMessage: string): Cmd {
+  const m = (assistantEnd({ text: '' }).message ?? {}) as Cmd
+  return { type: 'message_end', message: { ...m, stopReason: 'error', errorMessage } }
+}
+
 function runnerOpts(
   child: ReturnType<typeof makeFakeChild>,
   over: Partial<PiChildRunnerOpts> = {}
@@ -228,7 +234,8 @@ describe('PiChildRunner turns', () => {
     const before = child.client.request.mock.calls.length
     await expect(runner.runTurn(' /cui-deliver eyJ2IjoxfQ==')).resolves.toEqual({
       kind: 'error',
-      message: 'A prompt may not start with "/cui-".'
+      message: 'A prompt may not start with "/cui-".',
+      cause: 'refused'
     })
     expect(child.client.request.mock.calls.length).toBe(before)
   })
@@ -243,6 +250,19 @@ describe('PiChildRunner turns', () => {
     await expect(runner.runTurn('x')).resolves.toEqual({ kind: 'error', message: 'bad prompt' })
   })
 
+  it('a prompt request that rejects (the transport is gone) settles an error caused by the exit; pi’s own refusal has no cause', async () => {
+    const child = makeFakeChild((cmd) => {
+      if (cmd.type === 'prompt') throw new Error('PiRpcClient: process is not running')
+      return defaultHandler(cmd)
+    })
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    await expect(runner.runTurn('x')).resolves.toEqual({
+      kind: 'error',
+      message: 'PiRpcClient: process is not running',
+      cause: 'exit'
+    })
+  })
+
   it('a process exit mid-turn settles an error, disposes the bridge and calls onExit', async () => {
     const child = makeFakeChild()
     const onExit = vi.fn()
@@ -252,7 +272,11 @@ describe('PiChildRunner turns', () => {
     const turn = runner.runTurn('x')
     await tick()
     child.exit()
-    await expect(turn).resolves.toEqual({ kind: 'error', message: 'the child died' })
+    await expect(turn).resolves.toEqual({
+      kind: 'error',
+      message: 'the child died',
+      cause: 'exit'
+    })
     expect(child.bridgeDispose).toHaveBeenCalledTimes(1)
     expect(onExit).toHaveBeenCalledTimes(1)
   })
@@ -509,6 +533,33 @@ describe('PiChildRunner deliveries (ADR-089 S3)', () => {
     expect(settled).toBeUndefined()
     child.push(runtimeError)
     await expect(turn).resolves.toEqual({ kind: 'error', message: 'boom' })
+  })
+
+  it("a rejected credential (401, the mapper's auth-required) fails the turn like any turn error: no cause, an [error: …] row streamed", async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const turn = runner.runTurn('x')
+    await tick()
+    const message = '401 {"type":"error","error":{"type":"authentication_error"}}'
+    child.push(erroredAssistantEnd(message))
+    // Settles at the errored message_end — not later at agent_settled as an `ok` turn.
+    await expect(turn).resolves.toEqual({ kind: 'error', message })
+    const rows = emit.mock.calls.filter(([channel]) => channel === 'session:subagent-message')
+    expect(rows).toHaveLength(1)
+    expect(rows[0][1].message.content[0].text).toBe(`[error: ${message}]`)
+  })
+
+  it("an auth failure while draining an aborted turn settles the error but streams no row (the error branch's own rule)", async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const turn = runner.runTurn('x')
+    await tick()
+    void runner.abortTurn(30)
+    child.push(erroredAssistantEnd('403 status code (no body)'))
+    await expect(turn).resolves.toEqual({ kind: 'error', message: '403 status code (no body)' })
+    expect(emit.mock.calls.some(([channel]) => channel === 'session:subagent-message')).toBe(false)
   })
 
   it('awaitTurn sends no prompt and settles on the next agent_settled of a run pi started itself', async () => {

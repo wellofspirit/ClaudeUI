@@ -69,6 +69,12 @@ import {
   type SpawnPiChildFn
 } from './pi-child-runner'
 import { piUsageEvent } from './usage-row'
+import {
+  classifyPiAgentFailure,
+  failureSummary,
+  type PiAgentFailure,
+  type PiAgentFailureInput
+} from './pi-agent-failure'
 import { isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
 import type { ChatMessage, TaskTerminalStatus } from '../../shared/types'
@@ -276,6 +282,22 @@ export interface PiAgentRecord {
   runIndex: number
   status: 'running' | TaskTerminalStatus
   stoppedBy: PiStopReason | null
+  /**
+   * The user stopped this agent and has not spoken since (ADR-089 S1a): the
+   * model may not resume it by `send_message`. Set when a `'user'` stop is
+   * recorded (`stopWith`) — not only when the run ends, so a prompt the user
+   * types while the stopped run is still draining already counts as "since the
+   * stop" — and cleared by `userTurn()` for every record.
+   */
+  userStopHold: boolean
+  /**
+   * How the latest run failed (null unless `status === 'failed'`). A `permanent`
+   * failure refuses `send_message`'s resume (ADR-089 S1b); `transient` resumes
+   * like a completed agent.
+   */
+  failure: PiAgentFailure | null
+  /** The failure's first line, at most 200 characters (null when `failure` is). */
+  failureMessage: string | null
   dir: string
   promptFile: string
   /** Reused across runs: outcomes, denials and grants persist; `stopped` is reset at each run start. */
@@ -319,6 +341,8 @@ interface RunEnd {
   text: string
   /** completed: the report; failed: the error; stopped: none. */
   report: string | null
+  /** failed only: whether a resume can help (`classifyPiAgentFailure`). */
+  failure: PiAgentFailure | null
   usage: { totalTokens: number; toolUses: number; durationMs: number }
 }
 
@@ -633,7 +657,8 @@ export class PiSubagentManager {
         cuiAgent: {
           ...cuiAgent,
           status: end.status,
-          ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {})
+          ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {}),
+          ...runFailureDetails(end)
         }
       }
     }
@@ -679,6 +704,9 @@ export class PiSubagentManager {
     runIndex?: number
     status?: PiAgentRecord['status']
     stoppedBy?: PiStopReason | null
+    userStopHold?: boolean
+    failure?: PiAgentFailure | null
+    failureMessage?: string | null
   }): PiAgentRecord {
     const record: PiAgentRecord = {
       agentId: opts.agentId,
@@ -697,6 +725,9 @@ export class PiSubagentManager {
       runIndex: opts.runIndex ?? 0,
       status: opts.status ?? 'running',
       stoppedBy: opts.stoppedBy ?? null,
+      userStopHold: opts.userStopHold ?? false,
+      failure: opts.failure ?? null,
+      failureMessage: opts.failureMessage ?? null,
       dir: opts.dir,
       promptFile: opts.promptFile,
       scope: {
@@ -756,6 +787,8 @@ export class PiSubagentManager {
     record.background = background
     record.status = 'running'
     record.stoppedBy = null
+    record.failure = null
+    record.failureMessage = null
     const entry: LiveChild = {
       record,
       scope,
@@ -829,6 +862,12 @@ export class PiSubagentManager {
       scope.stopped = true
       record.runIndex -= 1
       record.status = 'failed'
+      // Only the FIRST run has no session file and no task to resume (rule 6).
+      record.failure = classifyPiAgentFailure({
+        kind: 'launch-failure',
+        firstRun: record.runIndex === 0
+      })
+      record.failureMessage = failureSummary(`Failed to start the agent: ${msg}`) || null
       this.live.delete(toolUseId)
       if (background) this.host.backgroundWorkChanged()
       return { ok: false, error: `Failed to start the agent: ${msg}` }
@@ -883,6 +922,8 @@ export class PiSubagentManager {
       status: 'failed',
       text: 'Agent failed.',
       report: null,
+      // A run that threw inside the host is not recognised: permanent.
+      failure: classifyPiAgentFailure({ kind: 'turn-error', message: 'Agent failed.' }),
       usage: { totalTokens: 0, toolUses: 0, durationMs: 0 }
     }
     try {
@@ -933,7 +974,13 @@ export class PiSubagentManager {
         durationMs: this.now() - entry.startedAt
       }
       if (entry.stopReason) {
-        end = { status: 'stopped', text: stoppedText(entry.stopReason), report: null, usage }
+        end = {
+          status: 'stopped',
+          text: stoppedText(entry.stopReason),
+          report: null,
+          failure: null,
+          usage
+        }
       } else if (outcome !== 'stopped' && outcome.kind === 'ok') {
         const report = (await runner.lastAssistantText()) ?? '(the agent returned no text)'
         end = {
@@ -942,11 +989,18 @@ export class PiSubagentManager {
             `${safeForegroundReport(report)}\n\n` +
             `${continueLine(record.agentId, record.name || record.agentId)}\n${usageBlock(usage)}`,
           report,
+          failure: null,
           usage
         }
       } else {
         const message = outcome === 'stopped' ? 'stopped' : outcome.message
-        end = { status: 'failed', text: `Agent failed: ${message}`, report: message, usage }
+        end = {
+          status: 'failed',
+          text: `Agent failed: ${message}`,
+          report: message,
+          failure: classifyPiAgentFailure(failureInput(outcome, message)),
+          usage
+        }
       }
     } catch (err) {
       entry.closing = true
@@ -959,6 +1013,12 @@ export class PiSubagentManager {
       record.status = end.status
       // Only a run that actually ended stopped was stopped (review R1).
       record.stoppedBy = end.status === 'stopped' ? entry.stopReason : null
+      // The user-stop hold was raised when the stop was recorded (`stopWith`);
+      // a user turn since then already cleared it and must stay cleared, so
+      // the end only DROPS a hold the run did not end under.
+      if (record.stoppedBy !== 'user') record.userStopHold = false
+      record.failure = end.status === 'failed' ? end.failure : null
+      record.failureMessage = runFailureMessage(end)
       // One end line for every run, foreground or background (ids only).
       logger.info(
         'PiSubagents',
@@ -1043,7 +1103,8 @@ export class PiSubagentManager {
         usage: end.usage,
         summary,
         runIndex: entry.record.runIndex,
-        ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {})
+        ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {}),
+        ...runFailureDetails(end)
       }
     }
     logger.info(
@@ -1245,10 +1306,20 @@ export class PiSubagentManager {
           : `Agent ${target.label} is finishing its run; send the message again shortly.`
       )
     }
-    if (target.stoppedBy === 'user') {
+    // The user stopped it and has not spoken since (S1a): the model may not
+    // override a stop the user has not had a chance to follow up on.
+    if (target.userStopHold) {
       return errorResult(
-        `Agent "${target.label}" was stopped by the user and was not resumed. Treat its work as ` +
-          'cancelled; only start a new agent for it if the user explicitly asks.'
+        `Agent "${target.label}" was stopped by the user. Resume it only if the user asks you ` +
+          'to; the user has not spoken since the stop.'
+      )
+    }
+    // A failure a resume cannot fix (S1b): a context overflow, an unrecognised
+    // error, a first launch that never ran.
+    if (target.status === 'failed' && target.failure === 'permanent') {
+      return errorResult(
+        `Agent "${target.label}" failed (${target.failureMessage ?? 'a permanent error'}) and ` +
+          'cannot be resumed. Launch a new agent for the task if it is still needed.'
       )
     }
 
@@ -1368,8 +1439,25 @@ export class PiSubagentManager {
       prompt: link.prompt ?? '',
       runIndex: 1,
       status,
-      stoppedBy: link.stoppedBy ?? null
+      stoppedBy: link.stoppedBy ?? null,
+      // The user has not spoken since a stop this history records (until their
+      // next prompt — `userTurn`).
+      userStopHold: link.stoppedBy === 'user',
+      // A failed link from before the classification was persisted resumes,
+      // as it always did.
+      failure: status === 'failed' ? (link.failure ?? 'transient') : null,
+      failureMessage: status === 'failed' ? (link.failureMessage ?? null) : null
     })
+  }
+
+  /**
+   * The user sent the ROOT session a prompt (ADR-089 S1a): every user-stop hold
+   * lifts, so the model may resume an agent the user stopped. Called by
+   * `PiSession.run` for each user-authored prompt it hands to pi — never for
+   * an agent delivery, a host nudge or judge traffic.
+   */
+  userTurn(): void {
+    for (const r of this.records.values()) r.userStopHold = false
   }
 
   /**
@@ -1414,6 +1502,9 @@ export class PiSubagentManager {
       this.stopWith(id, reason, foregroundOnly)
     }
     entry.stopReason = reason
+    // The cascade above recorded the same reason on every live descendant, so
+    // each of them carries the hold too (S1a).
+    if (reason === 'user') entry.record.userStopHold = true
     entry.scope.stopped = true
     // F1: no grant of a stopped run may execute (now or in a later run).
     entry.scope.grants.clear()
@@ -1493,6 +1584,36 @@ export class PiSubagentManager {
     // consumer left.
     if (info.toolName === 'agent') this.stop(info.toolCallId, 'interrupt')
   }
+}
+
+/** A failed run's one-line failure message (null unless it failed with a classification). */
+function runFailureMessage(end: RunEnd): string | null {
+  return end.status === 'failed' && end.failure && end.report !== null
+    ? failureSummary(end.report) || null
+    : null
+}
+
+/**
+ * What a failed run adds to the persisted `details` (the foreground
+ * `cuiAgent` and the background notification alike): the classification and
+ * its message, only when there is a failure.
+ */
+function runFailureDetails(end: RunEnd): { failure?: PiAgentFailure; failureMessage?: string } {
+  if (end.status !== 'failed' || !end.failure) return {}
+  const failureMessage = runFailureMessage(end)
+  return { failure: end.failure, ...(failureMessage ? { failureMessage } : {}) }
+}
+
+/** What a failed run ended with, as the classifier takes it (the runner tells a dead child from pi's own error). */
+function failureInput(
+  outcome: Exclude<PiTurnOutcome, { kind: 'ok' }> | 'stopped',
+  message: string
+): PiAgentFailureInput {
+  if (outcome !== 'stopped') {
+    if (outcome.cause === 'exit') return { kind: 'process-exit' }
+    if (outcome.cause === 'refused') return { kind: 'refused-command' }
+  }
+  return { kind: 'turn-error', message }
 }
 
 /** The hosted tools a child may call (each needs a gate grant). */

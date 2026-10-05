@@ -6210,6 +6210,25 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     )
   })
 
+  it("a rejected credential (401) is a FAILED dispatch carrying pi's message, not an empty completion", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_401' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const errored = piAssistantMessageEnd({ text: '' })
+    const msg = errored.message as Record<string, unknown>
+    target.pushEvent({
+      ...errored,
+      message: { ...msg, stopReason: 'error', errorMessage: '401 {"type":"error"}' }
+    })
+    // pi's own settle after the errored turn must not turn it into a completion.
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe('Dispatched turn failed: 401 {"type":"error"}')
+  })
+
   it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
     vi.useFakeTimers()
     try {

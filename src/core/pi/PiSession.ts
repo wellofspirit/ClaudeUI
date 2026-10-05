@@ -1315,6 +1315,14 @@ export class PiSession extends BaseSession {
       return
     }
 
+    // The user has spoken (ADR-089 S1a): lift every user-stop hold so the
+    // model may resume an agent the user stopped. THE one place a user-authored
+    // prompt reaches pi — a typed prompt, a queued one flushed later and a steer
+    // all come through here; agent deliveries (deliverAgentMessage), the plan
+    // toggles and the judge's ephemeral asks never do. After `ensureStarted`,
+    // which on a resume rebuilds the records this must clear.
+    this.subagents.userTurn()
+
     // M-PI1: read the busy state AFTER `await ensureStarted()`, never before.
     // Two run()s landing during the spawn window both awaited the SAME
     // startedPromise; run #1's continuation runs first and synchronously sets

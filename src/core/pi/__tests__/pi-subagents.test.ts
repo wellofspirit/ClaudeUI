@@ -23,6 +23,8 @@ import {
   type PiAgentDefinition,
   type PiAgentRegistry
 } from '../pi-agent-registry'
+import { collectAgentLinkRecords } from '../pi-subagent-store'
+import type { PiSessionEntry } from '../pi-protocol'
 import {
   buildPiSubagentChildArgs,
   buildPiSubagentChildEnv,
@@ -45,6 +47,8 @@ interface FakeChild {
   opts: PiChildSpawnOpts
   env: NodeJS.ProcessEnv
   push: (ev: Cmd) => void
+  /** The child process dies: fires the runner's onExit handlers. */
+  exit: () => void
   client: {
     request: ReturnType<typeof vi.fn>
     dispose: ReturnType<typeof vi.fn>
@@ -55,7 +59,8 @@ interface FakeChild {
 /** A fake SpawnPiChildFn: real mapper/runner, fake transport (the dispatcher suite's makeFakePiTarget shape). */
 function makeFakeSpawn(
   opts: {
-    setModelFails?: boolean
+    /** true: every child's set_model fails; a function picks per child (1-based). */
+    setModelFails?: boolean | ((n: number) => boolean)
     /** Park child n's get_last_assistant_text (1-based) until the promise resolves. */
     holdLastText?: (n: number) => Promise<void> | undefined
   } = {}
@@ -63,6 +68,7 @@ function makeFakeSpawn(
   const children: FakeChild[] = []
   const spawn = vi.fn<SpawnPiChildFn>(async (spawnOpts) => {
     const handlers: Array<(ev: Cmd) => void> = []
+    const exitHandlers: Array<() => void> = []
     const n = children.length + 1
     const client = {
       request: vi.fn(async (cmd: Cmd) => {
@@ -75,7 +81,9 @@ function makeFakeSpawn(
               data: { sessionId: `s${n}` }
             }
           case 'set_model':
-            return opts.setModelFails
+            return (
+              typeof opts.setModelFails === 'function' ? opts.setModelFails(n) : opts.setModelFails
+            )
               ? { type: 'response', command: 'set_model', success: false, error: 'no such model' }
               : { type: 'response', command: 'set_model', success: true }
           case 'get_last_assistant_text':
@@ -94,7 +102,10 @@ function makeFakeSpawn(
         handlers.push(cb)
         return () => {}
       }),
-      onExit: vi.fn(() => () => {}),
+      onExit: vi.fn((cb: () => void) => {
+        exitHandlers.push(cb)
+        return () => {}
+      }),
       dispose: vi.fn()
     }
     children.push({
@@ -102,6 +113,9 @@ function makeFakeSpawn(
       env: spawnOpts.env!({ url: 'http://127.0.0.1:1', token: 'child-token' }),
       push: (ev) => {
         for (const h of handlers) h(ev)
+      },
+      exit: () => {
+        for (const h of exitHandlers) h()
       },
       client,
       commands: () => client.request.mock.calls.map((c) => c[0] as Cmd)
@@ -1358,7 +1372,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
     expect(notes.map((n) => (n as { runIndex: number }).runIndex)).toEqual([1, 2])
   })
 
-  it('S3: to a user-stopped child → the CC2 refusal, no spawn', async () => {
+  it('S3: to a user-stopped child → refused until the user speaks, no spawn', async () => {
     const fake = makeFakeSpawn()
     const { host, delivered } = makeOrderedHost()
     const mgr = mgrWith(fake, host)
@@ -1372,8 +1386,8 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
         {
           type: 'text',
           text:
-            'Agent "worker" was stopped by the user and was not resumed. Treat its work as ' +
-            'cancelled; only start a new agent for it if the user explicitly asks.'
+            'Agent "worker" was stopped by the user. Resume it only if the user asks you to; ' +
+            'the user has not spoken since the stop.'
         }
       ],
       isError: true
@@ -1674,7 +1688,7 @@ describe('PiSubagentManager — S3b review round 1', () => {
     expect(fake.children).toHaveLength(2)
   })
 
-  it('R2: a rebuilt record stopped by the user gets the CC2 refusal and no spawn', async () => {
+  it('R2: a rebuilt record stopped by the user is refused until the user speaks, with no spawn', async () => {
     const fake = makeFakeSpawn()
     const { host } = makeOrderedHost()
     const mgr = mgrWith(fake, host)
@@ -1688,10 +1702,18 @@ describe('PiSubagentManager — S3b review round 1', () => {
       stoppedBy: 'user'
     })
     expect((await mgr.sendMessage({ to: 'halted', message: 'go' }, null)).content[0].text).toBe(
-      'Agent "halted" was stopped by the user and was not resumed. Treat its work as ' +
-        'cancelled; only start a new agent for it if the user explicitly asks.'
+      'Agent "halted" was stopped by the user. Resume it only if the user asks you to; ' +
+        'the user has not spoken since the stop.'
     )
     expect(fake.spawn).not.toHaveBeenCalled()
+    mgr.userTurn()
+    expect((await mgr.sendMessage({ to: 'halted', message: 'go' }, null)).content[0].text).toBe(
+      'Resuming agent halted. You will be notified when it completes.'
+    )
+    expect(fake.spawn).toHaveBeenCalledTimes(1)
+    fake.children[0].push({ type: 'agent_start' })
+    fake.children[0].push(deliveredEvent(deliveriesOn(fake.children[0])[0]))
+    fake.children[0].push({ type: 'agent_settled' })
   })
 
   it('M1: a child stops its own descendant', async () => {
@@ -2064,5 +2086,524 @@ describe('PiSubagentManager — logging (S4, ids and kinds only)', () => {
     }
     child.push(deliveredEvent(p))
     await settle(child)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S1 — resume rules: the user-stop hold and failure classification
+// ---------------------------------------------------------------------------
+
+/** pi's errored assistant message_end: the mapper turns it into the turn's `error` output. */
+function errorEnd(errorMessage: string): Cmd {
+  const m = (usageEnd(0, 0).message ?? {}) as Record<string, unknown>
+  return { type: 'message_end', message: { ...m, stopReason: 'error', errorMessage } }
+}
+
+describe('PiSubagentManager — S1a: the user-stop hold', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  const HOLD = (label: string): string =>
+    `Agent "${label}" was stopped by the user. Resume it only if the user asks you to; ` +
+    'the user has not spoken since the stop.'
+  /** Let a resumed child finish so the test leaves nothing running. */
+  async function finishResume(child: FakeChild): Promise<void> {
+    await vi.waitFor(() => expect(deliveriesOn(child)).toHaveLength(1))
+    child.push({ type: 'agent_start' })
+    child.push(deliveredEvent(deliveriesOn(child)[0]))
+    child.push({ type: 'agent_settled' })
+  }
+
+  it('a user stop → send_message refused → userTurn() → send_message resumes', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    expect(mgr.stop('call-w', 'user')).toBe(true)
+    fake.children[0].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const record = mgr.record(agentIdOf(fake.children[0]))!
+    expect(record).toMatchObject({ status: 'stopped', stoppedBy: 'user', userStopHold: true })
+
+    expect(await mgr.sendMessage({ to: 'worker', message: 'go on' }, null)).toEqual({
+      content: [{ type: 'text', text: HOLD('worker') }],
+      isError: true
+    })
+    expect(fake.children).toHaveLength(1)
+
+    mgr.userTurn()
+    expect(record.userStopHold).toBe(false)
+    expect((await mgr.sendMessage({ to: 'worker', message: 'go on' }, null)).content[0].text).toBe(
+      'Resuming agent worker. You will be notified when it completes.'
+    )
+    expect(fake.children).toHaveLength(2)
+    await finishResume(fake.children[1])
+    await vi.waitFor(() => expect(delivered).toHaveLength(2))
+    // The resumed run ended normally: nothing is held any more.
+    expect(record).toMatchObject({ status: 'completed', stoppedBy: null, userStopHold: false })
+  })
+
+  it('a user turn while the stopped run is still draining is not undone by the run ending', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'worker' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    mgr.stop('call-w', 'user')
+    const record = mgr.record(agentIdOf(fake.children[0]))!
+    // The stop is recorded the moment it is made …
+    expect(record.userStopHold).toBe(true)
+    // … so a prompt the user types before the abort has drained is "since the stop".
+    mgr.userTurn()
+    fake.children[0].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(record).toMatchObject({ status: 'stopped', stoppedBy: 'user', userStopHold: false })
+    expect((await mgr.sendMessage({ to: 'worker', message: 'x' }, null)).content[0].text).toMatch(
+      /^Resuming agent worker\./
+    )
+    await finishResume(fake.children[1])
+  })
+
+  it('the hold covers every descendant a user stop cascaded to', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    const grand = fake.children[1]
+    await promptedWith(grand)
+
+    expect(mgr.stop('call-L', 'user')).toBe(true)
+    grand.push({ type: 'agent_settled' })
+    lead.push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(0))
+    await vi.waitFor(() => expect(delivered.length).toBeGreaterThan(0))
+
+    const leadRec = mgr.record(agentIdOf(lead))!
+    const grandRec = mgr.record(agentIdOf(grand))!
+    expect(leadRec).toMatchObject({ stoppedBy: 'user', userStopHold: true })
+    expect(grandRec).toMatchObject({ stoppedBy: 'user', userStopHold: true })
+    expect((await mgr.sendMessage({ to: 'grand', message: 'x' }, null)).content[0].text).toBe(
+      HOLD('grand')
+    )
+    expect((await mgr.sendMessage({ to: 'lead', message: 'x' }, null)).content[0].text).toBe(
+      HOLD('lead')
+    )
+    expect(fake.children).toHaveLength(2)
+
+    mgr.userTurn()
+    expect(grandRec.userStopHold).toBe(false)
+    expect(leadRec.userStopHold).toBe(false)
+    expect((await mgr.sendMessage({ to: 'grand', message: 'x' }, null)).content[0].text).toMatch(
+      /^Resuming agent grand\./
+    )
+    await finishResume(fake.children[2])
+  })
+
+  it('task_stop (agent) and an interrupt leave the agent resumable with no user turn', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    // task_stop
+    await mgr.run({ description: 'd', prompt: 'p', name: 'bg' }, 'call-bg', null)
+    await promptedWith(fake.children[0])
+    expect(mgr.taskStop({ task_id: 'bg' }, null).content[0].text).toBe('Stopped agent bg.')
+    fake.children[0].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const bgRec = mgr.record(agentIdOf(fake.children[0]))!
+    expect(bgRec).toMatchObject({ stoppedBy: 'agent', userStopHold: false })
+    expect((await mgr.sendMessage({ to: 'bg', message: 'again' }, null)).content[0].text).toMatch(
+      /^Resuming agent bg\./
+    )
+    await finishResume(fake.children[1])
+
+    // interrupt (stopForeground)
+    const fg = mgr.run(
+      { description: 'd', prompt: 'p', name: 'fg', run_in_background: false },
+      'call-fg',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    await promptedWith(fake.children[2])
+    mgr.stopForeground('interrupt')
+    fake.children[2].push({ type: 'agent_settled' })
+    await fg
+    const fgRec = mgr.record(agentIdOf(fake.children[2]))!
+    expect(fgRec).toMatchObject({ stoppedBy: 'interrupt', userStopHold: false })
+    expect((await mgr.sendMessage({ to: 'fg', message: 'again' }, null)).content[0].text).toMatch(
+      /^Resuming agent fg\./
+    )
+    await finishResume(fake.children[3])
+  })
+
+  it('a rebuilt link that says stoppedBy user holds; any other stop reason does not', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const link = (id: string, name: string, stoppedBy: 'user' | 'agent') => ({
+      agentId: id,
+      originToolUseId: `call-${name}`,
+      subagentType: 'general-purpose',
+      name,
+      status: 'stopped',
+      stoppedBy
+    })
+    mgr.adoptRecord(link('88888888-8888-4888-8888-888888888888', 'u', 'user'))
+    mgr.adoptRecord(link('99999999-9999-4999-8999-999999999999', 'a', 'agent'))
+    expect(mgr.record('88888888-8888-4888-8888-888888888888')!.userStopHold).toBe(true)
+    expect(mgr.record('99999999-9999-4999-8999-999999999999')!.userStopHold).toBe(false)
+    expect((await mgr.sendMessage({ to: 'a', message: 'x' }, null)).content[0].text).toMatch(
+      /^Resuming agent a\./
+    )
+    await finishResume(fake.children[0])
+  })
+})
+
+describe('PiSubagentManager — S1b: failure classification', () => {
+  function mgrWith(fake: ReturnType<typeof makeFakeSpawn>, host: PiSubagentHost) {
+    return new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  async function finishResume(child: FakeChild): Promise<void> {
+    await vi.waitFor(() => expect(deliveriesOn(child)).toHaveLength(1))
+    child.push({ type: 'agent_start' })
+    child.push(deliveredEvent(deliveriesOn(child)[0]))
+    child.push({ type: 'agent_settled' })
+  }
+  const OVERFLOW = 'prompt is too long: 213462 tokens > 200000 maximum'
+
+  it('a permanent failure (context overflow) is recorded, persisted on the notification, and refuses the resume', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    fake.children[0].push(errorEnd(OVERFLOW))
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const record = mgr.record(agentIdOf(fake.children[0]))!
+    expect(record).toMatchObject({
+      status: 'failed',
+      failure: 'permanent',
+      failureMessage: OVERFLOW
+    })
+    expect(delivered[0].details).toMatchObject({ status: 'failed', failure: 'permanent' })
+
+    expect(await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).toEqual({
+      content: [
+        {
+          type: 'text',
+          text:
+            `Agent "w" failed (${OVERFLOW}) and cannot be resumed. ` +
+            'Launch a new agent for the task if it is still needed.'
+        }
+      ],
+      isError: true
+    })
+    expect(fake.children).toHaveLength(1)
+  })
+
+  it('a transient failure (provider overloaded) resumes like a completed agent', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    fake.children[0].push(errorEnd('529 {"type":"error","error":{"type":"overloaded_error"}}'))
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].details).toMatchObject({ status: 'failed', failure: 'transient' })
+    const record = mgr.record(agentIdOf(fake.children[0]))!
+    expect(record).toMatchObject({ status: 'failed', failure: 'transient' })
+    expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
+      /^Resuming agent w\./
+    )
+    expect(fake.children).toHaveLength(2)
+    // The new run clears the failure while it runs.
+    expect(record).toMatchObject({ status: 'running', failure: null, failureMessage: null })
+    await finishResume(fake.children[1])
+  })
+
+  it('a rejected credential (401) FAILS the run — it used to read as completed — and is transient and resumable', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    const auth = '401 {"type":"error","error":{"type":"authentication_error","message":"bad key"}}'
+    fake.children[0].push(errorEnd(auth))
+    // pi's own settle follows an errored turn; it must not turn the failure into a completion.
+    fake.children[0].push({ type: 'agent_settled' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].details).toMatchObject({ status: 'failed', failure: 'transient' })
+    expect(mgr.record(agentIdOf(fake.children[0]))).toMatchObject({
+      status: 'failed',
+      failure: 'transient',
+      failureMessage: auth
+    })
+    expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
+      /^Resuming agent w\./
+    )
+    await finishResume(fake.children[1])
+  })
+
+  it('a crashed child process is transient', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    fake.children[0].exit()
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].details).toMatchObject({ status: 'failed', failure: 'transient' })
+    expect(mgr.record(agentIdOf(fake.children[0]))).toMatchObject({
+      failure: 'transient',
+      failureMessage: 'pi child process exited unexpectedly'
+    })
+    expect((await mgr.sendMessage({ to: 'w', message: 'retry' }, null)).content[0].text).toMatch(
+      /^Resuming agent w\./
+    )
+    await finishResume(fake.children[1])
+  })
+
+  it('an unrecognised error is permanent', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await promptedWith(fake.children[0])
+    fake.children[0].push(
+      errorEnd('The model returned something we do not understand\nsecond line')
+    )
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    // Only the first line is kept.
+    expect(mgr.record(agentIdOf(fake.children[0]))).toMatchObject({
+      failure: 'permanent',
+      failureMessage: 'The model returned something we do not understand'
+    })
+  })
+
+  it('a FOREGROUND failure carries failure on details.cuiAgent (a stopped one does not)', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const failed = mgr.run(
+      { description: 'd', prompt: 'p', name: 'f1', run_in_background: false },
+      'call-f1',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    await promptedWith(fake.children[0])
+    fake.children[0].push(errorEnd(OVERFLOW))
+    const r = await failed
+    expect(r.isError).toBe(true)
+    expect(r.details).toMatchObject({
+      cuiAgent: { status: 'failed', failure: 'permanent' }
+    })
+
+    const stopped = mgr.run(
+      { description: 'd', prompt: 'p', name: 'f2', run_in_background: false },
+      'call-f2',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    await promptedWith(fake.children[1])
+    mgr.stop('call-f2', 'user')
+    fake.children[1].push({ type: 'agent_settled' })
+    const r2 = await stopped
+    expect((r2.details as { cuiAgent: Record<string, unknown> }).cuiAgent).toMatchObject({
+      status: 'stopped',
+      stoppedBy: 'user'
+    })
+    expect('failure' in (r2.details as { cuiAgent: object }).cuiAgent).toBe(false)
+  })
+
+  it('a launch failure on a RESUME is transient and the agent resumes again; a first-run one keeps no record', async () => {
+    const fake = makeFakeSpawn({ setModelFails: (n) => n === 2 })
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'w' }, 'call-w', null)
+    await settle(fake.children[0])
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const record = mgr.record(agentIdOf(fake.children[0]))!
+
+    // The resume's launch fails (child 2: set_model refused).
+    expect(await mgr.sendMessage({ to: 'w', message: 'again' }, null)).toEqual({
+      content: [{ type: 'text', text: 'Failed to start the agent: no such model' }],
+      isError: true
+    })
+    expect(record).toMatchObject({
+      status: 'failed',
+      failure: 'transient',
+      failureMessage: 'Failed to start the agent: no such model',
+      runIndex: 1
+    })
+    // Transient: the next resume is allowed (child 3 starts).
+    expect((await mgr.sendMessage({ to: 'w', message: 'again' }, null)).content[0].text).toMatch(
+      /^Resuming agent w\./
+    )
+    await finishResume(fake.children[2])
+
+    // A FIRST run that fails to launch never leaves a record to resume (permanent).
+    const fake2 = makeFakeSpawn({ setModelFails: true })
+    const mgr2 = mgrWith(fake2, makeOrderedHost().host)
+    const r = await mgr2.run({ description: 'd', prompt: 'p', name: 'x' }, 'call-x', null)
+    expect(r.isError).toBe(true)
+    expect((await mgr2.sendMessage({ to: 'x', message: 'y' }, null)).content[0].text).toMatch(
+      /^No agent "x" in this session/
+    )
+  })
+
+  it('an adopted failed link: no failure field resumes (old histories); permanent is refused', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    const old = '11111111-1111-4111-8111-111111111111'
+    const perm = '22222222-2222-4222-8222-222222222222'
+    mgr.adoptRecord({
+      agentId: old,
+      originToolUseId: 'call-old',
+      subagentType: 'general-purpose',
+      name: 'old',
+      status: 'failed'
+    })
+    mgr.adoptRecord({
+      agentId: perm,
+      originToolUseId: 'call-perm',
+      subagentType: 'general-purpose',
+      name: 'perm',
+      status: 'failed',
+      failure: 'permanent',
+      failureMessage: 'prompt is too long: 213462 tokens'
+    })
+    mgr.adoptRecord({
+      agentId: '33333333-3333-4333-8333-333333333333',
+      originToolUseId: 'call-nomsg',
+      subagentType: 'general-purpose',
+      name: 'nomsg',
+      status: 'failed',
+      failure: 'permanent'
+    })
+    expect(mgr.record(old)).toMatchObject({ status: 'failed', failure: 'transient' })
+    expect((await mgr.sendMessage({ to: 'old', message: 'x' }, null)).content[0].text).toMatch(
+      /^Resuming agent old\./
+    )
+    expect(await mgr.sendMessage({ to: 'perm', message: 'x' }, null)).toEqual({
+      content: [
+        {
+          type: 'text',
+          text:
+            'Agent "perm" failed (prompt is too long: 213462 tokens) and cannot be resumed. ' +
+            'Launch a new agent for the task if it is still needed.'
+        }
+      ],
+      isError: true
+    })
+    // A permanent link written without a message still refuses.
+    expect((await mgr.sendMessage({ to: 'nomsg', message: 'x' }, null)).content[0].text).toBe(
+      'Agent "nomsg" failed (a permanent error) and cannot be resumed. ' +
+        'Launch a new agent for the task if it is still needed.'
+    )
+    expect(fake.children).toHaveLength(1)
+    await finishResume(fake.children[0])
+  })
+
+  it('round trip: details.cuiAgent.failure and the notification details.failure → collectAgentLinkRecords → adoptRecord', async () => {
+    const fake = makeFakeSpawn()
+    const { host, delivered } = makeOrderedHost()
+    const mgr = mgrWith(fake, host)
+    // A foreground agent that fails permanently: its toolResult details carry failure.
+    const fg = mgr.run(
+      { description: 'd', prompt: 'p', name: 'fg', run_in_background: false },
+      'call-fg',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    await promptedWith(fake.children[0])
+    fake.children[0].push(errorEnd(OVERFLOW))
+    const fgResult = await fg
+    // A background agent that fails permanently: the launch result has no failure, its notification does.
+    const bgLaunch = await mgr.run({ description: 'd', prompt: 'p', name: 'bg' }, 'call-bg', null)
+    await promptedWith(fake.children[1])
+    fake.children[1].push(errorEnd(OVERFLOW))
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+
+    let seq = 0
+    const base = () => ({ id: `e${seq++}`, parentId: null, timestamp: '2024-01-01T00:00:00.000Z' })
+    const toolResult = (callId: string, r: { details?: unknown }): PiSessionEntry =>
+      ({
+        ...base(),
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: callId,
+          toolName: 'agent',
+          content: [{ type: 'text', text: 'x' }],
+          details: r.details,
+          isError: false,
+          timestamp: 1
+        }
+      }) as PiSessionEntry
+    const note: PiSessionEntry = {
+      ...base(),
+      type: 'custom_message',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: 'n' }],
+      display: true,
+      details: {
+        v: 1,
+        kind: 'task-notification',
+        title: 't',
+        ...delivered[0].details,
+        deliveryId: 'd1'
+      }
+    } as PiSessionEntry
+    const links = collectAgentLinkRecords([
+      toolResult('call-fg', fgResult),
+      toolResult('call-bg', bgLaunch),
+      note
+    ])
+    // Both persisted shapes carry the message beside the classification.
+    expect(fgResult.details).toMatchObject({
+      cuiAgent: { failure: 'permanent', failureMessage: OVERFLOW }
+    })
+    expect(delivered[0].details).toMatchObject({ failure: 'permanent', failureMessage: OVERFLOW })
+    expect(links.map((l) => [l.name, l.status, l.failure, l.failureMessage])).toEqual([
+      ['fg', 'failed', 'permanent', OVERFLOW],
+      ['bg', 'failed', 'permanent', OVERFLOW]
+    ])
+
+    const mgr2 = mgrWith(makeFakeSpawn(), makeOrderedHost().host)
+    for (const l of links) mgr2.adoptRecord(l)
+    for (const name of ['fg', 'bg']) {
+      expect(mgr2.record(links.find((l) => l.name === name)!.agentId)).toMatchObject({
+        status: 'failed',
+        failure: 'permanent',
+        failureMessage: OVERFLOW
+      })
+      expect((await mgr2.sendMessage({ to: name, message: 'x' }, null)).content[0].text).toBe(
+        `Agent "${name}" failed (${OVERFLOW}) and cannot be resumed. ` +
+          'Launch a new agent for the task if it is still needed.'
+      )
+    }
   })
 })

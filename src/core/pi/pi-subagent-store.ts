@@ -14,7 +14,7 @@
  * id is model-influenced data read back from disk, so it is validated as a
  * uuid v4 BEFORE it ever reaches a `path.join` (no traversal through it).
  *
- * A leaf (fs/os/path, pi-protocol types, pi-delivery): pi-session-list.ts and
+ * A leaf (fs/os/path, pi-protocol types, pi-delivery, the pure pi-agent-failure): pi-session-list.ts and
  * pi-subagents.ts import it, never the other way round.
  */
 import { promises as fsp, readdirSync } from 'fs'
@@ -22,6 +22,7 @@ import { homedir } from 'os'
 import path from 'path'
 import type { PiSessionEntry } from './pi-protocol'
 import { piAgentDeliveryDetails } from './pi-delivery'
+import { failureSummary, parsePiAgentFailure, type PiAgentFailure } from './pi-agent-failure'
 
 /** `~/.claude/ui/pi-subagents` (the same per-user `~/.claude/ui` root the vault and the bridge use). */
 export function piSubagentSessionsRoot(): string {
@@ -90,6 +91,18 @@ export interface PiAgentLinkRecord {
   /** The last task notification's status for that call, else the tool result's own. */
   status?: string
   stoppedBy?: 'user' | 'agent' | 'interrupt' | 'dispose' | null
+  /**
+   * A failed run's classification (ADR-089 S1b). Absent on a link written
+   * before it was persisted: the manager then treats the failure as transient.
+   */
+  failure?: PiAgentFailure
+  /** Its first line, ≤ 200 characters (capped on read: history is untrusted). */
+  failureMessage?: string
+}
+
+/** A persisted failure message, capped to one line of at most 200 characters; anything but a non-empty string is absent. */
+function persistedFailureMessage(v: unknown): string | undefined {
+  return typeof v === 'string' ? failureSummary(v) || undefined : undefined
 }
 
 const STOP_REASONS = new Set(['user', 'agent', 'interrupt', 'dispose'])
@@ -119,6 +132,8 @@ export function collectAgentLinkRecords(entries: readonly PiSessionEntry[]): PiA
         ?.cuiAgent
       if (!cui || !isValidAgentId(cui.agentId) || typeof cui.subagentType !== 'string') continue
       const stoppedBy = s(cui.stoppedBy)
+      const failure = parsePiAgentFailure(cui.failure)
+      const failureMessage = failure ? persistedFailureMessage(cui.failureMessage) : undefined
       const args = callInput.get(e.message.toolCallId)
       const description = s(cui.description) ?? s(args?.description)
       const prompt = s(args?.prompt)
@@ -135,7 +150,9 @@ export function collectAgentLinkRecords(entries: readonly PiSessionEntry[]): PiA
         stoppedBy:
           stoppedBy && STOP_REASONS.has(stoppedBy)
             ? (stoppedBy as PiAgentLinkRecord['stoppedBy'])
-            : null
+            : null,
+        ...(failure ? { failure } : {}),
+        ...(failureMessage ? { failureMessage } : {})
       })
     } else if (e.type === 'custom_message') {
       const d = piAgentDeliveryDetails(e.customType, e.details)
@@ -145,6 +162,14 @@ export function collectAgentLinkRecords(entries: readonly PiSessionEntry[]): PiA
       link.status = typeof d.status === 'string' ? d.status : link.status
       link.stoppedBy =
         typeof d.stoppedBy === 'string' && STOP_REASONS.has(d.stoppedBy) ? d.stoppedBy : null
+      // The latest run's classification replaces the launch result's (a resumed
+      // run that completed carries none).
+      const failure = parsePiAgentFailure(d.failure)
+      const failureMessage = failure ? persistedFailureMessage(d.failureMessage) : undefined
+      if (failure) link.failure = failure
+      else delete link.failure
+      if (failureMessage) link.failureMessage = failureMessage
+      else delete link.failureMessage
     }
   }
   return [...byCall.values()]

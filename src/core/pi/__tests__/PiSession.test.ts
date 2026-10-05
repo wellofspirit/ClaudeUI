@@ -6899,7 +6899,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  it('G2 (session, review R2): a rebuilt link stopped by the user is refused, with no spawn', async () => {
+  it('G2 (session, S1a): a rebuilt link stopped by the user is refused until the USER prompts — an agent delivery does not count', async () => {
     mockLoadPiAgentLinks.mockReturnValue([
       {
         agentId: '88888888-8888-4888-8888-888888888888',
@@ -6920,14 +6920,37 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       { model: 'openai-codex/gpt-5.6-luna', resumeSessionId: 'resume-g2-stopped' },
       { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
     )
-    await session.run('PARENT-INTENT: continue')
-    await gate('sm-g2s', 'send_message', { to: 'halted', message: 'go' })
-    const r = await hostedTool('send_message', { to: 'halted', message: 'go' }, 'sm-g2s')
-    expect(r.isError).toBe(true)
-    expect(r.content[0].text).toMatch(
-      /^Agent "halted" was stopped by the user and was not resumed\./
+    // Warm-up only (no prompt): the history load rebuilds the record.
+    await session.run(null)
+    await vi.waitFor(() => expect(mockLoadPiAgentLinks).toHaveBeenCalledWith('resume-g2-stopped'))
+    const resume = async (id: string): Promise<{ isError?: boolean; text: string }> => {
+      await gate(id, 'send_message', { to: 'halted', message: 'go' })
+      const r = await hostedTool('send_message', { to: 'halted', message: 'go' }, id)
+      return { isError: r.isError, text: r.content[0].text }
+    }
+    const held = await resume('sm-g2s-1')
+    expect(held.isError).toBe(true)
+    expect(held.text).toBe(
+      'Agent "halted" was stopped by the user. Resume it only if the user asks you to; ' +
+        'the user has not spoken since the stop.'
     )
     expect(kids.children).toHaveLength(0)
+
+    // An agent's message is not the user speaking.
+    session.deliverAgentMessage(payload())
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    expect((await resume('sm-g2s-2')).isError).toBe(true)
+    expect(kids.children).toHaveLength(0)
+
+    // The user's prompt lifts the hold.
+    settleParent()
+    await session.run('please carry on with the halted agent')
+    const resumed = await resume('sm-g2s-3')
+    expect(resumed).toEqual({
+      isError: undefined,
+      text: 'Resuming agent halted. You will be notified when it completes.'
+    })
+    expect(kids.children).toHaveLength(1)
     session.dispose()
   })
 

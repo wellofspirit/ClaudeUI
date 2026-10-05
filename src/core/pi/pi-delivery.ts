@@ -52,6 +52,10 @@ export interface PiAgentDeliveryDetails {
   to?: string
   /** A stopped run: who stopped it (`user`, `agent`, `interrupt`) — the G7 record rebuild reads it. */
   stoppedBy?: 'user' | 'agent' | 'interrupt' | 'dispose'
+  /** A failed run: whether a resume can help (`classifyPiAgentFailure`) — the G7 record rebuild reads it. */
+  failure?: 'transient' | 'permanent'
+  /** The failure's first line (≤ 200 characters), shown in the refusal of a resume. */
+  failureMessage?: string
 }
 
 export interface PiAgentDelivery {
