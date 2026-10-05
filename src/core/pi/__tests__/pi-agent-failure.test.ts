@@ -81,6 +81,19 @@ describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first matc
     }
   })
 
+  it('follows the patterns pi 1.0.4 added (z.ai CN overflow, ChatGPT subscription, capacity, HTTP/2 cancel)', () => {
+    expect(classify('{"code":"1261","message":"Prompt exceeds max length"}')).toBe('permanent')
+    for (const m of [
+      'subscription_sharing_usage_limit_exceeded',
+      'The model is at capacity, try again later',
+      'The pending stream has been canceled',
+      'subscription_sharing_usage_unavailable',
+      'subscription_sharing_user_unavailable'
+    ]) {
+      expect(classify(m), m).toBe('transient')
+    }
+  })
+
   it('5. a crashed child process is transient', () => {
     expect(classifyPiAgentFailure({ kind: 'process-exit' })).toBe('transient')
   })

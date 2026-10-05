@@ -280,7 +280,7 @@ text points at its own subagent tool; pi learns which models exist instead of gu
   transient; a launch failure → transient for a resume, permanent for a first run (no task to
   resume); a refused `/cui-` prompt and anything unmatched → permanent. The overflow, quota and
   retryable patterns are PORTED from `vendor/pi-src/packages/ai/src/utils/{overflow,retry}.ts` at
-  pi 0.87.1 — re-diff them at every pi bump. `failure` and `failureMessage` (one line, ≤ 200
+  pi 1.0.4 — re-diff them at every pi bump. `failure` and `failureMessage` (one line, ≤ 200
   characters, capped again on read) persist in `details.cuiAgent` and the notification `details`;
   a later notification without them clears them; a failed link written before this change reads as
   transient. A permanently failed agent refuses `send_message` with its message. pi drops errored
