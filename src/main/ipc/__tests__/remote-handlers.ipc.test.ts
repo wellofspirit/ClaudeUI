@@ -463,6 +463,27 @@ describe('registerRemoteHandlers', () => {
     )
   })
 
+  // A remote client's per-engine request: the id reaches the shared handler,
+  // only that engine answers, and an id that is not an engine rejects.
+  it('session:get-engine-models answers only the engine a remote client asks for', async () => {
+    const native = {
+      engineId: 'codex' as const,
+      vendorId: 'openai',
+      vendorName: 'Native OpenAI',
+      models: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
+      ]
+    }
+    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    await expect(
+      dispatcher.handle(makeRequest('session:get-engine-models', 'codex'), remoteConn)
+    ).resolves.toEqual([native])
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
+    await expect(
+      dispatcher.handle(makeRequest('session:get-engine-models', 'gemini'), remoteConn)
+    ).rejects.toThrow(/unknown engine/)
+  })
+
   // The model probe, title and commit message never run a turn that could use
   // a plugin's tools, so their processes skip the post-initialize reload.
   it.each([

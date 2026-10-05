@@ -347,8 +347,9 @@ export interface SyncEventMap {
    * An engine's model catalog became available after main had answered a
    * client with a degraded empty one (today: pi's probe failed, or boot's
    * invalidations kept killing it, and a later probe filled it). A nudge:
-   * `session:get-engine-models` is the shape, and a client reloads its models.
-   * Never fired by a warm-cache read, so that reload cannot loop.
+   * `session:get-engine-models` (asked for `engineId`) is the shape, and a
+   * client reloads that engine's models. Never fired by a warm-cache read, so
+   * that reload cannot loop.
    */
   'engine:models-changed': (data: { engineId: EngineId }) => void
   /**

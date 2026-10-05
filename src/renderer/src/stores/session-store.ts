@@ -65,6 +65,7 @@ import type {
   FileAttachment,
   ChatgptRateLimits
 } from '../../../shared/types'
+import { HARNESS_IDS } from '../../../shared/harness-types'
 // The harness snapshot (ADR-082 §8): whether a new session's harness runs.
 // `harness-store` imports nothing from this module, so there is no cycle.
 import { harnessStore } from '../components/SettingsDialog/harness-store'
@@ -1477,9 +1478,15 @@ export interface SessionState {
    *  reject it. Claude-only — opencode and pi implement auto themselves and are
    *  not governed by Claude's settings file. */
   autoModeDisabledBySettings: boolean
-  /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
-   *  an opencode provider/default-model change in Settings. */
+  /** Bumped by EVERY model reload, whole or one engine's — what a Settings pane
+   *  follows to re-read its models (e.g. after an opencode provider or
+   *  default-model change). */
   modelReloadNonce: number
+  /** Per engine, bumped when THAT engine's models may have changed: by every
+   *  `reloadModels()` and by `reloadEngineModels(engineId)`. The composer
+   *  re-fetches one engine's slice off its own entry, so a one-engine reload
+   *  re-probes no other engine. */
+  engineModelReloadNonces: Record<EngineId, number>
 
   // Global (not per-session)
   engineConfig: EngineConfig
@@ -1604,8 +1611,10 @@ export interface SessionState {
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
    *  later in THIS app run pick it up without a restart. */
   setDefaultPermissionMode: (mode: PermissionMode) => void
-  /** Force the model picker to re-fetch the engine model list. */
+  /** Force the model picker and every Settings model list to re-fetch, all engines. */
   reloadModels: () => void
+  /** Re-fetch ONE engine's models in the picker; Settings panes re-read too. */
+  reloadEngineModels: (engineId: EngineId) => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -1725,6 +1734,12 @@ export interface SessionState {
   setSelectedModel: (model: string) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
+  /**
+   * Replace ONE engine's slice of `availableModels` (a model without `engineId`
+   * is Claude's), keeping the others and the claude, opencode, pi, codex order
+   * whatever order the per-engine answers arrive in.
+   */
+  setEngineModels: (engineId: EngineId, models: ModelInfo[]) => void
   /**
    * "Start fresh". Async since the reset became a replicated event — await it
    * before spawning a replacement session, or the birth event can land BEFORE
@@ -1913,6 +1928,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   defaultPermissionMode: 'default' as PermissionMode,
   autoModeDisabledBySettings: false,
   modelReloadNonce: 0,
+  engineModelReloadNonces: { claude: 0, opencode: 0, pi: 0, codex: 0 },
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
@@ -2260,7 +2276,22 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
-  reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
+  reloadModels: () =>
+    set((s) => ({
+      modelReloadNonce: s.modelReloadNonce + 1,
+      engineModelReloadNonces: Object.fromEntries(
+        HARNESS_IDS.map((id) => [id, s.engineModelReloadNonces[id] + 1])
+      ) as Record<EngineId, number>
+    })),
+
+  reloadEngineModels: (engineId) =>
+    set((s) => ({
+      modelReloadNonce: s.modelReloadNonce + 1,
+      engineModelReloadNonces: {
+        ...s.engineModelReloadNonces,
+        [engineId]: s.engineModelReloadNonces[engineId] + 1
+      }
+    })),
 
   loadHistoricalSession: (
     routingId,
@@ -3084,6 +3115,16 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setAvailableModels: (models) => set({ availableModels: models }),
 
+  setEngineModels: (engineId, models) =>
+    set((s) => ({
+      // Rebuilt in the fixed engine order, not appended: a lookup by value
+      // across engines (`availableModels.find`) must not answer differently
+      // depending on which engine's probe happened to answer first.
+      availableModels: HARNESS_IDS.flatMap((id) =>
+        id === engineId ? models : s.availableModels.filter((m) => (m.engineId ?? 'claude') === id)
+      )
+    })),
+
   setAccountUsage: (data) => set({ accountUsage: data }),
 
   // ADR-068 §2. Both are plain READS of host-owned state — the store never
@@ -3810,12 +3851,14 @@ export const useSessionStore = create<SessionState>((set) => ({
 
 // A harness that now runs as a different binary (ADR-082 §8): main has
 // already dropped that engine's model catalog (`core/harness/catalog-
-// invalidation.ts`), so every picker and open model sheet reads it again off
-// the nonce. The provider registry counts pi's models from main's WARM catalog
-// only, so it is re-read once that is warm. `harness-store` notices the change
-// for every client surface at once; it imports nothing from here.
+// invalidation.ts`), so the composer re-fetches THAT engine's models (no other
+// engine's catalog changed, so none is re-probed) and every open model sheet
+// reads again off the nonce. The provider registry counts pi's models from
+// main's WARM catalog only, so it is re-read once that is warm. `harness-store`
+// notices the change for every client surface at once; it imports nothing from
+// here.
 harnessStore.followRunChanges((changed) => {
-  useSessionStore.getState().reloadModels()
+  for (const id of changed) useSessionStore.getState().reloadEngineModels(id)
   const warmPi = changed.includes('pi') && harnessStore.readiness('pi') === 'ready'
   void Promise.resolve()
     .then(() => (warmPi ? window.api.getPiModelCatalogGroups() : undefined))

@@ -306,14 +306,15 @@ export function useClaudeEvents(): void {
         void useSessionStore.getState().loadChatgptLimits(false)
       }),
       // A bare nudge: an engine's catalog filled after main had answered us a
-      // degraded empty one (pi's probe failing at boot). Every picker and the
-      // composer's model pill re-read off the nonce; main's cache is warm by
-      // now, so the re-read answers at once and cannot provoke another nudge.
-      // The provider registry counts pi's models from that warm catalog only,
-      // so it is re-read too (as `harnessStore.followRunChanges` does).
-      onSyncEvent('engine:models-changed', () => {
+      // degraded empty one (pi's probe failing at boot). The composer re-fetches
+      // THAT engine's slice only (no other engine is re-probed) and the Settings
+      // panes re-read off the shared nonce; main's cache is warm by now, so the
+      // re-read answers at once and cannot provoke another nudge. The provider
+      // registry counts pi's models from that warm catalog only, so it is
+      // re-read too (as `harnessStore.followRunChanges` does).
+      onSyncEvent('engine:models-changed', ({ engineId }) => {
         const store = useSessionStore.getState()
-        store.reloadModels()
+        store.reloadEngineModels(engineId)
         void store.refreshProviderAuth().catch(() => undefined)
       }),
       // Auth source from session init ('none' = logged out) — drives the banner

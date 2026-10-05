@@ -2,9 +2,11 @@
  * @vitest-environment node
  *
  * `listEngineModels` — what `session:get-engine-models` answers on both
- * transports. The engines are probed concurrently (one slow pi probe must not
- * hold back Claude's, opencode's and Codex's models), the groups keep their
- * order, and each engine degrades to [] on its own.
+ * transports. Asked for one engine, only that engine is probed (the composer's
+ * per-engine requests: one slow pi probe must not hold back Claude's,
+ * opencode's and Codex's models). Asked for all, the engines are probed
+ * concurrently and the groups keep their order. Each engine degrades to [] on
+ * its own, and an engine id that is not one rejects.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { EngineModelGroup, ModelInfo } from '../../../shared/types'
@@ -98,4 +100,74 @@ describe('listEngineModels', () => {
       'pi:openrouter:1'
     ])
   })
+
+  it('null asks for every engine, like no argument (a JSON wire sends `undefined` as null)', async () => {
+    discoverOpencodeModels.mockResolvedValue([group('opencode', 'zen')])
+    discoverPiModels.mockResolvedValue([])
+    discoverCodexModels.mockResolvedValue([])
+
+    const groups = await listEngineModels(async () => [opus], null)
+    expect(groups.map((g) => g.engineId)).toEqual(['claude', 'opencode'])
+  })
+})
+
+describe('listEngineModels for one engine', () => {
+  it.each([
+    ['opencode', discoverOpencodeModels, 'zen'],
+    ['pi', discoverPiModels, 'openrouter'],
+    ['codex', discoverCodexModels, 'openai']
+  ] as const)(
+    '%s: runs only its own lookup and answers only its groups',
+    async (id, own, vendor) => {
+      const claudeModels = vi.fn(async () => [opus])
+      own.mockResolvedValue([group(id, vendor)])
+
+      const groups = await listEngineModels(claudeModels, id)
+
+      expect(groups.map((g) => `${g.engineId}:${g.vendorId}`)).toEqual([`${id}:${vendor}`])
+      expect(own).toHaveBeenCalledTimes(1)
+      expect(claudeModels).not.toHaveBeenCalled()
+      for (const lookup of [discoverOpencodeModels, discoverPiModels, discoverCodexModels]) {
+        if (lookup !== own) expect(lookup).not.toHaveBeenCalled()
+      }
+    }
+  )
+
+  it('claude: answers the one stamped group without probing any other engine', async () => {
+    const groups = await listEngineModels(async () => [opus], 'claude')
+
+    expect(groups).toEqual([
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        vendorName: 'Anthropic',
+        models: [{ ...opus, engineId: 'claude', vendorId: 'anthropic' }]
+      }
+    ])
+    expect(discoverOpencodeModels).not.toHaveBeenCalled()
+    expect(discoverPiModels).not.toHaveBeenCalled()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+  })
+
+  it('degrades to its empty contribution, never a rejection', async () => {
+    discoverPiModels.mockRejectedValue(new Error('probe timed out'))
+    await expect(listEngineModels(async () => [], 'pi')).resolves.toEqual([])
+    await expect(
+      listEngineModels(async () => {
+        throw new Error('not logged in')
+      }, 'claude')
+    ).resolves.toEqual([expect.objectContaining({ engineId: 'claude', models: [] })])
+  })
+
+  it.each([['gemini'], [''], [42], [{ engineId: 'pi' }]])(
+    'rejects %j — a client bug is never answered as an engine with no models',
+    async (bad) => {
+      const claudeModels = vi.fn(async () => [opus])
+      await expect(listEngineModels(claudeModels, bad)).rejects.toThrow(/unknown engine/)
+      expect(claudeModels).not.toHaveBeenCalled()
+      expect(discoverOpencodeModels).not.toHaveBeenCalled()
+      expect(discoverPiModels).not.toHaveBeenCalled()
+      expect(discoverCodexModels).not.toHaveBeenCalled()
+    }
+  )
 })

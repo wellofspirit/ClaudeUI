@@ -445,7 +445,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: "An engine's model catalog filled after main answered some client a DEGRADED empty one (pi: a failed probe, its backoff, or invalidations overtaking it — `pi/model-discovery.ts`). A nudge carrying only `{ engineId }`; clients re-read `session:get-engine-models`, the one shape. Replicated because the degraded answer may have gone to any client, desktop or remote, and none of them asks again on its own. Rings like `harness:changed`: a replay costs one warm-cache reload. No snapshot field."
+    why: "An engine's model catalog filled after main answered some client a DEGRADED empty one (pi: a failed probe, its backoff, or invalidations overtaking it — `pi/model-discovery.ts`). A nudge carrying only `{ engineId }`; clients re-read that engine's `session:get-engine-models(engineId)`, the one shape. Replicated because the degraded answer may have gone to any client, desktop or remote, and none of them asks again on its own. Rings like `harness:changed`: a replay costs one warm-cache reload. No snapshot field."
   },
   'provider:auth-resolved': {
     cls: 'replicated',

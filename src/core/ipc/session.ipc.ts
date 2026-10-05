@@ -153,7 +153,7 @@ import {
 // bootstrap fetch a few seconds AFTER a spawn's init resolves (fire-and-forget),
 // so newly-entitled models (e.g. Fable) can be absent from the very first fetch on
 // a cold cache. A short TTL lets a subsequent picker fetch (the renderer re-fetches
-// on cwd change / modelReloadNonce) pick them up without an app restart.
+// on cwd change / a model reload) pick them up without an app restart.
 const MODELS_CACHE_TTL_MS = 2 * 60_000
 let cachedModels: { models: ModelInfo[]; at: number } | null = null
 
@@ -843,8 +843,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    // Concurrent across engines, shared with the remote twin (engine-models.ts).
-    handler: (): Promise<EngineModelGroup[]> => listEngineModels(fetchModels)
+    // One engine, or all of them concurrently; shared with the remote twin
+    // (engine-models.ts), which also validates the engine id.
+    handler: (engineId?: unknown): Promise<EngineModelGroup[]> =>
+      listEngineModels(fetchModels, engineId)
   })
 
   // Which judge-picker values ClaudeUI can call for the auto-mode judge

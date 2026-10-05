@@ -639,14 +639,16 @@ export function registerRemoteHandlers(
     handler: async () => claudeSupportedModels()
   })
 
-  // Cross-engine model catalog (Claude + opencode + pi + Codex) for the model
-  // picker: the same `listEngineModels` as session.ipc.ts's, minus the
-  // desktop-only auth-source reporting side effects of its Claude read.
+  // Cross-engine model catalog (Claude + opencode + pi + Codex, or one engine's
+  // share of it) for the model picker: the same `listEngineModels` as
+  // session.ipc.ts's, minus the desktop-only auth-source reporting side effects
+  // of its Claude read. It validates the client's engine id.
   handleRemote({
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: (): Promise<EngineModelGroup[]> => listEngineModels(claudeSupportedModels)
+    handler: (engineId?: unknown): Promise<EngineModelGroup[]> =>
+      listEngineModels(claudeSupportedModels, engineId)
   })
 
   // Which judge-picker values ClaudeUI can call for the auto-mode judge

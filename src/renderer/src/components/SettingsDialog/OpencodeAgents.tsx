@@ -350,7 +350,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
   useEffect(() => {
     // Load models
     window.api
-      .getEngineModels()
+      .getEngineModels('opencode')
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
         setModels(oc.flatMap((g) => g.models))

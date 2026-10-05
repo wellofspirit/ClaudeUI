@@ -397,7 +397,7 @@ function useCodexCatalog(): { models: ModelInfo[]; efforts: string[] } {
   useEffect(() => {
     let cancelled = false
     window.api
-      .getEngineModels()
+      .getEngineModels('codex')
       .then((groups) => {
         if (cancelled) return
         setModels(groups.filter((g) => g.engineId === 'codex').flatMap((g) => g.models))

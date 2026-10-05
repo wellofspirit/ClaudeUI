@@ -30,7 +30,8 @@ import { useHarnessReadiness } from '../../SettingsDialog/harness-store'
 import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
 import { engineMeta } from '../../../../../shared/engine-meta'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
-import type { PermissionMode } from '../../../../../shared/types'
+import type { EngineId, PermissionMode } from '../../../../../shared/types'
+import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import {
   claudeModelCapabilities,
   modelResolveThinkingMode,
@@ -272,6 +273,7 @@ export function InputBox(): React.JSX.Element {
 
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
+  const setEngineModels = useSessionStore((s) => s.setEngineModels)
   const models = useMemo(
     () => availableModels.map((m) => ({ ...m, shortName: modelLabel(m).shortName })),
     [availableModels]
@@ -502,44 +504,70 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
-  // Load models from all engines via getEngineModels(). Re-fetches when cwd
-  // changes, and whenever modelReloadNonce is bumped (e.g. an opencode provider
-  // or default-model change in Settings) so newly-available models show up in
-  // the picker without an app restart. Flattens EngineModelGroup[] → ModelInfo[]
-  // (each entry has engineId/vendorId set).
-  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
+  // Load models with one getEngineModels(engineId) request PER ENGINE, each
+  // filling only its own slice of `availableModels` as it answers: a slow probe
+  // (pi's runs up to 15s) holds back its own models, never Claude's. Every
+  // engine re-fetches when cwd changes; one engine re-fetches when its entry in
+  // `engineModelReloadNonces` is bumped — all of them on `reloadModels()` (e.g.
+  // an opencode provider or default-model change in Settings), only the one
+  // whose catalog main says recovered (`engine:models-changed`). Flattens
+  // EngineModelGroup[] → ModelInfo[] (each entry has engineId/vendorId set).
+  const engineModelReloadNonces = useSessionStore((s) => s.engineModelReloadNonces)
   const loadedModelsKey = useRef<string | null>(null)
+  /**
+   * Per engine: the nonce its slice was last requested at, and that request's
+   * token. An answer lands only while its token is still the engine's latest,
+   * so a superseded request (a cwd change, a newer reload of that engine) or
+   * one answering after unmount is dropped — per request, because the effect
+   * re-runs for ANY engine's nonce and must not orphan another engine's answer
+   * still in flight.
+   */
+  const modelRequests = useRef<Partial<Record<EngineId, { nonce: number; token: object }>>>({})
   useEffect(() => {
     const key = cwd ?? ''
-    if (loadedModelsKey.current !== null && loadedModelsKey.current !== key) {
+    const cwdChanged = loadedModelsKey.current !== key
+    if (loadedModelsKey.current !== null && cwdChanged) {
       setAvailableModels([])
     }
     loadedModelsKey.current = key
 
-    let ignore = false
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        if (!ignore) {
-          const flat = groups.flatMap((g) => g.models)
-          setAvailableModels(flat)
-        }
-      })
-      .catch(() => {
-        // Fallback to Claude-only models if getEngineModels fails
-        window.api
-          .getModels()
-          .then((models) => {
-            if (!ignore) setAvailableModels(models)
-          })
-          .catch(() => {
-            /* non-fatal */
-          })
-      })
-    return () => {
-      ignore = true
+    for (const engineId of HARNESS_IDS) {
+      const nonce = engineModelReloadNonces[engineId]
+      if (!cwdChanged && modelRequests.current[engineId]?.nonce === nonce) continue
+      const token = {}
+      modelRequests.current[engineId] = { nonce, token }
+      const latest = (): boolean => modelRequests.current[engineId]?.token === token
+      window.api
+        .getEngineModels(engineId)
+        .then((groups) => {
+          // Filtered, not trusted: a host that predates the argument answers
+          // every engine's groups to every request.
+          const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
+          if (latest()) setEngineModels(engineId, own)
+        })
+        .catch(() => {
+          // Claude falls back to its own model list; the other engines are
+          // optional and keep whatever they last showed.
+          if (engineId !== 'claude') return
+          window.api
+            .getModels()
+            .then((models) => {
+              if (latest()) setEngineModels('claude', models)
+            })
+            .catch(() => {
+              /* non-fatal */
+            })
+        })
     }
-  }, [cwd, modelReloadNonce, setAvailableModels])
+  }, [cwd, engineModelReloadNonces, setAvailableModels, setEngineModels])
+  // Unmount (and StrictMode's rehearsal of it): no request in flight may land.
+  // Emptying the map also makes the next mount's effect request every engine.
+  useEffect(
+    () => () => {
+      modelRequests.current = {}
+    },
+    []
+  )
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()

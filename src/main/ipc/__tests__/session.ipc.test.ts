@@ -926,6 +926,25 @@ describe('session.ipc', () => {
       )
     })
 
+    // The composer asks per engine (engine-models.ts); the id must reach the
+    // handler through the desktop transport, or every request answers all four.
+    it('session:get-engine-models carries its engine id: codex probes only codex', async () => {
+      const { discoverCodexModels } = await import('../../../core/codex/model-discovery')
+      const native = {
+        engineId: 'codex' as const,
+        vendorId: 'openai',
+        vendorName: 'OpenAI',
+        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'codex' as const }]
+      }
+      vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+      await expect(harness.call('session:get-engine-models', 'codex')).resolves.toEqual([native])
+      // Claude's probe never ran.
+      expect(vi.mocked(query)).not.toHaveBeenCalled()
+      await expect(harness.call('session:get-engine-models', 'gemini')).rejects.toThrow(
+        /unknown engine/
+      )
+    })
+
     it.each([
       ['session:generate-title', 'a conversation'],
       ['session:generate-commit-message', 'diff --git a/x b/x']

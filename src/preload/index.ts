@@ -224,7 +224,7 @@ const api: ClaudeAPI = {
   setReasoningVariant: (routingId: string, variant: string | null) =>
     ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
   getModels: () => ipcRenderer.invoke('session:get-models'),
-  getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+  getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
   judgeModelSupport: (engineId, values) =>
     ipcRenderer.invoke('automode:judge-model-support', engineId, values),
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),

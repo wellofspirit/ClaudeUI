@@ -1727,7 +1727,12 @@ interface SessionAPI {
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
-  getEngineModels(): Promise<EngineModelGroup[]>
+  /**
+   * The model catalog as engine groups: with `engineId`, only that engine's
+   * groups (and only its probe runs); without, every engine's in one reply that
+   * waits for the slowest probe. Rejects an unknown engine id.
+   */
+  getEngineModels(engineId?: EngineId): Promise<EngineModelGroup[]>
   /**
    * For each judge-picker value, whether ClaudeUI can call that model for the
    * engine's auto-mode judge (ADR-081 §3), and if not, why. Token-free: it
