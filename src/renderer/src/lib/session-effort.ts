@@ -3,6 +3,7 @@ import {
   modelResolveEffort,
   rememberEffortPatch,
   resolveSpawnEffort,
+  type EffortDefaultsPatch,
   type EffortDefaultsSlice,
   type EffortLevel
 } from '../../../shared/model-capabilities'
@@ -72,7 +73,7 @@ export function rememberedEffortPatch(
   state: EffortState,
   session: EffortSession,
   level: EffortLevel
-): EffortDefaultsSlice | undefined {
+): EffortDefaultsPatch | undefined {
   const { modelInfo, engineModels } = catalogFor(state, session)
   return rememberEffortPatch(
     state.settings,
@@ -100,7 +101,8 @@ export function rememberedEffortPatch(
  *    as `spawnEffort`, keeping the two equal.
  * Canonical `effort` is null only before a session's first spawn, while the
  * per-model starting effort still applies and every client derives it from the
- * replicated `modelEffortDefaults`; at spawn that effort freezes into the session,
+ * replicated `modelEffortDefaults` / `engineEffortDefaults`; at spawn that effort
+ * freezes into the session,
  * so a later change to the per-model value affects only sessions not yet started.
  *
  * `thinkingMode` is the RAW pick (`null` = unset): there is no per-model thinking

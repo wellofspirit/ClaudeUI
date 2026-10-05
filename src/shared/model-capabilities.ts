@@ -285,6 +285,27 @@ export function withSavedEffort(
 export interface EffortDefaultsSlice {
   modelEffortDefaults?: Partial<Record<string, EffortLevel>>
   engineEffortDefaults?: Partial<Record<string, Partial<Record<string, EffortLevel>>>>
+  /** `AppSettings.newSessionModel`; see {@link carriesPicksIntoNewSessions}. */
+  newSessionModel?: string
+}
+
+/** The two maps themselves: what {@link rememberEffortPatch} returns to be merged into settings. */
+export type EffortDefaultsPatch = Pick<
+  EffortDefaultsSlice,
+  'modelEffortDefaults' | 'engineEffortDefaults'
+>
+
+/**
+ * Do composer picks carry into NEW sessions? The `newSessionModel` rule as a
+ * predicate (`'last-picked'`, or absent, does; `'configured-default'` does not).
+ * THE one statement of it: the model pick follows it (`seedingModelPicks`), the
+ * composer's remembered effort follows it (the write gate in the composer and the
+ * read gate in {@link savedEffortFor}), and the Settings note reads it, so a user
+ * who chose "new sessions start on the configured default" is handed neither the
+ * last model nor the last effort they picked.
+ */
+export function carriesPicksIntoNewSessions(settings: { newSessionModel?: string }): boolean {
+  return settings.newSessionModel !== 'configured-default'
 }
 
 /**
@@ -314,7 +335,13 @@ export function savedEffortFor(
 ): EffortLevel | undefined {
   if (!settings || !model || !engineRemembersEffort(engineId)) return undefined
   const id = engineId ?? 'claude'
+  // Claude's map IS the configured table (the Settings page edits it), so it
+  // applies in both modes. Everything in `engineEffortDefaults` is a remembered
+  // composer pick with no table to see or clear it, so it applies only while
+  // composer picks carry into new sessions — otherwise a pick made earlier would
+  // keep applying after the user chose "the configured default".
   if (id === 'claude') return claudeSavedEffort(settings.modelEffortDefaults, model, engineModels)
+  if (!carriesPicksIntoNewSessions(settings)) return undefined
   return settings.engineEffortDefaults?.[id]?.[model.value]
 }
 
@@ -332,7 +359,7 @@ export function rememberEffortPatch(
   model: ModelCapabilityInput | undefined | null,
   engineModels: readonly ClaudeEffortRowInput[],
   level: EffortLevel
-): EffortDefaultsSlice | undefined {
+): EffortDefaultsPatch | undefined {
   if (!model || !engineRemembersEffort(engineId)) return undefined
   const id = engineId ?? 'claude'
   if (id === 'claude') {

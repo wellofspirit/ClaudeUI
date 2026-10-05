@@ -142,6 +142,21 @@ describe('pi remembers effort in its own map', () => {
     const settings = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } }
     expect(sessionSpawnEffort(state(settings), piSession)).toBe('low')
   })
+  it('under configured-default a remembered pi value no longer applies; the Claude table does', () => {
+    const pi = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'high' } } }
+    const mode = { newSessionModel: 'configured-default' as const }
+    expect(sessionSpawnEffort(state({ ...pi, ...mode }), piSession)).toBe('medium') // model default
+    expect(sessionSpawnEffort(state({ ...pi, newSessionModel: 'last-picked' }), piSession)).toBe(
+      'high'
+    )
+    expect(
+      sessionSpawnEffort(state({ modelEffortDefaults: { opus: 'low' }, ...mode }), {
+        selectedModel: 'opus',
+        selectedEngineId: 'claude',
+        effort: null
+      })
+    ).toBe('low')
+  })
   it('a remembered value the model does not offer is clamped at spawn', () => {
     // PI_OPUS offers low/medium/high only.
     const settings = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } }

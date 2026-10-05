@@ -23,6 +23,7 @@ import {
   resolveSpawnEffort,
   withSavedEffort,
   savedEffortFor,
+  carriesPicksIntoNewSessions,
   resolveAutomationEffort,
   type EffortLevel,
   rememberEffortPatch,
@@ -1019,6 +1020,28 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
     expect(rememberEffortPatch({}, 'codex', PI, [PI], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'pi', undefined, [], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'claude', null, [], 'low')).toBeUndefined()
+  })
+  describe('newSessionModel gates the remembered (pi) rung, never the Claude table', () => {
+    const saved = {
+      modelEffortDefaults: { opus: 'high' },
+      engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } }
+    } as const
+    it('last-picked (and absent): pi reads its remembered value', () => {
+      expect(savedEffortFor({ ...saved, newSessionModel: 'last-picked' }, 'pi', PI, [PI])).toBe(
+        'max'
+      )
+      expect(savedEffortFor(saved, 'pi', PI, [PI])).toBe('max')
+    })
+    it('configured-default: pi skips it, the Claude table still applies', () => {
+      const s = { ...saved, newSessionModel: 'configured-default' }
+      expect(savedEffortFor(s, 'pi', PI, [PI])).toBeUndefined()
+      expect(savedEffortFor(s, 'claude', OPUS, [OPUS])).toBe('high')
+    })
+    it('carriesPicksIntoNewSessions is the one predicate', () => {
+      expect(carriesPicksIntoNewSessions({})).toBe(true)
+      expect(carriesPicksIntoNewSessions({ newSessionModel: 'last-picked' })).toBe(true)
+      expect(carriesPicksIntoNewSessions({ newSessionModel: 'configured-default' })).toBe(false)
+    })
   })
   it('savedEffortFor reads what rememberEffortPatch wrote, per engine', () => {
     const piPatch = rememberEffortPatch({}, 'pi', PI, [PI], 'low')

@@ -1995,6 +1995,18 @@ describe('InputBox FC — rendered', () => {
       expect(ipcCalls['session:create'][0][2]).toBe('low')
     })
 
+    it('under configured-default a remembered pi effort is not applied: pill and spawn show the model default', async () => {
+      piSession({
+        newSessionModel: 'configured-default',
+        engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } }
+      })
+      renderFC()
+      await act(async () => {})
+      expect(viewProps.effort).toBe('medium')
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe('medium')
+    })
+
     it('a remembered value the pi model does not offer is clamped, pill and spawn alike', async () => {
       piSession({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } })
       renderFC()

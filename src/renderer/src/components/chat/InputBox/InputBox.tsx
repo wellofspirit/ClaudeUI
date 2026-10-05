@@ -279,6 +279,7 @@ export function InputBox(): React.JSX.Element {
   const availableModels = useSessionStore((s) => s.availableModels)
   const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
   const engineEffortDefaults = useSessionStore((s) => s.settings.engineEffortDefaults)
+  const newSessionModel = useSessionStore((s) => s.settings.newSessionModel)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const setEngineModels = useSessionStore((s) => s.setEngineModels)
   const models = useMemo(
@@ -1367,7 +1368,10 @@ export function InputBox(): React.JSX.Element {
           // inputs are the session's own model and engine; only the welcome
           // screen, which has no session, resolves from the picker's model.
           sessionSpawnEffort(
-            { availableModels, settings: { modelEffortDefaults, engineEffortDefaults } },
+            {
+              availableModels,
+              settings: { modelEffortDefaults, engineEffortDefaults, newSessionModel }
+            },
             activeSessionId
               ? {
                   selectedModel: requestedModelValue,
@@ -1391,6 +1395,7 @@ export function InputBox(): React.JSX.Element {
       effectiveEngineId,
       modelEffortDefaults,
       engineEffortDefaults,
+      newSessionModel,
       nativeEffortOptions,
       liveBackend,
       status.codex?.reasoningEffort

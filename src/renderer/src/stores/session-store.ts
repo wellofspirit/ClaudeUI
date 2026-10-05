@@ -1,7 +1,11 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
-import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import {
+  carriesPicksIntoNewSessions,
+  codexPublishesEffort,
+  resolveClaudeCapabilities
+} from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
@@ -443,19 +447,8 @@ export function seedingModelPicks(state: {
     : NO_SEEDING_PICKS
 }
 
-/**
- * Do composer picks carry into NEW sessions? The `newSessionModel` rule as a
- * predicate (`'last-picked'`, or absent, does; `'configured-default'` does not).
- * The model pick follows it through {@link seedingModelPicks}, and so does the
- * composer's remembered effort — the one place that decides to write it — so a
- * user who chose "new sessions start on the configured default" is not handed the
- * last effort they picked either.
- */
-export function carriesPicksIntoNewSessions(
-  settings: Pick<AppSettings, 'newSessionModel'>
-): boolean {
-  return settings.newSessionModel !== 'configured-default'
-}
+/** The `newSessionModel` rule as a predicate — defined once, in `shared/model-capabilities`. */
+export { carriesPicksIntoNewSessions }
 
 /**
  * The model a session on `engineId` starts with: the user's last pick on that
@@ -959,7 +952,8 @@ export interface PerSessionState {
   permissionMode: PermissionMode
   /**
    * null = not started yet, so the model's starting effort applies (Claude's
-   * per-model `modelEffortDefaults`, else the cli.js default); non-null = the
+   * per-model `modelEffortDefaults`, pi's `engineEffortDefaults`, else the cli.js
+   * default); non-null = the
    * tier the session runs at — the user's pick, or the starting effort frozen at
    * spawn (the birth event's `announce`). Canonical `effort` is `string | null`
    * (sync/state.ts): Claude's five rungs for Claude/opencode/pi, an engine-native
