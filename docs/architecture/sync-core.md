@@ -514,13 +514,20 @@ line is a named next step with the reason it is not phase-4 work.
   to emit the birth event before constructing the session, which reorders a spawn path
   with its own races. Recorded so the next reader does not mistake it for the ghost
   class F7 closed.
-- **Fork seeding reads the whole parent transcript for its status line.** F3 truncates
-  the MESSAGES at the anchor, but `ClaudeSession`'s resume-time
-  `reconcileAccumulatorsFromTranscript` (and `computeTokenMetrics` behind it) still
-  walks the parent's entire file, so a fork's opening token/cost figures include the
-  turns the fork discarded. Cosmetic and self-correcting — the first `result` of the
-  forked session replaces them with cli.js's authoritative numbers — but wrong until
-  then. The fix is the same anchor, threaded one level further down.
+- ~~**Fork seeding reads the whole parent transcript for its status line.**~~
+  **RESOLVED.** Two readers were named; neither still over-counts. (1) `ClaudeSession`'s
+  resume-time `reconcileAccumulatorsFromTranscript` was already guarded for forks
+  (`claude-session.ts`, the `!this.forkSession` condition at its call): a fork's fresh
+  transcript reconciles normally after its first result instead. (2) The status line
+  `loadSessionHistory` returns — which canonical's seed writes
+  (`seed-canonical-transcript.ts`) and `session:load-history` serves — came from
+  `computeTokenMetrics(filePath)` over the whole file. It now takes the same
+  `resumeSessionAt` anchor as the message truncation, with the same boundary (the anchor
+  line is the last one counted) and the same fallback (an anchor not in the file
+  truncates nothing), and limits subagent spend to the agents the kept lines spawned.
+  Agents spawned from inside a subagent cannot be placed on a side of the anchor from
+  the main file, so a truncated read leaves them out (a slight under-count rather than
+  the parent's whole spend).
 - ~~**The delete channels keep the `config` capability while now cancelling engines.**~~
   **RESOLVED by ADR-056:** both moved to `chat`, in both registrars. The review this
   asked for concluded that the honest label was neither "config" nor something
