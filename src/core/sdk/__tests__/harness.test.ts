@@ -133,8 +133,13 @@ describe('CLAUDEUI_CLAUDE_CLI', () => {
     process.env[CLAUDE_CLI_OVERRIDE_ENV] = missing
     expect(locateBunClaude()).toBe(bundled)
     expect(locateBunClaude()).toBe(bundled)
-    expect(warnSpy).toHaveBeenCalledTimes(1)
-    expect(String(warnSpy.mock.calls[0][0])).toContain(missing)
+    // Only the override's warning: a host with no bundled copy (CI has no
+    // vendor/claude-cli) also logs which bundled paths it probed.
+    const overrideWarnings = warnSpy.mock.calls.filter((call) =>
+      call.some((arg) => String(arg).includes(CLAUDE_CLI_OVERRIDE_ENV))
+    )
+    expect(overrideWarnings).toHaveLength(1)
+    expect(overrideWarnings[0].join(' ')).toContain(missing)
   })
 
   it('falls back when the value names a directory', () => {
