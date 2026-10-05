@@ -11,6 +11,7 @@
 //                             [--state] [--timeout <ms>]
 //                             [--keep] [--with-remote]
 //                             [--headed] [--testids] [--assert-testid <id>]...
+//                             [--profile <name>] [--font-scale <n>] [--overflow-audit]
 //
 // --click/--press/--type/--wait/--eval are ORDERED with respect to each other and
 // replayed in the order they appear on the command line, so a flow like "open a
@@ -47,6 +48,21 @@
 // --headed               show the window on-screen normally (opt out of headless,
 //                        see below). Implied by --keep.
 //
+// --profile <name>      emulate a device from scripts/lib/mobile-profiles.mjs (the same
+//                        numbers the vitest `browser` project asserts at): the window's
+//                        viewport, pixel ratio, touch and user agent are overridden over
+//                        CDP, so `useIsMobile` flips and the phone layout renders. Falls
+//                        back to webContents.enableDeviceEmulation if CDP is unavailable.
+// --font-scale <n>       set `settings.uiFontScale` to n IN MEMORY (the store's setState,
+//                        never updateSettings, which persists) and put the original back
+//                        before the app closes, so the settings file is never touched.
+// --overflow-audit       after the shot, print `OVERFLOW [...]`: every visible element whose
+//                        rect leaves the viewport horizontally, and every element whose
+//                        scrollWidth exceeds its clientWidth while its overflow-x is
+//                        visible/hidden (auto/scroll boxes, ellipsis truncation and
+//                        mask-image fades are ignored). Each entry names the nearest data-testid, the tag, the
+//                        rect and the overflow amount. `OVERFLOW []` is clean.
+//
 // Headless is the DEFAULT: the app is launched with CLAUDEUI_HEADLESS=1, which
 // makes it show the window inactive and off the virtual desktop, with no taskbar
 // entry — so a verifier run never steals focus or covers the user's screen.
@@ -66,6 +82,7 @@ import { _electron as electron } from 'playwright'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync } from 'node:fs'
+import { MOBILE_PROFILES } from './lib/mobile-profiles.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -100,6 +117,22 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--assert-testid' && args[i + 1]) assertTestids.push(args[i + 1])
 }
 const dumpTestids = has('testids') || assertTestids.length > 0
+const profileName = arg('profile', undefined)
+const profile = profileName ? MOBILE_PROFILES[profileName] : undefined
+if (profileName && !profile) {
+  console.error(
+    `unknown --profile "${profileName}" (known: ${Object.keys(MOBILE_PROFILES).join(', ')})`
+  )
+  process.exit(1)
+}
+const fontScaleArg = arg('font-scale', undefined)
+const fontScale = fontScaleArg === undefined ? undefined : Number(fontScaleArg)
+if (fontScale !== undefined && !(fontScale >= 1 && fontScale <= 1.5)) {
+  console.error(
+    `--font-scale must be a number from 1 to 1.5 (the setting's range), got "${fontScaleArg}"`
+  )
+  process.exit(1)
+}
 // --keep implies --headed: leaving behind an invisible, taskbar-less instance
 // makes it un-closeable by hand.
 const headed = has('headed') || has('keep')
@@ -114,7 +147,95 @@ const hardTimeout = setTimeout(() => {
   process.exit(2)
 }, timeoutMs)
 
+/**
+ * Device emulation for `--profile`. CDP first (the same override DevTools' device
+ * mode uses); webContents.enableDeviceEmulation from the main process if the
+ * window will not hand out a CDP session.
+ */
+async function emulateProfile(app, win, p) {
+  try {
+    const cdp = await win.context().newCDPSession(win)
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: p.width,
+      height: p.height,
+      deviceScaleFactor: p.deviceScaleFactor,
+      mobile: true
+    })
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    await cdp.send('Emulation.setUserAgentOverride', { userAgent: p.userAgent })
+    return 'cdp'
+  } catch (err) {
+    console.error(`CDP emulation unavailable (${err?.message}); using webContents emulation`)
+    await app.evaluate(({ BrowserWindow }, q) => {
+      const wc = BrowserWindow.getAllWindows()[0].webContents
+      wc.setUserAgent(q.userAgent)
+      wc.enableDeviceEmulation({
+        screenPosition: 'mobile',
+        screenSize: { width: q.width, height: q.height },
+        viewPosition: { x: 0, y: 0 },
+        viewSize: { width: q.width, height: q.height },
+        deviceScaleFactor: q.deviceScaleFactor,
+        scale: 1
+      })
+    }, p)
+    return 'webContents'
+  }
+}
+
+/**
+ * The `--overflow-audit` walk, run in the renderer. A rect is judged by its
+ * VISIBLE part: clipped by every ancestor that clips sideways first, so a row
+ * scrolled out of a horizontal scroller (or the closed drawer) is not a finding.
+ */
+function overflowAudit() {
+  const vw = window.innerWidth
+  const clips = (cs) => cs.overflowX !== 'visible'
+  const round = (n) => Math.round(n * 10) / 10
+  const nearestTestId = (el) => el.closest('[data-testid]')?.getAttribute('data-testid') ?? null
+  const out = []
+  for (const el of document.body.querySelectorAll('*')) {
+    const cs = getComputedStyle(el)
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue
+    let { left, right, top, bottom } = el.getBoundingClientRect()
+    if (right - left <= 0 || bottom - top <= 0) continue
+    const rect = [round(left), round(top), round(right), round(bottom)]
+    // Only the ancestors that really clip this element: a fixed one escapes them
+    // all, an absolute one stops at its containing block. The page itself
+    // (html/body) is not a clip here: leaving it is exactly what we look for.
+    if (cs.position !== 'fixed') {
+      for (
+        let a = el.parentElement;
+        a && a !== document.body && left < right;
+        a = a.parentElement
+      ) {
+        const acs = getComputedStyle(a)
+        if (clips(acs)) {
+          const r = a.getBoundingClientRect()
+          left = Math.max(left, r.left)
+          right = Math.min(right, r.right)
+        }
+        if (cs.position === 'absolute' && acs.position !== 'static') break
+      }
+    }
+    if (left >= right) continue // clipped away entirely: not on screen
+    const entry = (kind, overflow) =>
+      out.push({ kind, testid: nearestTestId(el), tag: el.tagName.toLowerCase(), rect, overflow })
+    if (left < -0.5 || right > vw + 0.5) entry('viewport', round(Math.max(-left, right - vw)))
+    if (
+      el.scrollWidth > el.clientWidth + 1 &&
+      (cs.overflowX === 'visible' || cs.overflowX === 'hidden') &&
+      cs.textOverflow !== 'ellipsis' &&
+      // A fade-out mask is the app's other deliberate truncation (session names).
+      (cs.maskImage || cs.webkitMaskImage || 'none') === 'none'
+    ) {
+      entry('scrollWidth', el.scrollWidth - el.clientWidth)
+    }
+  }
+  return out
+}
+
 let app
+let restoreFontScale = async () => {}
 try {
   // args:[root] → Electron uses package.json "main" (out/main/index.js).
   // env: inherit, plus the remote kill switch unless --with-remote was passed,
@@ -137,7 +258,34 @@ try {
   win.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`))
 
   await win.waitForLoadState('domcontentloaded')
+  if (profile) {
+    const via = await emulateProfile(app, win, profile)
+    // `useIsMobile` is `window.innerWidth < 768`: wait for the override to land.
+    await win.waitForFunction(() => window.innerWidth < 768, undefined, { timeout: 10_000 })
+    console.log(`PROFILE ${profileName} via ${via} ${profile.width}x${profile.height}`)
+  }
   await win.waitForTimeout(settle) // let React mount + first IPC round-trips settle
+
+  if (fontScale !== undefined) {
+    // In memory only: setState, never updateSettings (that writes the user's file).
+    const original = await win.evaluate((n) => {
+      const store = window.__claudeuiVerifier?.sessionStore
+      if (!store) return null
+      const before = store.getState().settings.uiFontScale
+      store.setState((st) => ({ settings: { ...st.settings, uiFontScale: n } }))
+      return before
+    }, fontScale)
+    if (original === null) throw new Error('--font-scale needs the verifier hooks (stale build?)')
+    restoreFontScale = async () => {
+      await win.evaluate((n) => {
+        window.__claudeuiVerifier?.sessionStore.setState((st) => ({
+          settings: { ...st.settings, uiFontScale: n }
+        }))
+      }, original)
+    }
+    console.log(`FONT_SCALE ${fontScale} (was ${original}, restored on exit)`)
+    await win.waitForTimeout(800) // let the zoomed layout settle
+  }
 
   for (const action of actions) {
     if (action.kind === 'wait') {
@@ -164,6 +312,12 @@ try {
   }
 
   await win.screenshot({ path: outPath })
+
+  if (has('overflow-audit')) {
+    const found = await win.evaluate(overflowAudit)
+    console.log(`OVERFLOW ${JSON.stringify(found.slice(0, 100))}`)
+    if (found.length > 100) console.log(`OVERFLOW_TRUNCATED ${found.length - 100} more`)
+  }
 
   // Renderer state, AFTER the shot so the two describe the same moment. Prints
   // `STATE null` rather than throwing when the hook is missing — that is a real
@@ -213,10 +367,16 @@ try {
     )
   )
 
+  await restoreFontScale()
   if (!has('keep')) await app.close()
   if (!ok) process.exit(3)
 } catch (err) {
   console.error('app-shot failed:', err?.stack || err)
+  try {
+    await restoreFontScale()
+  } catch {
+    /* ignore */
+  }
   try {
     await app?.close()
   } catch {
