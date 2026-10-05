@@ -15,6 +15,7 @@ harness), [ADR-061](adr-061_ci-build-gates-and-release-artifact-matrix.md) (rele
 three engine directories), [ADR-066](adr-066_codex-fourth-engine.md) (Codex is downloaded, not
 bundled; ClaudeUI's own copy stays at the pin, and a System Codex from the floor up to the ceiling
 runs as untested, §3).
+**Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — a harness change re-fetches only that engine's models in the composer (per-engine reload counters), not every engine's.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
 
