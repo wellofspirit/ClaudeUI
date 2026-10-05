@@ -17,8 +17,11 @@ import type { RunFn, RunResult } from '../run'
 import { fingerprintOf } from '../fs-util'
 import { cmdShim, writeNative, writePackage, writeText } from './layout'
 
-/** The Claude Code version ClaudeUI tests (`claude.json#tested`): what a "tested" install reports. */
+/** Tested manifest versions: what a "tested" install reports. */
 const CLAUDE_TESTED = harnessManifest('claude').tested
+const OPENCODE_TESTED = harnessManifest('opencode').tested
+const CODEX_TESTED = harnessManifest('codex').tested
+const PI_TESTED = harnessManifest('pi').tested
 
 const WIN = process.platform === 'win32'
 const EXE = WIN ? '.exe' : ''
@@ -145,17 +148,17 @@ describe('Codex', () => {
   it('needs codex-code-mode-host beside it', async () => {
     const dir = path.join(home, '.codex', 'packages', 'standalone', 'current', 'bin')
     const bin = writeNative(path.join(dir, `codex${EXE}`))
-    const answers = { [bin]: 'codex-cli 0.156.0\n' }
+    const answers = { [bin]: `codex-cli ${CODEX_TESTED}\n` }
     const [without] = mine(await detectHarness('codex', depsFor(answers)))
     expect(without).toMatchObject({
-      version: '0.156.0',
+      version: CODEX_TESTED,
       verdict: 'unsupported',
       reason: 'codex-code-mode-host not found beside it'
     })
     writeNative(path.join(dir, `codex-code-mode-host${EXE}`))
     const [withHost] = mine(await detectHarness('codex', depsFor(answers)))
     expect(withHost).toMatchObject({
-      version: '0.156.0',
+      version: CODEX_TESTED,
       verdict: 'tested',
       installKind: 'standalone'
     })
@@ -169,7 +172,7 @@ describe('pi', () => {
     const prefix = path.join(tmp, 'npm')
     const pkg = writePackage(
       path.join(prefix, 'node_modules', ...PI.split('/')),
-      { name: PI, version: '0.87.1' },
+      { name: PI, version: PI_TESTED },
       { 'dist/bundle/cli.js': '#!/usr/bin/env node\n' }
     )
     writeText(path.join(prefix, 'pi.cmd'), cmdShim(`node_modules/${PI}/dist/bundle/cli.js`, true))
@@ -182,7 +185,7 @@ describe('pi', () => {
     const run = vi.fn<RunFn>(async () => ok('v24.1.0\n'))
     const probeRun = vi.fn<RunFn>(async (command, args) =>
       command === node && args[0] === cli
-        ? ok('0.87.1\n')
+        ? ok(`${PI_TESTED}\n`)
         : { stdout: '', code: 1, timedOut: false }
     )
     const deps = depsFor({}, { run, probeRun, pathEntries: [shimDir], platform: 'win32' })
@@ -191,7 +194,7 @@ describe('pi', () => {
       realPath: cli,
       launch: { command: node, args: [cli] },
       node: { path: node, version: '24.1.0' },
-      version: '0.87.1',
+      version: PI_TESTED,
       verdict: 'tested'
     })
     expect(install.fingerprint.path).toBe(cli)
@@ -204,7 +207,7 @@ describe('pi', () => {
     const electron = { execPath: path.join(tmp, 'ClaudeUI.exe'), nodeVersion: '24.18.1' }
     const probeRun = vi.fn<RunFn>(async (_c, _a, options) =>
       options.env?.ELECTRON_RUN_AS_NODE === '1'
-        ? ok('0.87.1\n')
+        ? ok(`${PI_TESTED}\n`)
         : { stdout: '', code: 1, timedOut: false }
     )
     const deps = depsFor({}, { probeRun, electron, pathEntries: [shimDir], platform: 'win32' })
@@ -297,7 +300,7 @@ describe('detectHarnesses', () => {
       peak = Math.max(peak, ++active)
       await new Promise((r) => setTimeout(r, 5))
       active--
-      return ok(command === claude ? `${CLAUDE_TESTED} (Claude Code)` : '1.18.32')
+      return ok(command === claude ? `${CLAUDE_TESTED} (Claude Code)` : OPENCODE_TESTED)
     })
     const deps = depsFor({}, { probeRun, pathEntries: [path.join(tmp, 'bin')], concurrency: 1 })
     const detections = await detectHarnesses(undefined, deps)
