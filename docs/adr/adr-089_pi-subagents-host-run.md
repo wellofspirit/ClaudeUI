@@ -2,6 +2,7 @@
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a child's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
+**Amended (2026-10-05):** [Messaging v2](#messaging-v2-2026-10-05) — a user-stopped agent is resumable once the user speaks, failed agents resume only after a temporary failure, children know their identity, `list_models` and model resolution, and the shared `dispatch_agent` description (also amends [ADR-033](adr-033_cross-engine-dispatch.md)).
 **Supersedes:** [ADR-035](adr-035_pi-engine-backend.md)'s M5b in-pi subagent extension
 (`pi-subagent-source.ts`).
 **Relates to:** [ADR-035](adr-035_pi-engine-backend.md) (the pi backend and its bridge),
@@ -60,7 +61,7 @@ error is a diagnostic. Claude Code tool names map (`Read`→`read`, `Glob`→`fi
 …); a tool entry that is not a tool name is dropped; an unknown `permissionMode` becomes `default`
 (fail-safe: it can only narrow). The registry is a spawn-time snapshot.
 
-### The tools: `agent`, `send_message`, `task_stop` (bridge v9-v11)
+### The tools: `agent`, `send_message`, `task_stop`, `list_models` (bridge v9-v12)
 
 The bridge extension registers `agent` in its own block, gated on `CLAUDEUI_PI_AGENT_TOOL === '1'`
 plus the bridge url/token and independent of the hosted-tools flag. Its description is a fixed
@@ -76,17 +77,17 @@ messaging").
 
 ### Child flags and env
 
-| Flag / env                                                       | Value                                           | Why                                                                                                                      |
-| ---------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `--session-dir <root>/<agentId>`                                 | always                                          | persisted, outside `~/.pi`; flat layout, file written lazily (probe P1)                                                  |
-| `--session-id <agentId>`                                         | always                                          | S3 resume reopens the same file — only from the same cwd (P4), so cwd = the parent's                                     |
-| `--append-system-prompt <dir>/system-prompt.md`                  | always                                          | a file, not argv (Windows' 32 767-char limit); pi reads the path (P2)                                                    |
-| `--tools a,b`                                                    | when the definition lists tools                 | an allowlist over built-in AND extension tools (P3): `send_message` always, `agent` and `task_stop` only if it may spawn |
-| `--exclude-tools …`                                              | disallowed tools; `agent` when it may not spawn | belt and braces                                                                                                          |
-| `--thinking <level>`                                             | when the definition sets one                    |                                                                                                                          |
-| `CLAUDEUI_PI_HOSTED_TOOLS` / `_DISPATCH_ENABLED` / `_PLAN_TOOLS` | `''`                                            | no hosted tools, never `dispatch_agent`, plan mode is enforced by the parent's gate                                      |
-| `CLAUDEUI_PI_AGENT_TOOL` / `_AGENT_LISTING`                      | `'1'` + listing iff it may spawn, else `''`     | depth < 3, the definition can spawn, its tools include `agent`                                                           |
-| `CLAUDEUI_PI_SEND_MESSAGE`                                       | `'1'` (a dispatch target: `''`)                 | every child can message; a dispatch target is not an agent of this session                                               |
+| Flag / env                                                                                 | Value                                                          | Why                                                                                                                                     |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `--session-dir <root>/<agentId>`                                                           | always                                                         | persisted, outside `~/.pi`; flat layout, file written lazily (probe P1)                                                                 |
+| `--session-id <agentId>`                                                                   | always                                                         | S3 resume reopens the same file — only from the same cwd (P4), so cwd = the parent's                                                    |
+| `--append-system-prompt <dir>/system-prompt.md`                                            | always                                                         | a file, not argv (Windows' 32 767-char limit); pi reads the path (P2)                                                                   |
+| `--tools a,b`                                                                              | when the definition lists tools                                | an allowlist over built-in AND extension tools (P3): `send_message` always, `agent`, `task_stop` and `list_models` only if it may spawn |
+| `--exclude-tools …`                                                                        | disallowed tools; `agent`, `list_models` when it may not spawn | belt and braces                                                                                                                         |
+| `--thinking <level>`                                                                       | when the definition sets one                                   |                                                                                                                                         |
+| `CLAUDEUI_PI_HOSTED_TOOLS` / `_DISPATCH_ENABLED` / `_DISPATCH_DESCRIPTION` / `_PLAN_TOOLS` | `''`                                                           | no hosted tools, never `dispatch_agent`, plan mode is enforced by the parent's gate                                                     |
+| `CLAUDEUI_PI_AGENT_TOOL` / `_AGENT_LISTING`                                                | `'1'` + listing iff it may spawn, else `''`                    | depth < 3, the definition can spawn, its tools include `agent`                                                                          |
+| `CLAUDEUI_PI_SEND_MESSAGE`                                                                 | `'1'` (a dispatch target: `''`)                                | every child can message; a dispatch target is not an agent of this session                                                              |
 
 Every gate var is set explicitly — `''`, never omission — because the child inherits ClaudeUI's own
 env. The appended prompt is the definition body plus `PI_SUBAGENT_SUFFIX` (the report contract and
@@ -226,7 +227,8 @@ run_in_background !== false`. A background call returns once the child has start
   resolves `to` by exact id, then exact name. `main` from a BACKGROUND child is delivered to the
   session (a foreground child's channel is its report; the session sending to `main` is refused). A
   running agent gets a delivery ("queued for delivery … at its next tool round"); a user-stopped one
-  is refused (Claude Code's text); otherwise it is RESUMED: a new process with the record's flags on
+  is refused until the user prompts again, and a permanently failed one is refused (see
+  [Messaging v2](#messaging-v2-2026-10-05)); otherwise it is RESUMED: a new process with the record's flags on
   the same session file and the parent's cwd (P4), started by `PiChildRunner.resumeWithDelivery`,
   which builds the command from the host's structured payload (never text through `runTurn`),
   always in the background, notifying the original owner with the new run index. Model-authored
@@ -254,6 +256,74 @@ run_in_background !== false`. A background call returns once the child has start
   instead of failing its turn. Otherwise it stays an ordinary extension error.
 - **Labels.** An agent's label (its name, else its model-authored description) is one line without
   quotes or markup, at most 64 characters, wherever titles and summaries show it.
+
+### Messaging v2 (2026-10-05)
+
+Owner rulings: an accidental Stop must be recoverable without an approval card (a card stalls
+long-running work while the user is away); a failed agent resumes only when the failure is
+environmental, auth and quota included; ping-pong stays unlimited; every engine's `dispatch_agent`
+text points at its own subagent tool; pi learns which models exist instead of guessing ids.
+
+- **User-stop hold.** A `'user'` stop (the card's Stop, cascaded to every live descendant) raises
+  `userStopHold` on the record the moment the stop is recorded, not at run end, so a prompt typed
+  while the stopped child drains still counts. `PiSession.run()` — the one path every user-authored
+  prompt (typed, queued, steered) takes to pi — calls `userTurn()`, which clears every hold. While
+  held, `send_message` refuses: "was stopped by the user. Resume it only if the user asks you to;
+  the user has not spoken since the stop." Agent deliveries, plan toggles and judge traffic are not
+  user turns. Claude Code refuses a model resume of a user-stopped agent outright and only allows a
+  `userInitiated` one; "the user has spoken since" is the no-UI equivalent. `task_stop` and
+  interrupt stops never hold.
+- **Failure classes** (`pi-agent-failure.ts`, first match wins): context overflow → permanent;
+  401/403 (the anchored status parse, now `pi-error-status.ts`, shared with the event mapper) →
+  transient; quota/usage limits → transient; pi's retryable provider/transport errors → transient;
+  a crashed child or dead transport (`PiTurnOutcome.cause: 'exit'`, never message matching) →
+  transient; a launch failure → transient for a resume, permanent for a first run (no task to
+  resume); a refused `/cui-` prompt and anything unmatched → permanent. The overflow, quota and
+  retryable patterns are PORTED from `vendor/pi-src/packages/ai/src/utils/{overflow,retry}.ts` at
+  pi 0.87.1 — re-diff them at every pi bump. `failure` and `failureMessage` (one line, ≤ 200
+  characters, capped again on read) persist in `details.cuiAgent` and the notification `details`;
+  a later notification without them clears them; a failed link written before this change reads as
+  transient. A permanently failed agent refuses `send_message` with its message. pi drops errored
+  and aborted assistant messages when it rebuilds context (`transform-messages.ts`), so a resumed
+  run continues from the last good state.
+- **Child auth failures fail.** `PiChildRunner` ignored the mapper's `auth-required` output, so a
+  401/403 child settled `ok` at `agent_settled` and reported **completed** (a pi dispatch target an
+  empty success). It now settles like any turn error, under the same draining rule.
+- **Identity.** Every launch appends to `system-prompt.md`: the agent's id and name, who launched
+  it, the handle that reaches its launcher (`main`, else the spawner's name, else its id) — usable
+  only while it runs in the background — and how `<agent-message>` replies work. A FOREGROUND child
+  messaging its own launcher (by id or name) is refused like one messaging `main`, through one
+  check: the launcher is blocked in the `agent` call.
+- **Models.** The `agent` call's `model`, else the definition's (`inherit` excepted), resolves
+  against the authenticated, allowlisted catalog (`getPiAllowedModelCatalog`, the one allowlist
+  filter discovery also uses; `pi-agent-model.ts`): exact `provider/id` (then case-insensitive) →
+  bare id (the parent's provider first; still ambiguous → an error naming ≤ 10 candidates) → alias
+  `opus`/`sonnet`/`haiku`/`fable` (the newest version, the parent's provider first; only purely
+  numeric id tokens count as version, 8-digit dates excluded, so `-1m`/`:thinking` variants never
+  win) → "Unknown model … Call list_models". A miss refuses the launch (the 2026-08-21 ruling: never
+  substitute). An empty catalog passes the value through unchecked (as before); the parent's live
+  model fallback is not re-validated. The record, the child and `details.cuiAgent.model` carry the
+  resolved value. The name's uniqueness is re-checked after the catalog await, so parallel calls
+  cannot both claim one name.
+- **`list_models`** (bridge v12, in the `agent` block — only agents that may launch agents get it):
+  the session model, then one line per model (id, name, context window, price per M tokens,
+  reasoning, vision), `query` filter, 100-line cap. In `PI_HOSTED_TOOL_NAMES` and
+  `PI_AUTO_ALLOW_HOSTED_TOOLS` (read-only; a deny rule still wins); a `note` row.
+- **Dispatch description** ([ADR-033](adr-033_cross-engine-dispatch.md)).
+  `src/shared/dispatch-agent-description.ts` builds every engine's `dispatch_agent` description and
+  the Claude system-prompt section: target blurbs, "use this only when the user asks for a different
+  engine or model vendor, or wants an independent second opinion; for ordinary delegation use your
+  own `<tool>`" (Claude `Agent`, pi `agent`, opencode `task`, Codex `spawn_agent` — verified in the
+  vendored sources), the `session_id` contract and each caller's own model hints. pi gets it in
+  `CLAUDEUI_PI_DISPATCH_DESCRIPTION` (set beside `CLAUDEUI_PI_DISPATCH_ENABLED=1`, `''` for every
+  child and dispatch target); the bridge keeps a short static fallback.
+
+Residuals: a rebuilt record whose link says `stoppedBy: 'user'` is held until the next prompt even
+if the user spoke after the stop in the earlier app run (the link cannot say); ADR-091's "approve a
+block after the fact" nudge reaches the root through `run()` and so counts as a user turn (it is
+the user's own click); a resume whose launch fails is transient even when the cause is a model that
+no longer exists (each retry costs one spawn); the alias version rule reads id tokens and can be
+fooled by an id whose numbers are not versions.
 
 ## Consequences
 
@@ -301,7 +371,8 @@ owner routing, the stop and inactivity semantics, the history of notifications; 
   "unfinished" state is not reconstructed (only a background launch with no notification at all is).
 - A forked session shares its source's agent ids: resuming one from both sessions writes the same
   child file.
-- Model-driven message ping-pong between agents is not rate-limited (Claude Code parity).
+- Model-driven message ping-pong between agents is not rate-limited (Claude Code parity; re-affirmed
+  by the owner 2026-10-05 when agent-to-agent messaging was encouraged).
 - A user stop of a background agent is durable only once its passive notice is in the parent's
   file: quitting or cancelling before the end of the parent's turn loses it, and a rebuilt record
   then reads the agent as resumable.
