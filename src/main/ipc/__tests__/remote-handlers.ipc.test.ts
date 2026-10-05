@@ -280,10 +280,13 @@ import {
   cachedClaudeModels,
   resetCachedClaudeModels
 } from '../../../core/services/claude-model-catalog'
+import { hostAppVersion } from '../../../core/host'
+import { getCliVersion } from '../../../core/sdk/harness'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
   registerRemoteHandlers,
-  registerRemoteVersionInfo
+  registerRemoteVersionInfo,
+  resetRemoteVersionInfoForTests
 } from '../../../core/ipc/remote-handlers'
 import {
   CommandRegistry,
@@ -896,11 +899,49 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
-  it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
-    expect(dispatcher.has('app:version-info')).toBe(false)
-    registerRemoteVersionInfo({ appVersion: '1.2.3', cliVersion: '2.9' })
-    const res = await dispatcher.handle(makeRequest('app:version-info'), remoteConn)
-    expect(res).toEqual({ appVersion: '1.2.3', cliVersion: '2.9' })
+  describe('app:version-info', () => {
+    // The override is module-global: neither this describe's own override nor one
+    // left by an earlier test may reach the next.
+    beforeEach(() => resetRemoteVersionInfoForTests())
+    afterEach(() => resetRemoteVersionInfoForTests())
+
+    // A web client's Settings › About read this and got nothing: the channel was
+    // registered only by `registerRemoteVersionInfo`, which the desktop calls
+    // BEFORE `registerRemoteHandlers` (a no-op then) and claudeui-server never
+    // calls at all.
+    it('is served by registerRemoteHandlers alone, from what the host published (GUARD)', async () => {
+      expect(dispatcher.has('app:version-info')).toBe(true)
+      const res = (await dispatcher.handle(makeRequest('app:version-info'), remoteConn)) as {
+        appVersion: string
+        cliVersion: string
+      }
+      expect(res.appVersion).toBe(hostAppVersion())
+      expect(res.cliVersion).toBe(getCliVersion())
+    })
+
+    it('registerRemoteVersionInfo overrides it, before or after registration (GUARD)', async () => {
+      registerRemoteVersionInfo({ appVersion: '1.2.3', cliVersion: '2.9' })
+      const fresh = new RemoteDispatcher()
+      registerRemoteHandlers(fresh, sessionManagerStub)
+      // Called BEFORE the second registration, as the desktop does.
+      expect(await fresh.handle(makeRequest('app:version-info'), remoteConn)).toEqual({
+        appVersion: '1.2.3',
+        cliVersion: '2.9'
+      })
+      // And after.
+      registerRemoteVersionInfo({ appVersion: '4', cliVersion: '5' })
+      expect(await fresh.handle(makeRequest('app:version-info'), remoteConn)).toEqual({
+        appVersion: '4',
+        cliVersion: '5'
+      })
+    })
+
+    it('the override from the previous test does not outlive it (the reset seam)', async () => {
+      const res = (await dispatcher.handle(makeRequest('app:version-info'), remoteConn)) as {
+        appVersion: string
+      }
+      expect(res.appVersion).toBe(hostAppVersion())
+    })
   })
 
   // Regression: mockup channels must be reachable over remote — the web client

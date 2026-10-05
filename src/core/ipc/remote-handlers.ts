@@ -16,7 +16,7 @@ import {
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { accountState } from '../host'
+import { accountState, hostAppVersion } from '../host'
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
@@ -67,6 +67,7 @@ import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
+import { getCliVersion } from '../sdk/harness'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -175,13 +176,6 @@ function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'remote' })
 }
 
-/**
- * True once registerRemoteHandlers has run. `registerRemoteVersionInfo` is
- * called later in the app bootstrap and must stay a no-op when the remote
- * surface was never set up (it was previously gated on the captured dispatcher).
- */
-let remoteHandlersRegistered = false
-
 /** What `app:version-info` answers. */
 export interface VersionInfo {
   appVersion: string
@@ -189,21 +183,37 @@ export interface VersionInfo {
 }
 
 /**
- * Register the `app:version-info` channel on the remote transport. Called from
- * the main bootstrap once the build versions are known (they're computed after
- * registerRemoteHandlers runs). No-op if remote handlers aren't set up.
+ * What `app:version-info` serves unless a host overrides it
+ * ({@link registerRemoteVersionInfo}): the version the host published
+ * (`setHostAppVersion`, which the desktop sets from `app.getVersion()` and
+ * claudeui-server from its package manifest, `unknown` when it has none) and the
+ * Claude Code version of the harness that would spawn — read per call, since the
+ * harness selection can change while the host runs (ADR-082).
+ */
+const defaultVersionInfo = (): VersionInfo => ({
+  appVersion: hostAppVersion(),
+  cliVersion: getCliVersion()
+})
+
+let versionInfoSource: () => VersionInfo = defaultVersionInfo
+
+/** Test seam: drop any override, so `app:version-info` serves the host's defaults again. */
+export function resetRemoteVersionInfoForTests(): void {
+  versionInfoSource = defaultVersionInfo
+}
+
+/**
+ * Override what `app:version-info` answers. Order-independent: the channel itself
+ * is registered by {@link registerRemoteHandlers} (so every host that serves the
+ * remote surface — the desktop AND claudeui-server — serves it), and this only
+ * replaces its source, whether it runs before or after that. The desktop passes
+ * its display-form version.
  *
  * A function is read per call: the Claude Code version follows the harness
- * selection (ADR-082), so the desktop passes one that asks `getCliVersion()`.
+ * selection, so the desktop passes one that asks `getCliVersion()`.
  */
 export function registerRemoteVersionInfo(versionInfo: VersionInfo | (() => VersionInfo)): void {
-  if (!remoteHandlersRegistered) return
-  handleRemote({
-    channel: 'app:version-info',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => (typeof versionInfo === 'function' ? versionInfo() : versionInfo)
-  })
+  versionInfoSource = typeof versionInfo === 'function' ? versionInfo : () => versionInfo
 }
 
 /**
@@ -353,7 +363,15 @@ export function registerRemoteHandlers(
    */
   authDeps?: AuthCommandDeps
 ): void {
-  remoteHandlersRegistered = true
+  // Registered here, not by `registerRemoteVersionInfo`, so the channel exists
+  // whatever order a host calls them in (the desktop calls the latter BEFORE
+  // `bootCore` gets here; claudeui-server never calls it).
+  handleRemote({
+    channel: 'app:version-info',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => versionInfoSource()
+  })
 
   // -------------------------------------------------------------------------
   // Session lifecycle
