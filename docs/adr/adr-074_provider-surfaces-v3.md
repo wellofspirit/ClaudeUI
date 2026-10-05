@@ -239,7 +239,7 @@ What the build changed about the decision:
 6. **Models in the picker is a summary + a stacked editor** in the Manage sheet (mockup D), which re-reads
    the definition after every write so a split list never reopens as one.
 7. **Removal logging**: every `removeVendorAuth` logs the vendor id and call path (never the key), after
-    an unexplained loss of the owner's pi OpenRouter key during the arc.
+   an unexplained loss of the owner's pi OpenRouter key during the arc.
 
 **Amended 2026-10-01, stale rows and live model identity.** API providers' Remove action can remove
 disabled-only stale opencode entries by clearing their native veto and ClaudeUI curation.
