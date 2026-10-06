@@ -416,7 +416,7 @@ function VoiceNoticePill({
         ...(place ? { right: place.right, maxWidth: place.maxWidth } : {})
       }}
       // The entrance is `motion-safe:` rather than `animate-fade-in` +
-      // `motion-reduce:animate-none`: main.css's `.animate-fade-in` is unlayered,
+      // `motion-reduce:animate-none`: app.css's `.animate-fade-in` is unlayered,
       // so it would beat any layered Tailwind override.
       className={`absolute bottom-full right-0 mb-2 z-30 w-max motion-safe:animate-[fade-in_0.15s_ease-out] transition-opacity ease-out motion-reduce:transition-none ${
         fading ? 'opacity-0 motion-reduce:opacity-100' : 'opacity-100'

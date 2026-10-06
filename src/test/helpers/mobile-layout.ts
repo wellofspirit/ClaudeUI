@@ -80,7 +80,7 @@ export function LayoutComposer(props: { children: ReactNode }): ReturnType<typeo
  * The chain, outside in (uiFontScale 1 here, so the app zoom is the identity):
  *  - the scroller, `flex-1 overflow-y-auto chat-scroll mr-2`
  *    (chat/ChatPanel/ChatPanel.tsx:312). It carries `chat-scroll`, whose classic
- *    scrollbar is 7px wide (`.chat-scroll::-webkit-scrollbar`, assets/main.css:151);
+ *    scrollbar is 7px wide (`.chat-scroll::-webkit-scrollbar`, assets/app.css:166);
  *    Electron and any desktop-class browser draw it, Android's overlay scrollbars
  *    take none. The classic-scrollbar case is the NARROWER one, so it is the one
  *    modelled. Playwright launches Chromium with `--hide-scrollbars`, which
