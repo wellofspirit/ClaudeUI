@@ -141,3 +141,13 @@ agent still running in the source at fork time cannot read "running" forever in 
 anything spawns, so it cannot race live events. When the loader cannot be used (the source is not in the
 directory listing, or the read fails), and for the other engines, the in-memory slice stays and the
 source's notifications for agents spawned inside the slice are copied with it.
+
+The anchor itself also moves (`findForkAnchorUuid`, same date). After the tool-cycle balancing, it
+extends past agent completions cli.js delivered right after the chosen turn: a `<task-notification>`
+user line, or a `queued_command` attachment carrying one. Bookkeeping lines and `isMeta` handback notes
+are passed over. The walk stops at the next assistant line, real prompt, tool_result or steer. An agent's
+notification routinely lands after the reply to its handback. Cut before it, cli.js's resume scan
+(2.1.290, `aSr`) finds the agent launched but never delivered and reaps it as `failed: "… didn't finish
+before the previous session ended"` on the fork's first send. A branch that ends on the delivery has the
+same shape as a resumed session whose transcript ends in one. `--resume-session-at` resolves an
+attachment line's uuid (probed on 2.1.290).
