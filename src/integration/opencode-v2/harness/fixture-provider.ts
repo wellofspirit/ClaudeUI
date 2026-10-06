@@ -8,6 +8,8 @@
  * Markers (last user text):
  *   [tool]      shell tool call; after the tool result, echo the result
  *   [mcp]       call the first tool named `*_echo`; then echo the result
+ *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
+ *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [slow]      many text chunks, `slowChunkMs` apart (steer / interrupt window)
@@ -188,6 +190,18 @@ export async function startFixtureProvider(
           {
             text: 'hello-from-model'
           }
+        )
+      if (text.includes('[dispatch]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_dispatch_agent'),
+          { engine: 'claude', prompt: 'contract dispatch' }
+        )
+      if (text.includes('[mockup]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_create_mockup'),
+          { html: '<p>contract mockup</p>', title: 'Contract' }
         )
       if (text.includes('[question]'))
         return streamToolCall(

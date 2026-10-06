@@ -1,15 +1,24 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
-import { OpencodeServerManager } from '../OpencodeServerManager'
-import type { SpawnResult, SpawnServerFn } from '../OpencodeServerManager'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { OpencodeServerManager, locatePluginDir } from '../OpencodeServerManager'
+import type {
+  HostedToolsReadiness,
+  ServerConnection,
+  SpawnResult,
+  SpawnServerFn,
+  WaitReadyFn
+} from '../OpencodeServerManager'
 import type { McpHttpHost } from '../mcp-http-host'
+import type { OpencodeConfigInput } from '../opencode-server-config'
+import { logger } from '../../services/logger'
 
-// ── Fake spawn harness ─────────────────────────────────────────────────────────
+// ── Fakes ─────────────────────────────────────────────────────────────────────
 //
 // A fake ChildProcess (EventEmitter) whose kill() flips a flag and emits 'exit'
 // so the manager's unexpected-death cleanup runs exactly as it would in prod.
+// The manager ends servers through the injected `endServerFn`, which kills.
 
 interface FakeChild extends ChildProcess {
   killed: boolean
@@ -20,50 +29,31 @@ function makeFakeChild(): FakeChild {
   ;(emitter as { killed: boolean }).killed = false
   emitter.kill = ((_signal?: NodeJS.Signals | number) => {
     ;(emitter as { killed: boolean }).killed = true
-    // Mirror real behavior: killing the process eventually emits 'exit'.
     emitter.emit('exit', null, 'SIGTERM')
     return true
   }) as ChildProcess['kill']
   return emitter
 }
 
-// ── Fake MCP host harness ─────────────────────────────────────────────────────
-//
-// A fake McpHttpHost that tracks close() calls without binding a real port.
-
 interface FakeMcpHost extends McpHttpHost {
   closed: boolean
+  createServer: () => McpServer
 }
 
-function makeFakeMcpHost(port = 19999): FakeMcpHost {
-  const host: FakeMcpHost = {
-    port,
-    token: 'test-token-' + Math.random().toString(36).slice(2),
-    closed: false,
-    async close() {
-      this.closed = true
-    }
-  }
-  return host
+interface SpawnCall {
+  cwd: string
+  password: string
+  configContent: string
+  child: FakeChild
 }
 
-/**
- * Build an injectable spawnFn that records invocations and returns a fresh
- * fake child per call. `delayMs` lets us widen the async window so concurrent
- * acquires genuinely overlap (proving the pending-promise dedupe).
- *
- * The spawnFn now receives 5 args: launch, cwd, password, mcpPort, mcpToken.
- * The recorded calls include mcpPort and mcpToken so tests can assert on them.
- */
-function makeSpawnFn(delayMs = 0): {
-  spawnFn: SpawnServerFn
-  calls: Array<{ cwd: string; mcpPort: number; mcpToken: string; child: FakeChild }>
-} {
-  const calls: Array<{ cwd: string; mcpPort: number; mcpToken: string; child: FakeChild }> = []
+/** Records spawns; `delayMs` widens the window so concurrent acquires overlap. */
+function makeSpawnFn(delayMs = 0): { spawnFn: SpawnServerFn; calls: SpawnCall[] } {
+  const calls: SpawnCall[] = []
   let port = 40000
-  const spawnFn: SpawnServerFn = async (_launch, cwd, _password, mcpPort, mcpToken) => {
+  const spawnFn: SpawnServerFn = async (_launch, options) => {
     const child = makeFakeChild()
-    calls.push({ cwd, mcpPort, mcpToken, child })
+    calls.push({ ...options, child })
     if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
     const result: SpawnResult = { process: child, baseUrl: `http://127.0.0.1:${port++}` }
     return result
@@ -72,52 +62,72 @@ function makeSpawnFn(delayMs = 0): {
 }
 
 let fakeHostPort = 20000
-
-/**
- * Build an injectable startMcpHostFn that records calls and returns fake hosts.
- */
 function makeMcpHostFn(): {
-  startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
+  startMcpHostFn: (createServer: () => McpServer) => Promise<McpHttpHost>
   hosts: FakeMcpHost[]
 } {
   const hosts: FakeMcpHost[] = []
-  const startMcpHostFn = async (_mcpServer: McpServer): Promise<McpHttpHost> => {
-    const host = makeFakeMcpHost(fakeHostPort++)
+  const startMcpHostFn = async (createServer: () => McpServer): Promise<McpHttpHost> => {
+    const host: FakeMcpHost = {
+      port: fakeHostPort++,
+      token: 'test-token-' + Math.random().toString(36).slice(2),
+      closed: false,
+      createServer,
+      async close() {
+        this.closed = true
+      }
+    }
     hosts.push(host)
     return host
   }
   return { startMcpHostFn, hosts }
 }
 
-function makeManager(
-  spawnFn: SpawnServerFn,
-  startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
-): OpencodeServerManager {
-  // Stub the binary locator + MCP host starter so tests never touch the filesystem or network.
-  return new OpencodeServerManager({
-    spawnFn,
-    locateBinaryFn: () => '/fake/opencode',
-    startMcpHostFn
-  })
+const READY: HostedToolsReadiness = { state: 'ready', signal: 'registry', elapsedMs: 1 }
+
+interface Rig {
+  manager: OpencodeServerManager
+  calls: SpawnCall[]
+  hosts: FakeMcpHost[]
+  waits: { baseUrl: string; directory: string; pluginExpected: boolean }[]
+  /** Per-cwd config input; mutate to simulate a config change. */
+  configs: Map<string, OpencodeConfigInput>
 }
 
-// The key test: port parsing regex
-describe('port parsing', () => {
-  it('extracts port from opencode server stdout line', () => {
-    const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
-    const line = 'opencode server listening on http://127.0.0.1:45678'
-    const m = PORT_PATTERN.exec(line)
-    expect(m).not.toBeNull()
-    expect(m![1]).toBe('45678')
+function makeRig(
+  opts: {
+    delayMs?: number
+    spawnFn?: SpawnServerFn
+    waitReadyFn?: WaitReadyFn
+    locateBinaryFn?: () => string
+  } = {}
+): Rig {
+  const { spawnFn, calls } = makeSpawnFn(opts.delayMs)
+  const { startMcpHostFn, hosts } = makeMcpHostFn()
+  const waits: Rig['waits'] = []
+  const configs = new Map<string, OpencodeConfigInput>()
+  const manager = new OpencodeServerManager({
+    spawnFn: opts.spawnFn ?? spawnFn,
+    locateBinaryFn: opts.locateBinaryFn ?? (() => '/fake/opencode'),
+    startMcpHostFn,
+    configInputFn: (cwd) => configs.get(cwd) ?? { pluginDir: '/res/claudeui-xeng' },
+    waitReadyFn:
+      opts.waitReadyFn ??
+      (async (endpoint, directory, pluginExpected) => {
+        waits.push({ baseUrl: endpoint.baseUrl, directory, pluginExpected })
+        return READY
+      }),
+    endServerFn: (child) => child.kill(),
+    serverCwd: '/server-home'
   })
+  return { manager, calls, hosts, waits, configs }
+}
 
-  it('does not match partial or wrong-host lines', () => {
-    const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
-    expect(PORT_PATTERN.exec('opencode server listening on http://0.0.0.0:1234')).toBeNull()
-    expect(PORT_PATTERN.exec('listening on port 1234')).toBeNull()
-    expect(PORT_PATTERN.exec('')).toBeNull()
-  })
+afterEach(() => {
+  vi.restoreAllMocks()
 })
+
+// The SSE parser lives in the 1.x client (replaced in S3); its tests stay here.
 
 // SSE block parser tests (imported from client)
 describe('SSE block parsing', () => {
@@ -328,742 +338,465 @@ describe('SSE block parsing', () => {
   })
 })
 
-// Ref-counting / lifecycle tests against the REAL manager, with an injected
-// fake spawn (no binary). These exercise acquire/release/teardown and the
-// concurrency dedupe that FIX 1 closes.
-describe('OpencodeServerManager lifecycle', () => {
-  it('sequential: acquire×2 same cwd spawns once (refCount 2); release×2 kills once', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
+// ── One server for every directory, keyed by injected config (ADR-093 §2) ──────
 
-    const c1 = await mgr.acquire(cwd)
-    const c2 = await mgr.acquire(cwd)
-
-    expect(calls).toHaveLength(1) // spawned exactly once
-    expect(c1.baseUrl).toBe(c2.baseUrl) // same server
-    expect(c1.authHeader).toBe(c2.authHeader)
-    expect(mgr.activeCount).toBe(1)
-    expect(hosts).toHaveLength(1) // one MCP host for one cwd
-
-    const child = calls[0].child
-    mgr.release(cwd)
-    expect(child.killed).toBe(false) // still one ref outstanding
-    expect(hosts[0].closed).toBe(false)
-    expect(mgr.activeCount).toBe(1)
-
-    mgr.release(cwd)
-    expect(child.killed).toBe(true) // last-out kill
-    expect(hosts[0].closed).toBe(true) // MCP host also closed
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('concurrency: Promise.all([acquire, acquire]) spawns EXACTLY once (guards FIX 1)', async () => {
-    // A spawn delay forces the two acquires to overlap — without the pending
-    // promise, both would see no handle and each spawn a server (the race).
-    const { spawnFn, calls } = makeSpawnFn(25)
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const [c1, c2] = await Promise.all([mgr.acquire(cwd), mgr.acquire(cwd)])
-
-    expect(calls).toHaveLength(1) // <-- the assertion that fails pre-fix
-    expect(c1.baseUrl).toBe(c2.baseUrl)
-    expect(mgr.activeCount).toBe(1)
-    expect(hosts).toHaveLength(1) // one MCP host
-
-    // refCount must be 2 — both releases needed before teardown.
-    const child = calls[0].child
-    mgr.release(cwd)
-    expect(child.killed).toBe(false)
-    expect(hosts[0].closed).toBe(false)
-    mgr.release(cwd)
-    expect(child.killed).toBe(true)
-    expect(hosts[0].closed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('higher concurrency: 5 simultaneous acquires share one server, 5 releases tear down', async () => {
-    const { spawnFn, calls } = makeSpawnFn(15)
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const conns = await Promise.all(Array.from({ length: 5 }, () => mgr.acquire(cwd)))
-    expect(calls).toHaveLength(1)
-    expect(new Set(conns.map((c) => c.baseUrl)).size).toBe(1)
-    expect(hosts).toHaveLength(1)
-
-    const child = calls[0].child
-    for (let i = 0; i < 4; i++) {
-      mgr.release(cwd)
-      expect(child.killed).toBe(false)
-    }
-    mgr.release(cwd)
-    expect(child.killed).toBe(true)
-    expect(hosts[0].closed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('different cwds get separate servers', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    const a = await mgr.acquire('/work/a')
-    const b = await mgr.acquire('/work/b')
-
-    expect(calls).toHaveLength(2)
-    expect(a.baseUrl).not.toBe(b.baseUrl)
-    expect(mgr.activeCount).toBe(2)
-    expect(hosts).toHaveLength(2) // one MCP host per cwd
-
-    mgr.release('/work/a')
-    expect(mgr.activeCount).toBe(1)
-    mgr.release('/work/b')
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('normalizes cwd: relative + absolute forms of the same dir share a server', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    // resolvePath() collapses these to the same absolute key.
-    const a = await mgr.acquire('/work/proj')
-    const b = await mgr.acquire('/work/proj/sub/..')
-
+describe('OpencodeServerManager (2.x) — keying', () => {
+  it('different cwds with the same config share ONE server (1.x spawned one per cwd)', async () => {
+    const { manager, calls } = makeRig()
+    const a = await manager.acquire('/proj/a')
+    const b = await manager.acquire('/proj/b')
     expect(calls).toHaveLength(1)
     expect(a.baseUrl).toBe(b.baseUrl)
-
-    mgr.release('/work/proj')
-    mgr.release('/work/proj/sub/..')
-    expect(mgr.activeCount).toBe(0)
+    expect(a.directory).toBe('/proj/a')
+    expect(b.directory).toBe('/proj/b')
+    expect(calls[0].cwd).toBe('/server-home')
+    expect(manager.activeCount).toBe(1)
   })
 
-  it('re-acquire after full release spawns a fresh server', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    mgr.release(cwd)
-    expect(mgr.activeCount).toBe(0)
-
-    await mgr.acquire(cwd)
-    expect(calls).toHaveLength(2) // a new spawn, not a revived dead handle
-    expect(mgr.activeCount).toBe(1)
-    mgr.release(cwd)
+  it('a cwd whose effective config differs gets its own server', async () => {
+    const { manager, calls, configs } = makeRig()
+    configs.set('/proj/b', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { local: { type: 'local', command: ['x'], codemode: false } }
+    })
+    const a = await manager.acquire('/proj/a')
+    const b = await manager.acquire('/proj/b')
+    expect(calls).toHaveLength(2)
+    expect(a.baseUrl).not.toBe(b.baseUrl)
+    expect(JSON.parse(calls[1].configContent).mcp.servers.local).toBeDefined()
+    expect(JSON.parse(calls[0].configContent).mcp.servers.local).toBeUndefined()
   })
 
-  it('spawn failure rejects acquire and leaves no handle (retry can re-spawn)', async () => {
+  it('a config change: new leases get a new server, the old one drains and ends at its last release', async () => {
+    const { manager, calls, configs } = makeRig()
+    const old = await manager.acquire('/proj/a')
+    configs.set('/proj/a', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { added: { type: 'remote', url: 'https://x/mcp', codemode: false } }
+    })
+    const fresh = await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(2)
+    expect(fresh.baseUrl).not.toBe(old.baseUrl)
+    // The old server keeps serving its holder.
+    expect(calls[0].child.killed).toBe(false)
+    manager.releaseIfCurrent('/proj/a', old)
+    expect(calls[0].child.killed).toBe(true)
+    expect(calls[1].child.killed).toBe(false)
+    manager.releaseIfCurrent('/proj/a', fresh)
+    expect(calls[1].child.killed).toBe(true)
+  })
+
+  it('normalizes cwd: relative + absolute forms of one dir are one lease directory', async () => {
+    const { manager } = makeRig()
+    const rel = await manager.acquire('.')
+    const abs = await manager.acquire(process.cwd())
+    expect(rel.directory).toBe(abs.directory)
+    expect(rel.directory).toBe(process.cwd())
+  })
+})
+
+describe('OpencodeServerManager (2.x) — ref-counting', () => {
+  it('acquire×2 spawns once; release×2 ends once', async () => {
+    const { manager, calls, hosts } = makeRig()
+    await manager.acquire('/p')
+    await manager.acquire('/p')
+    manager.release('/p')
+    expect(calls[0].child.killed).toBe(false)
+    manager.release('/p')
+    expect(calls[0].child.killed).toBe(true)
+    expect(hosts[0].closed).toBe(true)
+    expect(manager.activeCount).toBe(0)
+  })
+
+  it('leases across directories keep one server alive until the last', async () => {
+    const { manager, calls } = makeRig()
+    await manager.acquire('/a')
+    await manager.acquire('/b')
+    manager.release('/a')
+    expect(calls[0].child.killed).toBe(false)
+    manager.release('/b')
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('concurrency: 5 simultaneous acquires (mixed dirs) share one start', async () => {
+    const { manager, calls } = makeRig({ delayMs: 20 })
+    const conns = await Promise.all(['/a', '/b', '/a', '/c', '/b'].map((d) => manager.acquire(d)))
+    expect(calls).toHaveLength(1)
+    expect(new Set(conns.map((c) => c.baseUrl)).size).toBe(1)
+    for (const d of ['/a', '/b', '/a', '/c']) manager.release(d)
+    expect(calls[0].child.killed).toBe(false)
+    manager.release('/b')
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('release on an unknown cwd is a no-op', () => {
+    const { manager } = makeRig()
+    expect(() => manager.release('/nope')).not.toThrow()
+  })
+
+  it('release(cwd) with two servers holding the cwd releases the NEWEST; releaseIfCurrent is exact', async () => {
+    const { manager, calls, configs } = makeRig()
+    const old = await manager.acquire('/p')
+    configs.set('/p', { pluginDir: null })
+    await manager.acquire('/p')
+    manager.release('/p') // the pair around one call: the newest
+    expect(calls[1].child.killed).toBe(true)
+    expect(calls[0].child.killed).toBe(false)
+    manager.releaseIfCurrent('/p', old)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('re-acquire after full release starts a fresh server', async () => {
+    const { manager, calls } = makeRig()
+    const first = await manager.acquire('/p')
+    manager.release('/p')
+    const second = await manager.acquire('/p')
+    expect(calls).toHaveLength(2)
+    expect(second.password).not.toBe(first.password)
+  })
+
+  it('a failed start rejects and leaves nothing behind (a retry can start)', async () => {
     let attempt = 0
-    const goodSpawn = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const spawnFn: SpawnServerFn = async (launch, cwd, password, mcpPort, mcpToken) => {
-      attempt++
-      if (attempt === 1) throw new Error('boom: serve failed to start')
-      return goodSpawn.spawnFn(launch, cwd, password, mcpPort, mcpToken)
-    }
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await expect(mgr.acquire(cwd)).rejects.toThrow('boom')
-    expect(mgr.activeCount).toBe(0)
-    // The MCP host that was started before the spawn attempt must be closed on failure.
-    expect(hosts[0].closed).toBe(true)
-
-    // A subsequent acquire must be able to re-spawn (pending entry was cleared).
-    const conn = await mgr.acquire(cwd)
-    expect(conn.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
-    expect(mgr.activeCount).toBe(1)
-    mgr.release(cwd)
-  })
-
-  it('concurrent acquires that all fail each reject; the cwd stays clean', async () => {
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const spawnFn: SpawnServerFn = async () => {
-      await new Promise((r) => setTimeout(r, 10))
-      throw new Error('boom')
-    }
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const results = await Promise.allSettled([mgr.acquire(cwd), mgr.acquire(cwd)])
-    expect(results.every((r) => r.status === 'rejected')).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-    // The MCP host started before the failed spawn must be closed.
-    expect(hosts[0].closed).toBe(true)
-  })
-
-  it('unexpected server death drops the handle and closes MCP host', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    expect(mgr.activeCount).toBe(1)
-
-    // Simulate a crash: the child emits 'exit' without us calling release().
-    calls[0].child.emit('exit', 1, null)
-    expect(mgr.activeCount).toBe(0)
-    // MCP host must be cleaned up on unexpected death.
-    await new Promise((r) => setTimeout(r, 10)) // give close() a tick
-    expect(hosts[0].closed).toBe(true)
-
-    // Next acquire spawns fresh rather than handing back the dead handle.
-    await mgr.acquire(cwd)
-    expect(calls).toHaveLength(2)
-    mgr.release(cwd)
-  })
-
-  it('release on an unknown cwd is a no-op (no throw)', () => {
     const { spawnFn } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    expect(() => mgr.release('/never/acquired')).not.toThrow()
+    const { manager, hosts } = makeRig({
+      spawnFn: async (launch, options) => {
+        if (attempt++ === 0) throw new Error('boom')
+        return spawnFn(launch, options)
+      }
+    })
+    await expect(manager.acquire('/p')).rejects.toThrow('boom')
+    expect(manager.activeCount).toBe(0)
+    expect(hosts[0].closed).toBe(true)
+    await expect(manager.acquire('/p')).resolves.toBeTruthy()
   })
 
-  it('dispose() kills all live servers, closes all MCP hosts, and clears state', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
+  it('a distinct random password (Basic header) per server', async () => {
+    const { manager, calls, configs } = makeRig()
+    configs.set('/b', { pluginDir: null })
+    const a = await manager.acquire('/a')
+    const b = await manager.acquire('/b')
+    expect(a.password).not.toBe(b.password)
+    expect(a.authHeader).toBe('Basic ' + Buffer.from('opencode:' + a.password).toString('base64'))
+    expect(calls[0].password).toBe(a.password)
+  })
 
-    await mgr.acquire('/work/a')
-    await mgr.acquire('/work/b')
-    expect(mgr.activeCount).toBe(2)
+  it('the spawn gets the server-own hosted MCP endpoint in its config', async () => {
+    const { manager, calls, hosts } = makeRig()
+    await manager.acquire('/p')
+    const cfg = JSON.parse(calls[0].configContent)
+    expect(cfg.mcp.servers.claudeui.url).toBe(`http://127.0.0.1:${hosts[0].port}/mcp`)
+    expect(cfg.mcp.servers.claudeui.headers.Authorization).toBe(`Bearer ${hosts[0].token}`)
+    expect(cfg.plugins).toEqual(['/res/claudeui-xeng'])
+  })
 
-    mgr.dispose()
-    expect(calls[0].child.killed).toBe(true)
-    expect(calls[1].child.killed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-    // Allow async close() callbacks a tick to run.
+  it('the MCP host builds a fresh claudeui McpServer per session', async () => {
+    const { manager, hosts } = makeRig()
+    await manager.acquire('/p')
+    const s1 = hosts[0].createServer()
+    const s2 = hosts[0].createServer()
+    expect(s1).toBeInstanceOf(McpServer)
+    expect(s1).not.toBe(s2)
+  })
+})
+
+describe('OpencodeServerManager (2.x) — hosted-tools readiness', () => {
+  it('acquire waits for readiness per directory, once per directory', async () => {
+    const { manager, waits } = makeRig()
+    const a = await manager.acquire('/a')
+    await manager.acquire('/a')
+    await manager.acquire('/b')
+    expect(waits.map((w) => w.directory)).toEqual(['/a', '/b'])
+    expect(waits[0]).toMatchObject({ baseUrl: a.baseUrl, pluginExpected: true })
+    expect(a.hostedTools).toEqual(READY)
+  })
+
+  it('waitForHostedTools:false skips the wait for a caller that runs no turn', async () => {
+    const { manager, waits } = makeRig()
+    const conn = await manager.acquire('/a', { waitForHostedTools: false })
+    expect(conn.hostedTools).toEqual({ state: 'skipped' })
+    expect(waits).toHaveLength(0)
+    // A later turn-running acquire still waits (nothing was memoized).
+    await manager.acquire('/a')
+    expect(waits).toHaveLength(1)
+  })
+
+  it('acquire does not resolve before readiness does', async () => {
+    let finish!: (r: HostedToolsReadiness) => void
+    const { manager } = makeRig({
+      waitReadyFn: () => new Promise((resolve) => (finish = resolve))
+    })
+    let resolved = false
+    const pending = manager.acquire('/a').then((c) => {
+      resolved = true
+      return c
+    })
     await new Promise((r) => setTimeout(r, 10))
-    expect(hosts[0].closed).toBe(true)
-    expect(hosts[1].closed).toBe(true)
+    expect(resolved).toBe(false)
+    finish(READY)
+    await expect(pending).resolves.toMatchObject({ hostedTools: READY })
   })
 
-  it('dispose() during an in-flight spawn reaps the resolving server instead of orphaning it', async () => {
-    // Widen the spawn window so dispose() lands while spawnFn is still pending.
-    const { spawnFn, calls } = makeSpawnFn(25)
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    const acquiring = mgr.acquire('/work/proj') // spawn in flight
-    await new Promise((r) => setTimeout(r, 5)) // ensure spawnFn was entered
-    mgr.dispose() // dispose BEFORE the spawn resolves
-
-    // Pre-fix, the spawn resolved AFTER dispose() cleared `handles`, re-inserting
-    // its handle (an orphaned opencode.exe surviving app quit). Now it must self-
-    // terminate: the acquire rejects, no handle is registered, and the child +
-    // MCP host we DID spawn are both reaped.
-    await expect(acquiring).rejects.toThrow(/disposed/)
-    expect(mgr.activeCount).toBe(0)
-    expect(calls).toHaveLength(1)
-    expect(calls[0].child.killed).toBe(true)
-    await new Promise((r) => setTimeout(r, 10)) // let close() run
-    expect(hosts[0].closed).toBe(true)
+  it('no plugin → the wait is told so (status fallback)', async () => {
+    const { manager, waits, configs } = makeRig()
+    configs.set('/a', { pluginDir: null })
+    await manager.acquire('/a')
+    expect(waits[0].pluginExpected).toBe(false)
   })
 
-  it('generates a distinct random password (Basic auth header) per server', async () => {
-    const { spawnFn } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    const a = await mgr.acquire('/work/a')
-    const b = await mgr.acquire('/work/b')
-
-    expect(a.authHeader.startsWith('Basic ')).toBe(true)
-    expect(a.authHeader).not.toBe(b.authHeader)
-    // Decodes to opencode:<password>
-    const decoded = Buffer.from(a.authHeader.slice('Basic '.length), 'base64').toString('utf8')
-    expect(decoded.startsWith('opencode:')).toBe(true)
-    expect(decoded.length).toBeGreaterThan('opencode:'.length)
-
-    mgr.release('/work/a')
-    mgr.release('/work/b')
+  it('a timeout is logged and the lease still handed out (degraded, never a failure)', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({
+      waitReadyFn: async () => ({
+        state: 'timeout',
+        last: 'rpc 200 [], claudeui pending',
+        elapsedMs: 10_000
+      })
+    })
+    const conn = await manager.acquire('/a')
+    expect(conn.hostedTools.state).toBe('timeout')
+    expect(
+      warn.mock.calls.some(([, msg]) => /still not registered.*\/a.*10000 ms/.test(String(msg)))
+    ).toBe(true)
   })
 
-  it('spawnFn receives the mcpPort and mcpToken from the started MCP host', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
+  it('a readiness probe that throws counts as a timeout, not a rejected acquire', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({ waitReadyFn: async () => Promise.reject(new Error('nope')) })
+    await expect(manager.acquire('/a')).resolves.toMatchObject({
+      hostedTools: { state: 'timeout' }
+    })
+  })
 
-    await mgr.acquire('/work/proj')
+  it('a server that dies during the wait rejects the acquire and leaks no ref', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    let finish!: (r: HostedToolsReadiness) => void
+    const { manager, calls } = makeRig({
+      waitReadyFn: () => new Promise((resolve) => (finish = resolve))
+    })
+    const pending = manager.acquire('/a')
+    await new Promise((r) => setTimeout(r, 0))
+    calls[0].child.emit('exit', 1, null)
+    finish(READY)
+    await expect(pending).rejects.toThrow(/went away/)
+    expect(manager.activeCount).toBe(0)
+  })
 
-    expect(calls[0].mcpPort).toBe(hosts[0].port)
-    expect(calls[0].mcpToken).toBe(hosts[0].token)
-
-    mgr.release('/work/proj')
+  it('refreshReadiness re-waits (S8: after a location reload)', async () => {
+    const { manager, waits } = makeRig()
+    const conn = await manager.acquire('/a')
+    await expect(manager.refreshReadiness(conn)).resolves.toEqual(READY)
+    expect(waits).toHaveLength(2)
+    manager.release('/a')
+    await expect(manager.refreshReadiness(conn)).resolves.toEqual({ state: 'skipped' })
   })
 })
 
-// Unexpected-death fan-out + identity-checked release. Both exist so a session
-// can react to its server dying (emit 'disconnected') WITHOUT a stale release
-// decrementing a replacement server another session is using.
-describe('OpencodeServerManager exit fan-out + releaseIfCurrent', () => {
-  it('subscribeExit fires on an unexpected child exit', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let fired = 0
-    mgr.subscribeExit(cwd, () => fired++)
-
-    calls[0].child.emit('exit', 1, null) // crash, nobody called release()
-    expect(fired).toBe(1)
-  })
-
-  it('a throwing subscriber does not starve the others, and listeners fire at most once', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let second = 0
-    mgr.subscribeExit(cwd, () => {
-      throw new Error('bad subscriber')
-    })
-    mgr.subscribeExit(cwd, () => second++)
-
+describe('OpencodeServerManager (2.x) — exit fan-out', () => {
+  it('subscribeExit fires on an unexpected exit; the handle is dropped and its MCP host closed', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager, calls, hosts } = makeRig()
+    const conn = await manager.acquire('/p')
+    const cb = vi.fn()
+    manager.subscribeExit('/p', cb, conn)
     calls[0].child.emit('exit', 1, null)
-    calls[0].child.emit('exit', 1, null) // handle already dropped — gate closed
-    expect(second).toBe(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(manager.activeCount).toBe(0)
+    expect(hosts[0].closed).toBe(true)
   })
 
-  it('subscribeExit does NOT fire on the deliberate refcount-0 release() kill', async () => {
-    const { spawnFn } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let fired = 0
-    mgr.subscribeExit(cwd, () => fired++)
-
-    mgr.release(cwd) // last ref → kills the child, which emits 'exit'
-    expect(mgr.activeCount).toBe(0)
-    expect(fired).toBe(0)
+  it('does NOT fire on the deliberate last release or on dispose', async () => {
+    const { manager } = makeRig()
+    await manager.acquire('/p')
+    const cb = vi.fn()
+    manager.subscribeExit('/p', cb)
+    manager.release('/p')
+    await manager.acquire('/q')
+    const cb2 = vi.fn()
+    manager.subscribeExit('/q', cb2)
+    manager.dispose()
+    expect(cb).not.toHaveBeenCalled()
+    expect(cb2).not.toHaveBeenCalled()
   })
 
-  it('subscribeExit does NOT fire on dispose()', async () => {
-    const { spawnFn } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let fired = 0
-    mgr.subscribeExit(cwd, () => fired++)
-
-    mgr.dispose()
-    expect(fired).toBe(0)
-  })
-
-  it('unsubscribe removes the listener; a stale unsubscribe cannot touch a respawned handle', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let firstFired = 0
-    const unsubscribeFirst = mgr.subscribeExit(cwd, () => firstFired++)
-    unsubscribeFirst()
+  it('subscribeExit with conn binds to that exact server', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager, calls, configs } = makeRig()
+    const old = await manager.acquire('/p')
+    configs.set('/p', { pluginDir: null })
+    await manager.acquire('/p')
+    const onOld = vi.fn()
+    const onNewest = vi.fn()
+    manager.subscribeExit('/p', onOld, old)
+    manager.subscribeExit('/p', onNewest)
     calls[0].child.emit('exit', 1, null)
-    expect(firstFired).toBe(0)
-
-    // Respawn for the same cwd, resubscribe, then replay the STALE unsubscribe:
-    // it is bound to the dead handle and must not remove the new listener.
-    await mgr.acquire(cwd)
-    let secondFired = 0
-    mgr.subscribeExit(cwd, () => secondFired++)
-    unsubscribeFirst()
-    calls[1].child.emit('exit', 1, null)
-    expect(secondFired).toBe(1)
+    expect(onOld).toHaveBeenCalledTimes(1)
+    expect(onNewest).not.toHaveBeenCalled()
   })
 
-  it('subscribeExit on a cwd with no live server returns a no-op unsubscribe', () => {
-    const { spawnFn } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const unsubscribe = mgr.subscribeExit('/never/acquired', () => {})
-    expect(() => unsubscribe()).not.toThrow()
-  })
-
-  it('releaseIfCurrent no-ops when the handle was already dropped by the death', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const conn = await mgr.acquire(cwd)
+  it('releaseIfCurrent no-ops after the death, and never touches the replacement', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager, calls } = makeRig()
+    const dead = await manager.acquire('/p')
     calls[0].child.emit('exit', 1, null)
-    expect(mgr.activeCount).toBe(0)
-
-    expect(() => mgr.releaseIfCurrent(cwd, conn)).not.toThrow()
-    expect(mgr.activeCount).toBe(0)
+    await manager.acquire('/p') // replacement
+    manager.releaseIfCurrent('/p', dead)
+    expect(calls[1].child.killed).toBe(false)
+    expect(manager.activeCount).toBe(1)
   })
 
-  it('releaseIfCurrent does NOT decrement a fresh server spawned for the same cwd after the old one died', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    // Session A acquires, then its server crashes.
-    const connA = await mgr.acquire(cwd)
+  it('a throwing subscriber does not starve the others', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager, calls } = makeRig()
+    const conn = await manager.acquire('/p')
+    const ok = vi.fn()
+    manager.subscribeExit(
+      '/p',
+      () => {
+        throw new Error('bad')
+      },
+      conn
+    )
+    manager.subscribeExit('/p', ok, conn)
     calls[0].child.emit('exit', 1, null)
+    expect(ok).toHaveBeenCalledTimes(1)
+  })
 
-    // Session B acquires a REPLACEMENT for the same cwd (refCount 1).
-    await mgr.acquire(cwd)
+  it('subscribeExit with nothing live returns a no-op unsubscribe', () => {
+    const { manager } = makeRig()
+    expect(() => manager.subscribeExit('/nope', () => {})()).not.toThrow()
+  })
+})
+
+describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / start turns', () => {
+  it('recycleAll ends every server, fans out, and the next acquire starts fresh', async () => {
+    const { manager, calls, configs } = makeRig()
+    configs.set('/b', { pluginDir: null })
+    const a = await manager.acquire('/a')
+    await manager.acquire('/b')
+    const cb = vi.fn()
+    manager.subscribeExit('/a', cb, a)
+    manager.recycleAll()
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(calls.every((c) => c.child.killed)).toBe(true)
+    expect(manager.activeCount).toBe(0)
+    const again = await manager.acquire('/a')
+    expect(again.baseUrl).not.toBe(a.baseUrl)
+    manager.releaseIfCurrent('/a', a) // stale: no-op
+    expect(calls[2].child.killed).toBe(false)
+  })
+
+  it('dispose ends all servers and closes hosts; an acquire after it rejects at once', async () => {
+    const { manager, calls, hosts } = makeRig()
+    await manager.acquire('/a')
+    manager.dispose()
+    expect(calls[0].child.killed).toBe(true)
+    expect(hosts[0].closed).toBe(true)
+    await expect(manager.acquire('/a')).rejects.toThrow(/disposed/)
+    expect(hosts).toHaveLength(1)
+  })
+
+  it('dispose during an in-flight start reaps the server instead of orphaning it', async () => {
+    const { manager, calls } = makeRig({ delayMs: 20 })
+    const pending = manager.acquire('/a')
+    await new Promise((r) => setTimeout(r, 5))
+    manager.dispose()
+    await expect(pending).rejects.toThrow(/disposed/)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('acquireDetached: its own server, no readiness wait, release ends only it', async () => {
+    const { manager, calls, waits } = makeRig()
+    const pooled = await manager.acquire('/a')
+    const lease = await manager.acquireDetached('/a')
     expect(calls).toHaveLength(2)
-    expect(mgr.activeCount).toBe(1)
-
-    // A's late cleanup must be a no-op: a plain release(cwd) here would drop B's
-    // refcount to 0 and kill the server B is actively using.
-    mgr.releaseIfCurrent(cwd, connA)
-    expect(calls[1].child.killed).toBe(false)
-    expect(mgr.activeCount).toBe(1)
-
-    // B's own release still tears it down.
-    mgr.release(cwd)
+    expect(lease.baseUrl).not.toBe(pooled.baseUrl)
+    expect(lease.hostedTools).toEqual({ state: 'skipped' })
+    expect(waits).toHaveLength(1)
+    lease.release()
+    lease.release()
     expect(calls[1].child.killed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('releaseIfCurrent releases normally when the connection IS the current spawn', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const conn = await mgr.acquire(cwd)
-    mgr.releaseIfCurrent(cwd, conn)
-    expect(calls[0].child.killed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-  })
-})
-
-// recycleAll(): the auth-mutation reload signal. opencode builds its provider
-// map once per process, so a credential change is only visible to a server
-// started AFTER the auth.json write — every pooled server must go.
-describe('OpencodeServerManager recycleAll', () => {
-  it('kills every live server, clears all handles, closes all MCP hosts', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    await mgr.acquire('/work/a')
-    await mgr.acquire('/work/b')
-    expect(mgr.activeCount).toBe(2)
-
-    mgr.recycleAll()
-
-    expect(calls[0].child.killed).toBe(true)
-    expect(calls[1].child.killed).toBe(true)
-    expect(mgr.activeCount).toBe(0)
-    await new Promise((r) => setTimeout(r, 10)) // let the async close() run
-    expect(hosts[0].closed).toBe(true)
-    expect(hosts[1].closed).toBe(true)
-  })
-
-  it('fans out exit listeners exactly once per handle (drained set, gated child exit)', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    await mgr.acquire(cwd)
-    let fired = 0
-    // A re-subscribing listener is the nasty case: subscribeExit inside the
-    // callback would re-add to the set we are iterating a COPY of, and the
-    // handle is already out of the map, so nothing can fire it again.
-    mgr.subscribeExit(cwd, () => {
-      fired++
-      mgr.subscribeExit(cwd, () => fired++)
-    })
-
-    mgr.recycleAll()
-    expect(fired).toBe(1)
-
-    // The fake child's kill() already emitted 'exit'; replay it to prove the
-    // identity gate (handle removed from the map first) does nothing extra.
-    calls[0].child.emit('exit', null, 'SIGTERM')
-    expect(fired).toBe(1)
-    expect(mgr.activeCount).toBe(0)
-  })
-
-  it('next acquire for the same cwd spawns a FRESH server', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const before = await mgr.acquire(cwd)
-    expect(calls).toHaveLength(1)
-
-    mgr.recycleAll()
-
-    const after = await mgr.acquire(cwd)
-    expect(calls).toHaveLength(2) // a new process, which re-reads auth.json
-    expect(after.baseUrl).not.toBe(before.baseUrl) // a different spawn, not a revived handle
-    expect(mgr.activeCount).toBe(1)
-    mgr.release(cwd)
-  })
-
-  it('a post-recycle releaseIfCurrent from the old connection is a no-op', async () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-    const cwd = '/work/proj'
-
-    const oldConn = await mgr.acquire(cwd)
-    mgr.recycleAll()
-
-    // A session's markDisconnected lands here after the recycle. Its handle is
-    // already gone, so this must not underflow or touch the replacement below.
-    expect(() => mgr.releaseIfCurrent(cwd, oldConn)).not.toThrow()
-    expect(mgr.activeCount).toBe(0)
-
-    await mgr.acquire(cwd) // the session reconnects (refCount 1)
-    mgr.releaseIfCurrent(cwd, oldConn) // replayed stale release
-    expect(calls[1].child.killed).toBe(false)
-    expect(mgr.activeCount).toBe(1)
-
-    mgr.release(cwd)
-    expect(calls[1].child.killed).toBe(true)
-  })
-
-  it('is a no-op with zero handles', () => {
-    const { spawnFn, calls } = makeSpawnFn()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const mgr = makeManager(spawnFn, startMcpHostFn)
-
-    expect(() => mgr.recycleAll()).not.toThrow()
-    expect(calls).toHaveLength(0)
-    expect(mgr.activeCount).toBe(0)
-  })
-})
-
-describe('OpencodeServerManager acquireDetached', () => {
-  /** A manager whose locator answers whatever `binary.path` says at spawn time. */
-  function detachedHarness(): {
-    manager: OpencodeServerManager
-    binary: { path: string }
-    spawned: Array<{ binary: string; child: FakeChild }>
-    hosts: FakeMcpHost[]
-  } {
-    const binary = { path: '/store/opencode/1.18.32/opencode' }
-    const spawned: Array<{ binary: string; child: FakeChild }> = []
-    let port = 41000
-    const spawnFn: SpawnServerFn = async (launch) => {
-      const child = makeFakeChild()
-      spawned.push({ binary: launch.command, child })
-      return { process: child, baseUrl: `http://127.0.0.1:${port++}` }
-    }
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const manager = new OpencodeServerManager({
-      spawnFn,
-      locateBinaryFn: () => binary.path,
-      startMcpHostFn
-    })
-    return { manager, binary, spawned, hosts }
-  }
-
-  it('spawns the binary that resolves NOW, even while a pooled server for the cwd is held', async () => {
-    const { manager, binary, spawned } = detachedHarness()
-    const pooled = await manager.acquire('/tmp/discovery')
-    binary.path = '/store/opencode/1.18.34/opencode'
-
-    const own = await manager.acquireDetached('/tmp/discovery')
-    expect(spawned.map((s) => s.binary)).toEqual([
-      '/store/opencode/1.18.32/opencode',
-      '/store/opencode/1.18.34/opencode'
-    ])
-    expect(own.baseUrl).not.toBe(pooled.baseUrl)
-    // The pool still hands the held server to its next caller: nothing a
-    // session holds was replaced.
-    expect((await manager.acquire('/tmp/discovery')).baseUrl).toBe(pooled.baseUrl)
-    expect(manager.activeCount).toBe(1)
-    own.release()
-    manager.dispose()
-  })
-
-  it('release kills only its own server, once', async () => {
-    const { manager, spawned, hosts } = detachedHarness()
-    await manager.acquire('/tmp/discovery')
-    const own = await manager.acquireDetached('/tmp/discovery')
-
-    own.release()
-    own.release()
-    expect(spawned[1].child.killed).toBe(true)
-    expect(hosts[1].closed).toBe(true)
-    expect(spawned[0].child.killed).toBe(false)
-    expect(hosts[0].closed).toBe(false)
-    expect(manager.activeCount).toBe(1)
-    manager.dispose()
+    expect(calls[0].child.killed).toBe(false)
   })
 
   it('dispose reaps a detached server nobody released', async () => {
-    const { manager, spawned, hosts } = detachedHarness()
-    await manager.acquireDetached('/tmp/discovery')
+    const { manager, calls } = makeRig()
+    await manager.acquireDetached('/a')
     manager.dispose()
-    expect(spawned[0].child.killed).toBe(true)
-    expect(hosts[0].closed).toBe(true)
+    expect(calls[0].child.killed).toBe(true)
   })
 
-  it('an unexpected death closes its MCP host; a later release is a no-op', async () => {
-    const { manager, spawned, hosts } = detachedHarness()
-    const own = await manager.acquireDetached('/tmp/discovery')
-    spawned[0].child.emit('exit', 1, null)
-    await Promise.resolve()
-    expect(hosts[0].closed).toBe(true)
-
-    spawned[0].child.kill = (() => {
-      throw new Error('killed a dead server')
-    }) as ChildProcess['kill']
-    expect(() => own.release()).not.toThrow()
-    manager.dispose()
-  })
-})
-
-describe('OpencodeServerManager start turns', () => {
-  it('starts one server at a time — pooled, other cwds and detached alike — and a failed start passes the turn on', async () => {
-    let starting = 0
-    let most = 0
-    let failNext = true
-    let port = 42000
-    const spawnFn: SpawnServerFn = async () => {
-      starting++
-      most = Math.max(most, starting)
-      await new Promise((r) => setTimeout(r, 5))
-      starting--
-      if (failNext) {
-        failNext = false
-        throw new Error('opencode exited before printing port')
+  it('starts take turns (pooled and detached alike); a failed start passes the turn on', async () => {
+    let active = 0
+    let maxActive = 0
+    let n = 0
+    const { spawnFn } = makeSpawnFn()
+    const { manager, configs } = makeRig({
+      spawnFn: async (launch, options) => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise((r) => setTimeout(r, 10))
+        active--
+        if (n++ === 1) throw new Error('second fails')
+        return spawnFn(launch, options)
       }
-      return { process: makeFakeChild(), baseUrl: `http://127.0.0.1:${port++}` }
-    }
-    const { startMcpHostFn } = makeMcpHostFn()
-    const manager = makeManager(spawnFn, startMcpHostFn)
-
+    })
+    configs.set('/b', { pluginDir: null })
+    configs.set('/c', { pluginDir: 'x' })
     const results = await Promise.allSettled([
-      manager.acquire('/tmp/a'),
-      manager.acquire('/tmp/b'),
-      manager.acquireDetached('/tmp/a'),
-      manager.acquireDetached('/tmp/c')
+      manager.acquire('/a'),
+      manager.acquire('/b'),
+      manager.acquireDetached('/c'),
+      manager.acquire('/c')
     ])
-    expect(most).toBe(1)
+    expect(maxActive).toBe(1)
     expect(results.map((r) => r.status)).toEqual([
-      'rejected',
       'fulfilled',
+      'rejected',
       'fulfilled',
       'fulfilled'
     ])
-    manager.dispose()
   })
 })
 
-describe('OpencodeServerManager start turns across shutdown', () => {
-  /** A spawnFn whose starts the test lands one by one, recording the binary each ran. */
-  function heldSpawns(): {
-    spawnFn: SpawnServerFn
-    started: Array<{ binary: string; child: FakeChild; land: () => void }>
-  } {
-    const started: Array<{ binary: string; child: FakeChild; land: () => void }> = []
-    let port = 43000
-    const spawnFn: SpawnServerFn = (launch) =>
-      new Promise<SpawnResult>((resolve) => {
-        const child = makeFakeChild()
-        started.push({
-          binary: launch.command,
-          child,
-          land: () => resolve({ process: child, baseUrl: `http://127.0.0.1:${port++}` })
-        })
+describe('OpencodeServerManager (2.x) — secrets', () => {
+  it('never logs the password, the hosted bearer, or a bridged secret', async () => {
+    const lines: string[] = []
+    for (const level of ['debug', 'info', 'warn', 'error'] as const)
+      vi.spyOn(logger, level).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
       })
-    return { spawnFn, started }
-  }
-  /** Let queued promise turns run (MCP hosts start, starts reach the queue). */
-  const turns = async (): Promise<void> => {
-    for (let i = 0; i < 10; i++) await Promise.resolve()
-  }
-
-  it('dispose with starts queued: the one in flight is reaped, the queued ones never spawn', async () => {
-    const { spawnFn, started } = heldSpawns()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const manager = makeManager(spawnFn, startMcpHostFn)
-
-    const results = Promise.allSettled([
-      manager.acquire('/tmp/a'),
-      manager.acquire('/tmp/b'),
-      manager.acquireDetached('/tmp/c')
-    ])
-    await turns()
-    expect(started).toHaveLength(1)
-    expect(hosts).toHaveLength(3)
-
-    manager.dispose()
-    started[0].land()
-    const settled = await results
-
-    expect(settled.map((r) => r.status)).toEqual(['rejected', 'rejected', 'rejected'])
-    // The start in flight came up after shutdown and was reaped at once.
-    expect(started[0].child.killed).toBe(true)
-    // The queued starts never spawned at all.
-    expect(started).toHaveLength(1)
-    // Every MCP host started for them is closed.
-    expect(hosts.every((h) => h.closed)).toBe(true)
-    // Nothing is held: no pooled handle, no in-flight entry, no detached server.
-    expect(manager.activeCount).toBe(0)
-    expect(manager['pending'].size).toBe(0)
-    expect(manager['detached'].size).toBe(0)
-  })
-
-  it('an acquire after dispose rejects at once, starting no MCP host and no server', async () => {
-    const { spawnFn, started } = heldSpawns()
-    const { startMcpHostFn, hosts } = makeMcpHostFn()
-    const manager = makeManager(spawnFn, startMcpHostFn)
-    manager.dispose()
-
-    await expect(manager.acquire('/tmp/a')).rejects.toThrow(/disposed/)
-    await expect(manager.acquireDetached('/tmp/a')).rejects.toThrow(/disposed/)
-    expect(hosts).toHaveLength(0)
-    expect(started).toHaveLength(0)
-  })
-
-  it('a queued start runs the binary that resolves when its turn comes', async () => {
-    const { spawnFn, started } = heldSpawns()
-    const { startMcpHostFn } = makeMcpHostFn()
-    const binary = { path: '/store/opencode/1.18.32/opencode' }
-    const manager = new OpencodeServerManager({
-      spawnFn,
-      locateBinaryFn: () => binary.path,
-      startMcpHostFn
+    const { manager, calls, hosts, configs } = makeRig({
+      waitReadyFn: async () => ({ state: 'timeout', last: 'x', elapsedMs: 1 })
     })
-
-    const first = manager.acquire('/tmp/a')
-    const queued = manager.acquireDetached('/tmp/b')
-    await turns()
-    // An install lands while the second start waits its turn.
-    binary.path = '/store/opencode/1.18.34/opencode'
-    started[0].land()
-    await first
-    await turns()
-    started[1].land()
-    ;(await queued).release()
-
-    expect(started.map((s) => s.binary)).toEqual([
-      '/store/opencode/1.18.32/opencode',
-      '/store/opencode/1.18.34/opencode'
-    ])
-    manager.dispose()
+    configs.set('/a', {
+      pluginDir: null,
+      bridgedMcp: {
+        gh: {
+          type: 'local',
+          command: ['gh'],
+          environment: { TOKEN: 'ghp_SECRET_VALUE' },
+          codemode: false
+        }
+      }
+    })
+    const conn = await manager.acquire('/a')
+    calls[0].child.emit('exit', 1, null)
+    expect(lines.length).toBeGreaterThan(0)
+    const all = lines.join('\n')
+    expect(all).not.toContain('ghp_SECRET_VALUE')
+    expect(all).not.toContain(hosts[0].token)
+    expect(all).not.toContain(conn.password)
+    expect(all).not.toContain('OPENCODE_CONFIG_CONTENT')
   })
 })
+
+describe('locatePluginDir', () => {
+  it('finds the shipped directory plugin in dev (repo root) and maps app.asar → app.asar.unpacked', () => {
+    const dir = locatePluginDir(process.cwd())
+    expect(dir).toBe(`${process.cwd()}/resources/opencode/claudeui-xeng`)
+    expect(locatePluginDir('/nowhere/app.asar')).toBeNull()
+  })
+})
+
+// Typed seam check: a ServerConnection carries what S3's client needs.
+export type _S3Seam = Pick<ServerConnection, 'baseUrl' | 'authHeader' | 'directory' | 'startedAt'>

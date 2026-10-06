@@ -61,7 +61,7 @@ describe.skipIf(SKIP || BINARY_MISSING)('opencode MCP integration: hosted tools'
     if (!binary) throw new Error('opencode binary not found — run `bun run ensure-opencode` first')
 
     // Start the in-process MCP host.
-    mcpHost = await startMcpHttpHost(createOpencodeHostedToolsServer(ROOT))
+    mcpHost = await startMcpHttpHost(() => createOpencodeHostedToolsServer(ROOT))
 
     const password = 'mcp-integration-test-secret'
     authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')

@@ -98,6 +98,23 @@ Proposed: **GO**, on the conditions in §8.
 - Env: `OPENCODE_DISABLE_AUTOUPDATE=1` and `OPENCODE_CONFIG_CONTENT`. XDG dirs are left at the user's
   defaults: shared data dir, §6.
 
+**As built (S2, 2026-10-06).**
+
+- `opencode serve --stdio --hostname 127.0.0.1 --port 0`; only a loopback `{url}` is accepted. The
+  password goes in `OPENCODE_PASSWORD` (2.x deletes it from its own env in stdio mode), plus
+  `OPENCODE_DISABLE_AUTOUPDATE=1`; no XDG or HOME override (shared data dir, §6). Shutdown closes
+  stdin and tree-kills only after 5 s.
+- One server per CONFIG, not per cwd: keyed by a digest of what is injected (bridged MCP, plugin
+  dir, agent-permission overlay). A config change starts a new server for new leases; the old one
+  ends at its last release. `releaseIfCurrent` releases exactly; `release(cwd)` the newest holder.
+- MCP readiness is per (server, directory): 2.x connects MCP per directory and registers its tools
+  about 100 ms after "connected", with no public event. The production plugin exposes an RPC
+  (`POST /api/rpc/claudeui-xeng/tools`) listing the registered `claudeui_*` tools; `acquire` waits
+  (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET
+/api/mcp` connected plus 400 ms. Callers that run no turn pass `waitForHostedTools:false`.
+- The hosted MCP host is multi-session (one transport per MCP session), since one server serves
+  every directory; mockup tools resolve their directory per call from the calling session.
+
 ### 3. Permissions (amends ADR-022; supersedes the ADR-032 mechanism)
 
 - Rules compile to `{action, resource, effect}`. Key table:
@@ -128,6 +145,13 @@ Proposed: **GO**, on the conditions in §8.
 - The `claudeui` MCP server and the bridged servers are injected as
   `mcp.servers.<name> = {type, url, headers, codemode:false}`. Without `codemode:false`, opencode
   hides MCP tools behind its Code Mode `execute` tool, and the call id becomes the `execute` call's id.
+
+**As built (S2).** `_meta["ai.opencode/sessionID"]` always wins: the engine sets it outside
+anything the model or a plugin controls. The plugin's `__xeng_caller_session` stamp is the fallback
+for a request without `_meta`. The plugin's `__xeng_call_id` (which keys live streaming to the tool
+card) is trusted only when the same call carries the plugin's session stamp and it agrees with
+`_meta`, so a lone or disagreeing call id cannot redirect a dispatch. The plugin is an import-free
+directory (`resources/opencode/claudeui-xeng/`), unpacked from the asar like the 1.x plugin.
 
 ### 5. Credentials (amends ADR-068 / ADR-021; ownership per ADR-082 §8)
 

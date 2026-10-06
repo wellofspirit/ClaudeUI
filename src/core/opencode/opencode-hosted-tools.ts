@@ -18,6 +18,11 @@
  * SDK `extra` (RequestHandlerExtra) adapted into our SdkToolExtra shape, and
  * because it depends on TWO things this module must NOT import directly —
  * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
+ *
+ * Caller identity (ADR-093 §4, amends ADR-033): see `resolveCallerIdentity`.
+ * One McpServer is built per MCP SESSION (mcp-http-host.ts): an opencode 2.x
+ * server serves every directory and connects its MCP clients per directory, so
+ * the mockup tools resolve their cwd per CALL from the calling session.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'
@@ -97,6 +102,60 @@ export type DispatchAgentFn = (
 ) => Promise<DispatchResult>
 
 /**
+ * The `_meta` key opencode 2.x puts on EVERY MCP `tools/call`
+ * (vendor/opencode-v2-src/packages/core/src/mcp/client.ts `callTool`).
+ */
+export const OPENCODE_SESSION_META_KEY = 'ai.opencode/sessionID'
+
+export interface CallerIdentity {
+  /** The calling opencode session, or undefined when nothing identifies it. */
+  sessionId?: string
+  /** The calling tool part's id (ADR-033 M3 live streaming), plugin-only. */
+  callId?: string
+  /** Which signal supplied `sessionId`. */
+  source: 'meta' | 'plugin' | 'none'
+  /** `_meta` and the plugin stamp named DIFFERENT sessions (`_meta` won). */
+  mismatch?: boolean
+}
+
+/**
+ * Who called a hosted tool. PRECEDENCE (ADR-093 §4):
+ *
+ * 1. Session — `_meta["ai.opencode/sessionID"]` wins. It is opencode's own
+ *    first-party contract, set by the engine outside anything the model or a
+ *    plugin controls, and it works even when the `claudeui-xeng` plugin failed
+ *    to load. The plugin's `__xeng_caller_session` stamp is the fallback for a
+ *    request without `_meta` (an engine that does not send it).
+ * 2. Call id — only the plugin knows it (`__xeng_call_id`), and it is trusted
+ *    only when the same call also carries the plugin's session stamp and that
+ *    stamp agrees with `_meta`: the plugin always writes both together, so a
+ *    lone or disagreeing call id did not come from it. No call id → dispatch
+ *    still works, without live streaming (as before).
+ */
+export function resolveCallerIdentity(
+  meta: Record<string, unknown> | undefined,
+  args: { __xeng_caller_session?: unknown; __xeng_call_id?: unknown }
+): CallerIdentity {
+  const nonEmpty = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined
+  const fromMeta = nonEmpty(meta?.[OPENCODE_SESSION_META_KEY])
+  const stamped = nonEmpty(args.__xeng_caller_session)
+  const stampedCall = nonEmpty(args.__xeng_call_id)
+  const mismatch = !!fromMeta && !!stamped && fromMeta !== stamped
+  const callId = stamped && !mismatch ? stampedCall : undefined
+  if (fromMeta)
+    return { sessionId: fromMeta, callId, source: 'meta', ...(mismatch ? { mismatch } : {}) }
+  if (stamped) return { sessionId: stamped, callId, source: 'plugin' }
+  return { source: 'none' }
+}
+
+/**
+ * Resolves the directory a hosted tool call works in, from the calling
+ * session's id (see `resolveCallerIdentity`). Undefined when it cannot.
+ */
+export type CallerCwdResolver = (callerSessionId: string | undefined) => Promise<string | undefined>
+
+/**
  * Built per server creation (not module-load time) so the `model` param's
  * `.describe()` can carry the concrete model-hint resolved from the current
  * engines/claude.json (ADR-033 follow-up — see dispatch-model-hint.ts).
@@ -121,7 +180,7 @@ function buildDispatchAgentInputSchema(
       .string()
       .optional()
       .describe('session_id from a previous dispatch_agent result — continues that agent'),
-    // Internal — see resources/opencode/claudeui-xeng-plugin.ts. Declared
+    // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops
     // unknown keys by default); the handler reads then removes it before any
     // other use.
@@ -143,8 +202,9 @@ function buildDispatchAgentInputSchema(
 
 /**
  * Create a single McpServer (name 'claudeui') that exposes all hosted
- * tools. Cwd is baked into the mockup tool's path resolution at creation time
- * (mockups land under `<cwd>/.claude/ui/mockups`).
+ * tools. Mockups land under `<cwd>/.claude/ui/mockups`: a string `cwd` binds
+ * them at creation time, a `CallerCwdResolver` per call (the server manager's
+ * case — one opencode server serves every directory).
  *
  * `lookupCallerSession`/`dispatch` are optional so existing callers (and
  * lifecycle tests that only exercise server spawn/teardown) keep working
@@ -152,8 +212,13 @@ function buildDispatchAgentInputSchema(
  * instead of throwing or silently misrouting.
  */
 export function createOpencodeHostedToolsServer(
-  cwd: string,
-  deps: { lookupCallerSession?: CallerSessionLookup; dispatch?: DispatchAgentFn } = {}
+  cwd: string | CallerCwdResolver,
+  deps: {
+    lookupCallerSession?: CallerSessionLookup
+    dispatch?: DispatchAgentFn
+    /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
+    onIdentityMismatch?: (identity: CallerIdentity) => void
+  } = {}
 ): McpServer {
   const server = new McpServer(
     { name: 'claudeui', version: '1.0.0' },
@@ -162,9 +227,7 @@ export function createOpencodeHostedToolsServer(
 
   // Extract tool definitions from the canonical implementations.
   const mermaidTools: SdkMcpTool[] = createMermaidServer().tools
-  const mockupTools: SdkMcpTool[] = createMockupServer(cwd).tools
-
-  for (const t of [...mermaidTools, ...mockupTools]) {
+  for (const t of mermaidTools) {
     server.registerTool(
       t.name,
       {
@@ -176,10 +239,61 @@ export function createOpencodeHostedToolsServer(
     )
   }
 
+  // Mockups land under `<cwd>/.claude/ui/mockups`. A fixed cwd (tests, and any
+  // single-directory host) binds them once; a resolver binds them per call to
+  // the CALLING session's directory, memoized per directory.
+  const mockupsByCwd = new Map<string, SdkMcpTool[]>()
+  const mockupToolsFor = (dir: string): SdkMcpTool[] => {
+    let tools = mockupsByCwd.get(dir)
+    if (!tools) {
+      tools = createMockupServer(dir).tools
+      mockupsByCwd.set(dir, tools)
+    }
+    return tools
+  }
+  const fixedCwd = typeof cwd === 'string' ? cwd : null
+  // Schemas and descriptions do not depend on the directory.
+  for (const t of createMockupServer(fixedCwd ?? '.').tools) {
+    const handler = fixedCwd
+      ? t.handler
+      : async (
+          args: Record<string, unknown>,
+          extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+        ) => {
+          const caller = resolveCallerIdentity(
+            extra?._meta as Record<string, unknown> | undefined,
+            {}
+          )
+          const dir = await (cwd as CallerCwdResolver)(caller.sessionId).catch(() => undefined)
+          if (!dir) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `${t.name} could not determine the calling session's project directory${caller.sessionId ? ` (${caller.sessionId})` : ''}. Try again from an active ClaudeUI session.`
+                }
+              ],
+              isError: true
+            }
+          }
+          const target = mockupToolsFor(dir).find((m) => m.name === t.name)!
+          return target.handler(args)
+        }
+    server.registerTool(
+      t.name,
+      {
+        description: t.description,
+        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      handler as unknown as (...args: any[]) => any
+    )
+  }
+
   // Model-hint snapshot (ADR-033 follow-up, see dispatch-model-hint.ts):
-  // resolved ONCE per cwd-server spawn (OpencodeServerManager.resolveHandle)
-  // from engines/claude.json. Config edits mid-lifetime aren't reflected
-  // until the NEXT spawn — cross-engine-dispatcher.ts's isError allowlist
+  // resolved ONCE per MCP session (one per directory an opencode server serves,
+  // see mcp-http-host.ts) from engines/claude.json. Config edits mid-lifetime
+  // aren't reflected until the NEXT session — cross-engine-dispatcher.ts's isError allowlist
   // echo remains the live source of truth if the model turns out to be
   // stale/mismatched. No cached-model peek on this side (unlike the
   // opencode-target side in collab-tool.ts): the only synchronous main-side
@@ -243,28 +357,34 @@ export function createOpencodeHostedToolsServer(
         __xeng_call_id?: string
       }
 
-      if (!__xeng_caller_session) {
+      const identity = resolveCallerIdentity(extra?._meta as Record<string, unknown> | undefined, {
+        __xeng_caller_session,
+        __xeng_call_id
+      })
+      if (identity.mismatch) deps.onIdentityMismatch?.(identity)
+      const callerId = identity.sessionId
+      if (!callerId) {
         return {
           content: [
             {
               type: 'text' as const,
               text:
-                'dispatch_agent could not identify the calling session. The ClaudeUI caller-identity ' +
-                'plugin (claudeui-xeng-plugin) must be loaded by opencode for cross-engine dispatch to ' +
-                'work — ask the user to check their opencode configuration.'
+                'dispatch_agent could not identify the calling session: the request carried neither ' +
+                `opencode's _meta["${OPENCODE_SESSION_META_KEY}"] nor the ClaudeUI caller-identity ` +
+                "plugin's stamp (claudeui-xeng) — ask the user to check their opencode configuration."
             }
           ],
           isError: true
         }
       }
 
-      const caller = deps.lookupCallerSession?.(__xeng_caller_session)
+      const caller = deps.lookupCallerSession?.(callerId)
       if (!caller) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `dispatch_agent could not find the calling session (${__xeng_caller_session}) — it may have ended. Start a fresh dispatch from an active session.`
+              text: `dispatch_agent could not find the calling session (${callerId}) — it may have ended. Start a fresh dispatch from an active session.`
             }
           ],
           isError: true
@@ -292,7 +412,7 @@ export function createOpencodeHostedToolsServer(
         { engine, prompt, model, sessionId: session_id },
         {
           fromEngine: 'opencode',
-          fromRoutingId: __xeng_caller_session,
+          fromRoutingId: callerId,
           cwd: caller.cwd,
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
@@ -300,7 +420,7 @@ export function createOpencodeHostedToolsServer(
           ...(caller.blockedCalls ? { blockedCalls: caller.blockedCalls } : {}),
           emit: caller.emit,
           addDispatchedCost: caller.addDispatchedCost,
-          toolUseId: __xeng_call_id,
+          toolUseId: identity.callId,
           extra: toolExtra
         }
       )

@@ -628,9 +628,11 @@ describe('OpencodeSession — run()', () => {
     expect(mockAcquire).toHaveBeenCalledTimes(1)
     expect(mockCreateSession).toHaveBeenCalledTimes(1)
 
-    // Ref balance: dispose() releases exactly once (acquire 1 ↔ release 1).
+    // Ref balance: dispose() releases exactly once (acquire 1 ↔ release 1),
+    // by connection identity (ADR-093 §2: never by cwd alone).
     session.dispose()
-    expect(mockRelease).toHaveBeenCalledTimes(1)
+    expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
+    expect(mockRelease).not.toHaveBeenCalled()
   })
 
   it('reconnects after a cancel (idle timeout) — _cancelled resets per run', async () => {
@@ -646,7 +648,7 @@ describe('OpencodeSession — run()', () => {
     await session.run('first')
     expect(acquiresForCwd()).toBe(1)
     session.cancel() // releases; _cancelled = true
-    expect(mockRelease).toHaveBeenCalledWith(CWD)
+    expect(mockReleaseIfCurrent).toHaveBeenCalledWith(CWD, expect.anything())
     await session.run('second') // must re-acquire, not silently no-op
     expect(acquiresForCwd()).toBe(2)
     expect(mockPromptAsync).toHaveBeenCalledTimes(2)
@@ -668,7 +670,7 @@ describe('OpencodeSession — run()', () => {
       // 5s timer in one advance.
       await vi.advanceTimersByTimeAsync(5_000)
       // The inactivity timer fired cancel() → released the acquired server ref.
-      expect(mockRelease).toHaveBeenCalledWith('/tmp/test-cwd')
+      expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp/test-cwd', expect.anything())
       session.dispose()
     } finally {
       vi.useRealTimers()
@@ -821,7 +823,7 @@ describe('OpencodeSession — cancel()', () => {
     const session = makeSession()
     await session.run('hello')
     session.cancel()
-    expect(mockRelease).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp/test-cwd', expect.anything())
   })
 
   it('aborts the turn server-side on cancel (so a same-cwd server that survives our release does not keep running headless)', async () => {

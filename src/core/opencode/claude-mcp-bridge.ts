@@ -3,44 +3,46 @@
  *
  * opencode reads MCP servers only from its own `mcp` config key — it does NOT
  * scan ~/.claude or project .mcp.json files. This module translates the user's
- * Claude-scoped MCP servers (user/project/local) into opencode's ConfigMCPV1
- * shape and returns them for injection into OPENCODE_CONFIG_CONTENT at spawn.
+ * Claude-scoped MCP servers (user/project/local) into opencode 2.x's native
+ * `mcp.servers.<name>` shape (`Mcp.LocalConfig` / `Mcp.RemoteConfig`,
+ * vendor/opencode-v2-src/packages/schema/src/mcp.ts) and returns them for
+ * injection into OPENCODE_CONFIG_CONTENT at spawn (ADR-093 §4).
  *
  * Key constraints:
  * - Pure I/O separation: `translateClaudeMcpServer` is pure; `collectClaudeMcpForOpencode`
  *   does the file I/O.
  * - Runtime-only (never written to opencode's on-disk config). Secrets stay in
  *   env/headers, flowing only through OPENCODE_CONFIG_CONTENT in memory.
+ * - `codemode: false` on every entry: 2.x defaults MCP tools to Code Mode, where
+ *   the model sees only an `execute` tool and the server's tools hide inside its
+ *   catalog — a Claude-bridged tool must stay a direct tool, as in Claude.
+ * - 2.x speaks Streamable HTTP only for remote servers; a Claude `sse` server is
+ *   still bridged (most SSE servers also answer Streamable HTTP) and opencode
+ *   marks it failed when it does not.
  * - The reserved name `claudeui` is filtered out (it's the hosted-tools block in
  *   buildOpencodeConfigContent — a user server must not shadow it).
  * - Respects Claude's per-cwd `disabledMcpServers` list.
  */
 
 import type { McpServerConfig } from '../../shared/types'
+import type { Mcp_LocalConfigEncoded, Mcp_RemoteConfigEncoded } from './protocol-v2/openapi'
 import { mergeClaudeMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { logger } from '../services/logger'
 
 // ---------------------------------------------------------------------------
-// Types — mirror ConfigMCPV1.Info from vendor/opencode-src
+// Types — opencode 2.x `Mcp.LocalConfig` / `Mcp.RemoteConfig`
 // ---------------------------------------------------------------------------
 
 /** opencode local (stdio) MCP server entry */
-export interface OpencodeMcpLocalEntry {
-  type: 'local'
-  command: string[]
-  environment?: Record<string, string>
-  enabled: true
-}
+export type OpencodeMcpLocalEntry = Mcp_LocalConfigEncoded & { readonly codemode: false }
 
-/** opencode remote (sse/http) MCP server entry */
-export interface OpencodeMcpRemoteEntry {
-  type: 'remote'
-  url: string
-  headers?: Record<string, string>
-  enabled: true
-}
+/** opencode remote (Streamable HTTP) MCP server entry */
+export type OpencodeMcpRemoteEntry = Mcp_RemoteConfigEncoded & { readonly codemode: false }
 
 export type OpencodeMcpEntry = OpencodeMcpLocalEntry | OpencodeMcpRemoteEntry
+
+/** The hosted-tools server's name (opencode prefixes its tools `claudeui_`). */
+export const HOSTED_MCP_SERVER = 'claudeui'
 
 // ---------------------------------------------------------------------------
 // Pure translation
@@ -59,27 +61,21 @@ export function translateClaudeMcpServer(cfg: McpServerConfig): OpencodeMcpEntry
     cfg.type === 'sse' || cfg.type === 'http' || (cfg.type === undefined && cfg.url !== undefined)
 
   if (isStdio && cfg.command) {
-    const entry: OpencodeMcpLocalEntry = {
+    return {
       type: 'local',
       command: [cfg.command, ...(cfg.args ?? [])],
-      enabled: true
+      ...(cfg.env && Object.keys(cfg.env).length > 0 ? { environment: cfg.env } : {}),
+      codemode: false
     }
-    if (cfg.env && Object.keys(cfg.env).length > 0) {
-      entry.environment = cfg.env
-    }
-    return entry
   }
 
   if (isRemote && cfg.url) {
-    const entry: OpencodeMcpRemoteEntry = {
+    return {
       type: 'remote',
       url: cfg.url,
-      enabled: true
+      ...(cfg.headers && Object.keys(cfg.headers).length > 0 ? { headers: cfg.headers } : {}),
+      codemode: false
     }
-    if (cfg.headers && Object.keys(cfg.headers).length > 0) {
-      entry.headers = cfg.headers
-    }
-    return entry
   }
 
   // Neither command nor url — skip.
@@ -108,7 +104,7 @@ export function collectClaudeMcpForOpencode(cwd: string): Record<string, Opencod
 
     const result: Record<string, OpencodeMcpEntry> = {}
     for (const [name, cfg] of Object.entries(merged)) {
-      if (name === 'claudeui') {
+      if (name === HOSTED_MCP_SERVER) {
         logger.warn(
           'ClaudeMcpBridge',
           `Skipping MCP server named "claudeui" — this name is reserved by ClaudeUI`

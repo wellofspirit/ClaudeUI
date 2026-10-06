@@ -217,6 +217,36 @@ const SANDBOX_PROFILE = [
   '(allow network-outbound (remote unix-socket))'
 ].join('\n')
 
+/**
+ * The isolated engine environment every contract server runs with: home + XDG
+ * under `.cache/`, models.dev fetch off, every proxy var at the refusing proxy.
+ * (No password, config or autoupdate switch: the caller — the harness's own
+ * `startServer`, or the production spawn path — adds those.)
+ */
+export function isolatedEnv(home: TestHome, proxy: RefusingProxy): Record<string, string> {
+  return {
+    PATH: process.platform === 'win32' ? (process.env.PATH ?? '') : '/usr/bin:/bin:/usr/sbin:/sbin',
+    ...(process.platform === 'win32' && process.env.SystemRoot
+      ? { SystemRoot: process.env.SystemRoot }
+      : {}),
+    ...home.env,
+    OPENCODE_DISABLE_MODELS_FETCH: '1',
+    HTTPS_PROXY: proxy.url,
+    HTTP_PROXY: proxy.url,
+    https_proxy: proxy.url,
+    http_proxy: proxy.url,
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost'
+  }
+}
+
+/** Writes the loopback-only `sandbox-exec` profile under the home; returns its path. */
+export function sandboxProfile(home: TestHome): string {
+  const profile = join(home.root, 'loopback-only.sb')
+  writeFileSync(profile, SANDBOX_PROFILE)
+  return profile
+}
+
 let serverCount = 0
 
 export async function startServer(options: ServerOptions): Promise<V2Server> {
@@ -224,21 +254,10 @@ export async function startServer(options: ServerOptions): Promise<V2Server> {
   const password = randomBytes(18).toString('base64url')
   const index = ++serverCount
   const env: Record<string, string> = {
-    PATH: process.platform === 'win32' ? (process.env.PATH ?? '') : '/usr/bin:/bin:/usr/sbin:/sbin',
-    ...(process.platform === 'win32' && process.env.SystemRoot
-      ? { SystemRoot: process.env.SystemRoot }
-      : {}),
-    ...home.env,
+    ...isolatedEnv(home, proxy),
     OPENCODE_PASSWORD: password,
-    OPENCODE_DISABLE_MODELS_FETCH: '1',
     OPENCODE_DISABLE_AUTOUPDATE: '1',
     OPENCODE_CONFIG_CONTENT: JSON.stringify(options.config),
-    HTTPS_PROXY: proxy.url,
-    HTTP_PROXY: proxy.url,
-    https_proxy: proxy.url,
-    http_proxy: proxy.url,
-    NO_PROXY: '127.0.0.1,localhost',
-    no_proxy: '127.0.0.1,localhost',
     ...options.env
   }
   const args = [
@@ -253,9 +272,7 @@ export async function startServer(options: ServerOptions): Promise<V2Server> {
   const sandbox = (options.sandbox ?? true) && SANDBOX_AVAILABLE
   let command = V2_BIN
   if (sandbox) {
-    const profile = join(home.root, 'loopback-only.sb')
-    writeFileSync(profile, SANDBOX_PROFILE)
-    args.unshift('-f', profile, V2_BIN)
+    args.unshift('-f', sandboxProfile(home), V2_BIN)
     command = '/usr/bin/sandbox-exec'
   }
   const child = spawn(command, args, { cwd: options.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })

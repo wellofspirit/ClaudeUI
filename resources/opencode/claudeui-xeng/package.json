@@ -1,0 +1,6 @@
+{
+  "name": "claudeui-xeng",
+  "private": true,
+  "type": "module",
+  "main": "index.js"
+}

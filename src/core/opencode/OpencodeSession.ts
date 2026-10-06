@@ -975,8 +975,10 @@ export class OpencodeSession extends BaseSession {
         // unexpected deaths. Drop any prior subscription first — a leftover
         // would keep a listener alive on a handle we no longer hold.
         this.unsubscribeServerExit?.()
-        this.unsubscribeServerExit = opencodeServerManager.subscribeExit(this.cwd, () =>
-          this.markDisconnected('opencode server exited')
+        this.unsubscribeServerExit = opencodeServerManager.subscribeExit(
+          this.cwd,
+          () => this.markDisconnected('opencode server exited'),
+          c
         )
       })().finally(() => {
         this.connectingPromise = null
@@ -1741,7 +1743,9 @@ export class OpencodeSession extends BaseSession {
     this.unsubscribeServerExit?.()
     this.unsubscribeServerExit = null
     if (this.conn) {
-      opencodeServerManager.release(this.cwd)
+      // Exact, never by cwd alone: one server serves many directories, and a
+      // config change can leave two servers holding this cwd (ADR-093 §2).
+      opencodeServerManager.releaseIfCurrent(this.cwd, this.conn)
       this.conn = null
       this.client = null
     }
