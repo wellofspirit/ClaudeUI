@@ -32,8 +32,6 @@ const { sessionManagerSpies } = vi.hoisted(() => {
     setThinkingMode: vi.fn(),
     voiceStartServer: vi.fn(async () => {}),
     voiceStopServer: vi.fn(async () => {}),
-    voiceStartRecording: vi.fn(async () => {}),
-    voiceStopRecording: vi.fn(async () => {}),
     mcpServerStatus: vi.fn(async () => []),
     mcpToggleServer: vi.fn(async () => {}),
     mcpReconnectServer: vi.fn(async () => {}),

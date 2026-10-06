@@ -44,11 +44,6 @@ import { agentNoteMessage } from './agent-note'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
-import { VoiceClient } from './voice-client'
-import { startRecording, stopRecording } from './voice-capture'
-// Host-local emissions (`voice:state`) go through the funnel like everything else
-// — see the note in voiceStartRecording. Replicated events use BaseSession.send.
-import { emitEvent } from './sync-host'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
@@ -430,16 +425,12 @@ export class ClaudeSession extends BaseSession {
   private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
   private sandboxConfig: SandboxSettings | null = null
-  private voiceClient: VoiceClient | null = null
-  private voiceServerPort: number | null = null
-  /** Bumped by every {@link ClaudeSession.voiceStartRecording}; identifies one start. */
-  private voiceStartGen = 0
   /**
-   * The generation of the start still awaiting the voice server, or null. A stop
-   * clears it and a newer start overwrites it, so a start that wakes to find a
-   * different value was cancelled and must not open the capture.
+   * The voice server's TCP port inside cli.js, once started. Captures themselves
+   * are not the session's: they belong to the client holding the microphone and
+   * live in `services/voice-relay.ts`, which asks for this port.
    */
-  private voicePendingStart: number | null = null
+  private voiceServerPort: number | null = null
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -2522,118 +2513,8 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     } catch (err) {
       logger.warn('ClaudeSession', 'voiceServerStop failed', err)
     }
-    if (this.voiceClient) {
-      this.voiceClient.destroy()
-      this.voiceClient = null
-    }
     this.voiceServerPort = null
     logger.info('ClaudeSession', 'Voice server stopped')
-  }
-
-  /** Start a voice recording session. */
-  async voiceStartRecording(language: string): Promise<void> {
-    // Start native audio capture IMMEDIATELY so we don't lose the first
-    // seconds of speech while the SDK spawns and the voice server starts.
-    const earlyBuffer: Buffer[] = []
-    let earlyCaptureStopped = false
-    // Owned by this session until the VoiceClient takes the microphone over, so
-    // this session's stops can never cut off another session's capture.
-    const captureStarted = startRecording((chunk) => {
-      if (!earlyCaptureStopped) earlyBuffer.push(chunk)
-    }, this)
-    if (!captureStarted) {
-      this.send('voice:error', 'Failed to start audio capture. Check microphone access.')
-      return
-    }
-    // A windowless boot (SyncCore 4d) has no host to stream a microphone to, and
-    // `VoiceClient` posts its transcript frames at a window. Refuse the same way a
-    // failed capture does rather than dereference a null handle — voice is the ONE
-    // host-local surface a session owns, so it is also the only thing a WS-created
-    // session cannot do.
-    if (!this.win) {
-      stopRecording(this)
-      this.send(
-        'voice:error',
-        'Voice input needs the desktop window (this app is running windowless).'
-      )
-      return
-    }
-    const win = this.win
-    // Notify renderer we're connecting (audio is flowing, just buffering). Through
-    // the funnel: `voice:state` is host-local, so it lands on the host window
-    // exactly as the old targeted send did (4c's VoiceClient lesson — a computed
-    // or hand-rolled send is one refactor away from being invisible).
-    emitEvent('voice:state', [this.routingId, 'connecting'])
-
-    const gen = ++this.voiceStartGen
-    this.voicePendingStart = gen
-    let pending = true
-    try {
-      // Ensure voice server is running (may spawn SDK + create TCP server)
-      if (!this.voiceServerPort) {
-        const result = await this.voiceStartServer()
-        if (!result.port) {
-          throw new Error('Voice server failed to return a port')
-        }
-      }
-
-      // Released while the server was starting (a spawn can take seconds): the
-      // stop already closed the microphone and reported idle, and a newer start
-      // owns the capture now — either way this one must not reopen it.
-      if (this.voicePendingStart !== gen) {
-        earlyCaptureStopped = true
-        return
-      }
-      this.voicePendingStart = null
-      pending = false
-
-      const port = this.voiceServerPort!
-      if (!this.voiceClient) {
-        this.voiceClient = new VoiceClient(port, win, () => this.routingId)
-      } else {
-        this.voiceClient.updatePort(port)
-      }
-
-      // Hand off early buffer and start streaming through VoiceClient
-      earlyCaptureStopped = true
-      await this.voiceClient.startRecording(language, earlyBuffer)
-      // A client that ended before taking the microphone over (a failed connect,
-      // a stop in the connect window) left it with this session: release it.
-      if (this.voiceClient?.currentState() === 'idle') stopRecording(this)
-    } catch (err) {
-      earlyCaptureStopped = true
-      if (pending) {
-        // Cancelled while pending — including a spawn that then timed out: the
-        // stop already ended it idle, so there is no error to report.
-        if (this.voicePendingStart !== gen) return
-        this.voicePendingStart = null
-      }
-      stopRecording(this)
-      emitEvent('voice:state', [this.routingId, 'idle'])
-      throw err
-    }
-  }
-
-  /** Stop the current voice recording session. */
-  async voiceStopRecording(): Promise<void> {
-    // Close this session's early capture if it still holds the microphone — a
-    // start awaiting the server, or one handed to a client that has not taken
-    // it over yet. Owner-scoped: a no-op when the client or another session has it.
-    stopRecording(this)
-    if (this.voicePendingStart !== null || !this.voiceClient) {
-      // Still in early capture (the start is awaiting the voice server, or never
-      // got a client): cancel that start.
-      this.voicePendingStart = null
-      emitEvent('voice:state', [this.routingId, 'idle'])
-      return
-    }
-    if (this.voiceClient.currentState() === 'idle') {
-      // Nothing to stop, but the renderer may still be showing the `connecting`
-      // this session told it — report the real state so a release always clears it.
-      emitEvent('voice:state', [this.routingId, 'idle'])
-      return
-    }
-    await this.voiceClient.stopRecording()
   }
 
   /**
@@ -3041,15 +2922,8 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     // Tear down any cross-engine dispatch targets owned by this session (ADR-033).
     crossEngineDispatcher.disposeFor(this.routingId)
 
-    // Clean up voice resources. A start still awaiting the voice server is
-    // cancelled like a stop would, and the microphone closed if this session
-    // (rather than its client, destroyed below) still holds it.
-    this.voicePendingStart = null
-    stopRecording(this)
-    if (this.voiceClient) {
-      this.voiceClient.destroy()
-      this.voiceClient = null
-    }
+    // The voice server dies with the child. A live relay capture notices on its
+    // own (its socket to the server closes) and retires itself.
     this.voiceServerPort = null
 
     // End the message channel before aborting so the SDK's streamInput

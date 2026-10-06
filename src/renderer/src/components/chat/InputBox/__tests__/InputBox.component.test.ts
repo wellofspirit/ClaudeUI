@@ -81,6 +81,20 @@ vi.mock('../../../../hooks/useIsMobile', () => ({
   useIsMobile: () => false
 }))
 
+// The voice controller with its microphone taken out: jsdom has no audio, so the
+// real capture would refuse before the TRANSPORT is ever reached. What these
+// tests pin is InputBox's sequencing (held/press refs around `ensureSession()`)
+// as it reaches the transport — `window.api.voiceStart` / `voiceStop`, i.e. the
+// `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
+// controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
+vi.mock('../../../../lib/voice/voice-controller', () => ({
+  voiceController: () => ({
+    start: (routingId: string, language: string) => window.api.voiceStart(routingId, language),
+    stop: (routingId: string) => window.api.voiceStop(routingId),
+    isActive: () => false
+  })
+}))
+
 const ROUTE = 'r-input-1'
 
 function setupSession(routingId = ROUTE, cwd = '/test'): void {
@@ -1548,7 +1562,7 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
-  it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
+  it('onVoiceStop: sends voice:stop-recording with the active session id', async () => {
     renderFC()
 
     await viewProps.onVoiceStop()

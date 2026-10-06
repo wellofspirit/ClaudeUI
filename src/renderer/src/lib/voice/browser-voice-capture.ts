@@ -1,21 +1,27 @@
 /**
- * Browser microphone capture for the web client — SyncCore phase 5 S3.
+ * Microphone capture for every client — the desktop window and the remote web
+ * client run this same file (`src/web/main.tsx` renders the renderer app).
  *
- * The desktop's `main/services/voice-capture.ts` loads a NAPI module that emits
- * 16 kHz i16LE mono PCM directly. A browser has no such thing: `MediaRecorder`
- * yields opus-in-webm and nothing else, which is what aborted the first attempt
- * at remote voice. `AudioWorklet` is the way through — it hands the page raw
- * Float32 blocks — and this file is the state machine around it.
+ * It began as the web client's (SyncCore phase 5 S3), when the desktop captured
+ * in the main process through Claude Code's native `audio-capture` module. That
+ * module binds the OS default input at start and has no device API, so desktop
+ * capture moved here too: one Web Audio implementation, pushing 16 kHz i16LE mono
+ * PCM to the main process, which relays it to the cli.js voice server.
+ *
+ * `MediaRecorder` yields opus-in-webm and nothing else, which is what aborted
+ * the first attempt at remote voice. `AudioWorklet` is the way through — it hands
+ * the page raw Float32 blocks — and this file is the state machine around it.
  *
  * Three parts, and only one of them can be wrong in a way tests can catch:
- *  - `public/voice-worklet.js` batches render quanta (untestable: no
- *    AudioWorklet in jsdom, no audio device in CI — see its header);
+ *  - `voice-worklet.js` batches render quanta (untestable: no AudioWorklet in
+ *    jsdom, no audio device in CI — see its header);
  *  - `shared/audio/pcm16.ts` converts to the wire format (pure, unit-tested,
  *    and carries the correctness of the whole path);
- *  - this controller owns permissions, the graph, and the lifecycle.
+ *  - this class owns permissions, the graph, and the lifecycle.
  *
- * Everything the environment supplies is injected ({@link CaptureEnv}) so the
- * lifecycle IS testable in jsdom without pretending jsdom has audio.
+ * Who it talks to is not its business: `voice-controller.ts` pairs it with a
+ * transport. Everything the environment supplies is injected ({@link CaptureEnv})
+ * so the lifecycle IS testable in jsdom without pretending jsdom has audio.
  */
 
 import {
@@ -24,22 +30,27 @@ import {
   initialDownsampleState,
   pcm16ToBytesLe,
   type DownsampleState
-} from '../shared/audio/pcm16'
+} from '../../../../shared/audio/pcm16'
+// `no-inline`: the worklet is small enough that Vite would otherwise inline it
+// as a `data:` URL, which `script-src 'self'` refuses. As a hashed asset under
+// `/assets/` it is same-origin in both builds — `file://` on the desktop,
+// `remote-server.ts`'s static branch on the web.
+import workletUrl from './voice-worklet.js?url&no-inline'
 
-/** Served by the remote server's static branch (`*.js` at the web root). */
-export const VOICE_WORKLET_URL = '/voice-worklet.js'
+/** The worklet module's URL, as the build emitted it. */
+export const VOICE_WORKLET_URL: string = workletUrl
 /** The name `voice-worklet.js` registers. */
 const PROCESSOR_NAME = 'voice-capture'
 
 /**
  * Pre-arm queue depth, in ~150 ms blocks.
  *
- * A capture starts the microphone BEFORE `voice:start` has resolved, because the
- * round trip can spawn a cli.js child and open a Deepgram socket — seconds during
+ * A capture starts the microphone BEFORE the transport's start has resolved,
+ * because that round trip can spawn a cli.js child and open a Deepgram socket — seconds during
  * which someone is already talking. Frames produced in that window are held here
  * and flushed when {@link BrowserVoiceCapture.arm} says the server is listening.
  *
- * Bounded because a `voice:start` that never resolves must not grow a buffer
+ * Bounded because a start that never resolves must not grow a buffer
  * forever, and dropping the OLDEST is the right end to drop: the newest audio is
  * the audio still being spoken. 64 blocks is ~10 s.
  */
@@ -73,7 +84,8 @@ export function detectCaptureEnv(): CaptureEnv {
 /**
  * Why this environment cannot capture, or null when it can.
  *
- * The tailnet HTTPS origin passes; plain-HTTP LAN does not, which is the same
+ * The desktop window passes (`file://` and the dev server's localhost are both
+ * secure contexts), as does the tailnet HTTPS origin; plain-HTTP LAN does not, which is the same
  * rule passkeys already imposed on this app (security.md) — so the answer for an
  * owner who wants voice on their phone is the answer they have already been
  * given for enrollment, not a new one.
@@ -92,7 +104,7 @@ export function captureUnsupportedReason(env: CaptureEnv): string | null {
 type CaptureState = 'idle' | 'starting' | 'capturing'
 
 export interface BrowserVoiceCaptureOptions {
-  /** Ship one base64 PCM batch upstream (the `voice-audio` lane frame). */
+  /** Ship one base64 PCM batch upstream (the transport's `voiceAudio`). */
   sendAudio: (dataB64: string) => void
   env?: CaptureEnv
 }
@@ -203,8 +215,8 @@ export class BrowserVoiceCapture {
   }
 
   /**
-   * The server is listening: flush what was captured while `voice:start` was in
-   * flight, and stream live from here on.
+   * The server is listening: flush what was captured while the transport's start
+   * was in flight, and stream live from here on.
    */
   arm(): void {
     if (this.state === 'idle') return

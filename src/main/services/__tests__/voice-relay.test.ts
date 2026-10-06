@@ -1,7 +1,10 @@
 /**
  * @vitest-environment node
  *
- * Layer 1/2 tests for the REMOTE voice capture (SyncCore phase 5 S3).
+ * Layer 1/2 tests for the voice relay — the main-process half of voice input
+ * for both capture owners: a remote browser (SyncCore phase 5 S3, where these
+ * tests began as `remote-voice.test.ts`) and the desktop window (whose capture
+ * moved into the renderer; the desktop block at the end).
  *
  * Real `net` and real `readline` throughout: the fake here is cli.js, not the
  * transport. A stub socket would have let the base class's framing drift from
@@ -9,9 +12,9 @@
  * test at this level can pin end to end.
  *
  * What is asserted, in the order the review will ask for it:
- *  - `voice:start` reaches the engine's voice server as a `voice_start` line;
+ *  - a start reaches the engine's voice server as a `voice_start` line;
  *  - audio frames arrive as base64 `audio` lines, buffered until `ready`;
- *  - transcripts come back TARGETED at the capturing connection;
+ *  - transcripts come back TARGETED at the capturing owner — and only it;
  *  - stop / socket-close / engine-death all end the capture;
  *  - oversized and stray audio frames are refused SILENTLY;
  *  - nothing about the audio ever reaches the logger.
@@ -43,16 +46,38 @@ vi.mock('../../../core/services/logger', () => ({ logger: loggerMock }))
 const deliveries = vi.hoisted(
   () => [] as Array<{ connectionId: string; channel: string; args: unknown[] }>
 )
+const emitted = vi.hoisted(() => [] as Array<{ channel: string; args: unknown[] }>)
 vi.mock('../../../core/services/sync-host', () => ({
   sendToStreamConnection: (connectionId: string, frame: { channel: string; args: unknown[] }) => {
     deliveries.push({ connectionId, channel: frame.channel, args: frame.args })
     return true
+  },
+  // The funnel — the desktop owner's `voice:error` goes here, not to its window.
+  emitEvent: (channel: string, args: unknown[]) => {
+    emitted.push({ channel, args })
   }
 }))
 
-import { remoteVoice, MAX_VOICE_FRAME_BYTES } from '../../../core/services/remote-voice'
+import {
+  voiceRelay,
+  remoteVoiceOwner,
+  desktopVoiceOwner,
+  desktopVoiceOwnerKey,
+  MAX_VOICE_FRAME_BYTES
+} from '../../../core/services/voice-relay'
 import type { SessionManager } from '../../../core/services/session-manager'
-import type { CommandConnection } from '../../../core/ipc/command-registry'
+import type { HostWindowHandle } from '../../../core/host'
+
+/** The remote verbs' shape, so the ported cases read as they always did. */
+const remoteVoice = {
+  start: (manager: SessionManager, connectionId: string, routingId: string, language?: string) =>
+    voiceRelay.start(manager, remoteVoiceOwner(connectionId), routingId, language),
+  feed: (connectionId: string, dataB64: unknown) => voiceRelay.feed(connectionId, dataB64),
+  stop: (connectionId: string) => voiceRelay.stop(connectionId),
+  releaseConnection: (connectionId: string) => voiceRelay.releaseOwner(connectionId),
+  isCapturing: (connectionId: string) => voiceRelay.isCapturing(connectionId),
+  clearForTests: () => voiceRelay.clearForTests()
+}
 
 // --- A fake cli.js voice server --------------------------------------------
 
@@ -68,10 +93,15 @@ interface FakeVoiceServer {
   resetConnection(): void
   close(): Promise<void>
   connections: number
+  /** Per accepted socket, in accept order: the JSON lines it sent. */
+  receivedBy: Array<Array<Record<string, unknown>>>
+  /** Push a server → client line to the `index`th accepted socket. */
+  pushTo(index: number, msg: Record<string, unknown>): void
 }
 
 async function startFakeVoiceServer(): Promise<FakeVoiceServer> {
   const received: Array<Record<string, unknown>> = []
+  const receivedBy: Array<Array<Record<string, unknown>>> = []
   // EVERY socket, not just the live one: a stopped capture keeps its socket open
   // until the engine answers `closed` (or the 8 s finalization timeout fires), so
   // a teardown that only destroyed the latest would make `server.close()` wait
@@ -84,10 +114,14 @@ async function startFakeVoiceServer(): Promise<FakeVoiceServer> {
     socket = s
     sockets.push(s)
     connections++
+    const mine: Array<Record<string, unknown>> = []
+    receivedBy.push(mine)
     const rl = readline.createInterface({ input: s })
     rl.on('line', (line) => {
       try {
-        received.push(JSON.parse(line))
+        const msg = JSON.parse(line)
+        received.push(msg)
+        mine.push(msg)
       } catch {
         /* the client never sends anything but JSON; a parse failure is a test bug */
       }
@@ -106,6 +140,8 @@ async function startFakeVoiceServer(): Promise<FakeVoiceServer> {
   return {
     port: address.port,
     received,
+    receivedBy,
+    pushTo: (index, msg) => sockets[index]?.write(JSON.stringify(msg) + '\n'),
     get connections() {
       return connections
     },
@@ -123,14 +159,6 @@ async function startFakeVoiceServer(): Promise<FakeVoiceServer> {
 }
 
 // --- Fakes for the session + connection ------------------------------------
-
-function makeConnection(connectionId: string): CommandConnection {
-  return {
-    connectionId,
-    identity: { method: 'webauthn', label: 'phone', connectedAt: Date.now() },
-    grants: new Set(['chat'])
-  } as unknown as CommandConnection
-}
 
 function makeManager(
   port: number,
@@ -169,6 +197,7 @@ describe('remote voice capture', () => {
 
   beforeEach(async () => {
     deliveries.length = 0
+    emitted.length = 0
     loggerMock.debug.mockClear()
     loggerMock.info.mockClear()
     loggerMock.warn.mockClear()
@@ -192,7 +221,7 @@ describe('remote voice capture', () => {
     manager = makeManager(voiceServer.port)
   ): Promise<void> {
     const seen = voiceServer.received.filter((m) => m.type === 'voice_start').length
-    await remoteVoice.start(manager, makeConnection(connectionId), ROUTING_ID, 'en')
+    await remoteVoice.start(manager, connectionId, ROUTING_ID, 'en')
     await waitFor(
       () => voiceServer.received.filter((m) => m.type === 'voice_start').length === seen + 1
     )
@@ -208,11 +237,7 @@ describe('remote voice capture', () => {
   })
 
   it('defaults the language rather than sending an empty one', async () => {
-    await remoteVoice.start(
-      makeManager(voiceServer.port),
-      makeConnection(CONNECTION_ID),
-      ROUTING_ID
-    )
+    await remoteVoice.start(makeManager(voiceServer.port), CONNECTION_ID, ROUTING_ID)
     await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
     expect(voiceServer.received[0]).toEqual({ type: 'voice_start', language: 'en' })
   })
@@ -320,7 +345,7 @@ describe('remote voice capture', () => {
   it('a `voice:stop` while the voice server is still starting cancels the capture', async () => {
     const { manager, spawning, releaseServer } = gatedManager()
 
-    const startP = remoteVoice.start(manager, makeConnection(CONNECTION_ID), ROUTING_ID, 'en')
+    const startP = remoteVoice.start(manager, CONNECTION_ID, ROUTING_ID, 'en')
     await spawning
     await remoteVoice.stop(CONNECTION_ID)
     releaseServer()
@@ -332,7 +357,7 @@ describe('remote voice capture', () => {
   it('a `voice:stop` landing before the start first yields cancels it too', async () => {
     const { manager, releaseServer } = gatedManager()
 
-    const startP = remoteVoice.start(manager, makeConnection(CONNECTION_ID), ROUTING_ID, 'en')
+    const startP = remoteVoice.start(manager, CONNECTION_ID, ROUTING_ID, 'en')
     await remoteVoice.stop(CONNECTION_ID)
     releaseServer()
     await startP
@@ -453,7 +478,7 @@ describe('remote voice capture', () => {
     await expect(
       remoteVoice.start(
         makeManager(voiceServer.port, { voice: false }),
-        makeConnection(CONNECTION_ID),
+        CONNECTION_ID,
         ROUTING_ID,
         'en'
       )
@@ -462,14 +487,14 @@ describe('remote voice capture', () => {
     await expect(
       remoteVoice.start(
         makeManager(voiceServer.port, { missingSession: true }),
-        makeConnection(CONNECTION_ID),
+        CONNECTION_ID,
         ROUTING_ID,
         'en'
       )
     ).rejects.toThrow(/No active session/)
 
     await expect(
-      remoteVoice.start(makeManager(voiceServer.port), makeConnection(CONNECTION_ID), '', 'en')
+      remoteVoice.start(makeManager(voiceServer.port), CONNECTION_ID, '', 'en')
     ).rejects.toThrow(/requires a session id/)
 
     expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(false)
@@ -482,7 +507,7 @@ describe('remote voice capture', () => {
     await expect(
       remoteVoice.start(
         makeManager(voiceServer.port, { voice: false, engineId: 'claude' }),
-        makeConnection(CONNECTION_ID),
+        CONNECTION_ID,
         ROUTING_ID,
         'en'
       )
@@ -518,9 +543,314 @@ describe('remote voice capture', () => {
     expect(logged).not.toContain(secretB64)
     expect(logged).not.toContain(secret.toString('binary'))
     // The oversize refusal reports a SIZE and nothing else.
-    expect(loggerMock.warn).toHaveBeenCalledWith(
-      'RemoteVoice',
-      expect.stringContaining('oversized')
+    expect(loggerMock.warn).toHaveBeenCalledWith('VoiceRelay', expect.stringContaining('oversized'))
+  })
+})
+
+// --- The desktop owner --------------------------------------------------------
+
+interface FakeWindow {
+  win: HostWindowHandle
+  sent: Array<[string, ...unknown[]]>
+  destroy(): void
+}
+
+/** A host window double: records what its webContents is sent; destroyable. */
+function makeWindow(id: number): FakeWindow {
+  const sent: Array<[string, ...unknown[]]> = []
+  let destroyed = false
+  const win = {
+    webContents: {
+      id,
+      send: (channel: string, ...args: unknown[]) => {
+        // A real destroyed webContents throws; the owner must never reach this.
+        if (destroyed) throw new Error('Object has been destroyed')
+        sent.push([channel, ...args])
+      },
+      isDestroyed: () => destroyed
+    },
+    isDestroyed: () => destroyed,
+    on: () => {}
+  } as unknown as HostWindowHandle
+  return {
+    win,
+    sent,
+    destroy: () => {
+      destroyed = true
+    }
+  }
+}
+
+function sentOn(w: FakeWindow, channel: string): unknown[][] {
+  return w.sent.filter(([c]) => c === channel).map(([, ...args]) => args)
+}
+
+describe('voice relay — the desktop owner', () => {
+  let voiceServer: FakeVoiceServer
+
+  beforeEach(async () => {
+    deliveries.length = 0
+    emitted.length = 0
+    loggerMock.warn.mockClear()
+    loggerMock.error.mockClear()
+    voiceServer = await startFakeVoiceServer()
+  })
+
+  afterEach(async () => {
+    voiceRelay.clearForTests()
+    await voiceServer.close()
+  })
+
+  const DESKTOP_KEY = desktopVoiceOwnerKey(7)
+
+  async function startDesktop(
+    w: FakeWindow,
+    manager: SessionManager = makeManager(voiceServer.port)
+  ): Promise<void> {
+    const seen = voiceServer.received.filter((m) => m.type === 'voice_start').length
+    await voiceRelay.start(manager, desktopVoiceOwner(w.win), ROUTING_ID, 'en')
+    await waitFor(
+      () => voiceServer.received.filter((m) => m.type === 'voice_start').length === seen + 1
     )
+  }
+
+  it('keys the owner by webContents id — the key the audio feed derives from the IPC sender', () => {
+    expect(desktopVoiceOwner(makeWindow(7).win).key).toBe('desktop:7')
+    expect(DESKTOP_KEY).toBe('desktop:7')
+  })
+
+  it('delivers state and transcripts to the OWNING window only', async () => {
+    const owner = makeWindow(7)
+    const other = makeWindow(8)
+    await startDesktop(owner)
+
+    voiceServer.push({ type: 'ready' })
+    voiceServer.push({ type: 'transcript', text: 'hello desk.', isFinal: true })
+    await waitFor(() => sentOn(owner, 'voice:transcript').length === 1)
+
+    expect(sentOn(owner, 'voice:state')).toContainEqual([ROUTING_ID, 'recording'])
+    expect(sentOn(owner, 'voice:transcript')).toEqual([
+      [ROUTING_ID, { text: 'hello desk.', isFinal: true }]
+    ])
+    expect(other.sent).toEqual([])
+    // Nothing went out on the remote lane, and nothing through the funnel.
+    expect(deliveries).toEqual([])
+    expect(emitted).toEqual([])
+  })
+
+  it('relays audio fed under its key, buffered until `ready`', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+
+    const chunk = Buffer.from([0x0a, 0x0b, 0x0c, 0x0d])
+    voiceRelay.feed(DESKTOP_KEY, chunk.toString('base64'))
+    expect(voiceServer.received.filter((m) => m.type === 'audio')).toHaveLength(0)
+
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'audio'))
+    expect(voiceServer.received.find((m) => m.type === 'audio')).toEqual({
+      type: 'audio',
+      data: chunk.toString('base64')
+    })
+  })
+
+  it('raises `voice:error` through the funnel, not at the window', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+
+    voiceServer.push({ type: 'error', message: 'Deepgram said no' })
+    await waitFor(() => emitted.length === 1)
+
+    expect(emitted).toEqual([{ channel: 'voice:error', args: [ROUTING_ID, 'Deepgram said no'] }])
+    expect(sentOn(owner, 'voice:error')).toEqual([])
+    expect(deliveries).toEqual([])
+  })
+
+  it('tolerates a window destroyed mid-capture — no send, no throw', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => sentOn(owner, 'voice:state').some((a) => a[1] === 'recording'))
+    const before = owner.sent.length
+
+    owner.destroy()
+    const uncaught: unknown[] = []
+    const onUncaught = (err: unknown): void => {
+      uncaught.push(err)
+    }
+    process.on('uncaughtException', onUncaught)
+    try {
+      voiceServer.push({ type: 'transcript', text: 'into the void.', isFinal: true })
+      voiceServer.push({ type: 'closed' })
+      await waitFor(() => !voiceRelay.isCapturing(DESKTOP_KEY))
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
+    expect(uncaught).toEqual([])
+    expect(owner.sent).toHaveLength(before)
+  })
+
+  it('releaseOwner (the window going away) ends the capture; later audio is dropped', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => sentOn(owner, 'voice:state').some((a) => a[1] === 'recording'))
+
+    voiceRelay.releaseOwner(DESKTOP_KEY)
+    expect(voiceRelay.isCapturing(DESKTOP_KEY)).toBe(false)
+    voiceRelay.feed(DESKTOP_KEY, Buffer.from([1, 2]).toString('base64'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(voiceServer.received.filter((m) => m.type === 'audio')).toHaveLength(0)
+  })
+
+  it('coexists with a remote capture — no crosstalk in either direction', async () => {
+    const owner = makeWindow(7)
+    await remoteVoice.start(makeManager(voiceServer.port), CONNECTION_ID, ROUTING_ID, 'en')
+    await waitFor(() => voiceServer.connections === 1)
+    await startDesktop(owner)
+    await waitFor(() => voiceServer.connections === 2)
+    expect(voiceRelay.isCapturing(CONNECTION_ID)).toBe(true)
+    expect(voiceRelay.isCapturing(DESKTOP_KEY)).toBe(true)
+
+    voiceServer.pushTo(0, { type: 'ready' })
+    voiceServer.pushTo(1, { type: 'ready' })
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:state').some((a) => a[1] === 'recording'))
+    await waitFor(() => sentOn(owner, 'voice:state').some((a) => a[1] === 'recording'))
+
+    // Audio lands on its own owner's voice socket.
+    const remoteChunk = Buffer.from([0x11]).toString('base64')
+    const desktopChunk = Buffer.from([0x22]).toString('base64')
+    voiceRelay.feed(CONNECTION_ID, remoteChunk)
+    voiceRelay.feed(DESKTOP_KEY, desktopChunk)
+    await waitFor(() => voiceServer.receivedBy[1].some((m) => m.type === 'audio'))
+    await waitFor(() => voiceServer.receivedBy[0].some((m) => m.type === 'audio'))
+    expect(voiceServer.receivedBy[0].filter((m) => m.type === 'audio')).toEqual([
+      { type: 'audio', data: remoteChunk }
+    ])
+    expect(voiceServer.receivedBy[1].filter((m) => m.type === 'audio')).toEqual([
+      { type: 'audio', data: desktopChunk }
+    ])
+
+    // Transcripts go back to their own owner.
+    voiceServer.pushTo(1, { type: 'transcript', text: 'desk.', isFinal: true })
+    voiceServer.pushTo(0, { type: 'transcript', text: 'phone.', isFinal: true })
+    await waitFor(() => sentOn(owner, 'voice:transcript').length === 1)
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:transcript').length === 1)
+    expect(sentOn(owner, 'voice:transcript')).toEqual([
+      [ROUTING_ID, { text: 'desk.', isFinal: true }]
+    ])
+    expect(framesFor(CONNECTION_ID, 'voice:transcript')).toEqual([
+      [ROUTING_ID, { text: 'phone.', isFinal: true }]
+    ])
+
+    // Stopping one owner leaves the other live.
+    await voiceRelay.stop(DESKTOP_KEY)
+    expect(voiceRelay.isCapturing(DESKTOP_KEY)).toBe(false)
+    expect(voiceRelay.isCapturing(CONNECTION_ID)).toBe(true)
+  })
+
+  /**
+   * A session whose voice server comes up per call only when the test says so —
+   * a first press spawns cli.js, which is seconds a release can land in.
+   */
+  function gatedManager(gates: Array<Promise<void>>): SessionManager {
+    let call = 0
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: async () => {
+        await gates[call++]
+        return { port: voiceServer.port }
+      }
+    }
+    return { get: () => session } as unknown as SessionManager
+  }
+
+  function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: Error) => void } {
+    let resolve!: () => void
+    let reject!: (e: Error) => void
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
+  // The four below are what `claude-session-voice.test.ts` pinned while the
+  // pending start lived in ClaudeSession; it lives here now.
+
+  it('announces `connecting` at once, and a stop during the spawn leaves the window idle', async () => {
+    const owner = makeWindow(7)
+    const gate = deferred()
+    const startP = voiceRelay.start(
+      gatedManager([gate.promise]),
+      desktopVoiceOwner(owner.win),
+      ROUTING_ID,
+      'en'
+    )
+    await waitFor(() => sentOn(owner, 'voice:state').length === 1)
+    expect(sentOn(owner, 'voice:state')).toEqual([[ROUTING_ID, 'connecting']])
+
+    await voiceRelay.stop(DESKTOP_KEY)
+    gate.resolve()
+    await startP
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(sentOn(owner, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    expect(voiceServer.connections).toBe(0)
+    expect(voiceRelay.isCapturing(DESKTOP_KEY)).toBe(false)
+  })
+
+  it("a stop→start pair: the first start's cancellation does not clobber the second", async () => {
+    const owner = makeWindow(7)
+    const first = deferred()
+    const second = deferred()
+    const manager = gatedManager([first.promise, second.promise])
+
+    const start1 = voiceRelay.start(manager, desktopVoiceOwner(owner.win), ROUTING_ID, 'en')
+    await voiceRelay.stop(DESKTOP_KEY)
+    const start2 = voiceRelay.start(manager, desktopVoiceOwner(owner.win), ROUTING_ID, 'en')
+
+    first.resolve()
+    await start1
+    expect(voiceServer.connections).toBe(0)
+
+    second.resolve()
+    await start2
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+    expect(voiceServer.connections).toBe(1)
+    expect(voiceRelay.isCapturing(DESKTOP_KEY)).toBe(true)
+  })
+
+  it('a cancelled start whose spawn then fails (the 15 s deadline) ends quietly', async () => {
+    const owner = makeWindow(7)
+    const gate = deferred()
+    const startP = voiceRelay.start(
+      gatedManager([gate.promise]),
+      desktopVoiceOwner(owner.win),
+      ROUTING_ID,
+      'en'
+    )
+    await voiceRelay.stop(DESKTOP_KEY)
+    const statesAtStop = sentOn(owner, 'voice:state').length
+    gate.reject(new Error('Timed out waiting for SDK session to start'))
+
+    await expect(startP).resolves.toBeUndefined()
+    expect(sentOn(owner, 'voice:state')).toHaveLength(statesAtStop)
+    expect(sentOn(owner, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    expect(voiceServer.connections).toBe(0)
+  })
+
+  it('a spawn that fails while still held reports idle and rejects', async () => {
+    const owner = makeWindow(7)
+    const failing = Promise.reject(new Error('spawn failed'))
+    failing.catch(() => {})
+    await expect(
+      voiceRelay.start(gatedManager([failing]), desktopVoiceOwner(owner.win), ROUTING_ID, 'en')
+    ).rejects.toThrow(/spawn failed/)
+    expect(sentOn(owner, 'voice:state')).toEqual([
+      [ROUTING_ID, 'connecting'],
+      [ROUTING_ID, 'idle']
+    ])
   })
 })

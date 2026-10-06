@@ -3,7 +3,7 @@
  *
  * Layer 3: E2E — remote browser voice input over a real socket (phase 5 S3).
  *
- * The unit suite (`main/services/__tests__/remote-voice.test.ts`) proves the
+ * The unit suite (`main/services/__tests__/voice-relay.test.ts`) proves the
  * protocol against a fake cli.js. What only this layer can prove is the part
  * that spans the transport:
  *
@@ -70,7 +70,7 @@ import {
   type CommandConnection
 } from '../../core/ipc/command-registry'
 import { STREAM_WATCH_COMMAND } from '../../core/ipc/stream-watch'
-import { remoteVoice } from '../../core/services/remote-voice'
+import { remoteVoiceOwner, voiceRelay } from '../../core/services/voice-relay'
 import { emitEvent, syncCore } from '../../core/services/sync-host'
 import type { SessionManager } from '../../core/services/session-manager'
 import type { WsServerMessage, StreamEventFrame } from '../../shared/remote-protocol'
@@ -159,7 +159,12 @@ beforeAll(async () => {
     sessionIdArg: 0,
     withConnection: true,
     handler: async (connection: CommandConnection, routingId: string, language?: string) =>
-      remoteVoice.start(fakeManager(), connection, routingId, language)
+      voiceRelay.start(
+        fakeManager(),
+        remoteVoiceOwner(connection.connectionId),
+        routingId,
+        language
+      )
   })
   registerCommand({
     channel: 'voice:stop',
@@ -167,7 +172,7 @@ beforeAll(async () => {
     kind: 'command',
     transport: 'remote',
     withConnection: true,
-    handler: async (connection: CommandConnection) => remoteVoice.stop(connection.connectionId)
+    handler: async (connection: CommandConnection) => voiceRelay.stop(connection.connectionId)
   })
 
   server = new RemoteServer(new RemoteDispatcher())
@@ -180,7 +185,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  remoteVoice.clearForTests()
+  voiceRelay.clearForTests()
   // Let every socket this file reset finish closing before the fake engine is
   // torn down underneath them. Without it the last capture's teardown races
   // `engine.close()`, and the loser surfaces as an unhandled ECONNRESET that

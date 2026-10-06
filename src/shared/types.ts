@@ -3190,11 +3190,18 @@ export interface VoiceTranscript {
 
 export type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing'
 
+/**
+ * The voice TRANSPORT. Capture is the renderer's (`renderer/src/lib/voice/`, one
+ * implementation for the desktop window and the web client); these only bind its
+ * pushed audio to a session's transcription server in the main process.
+ */
 interface VoiceAPI {
-  voiceStartServer(routingId: string): Promise<void>
-  voiceStopServer(routingId: string): Promise<void>
-  voiceStartRecording(routingId: string, language: string): Promise<void>
-  voiceStopRecording(routingId: string): Promise<void>
+  /** Bind this client's audio to `routingId`'s voice server. Rejects on refusal. */
+  voiceStart(routingId: string, language: string): Promise<void>
+  /** One ~150 ms batch of base64 16 kHz i16LE mono PCM. Fire-and-forget. */
+  voiceAudio(routingId: string, dataB64: string): void
+  /** End this client's capture; transcripts still in flight arrive afterwards. */
+  voiceStop(routingId: string): Promise<void>
   onVoiceTranscript(cb: (routingId: string, data: VoiceTranscript) => void): () => void
   onVoiceState(cb: (routingId: string, state: VoiceState) => void): () => void
 }

@@ -1,7 +1,13 @@
 /**
  * @vitest-environment node
  *
- * Layer 1 unit tests for VoiceClient.
+ * Layer 1 unit tests for the cli.js voice-server protocol — `VoiceStreamClient`.
+ *
+ * Ported from the retired `voice-client.test.ts` when desktop capture moved into
+ * the renderer: the native-microphone subclass is gone, but the protocol and the
+ * lifecycle races these pin are the base class's, and the relay's push-fed client
+ * runs on them. Driven through a minimal concrete subclass (a push source that
+ * records what it emits), so nothing here depends on a particular owner.
  *
  * Mocks:
  *   - `net.connect()` returns a fake Socket (EventEmitter + .write / .destroy /
@@ -10,39 +16,12 @@
  *   - `readline.createInterface()` returns a fake readline-like EventEmitter
  *     with a `.close()` method so we can drive inbound server messages via
  *     `rl.emit('line', ...)`.
- *   - `./voice-capture` is mocked so no native binding is touched. We also
- *     capture the onData callback VoiceClient installs so tests can feed audio
- *     through the real code path.
  *
  * Scope: protocol + lifecycle only, never raw audio contents.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-
-// --- voice-capture mock -----------------------------------------------------
-//
-// Captures the last onData callback VoiceClient registers so tests can drive
-// "the microphone just emitted a chunk" by invoking it directly.
-
-let capturedOnData: ((buf: Buffer) => void) | null = null
-let startRecordingShouldSucceed = true
-const startRecordingMock = vi.fn((onData: (buf: Buffer) => void, _owner: object) => {
-  capturedOnData = onData
-  return startRecordingShouldSucceed
-})
-const stopRecordingMock = vi.fn((_owner: object) => {})
-
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: (onData: (buf: Buffer) => void, owner: object) =>
-    startRecordingMock(onData, owner),
-  stopRecording: (owner: object) => stopRecordingMock(owner),
-  isVoiceCaptureAvailable: () => true,
-  getMicrophoneStatus: () => 3,
-  isRecording: () => false
-}))
-
-// --- logger mock ------------------------------------------------------------
 
 vi.mock('../../../core/services/logger', () => ({
   logger: {
@@ -117,21 +96,49 @@ vi.mock('readline', () => ({
 
 // --- Imports under test (after all mocks registered) ------------------------
 
-import { VoiceClient } from '../../../core/services/voice-client'
+import { VoiceStreamClient } from '../../../core/services/voice-stream-client'
+import type { VoiceState } from '../../../shared/types'
 
-// --- Test helpers -----------------------------------------------------------
+/** A push-fed client that records every emission, tagged with the live routing id. */
+class RecordingClient extends VoiceStreamClient {
+  emitted: Array<[string, string, unknown]> = []
+  sourceStarts = 0
 
-interface FakeBrowserWindow {
-  webContents: { send: ReturnType<typeof vi.fn>; isDestroyed?: () => boolean }
-  isDestroyed?: () => boolean
-}
+  constructor(
+    port: number,
+    private readonly getRoutingId: () => string
+  ) {
+    super(port, 'TestVoice')
+  }
 
-function makeWin(destroyed = false): FakeBrowserWindow {
-  return {
-    isDestroyed: () => destroyed,
-    webContents: { send: vi.fn(), isDestroyed: () => destroyed }
+  feed(chunk: Buffer): void {
+    this.pushAudio(chunk)
+  }
+
+  protected startAudioSource(): boolean {
+    this.sourceStarts++
+    return true
+  }
+  protected stopAudioSource(): void {}
+  protected audioSourceFailureMessage(): string {
+    return 'unreachable'
+  }
+  protected emitState(state: VoiceState): void {
+    this.emitted.push(['voice:state', this.getRoutingId(), state])
+  }
+  protected emitTranscript(text: string, isFinal: boolean): void {
+    this.emitted.push(['voice:transcript', this.getRoutingId(), { text, isFinal }])
+  }
+  protected emitError(message: string): void {
+    this.emitted.push(['voice:error', this.getRoutingId(), message])
+  }
+
+  states(): unknown[] {
+    return this.emitted.filter(([c]) => c === 'voice:state').map(([, , s]) => s)
   }
 }
+
+// --- Test helpers -----------------------------------------------------------
 
 /** Simulate the socket completing its TCP handshake. */
 function fireConnect(): void {
@@ -139,7 +146,7 @@ function fireConnect(): void {
   lastSocket.emit('connect')
 }
 
-/** Parse every JSON message VoiceClient has written to the socket so far. */
+/** Parse every JSON message the client has written to the socket so far. */
 function sentMessages(): Array<Record<string, unknown>> {
   if (!lastSocket) return []
   // Each call to write() includes one '\n'-terminated JSON object.
@@ -155,14 +162,10 @@ function sentMessages(): Array<Record<string, unknown>> {
 
 // --- Tests ------------------------------------------------------------------
 
-describe('VoiceClient', () => {
+describe('VoiceStreamClient', () => {
   beforeEach(() => {
-    capturedOnData = null
     lastSocket = null
     lastReadline = null
-    startRecordingShouldSucceed = true
-    startRecordingMock.mockClear()
-    stopRecordingMock.mockClear()
     connectMock.mockClear()
   })
 
@@ -171,8 +174,7 @@ describe('VoiceClient', () => {
   })
 
   it('startRecording() connects to the voice server on the configured port and sends voice_start with the language', async () => {
-    const win = makeWin()
-    const client = new VoiceClient(12345, win as unknown as never, () => 'routing-A')
+    const client = new RecordingClient(12345, () => 'routing-A')
 
     const startP = client.startRecording('en')
 
@@ -189,21 +191,12 @@ describe('VoiceClient', () => {
     expect(sent.length).toBeGreaterThanOrEqual(1)
     expect(sent[0]).toEqual({ type: 'voice_start', language: 'en' })
 
-    // VoiceClient emitted a state transition to 'connecting' on the win.
-    const states = win.webContents.send.mock.calls
-      .filter((c) => c[0] === 'voice:state')
-      .map((c) => c[2])
-    expect(states).toContain('connecting')
-
-    // The client took the microphone over via the voice-capture facade, as its
-    // owner (the facade restarts an active capture itself).
-    expect(startRecordingMock).toHaveBeenCalledTimes(1)
-    expect(startRecordingMock).toHaveBeenCalledWith(expect.any(Function), client)
+    expect(client.states()).toContain('connecting')
+    expect(client.sourceStarts).toBe(1)
   })
 
-  it('audio chunks pushed through the captured onData callback are forwarded as base64 audio frames once the server reports ready', async () => {
-    const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+  it('pushed audio is buffered until the server reports ready, then forwarded as base64 audio frames', async () => {
+    const client = new RecordingClient(4000, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
@@ -211,29 +204,27 @@ describe('VoiceClient', () => {
 
     // Before 'ready', chunks must buffer (not write).
     const writesBeforeReady = lastSocket!.writes.length
-    capturedOnData!(Buffer.from([0xaa, 0xbb]))
+    client.feed(Buffer.from([0xaa, 0xbb]))
     expect(lastSocket!.writes.length).toBe(writesBeforeReady)
 
-    // Server sends 'ready' — VoiceClient flushes the buffer and transitions to
+    // Server sends 'ready' — the client flushes the buffer and transitions to
     // 'recording'.
     lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
 
     // The buffered chunk was flushed as an 'audio' frame.
-    const afterReady = sentMessages()
-    const audioFrames = afterReady.filter((m) => m.type === 'audio')
+    const audioFrames = sentMessages().filter((m) => m.type === 'audio')
     expect(audioFrames.length).toBe(1)
     expect(audioFrames[0].data).toBe(Buffer.from([0xaa, 0xbb]).toString('base64'))
 
     // A new live chunk arrives after 'ready' — it should write directly.
-    capturedOnData!(Buffer.from([0x01, 0x02, 0x03]))
+    client.feed(Buffer.from([0x01, 0x02, 0x03]))
     const audioFrames2 = sentMessages().filter((m) => m.type === 'audio')
     expect(audioFrames2.length).toBe(2)
     expect(audioFrames2[1].data).toBe(Buffer.from([0x01, 0x02, 0x03]).toString('base64'))
   })
 
   it('rejects a second startRecording() while the first is still connecting (no orphan socket)', async () => {
-    const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+    const client = new RecordingClient(4000, () => 'routing-A')
 
     // First call: enters 'connecting' and awaits the TCP handshake (not fired).
     const p1 = client.startRecording('en')
@@ -250,79 +241,52 @@ describe('VoiceClient', () => {
     expect(connectMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does not call webContents.send when the window is destroyed', async () => {
-    const win = makeWin(true)
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
-
-    // startRecording transitions state (which would send 'voice:state') — every
-    // send must be suppressed against a destroyed window rather than throwing.
-    const p = client.startRecording('en')
-    fireConnect()
-    await p
-
-    expect(win.webContents.send).not.toHaveBeenCalled()
-  })
-
   it('stopRecording() sends voice_stop and cleans up after the server closes, restoring idle state', async () => {
-    const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+    const client = new RecordingClient(4000, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()
     await startP
     lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
 
-    // Clear the send history up to here so we can see only stop-related events.
-    win.webContents.send.mockClear()
+    // Clear the history up to here so we can see only stop-related events.
+    client.emitted.length = 0
 
     await client.stopRecording()
 
     // voice_stop is written to the socket.
-    const lastMsg = sentMessages().pop()
-    expect(lastMsg).toEqual({ type: 'voice_stop' })
-
-    // Microphone stop was invoked.
-    expect(stopRecordingMock).toHaveBeenCalled()
+    expect(sentMessages().pop()).toEqual({ type: 'voice_stop' })
 
     // State transitioned to 'processing' (waiting for server 'closed').
-    const statesAfterStop = win.webContents.send.mock.calls
-      .filter((c) => c[0] === 'voice:state')
-      .map((c) => c[2])
-    expect(statesAfterStop).toContain('processing')
+    expect(client.states()).toContain('processing')
 
-    // Server acks with 'closed' — VoiceClient tears down and returns to 'idle'.
+    // Server acks with 'closed' — the client tears down and returns to 'idle'.
     lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
 
     expect(lastSocket!.destroyed).toBe(true)
     expect(lastReadline!.closed).toBe(true)
-
-    const finalStates = win.webContents.send.mock.calls
-      .filter((c) => c[0] === 'voice:state')
-      .map((c) => c[2])
-    expect(finalStates[finalStates.length - 1]).toBe('idle')
+    expect(client.states().at(-1)).toBe('idle')
   })
 
   it('emits under the LIVE routing id when the session is rekeyed mid-capture', async () => {
     // A brand-new session's first press spawns cli.js and creates this client;
     // the first prompt then rekeys the session. Everything the client emits
     // afterwards must follow the new id, or the renderer drops it.
-    const win = makeWin()
     let routingId = 'routing-temp'
-    const client = new VoiceClient(4000, win as unknown as never, () => routingId)
+    const client = new RecordingClient(4000, () => routingId)
 
     const startP = client.startRecording('en')
     fireConnect()
     await startP
 
     routingId = 'routing-minted'
-    win.webContents.send.mockClear()
+    client.emitted.length = 0
 
     lastReadline!.emit('line', JSON.stringify({ type: 'ready' }))
     lastReadline!.emit('line', JSON.stringify({ type: 'transcript', text: 'hi', isFinal: true }))
     lastReadline!.emit('line', JSON.stringify({ type: 'closed' }))
 
-    const calls = win.webContents.send.mock.calls
-    expect(calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+    expect(client.emitted).toEqual([
       ['voice:state', 'routing-minted', 'recording'],
       ['voice:transcript', 'routing-minted', { text: 'hi', isFinal: true }],
       ['voice:state', 'routing-minted', 'idle']
@@ -330,8 +294,7 @@ describe('VoiceClient', () => {
   })
 
   it('a stop during the connect window ends the capture — the late connect is dropped', async () => {
-    const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+    const client = new RecordingClient(4000, () => 'routing-A')
 
     // Start, then release before the TCP handshake completes.
     const startP = client.startRecording('en')
@@ -339,8 +302,7 @@ describe('VoiceClient', () => {
     const rl = lastReadline!
     await client.stopRecording()
     expect(client.currentState()).toBe('idle')
-    startRecordingMock.mockClear()
-    win.webContents.send.mockClear()
+    client.emitted.length = 0
 
     // The handshake lands late, and the server even answers `ready`.
     fireConnect()
@@ -351,15 +313,14 @@ describe('VoiceClient', () => {
     expect(socket.destroyed).toBe(true)
     expect(rl.closed).toBe(true)
     expect(sentMessages().some((m) => m.type === 'voice_start')).toBe(false)
-    // The microphone is not reopened, and the renderer hears nothing more.
-    expect(startRecordingMock).not.toHaveBeenCalled()
-    expect(win.webContents.send).not.toHaveBeenCalled()
+    // The source is not restarted, and the owner hears nothing more.
+    expect(client.sourceStarts).toBe(0)
+    expect(client.emitted).toEqual([])
   })
 
   it('a second stop while processing is a no-op — one voice_stop, no timer left behind', async () => {
     vi.useFakeTimers()
-    const win = makeWin()
-    const client = new VoiceClient(4000, win as unknown as never, () => 'routing-A')
+    const client = new RecordingClient(4000, () => 'routing-A')
 
     const startP = client.startRecording('en')
     fireConnect()

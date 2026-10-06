@@ -86,8 +86,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     setThinkingMode: vi.fn(),
     voiceStartServer: vi.fn(async () => {}),
     voiceStopServer: vi.fn(async () => {}),
-    voiceStartRecording: vi.fn(async () => {}),
-    voiceStopRecording: vi.fn(async () => {}),
     mcpServerStatus: vi.fn(async () => []),
     mcpToggleServer: vi.fn(async () => {}),
     mcpReconnectServer: vi.fn(async () => {}),
@@ -299,6 +297,17 @@ vi.mock('../../../core/sdk', () => ({
 
 // Electron shim — must come last among electron-related mocks.
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
+
+// The relay itself is voice-relay.test.ts's; here only what the desktop verbs
+// hand it — the session, the owner, the language — and when they refuse first.
+const voiceRelaySpies = vi.hoisted(() => ({
+  start: vi.fn(async (..._args: unknown[]) => {}),
+  stop: vi.fn(async (_ownerKey: string) => {})
+}))
+vi.mock('../../../core/services/voice-relay', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/voice-relay')>()
+  return { ...actual, voiceRelay: voiceRelaySpies }
+})
 
 vi.mock('../../../core/services/logger', () => ({
   logger: {
@@ -862,45 +871,68 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('voice channels', () => {
-    it('voice:start-server routes to session.voiceStartServer', async () => {
-      const res = await harness.call<any>('voice:start-server', 'rid-1')
-      expect(res.ok).toBe(true)
-      expect(sessionStub.voiceStartServer).toHaveBeenCalled()
+    beforeEach(() => {
+      voiceRelaySpies.start.mockClear()
+      voiceRelaySpies.stop.mockClear()
     })
 
-    it('voice:start-recording routes to session.voiceStartRecording with language', async () => {
+    it('voice:start-recording binds the HOST WINDOW as capture owner, with the language', async () => {
       const res = await harness.call<any>('voice:start-recording', 'rid-1', 'en')
       expect(res.ok).toBe(true)
-      expect(sessionStub.voiceStartRecording).toHaveBeenCalledWith('en')
+      expect(voiceRelaySpies.start).toHaveBeenCalledTimes(1)
+      const [manager, owner, routingId, language] = voiceRelaySpies.start.mock.calls[0] as [
+        unknown,
+        { key: string },
+        string,
+        string
+      ]
+      expect((manager as { get: unknown }).get).toBe(sessionManagerSpies.get)
+      // The key the `voice:audio` feed derives from the IPC sender (the bridge's
+      // webContents is id 1).
+      expect(owner.key).toBe(`desktop:${harness.win.webContents.id}`)
+      expect(routingId).toBe('rid-1')
+      expect(language).toBe('en')
     })
 
-    it('voice:stop-server returns ok=false when no session', async () => {
+    it('voice:stop-recording ends the host window owner', async () => {
+      const res = await harness.call<any>('voice:stop-recording', 'rid-1')
+      expect(res.ok).toBe(true)
+      expect(voiceRelaySpies.stop).toHaveBeenCalledWith(`desktop:${harness.win.webContents.id}`)
+    })
+
+    it('voice:start-recording returns ok=false when no session', async () => {
       sessionManagerSpies.get.mockReturnValueOnce(undefined as any)
-      const res = await harness.call<any>('voice:stop-server', 'nope')
+      const res = await harness.call<any>('voice:start-recording', 'nope', 'en')
       expect(res.ok).toBe(false)
       expect(res.error).toBe('No active session')
+      expect(voiceRelaySpies.start).not.toHaveBeenCalled()
     })
 
-    it('refuses both start verbs on a Claude binary without the voice-server patch', async () => {
+    it('voice:stop-recording releases the window capture even when the session is gone', async () => {
+      // The capture is the WINDOW's: a session that vanished mid-press must not
+      // leave the relay holding a stream open. The handler never looks it up.
+      const res = await harness.call<any>('voice:stop-recording', 'gone')
+      expect(res.ok).toBe(true)
+      expect(voiceRelaySpies.stop).toHaveBeenCalledWith(`desktop:${harness.win.webContents.id}`)
+    })
+
+    it('refuses the start on a Claude binary without the voice-server patch', async () => {
       // ClaudeSession.capabilities.voice is false exactly then.
       const caps = sessionStub.capabilities
       sessionStub.capabilities = { ...caps, voice: false }
-      sessionStub.voiceStartServer.mockClear()
-      sessionStub.voiceStartRecording.mockClear()
       try {
-        for (const [channel, ...args] of [
-          ['voice:start-server', 'rid-1'],
-          ['voice:start-recording', 'rid-1', 'en']
-        ]) {
-          const res = await harness.call<any>(channel, ...args)
-          expect(res.ok, channel).toBe(false)
-          expect(res.error, channel).toMatch(/voice-server patch/)
-        }
-        expect(sessionStub.voiceStartServer).not.toHaveBeenCalled()
-        expect(sessionStub.voiceStartRecording).not.toHaveBeenCalled()
+        const res = await harness.call<any>('voice:start-recording', 'rid-1', 'en')
+        expect(res.ok).toBe(false)
+        expect(res.error).toMatch(/voice-server patch/)
+        expect(voiceRelaySpies.start).not.toHaveBeenCalled()
       } finally {
         sessionStub.capabilities = caps
       }
+    })
+
+    it('the server verbs are gone — no renderer ever called them', async () => {
+      await expect(harness.call('voice:start-server', 'rid-1')).rejects.toThrow()
+      await expect(harness.call('voice:stop-server', 'rid-1')).rejects.toThrow()
     })
   })
 

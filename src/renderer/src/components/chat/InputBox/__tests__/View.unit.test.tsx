@@ -378,8 +378,8 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     // the preventDefault would deliver. The button must not begin a second
     // capture — and the CONTROLLER is the backstop that guarantees it, since the
     // renderer's own `voiceState` guard cannot see a state that is still a round
-    // trip away (pinned in web/__tests__/voice-capture.unit.test.ts:
-    // "a second start() while capturing is a no-op", and api-adapter's
+    // trip away (pinned in lib/voice/__tests__/browser-voice-capture.unit.test.ts:
+    // "a second start() while capturing is a no-op", and the voice controller's
     // `isActive()` short-circuit).
     //
     // Here the button is already in the state the first press put it in, which

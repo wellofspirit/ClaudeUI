@@ -1,9 +1,9 @@
 /**
- * Layer 1 unit tests for the ONE piece of DSP in the remote-voice path.
+ * Layer 1 unit tests for the ONE piece of DSP in the voice capture path.
  *
  * The worklet cannot be tested here (jsdom has no `AudioWorklet`, no
  * `AudioContext`, and no audio device — see the note in
- * `src/web/__tests__/voice-capture.unit.test.ts`), so correctness of the wire
+ * `renderer/src/lib/voice/__tests__/browser-voice-capture.unit.test.ts`), so correctness of the wire
  * format rests entirely on this file. What it has to prove:
  *
  *  - the output really is 16 kHz mono int16 LE, whatever the input rate;

@@ -12,6 +12,7 @@ import {
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
 import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
+import { voiceController } from '../../../lib/voice/voice-controller'
 import type {
   AttachmentUpload,
   FileAttachment,
@@ -793,8 +794,8 @@ export function InputBox(): React.JSX.Element {
 
   /**
    * Is the push-to-talk still held? `ensureSession()` can spawn the engine first,
-   * and a release during that await sends its stop BEFORE the start — which main
-   * would then honor by opening a capture nobody is holding.
+   * and a release during that await sends its stop BEFORE the start — which would
+   * then open a microphone (and a main-side capture) nobody is holding.
    */
   const voiceHeldRef = useRef(false)
   /** Numbers each press, so a release-then-repress during one spawn starts once. */
@@ -807,16 +808,16 @@ export function InputBox(): React.JSX.Element {
     try {
       await ensureSession()
       if (!voiceHeldRef.current || voicePressRef.current !== press) return
-      await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
+      await voiceController().start(activeSessionId, voiceLanguage)
     } catch (err) {
-      window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
     }
   }, [activeSessionId, isDisabled, harnessBlocked, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
     voiceHeldRef.current = false
     if (!activeSessionId) return
-    await window.api.voiceStopRecording(activeSessionId)
+    await voiceController().stop(activeSessionId)
   }, [activeSessionId])
 
   useEffect(() => {

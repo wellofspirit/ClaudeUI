@@ -1,9 +1,11 @@
 /**
- * Layer 1 tests for the browser voice-capture controller (phase 5 S3).
+ * Layer 1 tests for the voice capture (`BrowserVoiceCapture`) — the one
+ * implementation the desktop window and the web client share. Moved here with
+ * it from `src/web/` when desktop capture left the main process.
  *
  * **What is deliberately NOT tested here, and why.** jsdom has no
  * `AudioContext`, no `AudioWorklet` and no audio device, and no headless
- * environment has a microphone. So `public/voice-worklet.js` — which is loaded
+ * environment has a microphone. So `voice-worklet.js` — which is loaded
  * by URL into an audio-thread global scope with no module graph the test runner
  * can reach — is untestable at every layer we have, and is written to be trivial
  * for exactly that reason: it copies floats into a buffer and posts it.
@@ -20,7 +22,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { BrowserVoiceCapture, captureUnsupportedReason, type CaptureEnv } from '../voice-capture'
+import {
+  BrowserVoiceCapture,
+  VOICE_WORKLET_URL,
+  captureUnsupportedReason,
+  type CaptureEnv
+} from '../browser-voice-capture'
 
 // ---------------------------------------------------------------------------
 // Environment doubles
@@ -165,9 +172,11 @@ describe('BrowserVoiceCapture', () => {
         autoGainControl: true
       }
     })
-    // Served from our own origin — a blob: module would be refused by the web
-    // client's own `script-src 'self'`.
-    expect(addedModules).toEqual(['/voice-worklet.js'])
+    // A same-origin asset — a blob: or data: module (which Vite would inline a
+    // file this small as, without `no-inline`) is refused by `script-src 'self'`.
+    expect(addedModules).toEqual([VOICE_WORKLET_URL])
+    expect(VOICE_WORKLET_URL).toMatch(/voice-worklet[^/]*\.js/)
+    expect(VOICE_WORKLET_URL).not.toMatch(/^(data|blob):/)
     expect(capture.isActive()).toBe(true)
     // The graph must reach the destination for a worklet to run at all, and the
     // gain it reaches it through must be silent or the speaker hears themselves.
@@ -228,7 +237,7 @@ describe('BrowserVoiceCapture', () => {
     const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
     await capture.start()
 
-    // The window while `voice:start` is in flight: the server has no capture
+    // The window while the transport start is in flight: the server has no capture
     // bound yet and would drop these on the floor.
     pushBlock(1600, 0.5)
     pushBlock(1600, -0.5)
@@ -261,7 +270,7 @@ describe('BrowserVoiceCapture', () => {
     expect([bytes[0], bytes[1]]).toEqual([0xff, 0x7f])
   })
 
-  it('drops the OLDEST queued block when a slow `voice:start` overruns the buffer', async () => {
+  it('drops the OLDEST queued block when a slow transport start overruns the buffer', async () => {
     const sendAudio = vi.fn()
     const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
     await capture.start()

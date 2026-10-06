@@ -1,19 +1,21 @@
 /**
  * The cli.js voice-server protocol, once — SyncCore phase 5 S3.
  *
- * Two things now stream audio into the transcription server the `voice-server`
- * patch opens inside cli.js (patch/voice-server/README.md): the desktop's native
- * microphone ({@link ../services/voice-client.VoiceClient}) and a remote
- * browser's AudioWorklet capture ({@link ../services/remote-voice}). They differ
- * in exactly two ways — where the PCM comes from, and where the transcripts go —
- * and agree about everything else: the TCP connect, the newline-JSON framing, the
- * pre-`ready` buffer, the state machine, the finalization timeout, the teardown.
+ * Audio streams into the transcription server the `voice-server` patch opens
+ * inside cli.js (patch/voice-server/README.md). Since the voice-input rework the
+ * only concrete client is the relay's push-fed one (`services/voice-relay.ts`):
+ * every capture — the desktop window's and a remote browser's — runs in a
+ * renderer and pushes PCM to the main process. Owners still differ in where the
+ * transcripts go, and agree about everything else: the TCP connect, the
+ * newline-JSON framing, the pre-`ready` buffer, the state machine, the
+ * finalization timeout, the teardown.
  *
- * So that half lives here and is written once. The two audio SOURCES and the two
- * DELIVERY targets are the abstract members below. A second copy of the protocol
- * would be a second place for the `connecting`-window race (see
- * {@link VoiceStreamClient.startRecording}) and the finalize timeout to be got
- * subtly wrong, and both were bugs here already.
+ * So that half lives here and is written once, with the audio SOURCE and the
+ * DELIVERY as the abstract members below. It was extracted when there were two
+ * sources (the desktop's native microphone and the remote browser) and is kept
+ * as the seam: a second copy of the protocol would be a second place for the
+ * `connecting`-window race (see {@link VoiceStreamClient.startRecording}) and the
+ * finalize timeout to be got subtly wrong, and both were bugs here already.
  *
  * Protocol (client → server):
  *   {"type":"voice_start","language":"en"}
@@ -56,7 +58,7 @@ export abstract class VoiceStreamClient {
    */
   private startGen = 0
 
-  /** Log tag — the concrete client's name, so the two sources stay separable. */
+  /** Log tag — the owner kind, so desktop and remote captures stay separable. */
   protected readonly logSource: string
 
   constructor(port: number, logSource: string) {
@@ -81,12 +83,9 @@ export abstract class VoiceStreamClient {
   /**
    * What to tell the user when {@link startAudioSource} refuses.
    *
-   * Per-source, because the two sources fail differently and the wording is
-   * user-facing: the desktop is RE-starting a microphone that is already running
-   * (`ClaudeSession` opened it the instant the button went down, to buffer while
-   * the SDK spawns), so "restart" is the accurate word there and was the shipped
-   * string. Parameterized rather than generalized so extracting this base class
-   * could not quietly reword a message someone may already recognize.
+   * Per-source, because the wording is user-facing and only the source knows
+   * what refusing means for it. A push source cannot refuse today, but states its
+   * message rather than inheriting one.
    */
   protected abstract audioSourceFailureMessage(): string
 
@@ -114,10 +113,10 @@ export abstract class VoiceStreamClient {
   /**
    * Start a voice recording session.
    *
-   * `earlyBuffer` is audio captured before the server was reachable (the desktop
-   * starts its microphone the instant the button is pressed, and a remote client
-   * may have frames in flight before `voice:start` resolved). It is flushed in
-   * order ahead of live audio once the server reports `ready`.
+   * `earlyBuffer` is audio captured before the server was reachable. It is
+   * flushed in order ahead of live audio once the server reports `ready`. The
+   * relay passes none: a renderer holds its own pre-arm queue until the start
+   * resolves, and anything pushed after that is buffered here like live audio.
    */
   async startRecording(language: string, earlyBuffer: Buffer[] = []): Promise<void> {
     // Only start from a clean idle state. Previously `connecting` was also
@@ -223,7 +222,7 @@ export abstract class VoiceStreamClient {
 
   /**
    * Hand one PCM chunk to the server, or buffer it until the Deepgram socket is
-   * up. Called by the concrete source — native `onData`, or a remote frame.
+   * up. Called by the concrete source — one pushed frame from a renderer.
    *
    * Chunks that arrive when this client is neither connecting nor recording are
    * DROPPED rather than buffered: they belong to a capture that has ended, and

@@ -45,11 +45,11 @@ export interface CreateSessionArgs {
  * shared by the desktop IPC handler and the remote WebSocket handler so both
  * surfaces spawn sessions identically.
  *
- * `win` is the HOST handle a session keeps (voice capture belongs to the machine
- * with the microphone), never a delivery target — every event a session emits
- * goes through the funnel to every subscriber (phase 4c). It is `null` when the
- * app runs windowless (phase 4d): a WS-created session spawns and streams
- * exactly the same, and only the host-local voice path is unavailable.
+ * `win` is the HOST handle a session keeps, never a delivery target — every
+ * event a session emits goes through the funnel to every subscriber (phase 4c).
+ * It is `null` when the app runs windowless (phase 4d): a WS-created session
+ * spawns and streams exactly the same. (Voice capture, its one former reader,
+ * now runs in the renderer and is relayed by `services/voice-relay.ts`.)
  */
 export async function prepareAndCreateSession(
   manager: SessionManager,

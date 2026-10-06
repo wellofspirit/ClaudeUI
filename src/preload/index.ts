@@ -17,7 +17,7 @@ import { verifierHooksEnabled } from '../shared/verifier-hooks'
  * events no longer ride `webContents.send`: they arrive on the sync port and are
  * subscribed to in the renderer via `shared/sync/client-registry.onSyncEvent`.
  * What is left here is the host talking to its own shell — window chrome, the
- * native OAuth flow, voice capture, desktop PTY bytes, the log-viewer window,
+ * native OAuth flow, voice state/transcripts, desktop PTY bytes, the log-viewer window,
  * plugin views, quit handshake — none of which a remote client has or wants.
  */
 function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
@@ -633,12 +633,13 @@ const api: ClaudeAPI = {
     throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
   },
 
-  // Voice input
-  voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),
-  voiceStopServer: (routingId: string) => unwrap('voice:stop-server', routingId),
-  voiceStartRecording: (routingId: string, language: string) =>
+  // Voice input — the transport only; the renderer owns the microphone. Audio is
+  // a fire-and-forget `send`, not an invoke: ~7 a second, nothing to answer.
+  voiceStart: (routingId: string, language: string) =>
     unwrap('voice:start-recording', routingId, language),
-  voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
+  voiceAudio: (routingId: string, dataB64: string) =>
+    ipcRenderer.send('voice:audio', routingId, dataB64),
+  voiceStop: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
 

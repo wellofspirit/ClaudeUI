@@ -1,20 +1,21 @@
 /**
  * Float32 audio → 16 kHz signed-16-bit little-endian mono PCM.
  *
- * THE format problem of remote voice, solved in one pure function.
+ * THE format problem of browser voice capture, solved in one pure function.
  *
  * The voice server inside cli.js streams to Deepgram Nova3 with
  * `encoding=linear16, sample_rate=16000, channels=1` (patch/voice-server/README.md),
- * and the desktop's native capture module emits exactly that. A browser cannot:
+ * which Claude Code's native capture module emits directly. A browser cannot —
+ * and every client, the desktop window included, now captures in one:
  * `MediaRecorder` produces opus/webm containers and nothing else — which is what
- * aborted the previous attempt at remote voice. `AudioWorklet` CAN: it hands the
+ * aborted the first attempt at remote voice. `AudioWorklet` CAN: it hands the
  * page raw Float32 blocks at the `AudioContext`'s own rate (typically 48000), and
  * the conversion to the wire format is arithmetic.
  *
  * That arithmetic lives HERE, alone, because it is the one part of the browser
  * capture path that is testable without an audio device: the worklet processor
- * (`src/web/public/voice-worklet.js`) only batches and posts blocks, and the
- * controller (`src/web/voice-capture.ts`) only owns the state machine. Neither
+ * (`renderer/src/lib/voice/voice-worklet.js`) only batches and posts blocks, and
+ * `renderer/src/lib/voice/browser-voice-capture.ts` only owns the state machine. Neither
  * does DSP. A second implementation of the resampling — in the worklet, say, to
  * save a postMessage — would be a second answer to "what does 16 kHz mean here",
  * and drift in it is inaudible until a transcript comes back garbled.

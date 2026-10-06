@@ -134,11 +134,13 @@ export interface ISession {
   stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
-  /** Voice input (gated by capabilities.voice). */
+  /**
+   * Voice input (gated by capabilities.voice): the transcription server only.
+   * Captures are owned by the client holding the microphone and relayed by
+   * `services/voice-relay.ts`, which starts the server through this.
+   */
   voiceStartServer?(): Promise<{ port: number }>
   voiceStopServer?(): Promise<void>
-  voiceStartRecording?(language: string): Promise<void>
-  voiceStopRecording?(): Promise<void>
 
   /**
    * Pin this session to one stored vendor account, or `null` to follow the

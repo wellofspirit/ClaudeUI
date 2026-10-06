@@ -60,8 +60,6 @@ vi.mock('../session-history', () => ({
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
-vi.mock('../voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
 vi.mock('../usage-fetcher', () => ({
   usageFetcher: { fetch: vi.fn(async () => null) }

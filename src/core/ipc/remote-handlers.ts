@@ -78,7 +78,7 @@ import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
-import { remoteVoice } from '../services/remote-voice'
+import { remoteVoiceOwner, voiceRelay } from '../services/voice-relay'
 import {
   registerCommand,
   type CommandConnection,
@@ -1528,7 +1528,7 @@ export function registerRemoteHandlers(
     sessionIdArg: 0,
     withConnection: true,
     handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
-      remoteVoice.start(manager, connection, routingId, opt(language))
+      voiceRelay.start(manager, remoteVoiceOwner(connection.connectionId), routingId, opt(language))
   })
 
   handleRemote({
@@ -1536,7 +1536,7 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection) => remoteVoice.stop(connection.connectionId)
+    handler: async (connection: CommandConnection) => voiceRelay.stop(connection.connectionId)
   })
 
   // Capability honesty: the ONLY thing a web client needs to decide whether to
