@@ -1,3 +1,6 @@
+import { queuedCommandText } from '../sdk/queued-command-text'
+import { isTaskNotificationDelivery } from './task-notification-xml'
+
 /**
  * Pure core of the fork ("branch off") anchor resolver — ENGINE-dispatched
  * (session-history.ts's `resolveForkAnchor`) between two unrelated
@@ -18,6 +21,15 @@
  * `lines.slice(0, w + 1)` where `lines[w].uuid === <anchor>`, so anchoring on a
  * bare assistant line that issued tools would drop the following tool_results
  * and leave a dangling `tool_use` → the API rejects the next turn with a 400.
+ *
+ * Then the anchor moves past the background-task completions cli.js
+ * DELIVERED right after that turn (`afterDeliveredCompletions`). An agent's
+ * `<task-notification>` routinely lands after the reply that reacted to its
+ * handback; cut before it, and on the fork's first send cli.js scans the kept
+ * prefix, finds the agent launched but its completion never delivered, and
+ * reaps it as `failed: "… didn't finish before the previous session ended"`
+ * (2.1.290, `aSr`). A branch that ends on the delivery is the same shape as a
+ * resumed session whose transcript ends in one.
  *
  * `messageId` is matched against the assistant line's `message.id` (the
  * `msg_xxx` API id the renderer carries for assistant messages), with a
@@ -52,12 +64,15 @@ export function findForkAnchorUuid(
 
   // No tools → the assistant line itself is a balanced boundary.
   if (pendingToolUseIds.size === 0) {
-    return typeof target.uuid === 'string' ? target.uuid : null
+    return typeof target.uuid === 'string'
+      ? afterDeliveredCompletions(lines, targetIdx, target.uuid)
+      : null
   }
 
   // Walk forward over the immediate tool_result user-lines that resolve this
   // turn's tool_uses. Stop at the next assistant turn.
   let anchorUuid = typeof target.uuid === 'string' ? target.uuid : null
+  let anchorIdx = targetIdx
   for (let i = targetIdx + 1; i < lines.length && pendingToolUseIds.size > 0; i++) {
     const l = lines[i]
     if (l.type === 'assistant') break
@@ -78,10 +93,63 @@ export function findForkAnchorUuid(
         pendingToolUseIds.delete(b.tool_use_id as string)
       }
     }
-    if (typeof l.uuid === 'string') anchorUuid = l.uuid
+    if (typeof l.uuid === 'string') {
+      anchorUuid = l.uuid
+      anchorIdx = i
+    }
   }
 
-  return anchorUuid
+  return anchorUuid ? afterDeliveredCompletions(lines, anchorIdx, anchorUuid) : null
+}
+
+/**
+ * The uuid of the last task-notification delivery that directly follows
+ * `lines[anchorIdx]`, else `anchorUuid` unchanged. A delivery is what cli.js's
+ * resume scan counts as one: a `user` line whose content carries it, or a
+ * `queued_command` attachment (a notification absorbed mid-turn), decided as
+ * the history loader decides it. Bookkeeping between them is passed over —
+ * uuid-less lines (queue-operation), `isMeta` user lines (an agent's handback
+ * note precedes its notification), other attachments, `system` lines. The
+ * walk ends at the first thing said: an assistant line, a user line that is a
+ * real prompt or a tool_result, or a steer (a `queued_command` in `prompt`
+ * mode).
+ */
+function afterDeliveredCompletions(
+  lines: Array<Record<string, unknown>>,
+  anchorIdx: number,
+  anchorUuid: string
+): string {
+  let anchor = anchorUuid
+  for (let i = anchorIdx + 1; i < lines.length; i++) {
+    const l = lines[i]
+    if (typeof l.uuid !== 'string') continue
+    if (l.type === 'assistant') break
+    if (l.type === 'user') {
+      const msg = l.message as Record<string, unknown> | undefined
+      const text = queuedCommandText(msg?.content)
+      if (text && isTaskNotificationDelivery(l.origin, text)) {
+        anchor = l.uuid
+        continue
+      }
+      if (l.isMeta === true) continue
+      break
+    }
+    if (l.type === 'attachment') {
+      const att = l.attachment as Record<string, unknown> | undefined
+      if (att?.type !== 'queued_command' || att.isMeta === true) continue
+      const text = queuedCommandText(att.prompt)
+      if (
+        text &&
+        (att.commandMode === 'task-notification' || isTaskNotificationDelivery(att.origin, text))
+      ) {
+        anchor = l.uuid
+        continue
+      }
+      // A steer the user typed into the running turn is something said.
+      if (att.commandMode === undefined || att.commandMode === 'prompt') break
+    }
+  }
+  return anchor
 }
 
 // ---------------------------------------------------------------------------

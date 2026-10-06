@@ -1317,6 +1317,101 @@ function errorText(err: unknown): string {
   return typeof err === 'string' ? err : 'Unknown error'
 }
 
+/**
+ * The source's task notifications that belong to a fork's seeded history: only
+ * those whose agent was LAUNCHED inside it (its `toolUseId` names a `tool_use`
+ * block in `seeded`). A fork that inherits the agent rows but not their
+ * notifications reads every background agent as running the moment its first
+ * send clears `isHistorical` (`deriveTaskState`: a background launch with a
+ * result and no terminal notification is "running"); one that inherits a
+ * post-anchor agent's notification paints a card the branch never shows.
+ * Entries with no `toolUseId` cannot be placed in the slice, so they stay behind.
+ */
+function forkTaskNotifications(
+  seeded: readonly ChatMessage[],
+  notifications: readonly TaskNotification[]
+): TaskNotification[] {
+  const launched = new Set<string>()
+  for (const m of seeded) {
+    for (const b of m.content) if (b.type === 'tool_use') launched.add(b.toolUseId)
+  }
+  return notifications.filter((n) => n.toolUseId !== null && launched.has(n.toolUseId))
+}
+
+/**
+ * What a fork's branch starts with: its history, the agents' notifications and
+ * the status line.
+ *
+ * Claude reads it from disk through the anchor-aware history loader — the same
+ * read the host's canonical seed and a reopened fork run, truncated at the anchor
+ * exactly as cli.js truncates on `--resume-session-at`. That is what makes an
+ * agent whose notification landed AFTER the anchor read `unfinished` (neutral)
+ * rather than a borrowed `completed`, and what keeps an agent still running in the
+ * source at fork time from reading "running" forever in the branch. The renderer
+ * cannot get this from `session:created`: the fork already holds messages by
+ * then, and `seedColdSession` is fill-only, so the resumed-transcript fill
+ * refuses it.
+ *
+ * Every other engine (and Claude when the session is not listed yet or the read
+ * fails) slices the source's in-memory history and keeps the notifications of the
+ * agents launched inside the slice ({@link forkTaskNotifications}). That copy
+ * cannot know where a notification sits relative to the anchor, so an agent that
+ * finished after it reads "completed" here, not "unfinished" — wrong in the
+ * direction that does not lie about anything still running.
+ */
+async function loadForkSeed(
+  src: PerSessionState,
+  sourceSessionId: string,
+  anchorUuid: string,
+  idx: number,
+  directories: readonly DirectoryGroup[]
+): Promise<
+  Pick<PerSessionState, 'messages' | 'taskNotifications'> & { statusLine?: StatusLineData }
+> {
+  if (src.status.engineId === 'claude') {
+    // `findSessionInfo`, inlined: `lib/session-history-load` imports this module.
+    let projectKey: string | undefined
+    for (const group of directories) {
+      const info = group.sessions.find((s) => s.sessionId === sourceSessionId)
+      if (info) {
+        projectKey = info.projectKey
+        break
+      }
+    }
+    let reason = `session ${sourceSessionId} is not in the directory listing`
+    if (projectKey) {
+      try {
+        const loaded = await window.api.loadSessionHistory(sourceSessionId, projectKey, anchorUuid)
+        if (loaded.messages.length > 0) {
+          // Not customTitle / warnings: a fork is a new session with its own title.
+          return {
+            messages: loaded.messages,
+            taskNotifications: loaded.taskNotifications,
+            ...(loaded.statusLine ? { statusLine: loaded.statusLine } : {})
+          }
+        }
+        reason = 'the transcript read came back empty'
+      } catch (err) {
+        reason = `the transcript read failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+    window.api?.logRelay?.(
+      'warn',
+      'SessionStore',
+      `fork of ${sourceSessionId}: seeding from memory because ${reason}`
+    )
+  }
+  // Deep-ish copy so edits to one session never mutate the other. cli.js performs
+  // the same slice by uuid when it materializes the fork, so the displayed history
+  // will match (pi's own clone/fork RPCs perform the equivalent truncation on its
+  // side).
+  const messages = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+    ...m,
+    content: m.content.map((b) => ({ ...b }))
+  }))
+  return { messages, taskNotifications: forkTaskNotifications(messages, src.taskNotifications) }
+}
+
 /** Helper to update a specific session's state */
 function updateSession(
   sessions: Record<string, PerSessionState>,
@@ -2563,14 +2658,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
     const anchorUuid = result.anchorUuid
 
-    // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
-    // to one session never mutate the other). cli.js performs the same slice by
-    // uuid when it materializes the fork, so the displayed history will match
-    // (pi's own clone/fork RPCs perform the equivalent truncation on its side).
-    const seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
-      ...m,
-      content: m.content.map((b) => ({ ...b }))
-    }))
+    // Seed the branch with messages 1..N and the notifications of the agents
+    // launched in them (see loadForkSeed for where each engine reads them). This
+    // runs before anything is spawned, so no live event can race it.
+    const seed = await loadForkSeed(
+      src,
+      sourceSessionId,
+      anchorUuid,
+      idx,
+      useSessionStore.getState().directories
+    )
 
     const newRoutingId = crypto.randomUUID()
     {
@@ -2597,7 +2694,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         newRoutingId,
         {
           cwd: src.cwd,
-          messages: seeded,
+          ...seed,
           permissionMode: bootstrapPermissionMode(s, forkEngineId),
           // Inherit the source's engine/model/effort/thinking choices.
           selectedEngineId: forkEngineId,
