@@ -33,6 +33,8 @@ import {
   setDefaultGeometry
 } from '@test/helpers/scroll-geometry'
 import type { ChatMessage } from '../../../../../../shared/types'
+import { estimateMessageHeight } from '../estimate-height'
+import { prose } from './estimate-samples'
 
 let mockIsMobile = true
 vi.mock('../../../../hooks/useIsMobile', () => ({
@@ -497,13 +499,154 @@ describe('ChatPanel — stick to bottom', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [ROUTE]: { ...state.sessions[ROUTE], status: { state: 'running' } as never }
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, state: 'running' }
+        }
       }
     }))
     const { unmount } = await renderChatPanel()
     const indicator = screen.getByTestId('ChatPanel.typingIndicator')
     const watched = observedElements().filter((el) => el !== scroller())
     expect(watched.some((el) => el.contains(indicator))).toBe(true)
+    unmount()
+  })
+})
+
+/**
+ * `contain-intrinsic-size` per message: only a never-rendered message uses it, and
+ * with a flat 100px the scrollbar and scroll anchoring were wrong by the ratio of
+ * a real message to 100px. The numbers themselves are estimate-height's (unit and
+ * browser tests); this is the wiring: every wrapper carries its estimate, one
+ * message's update leaves the others' alone, and the column width comes from the
+ * rendered column, bucketed.
+ */
+describe('ChatPanel — message height estimates', () => {
+  let app: TestApp
+  let restoreGeometry: () => void
+  const originalMatchMedia = window.matchMedia
+  const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  let wrapperWidth = 0
+
+  const message = (id: string, body: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: body }],
+    timestamp: 1
+  })
+  const MESSAGES = [message('e1', 'short'), message('e2', prose(8)), message('e3', prose(2))]
+
+  /** What the estimate is told about the session: the fork row exists when the engine can fork. */
+  const forkRow = (): boolean =>
+    useSessionStore.getState().sessions[ROUTE].status.capabilities.forkFromMessage
+  const expectedHeight = (m: ChatMessage, column: number): number =>
+    estimateMessageHeight(m, column, { forkRow: forkRow() })
+
+  const wrappers = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('.cv-auto'))
+  const estimates = (): number[] => wrappers().map((el) => Number(el.dataset.estH))
+
+  async function renderChatPanel(): Promise<{ unmount: () => void }> {
+    const { ChatPanel } = await import('../ChatPanel')
+    let result!: { unmount: () => void }
+    await act(async () => {
+      result = render(<ChatPanel />)
+    })
+    return result
+  }
+
+  beforeEach(async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    restoreGeometry = installScrollGeometry()
+    setDefaultGeometry({ scrollHeight: 4000, clientHeight: 600 })
+    // jsdom has no layout: the column the estimate measures is whatever a test says.
+    wrapperWidth = 0
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('cv-auto') ? wrapperWidth : 0
+      }
+    })
+    mockIsMobile = false
+    window.localStorage.setItem(HINT_KEY, '1')
+
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], messages: MESSAGES } }
+    }))
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    window.localStorage.clear()
+    window.matchMedia = originalMatchMedia
+    if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth)
+    restoreGeometry()
+  })
+
+  it('gives every wrapper its estimate as an inline intrinsic size and data-est-h', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(wrappers()).toHaveLength(3)
+    wrappers().forEach((el, i) => {
+      // Nothing measured yet (no layout): the default column from the width settings.
+      const expected = expectedHeight(MESSAGES[i], 700)
+      expect(el.dataset.estH).toBe(String(expected))
+      expect(el.style.containIntrinsicSize).toBe(`auto ${expected}px`)
+      expect(el.className).toContain('cv-auto')
+    })
+    // Not the flat 100px: the long message is estimated taller than the short one.
+    expect(estimates()[1]).toBeGreaterThan(estimates()[0] * 3)
+    unmount()
+  })
+
+  it('a streaming update to one message leaves every other message’s estimate alone', async () => {
+    const { unmount } = await renderChatPanel()
+    const before = estimates()
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            messages: state.sessions[ROUTE].messages.map((m) =>
+              m.id === 'e3' ? message('e3', prose(30)) : m
+            )
+          }
+        }
+      }))
+    })
+    const after = estimates()
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(after[2]).toBeGreaterThan(before[2] * 3)
+    unmount()
+  })
+
+  it('measures the column from a rendered wrapper, in 50px buckets', async () => {
+    wrapperWidth = 424
+    const { unmount } = await renderChatPanel()
+    // 424 -> the 400 bucket (not the 700 default).
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))
+    expect(estimates()[1]).toBeGreaterThan(expectedHeight(MESSAGES[1], 700))
+
+    // A resize inside the bucket changes nothing.
+    const content = wrappers()[0].parentElement as HTMLElement
+    wrapperWidth = 410
+    act(() => fireResize(content))
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))
+
+    // Crossing into the next one re-estimates narrower -> taller text.
+    wrapperWidth = 340
+    act(() => fireResize(content))
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 350))
     unmount()
   })
 })

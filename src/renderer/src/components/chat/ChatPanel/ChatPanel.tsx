@@ -27,6 +27,8 @@ import { reloadActiveTranscript } from '../../../lib/session-history-load'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
+import { bucketColumnWidth, defaultColumnWidth, type EstimateOptions } from './estimate-height'
+import { useMessageHeightEstimator } from './use-message-height-estimator'
 
 /** One-time discovery hint for the mobile-web double-tap fullscreen gesture. */
 const FULLSCREEN_HINT_KEY = 'claudeui.hint.fullscreenDoubleTap'
@@ -84,7 +86,7 @@ export function ChatPanel(): React.JSX.Element {
   // by a streaming turn.
   const {
     scrollerRef,
-    contentRef,
+    contentRef: followContentRef,
     scrollerEl: scrollRef,
     isAtBottom,
     scrollToBottom,
@@ -131,6 +133,64 @@ export function ChatPanel(): React.JSX.Element {
       : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0
+
+  // What a never-rendered message is assumed to measure (`contain-intrinsic-size`,
+  // see estimate-height.ts). The column is measured in the wrapper's own units from
+  // the first message wrapper — the content div is padded and zoomed, a wrapper is
+  // neither — and bucketed, so a window resize inside one bucket re-renders nothing.
+  const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
+  const contentRef = useCallback(
+    (el: HTMLElement | null) => {
+      followContentRef(el)
+      setContentEl(el)
+    },
+    [followContentRef]
+  )
+  const [measuredColumn, setMeasuredColumn] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const measure = (): void => {
+      const probe = contentEl.firstElementChild
+      const width = probe instanceof HTMLElement ? probe.clientWidth : 0
+      if (width > 0) setMeasuredColumn(bucketColumnWidth(width))
+    }
+    measure()
+    // jsdom has no ResizeObserver.
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(contentEl)
+    return () => observer.disconnect()
+  }, [contentEl])
+  const columnWidth =
+    measuredColumn ?? defaultColumnWidth({ isMobile, mode: chatWidthMode, px: chatWidthPx })
+  const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
+  const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
+  const expandThinking = useSessionStore((s) => s.settings.expandThinking)
+  const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
+  const toolOutputMaxChars = useSessionStore((s) => s.settings.toolOutputMaxChars)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const forkRow = useActiveSession((s) => s.status.capabilities.forkFromMessage)
+  const estimateOptions = useMemo<EstimateOptions>(
+    () => ({
+      engineId,
+      expandToolCalls,
+      expandReadResults,
+      expandThinking,
+      hideToolInput,
+      toolOutputMaxChars,
+      forkRow
+    }),
+    [
+      engineId,
+      expandToolCalls,
+      expandReadResults,
+      expandThinking,
+      hideToolInput,
+      toolOutputMaxChars,
+      forkRow
+    ]
+  )
+  const estimateHeight = useMessageHeightEstimator(columnWidth, estimateOptions)
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant') return messages[i].id
@@ -235,16 +295,27 @@ export function ChatPanel(): React.JSX.Element {
               <TranscriptSessionProvider value={activeSessionId}>
                 <ImageGalleryProvider messages={messages}>
                   <DiagramGalleryProvider messages={messages}>
-                    {messages.map((msg) => (
-                      <div key={msg.id} className="cv-auto" {...SEARCH_ANCHOR}>
-                        <MessageBubble
-                          message={msg}
-                          pendingApprovals={pendingApprovals}
-                          isLastAssistant={msg.id === lastAssistantId}
-                          activeThinking={activeThinkingByMessage.get(msg.id)}
-                        />
-                      </div>
-                    ))}
+                    {messages.map((msg) => {
+                      const estimate = estimateHeight(msg)
+                      return (
+                        <div
+                          key={msg.id}
+                          className="cv-auto"
+                          // Only a never-rendered message uses this: `auto` keeps the
+                          // remembered size afterwards. data-est-h is for calibration.
+                          style={{ containIntrinsicSize: `auto ${estimate}px` }}
+                          data-est-h={estimate}
+                          {...SEARCH_ANCHOR}
+                        >
+                          <MessageBubble
+                            message={msg}
+                            pendingApprovals={pendingApprovals}
+                            isLastAssistant={msg.id === lastAssistantId}
+                            activeThinking={activeThinkingByMessage.get(msg.id)}
+                          />
+                        </div>
+                      )
+                    })}
                   </DiagramGalleryProvider>
                 </ImageGalleryProvider>
               </TranscriptSessionProvider>
