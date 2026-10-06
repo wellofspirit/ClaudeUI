@@ -1,0 +1,577 @@
+{
+ "scenario": "patch",
+ "opencode": "2.0.24",
+ "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+ "events": [
+  {
+   "id": "evt_11128b06d001j76fdlwkH5UQRF",
+   "created": 1791289241709,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b06c002Ra6Kn0C3F2IZHh",
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[patch] patch-41079c7b"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b06d002GTuBxQNok6zVP4",
+   "created": 1791289241709,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b06f002PXlSylIW0v5Hr7",
+   "created": 1791289241711,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "inboxID": "msg_11128b06c002Ra6Kn0C3F2IZHh"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b077001f3cG2D0E636c15",
+   "created": 1791289241719,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b077002RePTqno2vO0Ice",
+   "created": 1791289241719,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "title": "Fixture title"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09b001ypKwhBcF4hkQ2Y",
+   "created": 1791289241755,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "agent": "build",
+    "model": {
+     "id": "gpt-5-fixture",
+     "providerID": "fixture",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289241754
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09c001TRqY1QHfiOHt2C",
+   "created": 1791289241756,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "id": "call_fx_20_0",
+    "name": "patch"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09c002G7d216Ev9i3UBJ",
+   "created": 1791289241756,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "id": "call_fx_20_0",
+    "text": "{\"patchText\":\"*** Begin Patch\\n*** Update File: notes.txt\\n@@\\n-beta\\n+gamma\\n*** End Patch\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09c003cGt1tBBSd1fZBw",
+   "created": 1791289241756,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "id": "call_fx_20_0",
+    "input": {
+     "patchText": "*** Begin Patch\n*** Update File: notes.txt\n@@\n-beta\n+gamma\n*** End Patch"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09d001QibUQ9vethx4z6",
+   "created": 1791289241757,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b09e001H0puTUy87rS2Kt",
+   "created": 1791289241758,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "id": "call_fx_20_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "Success. Updated the following files:\nM notes.txt"
+     }
+    ],
+    "metadata": {
+     "files": [
+      {
+       "file": "notes.txt",
+       "patch": "Index: /ws/main/notes.txt\n===================================================================\n--- /ws/main/notes.txt\n+++ /ws/main/notes.txt\n@@ -1,1 +1,1 @@\n-beta\n+gamma\n",
+       "status": "modified",
+       "additions": 1,
+       "deletions": 1
+      }
+     ],
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 12,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b0c2001I6RVCdfq0sqlPI",
+   "created": 1791289241794,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0720013SPV1atNpxyFBV",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b0c3001cM07B5skSrazJR",
+   "created": 1791289241795,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b0eb001Hn24ieovn4xfB2",
+   "created": 1791289241835,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "agent": "build",
+    "model": {
+     "id": "gpt-5-fixture",
+     "providerID": "fixture",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289241833
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b0eb00290OQRaX5uBJMUF",
+   "created": 1791289241835,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b0ec00181GeJQXoQimw0d",
+   "created": 1791289241836,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: Success. Updated the following files:\nM notes.txt"
+   }
+  },
+  {
+   "id": "evt_11128b0ec0021brvD2TlMEKo79",
+   "created": 1791289241836,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: Success. Updated the following files:\nM notes.txt"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b0ec003Sp9Hp1hHiJZ75U",
+   "created": 1791289241836,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b110001l7rkTo36Pr6LZW",
+   "created": 1791289241872,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "assistantMessageID": "msg_11128b0c6001qNb6E8x1Af9FSw",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b111001PK4FBODYOZxmtC",
+   "created": 1791289241873,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b1110023Pe34Z5ciqOu6b",
+   "created": 1791289241873,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74fc5ffewP15CVEiK1LN5H"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74fc5ffewP15CVEiK1LN5H",
+    "seq": 19,
+    "version": 1
+   }
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_11128b06c002Ra6Kn0C3F2IZHh",
+   "time": {
+    "created": 1791289241711
+   },
+   "text": "[patch] patch-41079c7b",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b0720013SPV1atNpxyFBV",
+   "time": {
+    "created": 1791289241754,
+    "streamed": 1791289241757,
+    "completed": 1791289241794
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "gpt-5-fixture",
+    "providerID": "fixture",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_20_0",
+     "name": "patch",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "patchText": "*** Begin Patch\n*** Update File: notes.txt\n@@\n-beta\n+gamma\n*** End Patch"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Success. Updated the following files:\nM notes.txt"
+       }
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "notes.txt",
+         "patch": "Index: /ws/main/notes.txt\n===================================================================\n--- /ws/main/notes.txt\n+++ /ws/main/notes.txt\n@@ -1,1 +1,1 @@\n-beta\n+gamma\n",
+         "status": "modified",
+         "additions": 1,
+         "deletions": 1
+        }
+       ],
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791289241756,
+      "ran": 1791289241756,
+      "completed": 1791289241758
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b0c6001qNb6E8x1Af9FSw",
+   "time": {
+    "created": 1791289241833,
+    "streamed": 1791289241836,
+    "completed": 1791289241872
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "gpt-5-fixture",
+    "providerID": "fixture",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: Success. Updated the following files:\nM notes.txt"
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b1110023Pe34Z5ciqOu6b",
+   "time": {
+    "created": 1791289241873
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": {},
+ "sessionTotals": {
+  "cost": 0.00054,
+  "tokens": {
+   "input": 360,
+   "output": 90,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  }
+ }
+}

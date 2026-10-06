@@ -47,6 +47,7 @@ import {
   type Session_Inbox_User,
   type Session_Info,
   type Session_Message_Info,
+  type Shell_Info,
   type Skill_Info,
   type SessionActive
 } from './protocol-v2/openapi'
@@ -609,6 +610,32 @@ export class OpencodeClient {
         ),
       'session.message.list'
     )
+  }
+
+  // ── Shells ────────────────────────────────────────────────────────────────
+
+  /**
+   * `GET /api/shell/{id}/output` — one page of a shell's captured
+   * stdout+stderr from `cursor` (an absolute byte offset; the page's `cursor`
+   * is where the next starts, equal to `size` once caught up). 2.x pushes no
+   * shell output on the feed (`session.tool.progress` carries only the
+   * `shellID`), so this is how a running command's output is followed (S4).
+   */
+  async shellOutput(
+    shellID: string,
+    page: { cursor?: number; limit?: number } = {},
+    opts?: OpencodeRequestOptions
+  ): Promise<OperationResponse<'shell.output'>['data']> {
+    const query = {
+      ...(page.cursor !== undefined ? { cursor: String(page.cursor) } : {}),
+      ...(page.limit !== undefined ? { limit: String(page.limit) } : {})
+    }
+    return (await this.call('shell.output', { params: { id: shellID }, query, ...opts })).data
+  }
+
+  /** `GET /api/shell/{id}` — a shell's status (`running`/`exited`/`timeout`/`killed`). */
+  async getShell(shellID: string, opts?: OpencodeRequestOptions): Promise<Shell_Info> {
+    return (await this.call('shell.get', { params: { id: shellID }, ...opts })).data
   }
 
   // ── Catalog ───────────────────────────────────────────────────────────────

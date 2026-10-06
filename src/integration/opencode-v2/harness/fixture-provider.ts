@@ -12,7 +12,18 @@
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
+ *   [subread]   `subagent` tool call whose child prompt is `[read]`
+ *   [subresume] `subagent` call RESUMING the last child named in the conversation
+ *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
+ *   [reason]    `reasoning_content` deltas, then text
+ *   [read]      `read` of `notes.txt`
+ *   [edit]      `edit` of `notes.txt` (alpha → beta)
+ *   [write]     `write` of `new.txt`
+ *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
+ *   [multi]     ONE response with two calls: `read` of `notes.txt` and `write` of `multi.txt`
  *   [slow]      many text chunks, `slowChunkMs` apart (steer / interrupt window)
+ *   a compaction request ("summarize the conversation") gets a summary that
+ *               fills opencode's template (`COMPACTION_SUMMARY`)
  *   otherwise   "echo: <text>"
  * A request without tools (title generation) gets "Fixture title".
  */
@@ -58,6 +69,11 @@ export interface FixtureProvider {
 
 export const SLOW_CHUNKS = 30
 export const SHELL_COMMAND = 'echo contract-tool-ran'
+export const REASONING_TEXT = 'thinking it over'
+/** opencode accepts a summary carrying one of its template headings (core/src/session/compaction.ts). */
+export const COMPACTION_SUMMARY = '## Objective\nContract compaction summary.'
+/** The file the file-tool markers work on (a test creates it with `alpha`). */
+export const NOTES_FILE = 'notes.txt'
 
 const USAGE = { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -124,17 +140,36 @@ export async function startFixtureProvider(
       }
     if (!res.destroyed) finishStream(res, 'stop')
   }
-  const streamToolCall = async (res: ServerResponse, name: string | undefined, args: object) => {
+  const streamToolCall = async (res: ServerResponse, name: string | undefined, args: object) =>
+    streamToolCalls(res, [{ name, args }])
+  const streamToolCalls = async (
+    res: ServerResponse,
+    calls: readonly { name: string | undefined; args: object }[]
+  ) => {
     // Answer in text rather than failing: a 5xx would make opencode retry and blur the trace.
-    if (!name) return streamText(res, `FIXTURE_NO_TOOL for ${JSON.stringify(args)}`)
+    const missing = calls.find((call) => !call.name)
+    if (missing) return streamText(res, `FIXTURE_NO_TOOL for ${JSON.stringify(missing.args)}`)
     chunk(res, { role: 'assistant', content: null })
-    chunk(res, {
-      tool_calls: [
-        { index: 0, id: `call_fx_${n}`, type: 'function', function: { name, arguments: '' } }
-      ]
+    calls.forEach(({ name, args }, index) => {
+      chunk(res, {
+        tool_calls: [
+          {
+            index,
+            id: `call_fx_${n}_${index}`,
+            type: 'function',
+            function: { name, arguments: '' }
+          }
+        ]
+      })
+      chunk(res, { tool_calls: [{ index, function: { arguments: JSON.stringify(args) } }] })
     })
-    chunk(res, { tool_calls: [{ index: 0, function: { arguments: JSON.stringify(args) } }] })
     finishStream(res, 'tool_calls')
+  }
+  const streamReasoning = async (res: ServerResponse, reasoning: string, text: string) => {
+    chunk(res, { role: 'assistant', content: '' })
+    for (const piece of reasoning.split(' ')) chunk(res, { reasoning_content: `${piece} ` })
+    chunk(res, { content: text })
+    finishStream(res, 'stop')
   }
 
   const server: Server = createServer((req, res) => {
@@ -172,6 +207,7 @@ export async function startFixtureProvider(
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
       const last = messages.at(-1)
       if (tools.length === 0) return streamText(res, 'Fixture title')
+      if (text.includes('summarize the conversation')) return streamText(res, COMPACTION_SUMMARY)
       if (last?.role === 'tool')
         return streamText(res, `TOOL_RESULT_SEEN: ${messageText(last.content).slice(0, 600)}`)
       if (text.includes('[tool]'))
@@ -220,6 +256,69 @@ export async function startFixtureProvider(
             ]
           }
         )
+      if (text.includes('[subresume]')) {
+        const named = messages
+          .map((message) => messageText(message.content))
+          .join('\n')
+          .match(/sessionID="(ses_[A-Za-z0-9]+)"/g)
+        const sessionID = named?.at(-1)?.slice('sessionID="'.length, -1)
+        return streamToolCall(
+          res,
+          sessionID ? tools.find((tool) => tool === 'subagent') : undefined,
+          {
+            description: 'contract reader again',
+            prompt: 'child reads again [read]',
+            agent: 'general',
+            ...(sessionID ? { sessionID } : {})
+          }
+        )
+      }
+      if (text.includes('[subread]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract reader',
+            prompt: 'child reads [read]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[reason]'))
+        return streamReasoning(res, REASONING_TEXT, `reasoned: ${text.slice(0, 80)}`)
+      if (text.includes('[read]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'read'),
+          { path: NOTES_FILE }
+        )
+      if (text.includes('[edit]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'edit'),
+          { path: NOTES_FILE, oldString: 'alpha', newString: 'beta' }
+        )
+      if (text.includes('[write]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'write'),
+          { path: 'new.txt', content: 'hello from write\n' }
+        )
+      if (text.includes('[patch]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'patch'),
+          {
+            patchText: `*** Begin Patch\n*** Update File: ${NOTES_FILE}\n@@\n-beta\n+gamma\n*** End Patch`
+          }
+        )
+      if (text.includes('[multi]'))
+        return streamToolCalls(res, [
+          { name: tools.find((tool) => tool === 'read'), args: { path: NOTES_FILE } },
+          {
+            name: tools.find((tool) => tool === 'write'),
+            args: { path: 'multi.txt', content: 'two calls\n' }
+          }
+        ])
       if (text.includes('[sub]'))
         return streamToolCall(
           res,

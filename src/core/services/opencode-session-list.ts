@@ -19,20 +19,15 @@ import path from 'path'
 import fs from 'fs'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
-// TODO(S4): history still reads the 1.x message shape (`StoredMessage` →
-// convertStoredMessage / opencodeHistoryStatusLine); the cold-history converter
-// for 2.x `Session.Message` rows is S4's. Until then this load answers nothing
-// against a 2.x server (the 1.x route 404s → the empty, best-effort result).
-import { OpencodeV1Client } from '../opencode/OpencodeV1Client'
-import { convertStoredMessage, storedCompactionMessages } from '../opencode/event-mapper'
-import { lastOpencodeModel, opencodeHistoryStatusLine } from '../opencode/history-status-line'
+import { convertOpencodeHistory, readOpencodeHistory } from '../opencode/v2-history'
+import { lastOpencodeV2Model, opencodeV2HistoryStatusLine } from '../opencode/history-status-line'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { readOpencodeSessionRows } from './db'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 import { cwdToProjectKey } from '../../shared/project-key'
-import type { ChatMessage, EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
+import type { EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
 
 /**
  * Resolve the path to opencode's global session DB. Mirrors opencode's own
@@ -139,9 +134,10 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
  * directory), so the shared server can read any session's messages regardless of
  * its cwd — no per-cwd spawn needed.
  *
- * Reuses `convertStoredMessage` (the same part→block mapping as live turns and the
- * OpencodeSession resume replay) so there's a single rendering path, and
- * `opencodeHistoryStatusLine` (the same reconstruction the session's own
+ * Reuses `convertOpencodeHistory` (the 2.x cold converter, held to parity with
+ * the live mapper — ADR-093 S4) so there's a single rendering path, children's
+ * transcripts included (`subagentMessages`, `taskNotifications`), and
+ * `opencodeV2HistoryStatusLine` (the same reconstruction the session's own
  * resume seeding runs) so the cold figure and the live one agree.
  *
  * Best-effort: returns no messages and a null status line on any error.
@@ -154,26 +150,30 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
       waitForHostedTools: false
     })
     acquired = true
-    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-    const stored = await client.listMessages(sessionId)
-    const messages: ChatMessage[] = []
-    for (const s of stored) {
-      // A compaction is a PART on an ordinary message but renders as its own
-      // system row, so it is pushed ahead of the message it rode in on.
-      messages.push(...storedCompactionMessages(s))
-      const msg = convertStoredMessage(s)
-      if (msg) messages.push(msg)
-    }
+    const client = new OpencodeClient(conn)
+    const { rows: stored, children } = await readOpencodeHistory(
+      (id) => client.listMessages(id),
+      sessionId
+    )
+    const history = convertOpencodeHistory(stored, children)
     // The billing type decides what this history was WORTH (ADR-071 §2) and it
     // comes from the auth probe's cache, which is empty in a process that has
     // not opened an opencode session yet. Warm it FIRST, and never let a probe
     // failure cost the user their transcript — an unwarmed vendor simply reads
     // as `unknown`, which prices the history at its list-price equivalent.
     await opencodeAuthProvider.warmCache().catch(() => {})
-    const last = lastOpencodeModel(stored)
+    const last = lastOpencodeV2Model(stored)
+    // The session's cumulative carries what no row does (title generation); a
+    // failed read just leaves that remainder out.
+    const session = await Promise.resolve()
+      .then(() => client.getSession(sessionId))
+      .catch(() => null)
     const statusLine =
       stored.length > 0
-        ? opencodeHistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId))
+        ? opencodeV2HistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId), {
+            children: children.values(),
+            ...(session ? { sessionTotals: { cost: session.cost, tokens: session.tokens } } : {})
+          })
         : null
     // The same last-assistant model the pricing uses, in ModelRef form: a
     // session opencode created on its own has no model persisted here, and the
@@ -184,7 +184,17 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
       last.providerID && last.modelID
         ? { engineId: 'opencode', vendorId: last.providerID, modelId: last.modelID }
         : null
-    return { messages, statusLine, lastModel }
+    return {
+      messages: history.messages,
+      statusLine,
+      lastModel,
+      ...(Object.keys(history.subagentMessages).length > 0
+        ? { subagentMessages: history.subagentMessages }
+        : {}),
+      ...(history.taskNotifications.length > 0
+        ? { taskNotifications: history.taskNotifications }
+        : {})
+    }
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',

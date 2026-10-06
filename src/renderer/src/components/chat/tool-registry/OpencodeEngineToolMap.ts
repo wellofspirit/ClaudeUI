@@ -3,8 +3,15 @@
  * normalizes their input/result shapes into the SAME engine-neutral ToolView
  * the kind bodies consume (so opencode renders through ClaudeUI's rich cards).
  *
- * The kindOf switch below IS the canonical opencode→kind table (tool ids
- * verified against opencode-src tool/registry.ts).
+ * The kindOf switch below IS the canonical opencode→kind table. It carries
+ * BOTH vocabularies (ADR-093 S4):
+ * - 2.x (`vendor/opencode-v2-src/packages/core/src/tool/plugin/*.ts` `name`):
+ *   `shell`, `subagent`, `patch`, `read`/`edit`/`write` taking `path`,
+ *   `subagent` taking `agent`; `execute` is Code Mode's wrapper;
+ * - 1.x (opencode-src tool/registry.ts): `bash`, `task`, `apply_patch`,
+ *   `filePath`, `subagent_type` — still what a session migrated from 1.x
+ *   holds in its history (2.x's v1 migration keeps the stored names,
+ *   `core/src/database/v1-migration.bun.ts`), and the 1.x adapter until S10.
  *
  * Hosted-tools MCP names: the in-process HTTP MCP server is named 'claudeui'.
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,
@@ -31,9 +38,11 @@ function opencodeKindOf(toolName: string): ToolKind {
 
   switch (toolName) {
     case 'bash':
+    case 'shell':
       return 'command'
     case 'edit':
     case 'apply_patch':
+    case 'patch':
       return 'fileEdit'
     case 'write':
       return 'fileWrite'
@@ -46,6 +55,7 @@ function opencodeKindOf(toolName: string): ToolKind {
     case 'websearch':
       return 'web'
     case 'task':
+    case 'subagent':
       return 'task'
     case 'todowrite':
       return 'todo'
@@ -88,15 +98,16 @@ function opencodeNormalize(
       }
 
     case 'fileEdit': {
-      // opencode edit input: { filePath, oldString, newString }. apply_patch has
-      // no old/new pair on its input, but its (and edit's) tool result carries
-      // real unified diffs in metadata — extractFileDiffs (event-mapper.ts) maps
-      // those onto result.fileDiffs, which we surface as `files` here so the
-      // body renders real per-file diff cards instead of the generic JSON view.
+      // opencode edit input: { path (2.x) | filePath (1.x), oldString, newString }.
+      // patch / apply_patch have no old/new pair on their input, but their (and
+      // edit's) tool result carries real unified diffs in metadata — the mappers
+      // (v2-content.ts toolFileDiffs; 1.x event-mapper.ts extractFileDiffs) put
+      // them on result.fileDiffs, which we surface as `files` here so the body
+      // renders real per-file diff cards instead of the generic JSON view.
       const fileDiffs = result?.fileDiffs
       return {
         kind: 'fileEdit',
-        path: inp.filePath != null ? String(inp.filePath) : '',
+        path: filePathOf(inp),
         before: inp.oldString != null ? String(inp.oldString) : '',
         after: inp.newString != null ? String(inp.newString) : '',
         ...(fileDiffs && fileDiffs.length > 0 ? { files: fileDiffs } : {})
@@ -104,18 +115,18 @@ function opencodeNormalize(
     }
 
     case 'fileWrite':
-      // opencode write input: { filePath, content }.
+      // opencode write input: { path (2.x) | filePath (1.x), content }.
       return {
         kind: 'fileWrite',
-        path: inp.filePath != null ? String(inp.filePath) : '',
+        path: filePathOf(inp),
         content: inp.content != null ? String(inp.content) : ''
       }
 
     case 'fileRead':
-      // opencode read input: { filePath }.
+      // opencode read input: { path (2.x) | filePath (1.x) }.
       return {
         kind: 'fileRead',
-        path: inp.filePath != null ? String(inp.filePath) : '',
+        path: filePathOf(inp),
         content: result?.toolResult ?? ''
       }
 
@@ -151,14 +162,16 @@ function opencodeNormalize(
           subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
         }
       }
+      // 2.x `subagent` names its agent `agent`; 1.x `task` named it `subagent_type`.
+      const agent = inp.agent ?? inp.subagent_type
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
         prompt: inp.prompt != null ? String(inp.prompt) : '',
-        // opencode's task tool has no per-agent name; its type is the best
+        // opencode's subagent tool has no per-agent name; its type is the best
         // label a roster row can carry (ADR-073).
-        ...(inp.subagent_type != null ? { name: String(inp.subagent_type) } : {}),
-        subagent: inp.subagent_type != null ? String(inp.subagent_type) : undefined,
+        ...(agent != null ? { name: String(agent) } : {}),
+        subagent: agent != null ? String(agent) : undefined,
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.background != null ? Boolean(inp.background) : undefined
       }
@@ -224,6 +237,12 @@ function opencodeNormalize(
   }
 }
 
+/** A file tool's path: 2.x `path`, 1.x `filePath`. */
+function filePathOf(inp: Record<string, unknown>): string {
+  const path = inp.path ?? inp.filePath
+  return path != null ? String(path) : ''
+}
+
 function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
   if (!result?.toolResult) return undefined
   const match = result.toolResult.match(/Directory:\s*(\S+)/)
@@ -232,6 +251,11 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
 
 /** Prettify map for opencode's lowercase/underscore tool names. */
 const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
+  // 2.x renamed tools keep the names their cards always had.
+  shell: 'Bash',
+  subagent: 'Task',
+  patch: 'Patch',
+  execute: 'Execute',
   bash: 'Bash',
   read: 'Read',
   write: 'Write',
