@@ -225,9 +225,19 @@ ClaudeUI owns rules and session allows, and Codex's execpolicy is not written.
 Under `auto` the native `auto_review` guardian reviews escalations first, and
 whatever still reaches the client is gated exactly like `default`.
 
-Approving is a full-access grant on this wire: an accepted command runs
-unsandboxed whatever the sandbox policy says (probe, [codex-spike.md](../codex-spike.md)
-section "Native approval surface probe"). The sandbox is what the model is told
+Approving is a full-access grant on this wire in effect, but not on the first attempt. An accepted
+command still runs first under the turn's sandbox, unless the model escalated it
+(`sandbox_permissions: "require_escalated"`) or an execpolicy `allow` matched
+(`core/src/tools/orchestrator.rs` and `sandbox_override_for_first_attempt` in
+`core/src/tools/sandboxing.rs`, rust-v0.160.1). When that attempt is denied by the sandbox, Codex
+re-runs it unsandboxed without asking again, but only if it CLASSIFIES the failure as a denial: for
+`exec_command` it waits at most 20 ms for output, then keyword-matches it
+(`core/src/unified_exec/process.rs` `check_for_sandbox_denial`, `sandboxing/src/denial.rs`; the exit
+code alone never counts). A miss reaches the model as an ordinary failed command, with no second
+prompt. That fails closed, but an approved outside-workspace write in default mode can come back
+failed; `apply_patch` classifies from complete output and is not affected. The integration
+suite's policy probe documents both branches, and its opt-in retry probe
+(`CODEX_INTEGRATION_RETRY=1`, serial) pins the retry. The sandbox is what the model is told
 about its environment and what contains Auto's silent in-workspace work, not a
 second decision layer. Sandbox enforcement itself cannot be measured in the
 integration fixture, so containment claims rest on the Codex source at tag
