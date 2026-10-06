@@ -287,7 +287,9 @@ function foldSubagentFile(
 async function foldSubagentCosts(
   filePath: string,
   modelTokens: Map<string, ModelTokenAgg>,
-  seenMessageIds: Set<string>
+  seenMessageIds: Set<string>,
+  /** Fold only these agents (a fork's anchor-truncated figures); absent = all. */
+  onlyAgentIds?: ReadonlySet<string>
 ): Promise<void> {
   const subagentsDir = path.join(
     path.dirname(filePath),
@@ -304,16 +306,32 @@ async function foldSubagentCosts(
     return
   }
 
-  const agentFiles = files.filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl')).sort()
+  const agentFiles = files
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .filter((f) => !onlyAgentIds || onlyAgentIds.has(f.slice('agent-'.length, -'.jsonl'.length)))
+    .sort()
 
   for (const f of agentFiles) {
     await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
   }
 }
 
+/**
+ * Token, cost and duration figures reconstructed from a transcript.
+ *
+ * `resumeSessionAt` is the fork/branch anchor, with `loadSessionHistory`'s
+ * semantics: the anchor line is the last one counted (cli.js keeps
+ * `lines.slice(0, w + 1)`), so a fork's figures stop where its conversation does
+ * instead of counting the whole parent. An anchor not in the file truncates
+ * nothing. Subagent spend is then limited to the agents the kept lines spawned
+ * (their `agentId`s are in the kept tool results); agents spawned from inside a
+ * subagent are not attributable to a side of the anchor from the main file, so a
+ * truncated read leaves them out.
+ */
 export async function computeTokenMetrics(
   filePath: string,
-  model?: string
+  model?: string,
+  resumeSessionAt?: string
 ): Promise<StatusLineData> {
   const empty: StatusLineData = {
     totalCostUsd: 0,
@@ -358,12 +376,30 @@ export async function computeTokenMetrics(
     const modelTokens = new Map<string, ModelTokenAgg>()
     const seenMessageIds = new Set<string>()
 
+    // Fork anchor (see the doc comment): set once the anchor line is READ, so that
+    // line is still counted and every later one is dropped.
+    let pastAnchor = false
+    let anchorFound = false
+    const keptAgentIds = new Set<string>()
+
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
 
     rl.on('line', (line) => {
+      if (pastAnchor) return
       try {
         const data = JSON.parse(line)
+        if (resumeSessionAt && data.uuid === resumeSessionAt) {
+          pastAnchor = true
+          anchorFound = true
+        }
+        if (resumeSessionAt && data.type === 'user' && Array.isArray(data.message?.content)) {
+          for (const block of data.message.content) {
+            if (block?.type !== 'tool_result') continue
+            const agentId = agentIdOf(extractToolResultContent(block.content).text)
+            if (agentId) keptAgentIds.add(agentId)
+          }
+        }
         turnSpanAcc.push(data)
 
         if (data.type === 'assistant' && data.message?.usage) {
@@ -430,7 +466,12 @@ export async function computeTokenMetrics(
       // Task-tool subagent spend lives in separate transcript files (see
       // foldSubagentCosts's doc comment) — fold it into the same modelTokens
       // map before deriving modelCosts/totalCostUsd below.
-      await foldSubagentCosts(filePath, modelTokens, seenMessageIds)
+      await foldSubagentCosts(
+        filePath,
+        modelTokens,
+        seenMessageIds,
+        anchorFound ? keptAgentIds : undefined
+      )
 
       const modelCosts: ModelCostEntry[] = []
       for (const [modelId, agg] of modelTokens) {
@@ -1438,7 +1479,8 @@ export async function loadSessionHistory(
         })
       }
 
-      const statusLine = await computeTokenMetrics(filePath)
+      // A fork's figures stop at its anchor, like the messages above.
+      const statusLine = await computeTokenMetrics(filePath, undefined, resumeSessionAt)
       // Slice C — merge durable dispatched-cost rows into the history-loaded
       // status line. A reopened session that hasn't spawned a ClaudeSession
       // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics

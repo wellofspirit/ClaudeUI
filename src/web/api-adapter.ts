@@ -91,7 +91,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       thinkingMode?,
       resumeSessionAt?,
       forkSession?,
-      engineId?
+      engineId?,
+      announce?
     ) =>
       connection.invoke(
         'session:create',
@@ -104,7 +105,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       ) as Promise<void>,
 
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
@@ -284,8 +286,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setReasoningVariant: (routingId, variant) =>
       connection.invoke('session:set-reasoning-variant', routingId, variant) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
-    getEngineModels: () =>
-      connection.invoke('session:get-engine-models') as ReturnType<ClaudeAPI['getEngineModels']>,
+    getEngineModels: (engineId) =>
+      connection.invoke('session:get-engine-models', engineId) as ReturnType<
+        ClaudeAPI['getEngineModels']
+      >,
     judgeModelSupport: (engineId, values) =>
       connection.invoke('automode:judge-model-support', engineId, values) as ReturnType<
         ClaudeAPI['judgeModelSupport']

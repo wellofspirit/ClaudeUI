@@ -186,6 +186,13 @@ describe('PiAuthProvider.listVendorAuthOptions', () => {
     expect(options.openai.map((o) => o.type)).toEqual(['api'])
   })
 
+  it("offers Azure under pi's provider id `azure`, not the pre-1.0.3 `azure-openai-responses`", async () => {
+    const provider = new PiAuthProvider()
+    const options = await provider.listVendorAuthOptions()
+    expect(options.azure?.map((o) => o.type)).toEqual(['api'])
+    expect(options['azure-openai-responses']).toBeUndefined()
+  })
+
   it('the api option carries a secret text prompt for the key', async () => {
     const provider = new PiAuthProvider()
     const options = await provider.listVendorAuthOptions()
@@ -261,6 +268,91 @@ describe('PiAuthProvider.setVendorApiKey', () => {
       expect(mode).toBe(0o600)
     })
   }
+})
+
+// The shared-provider key sync and CredentialSync's feed both run at every boot
+// with what pi usually holds already. A write of an unchanged entry invalidated
+// the pi model cache, killing the model probe in flight. writeAuthJson writes
+// compact JSON and the provider indents, so an unchanged raw string proves no
+// write happened.
+describe('PiAuthProvider — an unchanged credential writes nothing', () => {
+  const codex = { type: 'oauth', access: 'a1', refresh: 'r1', expires: 12345 }
+  const stored = {
+    anthropic: { type: 'api_key', key: 'sk-fixture-1' },
+    'openai-codex': codex
+  }
+
+  function rawAuthJson(): string {
+    return readFileSync(authJsonPath(), 'utf-8')
+  }
+
+  it('setVendorApiKey with the stored key: no write, no invalidation', async () => {
+    writeAuthJson(stored)
+    const raw = rawAuthJson()
+    await new PiAuthProvider().setVendorApiKey('anthropic', 'sk-fixture-1')
+    expect(rawAuthJson()).toBe(raw)
+    expect(mockInvalidatePiModelCache).not.toHaveBeenCalled()
+  })
+
+  it('setVendorApiKey with unknown fields on the entry, which the merge keeps anyway', async () => {
+    writeAuthJson({ gw: { type: 'api_key', key: 'sk-fixture-1', env: { ID: 'x' } } })
+    const raw = rawAuthJson()
+    await new PiAuthProvider().setVendorApiKey('gw', 'sk-fixture-1')
+    expect(rawAuthJson()).toBe(raw)
+    expect(mockInvalidatePiModelCache).not.toHaveBeenCalled()
+  })
+
+  it('setVendorApiKey with a different key: written and invalidated as before', async () => {
+    writeAuthJson(stored)
+    await new PiAuthProvider().setVendorApiKey('anthropic', 'sk-fixture-2')
+    expect(readAuthJsonRaw()).toEqual({
+      ...stored,
+      anthropic: { type: 'api_key', key: 'sk-fixture-2' }
+    })
+    expect(mockInvalidatePiModelCache).toHaveBeenCalledTimes(1)
+  })
+
+  it('feedOauthCredential with the stored credential: no write, no invalidation', async () => {
+    writeAuthJson(stored)
+    const raw = rawAuthJson()
+    // accountId is never persisted by pi, so it is no difference either.
+    await new PiAuthProvider().feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 12345,
+      accountId: 'acct-1'
+    })
+    expect(rawAuthJson()).toBe(raw)
+    expect(mockInvalidatePiModelCache).not.toHaveBeenCalled()
+  })
+
+  it('feedOauthCredential with a rotated token: written and invalidated as before', async () => {
+    writeAuthJson(stored)
+    const rotated = { access: 'a2', refresh: 'r2', expires: 23456 }
+    await new PiAuthProvider().feedOauthCredential('openai-codex', rotated)
+    expect(readAuthJsonRaw()).toEqual({ ...stored, 'openai-codex': { type: 'oauth', ...rotated } })
+    expect(mockInvalidatePiModelCache).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the file at call time: an entry pi rewrote in between is written over', async () => {
+    writeAuthJson(stored)
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 12345
+    })
+    expect(mockInvalidatePiModelCache).not.toHaveBeenCalled()
+    // pi refreshes its own token behind ClaudeUI's back.
+    writeAuthJson({ ...stored, 'openai-codex': { ...codex, access: 'a9', refresh: 'r9' } })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 12345
+    })
+    expect(readAuthJsonRaw()['openai-codex']).toEqual(codex)
+    expect(mockInvalidatePiModelCache).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('PiAuthProvider.removeVendorAuth', () => {

@@ -317,6 +317,11 @@ describe('ExitPlanModeCard FC', () => {
         ipcCalls[ch].push(args)
         // getSessionLogPath returns a path string
         if (ch === 'session:get-session-log-path') return '/logs/session.jsonl'
+        // Main emits the replicated reset, and the fold blanks the session's
+        // per-session config (effort, thinking mode) in THIS replica too — which
+        // is what makes "read the picks BEFORE the clear" a real ordering
+        // constraint rather than one the harness silently satisfies.
+        if (ch === 'session:clear-conversation') seed.conversationCleared(ROUTE_FC)
         return undefined
       })
     }
@@ -415,6 +420,80 @@ describe('ExitPlanModeCard FC', () => {
     expect(createArgs[5]).toBe('claude-opus-4-7')
     expect(createArgs[2]).toBe('high')
     expect(createArgs[6]).toBe('enabled')
+
+    unmount()
+  })
+
+  it("onStartFresh: a session with no effort pick starts at the model's saved effort", async () => {
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5', // built-in default: medium
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      settings: { ...s.settings, modelEffortDefaults: { opus: 'high' } },
+      sessions: {
+        ...s.sessions,
+        [ROUTE_FC]: { ...s.sessions[ROUTE_FC], selectedModel: 'opus', effort: null }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    const { unmount } = renderFC()
+
+    await act(async () => {
+      await viewProps.onStartFresh()
+    })
+
+    const createArgs = lastCall('session:create') as unknown[]
+    // Pre-fix: `session.effort ?? undefined` — cli.js's heuristic, not 'high'.
+    expect(createArgs[2]).toBe('high')
+    // The starting effort freezes into the fresh session: announced, and equal to
+    // the positional effort (computed BEFORE the reset blanked the session).
+    expect(createArgs[10]).toEqual({ effort: 'high', thinkingMode: null })
+
+    unmount()
+  })
+
+  it('onStartFresh: re-announces the picks the conversation reset blanked', async () => {
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5',
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      sessions: {
+        ...s.sessions,
+        [ROUTE_FC]: {
+          ...s.sessions[ROUTE_FC],
+          selectedModel: 'opus',
+          effort: 'low',
+          thinkingMode: 'disabled'
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    const { unmount } = renderFC()
+
+    await act(async () => {
+      await viewProps.onStartFresh()
+    })
+
+    expect((lastCall('session:create') as unknown[])[10]).toEqual({
+      effort: 'low',
+      thinkingMode: 'disabled'
+    })
 
     unmount()
   })

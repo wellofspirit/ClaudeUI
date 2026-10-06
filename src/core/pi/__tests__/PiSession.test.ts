@@ -326,6 +326,8 @@ vi.mock('../model-discovery', async () => {
   return {
     ...actual,
     getPiModelCatalog: mockGetPiModelCatalog,
+    // The allowlisted raw rows (list_models, the agent tool's model): the same double.
+    getPiAllowedModelCatalog: mockGetPiModelCatalog,
     discoverPiModels: mockDiscoverPiModels
   }
 })
@@ -747,6 +749,7 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+          CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
           CLAUDEUI_PI_PLAN_TOOLS: '1',
           CLAUDEUI_PI_AGENT_TOOL: '1',
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
@@ -1362,7 +1365,7 @@ describe('PiSession.interrupt — propagates into an in-flight dispatch_agent tu
 })
 
 describe('PiSession.cancel', () => {
-  it('disposes the client AND the bridge host, and returns state to idle', async () => {
+  it('disposes the client AND the bridge host, and reports disconnected', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-8', win as never, '/cwd', {})
     await session.run('hi')
@@ -1371,8 +1374,23 @@ describe('PiSession.cancel', () => {
 
     expect(mockDispose).toHaveBeenCalledTimes(1)
     expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
-    expect(session.status.state).toBe('idle')
+    // 'disconnected' is what clears the renderer's sdkActive — 'idle' would
+    // leave the session looking live after a Disconnect / idle timeout.
+    expect(session.status.state).toBe('disconnected')
+    const statuses = sentPayloads(win, 'session:status') as Array<{ state: string }>
+    expect(statuses[statuses.length - 1].state).toBe('disconnected')
     expect(session.willQueue).toBe(false)
+  })
+
+  it('a run() after cancel() respawns and is no longer disconnected', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-8b', win as never, '/cwd', {})
+    await session.run('hi')
+    session.cancel()
+
+    await session.run('again')
+
+    expect(session.status.state).not.toBe('disconnected')
   })
 
   it('denies any pending gate instead of leaving it hanging forever', async () => {
@@ -4583,6 +4601,16 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('1')
+    // S4: the shared description reaches the bridge, steering to pi's own `agent` tool,
+    // listing every OTHER engine (never pi itself).
+    const description = env.CLAUDEUI_PI_DISPATCH_DESCRIPTION as string
+    expect(description).toContain('use your own agent tool instead')
+    expect(description).toContain('claude (Anthropic')
+    expect(description).toContain('opencode (')
+    expect(description).toContain('codex (')
+    expect(description).not.toContain('pi (an alternative')
+    expect(description).toContain('For claude:')
+    expect(description).toContain('For codex:')
   })
 
   it('omits CLAUDEUI_PI_DISPATCH_ENABLED (but keeps CLAUDEUI_PI_HOSTED_TOOLS) when crossEngineDispatchAvailable("pi") is false', async () => {
@@ -4593,6 +4621,7 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
     expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_DESCRIPTION')
   })
 
   it('sets CLAUDEUI_PI_PLAN_TOOLS=1 by default (plan is a static-true engine capability, M5a)', async () => {
@@ -6848,6 +6877,47 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
+  it('S3 (session): list_models is auto-allowed with no card and answers from the allowlisted catalog; the agent tool resolves aliases and refuses an unknown model with no spawn', async () => {
+    const row = (provider: string, id: string, name: string) => ({
+      provider,
+      id,
+      name,
+      contextWindow: 200_000,
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }
+    })
+    mockGetPiModelCatalog.mockResolvedValue([
+      row('openai-codex', 'gpt-5.6-luna', 'GPT-5.6 Luna'),
+      row('anthropic', 'claude-sonnet-4-5', 'Claude Sonnet 4.5')
+    ])
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-s3-models', win)
+    expect(await gate('lm-1', 'list_models', { query: 'son' })).toEqual({ behavior: 'allow' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect((await hostedTool('list_models', { query: 'son' }, 'lm-1')).content[0].text).toBe(
+      [
+        'Current session model: openai-codex/gpt-5.6-luna',
+        'anthropic/claude-sonnet-4-5 — Claude Sonnet 4.5 · 200k ctx · $3/$15 per M tokens'
+      ].join('\n')
+    )
+
+    const bad = { ...AGENT_INPUT, model: 'gpt-9' }
+    await gate('ag-bad', 'agent', bad)
+    const refused = await hostedTool('agent', bad, 'ag-bad')
+    expect(refused.isError).toBe(true)
+    expect(refused.content[0].text).toContain('Unknown model "gpt-9"')
+    expect(kids.children).toHaveLength(0)
+
+    const { child } = await launch(kids, 'ag-ok', { ...AGENT_INPUT, model: 'sonnet' })
+    expect(child.commands().find((c) => c.type === 'set_model')).toMatchObject({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-5'
+    })
+    child.push({ type: 'agent_settled' })
+    session.dispose()
+  })
+
   it('G2 (session): a resumed session rebuilds the depth-1 records, so send_message to an earlier id resumes it', async () => {
     const id = '66666666-6666-4666-8666-666666666666'
     mockLoadPiAgentLinks.mockReturnValue([
@@ -6877,14 +6947,14 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(
       (await hostedTool('send_message', { to: 'earlier', message: 'one more' }, 'sm-g2')).content[0]
         .text
-    ).toBe('Resuming agent earlier. You will be notified when it completes.')
+    ).toBe('Resuming agent "earlier". You will be notified when it completes.')
     expect(kids.children).toHaveLength(1)
     const args = kids.children[0].opts.args!
     expect(args[args.indexOf('--session-id') + 1]).toBe(id)
     session.dispose()
   })
 
-  it('G2 (session, review R2): a rebuilt link stopped by the user is refused, with no spawn', async () => {
+  it('G2 (session, S1a): a rebuilt link stopped by the user is refused until the USER prompts — an agent delivery does not count', async () => {
     mockLoadPiAgentLinks.mockReturnValue([
       {
         agentId: '88888888-8888-4888-8888-888888888888',
@@ -6905,14 +6975,37 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       { model: 'openai-codex/gpt-5.6-luna', resumeSessionId: 'resume-g2-stopped' },
       { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
     )
-    await session.run('PARENT-INTENT: continue')
-    await gate('sm-g2s', 'send_message', { to: 'halted', message: 'go' })
-    const r = await hostedTool('send_message', { to: 'halted', message: 'go' }, 'sm-g2s')
-    expect(r.isError).toBe(true)
-    expect(r.content[0].text).toMatch(
-      /^Agent "halted" was stopped by the user and was not resumed\./
+    // Warm-up only (no prompt): the history load rebuilds the record.
+    await session.run(null)
+    await vi.waitFor(() => expect(mockLoadPiAgentLinks).toHaveBeenCalledWith('resume-g2-stopped'))
+    const resume = async (id: string): Promise<{ isError?: boolean; text: string }> => {
+      await gate(id, 'send_message', { to: 'halted', message: 'go' })
+      const r = await hostedTool('send_message', { to: 'halted', message: 'go' }, id)
+      return { isError: r.isError, text: r.content[0].text }
+    }
+    const held = await resume('sm-g2s-1')
+    expect(held.isError).toBe(true)
+    expect(held.text).toBe(
+      'Agent "halted" was stopped by the user. Resume it only if the user asks you to; ' +
+        'the user has not spoken since the stop.'
     )
     expect(kids.children).toHaveLength(0)
+
+    // An agent's message is not the user speaking.
+    session.deliverAgentMessage(payload())
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    expect((await resume('sm-g2s-2')).isError).toBe(true)
+    expect(kids.children).toHaveLength(0)
+
+    // The user's prompt lifts the hold.
+    settleParent()
+    await session.run('please carry on with the halted agent')
+    const resumed = await resume('sm-g2s-3')
+    expect(resumed).toEqual({
+      isError: undefined,
+      text: 'Resuming agent "halted". You will be notified when it completes.'
+    })
+    expect(kids.children).toHaveLength(1)
     session.dispose()
   })
 

@@ -84,7 +84,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       thinkingMode?,
       resumeSessionAt?,
       forkSession?,
-      engineId?
+      engineId?,
+      announce?
     ) =>
       ipcRenderer.invoke(
         'session:create',
@@ -97,7 +98,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       ),
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
       ipcRenderer.invoke(
@@ -184,7 +186,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setReasoningVariant: (routingId, variant) =>
       ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
-    getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+    getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
     judgeModelSupport: (engineId, values) =>
       ipcRenderer.invoke('automode:judge-model-support', engineId, values),
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),

@@ -4,7 +4,7 @@
  * Tests for pi model discovery: mapping/grouping a mocked get_available_models
  * catalog into EngineModelGroup[]/ModelInfo, caching, and graceful failure.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MODEL_UNAVAILABLE_CODE } from '../../../shared/model-errors'
 
 const {
@@ -86,9 +86,16 @@ const CATALOG = [
   }
 ]
 
+let previous: { cancelPiRecoveryProbeForTests: () => void } | null = null
+
 async function importFresh() {
+  // A failed probe arms a background re-probe; the instance being discarded
+  // must not spawn it into a later test's mocks.
+  previous?.cancelPiRecoveryProbeForTests()
   vi.resetModules()
-  return await import('../model-discovery')
+  const fresh = await import('../model-discovery')
+  previous = fresh
+  return fresh
 }
 
 beforeEach(() => {
@@ -115,6 +122,26 @@ describe('discoverPiModels', () => {
     expect(
       (await getPiModelCatalogGroups()).flatMap((group) => group.models.map((model) => model.value))
     ).toEqual(['openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'])
+  })
+
+  it('getPiAllowedModelCatalog returns the RAW rows discoverPiModels shows (one filter), never throws on failure', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: { anthropic: ['claude-sonnet-4-6'], 'openai-codex': [] } }
+    })
+    const { discoverPiModels, getPiAllowedModelCatalog } = await importFresh()
+    const raw = await getPiAllowedModelCatalog()
+    expect(raw.map((m) => `${m.provider}/${m.id}`)).toEqual(['anthropic/claude-sonnet-4-6'])
+    // The fields the picker's ModelInfo drops are there.
+    expect(raw[0]).toMatchObject({ contextWindow: expect.any(Number), cost: expect.any(Object) })
+    expect(
+      (await discoverPiModels()).flatMap((group) => group.models.map((model) => model.value))
+    ).toEqual(raw.map((m) => `${m.provider}/${m.id}`))
+
+    // A failed probe is an empty catalog.
+    mockRequest.mockRejectedValue(new Error('boom'))
+    const fresh = await importFresh()
+    expect(await fresh.getPiAllowedModelCatalog()).toEqual([])
   })
 
   it('treats an empty list under a provider key as none of that provider', async () => {
@@ -354,6 +381,148 @@ describe('discoverPiModels', () => {
     invalidatePiModelCache()
     await discoverPiModels()
     expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+  })
+})
+
+afterEach(() => {
+  previous?.cancelPiRecoveryProbeForTests()
+  vi.useRealTimers()
+})
+
+/**
+ * A FAILED probe (timeout, spawn error, `success:false`, the process exiting)
+ * is not pi saying it has no models. At boot it is the common case — the probe
+ * races credential sync and harness detection — so it backs off briefly
+ * instead of negative-caching for 60s, heals itself with one background
+ * re-probe, and tells the recovered listeners so clients that were answered []
+ * read their models again.
+ */
+describe('failed probes: short backoff, background recovery, recovered signal', () => {
+  const failing = (): void => {
+    mockRequest.mockRejectedValue(new Error('request "get_available_models" timed out'))
+  }
+  const answering = (models: unknown[]): void => {
+    mockRequest.mockResolvedValue({ success: true, data: { models } })
+  }
+
+  it('backs off only briefly after a failure, and the background re-probe does not loop', async () => {
+    vi.useFakeTimers()
+    failing()
+    const { discoverPiModels } = await importFresh()
+    expect(await discoverPiModels()).toEqual([])
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+
+    // Within the backoff: [] without a spawn.
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await discoverPiModels()).toEqual([])
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+
+    // The backoff (5s, not the empty answer's 60s) lapses: one background re-probe.
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+    // It failed too, and schedules no successor: a broken pi is not polled.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+
+    // Past its backoff, a caller probes again.
+    expect(await discoverPiModels()).toEqual([])
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(3)
+  })
+
+  it('an RPC error response is a failure too, not an empty answer', async () => {
+    vi.useFakeTimers()
+    mockRequest.mockResolvedValueOnce({ success: false, error: 'boom' })
+    answering(CATALOG)
+    const { discoverPiModels } = await importFresh()
+    expect(await discoverPiModels()).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+    expect((await discoverPiModels()).flatMap((g) => g.models)).toHaveLength(2)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+  })
+
+  it('a successful EMPTY answer (no auth) keeps its 60s negative cache and starts no re-probe', async () => {
+    vi.useFakeTimers()
+    answering([])
+    const { discoverPiModels, onPiCatalogRecovered } = await importFresh()
+    const recovered = vi.fn()
+    onPiCatalogRecovered(recovered)
+    expect(await discoverPiModels()).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(await discoverPiModels()).toEqual([])
+    await vi.advanceTimersByTimeAsync(29_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+    expect(recovered).not.toHaveBeenCalled()
+  })
+
+  it('a recovery after a degraded answer tells the listeners exactly once; warm reads never do', async () => {
+    vi.useFakeTimers()
+    mockRequest.mockRejectedValueOnce(new Error('pi process exited (code=null, signal=SIGTERM)'))
+    answering(CATALOG)
+    const { discoverPiModels, getPiModelCatalog, onPiCatalogRecovered } = await importFresh()
+    const recovered = vi.fn()
+    onPiCatalogRecovered(recovered)
+    expect(await discoverPiModels()).toEqual([])
+    expect(recovered).not.toHaveBeenCalled()
+
+    // Nobody asks again: the background re-probe fills the catalog by itself.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(recovered).toHaveBeenCalledTimes(1)
+
+    // The reload the signal provokes reads the warm cache — no second signal,
+    // no spawn, so a client reloading on it cannot loop.
+    expect((await discoverPiModels()).flatMap((g) => g.models)).toHaveLength(2)
+    expect(await getPiModelCatalog()).toEqual(CATALOG)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(recovered).toHaveBeenCalledTimes(1)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+  })
+
+  it('a fill nobody was degraded for says nothing', async () => {
+    answering(CATALOG)
+    const { discoverPiModels, invalidatePiModelCache, onPiCatalogRecovered } = await importFresh()
+    const recovered = vi.fn()
+    onPiCatalogRecovered(recovered)
+    await discoverPiModels()
+    invalidatePiModelCache()
+    await discoverPiModels()
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+    expect(recovered).not.toHaveBeenCalled()
+  })
+
+  it('an invalidation supersedes the scheduled re-probe instead of stacking a second one', async () => {
+    vi.useFakeTimers()
+    mockRequest.mockRejectedValueOnce(new Error('timed out'))
+    answering(CATALOG)
+    const { discoverPiModels, invalidatePiModelCache, onPiCatalogRecovered } = await importFresh()
+    const recovered = vi.fn()
+    onPiCatalogRecovered(recovered)
+    await discoverPiModels()
+
+    await vi.advanceTimersByTimeAsync(3_000)
+    invalidatePiModelCache() // e.g. credential sync rewrote auth.json
+    // The re-probe armed by the failure is gone…
+    await vi.advanceTimersByTimeAsync(2_500)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+    // …replaced by one armed from the invalidation, because a client still
+    // holds the degraded [] and nothing else would re-probe for it.
+    await vi.advanceTimersByTimeAsync(2_500)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+    expect(recovered).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+  })
+
+  it('an invalidation with no degraded answer outstanding arms nothing', async () => {
+    vi.useFakeTimers()
+    answering(CATALOG)
+    const { discoverPiModels, invalidatePiModelCache } = await importFresh()
+    await discoverPiModels()
+    invalidatePiModelCache()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
   })
 })
 

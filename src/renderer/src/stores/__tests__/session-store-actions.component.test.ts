@@ -219,6 +219,76 @@ describe('switchSession', () => {
   })
 
   /**
+   * `createNewSession` writes a `sessionEngines` row (and a recents slot) up front, and
+   * the user may pin/title/hide/worktree the session before sending. Dropping the
+   * abandoned session removed only the recents slot, so the engine row (and the saved
+   * config's) outlived it.
+   *
+   * PRE-FIX: `sessionEngines['r1']` is still present, here and in the saved payload.
+   */
+  it('drops the abandoned session from every registry row but its worktree entry', () => {
+    store().createNewSession('r1', '/a') // active, never spawned, no messages
+    store().createNewSession('r2', '/b', false)
+    store().pinSession('r1')
+    store().setCustomTitle('r1', 'scratch')
+    store().hideSession('r1')
+    store().setWorktreeInfo('r1', makeWorktreeInfo())
+    expect(store().sessionEngines['r1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    store().switchSession('r2')
+
+    const s = store()
+    expect(s.sessions['r1']).toBeUndefined()
+    expect(s.recentSessionIds).not.toContain('r1')
+    expect(s.pinnedSessionIds).not.toContain('r1')
+    expect(s.hiddenSessionIds).not.toContain('r1')
+    expect(s.customTitles['r1']).toBeUndefined()
+    expect(s.sessionEngines['r1']).toBeUndefined()
+    // The sibling's rows are untouched.
+    expect(s.sessionEngines['r2']).toBeDefined()
+    expect(s.recentSessionIds).toContain('r2')
+    const saves = (window.api.saveSessionConfig as any).mock.calls
+    expect(saves.length).toBeGreaterThan(0)
+    const persisted = saves.at(-1)[0]
+    expect(persisted.recentSessions).not.toContain('r1')
+    expect(persisted.pinnedSessions).not.toContain('r1')
+    expect(persisted.hiddenSessions).not.toContain('r1')
+    expect(persisted.customTitles['r1']).toBeUndefined()
+    expect(persisted.sessionEngines['r1']).toBeUndefined()
+    expect(persisted.sessionEngines['r2']).toBeDefined()
+  })
+
+  /**
+   * `worktreeInfoMap` is the handle on the worktree directory + branch on disk: the
+   * before-quit prompt offers to remove worktrees from it. Dropping an abandoned
+   * "new session in worktree" must leave it, or the worktree leaks.
+   *
+   * PRE-FIX (the scrub took worktreeInfoMap with the rest): the entry is gone.
+   */
+  it('keeps the worktree entry of a dropped empty session, here and in the saved config (GUARD)', () => {
+    store().createNewSession('r1', '/a')
+    store().createNewSession('r2', '/b', false)
+    const info = makeWorktreeInfo({ worktreePath: '/wt/r1' })
+    store().setWorktreeInfo('r1', info)
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    store().switchSession('r2')
+
+    expect(store().sessions['r1']).toBeUndefined()
+    expect(store().worktreeInfoMap['r1']).toEqual(info)
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.worktreeInfoMap['r1']).toEqual(info)
+  })
+
+  it('an explicit delete still removes the worktree entry', async () => {
+    store().createNewSession('r1', '/a', false)
+    store().setWorktreeInfo('r1', makeWorktreeInfo())
+    await store().deleteSession('r1', 'proj-key')
+    expect(store().worktreeInfoMap['r1']).toBeUndefined()
+  })
+
+  /**
    * R6. "Empty" is a local judgement and it does not distinguish an abandoned
    * scratch session from a REAL host session that was cancelled before its first
    * prompt. Dropping the second kind threw away state the host still had — and
@@ -261,6 +331,16 @@ describe('showWelcome', () => {
     store().showWelcome()
     expect(store().sessions['r1']).toBeUndefined()
     expect(store().recentSessionIds).not.toContain('r1')
+  })
+
+  it('also drops the abandoned session engine row (GUARD)', () => {
+    store().createNewSession('r1', '/a') // never spawned
+    expect(store().sessionEngines['r1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+    store().showWelcome()
+    expect(store().sessionEngines['r1']).toBeUndefined()
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['r1']).toBeUndefined()
   })
 
   it('preserves session with messages when returning to welcome', () => {
@@ -1778,6 +1858,14 @@ describe('applyExternalSettings', () => {
     seed.settings({ theme: 'monokai' })
     // maxRecentSessions should still be the default value (5)
     expect(store().settings.maxRecentSessions).toBe(5)
+  })
+
+  it('keeps the per-engine starting-effort map a remote client wrote, and defaults it to {}', () => {
+    const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+    seed.settings({ theme: 'light', engineEffortDefaults })
+    expect(store().settings.engineEffortDefaults).toEqual(engineEffortDefaults)
+    seed.settings({ theme: 'light' })
+    expect(store().settings.engineEffortDefaults).toEqual({})
   })
 
   it('does not call saveSettings (no disk write)', () => {

@@ -603,13 +603,13 @@ it.skipIf(!enabled)(
     // ── What the pinned binary actually does ────────────────────────────
     //
     // 1. A FORK IS NOT LISTED UNTIL IT HAS A TURN OF ITS OWN. Both forks here
-    //    are turn-less, and `thread/list` returns only the source root, in both
-    //    `archived: false` and `archived: true` — so "the row disappeared" is no
-    //    proof of deletion for a fresh fork, and a sidebar built on
-    //    `listAllThreads()` alone would never show one. Run a turn on it and it
-    //    IS listed, exactly like a root and with `forkedFromId: null` on the
-    //    entry — see the probe below, which is why lineage can only come from
-    //    `thread/read`.
+    //    are turn-less, and the active listing returns only the source root — so
+    //    "the row disappeared" is no proof of deletion for a fresh fork, and a
+    //    sidebar built on `listAllThreads()` alone would never show one. Since
+    //    0.160.0, archiving materializes even an empty rollout, so the turn-less
+    //    fork DOES enter `archived: true`. Run a turn on an active fork and it is
+    //    listed like any root and with `forkedFromId: null` on the entry — see
+    //    the probe below, which is why lineage can only come from `thread/read`.
     expect(listBeforeDelete).toEqual([sourceId])
     // 2. Delete AND archive are refused while the owning root process holds the
     //    thread — the contract `CodexService.deleteThread` documents — and the
@@ -633,11 +633,12 @@ it.skipIf(!enabled)(
     expect(listAfterSourceDelete).toEqual([sourceId])
     expect(readDeletedSource).toBe('ok')
     expect(descendantAfterSourceDelete).toBe('ok')
-    // 6. Archive retains the native data: the thread still reads. It adds no row
-    //    to the archived listing either, because a turn-less fork is not listed (1).
+    // 6. Archive retains the native data: the thread still reads. In 0.160.0 it
+    //    materializes the empty rollout and adds the turn-less fork to the
+    //    archived listing (upstream #48828); 0.156.0 left that listing empty.
     expect(archiveUnloadedFork).toBe('ok')
     expect(listAfterArchive).toEqual([sourceId])
-    expect(archivedListed).toEqual([])
+    expect(archivedListed).toEqual([byBefore.thread.id])
     expect(readArchived).toBe('ok')
     // 7. And ARCHIVING the descendant does not lift (5) — only DELETING it does.
     //    So a native delete of a forked thread is a whole-subtree operation,

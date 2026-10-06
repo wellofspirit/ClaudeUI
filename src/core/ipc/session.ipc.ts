@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { discoverCodexModels } from '../codex/model-discovery'
 import { codexCommands, CODEX_CHANNELS } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as path from 'path'
@@ -81,7 +80,6 @@ import type {
   ClaudePermissions
 } from '../../shared/types'
 import {
-  discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -90,7 +88,8 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
+import { getPiModelCatalogGroups } from '../pi/model-discovery'
+import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
@@ -99,7 +98,8 @@ import {
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
+import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
@@ -154,9 +154,8 @@ import {
 // bootstrap fetch a few seconds AFTER a spawn's init resolves (fire-and-forget),
 // so newly-entitled models (e.g. Fable) can be absent from the very first fetch on
 // a cold cache. A short TTL lets a subsequent picker fetch (the renderer re-fetches
-// on cwd change / modelReloadNonce) pick them up without an app restart.
+// on cwd change / a model reload) pick them up without an app restart.
 const MODELS_CACHE_TTL_MS = 2 * 60_000
-let cachedModels: { models: ModelInfo[]; at: number } | null = null
 
 const COMMIT_MSG_SYSTEM_PROMPT =
   'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
@@ -268,54 +267,42 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   }
 }
 
+/** Has a desktop model fetch reported login status from cli.js's init yet? */
+let loginStatusReported = false
+
+/** Test seam: forget that a desktop fetch has reported, so the next one queries again. */
+export function resetLoginStatusReportedForTests(): void {
+  loginStatusReported = false
+}
+
 async function fetchModels(): Promise<ModelInfo[]> {
-  if (cachedModels && Date.now() - cachedModels.at < MODELS_CACHE_TTL_MS) {
-    return cachedModels.models
-  }
+  // A remote picker fetch fills the same catalog, so a fresh one need not be
+  // ours: the desktop's FIRST fetch still queries, because only it reports login
+  // status from the init response (the remote path has no auth side effects).
+  const fresh = loginStatusReported ? freshClaudeModels(MODELS_CACHE_TTL_MS) : null
+  if (fresh) return fresh
 
-  const abort = new AbortController()
-  await ensureHostTokenFresh()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort,
-      // Init-only: killed right after the initialize response.
-      reloadPlugins: false
-    }
-  })
-
-  try {
-    const handle = q as unknown as {
-      supportedModels(): Promise<ModelInfo[]>
-      initializationResult(): Promise<Record<string, unknown>>
-    }
-    const models = await handle.supportedModels()
-    cachedModels = { models, at: Date.now() }
+  const models = await queryClaudeModels((init) => {
     // The same initialize response carries the user's account — report login
     // status at app load so the sign-in banner is accurate before any chat
-    // session is opened. Resolves immediately (init already completed). ADR-014.
-    try {
-      const init = await handle.initializationResult()
-      // reportLoginStatus broadcasts session:auth-source to the window (legacy
-      // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
-      // a no-op with no host wired.
-      reportHostLoginStatus(init?.account)
-      // Also update the ClaudeAuthProvider probe cache so probe() and session.account
-      // are accurate from the first model-fetch, before any chat session opens.
-      // The same signal the banner reads (claude-login-state.ts).
-      if (init?.account) {
-        const { loggedIn, account } = claudeLoginSignal(init.account)
-        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
-      }
-    } catch {
-      /* non-fatal — per-session init will still report status */
+    // session is opened. ADR-014.
+    // reportLoginStatus broadcasts session:auth-source to the window (legacy
+    // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
+    // a no-op with no host wired.
+    reportHostLoginStatus(init?.account)
+    // Also update the ClaudeAuthProvider probe cache so probe() and session.account
+    // are accurate from the first model-fetch, before any chat session opens.
+    // The same signal the banner reads (claude-login-state.ts).
+    if (init?.account) {
+      const { loggedIn, account } = claudeLoginSignal(init.account)
+      updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
     }
-    return models
-  } finally {
-    abort.abort()
-  }
+  })
+  // Set once the query answered, whether or not its init could be read: a
+  // failed read is non-fatal (per-session init reports status too), and must not
+  // send every later fetch past the cache.
+  loginStatusReported = true
+  return models
 }
 
 const SESSION_IPC_CHANNELS = [
@@ -530,7 +517,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       thinkingMode?: string,
       resumeSessionAt?: string,
       forkSession?: boolean,
-      engineId?: EngineId
+      engineId?: EngineId,
+      announce?: CreateSessionArgs['announce']
     ) => {
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
@@ -542,7 +530,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       })
     }
   })
@@ -845,34 +834,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<EngineModelGroup[]> => {
-      // Claude models as a flat group. supportedModels() returns bare ModelInfo
-      // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
-      // pick to the 'claude' engine. Without this, picking a Claude model while on
-      // an opencode session leaves engineId undefined and the pick is mis-recorded
-      // under the session's current engine (e.g. "opencode/default").
-      const claudeModels = (await fetchModels().catch(() => [])).map((m) => ({
-        ...m,
-        engineId: 'claude' as const,
-        vendorId: 'anthropic'
-      }))
-      const claudeGroup: EngineModelGroup = {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: claudeModels
-      }
-      // opencode models — returns [] if binary not present or discovery fails
-      const opencodeGroups = await discoverOpencodeModels()
-      // pi models — returns [] if binary not present, no auth configured, or discovery fails
-      const piGroups = await discoverPiModels()
-      return [
-        claudeGroup,
-        ...opencodeGroups,
-        ...piGroups,
-        ...(await discoverCodexModels().catch(() => []))
-      ]
-    }
+    // One engine, or all of them concurrently; shared with the remote twin
+    // (engine-models.ts), which also validates the engine id.
+    handler: (engineId?: unknown): Promise<EngineModelGroup[]> =>
+      listEngineModels(fetchModels, engineId)
   })
 
   // Which judge-picker values ClaudeUI can call for the auto-mode judge

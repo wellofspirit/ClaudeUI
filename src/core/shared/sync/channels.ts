@@ -441,6 +441,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: "ADR-082 §4: a managed install's phase and bytes (`HarnessInstallProgress`), at most four a second per install. Replicated, not the volatile lane: the lane is scoped to watched sessions and an install belongs to none. It rings, so a reconnecting client can replay stale progress; `harness:state`'s `installs` is the truth, and a `done`/`failed` phase is always the last event of an install. No snapshot field."
   },
+  'engine:models-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: "An engine's model catalog filled after main answered some client a DEGRADED empty one (pi: a failed probe, its backoff, or invalidations overtaking it — `pi/model-discovery.ts`). A nudge carrying only `{ engineId }`; clients re-read that engine's `session:get-engine-models(engineId)`, the one shape. Replicated because the degraded answer may have gone to any client, desktop or remote, and none of them asks again on its own. Rings like `harness:changed`: a replay costs one warm-cache reload. No snapshot field."
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     ring: true,

@@ -310,7 +310,12 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { registerSessionIpc } from '../../../core/ipc/session.ipc'
+import { registerSessionIpc, resetLoginStatusReportedForTests } from '../../../core/ipc/session.ipc'
+import { setHostAuth } from '../../../core/host'
+import {
+  resetCachedClaudeModels,
+  setCachedClaudeModels
+} from '../../../core/services/claude-model-catalog'
 import { gitServiceManager } from '../../../core/services/git-service'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { commandRegistry, hostConnection } from '../../../core/ipc/command-registry'
@@ -924,6 +929,100 @@ describe('session.ipc', () => {
           options: expect.objectContaining({ reloadPlugins: false })
         })
       )
+    })
+
+    // The composer asks per engine (engine-models.ts); the id must reach the
+    // handler through the desktop transport, or every request answers all four.
+    it('session:get-engine-models carries its engine id: codex probes only codex', async () => {
+      const { discoverCodexModels } = await import('../../../core/codex/model-discovery')
+      const native = {
+        engineId: 'codex' as const,
+        vendorId: 'openai',
+        vendorName: 'OpenAI',
+        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'codex' as const }]
+      }
+      vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+      await expect(harness.call('session:get-engine-models', 'codex')).resolves.toEqual([native])
+      // Claude's probe never ran.
+      expect(vi.mocked(query)).not.toHaveBeenCalled()
+      await expect(harness.call('session:get-engine-models', 'gemini')).rejects.toThrow(
+        /unknown engine/
+      )
+    })
+
+    describe('session:get-models login-status reporting', () => {
+      // A remote picker fetch fills the same catalog WITHOUT reporting login status
+      // (it has no auth side effects), so a fresh catalog must not make the
+      // desktop's first fetch skip its own query.
+      const reportLoginStatus = vi.fn()
+      const account = { emailAddress: 'someone@example.test' }
+
+      function answerWith(initializationResult: () => Promise<unknown>): void {
+        vi.mocked(query).mockImplementationOnce((() => {
+          async function* empty(): AsyncGenerator<unknown> {
+            /* noop */
+          }
+          const gen: any = empty()
+          gen.supportedModels = async () => [{ value: 'sonnet', description: '' }]
+          gen.initializationResult = initializationResult
+          return gen
+        }) as any)
+      }
+
+      beforeEach(() => {
+        reportLoginStatus.mockClear()
+        vi.mocked(query).mockClear()
+        resetCachedClaudeModels()
+        resetLoginStatusReportedForTests()
+        setHostAuth({
+          getAccountState: vi.fn(),
+          buildClaudeAccountRef: vi.fn(),
+          updateClaudeAuthSource: vi.fn(),
+          reportLoginStatus
+        } as any)
+      })
+
+      afterEach(() => {
+        setHostAuth(null)
+        resetCachedClaudeModels()
+        resetLoginStatusReportedForTests()
+      })
+
+      it('queries and reports on the first desktop fetch even when a remote fetch filled the catalog (GUARD)', async () => {
+        setCachedClaudeModels([{ value: 'from-remote', description: '' }] as any)
+        answerWith(async () => ({ account }))
+
+        const res = await harness.call<any[]>('session:get-models')
+
+        expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+        expect(reportLoginStatus).toHaveBeenCalledTimes(1)
+        expect(reportLoginStatus).toHaveBeenCalledWith(account)
+        expect(res).toEqual([{ value: 'sonnet', description: '' }])
+      })
+
+      it('then serves the next desktop call within the TTL from the cache', async () => {
+        answerWith(async () => ({ account }))
+        await harness.call('session:get-models')
+        vi.mocked(query).mockClear()
+
+        await harness.call('session:get-models')
+
+        expect(vi.mocked(query)).not.toHaveBeenCalled()
+        expect(reportLoginStatus).toHaveBeenCalledTimes(1)
+      })
+
+      it('an init that cannot be read is non-fatal and does not send later calls past the cache', async () => {
+        answerWith(async () => {
+          throw new Error('init unavailable')
+        })
+        await harness.call('session:get-models')
+        expect(reportLoginStatus).not.toHaveBeenCalled()
+        vi.mocked(query).mockClear()
+
+        await harness.call('session:get-models')
+
+        expect(vi.mocked(query)).not.toHaveBeenCalled()
+      })
     })
 
     it.each([

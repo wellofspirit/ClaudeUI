@@ -39,6 +39,8 @@ describe('PiEngineToolMap.kindOf', () => {
     ['agent', 'task'],
     // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
+    // The bridge's read-only list_models (ADR-089 S3): a one-line note.
+    ['list_models', 'note'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
     // Unknown tool names fall through gracefully.
@@ -464,6 +466,33 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
     )
   })
 
+  it('V1b: the model chip shows the RESOLVED model once the result says it, else what was asked for', () => {
+    const asked = { ...input, model: 'opus' }
+    // No result yet, a refusal, or a result without the host line: the request.
+    expect(PiEngineToolMap.normalize('task', asked)).toMatchObject({ model: 'opus' })
+    expect(
+      PiEngineToolMap.normalize('task', asked, result('Unknown model "opus".', true))
+    ).toMatchObject({ model: 'opus' })
+    // The host's launch acknowledgement and foreground trailer carry the resolved value.
+    const launchedWithModel = result(
+      "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: anthropic/claude-opus-4-5-20251101\nThe agent is working in the background."
+    )
+    expect(PiEngineToolMap.normalize('task', asked, launchedWithModel)).toMatchObject({
+      model: 'anthropic/claude-opus-4-5-20251101',
+      background: true
+    })
+    const foreground = result(
+      "the report\n\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: openai/o3\n<usage>total_tokens: 1\ntool_uses: 0\nduration_ms: 5</usage>"
+    )
+    expect(PiEngineToolMap.normalize('task', asked, foreground)).toMatchObject({
+      model: 'openai/o3'
+    })
+    // No model asked and none resolved: no chip.
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).not.toHaveProperty(
+      'model'
+    )
+  })
+
   it('an async-launched result is background: running until its notification', () => {
     const view = PiEngineToolMap.normalize('task', input, launched)
     expect(view).toMatchObject({ background: true })
@@ -482,6 +511,29 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
       background: false
     })
     expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+  })
+})
+
+describe('PiEngineToolMap — list_models row (ADR-089 S3)', () => {
+  it('a one-line note naming the query; the (long) result list is not the row text; task_stop is unchanged', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 't',
+      toolResult: ['Current session model: a/b', 'x/y — Y'].join('\n'),
+      isError: false
+    }
+    expect(PiEngineToolMap.normalize('note', {}, result)).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed the available models'
+    })
+    expect(PiEngineToolMap.normalize('note', { query: ' sonnet ' })).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed models matching "sonnet"'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toMatchObject({ icon: 'stop' })
+    expect(PiEngineToolMap.displayName('list_models')).toBe('Models')
   })
 })
 
@@ -508,6 +560,28 @@ describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () =
       kind: 'note',
       icon: 'stop',
       text: 'Stopped agent scout'
+    })
+  })
+
+  it('send_message refused: the host answer is the text, the attempted message a field', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'detail',
+        { to: 'nobody-here', message: 'hello' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'No agent "nobody-here" in this session. Agents: (none)',
+          isError: true
+        }
+      )
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'nobody-here' },
+        { label: 'message', value: 'hello' }
+      ],
+      text: 'No agent "nobody-here" in this session. Agents: (none)'
     })
   })
 

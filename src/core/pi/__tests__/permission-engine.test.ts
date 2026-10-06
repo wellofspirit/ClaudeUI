@@ -349,9 +349,10 @@ describe('isPlanSafeBashCommand (M5a — per-segment validation, deny-when-unsur
 })
 
 describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
-  it('contains exactly the three hosted LLM tools, not dispatch_agent', () => {
+  it('contains exactly the three hosted LLM tools plus the read-only list_models, not dispatch_agent', () => {
     expect([...PI_AUTO_ALLOW_HOSTED_TOOLS].sort()).toEqual([
       'create_mockup',
+      'list_models',
       'render_mermaid',
       'show_mockup'
     ])
@@ -376,6 +377,16 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
       expect(decide(toolName, {}, ctx)).toBe('allow')
     }
   )
+
+  it('list_models (ADR-089 S3) is a note-kind, read-only hosted tool: auto-allowed in every mode, plan included, with no card', () => {
+    expect(piToolKind('list_models')).toBe('note')
+    for (const mode of ['default', 'acceptEdits', 'plan', 'full']) {
+      const ctx = { mode, rules: rules({ ask: ['Bash'] }), sessionAllows: NO_SESSION_ALLOWS }
+      expect(decide('list_models', { query: 'x' }, ctx), mode).toBe('allow')
+    }
+    // Unlike dispatch_agent / agent it needs no mode-base decision.
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('list_models')).toBe(true)
+  })
 
   it('dispatch_agent is NOT auto-allowed — normal mode-base gating (ask in default)', () => {
     const ctx = { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
@@ -1020,6 +1031,7 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
         'agent',
         'create_mockup',
         'dispatch_agent',
+        'list_models',
         'render_mermaid',
         'send_message',
         'show_mockup',

@@ -14,6 +14,13 @@ import type {
   SharedProviderRouteDiagnosis
 } from '../../shared/shared-provider'
 
+/**
+ * The writers and removers invalidate opencode's model cache themselves, and
+ * only when the stored credential actually changed — so the adapter adds no
+ * invalidation of its own after a vend or a removal: re-vending an unchanged
+ * key, or removing one that is not there, at boot must not kill the model probe
+ * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorAuth`).
+ */
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
   feedOauthCredential(vendorId: string, credential: CodexCredentialInput): Promise<void>
@@ -168,7 +175,6 @@ export class OpencodeSharedProviderAdapter {
     }
     if (!definition.routes.opencode.enabled) return
     await this.authTarget.setVendorApiKey(opencodeProviderId(definition), apiKey)
-    this.invalidateModelCache()
   }
 
   async vendOauthCredential(
@@ -180,7 +186,6 @@ export class OpencodeSharedProviderAdapter {
     }
     if (!definition.routes.opencode.enabled) return
     await this.authTarget.feedOauthCredential(opencodeProviderId(definition), credential)
-    this.invalidateModelCache()
   }
 
   /**
@@ -193,7 +198,6 @@ export class OpencodeSharedProviderAdapter {
     if (!running && this.authTarget.removeVendorAuthDirect)
       await this.authTarget.removeVendorAuthDirect(vendorId)
     else await this.authTarget.removeVendorAuth(vendorId)
-    this.invalidateModelCache()
   }
 
   hasDefinition(definition: SharedProviderDefinition): boolean {

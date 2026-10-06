@@ -696,7 +696,7 @@ function PiSessionDefaultModel({
 
   useEffect(() => {
     window.api
-      .getEngineModels()
+      .getEngineModels('pi')
       .then((groups) => {
         const pi = groups.filter((g) => g.engineId === 'pi')
         setModels(pi.flatMap((g) => g.models))
@@ -706,7 +706,7 @@ function PiSessionDefaultModel({
 
   const refreshModels = (): void => {
     window.api
-      .getEngineModels()
+      .getEngineModels('pi')
       .then((groups) =>
         setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
       )

@@ -134,6 +134,15 @@ export function payloadExecutable(id: HarnessId, root: string): string | null {
   return candidates.find(isFile) ?? null
 }
 
+/** Why `p` is not a usable file, for a log line: the stat error code, or what it is instead. */
+function statProblem(p: string): string {
+  try {
+    return fs.statSync(p).isFile() ? 'is a file' : 'not a file'
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code ?? String(err)
+  }
+}
+
 function readVersionField(file: string): string | null {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
@@ -449,6 +458,18 @@ function resolveClaude(selection: HarnessSelection): ResolvedHarness {
     }
   }
   const missing = 'Claude Code was not found in this ClaudeUI build'
+  // `isFile` reads any stat failure as "absent", and this answer is cached until
+  // the next invalidation, so say what each probe actually hit: a transient
+  // sharing violation (EBUSY/EPERM) reads very differently from ENOENT.
+  logger.warn(
+    'harness',
+    `bundled Claude Code not found: ${bundledClaudeRoots()
+      .map((root) => {
+        const bin = path.join(root, exe(EXECUTABLES.claude))
+        return `${bin} (${statProblem(bin)})`
+      })
+      .join('; ')}`
+  )
   return {
     id: 'claude',
     path: null,

@@ -435,10 +435,10 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
  * (SettingsDialog only wires the 'claude' engine config), editing ONLY the
  * `autoMode` block so sibling blocks (`dispatch`, `piConfig`, …) survive.
  *
- * The judge-model picker is fed from `getEngineModels()` filtered to this
- * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
- * exactly what both sessions hand the judge route resolver as
- * `autoMode.judgeModel`. ClaudeUI makes the judge's model call itself
+ * The judge-model picker is fed from `getEngineModels(engineId)`, so its
+ * option values are picker VALUES (`<provider>/<modelId>`) — exactly what both
+ * sessions hand the judge route resolver as `autoMode.judgeModel`. ClaudeUI
+ * makes the judge's model call itself
  * (ADR-081), so the list is then narrowed to the models it can call
  * (`judgeModelSupport`); a saved value it can't call, or a list with nothing
  * left in it, gets a notice under the picker ({@link JudgeSupportNotice}).
@@ -474,7 +474,7 @@ function AutoModeSection({
       .catch(() => setEngineCfg({}))
     setSupport(null)
     window.api
-      .getEngineModels()
+      .getEngineModels(engineId)
       .then((groups) => {
         const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
         setModels(own)
@@ -1186,7 +1186,7 @@ function OpencodeModelsSection(): React.JSX.Element {
       .then(setCfg)
       .catch(() => setCfg({}))
     window.api
-      .getEngineModels()
+      .getEngineModels('opencode')
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
         setModels(oc.flatMap((g) => g.models))

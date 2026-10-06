@@ -29,6 +29,7 @@ vi.mock('../MarkdownRenderer', () => ({
 }))
 
 import { TaskCard } from '../TaskCard'
+import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -655,6 +656,44 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     )
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('V1a: a pi agent call the host refused (isError result, no lifecycle record) reads failed, not completed or running', () => {
+    const piInput = { description: 'd', prompt: 'p', model: 'gpt-9' }
+    const refused = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult: 'Unknown model "gpt-9". Call list_models to see the models available to agents.',
+      isError: true
+    }
+    const view = PiEngineToolMap.normalize('task', piInput, refused)
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolName: 'agent', toolInput: piInput })}
+        result={refused}
+        view={view as typeof defaultTaskView}
+      />
+    )
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'failed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('V1a: the same call with a non-error foreground report reads completed', () => {
+    const piInput = { description: 'd', prompt: 'p', run_in_background: false }
+    const done = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult: 'the report',
+      isError: false
+    }
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolName: 'agent', toolInput: piInput })}
+        result={done}
+        view={PiEngineToolMap.normalize('task', piInput, done) as typeof defaultTaskView}
+      />
+    )
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'completed')
   })
 
   it('native task card unchanged: running in the foreground → both Stop and "Send to background" render', () => {

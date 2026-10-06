@@ -650,8 +650,9 @@ app.whenReady().then(() => {
   // and `app.getVersion()` is reachable from main alone.
   setHostAppVersion(appVersion)
   ipcMain.handle('app:version-info', () => versionInfo())
-  // Mirror to the remote dispatcher so the web client's Settings dialog can
-  // read the server's build versions.
+  // Override the remote `app:version-info` source with the display-form version
+  // (the channel itself is registered by core, so this is order-independent), so
+  // the web client's Settings dialog reads the same build versions as ours.
   registerRemoteVersionInfo(versionInfo)
 
   // ── App menu (About panel + standard shortcuts) ────────────────────

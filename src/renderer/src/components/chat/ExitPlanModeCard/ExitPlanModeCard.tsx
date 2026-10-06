@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import type { PendingApproval, ContentBlock as _ContentBlock } from '../../../../../shared/types'
 import type { ToolView } from '../../../../../shared/tool-kinds'
+import { sessionSpawnEffort, spawnAnnouncement } from '../../../lib/session-effort'
 import { waitForModeChange } from './utils'
 import { ExitPlanModeCardView } from './View'
 
@@ -63,7 +64,17 @@ export function ExitPlanModeCard({
     // user's chosen model (like every other spawn path) instead of discarding it.
     const preSession = useSessionStore.getState().sessions[activeSessionId]
     const model = preSession?.selectedModel
-    const effort = preSession?.effort ?? undefined
+    // The spawn's own resolver (not the bare pick): a session on the model's
+    // starting effort has `effort === null`, and sending `undefined` here made the
+    // fresh session start at cli.js's heuristic instead. Codex keeps its native pick.
+    const effort =
+      preSession && selectedEngineId !== 'codex'
+        ? sessionSpawnEffort(useSessionStore.getState(), preSession)
+        : (preSession?.effort ?? undefined)
+    // Read now: `clearConversation` blanks the session's picks, and the birth
+    // event below must hand the fresh spawn's effort / thinking mode back to
+    // every replica as the session's own.
+    const announce = spawnAnnouncement(useSessionStore.getState(), preSession, effort)
     const thinkingMode = preSession?.thinkingMode ?? undefined
 
     // Get the session log path before cancelling (for transcript reference)
@@ -100,7 +111,8 @@ export function ExitPlanModeCard({
       thinkingMode,
       undefined,
       undefined,
-      selectedEngineId
+      selectedEngineId,
+      announce
     )
     markSdkActive(activeSessionId)
     // No local mode write: the fresh spawn's own init emits

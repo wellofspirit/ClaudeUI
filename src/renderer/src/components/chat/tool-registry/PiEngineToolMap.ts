@@ -56,7 +56,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
-import { isPiAsyncLaunchResult } from '../../../../../shared/pi-agent-result'
+import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
 import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -118,6 +118,10 @@ function piKindOf(toolName: string): ToolKind {
     case 'send_message':
       return 'detail'
     case 'task_stop':
+      return 'note'
+    // The bridge's read-only `list_models`: a one-line note. Mirrors
+    // permission-engine.ts's piToolKind.
+    case 'list_models':
       return 'note'
     default:
       return 'unknown'
@@ -236,13 +240,19 @@ function piNormalize(
             ? inp.subagent_type
             : undefined
         const name = typeof inp.name === 'string' && inp.name !== '' ? inp.name : type
+        const resolvedModel =
+          (result ? piAgentResultModel(result) : undefined) ||
+          (typeof inp.model === 'string' && inp.model !== '' ? inp.model : undefined)
         return {
           kind: 'task',
           description: inp.description,
           prompt: inp.prompt,
           subagent: type ?? DEFAULT_SUBAGENT_TYPE.pi,
           ...(name ? { name } : {}),
-          ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {}),
+          // The model the host resolved the request to (an alias or bare id is
+          // not what runs), once the result says; until then, and for a refused
+          // call, what was asked for.
+          ...(resolvedModel ? { model: resolvedModel } : {}),
           // Once a result exists it decides (ADR-089 S3): only the host's
           // launch acknowledgement means a background run. A call refused
           // before any spawn (validation, start failure, a deny) is settled,
@@ -300,13 +310,35 @@ function piNormalize(
       if (typeof inp.summary === 'string' && inp.summary !== '') {
         fields.push({ label: 'summary', value: inp.summary })
       }
+      // A refused send_message shows WHY (the host's answer); the message it
+      // tried to send moves into the fields.
+      if (result?.isError === true) {
+        if (typeof inp.message === 'string' && inp.message !== '') {
+          fields.push({ label: 'message', value: inp.message })
+        }
+        return { kind: 'detail', fields, text: result.toolResult }
+      }
       const text = typeof inp.message === 'string' ? inp.message : result?.toolResult
       return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
     }
 
-    // task_stop (ADR-089 S3b): the host's own answer once there is one — a
-    // refusal or "not running" must not read as a stop.
-    case 'note':
+    // Both pi 'note' tools, told apart by input shape (piNormalize never sees
+    // the tool name): task_stop always carries `task_id`; list_models takes at
+    // most a `query`.
+    case 'note': {
+      // list_models: the result is a long list the model reads — the row says
+      // only what was asked (a FAILED call still shows what came back, as
+      // every note row does).
+      if (!('task_id' in inp)) {
+        const query = typeof inp.query === 'string' ? inp.query.trim() : ''
+        return {
+          kind: 'note',
+          icon: 'search',
+          text: query ? `Listed models matching "${query}"` : 'Listed the available models'
+        }
+      }
+      // task_stop (ADR-089 S3b): the host's own answer once there is one — a
+      // refusal or "not running" must not read as a stop.
       return {
         kind: 'note',
         icon: 'stop',
@@ -315,6 +347,7 @@ function piNormalize(
             ? result.toolResult
             : `Stopped agent ${typeof inp.task_id === 'string' ? inp.task_id : ''}`.trim()
       }
+    }
 
     case 'mcp':
       return { kind: 'mcp', input: inp }
@@ -346,7 +379,8 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   show_mockup: 'Mockup',
   dispatch_agent: 'Dispatch',
   agent: 'Agent',
-  subagent: 'Subagent'
+  subagent: 'Subagent',
+  list_models: 'Models'
 }
 
 function piDisplayName(toolName: string): string {

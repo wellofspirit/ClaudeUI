@@ -86,6 +86,11 @@ describe('createCollabServer', () => {
     // The description must teach the model the continuation contract.
     expect(server.tools[0].description).toContain('session_id')
     expect(server.tools[0].description).toContain('user-configured')
+    // S4: Claude is steered to its own Agent tool for ordinary delegation.
+    expect(server.tools[0].description).toContain(
+      'Use this only when the user asks for a different engine or model vendor'
+    )
+    expect(server.tools[0].description).toContain('use your own Agent tool instead')
   })
 
   it('happy path: delegates to the dispatcher with the full context and appends the session_id', async () => {

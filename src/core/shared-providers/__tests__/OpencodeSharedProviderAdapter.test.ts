@@ -268,7 +268,9 @@ describe('OpencodeSharedProviderAdapter', () => {
     })
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('openai')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    // Neither: the feed and the removal invalidate in the auth target, and only
+    // when they change the stored credential.
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   it('fails closed when API-key and OAuth credentials target the wrong provider kind', async () => {
@@ -282,13 +284,27 @@ describe('OpencodeSharedProviderAdapter', () => {
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
-  it('vends API keys through the auth target and invalidates after credential mutations', async () => {
+  // The sync removes the key of every provider whose opencode route is off at
+  // each boot, mostly where there is none; the auth target skips an absent entry
+  // and invalidates only when it removes one, so the adapter must not add its own.
+  it('vends and removes API keys through the auth target, adding no invalidation', async () => {
     const { adapter, authTarget, invalidateModelCache } = setup()
     await adapter.vendApiKey(definition, 'secret')
     await adapter.removeCredential(definition)
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    expect(invalidateModelCache).not.toHaveBeenCalled()
+  })
+
+  // The shared-provider sync re-vends every key at each boot. The auth target
+  // invalidates the model cache itself, and only when the stored credential
+  // changed; a second invalidation here killed the model probe in flight even
+  // when nothing had.
+  it('adds no invalidation of its own after a vend — the auth target owns it', async () => {
+    const { adapter, invalidateModelCache } = setup()
+    await adapter.vendApiKey(definition, 'secret')
+    await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   describe('diagnoseZeroModels', () => {

@@ -2,6 +2,7 @@
 
 **Status:** Accepted (implemented on branch `pi`, M0–M4c)
 **Date:** 2026-07-20
+**Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — `PiRpcClient.dispose()` closes stdin and tree-kills only after a 2 s grace (a pi signalled during startup leaks its `models-store.json` lock).
 **Relates to:** ADR-018 (engine/vendor/account model), ADR-019 (opencode backend — the template this
 mirrors), ADR-020 (persistence/config plane), ADR-021 (neutral auth), ADR-022 (permission mapping),
 ADR-024 (interaction parity), ADR-025 (engine-neutral delete), ADR-030 (capability honesty),

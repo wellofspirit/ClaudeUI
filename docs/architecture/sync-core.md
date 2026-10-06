@@ -514,13 +514,20 @@ line is a named next step with the reason it is not phase-4 work.
   to emit the birth event before constructing the session, which reorders a spawn path
   with its own races. Recorded so the next reader does not mistake it for the ghost
   class F7 closed.
-- **Fork seeding reads the whole parent transcript for its status line.** F3 truncates
-  the MESSAGES at the anchor, but `ClaudeSession`'s resume-time
-  `reconcileAccumulatorsFromTranscript` (and `computeTokenMetrics` behind it) still
-  walks the parent's entire file, so a fork's opening token/cost figures include the
-  turns the fork discarded. Cosmetic and self-correcting — the first `result` of the
-  forked session replaces them with cli.js's authoritative numbers — but wrong until
-  then. The fix is the same anchor, threaded one level further down.
+- ~~**Fork seeding reads the whole parent transcript for its status line.**~~
+  **RESOLVED.** Two readers were named; neither still over-counts. (1) `ClaudeSession`'s
+  resume-time `reconcileAccumulatorsFromTranscript` was already guarded for forks
+  (`claude-session.ts`, the `!this.forkSession` condition at its call): a fork's fresh
+  transcript reconciles normally after its first result instead. (2) The status line
+  `loadSessionHistory` returns — which canonical's seed writes
+  (`seed-canonical-transcript.ts`) and `session:load-history` serves — came from
+  `computeTokenMetrics(filePath)` over the whole file. It now takes the same
+  `resumeSessionAt` anchor as the message truncation, with the same boundary (the anchor
+  line is the last one counted) and the same fallback (an anchor not in the file
+  truncates nothing), and limits subagent spend to the agents the kept lines spawned.
+  Agents spawned from inside a subagent cannot be placed on a side of the anchor from
+  the main file, so a truncated read leaves them out (a slight under-count rather than
+  the parent's whole spend).
 - ~~**The delete channels keep the `config` capability while now cancelling engines.**~~
   **RESOLVED by ADR-056:** both moved to `chat`, in both registrars. The review this
   asked for concluded that the honest label was neither "config" nor something
@@ -669,14 +676,41 @@ background reconnect catches up without a `sync-full`.
 
 **Replication gaps recorded rather than closed:**
 
-- **The desktop's effort / thinking-mode / reasoning-variant picks are client-local.**
-  `session-store`'s `setEffort` / `setThinkingMode` / `setReasoningVariant` call
-  `patchLocalSession` with no IPC: the desktop picker RESTARTS the session and the
-  respawn carries the value, so between the pick and the respawn that value's only home
-  is the client that made it — canonical (and therefore every remote client) does not
-  see it. Main-side setters exist (`session:set-effort`, `session:set-thinking-mode`)
-  and the pre-spawn `session:config-changed` echo exists; wiring the desktop picker to
-  them is the remaining half.
+- **The reasoning-variant pick is client-local until the session is live.** Effort and
+  thinking mode were the same gap and are now CLOSED for Claude / opencode / pi, by
+  freezing what the process starts with into the session. Their pickers write
+  `session-store`'s `setEffort` / `setThinkingMode` (`patchLocalSession`, no IPC) and
+  RESTART the session, and every spawn (the respawn, and the first send, which is also
+  how a pre-spawn pick leaves the originating client) goes through `session:create`,
+  whose trailing `announce` argument says what every replica adopts as the session's own
+  (`spawnAnnouncement`, `lib/session-effort.ts`): `effort` is `null` for a model KNOWN to
+  take none, omitted for a model the client does not know (empty or failed catalog), and
+  otherwise a signal to announce the effort the host spawns with; `thinkingMode` is the
+  raw pick. `prepareAndCreateSession` puts `thinkingMode` on `session:created` whenever
+  `announce` is present and `effort` unless it was omitted (`null` clears), taking the
+  effort from the positional spawn arg so replicas show what the process runs, and the
+  reducer folds them by key presence — an unknown model can therefore never wipe a pick. A client that omits
+  `announce` (cached phone bundles; WS JSON `null`) sends neither field and behaves as
+  before. Canonical `effort` is therefore null only BEFORE a session's first spawn, when
+  the per-model starting effort still applies and every client derives it from the
+  replicated settings (Claude: `modelEffortDefaults`, keyed by `claudeEffortKey`; pi:
+  `engineEffortDefaults.pi`, keyed by the model value — kept apart so a pi model embedding
+  a Claude id cannot hit a Claude row; opencode and Codex remember none); at spawn that
+  effort becomes the session's own. Freezing is the intent: a later change to the
+  per-model value (the composer's effort pick also rewrites it, "remembered per
+  model") affects only sessions that have not started, and every replica shows what the
+  process runs rather than the current map. The freeze lasts for the host run: canonical
+  `effort` is not persisted, so after a host restart a resumed session re-resolves
+  against the current per-model value, which is also what it is respawned with. A model
+  switch on a session that has not started (no process, no thread id) clears the effort
+  so the new model's starting effort applies; a started or running one keeps its
+  (coerced) effort, as the live process does. Codex's native tiers are out of scope:
+  they use the live `session:set-effort` setter. Still open:
+  `session:set-reasoning-variant` has a main-side setter, but `session:config-changed`
+  is dropped when no live session exists (the R5 gate in `handlers-core.ts` — a
+  pre-spawn session lives only in its creating client's replica, so the echo the earlier
+  design assumed does not exist), so a pre-spawn variant pick still reaches no other
+  client.
 - **A zero-session `sync-full` cannot carry `slashCommands` / `sdkSkillNames`.**
   `SyncCore.setAppState` seeds them app-level at boot, but `FullStateSnapshot` has no
   app-level field — `toSnapshot` fans the one list into every PER-SESSION entry — so a

@@ -254,6 +254,245 @@ export function modelResolveEffort(
   return modelDefaultEffort(model)
 }
 
+/**
+ * `efforts` with one row's starting effort written (or cleared, `next ===
+ * undefined`). Writing moves a v3.5 value off its legacy key so it cannot
+ * resurface. The ONE writer of `modelEffortDefaults`: the Settings table and the
+ * composer's remembered pick both go through it, so they cannot disagree about
+ * which key a row lives under.
+ */
+export function withSavedEffort(
+  efforts: Partial<Record<string, EffortLevel>> | undefined,
+  row: { key: string; legacyKey?: string },
+  next: EffortLevel | undefined
+): Partial<Record<string, EffortLevel>> {
+  const map = { ...efforts }
+  if (row.legacyKey) delete map[row.legacyKey]
+  if (next === undefined) delete map[row.key]
+  else map[row.key] = next
+  return map
+}
+
+/**
+ * The settings slice the per-model starting effort lives in. Two maps, because
+ * two namespaces: Claude's `modelEffortDefaults` is keyed by `claudeEffortKey`
+ * (alias / resolved id, with v3.5 legacy keys), while every other remembering
+ * engine uses `engineEffortDefaults[engineId][modelValue]` — the picker value
+ * VERBATIM (pi's `provider/model` is already unique per provider). Keeping them
+ * apart is what stops pi's `anthropic/claude-opus-5-5` from landing on the key
+ * Claude's own `opus` row owns.
+ */
+export interface EffortDefaultsSlice {
+  modelEffortDefaults?: Partial<Record<string, EffortLevel>>
+  engineEffortDefaults?: Partial<Record<string, Partial<Record<string, EffortLevel>>>>
+  /** `AppSettings.newSessionModel`; see {@link carriesPicksIntoNewSessions}. */
+  newSessionModel?: string
+}
+
+/** The two maps themselves: what {@link rememberEffortPatch} returns to be merged into settings. */
+export type EffortDefaultsPatch = Pick<
+  EffortDefaultsSlice,
+  'modelEffortDefaults' | 'engineEffortDefaults'
+>
+
+/**
+ * Do composer picks carry into NEW sessions? The `newSessionModel` rule as a
+ * predicate (`'last-picked'`, or absent, does; `'configured-default'` does not).
+ * THE one statement of it: the model pick follows it (`seedingModelPicks`), the
+ * composer's remembered effort follows it (the write gate in the composer and the
+ * read gate in {@link savedEffortFor}), and the Settings note reads it, so a user
+ * who chose "new sessions start on the configured default" is handed neither the
+ * last model nor the last effort they picked.
+ */
+export function carriesPicksIntoNewSessions(settings: { newSessionModel?: string }): boolean {
+  return settings.newSessionModel !== 'configured-default'
+}
+
+/**
+ * Does this engine remember a per-model starting effort? Claude and pi. opencode
+ * models take no effort (reasoning variants instead) and Codex's tiers are native
+ * and applied over a live setter, so neither remembers. The ONE predicate:
+ * {@link savedEffortFor} (the resolver's middle rung) and
+ * {@link rememberEffortPatch} (the composer's write) both gate on it.
+ */
+export function engineRemembersEffort(engineId: string | undefined): boolean {
+  const id = engineId ?? 'claude'
+  return id === 'claude' || id === 'pi'
+}
+
+/**
+ * The starting effort saved for a model, or undefined. THE reader of both maps:
+ * Claude through `modelEffortDefaults` and `claudeEffortKey` (legacy keys
+ * included), pi through `engineEffortDefaults.pi[modelValue]`. Not clamped here:
+ * the spawn clamp ({@link resolveSpawnEffort}) holds a saved value to the model's
+ * levels.
+ */
+export function savedEffortFor(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[]
+): EffortLevel | undefined {
+  if (!settings || !model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  // Claude's map IS the configured table (the Settings page edits it), so it
+  // applies in both modes. Everything in `engineEffortDefaults` is a remembered
+  // composer pick with no table to see or clear it, so it applies only while
+  // composer picks carry into new sessions — otherwise a pick made earlier would
+  // keep applying after the user chose "the configured default".
+  if (id === 'claude') return claudeSavedEffort(settings.modelEffortDefaults, model, engineModels)
+  if (!carriesPicksIntoNewSessions(settings)) return undefined
+  return settings.engineEffortDefaults?.[id]?.[model.value]
+}
+
+/**
+ * The settings PATCH that remembers `level` as the model's starting effort, or
+ * undefined — write nothing — for an engine that does not remember, or a model
+ * not in the catalog (no row to key it under; a pick must not be filed under
+ * `''`). THE writer, the twin of {@link savedEffortFor}: `{modelEffortDefaults}`
+ * for Claude (through {@link withSavedEffort}, so a legacy key moves to the new
+ * one), `{engineEffortDefaults}` for the rest.
+ */
+export function rememberEffortPatch(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[],
+  level: EffortLevel
+): EffortDefaultsPatch | undefined {
+  if (!model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  if (id === 'claude') {
+    return {
+      modelEffortDefaults: withSavedEffort(
+        settings?.modelEffortDefaults,
+        {
+          key: claudeEffortKey(model, engineModels),
+          legacyKey: claudeLegacyEffortKey(model, engineModels)
+        },
+        level
+      )
+    }
+  }
+  const all = settings?.engineEffortDefaults ?? {}
+  return { engineEffortDefaults: { ...all, [id]: { ...all[id], [model.value]: level } } }
+}
+
+/**
+ * The effort a non-native-effort session (Claude / opencode / pi) WANTS, before
+ * any clamp to the model's levels: its own explicit pick, else — for an engine
+ * that remembers (Claude, pi; {@link savedEffortFor}) — the user's per-model
+ * starting effort, else cli.js's own heuristic default.
+ *
+ * The ONE statement of that ladder. The composer's pill and every spawn site
+ * (first send, respawn after a pick, retry, plan "start fresh", review) read it,
+ * so what the pill says is what the process is started with by construction. A
+ * display that skipped the middle rung showed `medium` on a session that really
+ * ran the user's configured `high`.
+ */
+export function resolveDesiredEffort(args: {
+  /** The session's own pick (`session.effort`); `null`/absent = unset. */
+  explicit: string | null | undefined
+  /** The session's engine; absent = Claude. */
+  engineId?: string
+  modelInfo: ModelCapabilityInput | undefined | null
+  /** The catalog the row's `claudeEffortKey` is judged against (its engine's). */
+  engineModels: readonly ClaudeEffortRowInput[]
+  effortDefaults: EffortDefaultsSlice | undefined
+}): EffortLevel {
+  // Not the native branch: the only values a non-native session's pick can hold
+  // are the Claude rungs, the only ones its picker offers.
+  return (
+    (args.explicit as EffortLevel | null | undefined) ??
+    savedEffortFor(args.effortDefaults, args.engineId, args.modelInfo, args.engineModels) ??
+    modelDefaultEffort(args.modelInfo)
+  )
+}
+
+/**
+ * {@link resolveDesiredEffort} clamped to what the model accepts — the value a
+ * spawn sends and the pill shows. A model that takes no effort at all (`null`
+ * from the clamp) keeps the desired value, as the spawn always has.
+ */
+export function resolveSpawnEffort(args: Parameters<typeof resolveDesiredEffort>[0]): EffortLevel {
+  const desired = resolveDesiredEffort(args)
+  return modelResolveEffort(args.modelInfo, desired) ?? desired
+}
+
+/**
+ * The model row an AUTOMATION is judged on — its run and its config screen both:
+ * `modelValue` (`automation.model || 'default'`) in the Claude `catalog` the caller
+ * has (the renderer's undeduped picker models; the host's last
+ * `supportedModels()`), else a row built from the model the value NAMES.
+ *
+ * The fallback matters because a bare alias judged by its raw value is opaque to
+ * the id heuristics (`opus` → "no effort, no adaptive thinking"). So the missing
+ * row's capabilities come from {@link canonicalizeModelValue}'s model, while its
+ * `value` stays the alias, which is what the starting-effort key is derived from.
+ * For a canonical id nothing changes (it canonicalises to itself); `default` has no
+ * mapping and stays heuristic-judged, as before.
+ */
+export function automationModelRow(
+  modelValue: string,
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+): ModelCapabilityInput & ClaudeEffortRowInput {
+  const found = catalog.find((m) => m.value === modelValue)
+  if (found) return found
+  const canonical = canonicalizeModelValue(modelValue)
+  return {
+    value: modelValue,
+    resolvedModel: canonical,
+    supportsEffort: supportsEffort(canonical),
+    supportedEffortLevels: supportedEffortLevels(canonical),
+    supportsAdaptiveThinking: supportsAdaptiveThinking(canonical)
+  }
+}
+
+/**
+ * The effort an AUTOMATION runs at — and the config screen shows: the
+ * automation's own effort, else Claude's saved starting effort for the model
+ * (`modelEffortDefaults` through {@link savedEffortFor}), else the model's
+ * default, clamped to what the model accepts; `null` when it takes none (the run
+ * then sends no `effort`, and the screen shows no effort control). The sessions'
+ * ladder ({@link resolveSpawnEffort}) for a headless Claude run, in ONE function
+ * so the screen and the run cannot disagree. The model is judged on
+ * {@link automationModelRow}.
+ */
+export function resolveAutomationEffort(args: {
+  /** `automation.effort`; unset = follow the ladder. */
+  explicit: string | null | undefined
+  /** `automation.model || 'default'` — the value the run passes to sdkQuery. */
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+  modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
+}): EffortLevel | null {
+  const row = automationModelRow(args.modelValue, args.catalog)
+  const desired = resolveDesiredEffort({
+    explicit: args.explicit,
+    engineId: 'claude',
+    modelInfo: row,
+    engineModels: args.catalog,
+    effortDefaults: { modelEffortDefaults: args.modelEffortDefaults }
+  })
+  return modelResolveEffort(row, desired)
+}
+
+/**
+ * The thinking mode an AUTOMATION runs with — and the config screen shows. An
+ * unset pick is `'enabled'` (not the model's adaptive default), and any pick is
+ * coerced to what the model supports, on {@link automationModelRow}.
+ */
+export function resolveAutomationThinking(args: {
+  explicit: ThinkingMode | null | undefined
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+}): ThinkingMode {
+  return modelResolveThinkingMode(
+    automationModelRow(args.modelValue, args.catalog),
+    args.explicit ?? 'enabled'
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Id-based heuristics — used when SDK capability fields are absent.
 // Kept exported for tests and for future models the SDK hasn't labelled yet.

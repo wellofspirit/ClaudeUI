@@ -70,7 +70,7 @@ import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-comman
 import { harnessWritable } from '../harness/resolve'
 import { watchHarnessArrivals } from '../harness/arrivals'
 import { startCatalogInvalidation } from '../harness/catalog-invalidation'
-import { invalidatePiModelCache } from '../pi/model-discovery'
+import { invalidatePiModelCache, onPiCatalogRecovered } from '../pi/model-discovery'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
@@ -313,6 +313,20 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // and every remote client alike. Before the scheduler, so its first run's
   // invalidations are not missed.
   startHarnessEvents(emitEvent)
+
+  // pi's model catalog came back after some client was answered a degraded
+  // empty one (a failed probe at boot, its backoff, invalidations overtaking
+  // it): no client asks again on its own, so the composer would keep showing a
+  // raw model value. Tell every client, desktop and remote, to reload models.
+  // Here, beside the harness events, so model-discovery stays transport-free
+  // and both hosts get it. App-lifetime, like the subscriptions above.
+  onPiCatalogRecovered(() => {
+    try {
+      emitEvent('engine:models-changed', [{ engineId: 'pi' }])
+    } catch {
+      // No subscriber can take it (shutdown): the next models read is the truth.
+    }
+  })
 
   // System harness detection (ADR-082 §3), in the background: one run for
   // every harness a few seconds after boot, on an unref'd timer, and from then

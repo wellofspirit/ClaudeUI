@@ -43,13 +43,38 @@ interface PendingProbe {
  *  OpencodeServerManager's `pending` map precedent. Dropped by an invalidation,
  *  so no caller after it can join a probe of the old generation. */
 let pendingFetch: PendingProbe | null = null
-/** Negative cache: epoch ms of the last EMPTY probe (no auth / transient
- *  failure). While fresh, callers short-circuit to [] instead of re-spawning a
- *  15s-timeout probe on every picker open / session construct / setModel. Zeroed
- *  by invalidatePiModelCache() (fired on login/config change), and it expires,
- *  so a transient empty can't stick permanently the way an outright cache would. */
+/** Negative cache: epoch ms of the last probe pi ANSWERED with no models (no
+ *  auth configured — `get_available_models` is `[]` then). While fresh, callers
+ *  short-circuit to [] instead of re-spawning a probe on every picker open /
+ *  session construct / setModel. Zeroed by invalidatePiModelCache() (fired on
+ *  login/config change), and it expires, so it can't stick permanently. */
 let emptyProbeAtMs = 0
 const EMPTY_CACHE_TTL_MS = 60_000
+/**
+ * Backoff after a probe that FAILED (spawn error, `success:false`, timeout, the
+ * process exiting) — unlike an empty answer, that says nothing about what pi
+ * would report, and the common case is transient: at boot the probe races the
+ * credential sync and the harness detection, whose invalidations kill it, and
+ * the one after them can time out on a cold start. Short, so a transient
+ * failure recovers within seconds; still a backoff, so a genuinely broken pi
+ * can't cost a 15s probe on every call.
+ */
+let failedProbeAtMs = 0
+const FAILED_PROBE_BACKOFF_MS = 5_000
+/**
+ * A caller was answered [] that is not pi's answer: its probe failed, it fell
+ * in the failure backoff, or invalidations kept overtaking it. Clients render
+ * that [] (the composer pill shows a raw model value) and never ask again on
+ * their own, so the next time the catalog fills, {@link onPiCatalogRecovered}'s
+ * listeners are told. Cleared by any authoritative answer — a filled catalog,
+ * or pi saying it has none, which is what the client already shows. Survives
+ * an invalidation on purpose: a client told [] under the old generation is
+ * still wrong under the new one.
+ */
+let servedDegraded = false
+/** The one scheduled background re-probe (see {@link scheduleRecoveryProbe}). */
+let recoveryTimer: ReturnType<typeof setTimeout> | null = null
+const recoveredListeners = new Set<() => void>()
 /**
  * How many times a caller whose probe was overtaken by an invalidation asks
  * again. Each retry is a probe of the new generation; past this, invalidations
@@ -82,18 +107,116 @@ async function currentCatalog<T>(
     const started = generation
     const models = await probeCatalog()
     if (started === generation) return derive(models)
-    if (attempt >= SUPERSEDED_RETRIES) return empty
+    if (attempt >= SUPERSEDED_RETRIES) {
+      markDegraded()
+      return empty
+    }
   }
 }
 
-/** One answer for the current generation: cached, negative-cached, joined, or a fresh probe. */
-function probeCatalog(): Promise<PiModel[]> {
+/** A caller is about to be answered [] that is not pi's answer. */
+function markDegraded(): void {
+  servedDegraded = true
+  scheduleRecoveryProbe()
+}
+
+/**
+ * Re-probe once, in the background, after the failure backoff — so a degraded
+ * answer heals without anyone asking again (nothing does: the renderer only
+ * re-reads models on a cwd change or a nonce bump). One at a time: an armed
+ * timer is not re-armed. Unref'd: it never keeps the process alive. A
+ * background probe that fails does NOT schedule another (see probeCatalog), so
+ * a genuinely broken pi costs one extra probe per degraded answer, not a loop.
+ */
+function scheduleRecoveryProbe(): void {
+  if (recoveryTimer) return
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = null
+    if (!servedDegraded || cachedCatalog) return
+    // Its outcome reaches clients through the recovered listeners, not here.
+    probeCatalog(true).catch(() => {})
+  }, FAILED_PROBE_BACKOFF_MS)
+  recoveryTimer.unref?.()
+}
+
+function cancelRecoveryProbe(): void {
+  if (recoveryTimer) clearTimeout(recoveryTimer)
+  recoveryTimer = null
+}
+
+/**
+ * Test seam: disarm this module instance's recovery probe before a test
+ * discards it (`vi.resetModules`), so its timer cannot spawn a probe into a
+ * later test's mocks.
+ */
+export function cancelPiRecoveryProbeForTests(): void {
+  cancelRecoveryProbe()
+}
+
+/** pi answered (for the current generation): `models` is the truth now. */
+function settleAnswer(models: PiModel[]): void {
+  failedProbeAtMs = 0
+  cancelRecoveryProbe()
+  const recovered = servedDegraded && models.length > 0
+  servedDegraded = false
+  if (models.length > 0) cachedCatalog = models
+  // Negative-cache an empty answer (no auth) so we don't re-spawn a probe on
+  // the very next call. Bounded by EMPTY_CACHE_TTL_MS and cleared by
+  // invalidatePiModelCache() (login), so it never sticks permanently.
+  else emptyProbeAtMs = Date.now()
+  if (recovered) {
+    logger.info('pi', 'Model catalog recovered after a degraded answer — telling clients')
+    notifyRecovered()
+  }
+}
+
+function notifyRecovered(): void {
+  for (const listener of [...recoveredListeners]) {
+    try {
+      listener()
+    } catch (err) {
+      logger.warn('pi', 'pi catalog recovery listener failed', err)
+    }
+  }
+}
+
+/**
+ * Subscribe to "pi's catalog filled after some caller was answered a degraded
+ * [] (see `servedDegraded`)" — the cue for clients to read models again. Fired
+ * once per recovery, only by a probe that fills the cache: a warm-cache read
+ * never fires it, so a client re-reading on it cannot loop. Kept free of IPC so
+ * this module stays transport-agnostic; boot wires it to the sync funnel.
+ * Returns the unsubscribe function.
+ */
+export function onPiCatalogRecovered(listener: () => void): () => void {
+  recoveredListeners.add(listener)
+  return () => {
+    recoveredListeners.delete(listener)
+  }
+}
+
+/**
+ * One answer for the current generation: cached, negative-cached, joined, or a
+ * fresh probe. `background` is the recovery probe: it skips the failure backoff
+ * (its timer IS that backoff) and, failing, schedules no successor.
+ */
+function probeCatalog(background = false): Promise<PiModel[]> {
   if (cachedCatalog) return Promise.resolve(cachedCatalog)
-  // Recent empty probe still within its cooldown — skip the expensive spawn.
+  // Recent empty answer still within its cooldown — skip the expensive spawn.
   if (emptyProbeAtMs > 0 && Date.now() - emptyProbeAtMs < EMPTY_CACHE_TTL_MS) {
     return Promise.resolve([])
   }
+  // Join before the failure backoff: a probe in flight (the recovery probe,
+  // say) is a better answer than a degraded [].
   if (pendingFetch) return pendingFetch.promise
+  if (
+    !background &&
+    failedProbeAtMs > 0 &&
+    Date.now() - failedProbeAtMs < FAILED_PROBE_BACKOFF_MS
+  ) {
+    markDegraded()
+    return Promise.resolve([])
+  }
 
   const started = generation
   const current = (): boolean => generation === started
@@ -101,6 +224,16 @@ function probeCatalog(): Promise<PiModel[]> {
   const entry: PendingProbe = {
     promise: Promise.resolve([]),
     cancel: () => client?.dispose()
+  }
+  /** The probe failed for the current generation: back off, and heal later. */
+  const failed = (): PiModel[] => {
+    // Not for a probe an invalidation cancelled: its failure says nothing
+    // about the new pi, and its callers ask again under the new generation.
+    if (!current()) return []
+    failedProbeAtMs = Date.now()
+    servedDegraded = true
+    if (!background) scheduleRecoveryProbe()
+    return []
   }
   entry.promise = (async (): Promise<PiModel[]> => {
     // Binary-missing is already cheap (no spawn) and can flip when pi is
@@ -122,25 +255,23 @@ function probeCatalog(): Promise<PiModel[]> {
         { type: 'get_available_models' },
         DISCOVERY_TIMEOUT_MS
       )
-      const models = resp.success && resp.data ? resp.data.models : []
       if (!current()) return []
-      if (models.length > 0) cachedCatalog = models
-      // Negative-cache an empty result (no auth, RPC failure) so we don't
-      // re-spawn a fresh 15s-timeout probe on the very next call. Bounded by
-      // EMPTY_CACHE_TTL_MS and cleared by invalidatePiModelCache() (login),
-      // so it never sticks permanently.
-      else emptyProbeAtMs = Date.now()
+      if (!resp.success) {
+        logger.debug(
+          'pi',
+          `Model discovery failed (pi optional): ${resp.error ?? 'error response'}`
+        )
+        return failed()
+      }
+      const models = resp.data?.models ?? []
+      settleAnswer(models)
       return models
     } catch (err) {
       logger.debug(
         'pi',
         `Model discovery failed (pi optional): ${err instanceof Error ? err.message : String(err)}`
       )
-      // A spawn/timeout failure is exactly the pathological repeat-probe case —
-      // negative-cache it too (still bounded by the TTL). Not for a probe an
-      // invalidation cancelled: its failure says nothing about the new pi.
-      if (current()) emptyProbeAtMs = Date.now()
-      return []
+      return failed()
     } finally {
       probe.dispose()
     }
@@ -186,16 +317,33 @@ export function discoverPiModels(): Promise<EngineModelGroup[]> {
       if (models.length === 0) return []
       // Per provider (ADR-074 §1): a provider with no key shows every model it
       // reports, so one curated provider no longer hides every other one.
-      const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
-      const groups = groupPiModels(
-        models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id))
-      )
+      const groups = groupPiModels(filterAllowedPiModels(models))
       cachedGroups = groups
       return groups
     },
     [],
     () => cachedGroups
   )
+}
+
+/**
+ * The raw catalog rows the picker shows: authenticated, and let through by the
+ * per-provider allowlist (ADR-074 §1). THE one place that filter lives —
+ * `discoverPiModels` groups exactly these rows.
+ */
+function filterAllowedPiModels(models: PiModel[]): PiModel[] {
+  const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
+  return models.filter((m) => isPiModelAllowed(allowlist, m.provider, m.id))
+}
+
+/**
+ * The allowlisted raw `PiModel` rows (cost, context window, reasoning, input
+ * kinds), for callers that need more than the picker's `ModelInfo` — the
+ * `list_models` tool and the `agent` tool's model resolver (ADR-089). Same
+ * rows `discoverPiModels` shows; `[]` on any discovery failure.
+ */
+export function getPiAllowedModelCatalog(): Promise<PiModel[]> {
+  return currentCatalog(filterAllowedPiModels, [])
 }
 
 /** Unfiltered authenticated catalog for model-management UI. */
@@ -342,7 +490,14 @@ export function invalidatePiModelCache(): void {
   cachedCatalog = null
   cachedGroups = null
   emptyProbeAtMs = 0
+  failedProbeAtMs = 0
   const obsolete = pendingFetch
   pendingFetch = null
   obsolete?.cancel()
+  // A scheduled recovery probe is superseded, not dropped: a client still holds
+  // a degraded [], and nothing else would re-probe for it. Re-armed from now,
+  // so a burst of invalidations (boot: credential sync, harness detection)
+  // settles before the probe runs.
+  cancelRecoveryProbe()
+  if (servedDegraded) scheduleRecoveryProbe()
 }
