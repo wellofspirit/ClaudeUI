@@ -92,7 +92,7 @@ vi.mock('../../automode/ground-truth', async () => {
   }
 })
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeV1Session as OpencodeSession } from '../OpencodeV1Session'
 import type { HostWindowHandle } from '../../host'
 
 /** The private ground-truth builder the judge prompt is rendered from. */

@@ -167,7 +167,7 @@ vi.mock('../../services/ui-config', () => ({
 // Import SUT after mocking
 // ---------------------------------------------------------------------------
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeV1Session as OpencodeSession } from '../OpencodeV1Session'
 import { closeDb } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'

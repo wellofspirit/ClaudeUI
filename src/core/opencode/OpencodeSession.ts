@@ -1,15 +1,65 @@
+/**
+ * One ClaudeUI chat on opencode 2.x (ADR-093 S5). The 1.x session survives
+ * verbatim as `OpencodeV1Session` until S10.
+ *
+ * Lifecycle. A lease from the S2 manager (a turn-running `acquire`, so the
+ * `claudeui-xeng` permission guard is probed and a missing plugin surfaces as
+ * `OpencodePermissionGuardError`), an `OpencodeClient` scoped to the chat's
+ * directory, ONE `OpencodeEventMapper` for the chat's opencode session and the
+ * S3 event feed. A new session is created with its ruleset, agent and model
+ * in the body (`location` = the chat's cwd); a resumed one is read once
+ * (cold history → the transcript the judge reads, the status-line seed, and
+ * `mapper.seed`) and caught up with `reconcileAfterReconnect` on its first
+ * `connected`, exactly as after any feed gap. Every mapper output is
+ * dispatched to the engine-neutral channels in {@link dispatch}.
+ *
+ * Prompts and the queue (ADR-093 §9). Every prompt ClaudeUI posts carries a
+ * ClaudeUI-chosen inbox id (`msg_claudeui_…`). A prompt typed while a turn
+ * runs is still ADR-053's queue item (the queue card, take-back on ArrowUp),
+ * but the engine holds it: the item is posted to opencode's inbox at once
+ * with `delivery: 'steer'` — ADR-053 §1's timing, the next step boundary of
+ * the running turn — and stays cancellable until opencode delivers it.
+ * Delivered → the item is consumed; cancelled → recalled; take-back →
+ * `DELETE …/inbox/:id`, then the stored row decides who won the race.
+ * `setQueuedItemDelivery` switches an item between steer and queue (`PATCH`).
+ * The host-held forward of 1.x is gone for opencode.
+ *
+ * Permissions (ADR-093 §3, S6). The session ruleset is
+ * `buildSessionRuleset` (created with it, PATCHed when it changes; PATCH
+ * replaces), the plan agent is `switchAgent`. Every `permission.asked` goes
+ * through the host pre-check, the session-allow set, the auto-mode judge or
+ * the card, as in 1.x; the reply goes to the ASKING session (a subagent child
+ * answers its own asks). Every reject and every form cancel carries a
+ * message (a messageless one ends the turn and keeps its execution claim).
+ * Subagent children get `childSessionRuleset(parent, agent)` PATCHed on
+ * `session.created`, again on every parent re-apply and on an agent switch;
+ * `evaluateChildCall` refuses a child ask its own agent denies (the window
+ * before that PATCH lands).
+ *
+ * Synthetic inbox items (`synthetic`: plan-mode reminders, background
+ * completion notices, "continue" nudges) are neither rendered live nor cold:
+ * the cold converter skips the stored `synthetic` rows, and live they only
+ * reach the queue bookkeeping, which ignores every non-user item.
+ */
 import type { HostWindowHandle } from '../host'
+import { parse as parsePath } from 'node:path'
 import { v4 as uuid } from 'uuid'
-import { opencodeServerManager } from './OpencodeServerManager'
+import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
-// TODO(S5): the session still drives the 1.x wire (`prompt_async` + `/event`
-// with `properties`, `/permission/{id}/reply`, `/question/*`, `/abort`). Its
-// 2.x port is S5 on `./OpencodeClient` (inbox `prompt` with ClaudeUI ids,
-// `cancelInbox`/`setInboxDelivery`, `interrupt`, `replyPermission` whose
-// reject carries a message, `replyForm`/`cancelForm`, `subscribeEvents` with
-// its re-read-on-reconnect contract) and the S4 mapper.
-import { OpencodeV1Client } from './OpencodeV1Client'
-import type { OpencodeEvent } from './protocol/types'
+import { OpencodeClient, type PermissionReply } from './OpencodeClient'
+import type { OpencodeEvent } from './protocol-v2/events'
+import type { Agent_Info, Form_Answer, Model_Ref, Session_Info } from './protocol-v2/openapi'
+import {
+  OpencodeEventMapper,
+  type OpencodeApprovalRoute,
+  type OpencodeMapperOutput,
+  type OpencodeStepUsage,
+  type OpencodeStopReason
+} from './v2-event-mapper'
+import type { OpencodeFormField, OpencodeToolResult } from './v2-content'
+import { reconcileAfterReconnect } from './v2-reconnect'
+import { convertOpencodeHistory, readOpencodeHistory } from './v2-history'
+import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -31,7 +81,7 @@ import type {
   StatusLineData,
   SkillInfo,
   ModelCostEntry,
-  TaskNotification,
+  QueuedItem,
   ToolReviewBlock
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
@@ -45,19 +95,9 @@ import {
 import { equivalentCostUsd } from '../../shared/pricing'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
-import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
+import { opencodeV2HistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
-import {
-  mapEvent,
-  buildChatMessage,
-  extractToolResult,
-  convertStoredMessage,
-  findToolInput,
-  storedCompactionMessages
-} from './event-mapper'
-import type { MapperOutput, MessageAccumulator, PartSnapshot } from './event-mapper'
-import type { OpencodeStreamItem } from './event-mapper'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
@@ -65,22 +105,23 @@ import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
 import {
-  compileClaudeRulesToOpencode,
-  isOpencodeBuiltinPermissionKey,
   opencodeMcpKey,
   persistAllowSuggestions,
   sanitizeMcpName,
-  withoutAllowRules,
-  withoutMutatingAllowRules
+  suggestOpencodeAllowRule
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
-import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
 import {
-  CHILD_GATED_CATEGORIES,
-  subagentBackstopRules,
-  TASK_BACKSTOP_FAIL_CLOSED_RULE
-} from './subagent-permissions'
-import type { OpencodeAgentInfo } from './OpencodeV1Client' // TODO(S6): 2.x `Agent_Info`
+  asHostPrecheckRules,
+  buildSessionRuleset,
+  compileClaudeRulesV2,
+  opencodeOwnDirAllows,
+  THROWAWAY_RULESET,
+  type V2Rule
+} from './permission-v2'
+import { isV2BuiltinAction } from './permission-keys'
+import { childSessionRuleset, evaluateChildCall } from './subagent-permissions'
+import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -126,132 +167,126 @@ import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
 } from '../services/cross-engine-dispatcher'
-// Permission ruleset helper — extracted to permission-ruleset.ts so
-// cross-engine-dispatcher.ts can depend on it without importing THIS module
-// (which would cycle back now that this file imports crossEngineDispatcher
-// above). Re-exported here for back-compat with any other existing importer.
-import {
-  buildAutoModeRuleset,
-  buildRuleset,
-  CLAUDEUI_MCP_SERVER,
-  opencodeWireRuleset
-} from './permission-ruleset'
+import { CLAUDEUI_MCP_SERVER } from './permission-ruleset'
 import { editClearsAgentControl } from './agent-control-gate'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../pi/permission-engine'
-import type { PermissionRule } from './permission-ruleset'
-export { buildRuleset } from './permission-ruleset'
-export type { PermissionRule } from './permission-ruleset'
 
 const DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
 /**
- * Gates the ClaudeUI-hosted `claudeui_dispatch_agent` tool (ADR-033 M2) in
- * EVERY autonomy mode, appended LAST (after buildRuleset + the user's own
- * compiled rules) so last-match-wins can't accidentally auto-allow it via a
- * blanket user rule. In `auto`/`full` mode the ADR-023 LLM gatekeeper fields
- * the resulting permission.asked like any other gated tool — intended parity,
- * not a special case.
+ * The inbox delivery of a ClaudeUI queue item. ADR-053 §1 (Claude Code
+ * parity): a message typed while a turn runs is live feedback, folded in at
+ * the agent's next sub-turn boundary — opencode's `steer` (`queue` would hold
+ * it until the turn ends, which ADR-053 rejected). `setQueuedItemDelivery`
+ * moves a single item to `queue` and back.
  */
-const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
-  permission: 'claudeui_dispatch_agent',
-  pattern: '*',
-  action: 'ask'
+export const QUEUE_ITEM_DELIVERY = 'steer' as const
+
+/** The prefix of every inbox id ClaudeUI chooses (2.x requires `msg_`). */
+export const CLAUDEUI_INBOX_PREFIX = 'msg_claudeui_'
+
+/** A fresh ClaudeUI inbox id (`^msg_`, unique; opencode orders by sequence, not id). */
+function newInboxId(): string {
+  return `${CLAUDEUI_INBOX_PREFIX}${uuid().replaceAll('-', '')}`
 }
 
-/**
- * The ruleset every THROWAWAY opencode session is patched with before it is
- * prompted (`/btw` side questions; agent-generate patches the same one). Both
- * are tool-LESS by design — they must answer from text alone — and both are
- * hazardous without this patch, for two independent reasons:
- *
- *  1. SECURITY. A fresh opencode session inherits the vendor's `{*: allow}`
- *     default (verified: agent.ts's `defaults` = `Permission.fromConfig({"*":
- *     "allow", …})`), so an unpatched throwaway could really run bash/edit,
- *     with no human and no gate. With deny-all patched, upstream hides every
- *     tool from the request itself (`session/llm/request.ts` `resolveTools`,
- *     lines 208-214 in `vendor/opencode-src` v1.18.32: a tool whose last
- *     matching rule is a `*` deny is filtered out before the model sees the
- *     tool list), so there is nothing to call — and nothing an instance-global
- *     "always" approval could re-enable, because that list is not part of the
- *     ruleset the filter reads. (ClaudeUI no longer sends `always` at all —
- *     ADR-085 S2 keeps session approvals host-side, `session-allows.ts`.)
- *  2. LIVENESS. `client.prompt` runs a SYNCHRONOUS server-side turn. An
- *     ask-class action on a session with no SSE consumer emits a
- *     `permission.asked` that our main consumer filters out (foreign
- *     sessionID) and nobody ever answers → the prompt blocks forever → the
- *     parent turn hangs.
- *
- * `deny` (not `ask`) is what makes it hang-proof: opencode's evaluator
- * short-circuits a matching deny with a DeniedError BEFORE the Event.Asked
- * path (permission/index.ts `ask()`), so nothing is ever published.
- * `{permission:'*', pattern:'*'}` matches every tool via `Wildcard.match` →
- * regex `.*`.
- */
-const DENY_ALL_TOOLS_RULESET: PermissionRule[] = [{ permission: '*', pattern: '*', action: 'deny' }]
+/** The reason a host-sent reject carries when nothing better is known (never empty). */
+const DEFAULT_REJECT_MESSAGE = 'The user denied this tool call'
+
+/** A form the user dismissed (every cancel carries a message, ADR-093 §3). */
+const FORM_DISMISSED_MESSAGE = 'The user dismissed the question without answering'
 
 /**
- * The patch body for a throwaway session: the deny-all ruleset above, nothing
- * else. It hides every tool from the throwaway's request upstream (reason 1),
- * so nothing can be called or "always"-approved, and it keeps the synchronous
- * prompt hang-proof (reason 2). The auto-mode judge no longer runs through
- * opencode at all (ADR-081: ClaudeUI makes that call itself).
+ * Test seam: hold every child ruleset PATCH until the returned promise
+ * settles (the contract proves the plugin hook closes the create → PATCH
+ * window without winning a race). Null in production.
  */
-const DENY_ALL_THROWAWAY_PATCH = {
-  permission: DENY_ALL_TOOLS_RULESET
-} as const
-
-/**
- * ADR-084 §1 — how long the read-only gate waits for a shell call's tool part
- * to carry its input when the call's `permission.asked` got there first.
- *
- * The two race: the processor publishes the part's input from its `tool-call`
- * handler (vendor/opencode-src/packages/opencode/src/session/processor.ts,
- * `updateToolCall` → `state: {status: 'running', input}`) while the AI SDK is
- * already running the tool's `execute`, and the shell tool's `execute` parses
- * the command and asks straight away (src/tool/shell.ts `execute` → `ask`). So
- * the ask regularly lands while the part is still `pending` with `input: {}`,
- * the part following a moment later. Past the bound the call goes to the judge,
- * exactly as with no part at all.
- */
-export const TOOL_INPUT_WAIT_MS = 1000
-let toolInputWaitMs = TOOL_INPUT_WAIT_MS
-
-/** Tests shorten (or lengthen) the wait; no argument restores the default. */
-export function __setToolInputWaitMsForTests(ms?: number): void {
-  toolInputWaitMs = ms ?? TOOL_INPUT_WAIT_MS
+let childPatchGate: ((childID: string) => Promise<void>) | null = null
+export function __holdChildPatchesForTests(
+  gate: ((childID: string) => Promise<void>) | null
+): void {
+  childPatchGate = gate
 }
 
-/** How one wait for a tool part's input ended. `closed` = cancel()/dispose(). */
-type ToolInputWait = 'input' | 'timeout' | 'closed'
+/** Child sessions a resumed chat reads, at most (nested ones included). */
+const MAX_ADOPTED_CHILD_READS = 50
 
-/** One permission ask (or question) waiting for its answer, keyed by requestId. */
+/** How long a teardown waits for its interrupt/cancels before ending the lease. */
+const TEARDOWN_GRACE_MS = 5_000
+
+/** Why a turn that opencode stopped on its own ended (ADR-090: a user stop shows nothing). */
+const STOP_NOTICES: Partial<Record<OpencodeStopReason, string>> = {
+  shutdown:
+    'opencode stopped this turn while shutting down; it resumes the turn on its next start.',
+  superseded: 'opencode stopped this turn: another execution of this session took over.',
+  inactivity: 'opencode stopped this turn after a period of inactivity.',
+  unknown: 'The opencode turn was stopped.'
+}
+
+/** One permission ask waiting for its answer, keyed by request id. */
 interface PendingAsk {
-  /** The tool part's callID (`undefined` when the engine carried none) — what
-   *  lets resolveApproval annotate the RIGHT call when the human rejects. */
+  /** The call the ask is about (undefined when opencode named none). */
   toolUseId?: string
   approval: PendingApproval
-  /** false when a user ask rule holds it for the human — a session allow must never sweep it. */
+  /** false when a user ask rule (or a held block) keeps it for the human — never swept. */
   sweepable: boolean
-  /**
-   * Set while the card holds an auto-mode judge block (ADR-091 §3): the
-   * judge's deny text a kept block answers with, and the expiry timer.
-   */
+  /** Set while the card holds an auto-mode judge block (ADR-091 §3). */
   hold?: { reason: string; cancel: () => void }
 }
 
-/**
- * An errored tool part that was aborted rather than failed — `stopped`, as
- * Claude maps killed and Codex interrupted. Two opencode markers:
- * - `metadata.interrupted` (+ error 'Tool execution aborted'): the processor
- *   aborting an in-flight tool (session/processor.ts, ~602). Structural, so
- *   preferred.
- * - error 'Task cancelled': the task tool's cancelled child
- *   (tool/task.ts:340), which sets no metadata — only the string identifies it.
- */
-function wasAborted(snap: PartSnapshot): boolean {
-  return snap.state?.metadata?.interrupted === true || snap.state?.error === 'Task cancelled'
+/** One pending form (AskUserQuestion). */
+interface PendingForm {
+  sessionID: string
+  formID: string
+  fields: readonly OpencodeFormField[]
+  questions: readonly AskUserQuestion[]
 }
+
+/** A subagent child of this chat (or of one of its children). */
+interface ChildSession {
+  readonly parentID: string
+  /** The child's agent id (`session.created.agent`, then `session.agent.selected`). */
+  agent?: string
+  /** The ruleset last computed for it (what a grandchild's ruleset builds on). */
+  rules?: V2Rule[]
+  /** What was last PATCHed (skip an unchanged one). */
+  patchedKey?: string
+  /** The parent ruleset (its key) the child's rules were last computed from. */
+  parentKey?: string
+  /** PATCHes for this child run one at a time, in order (never a stale one last). */
+  chain: Promise<void>
+  /**
+   * Its ruleset could not be applied (twice): the child was interrupted and
+   * every ask it raises is refused until a PATCH lands (fail closed).
+   */
+  unpatched?: boolean
+}
+
+/** One metered request of this process (a step, a compaction's own request, overhead). */
+interface LiveUsage {
+  readonly inputs: OpencodeCostInputs
+  readonly modelId: string
+  readonly engineCostUsd: number
+  readonly tokens: OpencodeHistoryTokens
+}
+
+function tokensOf(t: {
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}): OpencodeHistoryTokens {
+  // Reasoning is billed as output (the fold every opencode figure applies).
+  return {
+    input: t.input,
+    output: t.output + t.reasoning,
+    cacheWrite: t.cache.write,
+    cacheRead: t.cache.read
+  }
+}
+
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
@@ -262,110 +297,65 @@ export class OpencodeSession extends BaseSession {
   }
 
   private conn: ServerConnection | null = null
-  private client: OpencodeV1Client | null = null
+  private client: OpencodeClient | null = null
   private openSessionId: string | null = null
-  private sseAbort: AbortController | null = null
+  /** The chat's mapper; created with the opencode session, kept across feed gaps and reconnects. */
+  private mapper: OpencodeEventMapper | null = null
+  /** The next `connected` must re-read state (a resumed session, a restarted feed). */
+  private needsCatchUp = false
+  private feedAbort: AbortController | null = null
+  /** Resolves at the feed's first `connected` (after its catch-up). */
+  private feedReady: Promise<void> | null = null
   private isProcessing = false
-  /**
-   * Set on server death, SSE stream loss, and deliberate teardown (cancel()).
-   * Drives the `'disconnected'` status state, which is the renderer's ONLY
-   * signal to clear `sdkActive` (useClaudeEvents' session:status handler) —
-   * i.e. the only way the sidebar's green activity dot ever turns off. Cleared
-   * on every fresh connect. Mirrors PiSession's `disconnected`.
-   */
+  /** Drives the `'disconnected'` status (the renderer's only signal to clear `sdkActive`). */
   private disconnected = false
-  /** Unsubscribe from the CURRENT server handle's unexpected-exit fan-out. */
   private unsubscribeServerExit: (() => void) | null = null
-  /**
-   * Cost tracking — base + live overlay (Slice B, durable across reloads,
-   * mirrors ClaudeSession's costBaseUsd/liveTotalCostUsd split).
-   *
-   * - costBase / modelCostBase: cost from stored history, seeded ONCE at
-   *   replayStoredHistory (a single OpencodeSession object only ever replays
-   *   once — replayStoredHistory is gated on `!this.openSessionId`/`!this.
-   *   openSessionId` branches that can't re-fire after openSessionId is set —
-   *   so no respawn-fold is needed here, unlike Claude's spawn-per-turn model).
-   * - the live half is recomputed from `accumulators` on demand (costTally),
-   *   which is why the historical base MUST live in a separate field: a live
-   *   recompute knows nothing about the messages that preceded this process.
-   *
-   * ADR-071 §2: the headline is not opencode's own `info.cost` — under a
-   * subscription opencode charges zero and the session is worth the list price
-   * of its tokens. What is stored is each message's cost INPUTS
-   * (opencodeCostInputs); the billing type is applied when a figure is read,
-   * because the auth probe resolves asynchronously and a session opened before
-   * it lands must not be stuck with what `unknown` made of its history. The
-   * engine's raw figures survive alongside, in rawCostBaseUsd /
-   * liveTotalCostUsd, for the one consumer that asks for what the ENGINE
-   * reported (sendMetering).
-   *
-   * this.totalCostUsd (below) is a getter over base + live.
-   */
+
+  // ── Cost and context (history base + this process) ─────────────────────────
   private costBase: OpencodeCostInputs[] = []
   private modelCostBase = new Map<string, number>()
-  /** Engine-reported cost from stored history — MeteringSnapshot's input. */
   private rawCostBaseUsd = 0
-  /** Engine-reported cost of this live process, synced from the mapper's
-   *  sumAccumulatorCosts ref. Not the headline (see the block comment). */
-  private liveTotalCostUsd = 0
-  /** modelId → summed display cost, own (non-child) messages only, populated in
-   *  recordTurnUsage at the same point each message's cost is finalized. */
-  private liveModelCosts = new Map<string, number>()
-  /** messageId → the cost inputs a message settled on at turn end. Frozen so a
-   *  mid-session model switch cannot re-price a finished message under a model
-   *  that never produced it (the per-model breakdown attributes it to the model
-   *  that did). The billing type is NOT frozen with them. */
-  private settledCostInputs = new Map<string, OpencodeCostInputs>()
-  /**
-   * Token totals from stored history, seeded on resume beside the cost base.
-   *
-   * The status line reports history + live, the way cost does; `sendMetering`
-   * deliberately does not add it, because a MeteringSnapshot describes what
-   * THIS process metered and the ledger rows behind it are per-turn.
-   */
   private tokenBase: OpencodeHistoryTokens = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
+  /** Every request this process metered: own and child steps, compactions, overhead (S4's rule). */
+  private liveUsage: LiveUsage[] = []
   private startTimeMs = 0
-  /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
-   *  Base is reconstructed from stored history on resume (replayStoredHistory),
-   *  then incremented per-turn from each `result` event — mirrors Claude's
-   *  accTotalDurationMs. Idle time between turns never counts. */
   private accTotalDurationMs = 0
-  /** Latest assistant prompt size (input + cacheRead) for context-used % in the status line. */
+  /** The last OWN step's prompt size (input + cache read) — the context meter. */
   private lastContextLength = 0
+
   private _model: string
   private permissionMode: string
   private reasoningVariant: string | null = null
-  private agent: string | null = null
-  // Pending permission approvals (and questions), requestId → the ask. Its
-  // toolUseId is what lets resolveApproval annotate the RIGHT tool call when the
-  // human rejects (phase 3 outcome annotations); the approval itself is what the
-  // session-allow sweep re-checks (ADR-085 S2).
+  /** The `provider/model#variant` the opencode session was last set to. */
+  private appliedModelKey: string | null = null
+  /** The opencode session's current agent (create, `switchAgent`, `agent-selected`). */
+  private currentAgent: string | null = null
+
   private pendingApprovals = new Map<string, PendingAsk>()
-  // ADR-085 S2 — the host-side "allow for this session" memory, replacing
-  // opencode's instance-global `always` (see session-allows.ts). Lives as long
-  // as this OpencodeSession, like PiSession.sessionAllows; cancel() keeps it.
+  private pendingForms = new Map<string, PendingForm>()
+  /** request/form id → the session that asked (replies go there). Until `approval-resolved`. */
+  private routes = new Map<string, string>()
   private readonly sessionAllows = new OpencodeSessionAllows()
-  // Pending model-elicitation questions (question.asked) keyed by requestId.
-  // Stored so resolveApproval can map the ordered answers Record→string[][].
-  private pendingQuestions = new Map<string, AskUserQuestion[]>()
-  // Per-message part accumulator keyed by messageId
-  private accumulators = new Map<string, MessageAccumulator>()
-  // ADR-084 §1 — readOnlyInput calls waiting for a tool part's input, keyed by
-  // the part's callID. Settled from consumeEvents right after mapEvent applied a
-  // `message.part.updated` to `accumulators`, by their own timeout, or by
-  // cancel(); each settle removes itself, so an empty set never lingers.
-  private toolInputWaiters = new Map<string, Set<(outcome: ToolInputWait) => void>>()
-  private activeStreamItems = new Map<
-    string,
-    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
-  >()
-  // Track last emitted tool completion per partId to avoid double-emitting
-  private emittedToolResults = new Set<string>()
-  // Live bash output streaming (own-session only — parity with Claude's
-  // bash-output-streaming patch). Dedups unchanged cumulative-output snapshots
-  // and throttles emissions to the trailing edge of a ~100ms window per
-  // toolUseId; see bash-stream-gate.ts. Cancelled per-toolUseId on tool
-  // completion/error and entirely on session teardown (cancel()).
+
+  /** Inbox ids of prompts THIS chat posted directly (their user rows are already shown). */
+  private ownInboxIds = new Set<string>()
+  /** inbox id → queue item id, for items posted to the inbox and not settled. */
+  private inboxToItem = new Map<string, string>()
+  private itemToInbox = new Map<string, string>()
+  /** Queue items whose POST is in flight: a take-back waits for it (else its DELETE could land first). */
+  private posting = new Map<string, Promise<void>>()
+  /** Commands posted (`runCommand` takes no id): their expansion's user row is ours too. */
+  private pendingCommandEchoes = 0
+  /** Posts go out one at a time, in call order (a queued item never overtakes its turn's prompt). */
+  private postChain: Promise<void> = Promise.resolve()
+  /** The inbox may hold ClaudeUI items nothing stands behind (after a teardown or a resume). */
+  private needsPurge = false
+
+  /** call id → tool input, from the tool_use blocks the mapper emitted (own and child). */
+  private toolInputs = new Map<string, Record<string, unknown>>()
+  /** Open item streams, so a teardown can seal them with what streamed so far. */
+  private openItems = new Map<string, { target: ItemStreamTarget; message: ChatMessage }>()
+
   private bashStreamGate = new BashStreamGate((toolUseId, output) => {
     this.send('session:bash-output', {
       toolUseId,
@@ -374,143 +364,49 @@ export class OpencodeSession extends BaseSession {
       totalBytes: Buffer.byteLength(output, 'utf-8')
     })
   })
-  // Metering: message ids already recorded to usage_event (the accumulators map
-  // persists across turns, so without this every session.idle re-iterates all
-  // prior messages; the DB UNIQUE(message_id) already dedups, this just avoids
-  // the repeated round-trips on long sessions).
-  private recordedUsageMessageIds = new Set<string>()
-  // Phase 8d — child session routing for the `task` tool.
-  // Maps childSessionId → parentToolUseId (the task part's callID).
-  // Populated by the event-mapper when it sees a task tool part with
-  // state.metadata.sessionId. An entry lives as long as the PARENT's task call:
-  // it is removed when that task part reaches a terminal state
-  // (settleTaskChildren), NOT on the child's session.idle/session.error — a
-  // child keeps running after a ContextOverflowError (auto-compaction), and
-  // its later permission.asked must still route here. (A background call's
-  // entry ends at the child's idle instead.) Cleared in cancel().
-  private childSessions = new Map<string, string>()
-  // Task callIDs whose part completed as a BACKGROUND task
-  // (`metadata.background`): the child keeps running, so its session.idle —
-  // not the part — carries that call's one terminal notification. Cleared in
-  // cancel().
-  private backgroundTaskCalls = new Set<string>()
-  // Auto-mode (full) LLM gatekeeper state (ADR-023).
-  private _autoModeConfig: AutoModeConfig | undefined
-  /** Memoized `~/.claude/ui/automode.json` — the engine-SHARED trust lists
-   *  (ADR-065 phase 4). Same lifetime as `_autoModeConfig`: one read per
-   *  session, and a mid-session edit is not hot-reloaded. */
-  private _sharedAutoMode: SharedAutoModeConfig | undefined
-  // Consecutive / same-rule / total denial caps, shared with pi (denial-tracker.ts).
-  private autoDenials = new AutoModeDenialTracker()
-  // One `session:error` per session for a CONFIGURED judge model that no longer
-  // exists — the check runs on every gated approval, and a banner per tool call
-  // would bury the transcript.
-  private staleJudgeModelReported = false
-  // The same one-banner rule for a judge model ClaudeUI has no route to call
-  // (ADR-081 §3) — the resolver runs on every judge call.
-  private judgeRouteUnavailableReported = false
-  // The USER-authored half of the last ruleset we patched onto the session
-  // (compiled allow/ask/deny). Kept so the auto-mode gatekeeper can re-match a
-  // pending approval against the user's own `ask` rules, which outrank the
-  // classifier (ADR-023 G9). opencode discards the matched rule before it
-  // publishes `permission.asked`, so this is the only way to recover provenance.
-  // `null` = not compiled yet. The SSE consumer starts BEFORE the first
-  // applyPermissionMode, so an approval can race it — see userOriginRules().
-  private lastCompiledUserRules: OpencodePermissionRule[] | null = null
-  // ADR-085 §3 — the MCP server names this session's server can reach: the
-  // bridged Claude servers, `claudeui`, and the `GET /mcp` keys (the user's own
-  // opencode-config servers). Resolved by the first applyPermissionMode whose
-  // `GET /mcp` succeeds, then kept: the server's MCP config is fixed at its
-  // spawn. Feeds the auto-mode per-server MCP asks and the compiler's
-  // server-level MCP allow gate. `null` = not resolved yet.
+  /** 2.x pushes no shell output: own shell calls are followed by polling (S4). */
+  private shellPoller = new ShellOutputPoller({
+    onOutput: (toolUseId, output) => this.bashStreamGate.update(toolUseId, output)
+  })
+
+  // ── Permissions ────────────────────────────────────────────────────────────
+  /** The ruleset last applied to the opencode session (create or PATCH). */
+  private applied: { sessionId: string; rules: V2Rule[]; key: string } | null = null
+  /** The user's compiled rules (all tiers) of the last build — the pre-check's provenance set. */
+  private lastUserRules: V2Rule[] | null = null
+  private children = new Map<string, ChildSession>()
+  /** A resumed chat lists its stored children on the next connect. */
+  private adoptChildrenOnConnect = false
+  /** Permission applies run one at a time (see applyPermissionMode). */
+  private applyChain: Promise<void> = Promise.resolve()
   private knownMcpServers: string[] | null = null
-  // One warn per session for a failing `GET /mcp` (the static set is used).
   private mcpStatusWarned = false
-  // ADR-085 S4 — the server's agents with their COMPUTED rulesets (`GET
-  // /agent`), for the parent-side `task:<name>` backstop. Cached like
-  // `knownMcpServers` (the server's agent config is fixed at its spawn) and
-  // reset with it on a reconnect. `null` = not resolved yet (a failing GET is
-  // not cached: the next apply retries).
-  private subagentAgents: OpencodeAgentInfo[] | null = null
-  // One warn per session for a failing `GET /agent` (every task spawn asks then).
+  /** `GET /api/agent` (cached per connection; a failure is not cached). */
+  private agentList: Agent_Info[] | null = null
   private agentsWarned = false
-  // ADR-085 S4 — the ruleset the last SUCCESSFUL patch put on the opencode
-  // session, keyed by that session's id: what a task child's ask is answered
-  // with (host-precheck.ts `parentRuleset`), and what `applyPermissionMode`
-  // compares against to skip an unchanged PATCH (S3b verifier F3 — see there).
-  // Reset on a reconnect and on cancel().
-  private lastPatchedRuleset: { sessionId: string; rules: PermissionRule[]; key: string } | null =
-    null
-  // ADR-085 S4 — the categories the spawn put a static child ask on (see
-  // childGatedCategories()). Memoized per connection — it reads the Claude MCP
-  // config, and the pre-check runs on every ask — and reset with
-  // `knownMcpServers` on a reconnect.
-  private childGated: string[] | null = null
-  // ── Phase 3 ground truth (docs/automode-rework-plan.md §5) ────────────────
-  // How prior tool calls ended, keyed by toolUseId. Fed to the classifier as
-  // `{"outcome":…}` annotations — the ONLY channel by which a refusal reaches
-  // the judge, since the slimmer drops tool results. Bounded by
-  // recordToolOutcome (MAX_TOOL_OUTCOMES) so a long session can't grow it
-  // unboundedly.
+  /** The location's git worktree root (`GET /api/location` project directory); null = none/unknown. */
+  private worktree: string | null | undefined = undefined
+
+  // ── Auto mode (ADR-023) ────────────────────────────────────────────────────
+  private _autoModeConfig: AutoModeConfig | undefined
+  private _sharedAutoMode: SharedAutoModeConfig | undefined
+  private autoDenials = new AutoModeDenialTracker()
+  private staleJudgeModelReported = false
+  private judgeRouteUnavailableReported = false
   private toolOutcomes = new Map<string, ToolOutcome>()
-  // SESSION-START git remotes — resolved once, lazily, at the first classifier
-  // use and then frozen for the session's lifetime. Never refreshed: a remote
-  // added mid-session is exactly what the exfiltration rules exist to catch, so
-  // re-reading would let the agent whitelist its own destination (ref §9.1).
   private sessionRemotes: GitRemote[] | null = null
   private sessionRemotesPromise: Promise<GitRemote[]> | null = null
-  // Repo visibility — also resolved at most once per session (a `gh` round trip
-  // on the approval hot path), including the 'unknown' answer.
   private sessionRepoVisibility: RepoVisibility | null = null
   private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
-  // Discovered command names (populated in run(null) eager connect). Used by
-  // run(prompt) to route /command tokens to runCommand instead of promptAsync.
+
   private knownCommandNames = new Set<string>()
-  // Set true by cancel()/dispose(), reset to false at the top of each run(), so
-  // ensureConnected() can detect a cancel that landed mid-acquire (during THIS
-  // run's connect window) and release the freshly-acquired ref.
   private _cancelled = false
-  // Memoized in-flight connection acquire. Both run(null)'s eagerConnect and
-  // run(prompt) await the SAME promise, so a prompt sent before the eager
-  // acquire resolves does NOT trigger a second acquire (ref-count stays 1).
   private connectingPromise: Promise<void> | null = null
-  // Memoized in-flight "establish" (connect + create/resume session + SSE +
-  // permission mode) for the FIRST prompt of a turn. A second prompt landing
-  // during the connect window (client + openSessionId both still null, up to
-  // ~15s) awaits this SAME promise and then steers into the one session it
-  // created, instead of taking the main path and calling createSession a second
-  // time — which orphaned one session and lost the events filtered to the
-  // overwritten openSessionId (M-OC1). Cleared once the first prompt's run()
-  // settles (its finally).
   private establishingPromise: Promise<void> | null = null
-  // Replay-once memo. On resume BOTH eagerConnect() (run(null)) and
-  // establishSession() (run(prompt)) gate on `!openSessionId` with an await
-  // window between the check and the set, so a prompt arriving during the eager
-  // connect can drive both into replayStoredHistory() for the same session —
-  // replaying the whole transcript (and re-emitting every session:message)
-  // twice. Memoize on the sessionId: the second caller awaits the SAME in-flight
-  // replay (preserving the history-before-new-prompt ordering) and never re-runs.
+  private resuming: Promise<void> | null = null
   private replayInFlight: Promise<void> | null = null
   private replayedSessionId: string | null = null
-
-  // The opencode session id to resume (passed from sidebar when clicking a
-  // persisted opencode session). When set, we skip createSession and replay
-  // the stored message history before accepting new prompts.
   private resumeSessionId: string | undefined
-
-  /** Resolve capabilities for the current model from the discovery cache. */
-  private resolveCapsForModel(): ResolvedCapabilities {
-    const { providerID, modelID } = parseModelString(this._model)
-    const base = resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
-    // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
-    // ANDed with the honest runtime check: some target (Claude Code, pi or
-    // Codex) is available. No longer a given since ADR-082 made Claude Code a
-    // selectable harness that can resolve to nothing.
-    return {
-      ...base,
-      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode')
-    }
-  }
 
   constructor(
     routingId: string,
@@ -519,17 +415,12 @@ export class OpencodeSession extends BaseSession {
     opts: EngineSpawnOptions = {}
   ) {
     super(routingId, win, cwd)
-    // effort/sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
-    // unread — Claude-only options per EngineSpawnOptions' docs / ADR-030.
     this._model = opts.model ?? DEFAULT_MODEL
     this.permissionMode = opts.permissionMode ?? 'default'
     this.resumeSessionId = opts.resumeSessionId || undefined
     this._capabilities = this.resolveCapsForModel()
     this.sendStatus()
     this.sendStatusLine()
-    // Warm the auth provider cache asynchronously so account is populated on
-    // the next status emit (e.g. when run() begins). A cross-vendor model switch
-    // re-reads from the cached map, so this only needs to warm once per session.
     opencodeAuthProvider
       .warmCache()
       .then(() => {
@@ -539,71 +430,17 @@ export class OpencodeSession extends BaseSession {
       .catch(() => {})
   }
 
+  private resolveCapsForModel(): ResolvedCapabilities {
+    const { providerID, modelID } = parseModelString(this._model)
+    const base = resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
+    return {
+      ...base,
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode')
+    }
+  }
+
   get willQueue(): boolean {
     return this.isProcessing
-  }
-
-  /**
-   * The session's costs: history base + this process's own messages, each one
-   * resolved by the cost rule (see the field doc comment for the split).
-   *
-   * A message the pricing table cannot price is counted as unknown, never as
-   * zero (ADR-030) — `totalCosts` keeps the known part and the unknown count
-   * apart so the status line can report both.
-   */
-  private costTally(): TotalCosts {
-    return totalCosts([...this.costBase, ...this.liveCostInputs()].map(resolveOpencodeCosts))
-  }
-
-  /**
-   * Cost inputs for this process's own (non-child) assistant messages.
-   *
-   * Own messages carry no per-message model of their own, so they are priced
-   * under the session's CURRENT model — the same simplification (and the same
-   * reason) as recordTurnUsage's attribution. Messages that already settled at
-   * a turn end keep the inputs they settled on.
-   */
-  private liveCostInputs(): OpencodeCostInputs[] {
-    const parsed = parseModelString(this._model)
-    const out: OpencodeCostInputs[] = []
-    for (const [messageId, acc] of this.accumulators) {
-      if (acc.isChild) continue
-      if (acc.role === 'user' || acc.role === 'system') continue
-      // Nothing metered yet — not an unpriced message, an empty one. Same
-      // condition recordTurnUsage skips on, deliberately: a message that has
-      // only just been announced must not flash through the headline as an
-      // unpriced one on its way to being metered.
-      if (!acc.cost && !acc.tokens) continue
-      const settled = this.settledCostInputs.get(messageId)
-      out.push(
-        settled ??
-          opencodeCostInputs(parsed.providerID, parsed.modelID, acc.tokens, acc.cost ?? null)
-      )
-    }
-    return out
-  }
-
-  /** What opencode itself reported spending, history + live. */
-  private get engineReportedCostUsd(): number {
-    return this.rawCostBaseUsd + this.liveTotalCostUsd
-  }
-
-  /** The headline figure: the known total, null when nothing could be priced. */
-  private get totalCostUsd(): number | null {
-    return this.costTally().displayCostUsd
-  }
-
-  /** modelCostBase merged with liveModelCosts, summed per model id. */
-  private get modelCostEntries(): ModelCostEntry[] {
-    const merged = new Map<string, number>(this.modelCostBase)
-    for (const [modelId, cost] of this.liveModelCosts) {
-      merged.set(modelId, (merged.get(modelId) ?? 0) + cost)
-    }
-    return [...merged.entries()].map(([modelId, costUsd]) => ({
-      engineId: 'opencode' as const,
-      modelId,
-      costUsd
-    }))
   }
 
   get status(): SessionStatus {
@@ -624,9 +461,7 @@ export class OpencodeSession extends BaseSession {
     return this.openSessionId
   }
 
-  /** Public accessor for cross-engine dispatch (ADR-033 M2) — the caller-session
-   *  lookup wired in main/index.ts reads this to inherit autonomy into a
-   *  dispatched Claude target. `permissionMode` itself stays private. */
+  /** Cross-engine dispatch reads the caller's autonomy (ADR-033 M2). */
   getAutonomyMode(): string {
     return this.permissionMode
   }
@@ -641,349 +476,355 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** Slice C — re-emit the status line so a dispatched-cost update reaches the
-   *  TopBar tooltip live (BaseSession.addDispatchedCost's hook). */
   protected override onDispatchedCostsChanged(): void {
     this.sendStatusLine()
   }
 
+  // ── Model ──────────────────────────────────────────────────────────────────
+
+  private modelRef(): Model_Ref {
+    const { providerID, modelID } = parseModelString(this._model)
+    return {
+      providerID,
+      id: modelID,
+      ...(this.reasoningVariant != null ? { variant: this.reasoningVariant } : {})
+    }
+  }
+
+  private modelKey(ref: Model_Ref): string {
+    return `${ref.providerID}/${ref.id}#${ref.variant ?? ''}`
+  }
+
+  /** Put the chat's model (and reasoning variant) on the opencode session before a request. */
+  private async syncModel(): Promise<void> {
+    if (!this.client || !this.openSessionId) return
+    const ref = this.modelRef()
+    const key = this.modelKey(ref)
+    if (this.appliedModelKey === key) return
+    await this.client.switchModel(this.openSessionId, ref)
+    this.appliedModelKey = key
+  }
+
+  // ── Turns ──────────────────────────────────────────────────────────────────
+
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
     this.clearInactivityTimer()
-    // Reset the cancel flag so it only guards THIS run's connect window. cancel()
-    // is also fired by the idle timeout; without this reset a session that
-    // idle-timed-out would refuse to reconnect on a subsequent prompt.
     this._cancelled = false
-    // Same for the disconnect flag: this run reconnects, so the status it is
-    // about to emit ('running') must not be overridden by a prior loss.
     this.disconnected = false
 
-    // ── Eager connect (parity with Claude's spawn-only path) ─────────────────
-    // run(null) is called at session creation to warm the connection + discover
-    // slash commands / skills before the first prompt arrives. We acquire the
-    // server, fetch commands + skills (instance/cwd-scoped, no opencode session
-    // needed), emit the two events, and keep the connection for reuse.
-    // Any failure degrades silently — opencode is optional. Arm the inactivity
-    // timer so an opened-but-never-prompted session still releases its server ref.
     if (prompt === null) {
       void this.eagerConnect()
       this.resetInactivityTimer()
       return
     }
 
-    // ── Steer path: prompt arriving mid-turn coalesces into the running opencode
-    // loop. We post immediately — opencode's
-    // runLoop re-reads the message list each step and picks it up — then ack it
-    // so a queued item (ADR-053) transitions to `consumed` and the renderer
-    // moves the card into chat.
-    // We do NOT touch isProcessing / startTimeMs / createSession / ensureSSEConsumer /
-    // applyPermissionMode — the ongoing turn already owns all of that.
-    if (this.isProcessing && this.client && this.openSessionId) {
-      const userMsg: ChatMessage = {
-        id: uuid(),
-        role: 'user',
-        content: this.userMessageContent(prompt, attachments),
-        timestamp: Date.now()
-      }
-      this.messageHistory.push(userMsg)
-      try {
-        await this.sendPrompt(prompt, attachments)
-      } catch (err) {
-        // The steer was NOT delivered. Acking here (the pre-fix behavior) told
-        // the renderer the message was sent while it silently vanished (M-OC9).
-        // Roll back the optimistic history push and surface the failure instead
-        // — do NOT consume the message.
-        logger.warn(
-          'OpencodeSession',
-          `steer send failed: ${err instanceof Error ? err.message : String(err)}`
-        )
-        this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
-        this.send('session:error', err instanceof Error ? err.message : String(err))
-        return
-      }
-      this.onPromptDelivered(prompt)
-      return
-    }
-
-    // ── Second prompt during the connect window (M-OC1) ──────────────────────
-    // The steer guard above needs client + openSessionId, both still null while
-    // the FIRST prompt is connecting (up to ~15s). A second prompt landing here
-    // must NOT fall through to the main path — both would pass `!openSessionId`
-    // and call createSession, orphaning one session and losing the events
-    // filtered to the overwritten id. Wait for the in-flight establish, then
-    // re-enter: the steer guard now holds (client + openSessionId set), so this
-    // prompt coalesces into the SINGLE session instead of creating a second.
+    // A prompt during another prompt's connect window rides into the ONE
+    // session that establish creates (M-OC1): never a second createSession.
     if (this.establishingPromise) {
       try {
         await this.establishingPromise
       } catch {
-        return // the first prompt's establish failed; it already surfaced session:error
+        return // the first prompt already surfaced its error
       }
-      if (this._cancelled || !this.client || !this.openSessionId || !this.isProcessing) return
-      return this.run(prompt, attachments)
+      if (this._cancelled || !this.client || !this.openSessionId) return
+      return this.steer(prompt, attachments)
     }
 
-    // A fresh turn closes the user-stop window (ADR-090); the steer path above keeps it.
+    // A turn is running: the prompt goes into it (the inbox steers it at the
+    // next step boundary). The send path normally queues instead.
+    if (this.isProcessing && this.client && this.openSessionId) {
+      return this.steer(prompt, attachments)
+    }
+
     this.endUserStop()
     this.isProcessing = true
     this.sendStatus()
 
-    // Memoize the establish phase (connect + create/resume + SSE + permission)
-    // so a second prompt during the connect window (above) awaits the SAME
-    // establish and never creates a duplicate session (M-OC1).
     const establishing = this.establishSession()
     this.establishingPromise = establishing
     try {
       await establishing
-      // Cancelled mid-connect (idle timeout / user cancel) or no session could
-      // be established — bail cleanly instead of dereferencing a null
-      // client/session below.
       if (!this.client || this._cancelled || !this.openSessionId) {
         this.isProcessing = false
-        // No connection ever landed → this is a disconnect as far as the
-        // renderer's sdkActive/green-dot contract goes (on the _cancelled path
-        // cancel() already set the flag, so this stays consistent).
         if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
         return
       }
-
-      // 5. Record the user message in local history (for getMessages()). Do NOT
-      // emit session:message — the renderer adds the user message optimistically
-      // (addUserMessage) and session:send relays session:user-message, mirroring
-      // ClaudeSession. Emitting here would render the prompt twice.
-      const userMsg: ChatMessage = {
-        id: uuid(),
-        role: 'user',
-        content: this.userMessageContent(prompt, attachments),
-        timestamp: Date.now()
-      }
-      this.messageHistory.push(userMsg)
-
-      // 6. Send prompt — route slash commands to runCommand when the name is known
       this.startTimeMs = Date.now()
-      await this.sendPrompt(prompt, attachments)
-      // Reached the engine. A no-op unless this run() was a queue flush at the
-      // previous turn's end (ADR-053) — then it consumes the forwarded item.
-      this.onPromptDelivered(prompt)
+      await this.postUserPrompt(prompt, attachments)
     } catch (err) {
-      logger.error(
-        'OpencodeSession',
-        `run() error: ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.error('OpencodeSession', `run() error: ${errText(err)}`)
       this.isProcessing = false
-      // A turn that failed before a connection exists (acquire rejected) is a
-      // disconnect for the renderer's sdkActive/green-dot contract — 'idle'
-      // here would leave the sidebar dot green forever.
       if (!this.conn) this.disconnected = true
-      this.send('session:error', err instanceof Error ? err.message : String(err))
+      this.send('session:error', errText(err))
       this.sendStatus()
       this.resetInactivityTimer()
     } finally {
-      // Release the memo once THIS prompt's run() settles — a later prompt that
-      // arrives after the turn is established takes the steer path directly.
       this.establishingPromise = null
+      // Items queued during the connect window go to the inbox now.
+      void this.flushQueuedItems()
+    }
+  }
+
+  /** A prompt into a running turn; a failed post is surfaced, never silently dropped. */
+  private async steer(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
+    try {
+      await this.postUserPrompt(prompt, attachments)
+    } catch (err) {
+      logger.warn('OpencodeSession', `steer send failed: ${errText(err)}`)
+      this.send('session:error', errText(err))
     }
   }
 
   /**
-   * Establish the opencode session for a turn: acquire the connection, create
-   * or resume the opencode session, start the SSE consumer, and apply the
-   * permission mode. Extracted from run() and memoized there (establishingPromise)
-   * so two prompts landing during the connect window share ONE establish and
-   * create exactly ONE session (M-OC1). Leaves client/openSessionId null when
-   * cancelled mid-connect; the caller checks and bails.
+   * Post one user prompt the renderer already shows (the send path relays
+   * `session:user-message`), under a ClaudeUI inbox id so its delivered row is
+   * recognized as ours. History is rolled back when the post fails.
+   */
+  private async postUserPrompt(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
+    const inboxID = newInboxId()
+    const userMsg: ChatMessage = {
+      id: uuid(),
+      role: 'user',
+      content: this.userMessageContent(prompt, attachments),
+      timestamp: Date.now()
+    }
+    this.messageHistory.push(userMsg)
+    this.ownInboxIds.add(inboxID)
+    try {
+      await this.postPrompt(prompt, attachments, inboxID, 'steer')
+    } catch (err) {
+      this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
+      this.ownInboxIds.delete(inboxID)
+      throw err
+    }
+  }
+
+  /**
+   * `POST …/prompt` (or `…/command` for a known `/command`, which takes no id
+   * and falls back to a plain prompt when opencode refuses it).
+   */
+  private postPrompt(
+    text: string,
+    attachments: AttachmentUpload[] | undefined,
+    inboxID: string,
+    delivery: 'steer' | 'queue'
+  ): Promise<void> {
+    const post = this.postChain.then(() => this.postPromptNow(text, attachments, inboxID, delivery))
+    this.postChain = post.catch(() => {})
+    return post
+  }
+
+  private async postPromptNow(
+    text: string,
+    attachments: AttachmentUpload[] | undefined,
+    inboxID: string,
+    delivery: 'steer' | 'queue'
+  ): Promise<void> {
+    const client = this.client
+    const sessionID = this.openSessionId
+    if (!client || !sessionID) throw new Error('opencode session is not connected')
+    await this.syncModel()
+    const files = (attachments ?? []).map((att) => ({
+      uri: `data:${att.mediaType};base64,${att.base64Data}`,
+      ...(att.fileName ? { name: att.fileName } : {})
+    }))
+    const slash = text.match(/^\/(\S+)\s*([\s\S]*)$/)
+    if (slash && this.knownCommandNames.has(slash[1])) {
+      this.pendingCommandEchoes++
+      try {
+        await client.runCommand(sessionID, {
+          name: slash[1],
+          text: (slash[2] ?? '').trim(),
+          ...(files.length > 0 ? { files } : {}),
+          delivery
+        })
+        return
+      } catch (err) {
+        this.pendingCommandEchoes--
+        logger.warn(
+          'OpencodeSession',
+          `runCommand(${slash[1]}) failed, sending the text as a prompt: ${errText(err)}`
+        )
+      }
+    }
+    await client.prompt(sessionID, {
+      id: inboxID,
+      text,
+      ...(files.length > 0 ? { files } : {}),
+      delivery
+    })
+  }
+
+  /**
+   * Connect, create or resume the opencode session, start the feed and apply
+   * the permission mode — memoized by `run()` so a second prompt during the
+   * connect window shares it (M-OC1).
    */
   private async establishSession(): Promise<void> {
-    // 1. Connect (memoized — shares the in-flight acquire with eagerConnect so
-    //    a prompt sent before the eager acquire resolves never double-acquires).
     await this.ensureConnected()
     if (!this.client || this._cancelled) return
 
-    // 2. Create or resume opencode session
-    if (!this.openSessionId) {
-      if (this.resumeSessionId) {
-        // Resume: reuse the prior session id (skip createSession).
-        // Verify the session exists first — if not, fall back to creating fresh.
-        try {
-          await this.client.getSession(this.resumeSessionId)
-          this.openSessionId = this.resumeSessionId
-          logger.info('OpencodeSession', `Resuming opencode session ${this.openSessionId}`)
-        } catch {
-          logger.warn(
-            'OpencodeSession',
-            `Resume session ${this.resumeSessionId} not found — creating fresh session`
-          )
-          this.resumeSessionId = undefined
-        }
-      }
-      if (!this.openSessionId) {
-        // Omit `title` so opencode stamps its default placeholder
-        // ("New session - <ISO>"). That placeholder is what gates opencode's
-        // own async title generation (SessionPrompt.ensureTitle fires only when
-        // `isDefaultTitle(session.title)` holds). Passing `title: ''` here would
-        // store an empty string — which opencode treats as a deliberate
-        // user-set title and so NEVER auto-titles — leaving the session
-        // permanently "Untitled". The placeholder is mapped back to a friendly
-        // label in opencode-session-list.ts until generation lands a real title.
-        const s = await this.client.createSession({})
-        this.openSessionId = s.id
-      }
-      // Emit status with the session id so the renderer can rekey
-      this.sendStatus()
+    // An eager resume in flight has set the id already: wait for its replay
+    // (the mapper must be seeded before the feed starts).
+    if (this.resuming) await this.resuming
+    else if (!this.openSessionId && this.resumeSessionId) await this.resume(this.resumeSessionId)
+    if (!this.client || this._cancelled) return
 
-      // 2a. On resume: replay stored history BEFORE accepting new prompts.
-      // This paints the prior transcript in the chat view so the user sees context.
-      if (this.resumeSessionId && this.openSessionId === this.resumeSessionId) {
-        await this.replayStoredHistory(this.openSessionId)
+    if (!this.openSessionId) {
+      const built = await this.buildRuleset(this.permissionMode)
+      const agent = built.agent ?? (await this.defaultAgentId())
+      const model = this.modelRef()
+      // No title: opencode's default placeholder gates its own title generation.
+      const created = await this.client.createSession({
+        ...(agent ? { agent } : {}),
+        model,
+        permissions: built.rules
+      })
+      this.adoptSession(created)
+      this.applied = {
+        sessionId: created.id,
+        rules: built.rules,
+        key: JSON.stringify(built.rules)
       }
+      this.lastUserRules = built.userRules
+      this.appliedModelKey = this.modelKey(model)
+      this.sendStatus()
     }
 
-    // 3. Start SSE consumer BEFORE sending prompt (so no events are missed)
-    this.ensureSSEConsumer()
+    await this.ensureFeed()
+    if (this.needsPurge) await this.purgeStaleInbox()
+    if (this.adoptChildrenOnConnect) await this.adoptStoredChildren()
+    await this.applyPermissionMode()
+  }
 
-    // 4. Apply autonomy/permission mode
-    await this.applyPermissionMode(this.permissionMode)
+  /** Take an opencode session as this chat's (fresh mapper). */
+  private adoptSession(info: Session_Info): void {
+    this.openSessionId = info.id
+    this.currentAgent = info.agent ?? null
+    this.appliedModelKey = info.model ? this.modelKey(info.model) : null
+    this.mapper = new OpencodeEventMapper({
+      sessionID: info.id,
+      ...(info.model ? { model: info.model } : {}),
+      suggest: (action, resources) => suggestOpencodeAllowRule(action, [...resources])
+    })
+    this.needsCatchUp = false
   }
 
   /**
-   * Load stored messages for a resumed session and replay them to the renderer
-   * as `session:message` (and `session:tool-result`) events, in order, BEFORE the
-   * first new prompt.  This populates the chat view with the prior transcript.
-   *
-   * Uses `convertStoredMessage` from the event-mapper for part→block mapping
-   * (parity with live turns — no divergent renderer path).
-   *
-   * Best-effort: any failure is swallowed and logged; it NEVER blocks the new prompt.
-   *
-   * Memoized (replayInFlight / replayedSessionId) so eagerConnect() and
-   * establishSession() racing on resume replay exactly once — see the field docs.
+   * Resume `sessionId` if it still exists: replay its history, seed the
+   * status line and the mapper, and arm the catch-up read for the feed's first
+   * `connected`. A missing session falls back to a fresh one.
    */
-  private async replayStoredHistory(sessionId: string): Promise<void> {
-    if (this.replayedSessionId === sessionId) return
+  private resume(sessionId: string): Promise<void> {
+    // Eager connect and the first prompt may both resume: one read, one replay,
+    // and neither starts the feed before the mapper is seeded.
+    this.resuming ??= this.resumeOnce(sessionId).finally(() => {
+      this.resuming = null
+    })
+    return this.resuming
+  }
+
+  private async resumeOnce(sessionId: string): Promise<void> {
+    if (!this.client) return
+    let info: Session_Info
+    try {
+      info = await this.client.getSession(sessionId)
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `Resume session ${sessionId} not found — creating a fresh session: ${errText(err)}`
+      )
+      this.resumeSessionId = undefined
+      return
+    }
+    if (this.openSessionId) return
+    this.adoptSession(info)
+    this.needsCatchUp = true
+    this.needsPurge = true
+    this.adoptChildrenOnConnect = true
+    logger.info('OpencodeSession', `Resuming opencode session ${info.id}`)
+    this.sendStatus()
+    await this.replayStoredHistory(info)
+  }
+
+  /** Replay a resumed session's history once (memoized against eager connect + run racing). */
+  private async replayStoredHistory(info: Session_Info): Promise<void> {
+    if (this.replayedSessionId === info.id) return
     if (this.replayInFlight) return this.replayInFlight
-    this.replayInFlight = this.replayStoredHistoryInner(sessionId)
+    this.replayInFlight = this.replayStoredHistoryInner(info)
     try {
       await this.replayInFlight
-      // Inner swallows its own errors, so reaching here means "attempted" —
-      // never replay this session again (a retry would double-emit history).
-      this.replayedSessionId = sessionId
+      this.replayedSessionId = info.id
     } finally {
       this.replayInFlight = null
     }
   }
 
-  private async replayStoredHistoryInner(sessionId: string): Promise<void> {
-    if (!this.client) return
+  private async replayStoredHistoryInner(info: Session_Info): Promise<void> {
+    const client = this.client
+    if (!client) return
     try {
-      const storedMessages = await this.client.listMessages(sessionId)
-      logger.info(
-        'OpencodeSession',
-        `Replaying ${storedMessages.length} stored messages for ${sessionId}`
-      )
-
-      // Slice B — cost durability across reloads: seed the cost base, the
-      // per-model breakdown, the token base, the context meter and the
-      // active-duration baseline from stored history BEFORE ensureSSEConsumer()
-      // starts (run()/eagerConnect() both call replayStoredHistory before
-      // starting the SSE consumer) and before any new turn runs, so neither
-      // overlay has to catch up from zero.
-      //
-      // S1d: the reconstruction itself lives in history-status-line.ts, which
-      // is also what a COLD sidebar open builds its status line from — one
-      // loop, so a reopened session and the same session after its first new
-      // turn cannot report different histories.
-      const seed = opencodeHistorySeed(storedMessages, parseModelString(this._model))
+      const { rows, children } = await readOpencodeHistory((id) => client.listMessages(id), info.id)
+      const sessionTotals = { cost: info.cost, tokens: info.tokens }
+      this.mapper?.seed(rows, { sessionTotals })
+      const parsed = parseModelString(this._model)
+      const seed = opencodeV2HistorySeed(rows, parsed, {
+        children: children.values(),
+        sessionTotals
+      })
       this.costBase = seed.costInputs
       this.rawCostBaseUsd = seed.engineReportedCostUsd
       this.modelCostBase = seed.modelCosts
       this.tokenBase = seed.tokens
       this.lastContextLength = seed.lastContextLength
       this.accTotalDurationMs = seed.totalDurationMs
-      // Slice C — cross-engine dispatched cost durability: seed from
-      // the usage ledger, keyed by this.routingId (the STABLE id a later
-      // reopen constructs this session object with — see seedDispatchedCosts'
-      // doc comment on BaseSession).
       this.seedDispatchedCosts()
-      // Push the seeded totals to the renderer NOW — otherwise the durable
-      // cost sits in memory but never reaches the TopBar tooltip until the
-      // next live cost_update/result event (which may be turns away, or never,
-      // if the user just reopens a session to look at it).
       this.sendStatusLine()
-
-      for (const stored of storedMessages) {
-        // Compaction parts ride an ordinary message but render as their own
-        // system row (see storedCompactionMessages); replayed ahead of it.
-        for (const separator of storedCompactionMessages(stored)) {
-          this.rememberOpencodeMessage(separator)
-          this.send('session:message', separator)
-        }
-        const msg = convertStoredMessage(stored)
-        if (!msg) continue
-
-        // Add to local history (for getMessages() and future turns), then emit.
-        this.rememberOpencodeMessage(msg)
-        this.send('session:message', msg)
-
-        // Emit tool_result events for completed tool parts so the renderer
-        // can display tool output blocks. Mirrors dispatchMapperOutput 'message' case.
-        for (const block of msg.content) {
-          if (block.type === 'tool_result') {
+      const history = convertOpencodeHistory(rows, children)
+      logger.info(
+        'OpencodeSession',
+        `Replaying ${history.messages.length} stored messages for ${info.id}`
+      )
+      for (const message of history.messages) {
+        this.rememberOpencodeMessage(message)
+        this.send('session:message', message)
+        for (const block of message.content) {
+          if (block.type === 'tool_use' && block.toolInput)
+            this.toolInputs.set(block.toolUseId, block.toolInput)
+          if (block.type === 'tool_result')
             this.recordToolOutcome(block.toolUseId, block.isError ? 'error' : 'ok')
-            this.send('session:tool-result', {
-              toolUseId: block.toolUseId,
-              result: block.toolResult,
-              isError: block.isError ?? false,
-              ...(block.fileDiffs ? { fileDiffs: block.fileDiffs } : {}),
-              ...(block.images ? { images: block.images } : {})
-            })
-          }
         }
       }
     } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `replayStoredHistory failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.warn('OpencodeSession', `replayStoredHistory failed for ${info.id}: ${errText(err)}`)
     }
   }
 
-  /**
-   * Acquire the opencode server connection + build the client, exactly once.
-   * Memoized via `connectingPromise`: concurrent callers (run(null)'s eagerConnect
-   * and a racing run(prompt)) await the SAME acquire, so the ref count is always 1.
-   * Race safety: if cancel() lands while acquire() is awaiting, the freshly
-   * acquired ref is released immediately and conn/client stay null.
-   */
+  /** Acquire the lease and build the client, exactly once (memoized, cancel-safe). */
   private async ensureConnected(): Promise<void> {
     if (this.conn) return
     if (!this.connectingPromise) {
       this.connectingPromise = (async () => {
         const c = await opencodeServerManager.acquire(this.cwd)
         if (this._cancelled) {
-          opencodeServerManager.release(this.cwd)
+          opencodeServerManager.releaseIfCurrent(this.cwd, c)
           return
         }
         this.conn = c
-        this.client = new OpencodeV1Client(c.baseUrl, c.authHeader)
-        // A (re)spawned server may carry a different MCP config (ADR-085 §3)
-        // and different agents (ADR-085 S4) — and the next apply must PATCH
-        // again rather than trust what the previous connection sent.
+        this.client = new OpencodeClient(c)
+        // A new lease may be a different server (another config): re-read
+        // what is per server, and re-assert the session's rules.
         this.knownMcpServers = null
-        this.subagentAgents = null
-        this.lastPatchedRuleset = null
-        this.childGated = null
+        this.agentList = null
+        this.worktree = undefined
+        this.applied = null
         this.disconnected = false
-        // Server death is otherwise INVISIBLE to a session with no SSE
-        // consumer: ensureSSEConsumer() only starts at the first prompt, so an
-        // eagerly-connected, never-prompted session would sit on a dead server
-        // showing a green dot forever. The manager fans this out only for
-        // unexpected deaths. Drop any prior subscription first — a leftover
-        // would keep a listener alive on a handle we no longer hold.
         this.unsubscribeServerExit?.()
         this.unsubscribeServerExit = opencodeServerManager.subscribeExit(
           this.cwd,
-          () => this.markDisconnected('opencode server exited'),
+          () => this.markDisconnected('opencode server exited', { serverGone: true }),
           c
         )
       })().finally(() => {
@@ -993,111 +834,37 @@ export class OpencodeSession extends BaseSession {
     await this.connectingPromise
   }
 
-  /**
-   * Idempotent teardown for every connection-LOSS path (unexpected server
-   * death, SSE stream end). Surfaces `'disconnected'` so the renderer clears
-   * `sdkActive`, and drops our connection so the next run() reacquires — which
-   * respawns the server, since the manager already dropped the dead handle.
-   *
-   * Releases via releaseIfCurrent, never release(): by the time we get here
-   * another same-cwd session may already have spawned a REPLACEMENT server, and
-   * a key-only release would decrement that live handle's refcount (see
-   * OpencodeServerManager.releaseIfCurrent).
-   */
-  private markDisconnected(reason: string): void {
-    if (this.disconnected && !this.conn) return
-    this.disconnected = true
-    this.sealStreamItems()
-    if (this.isProcessing) {
-      // A turn was in flight — unwedge it and tell the user why it stopped.
-      this.isProcessing = false
-      this.send('session:error', reason)
-    }
-    this.unsubscribeServerExit?.()
-    this.unsubscribeServerExit = null
-    if (this.conn) {
-      opencodeServerManager.releaseIfCurrent(this.cwd, this.conn)
-      this.conn = null
-      this.client = null
-    }
-    // No engine left to forward held items to (ADR-053 §engine death).
-    this.recallQueuedOnEngineLoss()
-    this.dropBlockHolds()
-    this.sendStatus()
-  }
-
-  /**
-   * Eager connect: acquire the server (memoized) + discover commands/skills +
-   * emit events. Called from run(null); fires and is caught internally (never
-   * throws to caller). Degrades silently — opencode is optional.
-   *
-   * On resume (resumeSessionId set): also replays stored history so the chat
-   * view is populated before the user sends a new prompt.
-   */
+  /** Warm the connection, publish commands/skills, replay a resumed session. Never throws. */
   private async eagerConnect(): Promise<void> {
     try {
       await this.ensureConnected()
-      // Cancelled mid-connect, or connect produced no client — bail (no discovery).
-      if (!this.client || this._cancelled) return
-
-      // Fetch commands + skills in parallel — both are cwd/instance-scoped,
-      // no opencode session needed.
+      const client = this.client
+      if (!client || this._cancelled) return
       const [commands, skills] = await Promise.all([
-        this.client.listCommands().catch((err) => {
-          logger.warn(
-            'OpencodeSession',
-            `listCommands failed: ${err instanceof Error ? err.message : String(err)}`
-          )
+        client.commands().catch((err) => {
+          logger.warn('OpencodeSession', `commands() failed: ${errText(err)}`)
           return []
         }),
-        this.client.listSkills().catch((err) => {
-          logger.warn(
-            'OpencodeSession',
-            `listSkills failed: ${err instanceof Error ? err.message : String(err)}`
-          )
+        client.skills().catch((err) => {
+          logger.warn('OpencodeSession', `skills() failed: ${errText(err)}`)
           return []
         })
       ])
-
-      // Store command names for slash routing in run(prompt)
       this.knownCommandNames = new Set(commands.map((c) => c.name))
-
-      // Emit session:slash-commands — names prefixed with '/' to match Claude's
-      // contract (claude-session.ts:883-887). Renderer slash menu is engine-neutral.
-      const slashCommands = commands.map((c) => ({
-        name: '/' + c.name,
-        description: c.description
-      }))
-      this.send('session:slash-commands', slashCommands)
-
-      // Emit session:skills — name list only (renderer's SkillsDialog calls the
-      // IPC to get full details; this just tells it skills are available).
-      const skillNames = skills.map((s) => s.name)
-      this.send('session:skills', skillNames)
-
-      // Resume path: verify + replay stored history so the chat view is populated
-      // before the user sends a new prompt. This mirrors Claude's historical
-      // session load (which reads JSONL from disk at sidebar click time).
+      this.send(
+        'session:slash-commands',
+        commands.map((c) => ({ name: '/' + c.name, description: c.description }))
+      )
+      this.send(
+        'session:skills',
+        skills.map((s) => s.name)
+      )
       if (this.resumeSessionId && !this.openSessionId) {
-        try {
-          await this.client.getSession(this.resumeSessionId)
-          this.openSessionId = this.resumeSessionId
-          this.sendStatus()
-          await this.replayStoredHistory(this.openSessionId)
-        } catch {
-          // Session not found on server — clear the resumeSessionId so run(prompt)
-          // will create a fresh session instead of attempting to resume.
-          logger.warn(
-            'OpencodeSession',
-            `eagerConnect: resume session ${this.resumeSessionId} not found — will create fresh`
-          )
-          this.resumeSessionId = undefined
-        }
+        await this.resume(this.resumeSessionId)
+        // Follow a resumed session at once: a turn opencode resumes on its own
+        // (a claim kept by a shutdown) and its pending asks show without a prompt.
+        if (this.openSessionId && !this._cancelled) await this.ensureFeed()
       }
-
-      // Discovery may not have run before this session was constructed (cold cache),
-      // in which case capabilities.vision (etc.) defaulted to false. Ensure the model
-      // catalog is warm, then recompute + re-emit so image-capable models enable paste.
       await discoverOpencodeModels().catch(() => [])
       const nextCaps = this.resolveCapsForModel()
       if (
@@ -1109,656 +876,687 @@ export class OpencodeSession extends BaseSession {
         this.sendStatusLine()
       }
     } catch (err) {
-      // Any failure degrades silently — opencode is optional
-      logger.warn(
-        'OpencodeSession',
-        `eagerConnect failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
-      )
+      const detail =
+        err instanceof OpencodePermissionGuardError
+          ? `permission guard not active: ${err.reason}`
+          : errText(err)
+      logger.warn('OpencodeSession', `eagerConnect failed: ${detail}`)
     }
   }
 
-  /**
-   * Route the prompt to runCommand (slash routing) or promptAsync.
-   * If prompt starts with /known-command, invoke via the command API.
-   * Unknown slash tokens fall through to promptAsync (model sees the literal text).
-   * On BadRequest from runCommand, fall back to promptAsync so a name mismatch
-   * never wedges the turn.
-   */
-  private async sendPrompt(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
-    const parsed = parseModelString(this._model)
+  // ── The event feed ─────────────────────────────────────────────────────────
 
-    // Build file parts once — they ride along with BOTH the runCommand and the
-    // promptAsync path so attachments are never dropped on a slash command.
-    const fileParts: Array<{ type: 'file'; mime: string; url: string }> = (attachments ?? []).map(
-      (att) => ({
-        type: 'file',
-        mime: att.mediaType,
-        url: `data:${att.mediaType};base64,${att.base64Data}`
-      })
-    )
-
-    // Slash command routing — only when we have a live connection + session
-    const slashMatch = prompt.match(/^\/(\S+)\s*([\s\S]*)$/)
-    if (slashMatch && this.client && this.openSessionId) {
-      const commandName = slashMatch[1]
-      const commandArgs = (slashMatch[2] ?? '').trim()
-      if (this.knownCommandNames.has(commandName)) {
-        try {
-          await this.client.runCommand(this.openSessionId, {
-            command: commandName,
-            arguments: commandArgs,
-            // Carry any file attachments into the command turn.
-            ...(fileParts.length > 0 ? { parts: fileParts } : {})
-          })
-          // Success — SSE consumer handles the streaming output + session.idle
-          return
-        } catch (err) {
-          // BadRequest ("Available commands: …") or other error — fall back to
-          // promptAsync so the turn isn't wedged by an edge-case name mismatch.
-          logger.warn(
-            'OpencodeSession',
-            `runCommand(${commandName}) failed, falling back to promptAsync: ${err instanceof Error ? err.message : String(err)}`
-          )
-          // Fall through to promptAsync below
-        }
-      }
-    }
-
-    // Default path: send via promptAsync (model sees literal prompt text)
-    const parts: Array<
-      { type: 'text'; text: string } | { type: 'file'; mime: string; url: string }
-    > = [{ type: 'text', text: prompt }, ...fileParts]
-    await this.client!.promptAsync(this.openSessionId!, {
-      model: { providerID: parsed.providerID, modelID: parsed.modelID },
-      agent: this.agent ?? undefined,
-      parts,
-      ...(this.reasoningVariant != null ? { variant: this.reasoningVariant } : {})
-    })
+  /** Start the feed (once per lease) and wait for its first `connected` (+ catch-up). */
+  private ensureFeed(): Promise<void> {
+    if (this.feedAbort && this.feedReady) return this.feedReady
+    const client = this.client
+    if (!client || !this.mapper) return Promise.resolve()
+    const abort = new AbortController()
+    this.feedAbort = abort
+    let ready!: () => void
+    this.feedReady = new Promise<void>((resolve) => (ready = resolve))
+    const readyNow = ready
+    void this.consumeFeed(client, abort, readyNow).finally(() => readyNow())
+    return this.feedReady
   }
 
-  private ensureSSEConsumer(): void {
-    if (this.sseAbort) return // already running
-    this.sseAbort = new AbortController()
-    // Fire and forget — runs in background
-    this.consumeEvents().catch((err) => {
-      if (!this.sseAbort?.signal.aborted) {
-        logger.error(
-          'OpencodeSession',
-          `SSE consumer error: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
-    })
-  }
-
-  private async consumeEvents(): Promise<void> {
-    const abort = this.sseAbort
-    if (!abort) return
-    const signal = abort.signal
-    if (!this.client || !this.openSessionId) {
-      // Never actually started — release the guard so a later run() can retry.
-      if (this.sseAbort === abort) this.sseAbort = null
-      return
-    }
-    // The ENGINE-reported live total (what opencode says it charged), not the
-    // headline — the headline is the cost rule's answer and is recomputed from
-    // the accumulators on demand (costTally). Starts at liveTotalCostUsd (0 for
-    // a fresh/just-resumed session) and never at the history base, because
-    // sumAccumulatorCosts (event-mapper.ts) always REPLACES this ref with a
-    // full recompute over the (base-less) live accumulators map; a base seeded
-    // here would just get discarded on the first cost_update.
-    const totalCostRef = { value: this.liveTotalCostUsd }
-
+  private async consumeFeed(
+    client: OpencodeClient,
+    abort: AbortController,
+    ready: () => void
+  ): Promise<void> {
+    const { signal } = abort
     try {
-      for await (const ev of this.client.subscribeEvents(signal)) {
+      for await (const item of client.subscribeEvents({ signal })) {
         if (signal.aborted) break
-        if (!this.openSessionId) continue
-
-        const output = mapEvent(
-          ev,
-          this.openSessionId,
-          this.accumulators,
-          this.startTimeMs,
-          totalCostRef,
-          this.childSessions
-        )
-        this.liveTotalCostUsd = totalCostRef.value
-        this.settleToolInputWaiters(ev)
-
-        this.dispatchMapperOutput(output)
+        if (item.kind === 'connected') {
+          if (item.reconnected || this.needsCatchUp) {
+            this.needsCatchUp = false
+            await this.catchUp(client)
+          }
+          ready()
+          continue
+        }
+        if (item.kind === 'disconnected') {
+          logger.info(
+            'OpencodeSession',
+            `event feed dropped (${item.error.message}); retrying in ${item.retryInMs} ms`
+          )
+          continue
+        }
+        this.handleEvent(item.event)
       }
     } catch (err) {
-      if (!signal.aborted) {
-        logger.error(
-          'OpencodeSession',
-          `SSE stream error: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      if (!signal.aborted) logger.error('OpencodeSession', `event feed failed: ${errText(err)}`)
     } finally {
-      // The event stream ended. opencode holds this subscription open for the
-      // whole session, so a NON-aborted end means the server died or the
-      // transport broke (the vendor also ends the stream on instance dispose).
-      // Pre-fix, sseAbort stayed non-null → ensureSSEConsumer() no-opped forever,
-      // isProcessing stayed stuck true, interrupt() waited on a session.idle that
-      // never comes, and every later run() steered into a dead session (H20).
-      // Clear the guard so the next run() re-establishes the consumer; on an
-      // unexpected end, go through the shared disconnect teardown — which
-      // unwedges isProcessing and surfaces the drop when a turn was in flight,
-      // and (crucially) reports 'disconnected' even when the stream dies while
-      // IDLE, the only status the renderer acts on to clear the green dot.
-      // No resetInactivityTimer(): that timer exists solely to release the
-      // server ref on an idle session, and markDisconnected already released
-      // it — arming it would only queue a redundant cancel() against a session
-      // the user may be about to resend on. The next run() re-arms it anyway.
       const deliberate = signal.aborted
-      if (this.sseAbort === abort) this.sseAbort = null
-      if (!deliberate) {
-        this.markDisconnected('opencode connection lost — resend to reconnect')
+      if (this.feedAbort === abort) {
+        this.feedAbort = null
+        this.feedReady = null
       }
+      if (!deliberate) this.markDisconnected('opencode connection lost — resend to reconnect')
     }
   }
 
-  /**
-   * Upsert one row into `messageHistory` by id — the ONE copy of that rule for
-   * this class (mirrors `PiSession.rememberPiMessage`). It had grown five
-   * identical hand-written copies, which is four chances for the next one to
-   * push a duplicate instead.
-   */
-  private rememberOpencodeMessage(message: ChatMessage): void {
-    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
-    if (index >= 0) this.messageHistory[index] = message
-    else this.messageHistory.push(message)
-  }
-
-  /**
-   * Put one row THIS class authored (not the mapper) into history and on the
-   * wire — the same upsert-by-id the mapper's `message` case does, minus the
-   * tool-part accumulator bookkeeping, which only applies to a message opencode
-   * itself produced.
-   */
-  private rememberAndSend(message: ChatMessage): void {
-    this.rememberOpencodeMessage(message)
-    this.send('session:message', message)
-  }
-
-  private sendTaskNotification(notification: TaskNotification): void {
-    this.sealStreamItems(notification.taskId)
-    this.send('session:task-notification', notification)
-  }
-
-  /**
-   * A tool call reached a terminal state. If it was a `task` call, this is the
-   * ONE source of that call's terminal notification, and its child mapping
-   * ends here. Only the part knows the outcome: a child's session.error may
-   * be a recovered context overflow, while the part fails with `Subagent
-   * failed (task_id: …): <msg>` exactly when the child ended on an error
-   * (opencode tool/task.ts runTask) — `failed`, unless the call was aborted
-   * (`stopped`, see wasAborted). The reason is the part's own error text,
-   * which reaches the TaskCard as the tool_result. A late child idle then
-   * finds no mapping and is ignored. Matching by VALUE keeps a resumed child (`task_id`) re-registered
-   * under a NEWER callID intact.
-   *
-   * A background task (`metadata.background`, opencode's experimental
-   * background subagents) completes its part while the child keeps running:
-   * its mapping stays, and the child's session.idle sends the notification.
-   */
-  private settleTaskChildren(
-    toolRes: { toolUseId: string; isError: boolean },
-    snap: PartSnapshot
-  ): void {
-    const callId = toolRes.toolUseId
-    if (snap.state?.metadata?.background === true) {
-      if ([...this.childSessions.values()].includes(callId)) this.backgroundTaskCalls.add(callId)
-      return
-    }
-    for (const [childSessionId, mappedCallId] of this.childSessions) {
-      if (mappedCallId !== callId) continue
-      this.sendTaskNotification({
-        taskId: childSessionId,
-        toolUseId: callId,
-        status: !toolRes.isError ? 'completed' : wasAborted(snap) ? 'stopped' : 'failed',
-        outputFile: '',
-        summary: ''
-      })
-      this.childSessions.delete(childSessionId)
+  /** Re-read what a gap (or a resume) hid and apply it like live output (S4 contract). */
+  private async catchUp(client: OpencodeClient): Promise<void> {
+    const mapper = this.mapper
+    if (!mapper) return
+    try {
+      const outputs = await reconcileAfterReconnect(client, mapper)
+      for (const output of outputs) this.dispatch(output)
+      await this.adoptUnknownChildren()
+    } catch (err) {
+      logger.warn('OpencodeSession', `reconnect catch-up failed: ${errText(err)}`)
     }
   }
 
-  private dispatchMapperOutput(output: MapperOutput): void {
-    switch (output.kind) {
-      case 'stream':
-        this.appendStreamItem(output.item, output.delta)
-        break
-
-      case 'message': {
-        const msg = output.message
-        this.rememberOpencodeMessage(msg)
-        if (output.item) this.updateStreamItem(output.item, msg)
-        else this.send('session:message', msg)
-
-        // Check for newly completed tool parts in the accumulator
-        const acc = this.accumulators.get(msg.id)
-        // ADR-053 sub-turn boundary: a tool call of THIS turn just finished, so
-        // held queue items may now be forwarded (see the flush below).
-        let toolCompleted = false
-        if (acc) {
-          for (const [partId, snap] of acc.parts) {
-            const cacheKey = `${msg.id}:${partId}`
-            if (!this.emittedToolResults.has(cacheKey)) {
-              const toolRes = extractToolResult(partId, snap)
-              if (toolRes) {
-                this.emittedToolResults.add(cacheKey)
-                toolCompleted = true
-                // Phase 3: the classifier's `{"outcome":…}` annotation for this
-                // call. Recorded HERE rather than derived from messageHistory at
-                // classify time because live assistant messages carry no
-                // tool_result blocks at all (buildChatMessage emits tool_use
-                // only — results are a separate channel); deriving would work
-                // only for replayed history and miss the in-turn retry, which is
-                // precisely what Transient Retry needs to see.
-                this.recordToolOutcome(toolRes.toolUseId, toolRes.isError ? 'error' : 'ok')
-                this.send('session:tool-result', toolRes)
-                this.settleTaskChildren(toolRes, snap)
-              }
-            }
-          }
-
-          // Live bash output streaming (parity with Claude's bash-output-streaming
-          // patch): while a `bash` tool part is still running, opencode's shell tool
-          // republishes a cumulative stdout+stderr tail preview on state.metadata.output.
-          // Feed it through bashStreamGate so LiveBashOutput updates during the run
-          // instead of only after completion. Own-session only — subagent-message
-          // (child) dispatch never reaches this branch. On completion/error, drop the
-          // gate's tracking for this toolUseId (the final result is already covered by
-          // the session:tool-result emitted above).
-          for (const [partId, snap] of acc.parts) {
-            if (snap.type !== 'tool' || snap.toolName !== 'bash') continue
-            const toolUseId = snap.callID ?? partId
-            const status = snap.state?.status
-            if (status === 'completed' || status === 'error') {
-              this.bashStreamGate.cancel(toolUseId)
-              continue
-            }
-            if (status !== 'running') continue
-            const liveOutput = snap.state?.metadata?.output
-            if (typeof liveOutput === 'string' && liveOutput.length > 0) {
-              this.bashStreamGate.update(toolUseId, liveOutput)
-            }
-          }
-        }
-        if (toolCompleted) void this.flushQueuedItems()
-        break
-      }
-
-      case 'approval': {
-        const approval = output.approval
-        this.pendingApprovals.set(approval.requestId, {
-          toolUseId: approval.toolUseId,
-          approval,
-          // A question is the human's alone — no session allow ever answers it.
-          sweepable: approval.toolName !== 'AskUserQuestion'
-        })
-
-        if (approval.toolName === 'AskUserQuestion') {
-          // Model-elicitation questions (question.asked) must ALWAYS go to the
-          // human regardless of autonomy mode — the auto-mode classifier judges
-          // tool PERMISSIONS, not user-facing structured questions. Store the
-          // question list so resolveApproval can map answers in order.
-          const input = approval.input as { questions?: AskUserQuestion[] }
-          this.pendingQuestions.set(approval.requestId, input.questions ?? [])
-          this.send('session:approval-request', approval)
-        } else {
-          this.routePermissionAsk(approval)
-        }
-        break
-      }
-
-      case 'approval-resolved': {
-        // M-OC2: a permission was resolved server-side (`permission.replied`) —
-        // either the reply we sent, or a sibling the vendor cascade-rejected /
-        // cascade-approved. Clear our local pending bookkeeping so a later reply
-        // can't fire, and retract the (now-stale) card in the renderer via the
-        // existing dismiss channel. All are no-ops if the request is unknown.
-        const { requestId } = output
-        this.takePendingAsk(requestId)
-        this.pendingQuestions.delete(requestId)
-        this.send('session:approval-dismiss', { requestId })
-        break
-      }
-
-      case 'result':
-        this.sealStreamItems(this.openSessionId ?? undefined)
-        this.isProcessing = false
-        // Turn just completed — its wall-clock cost moves from the live
-        // "in flight" delta (turnStartedAtMs) into the completed-turns total.
-        this.accTotalDurationMs += output.result.durationMs ?? 0
-        // Metering (Phase 7 Pass 1) — record one usage_event per assistant
-        // message in this turn. We record at session.idle (result) so we have
-        // the final cumulative token + cost state for each message_id.
-        this.recordTurnUsage()
-        // Metering (Phase 7 Pass 2) — emit the engine-neutral MeteringSnapshot.
-        this.sendMetering()
-        // Status line — emit final values at turn end (parity with Claude's result emit).
-        this.sendStatusLine()
-        // Phase 9b — refresh the per-engine dashboard immediately when an opencode
-        // turn ends. Without this, the opencode section only updates on the Claude
-        // usage poll (which may not fire at all in opencode-only sessions).
-        // recalculate() is self-guarded with a concurrency flag, so back-to-back
-        // turns queue safely.
-        blockUsageService.recalculate().catch(() => {})
-        // output.result.totalCostUsd is the LIVE-only value (event-mapper's
-        // totalCostUsd ref has no notion of the seeded historical base) —
-        // override with the getter so a resumed session's result payload
-        // reports the same durable total as the status line / session:status.
-        this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
-        this.sendStatus()
-        this.resetInactivityTimer()
-        // The stopped turn (if any) has ended: the user-stop window closes (ADR-090).
-        this.endUserStop()
-        // ADR-053: turn end is also a boundary — anything still held forwards
-        // now, as the next turn's prompt (isProcessing is already false, so
-        // run() takes the fresh-turn path rather than the steer path).
-        void this.flushQueuedItems()
-        break
-
-      case 'cost_update':
-        // totalCostUsd already updated via ref. Update lastContextLength from the
-        // latest assistant message's cumulative token snapshot (input + cacheRead is
-        // the running prompt size — the "context used" dimension). Then emit the
-        // status line live so the renderer updates during the turn (parity with Claude).
-        if (output.tokens) {
-          this.lastContextLength = (output.tokens.input ?? 0) + (output.tokens.cache?.read ?? 0)
-        }
-        this.sendStatusLine()
-        break
-
-      case 'auth-required': {
-        this.isProcessing = false
-        // ADR-068 §4: one event for every engine, naming the PROVIDER the
-        // sign-in dialog can act on rather than opencode's own vendor id.
-        //
-        // ADR-070 §1: opencode's verbatim message rides ON the event and the
-        // companion `session:error` is GONE — it was a second, separately
-        // dismissable card for the same fact. The words are not lost: the row
-        // discloses them in place, and the neutral transcript block below gives
-        // them a permanent home the floating card never had.
-        //
-        // ORDER: before `sendStatus()` below. The reducer captures the retry only
-        // while the canonical status still reads `running`.
-        const providerId = opencodeAuthRequiredProviderId(output.vendorId)
-        this.send('session:auth-required', { providerId, message: output.message })
-        // The SAME providerId on the block, so the row still names the provider
-        // once the live `authRequired` has settled (ADR-070 §4).
-        this.rememberAndSend(authErrorTranscriptMessage(uuid(), output.message, providerId))
-        this.sendStatus()
-        this.resetInactivityTimer()
-        break
-      }
-
-      case 'error':
-        this.sealStreamItems(this.openSessionId ?? undefined)
-        this.isProcessing = false
-        // ADR-090: a turn the user stopped ends in opencode's
-        // MessageAbortedError — the abort's aftermath, not news. The window is
-        // the rule (an abort outside a user stop is unexplained and still shows).
-        if (!this.suppressedAfterUserStop('OpencodeSession', output.message)) {
-          this.send('session:error', output.message)
-        }
-        this.sendStatus()
-        this.resetInactivityTimer()
-        break
-
-      case 'subagent-stream':
-        this.appendStreamItem(output.item, output.delta, output.toolUseId)
-        break
-
-      case 'subagent-message': {
-        const { toolUseId, message } = output
-        if (output.item) this.updateStreamItem(output.item, message, toolUseId)
-        else this.send('session:subagent-message', { toolUseId, message })
-
-        // Extract newly completed child tool parts → session:subagent-tool-result.
-        // Mirrors the own 'message' case's extractToolResult + emittedToolResults dedup.
-        const childAcc = this.accumulators.get(message.id)
-        if (childAcc) {
-          for (const [partId, snap] of childAcc.parts) {
-            const cacheKey = `${message.id}:${partId}`
-            if (!this.emittedToolResults.has(cacheKey)) {
-              const toolRes = extractToolResult(partId, snap)
-              if (toolRes) {
-                this.emittedToolResults.add(cacheKey)
-                this.send('session:subagent-tool-result', {
-                  toolUseId,
-                  toolResultToolUseId: toolRes.toolUseId,
-                  result: toolRes.result,
-                  isError: toolRes.isError,
-                  ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {}),
-                  ...(toolRes.images ? { images: toolRes.images } : {})
-                })
-                // A child's own `task` call ended: its grandchild's mapping
-                // ends with it (same lifetime rule as the parent's calls).
-                this.settleTaskChildren(toolRes, snap)
-              }
-            }
-          }
-        }
-        break
-      }
-
-      case 'task-notification': {
-        // A child's session.idle: the child's streams are done either way, but
-        // the notification is terminal only for a background call — a
-        // foreground call's comes from its task part (settleTaskChildren), the
-        // only place that knows the outcome.
-        const { taskId, toolUseId } = output.notification
-        if (!toolUseId || !this.backgroundTaskCalls.delete(toolUseId)) {
-          this.sealStreamItems(taskId)
-          break
-        }
-        if (this.childSessions.get(taskId) === toolUseId) this.childSessions.delete(taskId)
-        this.sendTaskNotification(output.notification)
-        break
-      }
-
-      case 'todos':
-        // Feed the floating Todo widget via the existing session:plan channel,
-        // which is already wired through preload → useClaudeEvents.onPlanSteps → setTodos.
-        this.send('session:plan', output.items)
-        break
-
-      case 'ignore':
-        break
-    }
+  /** Raw hooks the mapper does not cover, then every mapper output. */
+  private handleEvent(event: OpencodeEvent): void {
+    if (event.type === 'session.created') this.onSessionCreated(event.data)
+    else if (event.type === 'session.agent.selected') this.onAgentSelected(event.data)
+    const mapper = this.mapper
+    if (!mapper) return
+    for (const output of mapper.map(event)) this.dispatch(output)
   }
 
-  private streamItemKey(ownerSessionId: string, partId: string): string {
-    return JSON.stringify([ownerSessionId, partId])
-  }
-
-  private streamTarget(item: OpencodeStreamItem, ownerToolUseId?: string): ItemStreamTarget {
-    return {
-      messageId: item.messageId,
-      blockIndex: item.blockIndex,
-      kind: item.kind,
-      ...(ownerToolUseId ? { ownerToolUseId } : {})
-    }
-  }
-
-  private updateStreamItem(
-    item: OpencodeStreamItem,
-    message: ChatMessage,
-    ownerToolUseId?: string
-  ): void {
-    const ownerSessionId = ownerToolUseId
-      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
-      : (this.openSessionId ?? '')
-    const key = this.streamItemKey(ownerSessionId, item.partId)
-    const target = this.streamTarget(item, ownerToolUseId)
-    const active = this.activeStreamItems.get(key)
-    const snap = this.accumulators.get(item.messageId)?.parts.get(item.partId)
-    if (snap?.sealed) {
-      if (item.completed)
-        this.send('session:item-seal', {
+  /** Dispatch one mapper output (the S4 results table). */
+  private dispatch(o: OpencodeMapperOutput): void {
+    switch (o.kind) {
+      case 'turn-start':
+        if (!this.isProcessing) {
+          this.isProcessing = true
+          this.startTimeMs = Date.now()
+          this.clearInactivityTimer()
+          this.sendStatus()
+        }
+        return
+      case 'item-open': {
+        const { target } = o.open
+        this.openItems.set(this.itemKey(target), {
           target,
-          message,
-          ...(ownerToolUseId ? { ownerToolUseId } : {})
+          message: structuredClone(o.open.message)
         })
-      return
-    }
-    const block = message.content[item.blockIndex]
-    if (
-      !active &&
-      item.kind === 'thinking' &&
-      block?.type === 'thinking' &&
-      block.text.length === 0
-    )
-      return
-    if (!active) {
-      this.activeStreamItems.set(key, { target, ownerSessionId, partId: item.partId })
-      this.send('session:item-open', {
-        target,
-        message,
-        // opencode times its own reasoning parts; fall back to now when the
-        // snapshot has no start yet.
-        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
-      })
-    }
-    if (item.completed) {
-      this.send('session:item-seal', {
-        target,
-        message,
-        ...(ownerToolUseId ? { ownerToolUseId } : {})
-      })
-      this.activeStreamItems.delete(key)
-      if (snap) snap.sealed = true
-    }
-  }
-
-  private appendStreamItem(item: OpencodeStreamItem, chunk: string, ownerToolUseId?: string): void {
-    const ownerSessionId = ownerToolUseId
-      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
-      : (this.openSessionId ?? '')
-    const acc = this.accumulators.get(item.messageId)
-    const key = this.streamItemKey(ownerSessionId, item.partId)
-    let active = this.activeStreamItems.get(key)
-    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
-      const target = this.streamTarget(item, ownerToolUseId)
-      const message = buildChatMessage(item.messageId, acc)
-      const content = [...message.content]
-      content[item.blockIndex] =
-        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
-      this.send('session:item-open', {
-        target,
-        message: { ...message, content },
-        ...(item.kind === 'thinking'
-          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
-          : {})
-      })
-      active = { target, ownerSessionId, partId: item.partId }
-      this.activeStreamItems.set(key, active)
-    }
-    if (!active) return
-    this.send('session:item-delta', { target: active.target, chunk })
-    if (acc && !ownerToolUseId) this.rememberOpencodeMessage(buildChatMessage(item.messageId, acc))
-  }
-
-  private sealStreamItems(ownerSessionId?: string): void {
-    for (const [key, active] of this.activeStreamItems) {
-      if (ownerSessionId !== undefined && active.ownerSessionId !== ownerSessionId) continue
-      const acc = this.accumulators.get(active.target.messageId)
-      if (acc) {
-        const snap = acc.parts.get(active.partId)
-        if (snap) {
-          snap.sealed = true
-          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
-            const end = Date.now()
-            snap.time = { start: snap.time?.start ?? end, end }
-          }
+        if (!target.ownerToolUseId) this.rememberOpencodeMessage(o.open.message)
+        this.send('session:item-open', o.open)
+        return
+      }
+      case 'item-delta': {
+        const open = this.openItems.get(this.itemKey(o.target))
+        const block = open?.message.content[o.target.blockIndex]
+        if (block && (block.type === 'text' || block.type === 'thinking')) block.text += o.chunk
+        this.send('session:item-delta', { target: o.target, chunk: o.chunk })
+        return
+      }
+      case 'item-seal': {
+        const { seal } = o
+        if (seal.target) this.openItems.delete(this.itemKey(seal.target))
+        else
+          for (const [key, open] of this.openItems)
+            if (open.target.messageId === seal.message.id) this.openItems.delete(key)
+        if (!seal.ownerToolUseId && !seal.target?.ownerToolUseId)
+          this.rememberOpencodeMessage(seal.message)
+        this.send('session:item-seal', seal)
+        return
+      }
+      case 'message':
+        this.noteToolInputs(o.message)
+        if (o.ownerToolUseId) {
+          this.send('session:subagent-message', {
+            toolUseId: o.ownerToolUseId,
+            message: o.message
+          })
+        } else {
+          this.rememberOpencodeMessage(o.message)
+          this.send('session:message', o.message)
         }
-        this.send('session:item-seal', {
-          target: active.target,
-          message: buildChatMessage(active.target.messageId, acc),
-          ...(active.target.ownerToolUseId ? { ownerToolUseId: active.target.ownerToolUseId } : {})
+        return
+      case 'user-message':
+        this.onUserMessage(o.inboxID, o.message)
+        return
+      case 'tool-input-delta':
+        return
+      case 'tool-result':
+        this.onToolResult(o.result, o.ownerToolUseId)
+        return
+      case 'permission-denial':
+        // A child's call is not a top-level block the reducer can attach to.
+        if (!o.ownerToolUseId)
+          this.send('session:permission-denial', { toolUseId: o.toolUseId, denial: o.denial })
+        return
+      case 'shell-started':
+        if (!o.ownerToolUseId && this.client)
+          this.shellPoller.start(o.toolUseId, o.shellID, this.client)
+        return
+      case 'subagent-started':
+        // A resumed child re-links under a newer call: re-assert its ruleset.
+        if (this.children.has(o.childSessionId)) void this.patchChild(o.childSessionId)
+        else void this.adoptUnknownChildren()
+        return
+      case 'task-notification':
+        this.send('session:task-notification', o.notification)
+        return
+      case 'approval':
+        this.onApproval(o.approval, o.route)
+        return
+      case 'approval-resolved':
+        this.takePendingAsk(o.requestId)
+        this.pendingForms.delete(o.requestId)
+        this.routes.delete(o.requestId)
+        this.send('session:approval-dismiss', { requestId: o.requestId })
+        return
+      case 'step-usage':
+        this.meterStep(o.usage)
+        return
+      case 'session-usage':
+        return
+      case 'overhead-usage': {
+        const { providerID, modelID } = parseModelString(this._model)
+        this.addLiveUsage(providerID, modelID, o.cost, o.tokens, false)
+        this.sendStatusLine()
+        return
+      }
+      case 'compaction':
+        if (o.usage) {
+          const fallback = parseModelString(this._model)
+          this.addLiveUsage(
+            o.usage.model?.providerID ?? fallback.providerID,
+            o.usage.model?.id ?? fallback.modelID,
+            o.usage.cost,
+            o.usage.tokens,
+            false
+          )
+          this.sendStatusLine()
+        }
+        return
+      case 'retry':
+        logger.info(
+          'OpencodeSession',
+          `opencode retries the request (attempt ${o.attempt}): ${o.error.message}`
+        )
+        return
+      case 'inbox':
+        this.onInbox(o)
+        return
+      case 'agent-selected':
+        this.currentAgent = o.agent
+        return
+      case 'model-selected':
+        this.appliedModelKey = this.modelKey(o.model)
+        return
+      case 'session-renamed':
+        return
+      case 'session-deleted':
+        logger.warn('OpencodeSession', `opencode session ${this.openSessionId} was deleted`)
+        return
+      case 'result':
+        this.endTurn(o.durationMs, o.sessionId)
+        return
+      case 'stopped':
+        this.onStopped(o.reason)
+        this.endTurn(o.durationMs, o.sessionId)
+        return
+      case 'error':
+        // ADR-090: a turn the user stopped may still end in an error; not news.
+        if (!this.suppressedAfterUserStop('OpencodeSession', o.message))
+          this.send('session:error', o.message)
+        this.endTurn(o.durationMs, o.sessionId)
+        return
+      case 'auth-required': {
+        // ADR-068 §4 / ADR-070 §1: one event naming the provider, BEFORE the
+        // status leaves `running` (the reducer captures the retry while running).
+        const providerId = opencodeAuthRequiredProviderId(o.vendorId)
+        this.send('session:auth-required', { providerId, message: o.message })
+        this.rememberAndSend(authErrorTranscriptMessage(uuid(), o.message, providerId))
+        this.endTurn(o.durationMs, o.sessionId)
+        return
+      }
+    }
+  }
+
+  private itemKey(target: ItemStreamTarget): string {
+    return JSON.stringify([target.messageId, target.blockIndex, target.ownerToolUseId ?? ''])
+  }
+
+  private noteToolInputs(message: ChatMessage): void {
+    for (const block of message.content) {
+      if (block.type === 'tool_use' && block.toolInput && Object.keys(block.toolInput).length > 0)
+        this.toolInputs.set(block.toolUseId, block.toolInput)
+    }
+  }
+
+  /**
+   * A user row opencode delivered. Ours (a direct prompt, a queue item — the
+   * queue's consume paints it — or a command expansion) is already shown; a
+   * prompt another client posted into this session is painted here.
+   */
+  private onUserMessage(inboxID: string, message: ChatMessage): void {
+    if (this.ownInboxIds.delete(inboxID) || this.inboxToItem.has(inboxID)) return
+    if (inboxID.startsWith(CLAUDEUI_INBOX_PREFIX)) return
+    if (this.pendingCommandEchoes > 0) {
+      this.pendingCommandEchoes--
+      return
+    }
+    this.rememberAndSend(message)
+  }
+
+  private onToolResult(result: OpencodeToolResult, ownerToolUseId: string | undefined): void {
+    const extras = {
+      ...(result.fileDiffs ? { fileDiffs: result.fileDiffs } : {}),
+      ...(result.images ? { images: result.images } : {})
+    }
+    if (ownerToolUseId) {
+      this.send('session:subagent-tool-result', {
+        toolUseId: ownerToolUseId,
+        toolResultToolUseId: result.toolUseId,
+        result: result.result,
+        isError: result.isError,
+        ...extras
+      })
+      return
+    }
+    this.shellPoller.stop(result.toolUseId)
+    this.bashStreamGate.cancel(result.toolUseId)
+    this.recordToolOutcome(result.toolUseId, result.isError ? 'error' : 'ok')
+    this.send('session:tool-result', {
+      toolUseId: result.toolUseId,
+      result: result.result,
+      isError: result.isError,
+      ...extras
+    })
+  }
+
+  /** A turn that opencode stopped (ADR-090: the user's own stop shows nothing). */
+  private onStopped(reason: OpencodeStopReason): void {
+    if (reason === 'user') return
+    if (reason === 'denied' || reason === 'form-cancelled') {
+      // ClaudeUI never sends a messageless reject or cancel; another client did.
+      logger.warn('OpencodeSession', `turn ended by a messageless ${reason} reply`)
+      return
+    }
+    const notice = STOP_NOTICES[reason]
+    if (notice && !this.suppressedAfterUserStop('OpencodeSession', notice))
+      this.send('session:warning', notice)
+  }
+
+  /** The turn's end bookkeeping, whatever ended it (result, stop, error, auth). */
+  private endTurn(durationMs: number, sessionId: string): void {
+    this.isProcessing = false
+    this.accTotalDurationMs += durationMs
+    this.sendMetering()
+    this.sendStatusLine()
+    blockUsageService.recalculate().catch(() => {})
+    this.send('session:result', {
+      totalCostUsd: this.totalCostUsd,
+      durationMs,
+      result: '',
+      sessionId
+    })
+    this.sendStatus()
+    this.resetInactivityTimer()
+    this.endUserStop()
+    // A queued item whose post failed gets another chance at every turn end.
+    void this.flushQueuedItems()
+  }
+
+  // ── Queue (ADR-093 §9 over ADR-053's queue of record) ──────────────────────
+
+  /** A prompt typed while busy: posted to the inbox at once (see the file header). */
+  protected override onPromptQueued(item: QueuedItem): void {
+    void this.postQueuedItem(item)
+  }
+
+  /** Post every queued item not in the inbox yet (after a connect, a failed post). */
+  protected override async flushQueuedItems(): Promise<void> {
+    for (const item of this.queue.pending()) {
+      if (!this.queue.isForwarded(item)) await this.postQueuedItem(item)
+    }
+  }
+
+  private async postQueuedItem(item: QueuedItem): Promise<void> {
+    if (this.establishingPromise) await this.establishingPromise.catch(() => {})
+    if (item.state !== 'queued' || this.queue.isForwarded(item)) return
+    if (!this.client || !this.openSessionId) return // the next connect flushes it
+    const inboxID = newInboxId()
+    this.queue.markForwarded(item)
+    this.inboxToItem.set(inboxID, item.itemId)
+    this.itemToInbox.set(item.itemId, inboxID)
+    const post = this.postPrompt(item.text, this.queuedUploads(item), inboxID, QUEUE_ITEM_DELIVERY)
+    this.posting.set(
+      item.itemId,
+      post.catch(() => {})
+    )
+    try {
+      await post
+    } catch (err) {
+      this.queue.unmarkForwarded(item)
+      this.inboxToItem.delete(inboxID)
+      this.itemToInbox.delete(item.itemId)
+      logger.warn('OpencodeSession', `queued prompt not posted: ${errText(err)}`)
+      this.send('session:error', `The queued message could not be sent: ${errText(err)}`)
+    } finally {
+      this.posting.delete(item.itemId)
+    }
+  }
+
+  /**
+   * Take back one item. Held only by core → yes. In the inbox → `DELETE`;
+   * opencode answers 204 even when the item was delivered meanwhile, so the
+   * stored row decides: a user row with the inbox id = delivered (not taken
+   * back; its `delivered` event consumes it).
+   */
+  protected override async tryRecallQueuedItem(item: QueuedItem): Promise<boolean> {
+    await this.posting.get(item.itemId)
+    if (!this.queue.isForwarded(item)) return true
+    const inboxID = this.itemToInbox.get(item.itemId)
+    const client = this.client
+    const sessionID = this.openSessionId
+    if (!inboxID || !client || !sessionID) return false
+    try {
+      await client.cancelInbox(sessionID, inboxID)
+    } catch (err) {
+      logger.warn('OpencodeSession', `inbox cancel failed: ${errText(err)}`)
+      return false
+    }
+    try {
+      await client.call('session.message.get', { params: { sessionID, messageID: inboxID } })
+      return false
+    } catch (err) {
+      if ((err as { status?: unknown }).status !== 404) return false
+    }
+    this.inboxToItem.delete(inboxID)
+    this.itemToInbox.delete(item.itemId)
+    return true
+  }
+
+  /**
+   * Take back ONE queued item (by id) — the engine half of a per-item dequeue.
+   * Returns whether it was taken back (false: delivered, or unknown).
+   */
+  async dequeueItem(itemId: string): Promise<boolean> {
+    const item = this.queue.pending().find((candidate) => candidate.itemId === itemId)
+    if (!item) return false
+    const taken = await this.tryRecallQueuedItem(item)
+    if (taken && item.state === 'queued') {
+      this.queue.setState(item, 'recalled')
+      this.queue.emit()
+    }
+    return taken
+  }
+
+  /** Move a posted queue item between `steer` and `queue` (`PATCH …/inbox/:id`). */
+  async setQueuedItemDelivery(itemId: string, delivery: 'steer' | 'queue'): Promise<boolean> {
+    const inboxID = this.itemToInbox.get(itemId)
+    if (!inboxID || !this.client || !this.openSessionId) return false
+    try {
+      await this.client.setInboxDelivery(this.openSessionId, inboxID, delivery)
+      return true
+    } catch (err) {
+      logger.warn('OpencodeSession', `inbox delivery change failed: ${errText(err)}`)
+      return false
+    }
+  }
+
+  private onInbox(o: Extract<OpencodeMapperOutput, { kind: 'inbox' }>): void {
+    const itemId = this.inboxToItem.get(o.inboxID)
+    if (!itemId) return
+    if (o.change === 'delivered') {
+      const item = this.queue.pending().find((candidate) => candidate.itemId === itemId)
+      if (item) {
+        // The judge's transcript gets the user's word where the model read it.
+        this.messageHistory.push({
+          id: `steer-${itemId}`,
+          role: 'user',
+          content: this.userMessageContent(item.text, this.queuedUploads(item)),
+          timestamp: Date.now()
         })
       }
-      this.activeStreamItems.delete(key)
+      this.inboxToItem.delete(o.inboxID)
+      this.itemToInbox.delete(itemId)
+      if (this.queue.consumeById(itemId)) this.queue.emit()
+    } else if (o.change === 'cancelled') {
+      this.inboxToItem.delete(o.inboxID)
+      this.itemToInbox.delete(itemId)
+      if (this.queue.recallById(itemId)) this.queue.emit()
     }
   }
+
+  /**
+   * Cancel ClaudeUI inbox items no queue item stands behind any more (a
+   * teardown or a dead server left them): delivered later they would run a
+   * message the queue card already reported as taken back.
+   */
+  private async purgeStaleInbox(): Promise<void> {
+    const client = this.client
+    const sessionID = this.openSessionId
+    if (!client || !sessionID) return
+    this.needsPurge = false
+    try {
+      const inbox = await client.listInbox(sessionID)
+      for (const item of inbox) {
+        if (!item.id.startsWith(CLAUDEUI_INBOX_PREFIX) || this.inboxToItem.has(item.id)) continue
+        if (item.type === 'user' && this.ownInboxIds.has(item.id)) continue
+        await client.cancelInbox(sessionID, item.id).catch(() => {})
+        logger.info('OpencodeSession', `cancelled a stale queued inbox item`)
+      }
+    } catch (err) {
+      logger.debug('OpencodeSession', `inbox read skipped: ${errText(err)}`)
+    }
+  }
+
+  // ── Interrupt / teardown ───────────────────────────────────────────────────
 
   async interrupt(): Promise<void> {
-    // ADR-090: open the user-stop window for a live turn BEFORE the abort —
-    // the SSE `session.error` (MessageAbortedError) can beat the HTTP reply.
+    // ADR-090: open the window before the request — the end can beat the reply.
     if (this.isProcessing) this.beginUserStop()
-    if (this.client && this.openSessionId) {
-      try {
-        await this.client.abortSession(this.openSessionId)
-        this.sealStreamItems(this.openSessionId)
-      } catch (err) {
-        logger.warn(
-          'OpencodeSession',
-          `abort failed: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+    if (!this.client || !this.openSessionId) return
+    try {
+      // `resume`: queued steers still run after the stop, as 1.x flushed them
+      // at the stopped turn's end; ArrowUp takes them back first.
+      await this.client.interrupt(this.openSessionId, { resume: true })
+    } catch (err) {
+      logger.warn('OpencodeSession', `interrupt failed: ${errText(err)}`)
     }
+  }
+
+  /**
+   * Idempotent teardown for every connection LOSS (server death, a feed that
+   * gave up): drop the lease (exactly — another session may hold a
+   * replacement server), retract what can no longer be answered.
+   */
+  private markDisconnected(reason: string, options: { serverGone?: boolean } = {}): void {
+    if (this.disconnected && !this.conn) return
+    this.disconnected = true
+    this.feedAbort?.abort()
+    this.feedAbort = null
+    this.feedReady = null
+    this.needsCatchUp = true
+    this.needsPurge = true
+    this.shellPoller.stopAll()
+    this.sealOpenItems()
+    if (this.isProcessing) {
+      this.isProcessing = false
+      this.send('session:error', reason)
+    }
+    this.unsubscribeServerExit?.()
+    this.unsubscribeServerExit = null
+    const conn = this.conn
+    const client = this.client
+    this.conn = null
+    this.client = null
+    // A feed that gave up may sit on a LIVE server: stop and take back like a
+    // teardown. A dead server has nothing left to stop.
+    if (conn) this.endLease(conn, options.serverGone ? null : client)
+    this.recallQueuedOnEngineLoss()
+    this.dismissAllCards()
+    // The cards are gone; asks still pending server-side must come back on the
+    // next connect's re-read.
+    this.mapper?.forgetRequests()
+    this.sendStatus()
   }
 
   cancel(): void {
     this.clearInactivityTimer()
-    this.sealStreamItems()
     this._cancelled = true
     this.isProcessing = false
     this.endUserStop()
-    // Deliberate teardown (window close, idle timeout) is still a disconnect as
-    // far as the renderer is concerned — Claude broadcasts 'disconnected' from
-    // its own cancel() (claude-session.ts). Without it an idle-timed-out
-    // opencode session keeps `sdkActive` set and the sidebar dot stays green.
     this.disconnected = true
     this.lastContextLength = 0
-    this.sseAbort?.abort()
-    this.sseAbort = null
-    // No SSE consumer is left to deliver a tool part, so nothing waiting on one
-    // may sit out its timer (ADR-084 §1): settle every wait as closed.
-    for (const waiters of [...this.toolInputWaiters.values()]) {
-      for (const settle of [...waiters]) settle('closed')
-    }
-    this.childSessions.clear()
-    this.backgroundTaskCalls.clear()
-    // ADR-085 S4 — the next run() reconnects and re-PATCHes (F3's skip must
-    // not trust a ruleset from before the teardown).
-    this.lastPatchedRuleset = null
-    // Tear down any cross-engine dispatch targets owned by this session
-    // (ADR-033 M2 — mirrors ClaudeSession.cancel()'s identical call).
-    crossEngineDispatcher.disposeFor(this.routingId)
-    // Drop all pending bash-output throttle timers — nothing left to flush to
-    // once the SSE consumer stops; a firing timer after teardown would send()
-    // to a session that's going away.
+    this.feedAbort?.abort()
+    this.feedAbort = null
+    this.feedReady = null
+    this.needsCatchUp = true
+    this.needsPurge = true
+    this.sealOpenItems()
+    this.shellPoller.stopAll()
     this.bashStreamGate.cancelAll()
-    // Interrupt the turn server-side BEFORE releasing our server ref. Releasing
-    // only KILLS the opencode process when we hold the LAST ref; if another
-    // same-cwd session keeps the server alive, our turn would otherwise keep
-    // running headless (no SSE consumer), burning tokens until it finishes.
-    // Fire-and-forget: if we ARE the last ref the release below kills the
-    // process and this in-flight abort just fails silently. Captured before the
-    // release nulls `this.client`.
-    if (this.client && this.openSessionId) {
-      // Optional-chain the result: cancel() runs on the teardown path (dispose)
-      // and must never throw. abortSession returns a Promise in production, but
-      // a partial/mock client can return undefined — `?.catch` keeps teardown
-      // crash-proof either way.
-      void this.client.abortSession(this.openSessionId)?.catch(() => {})
-    }
+    this.applied = null
+    crossEngineDispatcher.disposeFor(this.routingId)
     this.unsubscribeServerExit?.()
     this.unsubscribeServerExit = null
-    if (this.conn) {
-      // Exact, never by cwd alone: one server serves many directories, and a
-      // config change can leave two servers holding this cwd (ADR-093 §2).
-      opencodeServerManager.releaseIfCurrent(this.cwd, this.conn)
-      this.conn = null
-      this.client = null
-    }
-    // Nothing left to serve the queue (ADR-053 §engine death).
+    const conn = this.conn
+    const client = this.client
+    this.conn = null
+    this.client = null
+    if (conn) this.endLease(conn, client)
     this.recallQueuedOnEngineLoss()
     this.dropBlockHolds()
     this.sendStatus()
+  }
+
+  /**
+   * End a lease, stopping first what this chat runs on the server: the last
+   * lease ends the server, and a shutdown keeps a running execution's claim —
+   * opencode would resume it headless on its next start (`execution.ts`), and
+   * a parked inbox item would run with it.
+   *
+   * So, best-effort and bounded by TEARDOWN_GRACE_MS: interrupt the own
+   * session and every child whose call is still open (idle or not — an idle
+   * interrupt is a no-op upstream, and a turn ClaudeUI has not seen yet or a
+   * background child runs anyway), cancel ClaudeUI's undelivered inbox items,
+   * then wait until `GET /api/session/active` lists none of them (the
+   * interrupt route answers before its cleanup settles). `client` null = the
+   * server is gone: just release.
+   */
+  private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
+    const release = () => opencodeServerManager.releaseIfCurrent(this.cwd, conn)
+    const sessionID = this.openSessionId
+    const inboxIDs = [...this.inboxToItem.keys()]
+    this.inboxToItem.clear()
+    this.itemToInbox.clear()
+    if (!client || !sessionID) {
+      release()
+      return
+    }
+    const followed = this.mapper?.followedSessions() ?? []
+    const sessions = [sessionID, ...followed.filter((id) => id !== sessionID)]
+    let over = false
+    const stop = (async () => {
+      await Promise.allSettled([
+        ...sessions.map((id) => Promise.resolve().then(() => client.interrupt(id))),
+        ...inboxIDs.map((id) => Promise.resolve().then(() => client.cancelInbox(sessionID, id)))
+      ])
+      while (!over) {
+        const active = await client.activeSessions()
+        if (!sessions.some((id) => id in active)) return
+        await new Promise((done) => setTimeout(done, 100))
+      }
+    })()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const grace = new Promise<void>((done) => (timer = setTimeout(done, TEARDOWN_GRACE_MS)))
+    void Promise.race([stop.catch(() => {}), grace]).finally(() => {
+      over = true
+      clearTimeout(timer)
+      release()
+    })
+  }
+
+  dispose(): void {
+    this.cancel()
+  }
+
+  /** Seal every open item stream with what streamed so far (nothing will finish it). */
+  private sealOpenItems(): void {
+    for (const { target, message } of this.openItems.values()) {
+      this.send('session:item-seal', {
+        target,
+        message,
+        ...(target.ownerToolUseId ? { ownerToolUseId: target.ownerToolUseId } : {})
+      })
+    }
+    this.openItems.clear()
+  }
+
+  /** The engine is gone: no pending ask or form can be answered any more. */
+  private dismissAllCards(): void {
+    const ids = new Set([...this.pendingApprovals.keys(), ...this.pendingForms.keys()])
+    for (const requestId of ids) {
+      this.takePendingAsk(requestId)
+      this.pendingForms.delete(requestId)
+      this.routes.delete(requestId)
+      this.send('session:approval-dismiss', { requestId })
+    }
+  }
+
+  // ── Approvals and forms ────────────────────────────────────────────────────
+
+  private onApproval(approval: PendingApproval, route: OpencodeApprovalRoute): void {
+    this.routes.set(approval.requestId, route.sessionID)
+    if (route.form) {
+      const input = approval.input as { questions?: AskUserQuestion[] }
+      this.pendingForms.set(approval.requestId, {
+        sessionID: route.sessionID,
+        formID: route.form.formID,
+        fields: route.form.fields,
+        questions: input.questions ?? []
+      })
+      // A question is the human's, in every autonomy mode.
+      this.send('session:approval-request', approval)
+      return
+    }
+    this.pendingApprovals.set(approval.requestId, {
+      toolUseId: approval.toolUseId,
+      approval,
+      sweepable: true
+    })
+    if (approval.subagent && this.refuseByChildAgent(approval, route.sessionID)) return
+    this.routePermissionAsk(approval)
+  }
+
+  /**
+   * S6 backstop: a child's ask its OWN agent denies (the window before the
+   * child's ruleset PATCH lands, or a deny the agent carves itself) is
+   * refused here with the agent's verdict.
+   */
+  private refuseByChildAgent(approval: PendingApproval, childID: string): boolean {
+    const child = this.children.get(childID)
+    if (!child) return false
+    if (child.unpatched) {
+      logger.info(
+        'OpencodeSession',
+        `child ask ${approval.toolName} refused: its ruleset is not applied`
+      )
+      this.autoReply(approval.requestId, {
+        decision: 'reject',
+        message:
+          "ClaudeUI could not apply this subagent's permission rules, so its tool calls are refused"
+      })
+      return true
+    }
+    const agent = this.agentInfo(child.agent)
+    if (!agent) return false
+    const resources = approval.patterns && approval.patterns.length > 0 ? approval.patterns : ['*']
+    const denied = resources.find(
+      (resource) => evaluateChildCall(agent.permissions, approval.toolName, resource) === 'deny'
+    )
+    if (denied === undefined) return false
+    const reason = `Denied by the ${agent.id} agent's permission rules: ${approval.toolName}(${denied})`
+    logger.info(
+      'OpencodeSession',
+      `child ask ${approval.toolName} refused by its agent ${agent.id}`
+    )
+    this.autoReply(approval.requestId, { decision: 'reject', message: reason })
+    return true
   }
 
   resolveApproval(
@@ -1767,128 +1565,116 @@ export class OpencodeSession extends BaseSession {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void {
-    // Read BEFORE the delete: the record's approval carries the `always`
-    // patterns an allow-for-session remembers (ADR-085 S2).
-    const pending = this.takePendingAsk(requestId)
-    const approvalToolUseId = pending?.toolUseId
-    if (!this.client) return
-
-    // ── Model-elicitation question (question.asked) ──────────────────────────
-    // These are entirely separate from permission approvals: we reply via
-    // /question/{id}/reply (with answers) or /question/{id}/reject, NOT
-    // /permission/{id}/reply. The stored pendingQuestions list provides the
-    // ordered question objects so we can reconstruct the string[][] answers
-    // that opencode expects.
-    if (this.pendingQuestions.has(requestId)) {
-      const questions = this.pendingQuestions.get(requestId)!
-      this.pendingQuestions.delete(requestId)
-
-      const allow = decision === 'allow' || decision === 'allowForSession'
-      if (allow && answers) {
-        // Map answers: Record<string,string> → string[][] in question ORDER.
-        // Key: q.question || 'q' + index  (mirrors AskUserQuestionBlock View.tsx keyOf)
-        // MultiSelect values: comma-space joined → split back to string[]
-        // Single-select: wrap as [value]
-        const mapped: string[][] = questions.map((q, i) => {
-          const key = q.question || `q${i}`
-          const raw = answers[key] ?? ''
-          if (q.multiSelect) {
-            // AskUserQuestionBlock joins selections with ', '
-            return raw ? raw.split(', ') : []
-          }
-          return raw ? [raw] : []
-        })
-        this.client.replyQuestion(requestId, mapped).catch((err) => {
-          logger.warn(
-            'OpencodeSession',
-            `replyQuestion failed: ${err instanceof Error ? err.message : String(err)}`
-          )
-        })
-      } else {
-        // deny or allow without answers → reject the question
-        this.client.rejectQuestion(requestId).catch((err) => {
-          logger.warn(
-            'OpencodeSession',
-            `rejectQuestion failed: ${err instanceof Error ? err.message : String(err)}`
-          )
-        })
-      }
+    const form = this.pendingForms.get(requestId)
+    if (form) {
+      this.pendingForms.delete(requestId)
+      this.answerForm(form, decision, answers)
       return
     }
-
-    // ── Permission approval (permission.asked) ───────────────────────────────
+    const pending = this.takePendingAsk(requestId)
+    const toolUseId = pending?.toolUseId
+    if (!this.client) return
     const allow = decision === 'allow' || decision === 'allowForSession'
 
-    // A held auto-mode block (ADR-091 §3) — Keep blocked (or its expiry) /
-    // Approve anyway. An override of this ONE call: `once` either way, no
-    // session allow, no persisted rule.
+    // A held auto-mode block (ADR-091 §3): override this ONE call either way.
     if (pending?.hold) {
       if (allow) {
-        // The user overrode the block: the streak it counted resets, the
-        // review reads "approved by you", and the call reports its own
-        // outcome when it runs.
         this.autoDenials.recordAllow()
-        if (approvalToolUseId) this.blockedCalls.approveHeld(approvalToolUseId)
-        this.autoReply(requestId, 'once')
+        if (toolUseId) this.blockedCalls.approveHeld(toolUseId)
+        this.replyPermission(requestId, { decision: 'once' })
       } else {
-        this.keepBlocked(requestId, approvalToolUseId, pending.hold.reason)
+        this.keepBlocked(requestId, toolUseId, pending.hold.reason)
       }
       return
     }
-    // "always allow" = the user checked persist-rule suggestions in the dialog.
     const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
-    // ADR-085 S2 — never `always`, for any category. opencode stores an
-    // `always` reply's patterns in an INSTANCE-global `approved` list
-    // (vendor permission/index.ts `reply()`), which `ask()` evaluates AFTER the
-    // session ruleset with last-match-wins: one approval then outranks the
-    // user's deny/ask rules for every chat, child and dispatch target in this
-    // folder until the server exits, and the judge never sees those calls. An
-    // allow-for-session or a ticked "always allow" is remembered host-side
-    // instead (sessionAllows, below) and the reply is `once`.
-    const reply = allow ? 'once' : 'reject'
-    // On deny, attach model-visible feedback (parity with claude-session.ts):
-    // reject-with-message → CorrectedError → the tool call fails but the turn
-    // continues, so the model can adjust and retry instead of dying.
-    const message = reply === 'reject' ? answers?.feedback || 'User denied' : undefined
-
-    // Phase 3 — a HUMAN refusal is the strongest signal the judge can get: it
-    // makes the Transient Retry exception inapplicable to a re-attempt and
-    // turns the retry into a consent question. Only a reject maps here; an
-    // allow leaves the call to report its own ok/error outcome.
-    if (reply === 'reject' && approvalToolUseId) {
-      this.recordToolOutcome(approvalToolUseId, 'rejected-by-user')
-    }
-
-    const replied = message
-      ? this.client.replyPermission(requestId, reply, message)
-      : this.client.replyPermission(requestId, reply)
-    replied.catch((err) => {
-      logger.warn(
-        'OpencodeSession',
-        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    })
-
-    // ADR-085 S2 — what `always` used to buy, kept host-side: remember the
-    // ask's `always` patterns for THIS chat, then answer the pending asks they
-    // now cover (the vendor's same-session `always` cascade, which a `once`
-    // reply does not run). An ask with no `always` cannot be remembered.
+    if (!allow && toolUseId) this.recordToolOutcome(toolUseId, 'rejected-by-user')
+    // ADR-085 S2: never `always` (opencode's saved table is shared with the
+    // user's own opencode); a session allow is remembered host-side. A reject
+    // always carries the model-visible reason (ADR-093 §3).
+    this.replyPermission(
+      requestId,
+      allow
+        ? { decision: 'once' }
+        : { decision: 'reject', message: answers?.feedback?.trim() || DEFAULT_REJECT_MESSAGE }
+    )
     if (allow && (decision === 'allowForSession' || persist) && pending?.approval.always) {
       this.sessionAllows.add(pending.approval.toolName, pending.approval.always)
       this.sweepSessionAllows()
     }
-
-    // Persist the rule to the shared store so it recompiles onto opencode next
-    // spawn + shows in PermissionsDialog (session + shared store — ADR-022).
-    // 'session' destinations are skipped by the shared persister — the host
-    // session-allow set above already covers them (session-allows.ts).
     if (persist) persistAllowSuggestions(updatedPermissions!, this.cwd, 'OpencodeSession')
   }
+
+  /**
+   * Answer a form: `{<field key>: value}` — a string for a single choice, a
+   * list for a multiselect, the OPTION VALUE for a chosen label. Anything else
+   * cancels it WITH a message (a messageless cancel ends the turn).
+   */
+  private answerForm(
+    form: PendingForm,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>
+  ): void {
+    const client = this.client
+    if (!client) return
+    const cancel = (message: string) => {
+      try {
+        void client.cancelForm(form.sessionID, form.formID, message).catch((err) => {
+          logger.warn('OpencodeSession', `form cancel failed: ${errText(err)}`)
+        })
+      } catch (err) {
+        logger.warn('OpencodeSession', `form cancel refused: ${errText(err)}`)
+      }
+    }
+    const allow = decision === 'allow' || decision === 'allowForSession'
+    if (!allow || !answers) {
+      cancel(answers?.feedback?.trim() || FORM_DISMISSED_MESSAGE)
+      return
+    }
+    const answer: Record<string, string | string[]> = {}
+    form.fields.forEach((field, i) => {
+      const question = form.questions[i]
+      const raw = answers[question?.question || `q${i}`] ?? ''
+      const value = (label: string) => field.values?.[label] ?? label
+      // The card joins a multiselect's labels with ', '.
+      answer[field.key] = field.multiSelect ? (raw ? raw.split(', ').map(value) : []) : value(raw)
+    })
+    void client.replyForm(form.sessionID, form.formID, answer as Form_Answer).catch((err) => {
+      // An answer opencode refuses would leave the tool waiting: cancel it, with a reason.
+      logger.warn('OpencodeSession', `form reply failed: ${errText(err)}`)
+      cancel('The answer could not be submitted')
+    })
+  }
+
+  /** Reply to a permission ask on the session that asked. Never throws. */
+  private replyPermission(requestId: string, reply: PermissionReply): void {
+    const client = this.client
+    const sessionID = this.routes.get(requestId) ?? this.openSessionId
+    if (!client || !sessionID) return
+    const safe: PermissionReply =
+      reply.decision === 'reject'
+        ? { decision: 'reject', message: reply.message.trim() || DEFAULT_REJECT_MESSAGE }
+        : reply
+    try {
+      void client.replyPermission(sessionID, requestId, safe).catch((err) => {
+        logger.warn('OpencodeSession', `replyPermission failed: ${errText(err)}`)
+      })
+    } catch (err) {
+      logger.warn('OpencodeSession', `replyPermission refused: ${errText(err)}`)
+    }
+  }
+
+  /** Settle one ask programmatically (pre-check, session allow, judge). */
+  private autoReply(requestId: string, reply: PermissionReply): void {
+    this.takePendingAsk(requestId)
+    this.replyPermission(requestId, reply)
+  }
+
+  // ── Model / mode / settings ────────────────────────────────────────────────
 
   async setModel(model: string): Promise<void> {
     this._model = model
     this._capabilities = this.resolveCapsForModel()
-    // Reset the reasoning variant — the new model may have different variants.
     this.reasoningVariant = null
     this.sendStatus()
     this.sendStatusLine()
@@ -1901,170 +1687,108 @@ export class OpencodeSession extends BaseSession {
   async setPermissionMode(mode: string): Promise<void> {
     this.permissionMode = mode
     if (this.openSessionId && this.client) {
-      // applyPermissionMode now fails CLOSED (throws). Surface that as an error
-      // banner rather than rejecting the IPC call — a rejected
-      // `session:set-permission-mode` invoke would blow up in the renderer with
-      // no user-visible explanation. The session keeps the OLD server-side
-      // ruleset (never a widened one), `this.permissionMode` holds the newly
-      // requested mode, and the next `run()` re-applies it — failing the TURN
-      // if it still can't be applied. The prompt boundary, not this setter, is
-      // where the fail-closed guarantee actually has to hold.
+      // Fail closed at the PROMPT boundary (run re-applies); here a failure is a banner.
       try {
-        await this.applyPermissionMode(mode)
+        await this.applyPermissionMode()
       } catch (err) {
-        this.send('session:error', err instanceof Error ? err.message : String(err))
+        this.send('session:error', errText(err))
       }
     }
     this.send('session:permission-mode', mode)
   }
 
-  /**
-   * Settings files changed on disk — recompile the user's permission rules into
-   * the live session ruleset (parity with ClaudeSession/PiSession, which both
-   * hot-reload rules mid-session). `mergedUserPermissions` reads user/project/
-   * local fresh on every call, so re-applying the CURRENT mode is enough to
-   * pick up the edit; the mode itself is untouched.
-   */
   async notifySettingsChanged(): Promise<void> {
-    // Nothing to patch yet — establishSession applies the mode (and reads the
-    // rules) once the session exists.
     if (!this.client || !this.openSessionId) return
     try {
-      await this.applyPermissionMode(this.permissionMode)
+      await this.applyPermissionMode()
     } catch (err) {
-      // applyPermissionMode fails CLOSED to gate a TURN. This is a background
-      // refresh with no turn behind it: the previously-applied ruleset stays in
-      // force and the next run() re-applies (and fails the turn if it still
-      // can't), so surfacing a session:error here would be noise.
       logger.warn(
         'OpencodeSession',
-        `notifySettingsChanged: rule refresh failed, keeping the active ruleset: ${
-          err instanceof Error ? err.message : String(err)
-        }`
+        `notifySettingsChanged: rule refresh failed, keeping the active ruleset: ${errText(err)}`
       )
     }
   }
 
   /**
-   * Patch the session's permission ruleset for `mode`: the mode base, the
-   * user's compiled rules (mode-filtered), the subagent backstop (ADR-085 S4)
-   * and the dispatch-tool ask.
-   *
-   * ADR-085 S4 / S3b verifier F3 — an UNCHANGED ruleset is not re-sent. The
-   * PATCH APPENDS (`vendor/opencode-src/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:194-198`,
-   * `Permission.merge(current, payload)`), and every `run()` applies the mode,
-   * so re-sending the same rules grew the stored ruleset without bound (116 →
-   * 2705 rules in ~21 turns) — and opencode's DeniedError renders every
-   * matching rule, the user's own included, into the tool result the model
-   * reads. A NEW opencode session id, a reconnect (`ensureConnected` resets the
-   * record), or a changed mode / settings / MCP set / agent set re-PATCHes;
-   * so does a retry after a failed PATCH (the record is only written on
-   * success).
+   * Put the CURRENT mode's ruleset and agent on the opencode session (S6).
+   * Serialized: a mode switch racing a turn's establish applies in call order,
+   * each reading the mode when it runs, so the last one leaves the session on
+   * the mode the UI shows.
    */
-  private async applyPermissionMode(mode: string): Promise<void> {
-    if (!this.client || !this.openSessionId) return
-    // Plan mode additionally switches to opencode's read-only `plan` agent
-    // (its planning system prompt + plan_exit flow); all other modes use the
-    // default `build` agent. We ALWAYS patch a ruleset (including plan) so the
-    // session's effective permissions are deterministic and never inherit a
-    // stale override from a previous mode. See buildRuleset / ADR-022.
-    this.agent = mode === 'plan' ? 'plan' : null
-    // In auto mode (full + classifier enabled) we use the acceptEdits base so the
-    // ruleset auto-allows reads and only bash/webfetch raise `permission.asked`
-    // → the classifier judges just those (the acceptEdits-equivalence
-    // fast-path, parity with cli.js). Edits ask too, but only so the host-side
-    // agent-control gate in handleAutoModeApproval sees them: an ordinary edit
-    // is allowed there with no judge call (buildAutoModeRuleset, ADR-084 §3).
-    // Classifier-disabled `full` falls through to buildRuleset('full') = the
-    // gated `default` (ADR-023).
-    const autoMode = this.isAutoMode(mode)
-    const mcpServers = await this.resolveMcpServers()
-    // ADR-085 §3: auto mode adds one MCP ask per known server, so MCP calls
-    // reach the host (the user's MCP rules, then the judge).
-    const base = autoMode ? buildAutoModeRuleset({ mcpServers }) : buildRuleset(mode)
-    // Compose: autonomy-mode base ruleset + the user's neutral permission rules
-    // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
-    // appended AFTER the base so they override it (last-match-wins). This makes
-    // the SAME configured rules apply to opencode as to Claude. See ADR-022.
-    const userRules = this.compiledUserRules(mcpServers)
-    // Remember the user-origin half for the auto-mode ask-rule precedence check
-    // (G9) — see `lastCompiledUserRules`. This keeps the FULL set including the
-    // allow rules the patched ruleset drops below: G9's re-match honours
-    // opencode's last-match-wins over the user half, so feeding it a filtered
-    // view would be lying to the provenance check about what the user wrote.
-    // A formerly-allowed action re-matches as `allow` there → not an ask rule →
-    // it goes to the JUDGE, which is the whole point of the filter. (Only the
-    // ask tier is read back, and the compiler emits allow→ask→deny, so an ask
-    // already outranks an allow under last-match-wins either way.)
-    this.lastCompiledUserRules = userRules
-    // AUTO MODE: patch the user's ALLOW rules OUT of the session ruleset, so the
-    // actions they would have silently auto-allowed raise `permission.asked` and
-    // reach the classifier instead of bypassing it (cli.js §3 step 2 parity —
-    // see `withoutAllowRules` for the full reasoning and the live evasion that
-    // motivated it). Ask + deny + the base + DISPATCH_AGENT_ASK_RULE are
-    // unchanged.
-    // PLAN MODE (ADR-085 ruling 7): the user's `edit`, `bash` and `task` ALLOW
-    // rules are patched out too — appended after the plan base they would turn
-    // its `edit`/`bash`/`task:general` asks back into server-side allows
-    // (last-match-wins), so an edit, `git commit` or a `general` subagent never
-    // asked and the host's plan refusal never saw it. The bash allows are
-    // applied host-side instead, for plan-safe commands only (host-precheck.ts
-    // `allow-rule`); see `withoutMutatingAllowRules`. Every other mode keeps
-    // the full compiled set.
-    const effectiveUserRules = autoMode
-      ? withoutAllowRules(userRules)
-      : mode === 'plan'
-        ? withoutMutatingAllowRules(userRules)
-        : userRules
-    // ADR-085 S4 — the `task:<name>` asks for subagents a gated category may
-    // still be allowed under (see resolveSubagentBackstop). AFTER the user
-    // rules on purpose: a user `Task`/`Task(x)` allow must not un-gate an
-    // agent whose bash is ungated — the ask is about the agent, not the user's
-    // task preference (in plan mode `withoutMutatingAllowRules` strips task
-    // allows anyway).
-    const backstop = await this.resolveSubagentBackstop(autoMode, mcpServers)
-    const ruleset = [...base, ...effectiveUserRules, ...backstop, DISPATCH_AGENT_ASK_RULE]
+  private applyPermissionMode(): Promise<void> {
+    const apply = this.applyChain.then(() => this.applyPermissionModeNow())
+    this.applyChain = apply.catch(() => {})
+    return apply
+  }
+
+  /**
+   * PATCH (which REPLACES) only when the rules changed, then every child whose
+   * rules were computed from another parent ruleset (settled ones too: a later
+   * call can resume them), then `switchAgent` (`plan` in plan mode, else the
+   * default). PATCH first: every half-applied state that leaves is the
+   * stricter one. Fails CLOSED (throws) — run() then never posts the prompt; a
+   * failed `switchAgent` is retried by the next apply (the agent is compared,
+   * not remembered as done).
+   */
+  private async applyPermissionModeNow(): Promise<void> {
+    const client = this.client
     const sessionId = this.openSessionId
-    const key = JSON.stringify(ruleset)
-    if (
-      this.lastPatchedRuleset &&
-      this.lastPatchedRuleset.sessionId === sessionId &&
-      this.lastPatchedRuleset.key === key
-    ) {
-      logger.debug('OpencodeSession', 'permission ruleset unchanged — no PATCH')
-      return
-    }
-    try {
-      // The server gets no narrow bash/edit/webfetch deny — each is an ask the
-      // host pre-check refuses (rung 1b), because opencode's DeniedError dumps
-      // the ruleset into the model's context — and its whole-category denies
-      // last, so they hide the tool (`opencodeWireRuleset`). The host keeps
-      // `ruleset` itself: `parentRuleset` and the unchanged-key check read it.
-      await this.client.patchSession(sessionId, {
-        permission: opencodeWireRuleset(ruleset, CHILD_GATED_CATEGORIES)
-      })
-      this.lastPatchedRuleset = { sessionId, rules: ruleset, key }
-    } catch (err) {
-      // FAIL CLOSED. This patch is the ONLY thing standing between the user's
-      // chosen autonomy mode (+ their deny rules) and the vendor's `{*: allow}`
-      // session default (agent.ts's `defaults`). Warn-and-continue meant a
-      // transient 500 / dropped connection silently downgraded a `plan` or
-      // `default` session to allow-everything for the whole turn — the model
-      // then edits and runs commands with no gate and no prompt, and the user
-      // sees nothing but a log line. Throwing propagates to `run()`'s catch,
-      // which emits `session:error` and NEVER reaches `sendPrompt`: no prompt,
-      // no tools, a visible error instead of a silent fail-open.
-      const detail = err instanceof Error ? err.message : String(err)
-      logger.error('OpencodeSession', `patchSession failed (refusing to run ungated): ${detail}`)
-      throw new Error(
+    if (!client || !sessionId) return
+    const mode = this.permissionMode
+    const fail = (err: unknown): Error => {
+      const detail = errText(err)
+      logger.error(
+        'OpencodeSession',
+        `permission apply failed (refusing to run ungated): ${detail}`
+      )
+      return new Error(
         `Could not apply permission mode "${mode}" to the opencode session: ${detail}`
       )
     }
+    const built = await this.buildRuleset(mode)
+    this.lastUserRules = built.userRules
+    const key = JSON.stringify(built.rules)
+    const agent = built.agent ?? (await this.defaultAgentId())
+    if (!(this.applied?.sessionId === sessionId && this.applied.key === key)) {
+      try {
+        await client.setSessionPermissions(sessionId, built.rules)
+      } catch (err) {
+        throw fail(err)
+      }
+      this.applied = { sessionId, rules: built.rules, key }
+    } else {
+      logger.debug('OpencodeSession', 'permission ruleset unchanged — no PATCH')
+    }
+    this.repatchChildren()
+    if (agent && this.currentAgent !== agent) {
+      try {
+        await client.switchAgent(sessionId, agent)
+      } catch (err) {
+        throw fail(err)
+      }
+      this.currentAgent = agent
+    }
   }
 
-  /** Merge the user/project/local permission scopes. Best-effort: a load/parse
-   *  failure yields empty permissions rather than breaking the turn. Read fresh
-   *  each time so a settings.json edit mid-session takes effect. */
+  /** The session ruleset for `mode` (S6 `buildSessionRuleset` with this chat's inputs). */
+  private async buildRuleset(mode: string): Promise<ReturnType<typeof buildSessionRuleset>> {
+    const autoMode = this.isAutoMode(mode)
+    const [mcpServers, worktree, externalDirAllows] = await Promise.all([
+      this.resolveMcpServers(),
+      this.resolveWorktree(),
+      autoMode ? this.primaryAgentDirAllows(mode) : Promise.resolve(undefined)
+    ])
+    return buildSessionRuleset({
+      mode,
+      autoMode,
+      permissions: this.mergedUserPermissions(),
+      mcpServers,
+      cwd: this.cwd,
+      ...(worktree ? { worktree } : {}),
+      ...(externalDirAllows ? { externalDirAllows } : {})
+    })
+  }
+
   private mergedUserPermissions(): ClaudePermissions {
     const merged: ClaudePermissions = {
       allow: [],
@@ -2083,135 +1807,242 @@ export class OpencodeSession extends BaseSession {
         merged.additionalDirectories.push(...p.additionalDirectories)
       }
     } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `loading user permission rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.warn('OpencodeSession', `loading user permission rules failed: ${errText(err)}`)
     }
     return merged
   }
 
-  /** Merge the user/project/local permission scopes and compile them to opencode
-   *  rules (allow→ask→deny). Best-effort: a load/parse failure yields no rules
-   *  rather than breaking the turn. `mcpServers` gates server-level MCP allow
-   *  rules (ADR-085 §3). */
-  private compiledUserRules(
-    mcpServers: readonly string[]
-  ): ReturnType<typeof compileClaudeRulesToOpencode> {
-    try {
-      return compileClaudeRulesToOpencode(this.mergedUserPermissions(), { mcpServers })
-    } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `compiling user permission rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-      return []
-    }
-  }
-
-  /**
-   * The MCP server names ClaudeUI knows without asking the server: the Claude
-   * servers it bridges (`collectClaudeMcpForOpencode`, the same call the spawn
-   * uses) and its own `claudeui`. Never throws (the collector returns `{}` on
-   * failure).
-   */
   private staticMcpServers(): string[] {
     return [
       ...new Set([...Object.keys(collectClaudeMcpForOpencode(this.cwd)), CLAUDEUI_MCP_SERVER])
     ]
   }
 
-  /**
-   * The live MCP server set (see `knownMcpServers`): the static set plus the
-   * `GET /mcp` keys. A failing `GET /mcp` warns once per session and yields
-   * the static set for this call; it is not cached, so the next apply retries.
-   */
+  /** Bridged + `claudeui` + `GET /api/mcp` names (cached per lease; a failure is not). */
   private async resolveMcpServers(): Promise<string[]> {
     if (this.knownMcpServers) return this.knownMcpServers
     const known = this.staticMcpServers()
     try {
-      const status = (await this.client?.mcpStatus()) ?? {}
-      this.knownMcpServers = [...new Set([...known, ...Object.keys(status)])]
+      const servers = (await this.client?.mcpServers()) ?? []
+      this.knownMcpServers = [...new Set([...known, ...servers.map((s) => s.name)])]
       return this.knownMcpServers
     } catch (err) {
       if (!this.mcpStatusWarned) {
         this.mcpStatusWarned = true
         logger.warn(
           'OpencodeSession',
-          `GET /mcp failed — MCP rules use the bridged servers only: ${err instanceof Error ? err.message : String(err)}`
+          `GET /api/mcp failed — bridged servers only: ${errText(err)}`
         )
       }
       return known
     }
   }
 
-  /**
-   * ADR-085 S4 — the categories a task child's ask may be answered with the
-   * parent's rules for (host-precheck.ts `childGatedCategories`): exactly the
-   * ones the spawn put a static ask on — the gated built-ins plus the bridged
-   * MCP servers' keys (the spawn's `collectClaudeMcpForOpencode` set, minus
-   * `claudeui`). A `GET /mcp`-only server got no injected ask, so a child ask
-   * for it stays the card's / judge's, as does every other category.
-   */
-  private childGatedCategories(): string[] {
-    this.childGated ??= [
-      ...CHILD_GATED_CATEGORIES,
-      ...this.staticMcpServers()
-        .filter((server) => server !== CLAUDEUI_MCP_SERVER)
-        .map((server) => opencodeMcpKey(server))
-    ]
-    return this.childGated
+  /** The location's git worktree root — where 2.x stops spelling paths relatively. */
+  private async resolveWorktree(): Promise<string | undefined> {
+    if (this.worktree !== undefined) return this.worktree ?? undefined
+    try {
+      const location = await this.client?.call('location.get', {})
+      const dir = location?.project?.directory
+      // A location outside any repository reports the filesystem root, which
+      // 2.x does not treat as a worktree either (`file-access.ts`).
+      this.worktree =
+        typeof dir === 'string' && dir !== '' && parsePath(dir).root !== dir ? dir : null
+    } catch (err) {
+      logger.debug('OpencodeSession', `GET /api/location failed: ${errText(err)}`)
+      return undefined
+    }
+    return this.worktree ?? undefined
+  }
+
+  private async loadAgents(): Promise<Agent_Info[] | null> {
+    if (this.agentList) return this.agentList
+    try {
+      const listed = await this.client?.agents()
+      if (!Array.isArray(listed)) throw new Error('GET /api/agent did not return a list')
+      this.agentList = [...listed]
+      return this.agentList
+    } catch (err) {
+      if (!this.agentsWarned) {
+        this.agentsWarned = true
+        logger.warn('OpencodeSession', `GET /api/agent failed: ${errText(err)}`)
+      }
+      return null
+    }
+  }
+
+  /** opencode's default primary agent: `agent.list()` puts it first. */
+  private async defaultAgentId(): Promise<string | undefined> {
+    const agents = await this.loadAgents()
+    const first = agents?.[0]
+    return first && first.mode !== 'subagent' ? first.id : undefined
+  }
+
+  /** A cached agent by id (the default agent for an unnamed one). */
+  private agentInfo(id: string | undefined): Agent_Info | undefined {
+    const agents = this.agentList
+    if (!agents) return undefined
+    return id ? agents.find((agent) => agent.id === id) : agents[0]
+  }
+
+  /** Auto mode: the primary agent's allows for opencode's own directories (S6). */
+  private async primaryAgentDirAllows(mode: string): Promise<V2Rule[]> {
+    const agents = await this.loadAgents()
+    if (!agents) return []
+    const agent =
+      mode === 'plan'
+        ? agents.find((a) => a.id === 'plan')
+        : agents.find((a) => a.mode !== 'subagent')
+    return agent ? opencodeOwnDirAllows(agent.permissions) : []
+  }
+
+  // ── Subagent children (S6 seam) ────────────────────────────────────────────
+
+  private onSessionCreated(data: { sessionID: string; parentID?: string; agent?: string }): void {
+    const { sessionID, parentID } = data
+    if (!parentID || sessionID === this.openSessionId) return
+    if (parentID !== this.openSessionId && !this.children.has(parentID)) return
+    if (!this.children.has(sessionID))
+      this.children.set(sessionID, {
+        parentID,
+        chain: Promise.resolve(),
+        ...(data.agent ? { agent: data.agent } : {})
+      })
+    void this.patchChild(sessionID)
+  }
+
+  private onAgentSelected(data: { sessionID: string; agent: string }): void {
+    const child = this.children.get(data.sessionID)
+    if (!child || child.agent === data.agent) return
+    child.agent = data.agent
+    void this.patchChild(data.sessionID, true)
+  }
+
+  /** Re-derive every direct child (each cascades to its own); unchanged parents are skipped. */
+  private repatchChildren(): void {
+    for (const [childID, child] of this.children)
+      if (child.parentID === this.openSessionId) void this.patchChild(childID)
   }
 
   /**
-   * ADR-085 S4 — the parent-side subagent backstop for this apply: one
-   * `{task, <name>, ask}` per subagent whose computed ruleset (`GET /agent`)
-   * may still ALLOW a gated category (`subagentBackstopRules`) — an agent the
-   * spawn-time scan could not give its static asks. Gated = bash/edit/webfetch,
-   * plus in auto mode (the one mode whose parent base gates MCP) the MCP key
-   * of every known server except `claudeui`. The agent list is cached per
-   * session (see `subagentAgents`); a failing `GET /agent` warns once per
-   * session and fails CLOSED for this apply (`task * ask` — every spawn asks),
-   * not cached, so the next apply retries.
+   * PATCH `childSessionRuleset(parent's rules, its agent's rules)` onto a
+   * child, then onto its own children — skipped when the parent ruleset it was
+   * computed from is unchanged (`force`: its agent changed). Serialized per
+   * child, and the parent's rules are read only after every await, so the
+   * last PATCH to land is always the newest one.
    */
-  private async resolveSubagentBackstop(
-    autoMode: boolean,
-    mcpServers: readonly string[]
-  ): Promise<PermissionRule[]> {
-    let agents = this.subagentAgents
-    if (!agents) {
-      try {
-        const listed = await this.client?.agents()
-        if (!Array.isArray(listed)) throw new Error('GET /agent did not return a list')
-        agents = listed
-        this.subagentAgents = listed
-      } catch (err) {
-        if (!this.agentsWarned) {
-          this.agentsWarned = true
-          logger.warn(
-            'OpencodeSession',
-            `GET /agent failed — every task spawn asks: ${err instanceof Error ? err.message : String(err)}`
-          )
+  private patchChild(childID: string, force = false): Promise<void> {
+    const child = this.children.get(childID)
+    if (!child) return Promise.resolve()
+    const next = child.chain.then(() => this.patchChildNow(childID, force))
+    child.chain = next.catch(() => {})
+    return next
+  }
+
+  private async patchChildNow(childID: string, force: boolean): Promise<void> {
+    const child = this.children.get(childID)
+    const client = this.client
+    if (!child || !client) return
+    if (childPatchGate) await childPatchGate(childID)
+    await this.loadAgents()
+    const parentRules =
+      child.parentID === this.openSessionId
+        ? this.applied?.rules
+        : this.children.get(child.parentID)?.rules
+    if (!parentRules) return
+    const parentKey = JSON.stringify(parentRules)
+    if (!force && !child.unpatched && child.parentKey === parentKey) return
+    const agent = this.agentInfo(child.agent)
+    if (!agent)
+      logger.warn(
+        'OpencodeSession',
+        `subagent ${child.agent ?? '(default)'}: agent rules unknown — the child gets the parent's rules (its agent's own rules still hold in the plugin hook)`
+      )
+    const rules = childSessionRuleset(parentRules, agent?.permissions ?? [])
+    child.rules = rules
+    child.parentKey = parentKey
+    const key = JSON.stringify(rules)
+    if (child.patchedKey !== key || child.unpatched) {
+      let failure: unknown
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await client.setSessionPermissions(childID, rules)
+          failure = undefined
+          break
+        } catch (err) {
+          failure = err
         }
-        return [TASK_BACKSTOP_FAIL_CLOSED_RULE]
+      }
+      if (failure === undefined) {
+        child.patchedKey = key
+        child.unpatched = false
+      } else {
+        // FAIL CLOSED: a child left on a stale (looser) snapshot must not run on.
+        child.unpatched = true
+        logger.error(
+          'OpencodeSession',
+          `child ruleset PATCH failed twice (${childID}) — interrupting it: ${errText(failure)}`
+        )
+        void Promise.resolve()
+          .then(() => client.interrupt(childID))
+          .catch((err) => logger.warn('OpencodeSession', `child interrupt failed: ${errText(err)}`))
       }
     }
-    const gated: string[] = [
-      ...CHILD_GATED_CATEGORIES,
-      ...(autoMode
-        ? mcpServers
-            .filter((server) => server !== CLAUDEUI_MCP_SERVER)
-            .map((server) => opencodeMcpKey(server))
-        : [])
-    ]
-    const rules = subagentBackstopRules(agents, gated)
-    if (rules.length > 0) {
-      logger.debug(
-        'OpencodeSession',
-        `subagent backstop: task ask for ${rules.map((r) => r.pattern).join(', ')}`
-      )
+    for (const [grandchildID, grandchild] of this.children)
+      if (grandchild.parentID === childID) void this.patchChild(grandchildID)
+  }
+
+  /**
+   * A resumed chat's children from an earlier process (any of them can be
+   * resumed by a later call with its `sessionID`): learn them all and bring
+   * their rulesets to this process's parent rules.
+   */
+  private async adoptStoredChildren(): Promise<void> {
+    const client = this.client
+    const own = this.openSessionId
+    if (!client || !own) return
+    this.adoptChildrenOnConnect = false
+    const queue = [own]
+    for (let read = 0; queue.length > 0 && read < MAX_ADOPTED_CHILD_READS; read++) {
+      const parentID = queue.shift()!
+      let listed: Session_Info[]
+      try {
+        listed = await client.listSessions({ parentID })
+      } catch (err) {
+        logger.debug('OpencodeSession', `children of ${parentID} not listed: ${errText(err)}`)
+        continue
+      }
+      for (const info of listed) {
+        if (this.children.has(info.id) || info.id === own) continue
+        this.children.set(info.id, {
+          parentID,
+          chain: Promise.resolve(),
+          ...(info.agent ? { agent: info.agent } : {})
+        })
+        queue.push(info.id)
+      }
     }
-    return rules
+  }
+
+  /** A re-read linked children whose `session.created` fell in a gap: learn and PATCH them. */
+  private async adoptUnknownChildren(): Promise<void> {
+    const client = this.client
+    const mapper = this.mapper
+    if (!client || !mapper) return
+    for (const id of mapper.followedSessions()) {
+      if (id === this.openSessionId || this.children.has(id)) continue
+      try {
+        const info = await client.getSession(id)
+        if (!info.parentID) continue
+        this.onSessionCreated({
+          sessionID: id,
+          parentID: info.parentID,
+          ...(info.agent ? { agent: info.agent } : {})
+        })
+      } catch (err) {
+        logger.debug('OpencodeSession', `child ${id} not readable: ${errText(err)}`)
+      }
+    }
   }
 
   // ── Auto mode (full) LLM permission gatekeeper (ADR-023) ──────────────────
@@ -2227,10 +2058,6 @@ export class OpencodeSession extends BaseSession {
     return this._autoModeConfig
   }
 
-  /** The engine-shared trust lists, DERIVED into this session's classifier
-   *  environment at session start (ADR-065 § Shared trust lists). They live in
-   *  one file for every engine, so they are read from there rather than from
-   *  `autoModeConfig()`, which is opencode's own judge block. */
   private sharedAutoModeConfig(): SharedAutoModeConfig {
     if (this._sharedAutoMode === undefined) {
       try {
@@ -2242,31 +2069,22 @@ export class OpencodeSession extends BaseSession {
     return this._sharedAutoMode
   }
 
-  /** The user-authored (compiled) rules the last patched ruleset carried. Falls
-   *  back to compiling them on demand: the SSE consumer is started before the
-   *  first `applyPermissionMode`, so a `permission.asked` can arrive before the
-   *  cache is warm, and G9 must not silently degrade to "no user rules". The
-   *  cold-start compile is synchronous, so it sees the static MCP server set
-   *  (bridged servers + `claudeui`), or the live one once resolved. */
+  /** The user's compiled rules (all tiers), compiled on demand before the first apply. */
   private userOriginRules(): OpencodePermissionRule[] {
-    if (this.lastCompiledUserRules === null) {
-      this.lastCompiledUserRules = this.compiledUserRules(
-        this.knownMcpServers ?? this.staticMcpServers()
-      )
+    if (this.lastUserRules === null) {
+      this.lastUserRules = compileClaudeRulesV2(this.mergedUserPermissions(), {
+        mcpServers: this.knownMcpServers ?? this.staticMcpServers(),
+        cwd: this.cwd,
+        ...(this.worktree ? { worktree: this.worktree } : {})
+      })
     }
-    return this.lastCompiledUserRules
+    return asHostPrecheckRules(this.lastUserRules)
   }
 
-  /** Record how a tool call ended, for the classifier's `{"outcome":…}`
-   *  annotations. Bounded + decision-sticky — see recordToolOutcome. */
   private recordToolOutcome(toolUseId: string, outcome: ToolOutcome): void {
     recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
   }
 
-  /** Session-start git remotes, captured ONCE and frozen (ref §9.1). The
-   *  promise is memoized too, so two approvals racing the first classifier call
-   *  share a single `git remote -v`. Never throws — an empty list is the
-   *  policy's restrictive fallback. */
   private async sessionGitRemotes(): Promise<GitRemote[]> {
     if (this.sessionRemotes) return this.sessionRemotes
     this.sessionRemotesPromise ??= captureGitRemotes(this.cwd)
@@ -2274,8 +2092,6 @@ export class OpencodeSession extends BaseSession {
     return this.sessionRemotes
   }
 
-  /** Repo visibility, resolved at most once per session ('unknown' included —
-   *  it is a real answer meaning "we looked and could not tell"). */
   private async sessionVisibility(): Promise<RepoVisibility> {
     if (this.sessionRepoVisibility) return this.sessionRepoVisibility
     this.sessionRepoVisibilityPromise ??= captureRepoVisibility(this.cwd)
@@ -2283,14 +2099,6 @@ export class OpencodeSession extends BaseSession {
     return this.sessionRepoVisibility
   }
 
-  /** Host-supplied ground truth for the classifier's Environment section
-   *  (plan phase 2 + 3, ADR-083 §3/§4). What the judge is told is
-   *  {@link buildClassifierEnvironment}'s job, shared with pi; this method only
-   *  gathers the inputs. The trust and guidance lists come from the
-   *  engine-SHARED `~/.claude/ui/automode.json` (read once per session); the
-   *  user's permission rules are read FRESH on every approval, like the rules
-   *  the engine enforces, so a settings.json edit mid-session reaches the judge
-   *  on the next action. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
     const remotes = await this.sessionGitRemotes()
     return buildClassifierEnvironment({
@@ -2303,12 +2111,7 @@ export class OpencodeSession extends BaseSession {
     })
   }
 
-  /** Per-ACTION measured ground truth → the classifier's `{"meta":{…}}` line
-   *  (ref §5). Only shell-like actions qualify, only the command shapes the
-   *  reference names trigger a capture, and a capture that fails contributes
-   *  NOTHING — a fabricated `{"clean":true}` would clear the policy's dirty-tree
-   *  presumption on no evidence. The 1.5 s/2 s capture timeouts are the budget
-   *  for the await this adds to the approval path. */
+  /** Measured ground truth for a shell action (absence is never "fine"). */
   private async captureActionMeta(
     toolName: string,
     input: Record<string, unknown>
@@ -2320,23 +2123,13 @@ export class OpencodeSession extends BaseSession {
       const gitStatus = await captureGitStatus(this.cwd)
       if (gitStatus) meta.gitStatus = gitStatus
     }
-    if (needsRepoVisibility(command)) {
-      meta.repoVisibility = await this.sessionVisibility()
-    }
-    // Pure and synchronous — no subprocess, so unlike the captures above it
-    // costs nothing to attempt on every shell action. Scope mirrors what
-    // `classifierEnvironment` publishes (cwd + the user's additionalDirectories)
-    // plus the process's temp roots.
+    if (needsRepoVisibility(command)) meta.repoVisibility = await this.sessionVisibility()
     const redirects = analyzeRedirects(command, {
       cwd: this.cwd,
       tempDirs: tempDirRoots(),
       additionalDirectories: this.mergedUserPermissions().additionalDirectories
     })
     if (redirects) meta.redirects = redirects
-    // ADR-084 §2 — repo-local git config that makes git run a program, in the
-    // directory the command runs in (opencode honours `workdir`). Only a
-    // non-empty list is emitted: `[]` (clean) and `null` (not measured) both
-    // say nothing, per this method's rule that absence is never "fine".
     if (hasGitSegment(command)) {
       const runIn = effectiveShellCwd(this.cwd, input, true)
       const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
@@ -2346,111 +2139,33 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
-   * ADR-084 §1 — the input the pipeline's read-only gate reads
-   * (`inputFor('read-only')`), run after the category fast path and before any
-   * judge is resolved. `null` → no read-only gate (the call goes on to the
-   * allow-rule skip and the judge exactly as before); `'settled'` → the ask
-   * went away meanwhile (nothing replied, no judge asked).
-   *
-   * The command is read from the TOOL PART's own input, never from the ask's
-   * `metadata` fallback: opencode's shell ask carries only `{command}` there
-   * (vendor/opencode-src/packages/opencode/src/tool/shell.ts `ask`), so a
-   * `workdir` would be lost and every relative path checked against the wrong
-   * directory. The shell tool asks from its own `execute`, concurrently with
-   * the processor publishing the part's input, so the ask can arrive first:
-   * when the part carries no input yet, wait up to TOOL_INPUT_WAIT_MS for it.
-   * Still no tool part → no read-only gate (the judge decides).
+   * The read-only gate's input (ADR-084 §1): the shell call's own input. 2.x
+   * publishes `session.tool.called` (with the input) BEFORE it runs the tool
+   * (`runner/step.ts`), so the ask always carries it — no wait as in 1.x.
    */
-  private async readOnlyInput(
-    approval: PendingApproval
-  ): Promise<Record<string, unknown> | null | 'settled'> {
+  private readOnlyInput(approval: PendingApproval): Record<string, unknown> | null {
     if (!isShellToolName(approval.toolName)) return null
     if (!this.isAutoMode(this.permissionMode)) return null
-    let input = findToolInput(this.accumulators, undefined, approval.toolUseId)
-    if (!input && approval.toolUseId) {
-      logger.debug('OpencodeSession', 'auto-mode read-only bypass: waiting for the tool part input')
-      const outcome = await this.waitForToolInput(approval.toolUseId)
-      // The session closed under the wait: the ask went with it, so nothing is
-      // replied and no judge is asked.
-      if (outcome === 'closed') {
-        logger.debug(
-          'OpencodeSession',
-          'auto-mode read-only bypass: session closed while waiting — not replying'
-        )
-        return 'settled'
-      }
-      // Answered server-side during the wait: settled, so handled — the same
-      // rule as the pipeline's check after the gate (`stillPending`).
-      if (!this.pendingApprovals.has(approval.requestId)) {
-        logger.debug(
-          'OpencodeSession',
-          'auto-mode read-only bypass: ask resolved while it ran — not replying'
-        )
-        return 'settled'
-      }
-      input = findToolInput(this.accumulators, undefined, approval.toolUseId)
-    }
-    if (!input) {
+    const input = approval.input as Record<string, unknown> | undefined
+    if (!input || typeof input.command !== 'string') {
       logger.debug('OpencodeSession', 'auto-mode read-only bypass refused (input:unverified)')
       return null
     }
     return input
   }
 
-  /**
-   * The allow-rule review on the call's card. A shell ask only gets here once
-   * its tool part is known (readOnlyInput waited), but an MCP / webfetch ask
-   * can precede its part, and the reducer DROPS a block whose `tool_use` is in
-   * no message yet — so, like sendDenial, hold it until the part's input
-   * arrives (≤ TOOL_INPUT_WAIT_MS). The reply is never delayed.
-   */
-  private sendAllowRuleReview(toolUseId: string | undefined, rule: string): void {
-    if (!toolUseId) return
-    const send = (): void => {
-      this.sendToolReview(toolUseId, { allowRule: rule })
-    }
-    if (this.hasToolPart(toolUseId)) {
-      send()
-      return
-    }
-    void this.waitForToolInput(toolUseId).then((outcome) => {
-      if (outcome === 'input' || (outcome === 'timeout' && this.hasToolPart(toolUseId))) send()
-    })
-  }
-
-  /**
-   * What the allow-rule skip checks for this ask, or `undefined` (no skip —
-   * the judge decides). Paths below are under
-   * `vendor/opencode-src/packages/opencode/src/`.
-   * - shell: the TOOL PART's input only (readOnlyInput already waited for
-   *   it; the ask's `{command}` metadata would lose `workdir`);
-   * - `webfetch`: the url (`tool/webfetch.ts:39-47` asks with
-   *   `patterns: [params.url]`, `metadata: {url, …}`); `websearch`
-   *   (`tool/websearch.ts:119-124`, bare rules only); `skill`: its name
-   *   (`tool/skill.ts:27-32`, `patterns: [name]`);
-   * - an MCP key (`session/tools.ts:408` asks with
-   *   `permission: <sanitize(server)>_<sanitize(tool)>`, `patterns: ["*"]`,
-   *   `metadata: {}`; the sanitiser is `mcp/catalog.ts:117-119`): not a
-   *   built-in permission key, and exactly ONE known server (the S3 resolved
-   *   set) whose `sanitize(s)_` prefixes it — two (`a` and `a_b` over `a_b_x`,
-   *   or `a.b` and `a_b`) leave the call's server unknown, so no skip. The
-   *   rule's tool name is compared in the key's form (`mcpToolKey`);
-   * - `edit`, `task`, `doom_loop`, `read`, `external_directory`, anything
-   *   else: no skip.
-   */
+  /** What the allow-rule skip checks for this ask, or undefined (the judge decides). */
   private allowRuleAction(
     approval: PendingApproval
   ): { action: AllowSkipAction; mcpToolKey?: (ruleTool: string) => string } | undefined {
     const category = approval.toolName
     const patterns = approval.patterns ?? []
+    const input = (approval.input ?? {}) as Record<string, unknown>
     const str = (v: unknown): string | undefined =>
       typeof v === 'string' && v !== '' ? v : undefined
     if (isShellToolName(category)) {
-      const input = approval.toolUseId
-        ? findToolInput(this.accumulators, undefined, approval.toolUseId)
-        : undefined
-      const command = input?.command
-      if (!input || typeof command !== 'string') return undefined
+      const command = input.command
+      if (typeof command !== 'string') return undefined
       const workdir = input.workdir
       if (workdir !== undefined && workdir !== null && typeof workdir !== 'string') return undefined
       const dir = str(workdir)
@@ -2458,7 +2173,7 @@ export class OpencodeSession extends BaseSession {
     }
     switch (category) {
       case 'webfetch': {
-        const url = str(approval.input?.url) ?? str(patterns[0])
+        const url = str(input.url) ?? str(patterns[0])
         return url ? { action: { kind: 'webfetch', url } } : undefined
       }
       case 'websearch':
@@ -2468,7 +2183,8 @@ export class OpencodeSession extends BaseSession {
         return name ? { action: { kind: 'skill', name } } : undefined
       }
     }
-    if (isOpencodeBuiltinPermissionKey(category) || !this.knownMcpServers) return undefined
+    // An MCP tool asks under `<server>_<tool>` (2.x `tool/mcp.ts`).
+    if (isV2BuiltinAction((key) => key === category) || !this.knownMcpServers) return undefined
     const servers = this.knownMcpServers.filter((s) =>
       category.startsWith(opencodeMcpKey(s).slice(0, -1))
     )
@@ -2478,94 +2194,11 @@ export class OpencodeSession extends BaseSession {
     return tool ? { action: { kind: 'mcp', server, tool }, mcpToolKey: sanitizeMcpName } : undefined
   }
 
-  /**
-   * The approval the judge sees, with the tool part's input when the ask
-   * carried none — an MCP tool asks straight from its `execute` with
-   * `metadata: {}` (`vendor/opencode-src/packages/opencode/src/session/tools.ts:408`)
-   * and never calls `ctx.metadata` first (which is what sets the part's
-   * `input: args`, `:67-80`), so its part input comes only from the
-   * processor's `tool-call` handler (`session/processor.ts:331-351`), which
-   * runs concurrently with `execute` — the ask can win (M-OC6). Waits up to
-   * TOOL_INPUT_WAIT_MS, like readOnlyInput for shell. `null` when the session
-   * closed or the ask was settled during the wait (nothing to reply); the
-   * approval unchanged when it already carries input, has no tool part, or the
-   * wait timed out (the judge then sees `{}`, as before).
-   */
-  private async inputForJudge(approval: PendingApproval): Promise<PendingApproval | null> {
-    const hasInput = (input: unknown): boolean =>
-      !!input && typeof input === 'object' && Object.keys(input).length > 0
-    if (hasInput(approval.input) || !approval.toolUseId) return approval
-    const found = findToolInput(this.accumulators, undefined, approval.toolUseId)
-    if (found) return { ...approval, input: found }
-    const outcome = await this.waitForToolInput(approval.toolUseId)
-    if (outcome === 'closed' || !this.pendingApprovals.has(approval.requestId)) {
-      logger.debug(
-        'OpencodeSession',
-        `auto-mode ${approval.toolName}: settled while waiting for input`
-      )
-      return null
-    }
-    const input = findToolInput(this.accumulators, undefined, approval.toolUseId)
-    return input ? { ...approval, input } : approval
-  }
-
-  /**
-   * Resolve once the tool part for `callId` carries a non-empty input
-   * (`input`), after TOOL_INPUT_WAIT_MS (`timeout`), or on cancel()
-   * (`closed`). The caller re-reads the input from the accumulators either way.
-   */
-  private waitForToolInput(callId: string): Promise<ToolInputWait> {
-    return new Promise((resolve) => {
-      let waiters = this.toolInputWaiters.get(callId)
-      if (!waiters) {
-        waiters = new Set()
-        this.toolInputWaiters.set(callId, waiters)
-      }
-      const settle = (outcome: ToolInputWait): void => {
-        clearTimeout(timer)
-        const current = this.toolInputWaiters.get(callId)
-        current?.delete(settle)
-        if (current?.size === 0) this.toolInputWaiters.delete(callId)
-        resolve(outcome)
-      }
-      const timer = setTimeout(() => settle('timeout'), toolInputWaitMs)
-      waiters.add(settle)
-    })
-  }
-
-  /**
-   * Wake the waits for a tool part whose input just arrived. Called right
-   * after mapEvent applied the event to the accumulators, and it reads the
-   * accumulators rather than the raw part, so a wake means `findToolInput`
-   * will find it.
-   */
-  private settleToolInputWaiters(ev: OpencodeEvent): void {
-    if (this.toolInputWaiters.size === 0 || ev.type !== 'message.part.updated') return
-    const part = ev.properties.part as { type?: unknown; callID?: unknown } | undefined
-    if (part?.type !== 'tool' || typeof part.callID !== 'string') return
-    const waiters = this.toolInputWaiters.get(part.callID)
-    if (!waiters || !findToolInput(this.accumulators, undefined, part.callID)) return
-    for (const settle of [...waiters]) settle('input')
-  }
-
-  /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
   private isAutoMode(mode: string): boolean {
     return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
   }
 
-  /**
-   * True when `autoMode.judgeModel` names a model opencode no longer offers.
-   *
-   * Fail-closed on purpose: the caller drops to the human instead of judging
-   * with a substitute, and specifically instead of falling through to
-   * `?? this._model` — silently promoting the SESSION's model to security judge
-   * is not what "I picked a cheaper/stronger judge" asked for.
-   *
-   * Cache-only (`peekOpencodeModels`): a cold or empty catalog cannot tell
-   * "removed" from "not discovered yet", so it validates nothing and the
-   * configured model passes through. eagerConnect already awaits
-   * `discoverOpencodeModels()`, so the cache is warm by the time approvals flow.
-   */
+  /** A CONFIGURED judge model opencode no longer offers: fail closed to the human. */
   private judgeModelUnavailable(): boolean {
     const configured = this.autoModeConfig().judgeModel
     if (!configured) return false
@@ -2583,24 +2216,13 @@ export class OpencodeSession extends BaseSession {
     return true
   }
 
-  /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
   private reportJudgeRouteUnavailable(reason: string): void {
     if (this.judgeRouteUnavailableReported) return
     this.judgeRouteUnavailableReported = true
     this.send('session:error', judgeRouteUnavailableMessage('opencode', reason))
   }
 
-  /**
-   * The judge transport: ClaudeUI's own HTTP call to the judge model (ADR-081),
-   * NOT an opencode session — so the judge prompt is exactly the policy, the
-   * stage budgets and stop sequence apply, and the call's usage lands on the
-   * ledger as a `judge` row under this session.
-   *
-   * Judge model = `autoMode.judgeModel`, else the session's own model (ADR-023),
-   * resolved per call. A model no ClaudeUI route covers is not judged by anyone
-   * else: the call fails, `classify()` returns unavailable, the human decides,
-   * and the session says why once.
-   */
+  /** ClaudeUI's own judge call (ADR-081), on `autoMode.judgeModel` or the session's model. */
   private makeJudgeFn(): JudgeTransport | null {
     if (this.judgeModelUnavailable()) return null
     return makeSessionJudgeTransport({
@@ -2612,40 +2234,14 @@ export class OpencodeSession extends BaseSession {
     })
   }
 
-  // ── ADR-085 S2: host pre-check + session allows ───────────────────────────
+  // ── ADR-085: host pre-check + session allows ───────────────────────────────
 
   /**
-   * Route one permission ask (own session or task child). Before the
-   * auto/human split, the host looks at it (host-precheck.ts): the user's
-   * deny/ask rules hold in EVERY mode (owner ruling 3) — a deny the server's
-   * glob missed is refused here, and an ask rule sends the call to the human,
-   * never the judge (G9: letting the judge auto-approve exactly what the user
-   * singled out would make auto mode a permission downgrade; it runs before
-   * both fast paths, so an ask the user wrote on `read` still reaches them).
-   * Only then may this chat's session-allow set answer it; otherwise today's
-   * split: auto mode → the judge path, else the card.
-   *
-   * Plan mode's refusal (ADR-085 §3, ruling 7) is a rung of the pre-check,
-   * right after the deny rules: any `edit`, `task:general`, and a shell
-   * command `isPlanReadOnlyCommand` cannot vouch for — regardless of the
-   * user's ask rules, session allows and allow rules. The plan ruleset ASKS
-   * for `edit`/`task:general`/`bash` rather than denying them server-side (a
-   * PATCHed deny outlives the mode and binds every task child —
-   * permission-ruleset.ts `buildRuleset('plan')`), so the refusal is made
-   * here, for own and child asks alike. The mode is read at ask time: a
-   * mid-turn switch is visible here at once, while the server keeps the
-   * ruleset its runLoop snapshotted. A plan-safe command a user allow rule
-   * covers is answered `once` host-side (`allow-rule`), because plan mode
-   * sends no `edit`/`bash` allow to the server (`withoutMutatingAllowRules`).
-   *
-   * ADR-085 S4 (owner ruling 4) — a task CHILD's ask is answered with the
-   * PARENT's rules: its agent always asks for the gated categories (static
-   * asks injected at spawn, `subagent-permissions.ts`), and once the rungs
-   * above have not spoken, the ruleset last PATCHed onto this session decides
-   * (`parent-allow` → `once` silently; a deny → refused with the rule; an ask
-   * → today's split, so in auto mode the fast path, the agent-control gate,
-   * the read-only bypass and the judge — told which subagent proposed the
-   * call — all apply).
+   * Route one permission ask (own or a child's): the host pre-check ladder
+   * (deny rules, plan mode, user ask rules, session allows — ADR-085), then
+   * the judge in auto mode or the card. An `external_directory` ask is an
+   * ordinary ask here (card, or the judge in auto mode). 2.x children inherit
+   * the parent's rules, so the 1.x parent rung is not used.
    */
   private routePermissionAsk(approval: PendingApproval): void {
     const category = approval.toolName
@@ -2654,7 +2250,7 @@ export class OpencodeSession extends BaseSession {
     if (approval.subagent) {
       logger.debug(
         'OpencodeSession',
-        `child ask ${category} from subagent session ${approval.subagent.sessionId} (task ${approval.subagent.parentToolUseId}) → ${verdict.kind}`
+        `child ask ${category} from subagent session ${approval.subagent.sessionId} → ${verdict.kind}`
       )
     }
     switch (verdict.kind) {
@@ -2662,21 +2258,21 @@ export class OpencodeSession extends BaseSession {
         this.denyByRule(approval, verdict.rule)
         return
       case 'plan-refuse':
-        this.autoReply(approval.requestId, 'reject', PLAN_MODE_DENY_REASON_NO_EXIT_TOOL)
-        // No command text on an info line (ADR-084 logging rule).
+        this.autoReply(approval.requestId, {
+          decision: 'reject',
+          message: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        })
         logger.info(
           'OpencodeSession',
           `plan mode refused ${category}${approval.subagent ? ' (subagent)' : ''}`
         )
-        if (approval.toolUseId) {
+        if (approval.toolUseId && !approval.subagent)
           this.sendDenial(approval.toolUseId, 'mode', PLAN_MODE_DENY_REASON_NO_EXIT_TOOL)
-        }
         return
       case 'user-ask': {
         const pending = this.pendingApprovals.get(approval.requestId)
         if (pending) pending.sweepable = false
         if (autoMode) {
-          // No command text on an info line (ADR-084 logging rule).
           logger.info(
             'OpencodeSession',
             `auto-mode → human: user ask rule matches ${category}${verdict.rule ? ` (rule ${verdict.rule})` : ''}`
@@ -2688,108 +2284,58 @@ export class OpencodeSession extends BaseSession {
         return
       }
       case 'session-allow':
-        // ADR-084 §3: in auto mode an agent-control edit always sees the
-        // gate/judge — a session allow on `edit *` must not skip it.
         if (!this.sessionAllowApplies(approval)) break
         logger.debug('OpencodeSession', `session allow ${category}`)
-        this.autoReply(approval.requestId, 'once')
+        this.autoReply(approval.requestId, { decision: 'once' })
         return
       case 'allow-rule':
-        // Plan mode only (ruling 7): a plan-safe command the user's allow
-        // rules cover. The rule text is the user's own; no command text.
         logger.info(
           'OpencodeSession',
           `plan mode: allow rule covers a read-only ${category} (rule ${verdict.rule})`
         )
-        this.autoReply(approval.requestId, 'once')
+        this.autoReply(approval.requestId, { decision: 'once' })
         return
-      case 'parent-allow': {
-        // ADR-085 S4 (ruling 4): the parent's rules allow this child call.
-        // The subagent type when known; never the command, patterns or the
-        // task prompt (ADR-084 logging rule).
-        const type = approval.subagent ? this.subagentTask(approval.subagent)?.type : undefined
-        logger.info(
-          'OpencodeSession',
-          `child ask ${category} allowed by the parent's rules${type ? ` (subagent ${type})` : ''}`
-        )
-        this.autoReply(approval.requestId, 'once')
+      case 'parent-allow':
+        this.autoReply(approval.requestId, { decision: 'once' })
         return
-      }
       case 'continue':
         break
     }
-    // Permission approval: auto mode (full) → LLM gatekeeper; else → human.
-    // See ADR-023.
-    if (autoMode) {
-      void this.handleAutoModeApproval(approval)
-    } else {
-      this.send('session:approval-request', approval)
-    }
+    if (autoMode) void this.handleAutoModeApproval(approval)
+    else this.send('session:approval-request', approval)
   }
 
-  /**
-   * What the pre-check reads: the permission mode at ask time, the user's
-   * deny/ask (and, read in plan mode only, allow) rules FRESH per call (as
-   * the pipeline's read-only gate reads them — a settings edit mid-session binds the next
-   * ask; best-effort, so a load failure leaves only plan-refuse/session-allow/
-   * continue), G9's compiled user-origin rules, this chat's session-allow set,
-   * and (for child asks, ADR-085 S4) the ruleset last patched onto this
-   * opencode session.
-   */
   private precheckContext(): HostPrecheckContext {
     const permissions = this.mergedUserPermissions()
     return {
       mode: this.permissionMode,
       rules: { deny: permissions.deny, ask: permissions.ask, allow: permissions.allow },
-      // Plan mode's second read-only oracle (ADR-085 S3b, `isPlanReadOnlyCommand`).
       cwd: this.cwd,
       additionalDirectories: permissions.additionalDirectories,
       userRules: this.userOriginRules(),
       sessionAllows: this.sessionAllows,
-      // ADR-085 S4 — what a CHILD ask is answered with: the ruleset on THIS
-      // opencode session, never one patched onto a previous session id.
-      parentRuleset:
-        this.lastPatchedRuleset?.sessionId === this.openSessionId
-          ? this.lastPatchedRuleset.rules
-          : undefined,
-      // …and only for the categories the spawn put a static ask on: the gated
-      // built-ins plus the bridged MCP servers' keys (the spawn's
-      // `collectClaudeMcpForOpencode` set — `GET /mcp`-only servers got no
-      // injected ask, so their child asks stay the card/judge's).
-      childGatedCategories: this.childGatedCategories(),
       onError: (err) =>
-        logger.warn(
-          'OpencodeSession',
-          `host pre-check failed — asking the human: ${err instanceof Error ? err.message : String(err)}`
-        )
+        logger.warn('OpencodeSession', `host pre-check failed — asking the human: ${errText(err)}`)
     }
   }
 
-  /**
-   * ADR-085 S4 — the parent `task` call that spawned a child, read from its
-   * tool part at the time it is needed (the mapper's marker carries only
-   * `{sessionId, parentToolUseId}` — one resolution site, and the task part's
-   * input is certainly there by then): the subagent type (`'unknown'` when the
-   * part has none), plus the description and prompt when they are strings.
-   * `undefined` when the part carries no input at all.
-   */
+  /** The subagent call that spawned a child (its 2.x input: `agent`, `description`, `prompt`). */
   private subagentTask(marker: {
     parentToolUseId: string
   }): { type: string; description?: string; prompt?: string } | undefined {
-    const input = findToolInput(this.accumulators, undefined, marker.parentToolUseId)
+    const input = this.toolInputs.get(marker.parentToolUseId)
     if (!input) return undefined
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
     const description = str(input.description)
     const prompt = str(input.prompt)
     return {
-      type: str(input.subagent_type) ?? 'unknown',
+      type: str(input.agent) ?? str(input.subagent_type) ?? 'unknown',
       ...(description !== undefined ? { description } : {}),
       ...(prompt !== undefined ? { prompt } : {})
     }
   }
 
-  /** False for the one ask a session allow never answers: an auto-mode edit
-   *  that touches (or may touch) an agent-control path (ADR-084 §3). */
+  /** An auto-mode edit on an agent-control path always sees the gate/judge (ADR-084 §3). */
   private sessionAllowApplies(approval: PendingApproval): boolean {
     return !(
       this.isAutoMode(this.permissionMode) &&
@@ -2798,36 +2344,16 @@ export class OpencodeSession extends BaseSession {
     )
   }
 
-  /**
-   * Refuse an ask a user deny rule hits. The reject cascades server-side to
-   * this opencode session's other pending asks (vendor permission/index.ts
-   * `reply()`), which `approval-resolved` already turns into card dismissals.
-   * Same wording as pi (PiSession `gateToolCallInner`) and Codex.
-   *
-   * No outcome is recorded for the judge's transcript annotations:
-   * `rejected-by-user` is the HUMAN's signal and would lie here, and no other
-   * outcome kind fits a rule denial (S5 may add one).
-   */
+  /** Refuse an ask a user deny rule hits, with the rule as the reason. */
   private denyByRule(approval: PendingApproval, rule: string): void {
     const reason = `Denied by permission rule: ${rule}`
-    this.autoReply(approval.requestId, 'reject', reason)
-    // No command text on an info line (ADR-084 logging rule, read-only-gate.ts).
+    this.autoReply(approval.requestId, { decision: 'reject', message: reason })
     logger.info('OpencodeSession', `permission rule deny ${approval.toolName} — ${rule}`)
-    if (approval.toolUseId) this.sendDenial(approval.toolUseId, 'rule', reason)
+    if (approval.toolUseId && !approval.subagent)
+      this.sendDenial(approval.toolUseId, 'rule', reason)
   }
 
-  /**
-   * A host denial on the call's card — a user rule (`source: 'rule'`) or plan
-   * mode's refusal (`'mode'`), parity with ClaudeSession's
-   * `session:permission-denial`. The reducer DROPS a block whose `tool_use` is
-   * in no message yet, and a shell ask can precede its tool part (M-OC6), so
-   * the producer holds: sent now when the part is already known, else once its
-   * input arrives (≤ TOOL_INPUT_WAIT_MS) — consumeEvents settles that wait
-   * right after mapEvent and BEFORE dispatchMapperOutput synchronously sends
-   * the part's message, and this continuation runs after both. A timeout still
-   * sends when the part turned up without input (its `tool_use` exists); no
-   * part at all, or a closed session, drops it. The reject is never delayed.
-   */
+  /** A host denial on the call's card (its `tool_use` is already out: tool.called precedes the ask). */
   private sendDenial(
     toolUseId: string,
     source: PermissionDenialBlock['source'],
@@ -2841,79 +2367,32 @@ export class OpencodeSession extends BaseSession {
       source,
       ...(clipped ? { reason: clipped } : {})
     }
-    const send = (): void => this.send('session:permission-denial', { toolUseId, denial })
-    if (this.hasToolPart(toolUseId)) {
-      send()
-      return
-    }
-    void this.waitForToolInput(toolUseId).then((outcome) => {
-      if (outcome === 'input' || (outcome === 'timeout' && this.hasToolPart(toolUseId))) {
-        send()
-        return
-      }
-      logger.debug('OpencodeSession', `${source} denial not shown: no tool part (${outcome})`)
-    })
+    this.send('session:permission-denial', { toolUseId, denial })
   }
 
-  /** A tool part with this callID is in the accumulators (so its `tool_use` is on the wire). */
-  private hasToolPart(callId: string): boolean {
-    for (const acc of this.accumulators.values()) {
-      for (const snap of acc.parts.values()) {
-        if (snap.type === 'tool' && snap.callID === callId) return true
-      }
-    }
-    return false
-  }
-
-  /**
-   * After a session allow was added: answer `once` every pending ask of THIS
-   * chat (own and child) it now covers — the vendor's same-session `always`
-   * cascade (`reply()`), limited to this ClaudeUI session, never another chat
-   * in the folder. The full pre-check is re-run per ask, so a deny/ask rule
-   * still wins; an ask a user ask rule holds (`sweepable: false`), a question,
-   * and an auto-mode agent-control edit are never swept. The swept card is
-   * retracted by `permission.replied` → `approval-resolved`.
-   */
+  /** Answer every pending ask (own and child) a new session allow covers. */
   private sweepSessionAllows(): void {
     if (this.sessionAllows.size === 0 || this.pendingApprovals.size === 0) return
     const ctx = this.precheckContext()
     for (const [requestId, rec] of [...this.pendingApprovals]) {
-      if (!rec.sweepable || this.pendingQuestions.has(requestId)) continue
+      if (!rec.sweepable) continue
       if (hostPrecheck(rec.approval, ctx).kind !== 'session-allow') continue
       if (!this.sessionAllowApplies(rec.approval)) continue
       logger.debug('OpencodeSession', `session allow ${rec.approval.toolName} — pending ask swept`)
-      this.autoReply(requestId, 'once')
+      this.autoReply(requestId, { decision: 'once' })
     }
   }
 
-  /**
-   * The auto-mode decision for one ask: the edit fast path here, then the
-   * shared judge pipeline (`automode/judge-pipeline.ts`, ADR-088) with
-   * opencode's hooks. G9 (a USER-authored ask rule outranks the classifier)
-   * runs before this, for every mode: the host pre-check in
-   * routePermissionAsk (ADR-085 S2).
-   */
+  /** The auto-mode decision: the edit fast path, then the shared judge pipeline (ADR-088). */
   private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
     const category = approval.toolName
-    // ADR-084 §3 — the auto-mode ruleset asks for EVERY edit so this gate sees
-    // it: an edit whose targets (patterns, the edit/write path, apply_patch
-    // move destinations) are all clear of agent-control paths is the
-    // acceptEdits auto-allow, with no judge call and no denial-cap bookkeeping,
-    // exactly as when opencode allowed it server-side. Anything else — a
-    // control path, or targets that cannot all be told — goes to the judge.
-    // Before the pipeline: its category fast path never covers `edit`, so the
-    // order between the two is unobservable.
     if (
       category === 'edit' &&
       editClearsAgentControl(approval.patterns, approval.input, this.cwd)
     ) {
-      this.autoReply(approval.requestId, 'once')
+      this.autoReply(approval.requestId, { decision: 'once' })
       return
     }
-    // The approval the judge and the human card see: the ask itself, or — for
-    // an ask that came without input (an MCP tool) — with the tool part's
-    // input once `inputFor('judge')` has found it.
-    let judgedApproval = approval
     let transport: JudgeTransport | null = null
     const outcome = await runJudgePipeline(
       { toolUseId: approval.toolUseId ?? '', toolName: category, input: approval.input },
@@ -2924,37 +2403,13 @@ export class OpencodeSession extends BaseSession {
         autoModeActive: () => this.isAutoMode(this.permissionMode),
         permissions: () => this.mergedUserPermissions(),
         honoursWorkdir: true,
-        // ADR-084 §1 — the read-only gate reads the TOOL PART's input (it may
-        // wait for it, see readOnlyInput). ADR-085 S3 — an ask with no input
-        // yet (an MCP tool) gives the judge the tool part's real input; asked
-        // only after the allow-rule skip, which needs none, so a skippable ask
-        // is answered at once.
-        inputFor: async (stage) => {
-          if (stage === 'read-only') return this.readOnlyInput(approval)
-          const judged = await this.inputForJudge(approval)
-          if (!judged) return 'settled'
-          judgedApproval = judged
-          return judged.input
-        },
-        // ADR-085 §4 — a narrow user allow rule skips the judge (Claude Code
-        // parity plus safety checks, allow-rule-skip.ts). Same bookkeeping as
-        // the read-only path: no recordAllow(), no usage row, no tool outcome.
-        // A child ask takes it too, with the PARENT's rules (ruling 4). The
-        // engine ruleset stripped every allow rule in auto mode
-        // (`withoutAllowRules`), so an allowed call still asks and the host
-        // decides here, from `mergedUserPermissions()` (allow rules included,
-        // read fresh). allowRuleAction reads the ask's own data (patterns, the
-        // MCP key, the tool part's shell input the read-only stage already
-        // waited for); the gate applies `mcpToolKey` to MCP actions only.
+        inputFor: async (stage) =>
+          stage === 'read-only' ? this.readOnlyInput(approval) : approval.input,
         allowRuleAction: () => this.allowRuleAction(approval)?.action,
         mcpToolKey: sanitizeMcpName,
-        // ADR-085 S4 — a child's call is judged as the assistant's own,
-        // against the parent's task that spawned it.
         subagent: approval.subagent
           ? (this.subagentTask(approval.subagent) ?? { type: 'unknown' })
           : undefined,
-        // A stale configured judge model fails closed (one session:error);
-        // no transport → the human decides.
         judgeAvailable: () => {
           transport = this.makeJudgeFn()
           return transport !== null
@@ -2967,69 +2422,32 @@ export class OpencodeSession extends BaseSession {
           this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
         denials: this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
-        // The allow-rule review waits for the tool part (sendAllowRuleReview);
-        // every other review goes out at once (sendToolReview). Both are
-        // no-ops without a toolUseId.
-        sendReview: (_id, review) =>
-          typeof review === 'object' && 'allowRule' in review
-            ? this.sendAllowRuleReview(approval.toolUseId, review.allowRule)
-            : this.sendToolReview(approval.toolUseId, review),
-        // ADR-091 part 6 — the user approved an earlier block of this exact
-        // call (own or a task child's): allowed once, no judge call.
+        sendReview: (_id, review) => this.sendToolReview(approval.toolUseId, review),
         consumeGrant: (name, input) =>
           this.blockedCalls.consumeGrant(blockGrantKey('opencode', name, input, this.cwd, true)),
-        // ADR-085 S2 — the ask may have been settled meanwhile: a session-allow
-        // sweep answered it `once`, or a server-side cascade
-        // (`approval-resolved`) dropped it. Replying now would 404 and paint a
-        // verdict on a call that already ran. Each stage keeps its own line.
         stillPending: (stage) => {
           if (this.pendingApprovals.has(approval.requestId)) return true
-          const line =
-            stage === 'read-only'
-              ? 'auto-mode read-only bypass: ask resolved while it ran — not replying'
-              : stage === 'allow-rule'
-                ? 'auto-mode allow-rule skip: ask already settled — not replying'
-                : stage === 'judge'
-                  ? 'auto-mode verdict for an ask already settled — not replying'
-                  : null
-          if (line) logger.debug('OpencodeSession', line)
+          logger.debug('OpencodeSession', `auto-mode ${stage}: ask already settled — not replying`)
           return false
         }
       }
     )
     switch (outcome.kind) {
       case 'allow':
-        this.autoReply(approval.requestId, 'once')
+        this.autoReply(approval.requestId, { decision: 'once' })
         return
       case 'hold':
-        this.holdBlock(judgedApproval, outcome.reason, outcome.review)
+        this.holdBlock(approval, outcome.reason, outcome.review)
         return
       case 'human':
-        this.fallbackToHuman(judgedApproval, outcome.reason)
+        this.fallbackToHuman(approval, outcome.reason)
         return
       case 'settled':
         return
     }
   }
 
-  /**
-   * The judge's verdict on the card it judged (F18).
-   *
-   * `approval.toolUseId` is `permission.asked`'s `tool.callID`, which is EXACTLY
-   * the id `buildChatMessage` puts on the `tool_use` block (`snap.callID`), so
-   * the reducer binds it to the right card. No hold is needed here the way Codex
-   * needs one: the tool part carrying `state.input` is published
-   * (`message.part.updated`, which emits the whole assistant message) BEFORE the
-   * tool calls `ctx.ask` — the fact M-OC6 already relies on to read the real
-   * input off the accumulator — and the judge call that produced this verdict
-   * took a model round-trip on top of that.
-   *
-   * `'read-only'` is the static path's fixed review (ADR-084 §1). It has no
-   * round-trip to wait on, but needs none: that path only runs once it has
-   * found the tool part in the accumulator, so the card already exists.
-   * `{ allowRule }` is the allow-rule skip's (ADR-085 §4), held until the
-   * tool part exists (sendAllowRuleReview).
-   */
+  /** The judge's verdict (or a static review) on the call's card. */
   private sendToolReview(
     toolUseId: string | undefined,
     result: ClassifyResult | 'read-only' | { allowRule: string }
@@ -3046,32 +2464,6 @@ export class OpencodeSession extends BaseSession {
     return review
   }
 
-  /**
-   * Resolve a pending approval programmatically (the classifier's decision).
-   * A reject `message` becomes model-visible feedback (CorrectedError) so the
-   * turn survives the denial and the agent can see why it was blocked.
-   */
-  private autoReply(requestId: string, reply: 'once' | 'reject', message?: string): void {
-    this.takePendingAsk(requestId)
-    const replied = message
-      ? this.client?.replyPermission(requestId, reply, message)
-      : this.client?.replyPermission(requestId, reply)
-    replied?.catch((err) => {
-      logger.warn(
-        'OpencodeSession',
-        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    })
-  }
-
-  /** Classifier couldn't decide (unavailable / cap / error) → ask the human.
-   *
-   *  `decisionReason` is the one-line explanation the approval card renders
-   *  above the buttons (ApprovalButtons / FloatingApproval read
-   *  `PendingApproval.decisionReason`) — set on the denial-cap handoffs, where
-   *  "auto mode gave up on this" is not otherwise visible. Spread rather than
-   *  mutated: the caller's approval object is also the one the SSE consumer
-   *  keeps, and this is a presentation detail of THIS send. */
   private fallbackToHuman(approval: PendingApproval, decisionReason?: string): void {
     this.send(
       'session:approval-request',
@@ -3079,26 +2471,12 @@ export class OpencodeSession extends BaseSession {
     )
   }
 
-  /**
-   * A judge block (ADR-091 §3), recorded first so the user can approve it
-   * after the fact (ADR-091 part 6). The user's live hold window decides the
-   * rest: zero — kept at once through {@link keepBlocked}, the path a Keep
-   * blocked click and the expiry take; above zero — the human card, flagged as
-   * an auto-mode block (Keep blocked / Approve anyway, no "always allow"
-   * suggestions), under the review the pipeline already sent. Unanswered, it
-   * resolves exactly as a Keep blocked click — through `resolveApproval` —
-   * when the window passes; the reject's `permission.replied` then withdraws
-   * the card, and the explicit dismiss covers a reply that never comes back
-   * (a lost connection). `reason` is the judge's deny text.
-   */
+  /** A judge block (ADR-091 §3): kept at once, or held on the card for the user's window. */
   private holdBlock(approval: PendingApproval, reason: string, review?: ToolReviewBlock): void {
     const rec = this.pendingApprovals.get(approval.requestId)
-    // Settled between the verdict and here — nothing left to hold.
     if (!rec) return
     const { requestId } = approval
     const ms = blockHoldMs()
-    // No `deliver`: a task child cannot take a delivery, so the nudge goes to
-    // this session's queue, which flushes once the child's task call returns.
     if (review && approval.toolUseId) {
       const task = approval.subagent ? this.subagentTask(approval.subagent) : undefined
       const agentLabel = approval.subagent ? (task?.description ?? task?.type) : undefined
@@ -3123,34 +2501,22 @@ export class OpencodeSession extends BaseSession {
       this.send('session:approval-dismiss', { requestId })
     }, ms)
     rec.hold = { reason, cancel: timer.cancel }
-    // A held block is never swept by a session allow: it is the human's call.
     rec.sweepable = false
     const { suggestions: _suggestions, ...card } = approval
     this.send('session:approval-request', {
       ...card,
       autoModeBlock: { expiresAt: timer.expiresAt },
-      // The card states why it is held: the review strip sits on the tool
-      // card, which a floating approval may not be next to.
       decisionReason: reason
     } satisfies PendingApproval)
   }
 
-  /**
-   * A judge block that stands — Keep blocked, its expiry, or no hold at all
-   * (ADR-091 §3 / part 6): the model reads the judge's own text, and the call
-   * is annotated as this monitor's block, not a human one.
-   */
+  /** A judge block that stands: the model reads the judge's text. */
   private keepBlocked(requestId: string, toolUseId: string | undefined, reason: string): void {
     if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked')
-    this.autoReply(requestId, 'reject', reason)
+    this.autoReply(requestId, { decision: 'reject', message: reason })
   }
 
-  /**
-   * Remove one pending ask, disarming a held block's expiry (ADR-091 §3). The
-   * ONE way an entry leaves `pendingApprovals`, so no resolution path — a
-   * reply, the server's cascade, the human — leaks a timer, and every one of
-   * them leaves the block approvable after the fact (part 6).
-   */
+  /** The ONE way an ask leaves `pendingApprovals` (disarms a held block). */
   private takePendingAsk(requestId: string): PendingAsk | undefined {
     const rec = this.pendingApprovals.get(requestId)
     if (!rec) return undefined
@@ -3162,11 +2528,6 @@ export class OpencodeSession extends BaseSession {
     return rec
   }
 
-  /**
-   * Teardown / connection loss: no reply can reach the engine any more, so
-   * every held block is disarmed and its card withdrawn (ADR-091 §3: no hold
-   * outlives the connection that would answer it).
-   */
   private dropBlockHolds(): void {
     for (const [requestId, rec] of [...this.pendingApprovals]) {
       if (!rec.hold) continue
@@ -3175,250 +2536,163 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  // ── Side question ──────────────────────────────────────────────────────────
+
   /**
-   * Ask a one-off question outside the main conversation history (the `/btw`
-   * command). Uses a fresh throwaway opencode session so the question never
-   * pollutes the main session's history. Returns the joined assistant text, or
-   * null on any failure. Never throws.
-   *
-   * `client.prompt` runs a SYNCHRONOUS server-side turn (POST /session/{id}/message
-   * blocks until the turn fully completes). Claude's `/btw` is tool-less; ours
-   * must match — and critically, must be HANG-PROOF: if the model called a tool
-   * that needed approval, opencode would emit `permission.asked` for THIS
-   * throwaway session, which our main SSE consumer filters out (foreign
-   * sessionID) and never answers → the synchronous prompt would hang forever
-   * (spinner stuck). So we patch a deny-all ruleset on the throwaway session
-   * BEFORE prompting (DENY_ALL_THROWAWAY_PATCH): upstream then hides every tool
-   * from the request, and its permission evaluator short-circuits a matching
-   * `deny` WITHOUT publishing `permission.asked` (permission/index.ts `ask()`
-   * returns DeniedError before the Event.Asked path; `{permission:'*',
-   * pattern:'*'}` matches every tool via Wildcard.match → regex `.*`). The model
-   * therefore just answers in text — tool-less, hang-proof. The system prompt is
-   * a belt-and-suspenders nudge. (We deliberately avoid the prompt body's
-   * `tools` field, which opencode marks as deprecated.)
+   * `/btw`: one transient completion (`POST …/generate`, 240 s) — from this
+   * chat's own context when its opencode session exists (nothing is written
+   * to its history), else from a throwaway session with every tool hidden.
+   * Never throws.
    */
   override async askSideQuestion(question: string): Promise<string | null> {
     try {
       await this.ensureConnected()
-      if (!this.client || this._cancelled) return null
-
-      const parsed = parseModelString(this._model)
-      const js = await this.client.createSession({ title: 'side-question' })
+      const client = this.client
+      if (!client || this._cancelled) return null
+      const prompt = `Answer the following question concisely and directly. Do not use tools.\n\n${question}`
+      if (this.openSessionId) {
+        // Never switch the model under a running turn: then the question rides
+        // the session's current model. Idle, the switch is the one the next
+        // prompt makes anyway.
+        if (!this.isProcessing) await this.syncModel().catch(() => {})
+        return (await client.generate(this.openSessionId, prompt)).trim() || null
+      }
+      const throwaway = await client.createSession({
+        title: 'side-question',
+        model: this.modelRef(),
+        permissions: [...THROWAWAY_RULESET]
+      })
       try {
-        // Deny (and so hide) every tool — see DENY_ALL_THROWAWAY_PATCH.
-        // Best-effort; the system prompt still discourages tools if the patch
-        // were to fail.
-        await this.client.patchSession(js.id, DENY_ALL_THROWAWAY_PATCH)
-        const resp = (await this.client.prompt(js.id, {
-          model: { providerID: parsed.providerID, modelID: parsed.modelID },
-          system: 'Answer the following question concisely and directly. Do not use tools.',
-          parts: [{ type: 'text', text: question }]
-        })) as { parts?: Array<{ type?: string; text?: string }> }
-        const text = (resp?.parts ?? [])
-          .filter((p) => p?.type === 'text')
-          .map((p) => p?.text ?? '')
-          .join('')
-        return text || null
+        return (await client.generate(throwaway.id, prompt)).trim() || null
       } finally {
-        this.client.deleteSession(js.id).catch(() => {})
+        // Awaited: the data dir is shared with the user's own opencode.
+        await client.deleteSession(throwaway.id).catch((err) => {
+          logger.warn('OpencodeSession', `side-question session not deleted: ${errText(err)}`)
+        })
       }
     } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `askSideQuestion failed: ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.warn('OpencodeSession', `askSideQuestion failed: ${errText(err)}`)
       return null
     }
   }
+
+  // ── Status, cost, metering ─────────────────────────────────────────────────
 
   sendStatus(): void {
     this.send('session:status', this.status)
   }
 
-  /**
-   * Record one usage_event per accumulated assistant message at turn end.
-   * Called at session.idle so we have final cumulative token + cost state.
-   * Failures are swallowed by recordUsageEvent — never breaks a turn.
-   *
-   * Phase 9a: child accumulators (isChild) are now also metered, but under the
-   * CHILD's own model + childSessionId — not the parent's. If a child accumulator
-   * has no model info, it is skipped (never attributed to the parent model).
-   */
-  private recordTurnUsage(): void {
-    const parsed = parseModelString(this._model)
-    const ownAccount = opencodeAuthProvider.buildAccountRef(parsed.providerID)
-    // ADR-071 §3: which account this vendor's turns run under, read per TURN
-    // (so a sign-in change between turns attributes each turn to the account
-    // that actually ran it) but once per provider id, not once per message —
-    // a turn's child accumulators are usually all on the same provider.
-    const identities = new Map<string, AccountIdentity>()
-    const identityFor = (providerID: string): AccountIdentity => {
-      let identity = identities.get(providerID)
-      if (!identity) {
-        identity = opencodeAuthProvider.accountIdentity(providerID)
-        identities.set(providerID, identity)
-      }
-      return identity
-    }
-    const ownIdentity = identityFor(parsed.providerID)
+  private rememberOpencodeMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
+  }
 
-    for (const [messageId, acc] of this.accumulators) {
-      // Only record assistant messages that have cost or token data
-      if (acc.role === 'user' || acc.role === 'system') continue
-      if (!acc.cost && !acc.tokens) continue
-      // Skip messages already recorded in a prior session.idle this session
-      // (the DB dedups anyway; this avoids the redundant round-trip).
-      if (this.recordedUsageMessageIds.has(messageId)) continue
-      this.recordedUsageMessageIds.add(messageId)
+  private rememberAndSend(message: ChatMessage): void {
+    this.rememberOpencodeMessage(message)
+    this.send('session:message', message)
+  }
 
-      const tokens = acc.tokens
-      // Reasoning tokens are billed as OUTPUT tokens by every provider opencode
-      // meters this way (acc.cost already includes them) — fold them into the
-      // output figure so the row's token counts and equiv cost don't undercount.
-      const outputTokens = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
-
-      if (!acc.isChild) {
-        // Slice B — per-model cost breakdown: attribute this message's final
-        // (now-stable) cost to the model active when it was recorded. Own
-        // accumulators don't carry a per-message model (unlike child ones),
-        // but since this loop only visits each messageId once (guarded by
-        // recordedUsageMessageIds above) and runs at turn end, `parsed.modelID`
-        // IS the model that produced this message — a mid-session model switch
-        // naturally attributes turn N's messages to whichever model was active
-        // when turn N's session.idle fired. Matches recordUsageEvent's own
-        // attribution below (same simplification, same precedent).
-        //
-        // ADR-071 §2: the figure is the DISPLAY cost, not opencode's own —
-        // the breakdown has to add up to the headline. The message's inputs are
-        // frozen here so a later model switch cannot silently re-price it.
-        const inputs = opencodeCostInputs(
-          parsed.providerID,
-          parsed.modelID,
-          tokens,
-          acc.cost ?? null
-        )
-        this.settledCostInputs.set(messageId, inputs)
-        const displayCostUsd = resolveOpencodeCosts(inputs).displayCostUsd
-        if (displayCostUsd !== null) {
-          this.liveModelCosts.set(
-            parsed.modelID,
-            (this.liveModelCosts.get(parsed.modelID) ?? 0) + displayCostUsd
-          )
-        }
-
-        // Own (parent) message — attribute to this session's model.
-        recordUsageEvent({
-          engineId: 'opencode',
-          vendorId: parsed.providerID,
-          accountId: ownAccount?.accountId ?? null,
-          accountUuid: null, // opencode does not expose an OAuth account UUID yet
-          modelId: parsed.modelID,
-          tokens: {
-            input: tokens?.input ?? 0,
-            output: outputTokens,
-            cacheWrite: tokens?.cache?.write ?? 0,
-            cacheWrite1h: 0, // opencode does not distinguish 1h cache writes
-            cacheRead: tokens?.cache?.read ?? 0
-          },
-          engineCostUsd: acc.cost ?? null,
-          sessionId: this.openSessionId,
-          messageId,
-          source: 'live',
-          accountKey: ownIdentity.accountKey,
-          accountLabel: ownIdentity.accountLabel,
-          billingType: ownAccount?.billingType ?? 'unknown',
-          origin: 'session',
-          parentRoutingId: null,
-          // opencode's `cost` is what it charged, not a list-price estimate.
-          engineCostIsEquivalent: false
-        })
-      } else {
-        // Child (subagent) message — attribute to the CHILD's own model + session.
-        // If model info is absent, skip: never record a child under the parent model.
-        if (!acc.model) {
-          logger.debug(
-            'OpencodeSession',
-            `Child accumulator ${messageId} has no model info — skipping metering`
-          )
-          continue
-        }
-        const childAccount = opencodeAuthProvider.buildAccountRef(acc.model.providerID)
-        const childIdentity = identityFor(acc.model.providerID)
-        recordUsageEvent({
-          engineId: 'opencode',
-          vendorId: acc.model.providerID,
-          accountId: childAccount?.accountId ?? null,
-          accountUuid: null,
-          modelId: acc.model.modelID,
-          tokens: {
-            input: tokens?.input ?? 0,
-            output: outputTokens,
-            cacheWrite: tokens?.cache?.write ?? 0,
-            cacheWrite1h: 0,
-            cacheRead: tokens?.cache?.read ?? 0
-          },
-          engineCostUsd: acc.cost ?? null,
-          sessionId: acc.childSessionId ?? null,
-          messageId,
-          source: 'live',
-          accountKey: childIdentity.accountKey,
-          accountLabel: childIdentity.accountLabel,
-          billingType: childAccount?.billingType ?? 'unknown',
-          // A subagent's spend is its own row, attributed back to the session
-          // that spawned it (ADR-071 §1).
-          origin: 'child',
-          parentRoutingId: this.routingId,
-          engineCostIsEquivalent: false
-        })
-      }
-    }
+  private addLiveUsage(
+    providerID: string,
+    modelID: string,
+    cost: number,
+    tokens: OpencodeStepUsage['tokens'],
+    context: boolean
+  ): void {
+    this.liveUsage.push({
+      inputs: opencodeCostInputs(providerID, modelID, tokens, cost),
+      modelId: modelID,
+      engineCostUsd: cost,
+      tokens: tokensOf(tokens)
+    })
+    if (context) this.lastContextLength = tokens.input + tokens.cache.read
   }
 
   /**
-   * Sum the cumulative tokens from all own (non-child) assistant accumulators.
-   * Returns { input, output, cacheWrite, cacheRead }.
-   *
-   * THIS PROCESS only — buildStatusLine adds the history base on top (see
-   * tokenBase), sendMetering deliberately does not.
+   * One step's usage (own or a child's — Claude's status line folds subagent
+   * spend in, S4): the headline, the context meter (own steps only) and one
+   * ledger row per step, under the model that ran it.
    */
-  private sumSessionTokens(): {
-    input: number
-    output: number
-    cacheWrite: number
-    cacheRead: number
-  } {
-    let input = 0
-    let output = 0
-    let cacheWrite = 0
-    let cacheRead = 0
-    for (const acc of this.accumulators.values()) {
-      if (acc.role === 'user' || acc.role === 'system') continue
-      if (acc.isChild) continue
-      const t = acc.tokens
-      if (!t) continue
-      input += t.input ?? 0
-      // Reasoning tokens are billed as output — fold them in, matching the
-      // recordTurnUsage accounting (BD-j) so the status line agrees with usage.
-      output += (t.output ?? 0) + (t.reasoning ?? 0)
-      cacheWrite += t.cache?.write ?? 0
-      cacheRead += t.cache?.read ?? 0
-    }
-    return { input, output, cacheWrite, cacheRead }
+  private meterStep(u: OpencodeStepUsage): void {
+    const fallback = parseModelString(this._model)
+    const providerID = u.model?.providerID ?? fallback.providerID
+    const modelID = u.model?.id ?? fallback.modelID
+    const child = u.ownerToolUseId !== undefined
+    this.addLiveUsage(providerID, modelID, u.cost, u.tokens, !child)
+    const account = opencodeAuthProvider.buildAccountRef(providerID)
+    const identity: AccountIdentity = opencodeAuthProvider.accountIdentity(providerID)
+    const t = tokensOf(u.tokens)
+    recordUsageEvent({
+      engineId: 'opencode',
+      vendorId: providerID,
+      accountId: account?.accountId ?? null,
+      accountUuid: null,
+      modelId: modelID,
+      tokens: {
+        input: t.input,
+        output: t.output,
+        cacheWrite: t.cacheWrite,
+        cacheWrite1h: 0,
+        cacheRead: t.cacheRead
+      },
+      engineCostUsd: u.cost,
+      sessionId: u.sessionId,
+      messageId: u.messageId,
+      source: 'live',
+      accountKey: identity.accountKey,
+      accountLabel: identity.accountLabel,
+      billingType: account?.billingType ?? 'unknown',
+      origin: child ? 'child' : 'session',
+      parentRoutingId: child ? this.routingId : null,
+      engineCostIsEquivalent: false
+    })
+    this.sendStatusLine()
   }
 
-  /**
-   * Build a StatusLineData snapshot for the current session state.
-   * Context "used" = lastContextLength (latest turn's input+cacheRead, NOT
-   * the cumulative In/Out/Total sum). Context window size from the discovery
-   * cache. usedPercentage is null when the window size is unknown (acceptable —
-   * status line shows tokens, omits the %).
-   */
+  private costTally(): TotalCosts {
+    return totalCosts(
+      [...this.costBase, ...this.liveUsage.map((u) => u.inputs)].map(resolveOpencodeCosts)
+    )
+  }
+
+  private get totalCostUsd(): number | null {
+    return this.costTally().displayCostUsd
+  }
+
+  private get engineReportedCostUsd(): number {
+    return this.rawCostBaseUsd + this.liveUsage.reduce((sum, u) => sum + u.engineCostUsd, 0)
+  }
+
+  private get modelCostEntries(): ModelCostEntry[] {
+    const merged = new Map<string, number>(this.modelCostBase)
+    for (const usage of this.liveUsage) {
+      const display = resolveOpencodeCosts(usage.inputs).displayCostUsd
+      if (display === null) continue
+      merged.set(usage.modelId, (merged.get(usage.modelId) ?? 0) + display)
+    }
+    return [...merged.entries()].map(([modelId, costUsd]) => ({
+      engineId: 'opencode' as const,
+      modelId,
+      costUsd
+    }))
+  }
+
+  /** This process's tokens (the status line adds the history base). */
+  private sumLiveTokens(): OpencodeHistoryTokens {
+    const sum: OpencodeHistoryTokens = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
+    for (const { tokens } of this.liveUsage) {
+      sum.input += tokens.input
+      sum.output += tokens.output
+      sum.cacheWrite += tokens.cacheWrite
+      sum.cacheRead += tokens.cacheRead
+    }
+    return sum
+  }
+
   private buildStatusLine(): StatusLineData {
     const parsed = parseModelString(this._model)
-    const live = this.sumSessionTokens()
-    // History + live, the same split cost uses: a resumed session's tokens are
-    // not this process's alone, and the figure must not drop back to one
-    // turn's worth the moment a reopened session is prompted.
+    const live = this.sumLiveTokens()
     const sum = {
       input: this.tokenBase.input + live.input,
       output: this.tokenBase.output + live.output,
@@ -3430,9 +2704,7 @@ export class OpencodeSession extends BaseSession {
       ctx > 0 && this.lastContextLength > 0
         ? Math.round((this.lastContextLength / ctx) * 100)
         : null
-    const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = sum.cacheRead + sum.cacheWrite
-    const totalTokens = sum.input + sum.output + cachedTokens
     const costs = this.costTally()
     return {
       totalCostUsd: costs.displayCostUsd,
@@ -3443,39 +2715,25 @@ export class OpencodeSession extends BaseSession {
       totalInputTokens: sum.input,
       totalOutputTokens: sum.output,
       cachedTokens,
-      totalTokens,
+      totalTokens: sum.input + sum.output + cachedTokens,
       contextWindow: { used: this.lastContextLength, size: ctx },
       usedPercentage,
-      remainingPercentage,
+      remainingPercentage: usedPercentage !== null ? 100 - usedPercentage : null,
       turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null,
       modelCosts: [...this.modelCostEntries, ...this.dispatchedCostEntries()]
     }
   }
 
-  /** Emit the status line to the renderer (parity with Claude's session:status-line). */
   private sendStatusLine(): void {
     this.send('session:status-line', this.buildStatusLine())
   }
 
-  /**
-   * Emit the engine-neutral MeteringSnapshot (Phase 7 Pass 2). opencode has no
-   * window (no usage provider yet — foundation §7), so window is omitted; this
-   * is the cumulative-meter case. Tokens summed across the turn's assistant
-   * messages; equivalentCostUsd from the internal pricing table. Best-effort.
-   */
+  /** The engine-neutral MeteringSnapshot (cumulative meter; opencode has no window). */
   private sendMetering(): void {
     try {
       const parsed = parseModelString(this._model)
       const account = opencodeAuthProvider.buildAccountRef(parsed.providerID)
-      const { input, output, cacheWrite, cacheRead } = this.sumSessionTokens()
-      const equiv = equivalentCostUsd(parsed.providerID, parsed.modelID, {
-        inputTokens: input,
-        outputTokens: output,
-        cacheWriteTokens: cacheWrite,
-        cacheWrite1hTokens: 0,
-        cacheReadTokens: cacheRead
-      })
-      const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
+      const { input, output, cacheWrite, cacheRead } = this.sumLiveTokens()
       const snapshot: MeteringSnapshot = {
         engineId: 'opencode',
         vendorId: parsed.providerID,
@@ -3487,13 +2745,18 @@ export class OpencodeSession extends BaseSession {
           cacheRead,
           total: input + output + cacheWrite + cacheRead
         },
-        equivalentCostUsd: equiv,
-        // What opencode itself reported, NOT the headline — the headline is the
-        // cost rule's answer now (ADR-071 §2) and this field's one job is to
-        // carry the engine's raw claim beside the equivalent.
+        equivalentCostUsd: equivalentCostUsd(parsed.providerID, parsed.modelID, {
+          inputTokens: input,
+          outputTokens: output,
+          cacheWriteTokens: cacheWrite,
+          cacheWrite1hTokens: 0,
+          cacheReadTokens: cacheRead
+        }),
         engineReportedCostUsd: this.engineReportedCostUsd,
-        contextWindow: { used: this.lastContextLength, size: ctx }
-        // window omitted — opencode has no usage provider (cumulative meter)
+        contextWindow: {
+          used: this.lastContextLength,
+          size: getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
+        }
       }
       this.send('session:metering', snapshot)
     } catch {
@@ -3501,12 +2764,7 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** ISession.discoverSkills — opencode sources skills from its GET /skill API. */
   discoverSkills(cwd: string): Promise<SkillInfo[]> {
     return discoverOpencodeSkills(cwd)
-  }
-
-  dispose(): void {
-    this.cancel()
   }
 }

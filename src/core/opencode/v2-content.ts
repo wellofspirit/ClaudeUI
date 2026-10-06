@@ -279,6 +279,12 @@ export function messageIdFromEvent(eventID: string): string {
 export interface OpencodeFormField {
   readonly key: string
   readonly multiSelect: boolean
+  /**
+   * Option label (what the question shows and the card answers with) → the
+   * option VALUE a reply must carry. Absent for a field without options (a
+   * free-form answer is sent as typed).
+   */
+  readonly values?: Readonly<Record<string, string>>
 }
 
 function fieldQuestion(field: Form_Field): AskUserQuestion {
@@ -307,7 +313,20 @@ export function formQuestions(form: Form_Info): {
   const asked = form.fields.filter((field) => field.type !== 'external' && !field.hidden)
   return {
     questions: asked.map(fieldQuestion),
-    fields: asked.map((field) => ({ key: field.key, multiSelect: field.type === 'multiselect' }))
+    fields: asked.map((field) => {
+      const options = 'options' in field && Array.isArray(field.options) ? field.options : []
+      return {
+        key: field.key,
+        multiSelect: field.type === 'multiselect',
+        ...(options.length > 0
+          ? {
+              values: Object.fromEntries(
+                options.map((option) => [option.label || option.value, option.value])
+              )
+            }
+          : {})
+      }
+    })
   }
 }
 

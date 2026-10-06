@@ -562,16 +562,26 @@ export class OpencodeClient {
     })
   }
 
-  /** Dismiss a form; `message` reaches the model as the reason. */
+  /**
+   * Dismiss a form; `message` reaches the model as the call's failure. It is
+   * REQUIRED, like a reject's (ADR-093 §3, review #4c): a cancel without one
+   * fails the question tool `aborted` and ends the turn `interrupted{shutdown}`,
+   * which keeps the execution claim — opencode would resume the turn on its
+   * next start. A blank message throws before anything is sent.
+   */
   cancelForm(
     sessionID: string,
     formID: string,
-    message?: string,
+    message: string,
     opts?: OpencodeRequestOptions
   ): Promise<void> {
+    if (!message?.trim())
+      throw new TypeError(
+        'opencode form cancel needs a non-empty message (ADR-093 §3: a messageless cancel ends the turn and keeps its claim)'
+      )
     return this.call('session.form.cancel', {
       params: { sessionID, formID },
-      query: message ? { message } : {},
+      query: { message },
       ...opts
     })
   }

@@ -417,6 +417,71 @@ helpers, and recorded 2.0.24 sequences plus contract cases hold it equal to what
   reached the model.
 - Other engines keep ADR-053.
 
+**As built (S5, 2026-10-07).** `OpencodeSession` runs on the 2.x client, feed and mapper; the 1.x
+session survives verbatim as `OpencodeV1Session` (with its tests) until S10.
+
+- **Lifecycle.** A turn-running `acquire` (so a missing `claudeui-xeng` guard fails the turn with
+  `OpencodePermissionGuardError`'s text), one `OpencodeClient` for the chat's directory, one
+  `OpencodeEventMapper` per chat and one feed. A new session is created with its ruleset, agent and
+  model in the body. A resumed one is read once (cold history → the judge's transcript and the
+  replayed rows, `opencodeV2HistorySeed` with the session totals, `mapper.seed`), and its feed's
+  first `connected` runs `reconcileAfterReconnect` exactly like a gap, which also surfaces asks
+  left pending. A prompt that arrives while an eager resume still replays waits for it (the
+  mapper is seeded before the feed starts). Every mapper output goes to the existing channels;
+  `stopped/user` is a turn end with no banner (ADR-090), `shutdown`/`superseded`/`inactivity`
+  ends add a `session:warning`.
+- **Queue on the inbox.** Every prompt carries a ClaudeUI id (`msg_claudeui_<32 hex>`). A prompt
+  typed while a turn runs stays ADR-053's queue item (card, ArrowUp take-back), but it is posted
+  at once with `delivery:'steer'`: ADR-053 §1's timing (the next step boundary; `queue` would hold
+  it until the turn ends, which ADR-053 rejected). `delivered` consumes the item, `cancelled`
+  recalls it. Take-back is `DELETE …/inbox/:id` after the item's own POST settled; opencode
+  answers 204 even for a delivered item, so the stored row (`GET …/message/:id`) decides. Posts
+  are serialized, so a queued item never overtakes its turn's prompt. `setQueuedItemDelivery`
+  (PATCH, steer↔queue) and `dequeueItem` exist engine-side; the renderer still has recall-all
+  only. Stop is `interrupt {resume:true}` (queued steers still run, as 1.x flushed them).
+- **Teardown (review fix).** Every end of a lease on a live server — `cancel()` and a feed that
+  gave up alike — first interrupts the own session and every child whose call is still open,
+  running or not (an idle interrupt is a no-op upstream; a background child or a turn ClaudeUI
+  has not seen still holds a claim), cancels ClaudeUI's undelivered inbox items, and waits until
+  `GET /api/session/active` lists none of them (the interrupt route answers before its cleanup
+  settles), bounded at 5 s; only then is the lease released. A last-lease release ends the server,
+  and a shutdown keeps a running execution's claim (opencode would resume it headless). After a
+  give-up the mapper also forgets its open requests with the cards, so the next connect's re-read
+  raises an ask the server still holds again. After a teardown or a resume, ClaudeUI items
+  nothing stands behind are cancelled on the next connect.
+- **Approvals.** The 1.x ladder unchanged (host pre-check on `asHostPrecheckRules`, session allows,
+  the judge pipeline, holds); the 1.x parent rung is not used (children inherit the rules).
+  Replies go to the asking session. Every reject carries a message (default "The user denied this
+  tool call"), every form cancel too, and `OpencodeClient.cancelForm` now refuses a blank one like
+  `replyPermission`. 2.x publishes `tool.called` before it runs the tool, so asks carry the real
+  input and the 1.x input wait is gone. Forms reply `{<key>: value}` with the option VALUE.
+- **Children.** Two layers.
+  - **The plugin holds the agent's own rules (review fix).** A child is created with the parent's
+    whole ruleset after its agent's rules, and its first prompt goes out in the same effect, so a
+    parent allow outranks the agent's deny until ClaudeUI's PATCH lands. A deny the agent carves
+    itself (`git *` deny, then `git status*` allow) cannot be restored by any child ruleset.
+    `claudeui-xeng`'s `permission.evaluate` therefore also evaluates a child's (`parentID`)
+    agent rules ALONE on every call, allows included: their `deny` is a deny, their `ask` turns
+    an allow into an ask; tighten-only, unreadable rules → `ask`. Contract: with ClaudeUI's child
+    PATCH held, the child's first call (a read its agent denies) is blocked.
+  - **ClaudeUI PATCHes `childSessionRuleset(parent, agent)`** on `session.created{parentID}`,
+    on the child's `session.agent.selected`, and on every parent apply for every known child
+    computed from another parent ruleset (settled ones too: a later call can resume them by
+    `sessionID`). A resumed chat lists its stored children (`GET /api/session?parentID=`) and
+    brings them along. The children loop runs before `switchAgent`, so a failed switch neither
+    skips it nor stops a later apply from retrying. PATCHes are serialized per child and read the
+    parent's rules after every await. A PATCH that fails twice fails closed: the child is
+    interrupted and its asks are refused. `evaluateChildCall` also refuses a child ask its own
+    agent denies. Permission applies are serialized too (a mode switch racing a turn's establish).
+- **Usage.** Each `step-usage` (own and child) is a ledger row and counts in the headline, as do
+  compaction requests and `overhead-usage`; only own steps move the context meter.
+- **Side question / agent generation.** `generate` (240 s): on the chat's own session when it
+  exists (never switching a running turn's model), else on a throwaway created with
+  `THROWAWAY_RULESET`; agent generation creates its throwaway with the ruleset and model in the
+  body and sends the meta-prompt in the prompt text. A throwaway is deleted (awaited) before the
+  lease ends: the data dir is shared with the user's own opencode.
+- **Synthetic items** (plan reminders, notices) are neither rendered live nor cold.
+
 ## Migration slices (order, rough size)
 
 The estimates assume the ADR-026 loop with one implementer and orchestrator review.

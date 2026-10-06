@@ -86,7 +86,7 @@ vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: vi.fn().mockResolvedValue([])
 }))
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeV1Session as OpencodeSession } from '../OpencodeV1Session'
 import type { HostWindowHandle } from '../../host'
 import type { OpencodeEvent } from '../protocol/types'
 

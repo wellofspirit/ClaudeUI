@@ -63,7 +63,7 @@ interface Fake {
 
 /** Sets the plugin up against a fake context whose session/agent reads are scripted. */
 async function setup(opts: {
-  session?: { agent?: string; permissions?: Rule[] }
+  session?: { agent?: string; parentID?: string; permissions?: Rule[] }
   agents?: Record<string, Rule[]>
   defaultAgent?: string
   failReads?: boolean
@@ -216,6 +216,84 @@ describe('saved allows never answer a ClaudeUI ask (permission.evaluate)', () =>
     ['allow', 'bogus', 'ask']
   ])('stricter(%s, %s) = %s', async (a, b, expected) => {
     expect((await mod()).stricter(a, b)).toBe(expected)
+  })
+})
+
+describe("a subagent child holds its agent's OWN rules (S5 review #1)", () => {
+  it('the create → PATCH window: an inherited parent allow never outranks the agent deny', async () => {
+    const parentRules = [r('*', 'ask'), r('read', 'allow')]
+    const general = [r('*', 'allow'), r('read', 'deny')]
+    const child = await setup({
+      session: { agent: 'general', parentID: 'ses_parent', permissions: parentRules },
+      agents: { build: AGENT_BUILD, general }
+    })
+    const e = event({
+      agent: 'general',
+      action: 'read',
+      resources: ['secret.txt'],
+      effect: 'allow'
+    })
+    await child.evaluate(e)
+    expect(e.effect).toBe('deny')
+    // The same rules on a ROOT session: the session's allow wins, as opencode decides.
+    const root = await setup({
+      session: { agent: 'general', permissions: parentRules },
+      agents: { build: AGENT_BUILD, general }
+    })
+    const e2 = event({
+      agent: 'general',
+      action: 'read',
+      resources: ['secret.txt'],
+      effect: 'allow'
+    })
+    await root.evaluate(e2)
+    expect(e2.effect).toBe('allow')
+  })
+
+  it('a deny the agent carves itself holds under a parent allow; what it carves back stays allowed', async () => {
+    const carved = [
+      r('shell', 'allow'),
+      r('shell', 'deny', 'git *'),
+      r('shell', 'allow', 'git status*')
+    ]
+    // The parent's rules as a child inherits/PATCHes them: a gate, then a user `Bash(git:*)` allow.
+    const parent = [r('shell', 'ask'), r('shell', 'allow', 'git*')]
+    const fake = await setup({
+      session: { agent: 'custom', parentID: 'ses_parent', permissions: parent },
+      agents: { build: AGENT_BUILD, custom: carved }
+    })
+    const push = event({ agent: 'custom', resources: ['git push origin main'] })
+    await fake.evaluate(push)
+    expect(push.effect).toBe('deny')
+    const status = event({ agent: 'custom', resources: ['git status'] })
+    await fake.evaluate(status)
+    expect(status.effect).toBe('allow')
+  })
+
+  it("the agent's own ask turns a child allow into an ask; it never loosens", async () => {
+    const asks = [r('*', 'allow'), r('webfetch', 'ask')]
+    const fake = await setup({
+      session: { agent: 'asker', parentID: 'p', permissions: [r('webfetch', 'allow')] },
+      agents: { build: AGENT_BUILD, asker: asks }
+    })
+    const e = event({
+      agent: 'asker',
+      action: 'webfetch',
+      resources: ['https://x'],
+      effect: 'allow'
+    })
+    await fake.evaluate(e)
+    expect(e.effect).toBe('ask')
+    const kept = event({ agent: 'asker', action: 'read', resources: ['a'], effect: 'ask' })
+    await fake.evaluate(kept)
+    expect(kept.effect).toBe('ask')
+  })
+
+  it('unreadable rules answer ask for a child too', async () => {
+    const fake = await setup({ session: { parentID: 'p' }, failReads: true })
+    const e = event({ effect: 'allow' })
+    await fake.evaluate(e)
+    expect(e.effect).toBe('ask')
   })
 })
 

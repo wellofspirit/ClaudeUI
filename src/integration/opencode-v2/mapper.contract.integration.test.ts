@@ -547,7 +547,11 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
       from = feed.outputs.length
       await client.prompt(sessionID, { text: `[question] ${nonce('dismiss')}` })
       asked = await feed.output('approval', from)
-      await client.cancelForm(sessionID, asked.route.form!.formID)
+      // Raw call: the production client refuses a messageless cancel (S5).
+      await client.call('session.form.cancel', {
+        params: { sessionID, formID: asked.route.form!.formID },
+        query: {}
+      })
       expect(await feed.turnEnd(from)).toMatchObject({
         kind: 'stopped',
         reason: 'form-cancelled'
@@ -682,7 +686,9 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
           ]
         }
       })
-      expect(asked.route.form?.fields).toEqual([{ key: 'q0', multiSelect: false }])
+      expect(asked.route.form?.fields).toEqual([
+        { key: 'q0', multiSelect: false, values: { Apple: 'Apple', Banana: 'Banana' } }
+      ])
       await client.replyForm(sessionID, asked.route.form!.formID, { q0: 'Banana' })
       expect(await feed.turnEnd(from)).toMatchObject({ kind: 'result' })
       expect(feed.outputs.slice(from).map((o) => o.kind)).toContain('approval-resolved')

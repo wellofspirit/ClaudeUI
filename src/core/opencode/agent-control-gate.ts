@@ -70,6 +70,9 @@ export function opencodeEditTargets(
       if (typeof movePath !== 'string' || !movePath) return null
       targets.push(movePath)
     }
+  } else if (typeof input.path === 'string') {
+    // opencode 2.x `edit`/`write` (`tool/plugin/edit.ts`, `write.ts`: `filePath` → `path`).
+    targets.push(input.path)
   } else if (typeof input.filePath === 'string' || typeof input.filepath === 'string') {
     targets.push((typeof input.filePath === 'string' ? input.filePath : input.filepath) as string)
   } else {

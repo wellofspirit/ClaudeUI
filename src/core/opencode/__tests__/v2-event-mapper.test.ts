@@ -843,7 +843,7 @@ describe('approvals', () => {
           form: {
             formID: 'frm_1',
             fields: [
-              { key: 'q0', multiSelect: false },
+              { key: 'q0', multiSelect: false, values: { Apple: 'Apple', Banana: 'Banana' } },
               { key: 'q1', multiSelect: true }
             ]
           }

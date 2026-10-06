@@ -145,7 +145,7 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
   }
 }))
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeV1Session as OpencodeSession } from '../OpencodeV1Session'
 import { opencodeHistoryStatusLine } from '../history-status-line'
 import { insertUsageEvent } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'

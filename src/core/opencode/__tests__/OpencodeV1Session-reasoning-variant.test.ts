@@ -137,7 +137,7 @@ vi.mock('../model-discovery', () => ({
 // Import SUT after mocks
 // ---------------------------------------------------------------------------
 
-import { OpencodeSession } from '../OpencodeSession'
+import { OpencodeV1Session as OpencodeSession } from '../OpencodeV1Session'
 import type { HostWindowHandle } from '../../host'
 
 // ---------------------------------------------------------------------------

@@ -242,13 +242,19 @@ describe('request building', () => {
     const { api, sent } = client(() => empty())
     await api.replyForm('ses_1', 'frm_1', { q0: 'Banana' })
     await api.cancelForm('ses_1', 'frm_1', 'user dismissed')
-    await api.cancelForm('ses_1', 'frm_2')
     expect(sent.map((s) => `${s.method} ${s.url.slice(BASE.length)}`)).toEqual([
       'POST /api/session/ses_1/form/frm_1/reply',
-      'DELETE /api/session/ses_1/form/frm_1?message=user+dismissed',
-      'DELETE /api/session/ses_1/form/frm_2'
+      'DELETE /api/session/ses_1/form/frm_1?message=user+dismissed'
     ])
     expect(sent[0].body).toEqual({ answer: { q0: 'Banana' } })
+  })
+
+  it('refuses a form cancel without a non-empty message, before sending anything (review #4c)', () => {
+    const { api, fetchFn } = client(() => empty())
+    // @ts-expect-error — the type makes the message mandatory
+    expect(() => api.cancelForm('ses_1', 'frm_2')).toThrow(/non-empty message/)
+    expect(() => api.cancelForm('ses_1', 'frm_2', '   ')).toThrow(/non-empty message/)
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 })
 

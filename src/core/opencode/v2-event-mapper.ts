@@ -512,6 +512,16 @@ export class OpencodeEventMapper {
     return [this.sessionID, ...live.map((child) => child.id)]
   }
 
+  /**
+   * Forget every open approval/form without retracting anything (no
+   * outputs): the host dropped its cards (a lost connection), so the next
+   * re-read must announce the requests that are still pending again instead of
+   * taking them as already shown.
+   */
+  forgetRequests(): void {
+    this.approvals.clear()
+  }
+
   /** True between the own session's `execution.started` and its end. */
   get running(): boolean {
     return this.own.running

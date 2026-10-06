@@ -1,23 +1,24 @@
 /**
  * agent-generate.ts
  *
- * AI-assisted agent authoring: sends a user description to opencode's /session
- * endpoint using the meta-prompt below and returns a structured agent config.
+ * AI-assisted agent authoring: one transient completion from opencode 2.x
+ * (`POST /api/session/{id}/generate`, ADR-093 S5) on a throwaway session, with
+ * the meta-prompt below, parsed into a structured agent config.
  *
- * Mirrors the makeJudgeFn pattern from OpencodeSession (lines 993-1013).
+ * 2.x has no synchronous prompt (`session.prompt` only enqueues), and
+ * `generate` has no `system` field: the throwaway session is created with the
+ * model and a ruleset that hides every tool (`THROWAWAY_RULESET`), and the
+ * meta-prompt rides in the prompt text. `generate` writes nothing to the
+ * session and is the only model-waiting call (240 s, under undici's 300 s
+ * header timeout).
  */
 
 import { opencodeServerManager } from './OpencodeServerManager'
-// TODO(S5): still the 1.x synchronous `POST /session/{id}/message` turn. 2.x
-// has no synchronous prompt (`session.prompt` only enqueues); the candidates
-// are `OpencodeClient.generate()` (`POST /api/session/{id}/generate`: one
-// transient completion from the session's context — create the throwaway with
-// `model` + a deny-all `permissions` ruleset first; it has no `system` field,
-// so the meta-prompt rides in the prompt text) or prompt + the event feed.
-// `/api/experimental/generate` is avoided (experimental). S5 decides.
-import { OpencodeV1Client } from './OpencodeV1Client'
+import { OpencodeClient } from './OpencodeClient'
+import { THROWAWAY_RULESET } from './permission-v2'
 import { resolveOpencodeSpawnModel, parseModelString } from './model-discovery'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+import { logger } from '../services/logger'
 
 // ─── Meta-prompt ──────────────────────────────────────────────────────────────
 
@@ -98,63 +99,38 @@ Remember: The agents you create should be autonomous experts capable of handling
 
 /**
  * Generate an agent configuration from a natural-language description.
- * Spins up a throwaway opencode session, sends the meta-prompt + description,
- * parses the JSON response, and cleans up the session.
+ * Creates a throwaway opencode session, asks `generate` with the meta-prompt +
+ * description, parses the JSON answer, and deletes the session.
  */
 export async function generateAgent(
   description: string,
   cwd?: string
 ): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }> {
   const dir = cwd ?? PERSISTED_SESSIONS_DIR
-  // One throwaway turn with every tool denied: the hosted MCP tools are never
-  // used, so do not wait for them.
+  // No turn runs and every tool is hidden: do not wait for the hosted MCP tools.
   const conn = await opencodeServerManager.acquire(dir, { waitForHostedTools: false })
-  const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-
-  // Resolve a concrete model up front. client.prompt() is a SYNCHRONOUS turn
-  // (POST /session/{id}/message blocks until completion); opencode needs to know
-  // which provider/model to run, and this throwaway session — unlike a chat
-  // session — has no per-session model configured, so we must pass one explicitly.
-  const modelStr = await resolveOpencodeSpawnModel()
-  const model = modelStr ? parseModelString(modelStr) : undefined
-
-  const js = await client.createSession({ title: 'agent-generate' })
+  const client = new OpencodeClient(conn)
+  let sessionID: string | null = null
   try {
-    // Deny EVERY tool before prompting. If the model decides to call any tool
-    // (e.g. to read project context), opencode emits `permission.asked` for this
-    // throwaway session. There is no SSE consumer answering it (this session is
-    // foreign to any chat session's consumer), so the synchronous prompt would
-    // hang forever — "session launched, no response ever". With deny-all
-    // patched, upstream hides every tool from the request itself
-    // (`session/llm/request.ts` `resolveTools`, v1.18.32), so there is nothing
-    // to call or "always"-approve, and its permission evaluator short-circuits a
-    // matching `deny` WITHOUT publishing `permission.asked` ({permission:'*',
-    // pattern:'*'} matches every tool), making the turn tool-less and
-    // hang-proof. Mirrors OpencodeSession.askSideQuestion's
-    // DENY_ALL_THROWAWAY_PATCH. NOT swallowed: if the deny ruleset can't be
-    // applied we must fail loudly rather than risk the hang it exists to
-    // prevent.
-    await client.patchSession(js.id, {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+    // A concrete model: the throwaway has no chat behind it to inherit one from.
+    const modelStr = await resolveOpencodeSpawnModel()
+    const parsedModel = modelStr ? parseModelString(modelStr) : undefined
+    // Every tool hidden (THROWAWAY_RULESET): the model answers from text
+    // alone, and nothing it proposes can run. NOT swallowed: without the
+    // ruleset the session would offer every tool.
+    const session = await client.createSession({
+      title: 'agent-generate',
+      permissions: [...THROWAWAY_RULESET],
+      ...(parsedModel
+        ? { model: { providerID: parsedModel.providerID, id: parsedModel.modelID } }
+        : {})
     })
+    sessionID = session.id
 
-    const resp = await client.prompt(js.id, {
-      ...(model ? { model } : {}),
-      system: AGENT_GENERATE_PROMPT,
-      parts: [
-        {
-          type: 'text',
-          text: `Create an agent configuration based on this request: "${description}". Return ONLY the JSON object, no backticks.`
-        }
-      ]
-    })
-
-    // Extract text from response parts
-    const text =
-      (resp as { parts?: Array<{ type?: string; text?: string }> })?.parts
-        ?.filter((p) => p?.type === 'text')
-        .map((p) => p?.text ?? '')
-        .join('') ?? ''
+    const text = await client.generate(
+      session.id,
+      `${AGENT_GENERATE_PROMPT}\n\nCreate an agent configuration based on this request: "${description}". Return ONLY the JSON object, no backticks.`
+    )
 
     // Strip markdown fences if present
     const cleaned = text
@@ -183,7 +159,15 @@ export async function generateAgent(
       systemPrompt: result.systemPrompt
     }
   } finally {
-    client.deleteSession(js.id).catch(() => {})
-    opencodeServerManager.release(dir)
+    // Delete BEFORE the lease ends (a last-lease release ends the server): an
+    // orphaned throwaway would land in the data dir shared with the user's opencode.
+    if (sessionID)
+      await client.deleteSession(sessionID).catch((err: unknown) => {
+        logger.warn(
+          'agent-generate',
+          `throwaway session not deleted: ${err instanceof Error ? err.message : String(err)}`
+        )
+      })
+    opencodeServerManager.releaseIfCurrent(dir, conn)
   }
 }

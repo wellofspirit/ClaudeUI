@@ -26,7 +26,10 @@
 //    rules only (the agent's rules, then the session's — what ClaudeUI
 //    PATCHed), read from opencode itself by session id, and keeps the
 //    STRICTER of the two. It only ever tightens: allow → ask/deny, never back.
-//    opencode runs the hook only when its own deny check found no deny.
+//    opencode runs the hook only when its own deny check found no deny. For a
+//    subagent child it also holds the child's agent's OWN rules alone, so a
+//    parent allow can never outrank the agent's deny (the create → PATCH
+//    window, and denies the agent carves itself).
 // 4. MCP servers from the user's own opencode config are declared directly
 //    (`codemode: false`), not behind Code Mode's `execute`, which ClaudeUI
 //    hides (its runtime has an ungated `fetch`). A config overlay cannot do it:
@@ -98,7 +101,8 @@ const unwrap = (response) =>
  * The configured ruleset of a permission check: the agent's rules (the event's
  * agent, else the session's, else opencode's default agent — `Agent.list`
  * puts it first), then the session's. Read from opencode by id — never from
- * anything the model wrote.
+ * anything the model wrote. `child` = the session is a subagent's
+ * (`parentID`), whose agent's own rules are evaluated alone as well.
  */
 async function configuredRules(ctx, event) {
   const session = unwrap(await ctx.session.get({ sessionID: event.sessionID }))
@@ -108,19 +112,31 @@ async function configuredRules(ctx, event) {
     : (unwrap(await ctx.agent.list({})) ?? [])[0]
   const agentRules = Array.isArray(agent?.permissions) ? agent.permissions : MISSING_AGENT
   const sessionRules = Array.isArray(session?.permissions) ? session.permissions : []
-  return [...agentRules, ...sessionRules]
+  return { agentRules, sessionRules, child: typeof session?.parentID === 'string' }
 }
 
 /**
  * The `permission.evaluate` hook: keep the stricter of opencode's effect and
  * the configured-rules verdict. A failure to read the rules answers `ask`
  * (fail toward the human), still never looser than opencode's own effect.
+ *
+ * A subagent child (ADR-093 §3, S5 review #1): a child is created with the
+ * PARENT's whole session ruleset, which comes after its agent's rules, so a
+ * parent allow outranks the agent's own deny until ClaudeUI PATCHes the
+ * child — and for a deny the agent carves itself (`git *` deny, then
+ * `git status*` allow), the child ruleset cannot restore it at all. So for a
+ * child the agent's OWN rules are evaluated alone on every call, allows
+ * included: their `deny` is a deny, their `ask` turns an allow into an ask.
+ * The agent's own verdict is the floor; it never loosens anything.
  */
 export async function tightenToConfigured(ctx, event) {
   if (!event || event.effect === 'deny') return
   let verdict
   try {
-    verdict = evaluateConfigured(await configuredRules(ctx, event), event.action, event.resources)
+    const { agentRules, sessionRules, child } = await configuredRules(ctx, event)
+    verdict = evaluateConfigured([...agentRules, ...sessionRules], event.action, event.resources)
+    if (child)
+      verdict = stricter(verdict, evaluateConfigured(agentRules, event.action, event.resources))
   } catch {
     verdict = 'ask'
   }
