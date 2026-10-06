@@ -349,3 +349,30 @@ describe('ClaudeSession — M-CL3: a DISPOSED (replaced) object cannot re-arm it
     }
   })
 })
+
+describe('ClaudeSession — the voice server port dies with the child (S2 item 4)', () => {
+  it('a respawned engine is asked for a fresh port, not handed the dead one', async () => {
+    const ports = [4101, 4202]
+    mockQuery.mockImplementation(() => {
+      const h = makeParkedHandle()
+      const port = ports[createdHandles.length]
+      Object.assign(h.handle, { voiceServerStart: vi.fn(async () => ({ port })) })
+      createdHandles.push(h)
+      return h.handle
+    })
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-voice-port', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    const first = session.run('first')
+    expect(await session.voiceStartServer()).toEqual({ port: 4101 })
+
+    // cli.js exits (crash, idle reap): the voice server inside it is gone.
+    createdHandles[0].end()
+    await first
+
+    // The next capture spawns a fresh child — and must ask IT for the port.
+    expect(await session.voiceStartServer()).toEqual({ port: 4202 })
+    expect(mockQuery).toHaveBeenCalledTimes(2)
+  })
+})

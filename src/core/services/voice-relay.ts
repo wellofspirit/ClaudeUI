@@ -95,18 +95,6 @@ export interface VoiceOwner {
   /** The voice-server client's log tag, so the two kinds stay separable in the log. */
   readonly logSource: string
   readonly delivery: VoiceDelivery
-  /**
-   * Announce `connecting` the moment a start is accepted, and `idle` when that
-   * pending start is cancelled or fails — rather than only once the voice server
-   * is reachable.
-   *
-   * The desktop has always done this (a first press spawns cli.js, seconds during
-   * which the mic button should already read as live), and moving its capture
-   * into the renderer was not meant to change what the window shows. A remote
-   * owner never did, and its tests pin that a cancelled pending start tells the
-   * client nothing; unifying the two is lifecycle work, not part of the move.
-   */
-  readonly announcesPendingStart: boolean
 }
 
 /**
@@ -129,7 +117,6 @@ export function remoteVoiceOwner(connectionId: string): VoiceOwner {
   return {
     key: connectionId,
     logSource: 'RemoteVoice',
-    announcesPendingStart: false,
     delivery: {
       state: (routingId, state) => deliver('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
@@ -178,7 +165,6 @@ export function desktopVoiceOwner(win: HostWindowHandle): VoiceOwner {
   return {
     key: desktopVoiceOwnerKey(wc.id),
     logSource: 'DesktopVoice',
-    announcesPendingStart: true,
     delivery: {
       state: (routingId, state) => host.send('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
@@ -265,7 +251,7 @@ interface Entry {
 interface PendingStart {
   gen: number
   owner: VoiceOwner
-  /** Read at cancellation, so a cancelled desktop start reports idle under the live id. */
+  /** Read at cancellation, so a cancelled start reports idle under the live id. */
   routingId: () => string
 }
 
@@ -317,10 +303,13 @@ export class VoiceRelayRegistry {
     // `endCapture`, not `stop`: that would cancel this very start.
     await this.endCapture(key)
 
-    // Announced AFTER the previous capture has begun finalizing, so its
-    // `processing` cannot land on top of this start's `connecting`; and only if
-    // this start survived that await (a stop in it has already reported idle).
-    if (owner.announcesPendingStart && this.pendingStarts.get(key)?.gen === gen) {
+    // Every owner hears `connecting` the moment its start is accepted, not only
+    // once the voice server is reachable: a first press spawns cli.js — seconds
+    // during which the mic should already read as live, on a phone as much as
+    // on the desktop. Announced AFTER the previous capture has begun finalizing,
+    // so its `processing` cannot land on top of this start's `connecting`; and
+    // only if this start survived that await (a stop in it already said idle).
+    if (this.pendingStarts.get(key)?.gen === gen) {
       owner.delivery.state(liveRoutingId(), 'connecting')
     }
 
@@ -331,7 +320,7 @@ export class VoiceRelayRegistry {
       // Cancelled while spawning: the stop already answered; this is not its failure.
       if (this.pendingStarts.get(key)?.gen !== gen) return
       this.pendingStarts.delete(key)
-      if (owner.announcesPendingStart) owner.delivery.state(liveRoutingId(), 'idle')
+      owner.delivery.state(liveRoutingId(), 'idle')
       throw err
     }
     // A stop, a newer start or the owner going away landed during the spawn.
@@ -339,7 +328,7 @@ export class VoiceRelayRegistry {
     this.pendingStarts.delete(key)
     const { port } = server
     if (!port) {
-      if (owner.announcesPendingStart) owner.delivery.state(liveRoutingId(), 'idle')
+      owner.delivery.state(liveRoutingId(), 'idle')
       throw new Error('Voice server failed to return a port')
     }
 
@@ -395,17 +384,16 @@ export class VoiceRelayRegistry {
 
   /**
    * End this owner's capture, if it has one. Idempotent, and awaited by the stop
-   * verb so the client knows finalization has begun — the remaining transcripts
-   * still arrive asynchronously.
+   * verb so the client knows the stop has landed — finalization begins now, or
+   * at `ready` for a capture released before the stream was up (the drain in
+   * `VoiceStreamClient`), and the remaining transcripts arrive asynchronously.
    */
   async stop(ownerKey: string): Promise<void> {
     const pending = this.pendingStarts.get(ownerKey)
     this.pendingStarts.delete(ownerKey)
     // The owner was told `connecting` for a start that will now never open; a
     // release must always leave it idle.
-    if (pending?.owner.announcesPendingStart) {
-      pending.owner.delivery.state(pending.routingId(), 'idle')
-    }
+    if (pending) pending.owner.delivery.state(pending.routingId(), 'idle')
     await this.endCapture(ownerKey)
   }
 

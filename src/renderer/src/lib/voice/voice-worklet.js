@@ -37,6 +37,15 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
     this.batchSize = Math.max(128, Math.round(sampleRate * BATCH_SECONDS))
     this.buffer = new Float32Array(this.batchSize)
     this.filled = 0
+    // A release asks for the partial batch (< 150 ms — the last syllable) before
+    // the graph is torn down. `flushed` follows the block on the same port, so
+    // the page knows the tail has arrived; the waiting and its bound live in
+    // `browser-voice-capture.ts`, where they can be tested.
+    this.port.onmessage = (event) => {
+      if (event.data !== 'flush') return
+      this.flush()
+      this.port.postMessage('flushed')
+    }
   }
 
   process(inputs) {

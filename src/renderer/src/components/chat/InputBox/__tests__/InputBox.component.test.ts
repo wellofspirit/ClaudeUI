@@ -87,11 +87,16 @@ vi.mock('../../../../hooks/useIsMobile', () => ({
 // as it reaches the transport — `window.api.voiceStart` / `voiceStop`, i.e. the
 // `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
 // controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
+const voiceFaults = vi.hoisted(() => new Set<(message: string) => void>())
 vi.mock('../../../../lib/voice/voice-controller', () => ({
   voiceController: () => ({
     start: (routingId: string, language: string) => window.api.voiceStart(routingId, language),
     stop: (routingId: string) => window.api.voiceStop(routingId),
-    isActive: () => false
+    isActive: () => false,
+    onFault: (listener: (message: string) => void) => {
+      voiceFaults.add(listener)
+      return () => voiceFaults.delete(listener)
+    }
   })
 }))
 
@@ -1560,6 +1565,64 @@ describe('InputBox FC — rendered', () => {
 
     expect(viewProps.selectedModel.displayName).toBe('opencode/mimo-v2.5-free')
     expect(viewProps.selectedModel.engineId).toBe('opencode')
+  })
+
+  // S2 item 6: a start/stop the renderer saw fail lands where a server-side
+  // `voice:error` does (it used to reach only `logRelay`, i.e. the console).
+  describe('voice failures are visible', () => {
+    function liveSession(): void {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+
+    it('a refused start is added to the session errors (and still logged)', async () => {
+      liveSession()
+      app.bridge.ipcMain.handle('voice:start-recording', () => ({
+        ok: false,
+        error: 'Microphone access was denied. Allow it for this site and try again.'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+
+      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe(
+        'Microphone access was denied. Allow it for this site and try again.'
+      )
+    })
+
+    it('a failed stop is added to the session errors too', async () => {
+      app.bridge.ipcMain.handle('voice:stop-recording', () => ({
+        ok: false,
+        error: 'stop went wrong'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+
+      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe('stop went wrong')
+    })
+
+    it('a microphone fault reaches the active session errors (S2 item 9)', async () => {
+      renderFC()
+      expect(voiceFaults.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceFaults) listener('The microphone was disconnected.')
+      })
+
+      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe(
+        'The microphone was disconnected.'
+      )
+    })
   })
 
   it('onVoiceStop: sends voice:stop-recording with the active session id', async () => {

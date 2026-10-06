@@ -84,4 +84,34 @@ describe('desktop voice feed', () => {
 
     expect(relay.releaseOwner).toHaveBeenCalledWith('desktop:5')
   })
+
+  // S2 item 11: the capture lives in the DOCUMENT, so anything that ends the
+  // document releases it — not only the webContents being destroyed.
+  it('releases on a renderer crash (render-process-gone)', () => {
+    const { win, webContents } = makeWindow(5)
+    installDesktopVoiceFeed(win)
+
+    webContents.emit('render-process-gone', {}, webContents, { reason: 'crashed' })
+
+    expect(relay.releaseOwner).toHaveBeenCalledWith('desktop:5')
+  })
+
+  it('releases on a main-frame cross-document navigation (a reload)', () => {
+    const { win, webContents } = makeWindow(5)
+    installDesktopVoiceFeed(win)
+
+    webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+
+    expect(relay.releaseOwner).toHaveBeenCalledWith('desktop:5')
+  })
+
+  it('keeps the capture across same-document and sub-frame navigations', () => {
+    const { win, webContents } = makeWindow(5)
+    installDesktopVoiceFeed(win)
+
+    webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+    webContents.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+
+    expect(relay.releaseOwner).not.toHaveBeenCalled()
+  })
 })

@@ -21,12 +21,17 @@
  * is the owner's device verification.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   BrowserVoiceCapture,
+  MIC_DISCONNECTED_MESSAGE,
+  MIC_MUTED_MESSAGE,
+  MIC_MUTE_GRACE_MS,
   VOICE_WORKLET_URL,
+  WORKLET_FLUSH_TIMEOUT_MS,
   captureUnsupportedReason,
-  type CaptureEnv
+  type CaptureEnv,
+  type CaptureFault
 } from '../browser-voice-capture'
 
 // ---------------------------------------------------------------------------
@@ -38,9 +43,19 @@ class FakeAudioNode {
   disconnect = vi.fn()
   gain = { value: 1 }
   port = {
-    onmessage: null as ((event: { data: Float32Array }) => void) | null
+    onmessage: null as ((event: { data: Float32Array | string }) => void) | null,
+    postMessage: vi.fn((_message: unknown) => {})
   }
 }
+
+/**
+ * How the fake worklet answers a `flush`: post a partial batch of
+ * `workletTailSamples` (if any) and then `flushed`, asynchronously like a real
+ * port — or, when `workletAnswers` is false, never (a context that stopped
+ * rendering).
+ */
+let workletAnswers = true
+let workletTailSamples = 0
 
 let contexts: FakeAudioContext[] = []
 let workletNodes: FakeAudioWorkletNode[] = []
@@ -49,6 +64,10 @@ let addedModules: string[] = []
 class FakeAudioContext {
   sampleRate: number
   closed = false
+  state: AudioContextState = 'running'
+  resume = vi.fn(async () => {
+    this.state = 'running'
+  })
   destination = new FakeAudioNode()
   audioWorklet = {
     addModule: vi.fn(async (url: string) => {
@@ -90,17 +109,25 @@ class FakeAudioWorkletNode extends FakeAudioNode {
   ) {
     super()
     workletNodes.push(this)
+    this.port.postMessage = vi.fn((message: unknown) => {
+      if (message !== 'flush' || !workletAnswers) return
+      queueMicrotask(() => {
+        if (workletTailSamples > 0) {
+          this.port.onmessage?.({ data: new Float32Array(workletTailSamples).fill(0.75) })
+        }
+        this.port.onmessage?.({ data: 'flushed' })
+      })
+    })
   }
 }
 
-interface FakeTrack {
-  stop: ReturnType<typeof vi.fn>
-}
+/** A MediaStreamTrack double: stoppable, and an EventTarget for `ended`/`mute`. */
+type FakeTrack = EventTarget & { stop: ReturnType<typeof vi.fn> }
 
 let tracks: FakeTrack[] = []
 
 function makeStream(): MediaStream {
-  const track: FakeTrack = { stop: vi.fn() }
+  const track = Object.assign(new EventTarget(), { stop: vi.fn() }) as FakeTrack
   tracks.push(track)
   return { getTracks: () => [track] } as unknown as MediaStream
 }
@@ -129,6 +156,8 @@ beforeEach(() => {
   workletNodes = []
   addedModules = []
   tracks = []
+  workletAnswers = true
+  workletTailSamples = 0
 })
 
 // ---------------------------------------------------------------------------
@@ -390,5 +419,264 @@ describe('BrowserVoiceCapture', () => {
 
     expect(env.mediaDevices!.getUserMedia).toHaveBeenCalledTimes(1)
     expect(contexts).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S2 — lifecycle robustness
+// ---------------------------------------------------------------------------
+
+/** Decode a sent batch's first sample. */
+function firstSample(dataB64: string): number {
+  const bytes = Uint8Array.from(atob(dataB64), (c) => c.charCodeAt(0))
+  return ((bytes[0] | (bytes[1] << 8)) << 16) >> 16
+}
+
+describe('BrowserVoiceCapture — halt keeps what was captured (S2 item 1)', () => {
+  it('halt() closes the microphone at once but keeps the queue; arm() then drains it', async () => {
+    const sendAudio = vi.fn()
+    const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
+    await capture.start()
+    pushBlock(160, 0.5)
+
+    await capture.halt()
+    expect(tracks[0].stop).toHaveBeenCalled()
+    expect(contexts[0].closed).toBe(true)
+    expect(capture.isActive()).toBe(false)
+    expect(sendAudio).not.toHaveBeenCalled()
+
+    capture.arm()
+    expect(sendAudio).toHaveBeenCalledTimes(1)
+    // Drained: a second arm has nothing left to send.
+    capture.arm()
+    expect(sendAudio).toHaveBeenCalledTimes(1)
+  })
+
+  it('stop() after halt() discards the queue', async () => {
+    const sendAudio = vi.fn()
+    const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
+    await capture.start()
+    pushBlock(160, 0.5)
+
+    await capture.halt()
+    await capture.stop()
+    capture.arm()
+    expect(sendAudio).not.toHaveBeenCalled()
+  })
+
+  it('halt() is idempotent — concurrent halts share one teardown', async () => {
+    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), env: makeEnv() })
+    await capture.start()
+    await Promise.all([capture.halt(), capture.halt()])
+    expect(contexts[0].close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('BrowserVoiceCapture — a suspended context is resumed (S2 item 8)', () => {
+  class SuspendedContext extends FakeAudioContext {
+    state: AudioContextState = 'suspended'
+  }
+
+  it('resumes a context that starts suspended, before building the graph', async () => {
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: makeEnv({ AudioContextCtor: SuspendedContext as unknown as typeof AudioContext })
+    })
+    await capture.start()
+    expect(contexts[0].resume).toHaveBeenCalledTimes(1)
+    expect(contexts[0].state).toBe('running')
+    expect(capture.isActive()).toBe(true)
+  })
+
+  it('does not resume a running one', async () => {
+    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), env: makeEnv() })
+    await capture.start()
+    expect(contexts[0].resume).not.toHaveBeenCalled()
+  })
+
+  it('a release while resuming bails and releases everything', async () => {
+    let finishResume: () => void = () => {}
+    class SlowResume extends SuspendedContext {
+      resume = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishResume = resolve
+          })
+      )
+    }
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: makeEnv({ AudioContextCtor: SlowResume as unknown as typeof AudioContext })
+    })
+    const starting = capture.start()
+    await vi.waitFor(() => expect(contexts[0]?.resume).toHaveBeenCalled())
+    await capture.stop()
+    finishResume()
+    await starting
+
+    expect(capture.isActive()).toBe(false)
+    expect(tracks[0].stop).toHaveBeenCalled()
+    expect(contexts[0].closed).toBe(true)
+    expect(workletNodes).toHaveLength(0)
+  })
+})
+
+describe('BrowserVoiceCapture — track faults (S2 item 9)', () => {
+  it('reports an unplugged microphone as an ENDED fault', async () => {
+    const onFault = vi.fn((_fault: CaptureFault) => {})
+    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), onFault, env: makeEnv() })
+    await capture.start()
+
+    tracks[0].dispatchEvent(new Event('ended'))
+    expect(onFault).toHaveBeenCalledWith({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
+    // The capture does not end itself — that is the owner's call.
+    expect(capture.isActive()).toBe(true)
+  })
+
+  describe(`a mute is reported only once it outlasts ${MIC_MUTE_GRACE_MS} ms`, () => {
+    // Real tracks carry a live `muted` flag next to the events; the double mirrors it.
+    function mute(track: FakeTrack): void {
+      Object.assign(track, { muted: true })
+      track.dispatchEvent(new Event('mute'))
+    }
+    function unmute(track: FakeTrack): void {
+      Object.assign(track, { muted: false })
+      track.dispatchEvent(new Event('unmute'))
+    }
+
+    async function capturing(): Promise<{
+      capture: BrowserVoiceCapture
+      onFault: ReturnType<typeof vi.fn>
+    }> {
+      const onFault = vi.fn((_fault: CaptureFault) => {})
+      const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), onFault, env: makeEnv() })
+      await capture.start()
+      return { capture, onFault }
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('a mute held past the grace is reported once, as a non-ending fault', async () => {
+      const { capture, onFault } = await capturing()
+
+      mute(tracks[0])
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS - 1)
+      expect(onFault).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(onFault).toHaveBeenCalledTimes(1)
+      expect(onFault).toHaveBeenCalledWith({ message: MIC_MUTED_MESSAGE, ended: false })
+
+      // A repeated `mute` event while still muted does not report again on its own.
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS * 5)
+      expect(onFault).toHaveBeenCalledTimes(1)
+      expect(capture.isActive()).toBe(true)
+    })
+
+    it('a mute→unmute pair within the grace (a Bluetooth profile switch) reports nothing', async () => {
+      const { onFault } = await capturing()
+
+      mute(tracks[0])
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS / 2)
+      unmute(tracks[0])
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS * 2)
+
+      expect(onFault).not.toHaveBeenCalled()
+    })
+
+    it('a halt during the grace reports nothing', async () => {
+      const { capture, onFault } = await capturing()
+
+      mute(tracks[0])
+      const halting = capture.halt()
+      await vi.advanceTimersByTimeAsync(MIC_MUTE_GRACE_MS * 2)
+      await halting
+
+      expect(onFault).not.toHaveBeenCalled()
+    })
+
+    it('an `ended` during the grace reports the disconnect, not the mute', async () => {
+      const { onFault } = await capturing()
+
+      mute(tracks[0])
+      tracks[0].dispatchEvent(new Event('ended'))
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS * 2)
+
+      expect(onFault.mock.calls.map(([fault]) => fault)).toEqual([
+        { message: MIC_DISCONNECTED_MESSAGE, ended: true }
+      ])
+    })
+  })
+
+  it('says nothing about a track that ends because WE stopped it', async () => {
+    const onFault = vi.fn((_fault: CaptureFault) => {})
+    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), onFault, env: makeEnv() })
+    await capture.start()
+    const track = tracks[0]
+    await capture.stop()
+
+    track.dispatchEvent(new Event('ended'))
+    track.dispatchEvent(new Event('mute'))
+    expect(onFault).not.toHaveBeenCalled()
+  })
+})
+
+describe('BrowserVoiceCapture — the worklet tail (S2 item 10)', () => {
+  it('asks the worklet for its partial batch before tearing down, and keeps it', async () => {
+    const sendAudio = vi.fn()
+    const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
+    await capture.start()
+    capture.arm()
+    workletTailSamples = 160
+    const node = workletNodes[0]
+
+    await capture.halt()
+
+    expect(node.port.postMessage).toHaveBeenCalledWith('flush')
+    // The tail (0.75 full scale) went out before the node was disconnected.
+    expect(sendAudio).toHaveBeenCalledTimes(1)
+    expect(firstSample(sendAudio.mock.calls[0][0] as string)).toBe(Math.round(0.75 * 0x7fff))
+    expect(node.disconnect).toHaveBeenCalled()
+  })
+
+  it('an unarmed capture queues the tail for the drain', async () => {
+    const sendAudio = vi.fn()
+    const capture = new BrowserVoiceCapture({ sendAudio, env: makeEnv() })
+    await capture.start()
+    workletTailSamples = 160
+
+    await capture.halt()
+    expect(sendAudio).not.toHaveBeenCalled()
+    capture.arm()
+    expect(sendAudio).toHaveBeenCalledTimes(1)
+  })
+
+  it(`waits at most ${WORKLET_FLUSH_TIMEOUT_MS} ms for a worklet that never answers`, async () => {
+    vi.useFakeTimers()
+    try {
+      workletAnswers = false
+      const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), env: makeEnv() })
+      await capture.start()
+
+      let halted = false
+      const halting = capture.halt().then(() => {
+        halted = true
+      })
+      await vi.advanceTimersByTimeAsync(WORKLET_FLUSH_TIMEOUT_MS - 1)
+      expect(halted).toBe(false)
+      // The microphone is off already; only the graph waits for the tail.
+      expect(tracks[0].stop).toHaveBeenCalled()
+      expect(workletNodes[0].disconnect).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await halting
+      expect(halted).toBe(true)
+      expect(workletNodes[0].disconnect).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

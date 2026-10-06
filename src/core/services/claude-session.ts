@@ -1173,6 +1173,10 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
         this.rejectActiveQuery = null
         this.activeQueryPromise = null
         this.activeQuery = null
+        // The voice server lived inside the child that just exited. Keeping its
+        // port would hand the next capture a dead socket; cleared, the next
+        // `voiceStartServer` asks the respawned engine for a fresh one.
+        this.voiceServerPort = null
         this.abortController = null
         this.isProcessing = false
         this.turnStartedAtMs = null

@@ -186,6 +186,15 @@ function readFileAsBase64(file: File): Promise<{ mediaType: string; base64Data: 
   })
 }
 
+/**
+ * A voice failure the renderer itself saw (start/stop rejected), surfaced through
+ * the same store path a server-side `voice:error` takes (`useClaudeEvents`).
+ */
+function reportVoiceError(routingId: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err)
+  useSessionStore.getState().addError(routingId, message)
+}
+
 // ---------------------------------------------------------------------------
 // InputBox — logic layer, provides context to InputBoxView
 // ---------------------------------------------------------------------------
@@ -807,17 +816,40 @@ export function InputBox(): React.JSX.Element {
     voiceHeldRef.current = true
     try {
       await ensureSession()
-      if (!voiceHeldRef.current || voicePressRef.current !== press) return
+    } catch (err) {
+      // The spawn's own failure is reported by the session path; log only.
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      return
+    }
+    if (!voiceHeldRef.current || voicePressRef.current !== press) return
+    try {
       await voiceController().start(activeSessionId, voiceLanguage)
     } catch (err) {
+      // A denied microphone, a refused session, a dead transport: all things the
+      // speaker can act on, so they land where a server-side `voice:error` does.
       window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
     }
   }, [activeSessionId, isDisabled, harnessBlocked, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
     voiceHeldRef.current = false
     if (!activeSessionId) return
-    await voiceController().stop(activeSessionId)
+    try {
+      await voiceController().stop(activeSessionId)
+    } catch (err) {
+      window.api.logRelay('error', 'Voice:InputBox', `voice stop failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
+    }
+  }, [activeSessionId])
+
+  // The microphone itself failing mid-capture (unplugged, muted by the OS) is
+  // the capture's news, not the server's — surfaced the same way.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onFault((message) => {
+      useSessionStore.getState().addError(activeSessionId, message)
+    })
   }, [activeSessionId])
 
   useEffect(() => {

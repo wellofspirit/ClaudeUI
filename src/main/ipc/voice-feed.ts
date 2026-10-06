@@ -14,7 +14,12 @@
  * transport makes with its `voice-audio` lane frame. Validation is a type check;
  * the relay bounds the size.
  *
- * Owner death: the window's webContents being destroyed releases its capture, the
+ * Owner death: the capture lives in the renderer's DOCUMENT, so anything that
+ * ends the document releases it — the webContents being destroyed (window
+ * closed), its renderer process going away (crash, OOM kill), or a main-frame
+ * cross-document navigation (a reload). The webContents id survives the last
+ * two, so without them the relay would keep a capture open for a page that no
+ * longer exists, holding a Deepgram stream until the engine died. This is the
  * desktop counterpart of a socket closing on the remote side.
  */
 
@@ -38,5 +43,12 @@ export function installDesktopVoiceFeed(win: BrowserWindow): void {
 
   // Read now: a destroyed webContents throws on property access.
   const ownerKey = desktopVoiceOwnerKey(win.webContents.id)
-  win.webContents.once('destroyed', () => voiceRelay.releaseOwner(ownerKey))
+  const release = (): void => voiceRelay.releaseOwner(ownerKey)
+  win.webContents.once('destroyed', release)
+  win.webContents.on('render-process-gone', release)
+  win.webContents.on('did-start-navigation', (details) => {
+    // Same-document navigations (the SPA's hash routing) keep the document — and
+    // the capture — alive; sub-frames (plugin webviews, mockup iframes) are not it.
+    if (details.isMainFrame && !details.isSameDocument) release()
+  })
 }

@@ -11,13 +11,15 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createVoiceController, type VoiceTransport } from '../voice-controller'
-import type { CaptureEnv } from '../browser-voice-capture'
+import { MIC_MUTE_GRACE_MS, type CaptureEnv } from '../browser-voice-capture'
 
 // ---------------------------------------------------------------------------
 // Doubles
 // ---------------------------------------------------------------------------
 
 let log: string[] = []
+/** Every track the fake microphone handed out, to dispatch `ended`/`mute` on. */
+let liveTracks: EventTarget[] = []
 let workletPort: { onmessage: ((event: { data: Float32Array }) => void) | null } | null = null
 
 class FakeNode {
@@ -57,7 +59,10 @@ function makeEnv(gum?: () => Promise<MediaStream>): CaptureEnv {
         gum ??
           (async () => {
             log.push('mic:open')
-            const track = { stop: () => log.push('mic:close') }
+            const track = Object.assign(new EventTarget(), {
+              stop: () => log.push('mic:close')
+            })
+            liveTracks.push(track)
             return { getTracks: () => [track] } as unknown as MediaStream
           })
       )
@@ -104,6 +109,7 @@ function pushBlock(): void {
 
 beforeEach(() => {
   log = []
+  liveTracks = []
   workletPort = null
 })
 
@@ -207,7 +213,37 @@ describe('voice controller — stop', () => {
     expect(transport.stop).toHaveBeenCalledWith('rid-1')
   })
 
-  it('a stop while the transport start is in flight leaves nothing armed', async () => {
+  it('a stop while the transport start is in flight DRAINS: queued audio goes out before the stop (S2 item 1)', async () => {
+    const gate = deferred()
+    const transport = makeTransport(() => gate.promise)
+    const controller = createVoiceController(transport, { env: makeEnv() })
+
+    const started = controller.start('rid-1', 'en')
+    await vi.waitFor(() => expect(transport.start).toHaveBeenCalled())
+    pushBlock() // said while cli.js was still spawning
+    const stopped = controller.stop('rid-1')
+    // The microphone closed at once…
+    expect(log).toContain('mic:close')
+    // …and the halt has long finished (graph torn down) — yet the transport is
+    // not told to stop, and nothing is discarded, until the start has answered.
+    await vi.waitFor(() => expect(log).toContain('context:close'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(transport.stop).not.toHaveBeenCalled()
+
+    gate.resolve()
+    await Promise.all([started, stopped])
+
+    expect(log.filter((l) => l.startsWith('transport:'))).toEqual([
+      'transport:start rid-1 en',
+      'transport:audio rid-1',
+      'transport:stop rid-1'
+    ])
+    expect(controller.isActive()).toBe(false)
+  })
+})
+
+describe('voice controller — drain edge cases (S2 item 1)', () => {
+  it('a start that FAILS discards the queue; the stop still reaches the transport', async () => {
     const gate = deferred()
     const transport = makeTransport(() => gate.promise)
     const controller = createVoiceController(transport, { env: makeEnv() })
@@ -215,12 +251,106 @@ describe('voice controller — stop', () => {
     const started = controller.start('rid-1', 'en')
     await vi.waitFor(() => expect(transport.start).toHaveBeenCalled())
     pushBlock()
-    await controller.stop('rid-1')
-    gate.resolve()
-    await started
+    const stopped = controller.stop('rid-1')
+    gate.reject(new Error('Provider does not support voice'))
 
-    // The held block died with the capture; arm() on an idle capture is a no-op.
+    await expect(started).rejects.toThrow(/does not support voice/)
+    await stopped
     expect(transport.audio).not.toHaveBeenCalled()
+    expect(transport.stop).toHaveBeenCalledWith('rid-1')
+  })
+
+  it('a release while the microphone is still opening cancels the press', async () => {
+    let grant!: () => void
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, {
+      env: makeEnv(
+        () =>
+          new Promise<MediaStream>((resolve) => {
+            grant = () => {
+              const track = Object.assign(new EventTarget(), {
+                stop: () => log.push('mic:close')
+              })
+              resolve({ getTracks: () => [track] } as unknown as MediaStream)
+            }
+          })
+      )
+    })
+
+    const started = controller.start('rid-1', 'en')
+    await vi.waitFor(() => expect(grant).toBeTypeOf('function'))
+    const stopped = controller.stop('rid-1')
+    grant() // the permission prompt answered after the button was let go
+    await Promise.all([started, stopped])
+
+    expect(transport.start).not.toHaveBeenCalled()
+    expect(log).toContain('mic:close')
     expect(controller.isActive()).toBe(false)
+  })
+
+  it('a re-press during the drain waits for it, then starts cleanly', async () => {
+    const gate = deferred()
+    let calls = 0
+    const transport = makeTransport(() => (++calls === 1 ? gate.promise : Promise.resolve()))
+    const controller = createVoiceController(transport, { env: makeEnv() })
+
+    const first = controller.start('rid-1', 'en')
+    await vi.waitFor(() => expect(transport.start).toHaveBeenCalledTimes(1))
+    const stopped = controller.stop('rid-1')
+    const second = controller.start('rid-1', 'en')
+    gate.resolve()
+    await Promise.all([first, stopped, second])
+
+    // The first press's stop reached the transport BEFORE the second start.
+    expect(
+      log.filter((l) => l.startsWith('transport:start') || l.startsWith('transport:stop'))
+    ).toEqual(['transport:start rid-1 en', 'transport:stop rid-1', 'transport:start rid-1 en'])
+    expect(controller.isActive()).toBe(true)
+  })
+})
+
+describe('voice controller — microphone faults (S2 item 9)', () => {
+  it('an unplugged microphone is reported AND ends the capture through the normal stop', async () => {
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, { env: makeEnv() })
+    const faults: string[] = []
+    controller.onFault((message) => faults.push(message))
+    await controller.start('rid-1', 'en')
+    pushBlock()
+
+    liveTracks[0].dispatchEvent(new Event('ended'))
+    await vi.waitFor(() => expect(transport.stop).toHaveBeenCalledWith('rid-1'))
+
+    expect(faults).toEqual(['The microphone was disconnected.'])
+    expect(controller.isActive()).toBe(false)
+  })
+
+  it('a sustained system mute is reported, and the capture carries on', async () => {
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, { env: makeEnv() })
+    const faults: string[] = []
+    const off = controller.onFault((message) => faults.push(message))
+    await controller.start('rid-1', 'en')
+
+    vi.useFakeTimers()
+    try {
+      const track = liveTracks[0]
+      Object.assign(track, { muted: true })
+      track.dispatchEvent(new Event('mute'))
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS)
+      expect(faults).toEqual(['The microphone was muted by the system.'])
+      expect(transport.stop).not.toHaveBeenCalled()
+      expect(controller.isActive()).toBe(true)
+
+      off()
+      Object.assign(track, { muted: false })
+      track.dispatchEvent(new Event('unmute'))
+      Object.assign(track, { muted: true })
+      track.dispatchEvent(new Event('mute'))
+      vi.advanceTimersByTime(MIC_MUTE_GRACE_MS)
+      expect(faults).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

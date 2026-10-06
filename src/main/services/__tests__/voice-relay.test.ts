@@ -333,14 +333,49 @@ describe('remote voice capture', () => {
     return { manager: { get: () => session } as unknown as SessionManager, spawning, releaseServer }
   }
 
-  /** Nothing reached the engine and nothing was told to the client. */
+  /**
+   * Nothing reached the engine, and the client was left idle — the only thing it
+   * is told about a cancelled start is its state (S2: every owner hears
+   * `connecting` once a start is accepted, so a cancel must answer `idle`).
+   */
   async function expectNoCapture(): Promise<void> {
     // Give a wrongly-opened capture every chance to reach the engine.
     await new Promise((r) => setTimeout(r, 50))
     expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(false)
     expect(voiceServer.connections).toBe(0)
-    expect(deliveries).toHaveLength(0)
+    expect(deliveries.every((d) => d.channel === 'voice:state')).toBe(true)
+    expect(framesFor(CONNECTION_ID, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
   }
+
+  it('tells a remote client `connecting` while the voice server spawns, and `idle` if it fails', async () => {
+    // S2 item 7. A phone on a cold engine used to see nothing for the seconds a
+    // spawn takes — the start had been accepted, but only the desktop was told.
+    let failSpawn!: (err: Error) => void
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: () =>
+        new Promise<{ port: number }>((_resolve, reject) => {
+          failSpawn = reject
+        })
+    }
+    const startP = remoteVoice.start(
+      { get: () => session } as unknown as SessionManager,
+      CONNECTION_ID,
+      ROUTING_ID,
+      'en'
+    )
+    // The spawn is still pending — and the client has already been told.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(framesFor(CONNECTION_ID, 'voice:state')).toEqual([[ROUTING_ID, 'connecting']])
+
+    failSpawn(new Error('spawn failed'))
+    await expect(startP).rejects.toThrow(/spawn failed/)
+    expect(framesFor(CONNECTION_ID, 'voice:state')).toEqual([
+      [ROUTING_ID, 'connecting'],
+      [ROUTING_ID, 'idle']
+    ])
+  })
 
   it('a `voice:stop` while the voice server is still starting cancels the capture', async () => {
     const { manager, spawning, releaseServer } = gatedManager()

@@ -53,7 +53,7 @@ UISettings — a phone and the Mac have different microphones.
 
 | # | Slice | Status |
 |---|---|---|
-| S1 | Renderer-owned capture for desktop + web (behavior-preserving move) | reviewed, gates green; real-app verify pending |
+| S1 | Renderer-owned capture for desktop + web (behavior-preserving move) | committed a814b15b (gates green; real-app boot + worklet asset + mic button verified) |
 | S2 | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo |
 | S3 | Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI | todo |
 | S4 | Phone/car: tap-to-talk mode with silence auto-stop, touch hardening, no keyboard pop, capture diagnostics (track label/settings/level stats → logRelay, never audio) | todo |
@@ -66,6 +66,7 @@ UISettings — a phone and the Mac have different microphones.
 - Desktop owner keeps the old immediate `connecting` / cancel→`idle` (`announcesPendingStart`);
   remote does not — unify in S2.
 - Review fix: `voice:stop-recording` always releases the window's capture (no session gate).
+- app-shot never finishes quitting (90 s watchdog) — PRE-EXISTING, reproduced on a HEAD build.
 - Build gate: use `bunx electron-vite build` in this worktree — `bun run build` runs ensure-cli,
   which writes the symlinked `vendor/claude-cli` in the main checkout. Full `bun run build` after merge.
 
@@ -201,3 +202,102 @@ server through one push-fed registry keyed by capture owner.
 This is the groundwork for microphone selection: the native module binds
 the macOS default input at start and exposes no device API.
 ```
+
+## S2 kickoff spec — lifecycle robustness
+
+Base: `a814b15b` (S1). Same standing constraints as S1 (worktree only; no commit/add/branch/stash/
+`bun install`; never open a real mic or contact the voice API; build with `bunx electron-vite build`,
+not `bun run build`; don't touch `patch/`).
+
+### Goal
+
+No press is ever silently lost, and every failure the user can act on is VISIBLE on both the desktop
+window and the web client. All items below get a guard test that fails against `a814b15b`.
+
+### Items
+
+1. **Never drop a short press (drain).**
+   - Renderer: `voice-controller.ts` serializes stop after an in-flight start. `stop()` HALTS the
+     microphone immediately (tracks stopped, graph torn down) but KEEPS the pre-arm queue; if a start
+     is in flight it awaits it (ignoring its failure), the start's `arm()` then flushes the queue,
+     and only then does it call `transport.stop`. A start that failed discards the queue. Split
+     `BrowserVoiceCapture.stop()` accordingly (e.g. `halt()` keeps queued blocks; `stop()` = halt +
+     discard), keep it idempotent, and keep the existing permission-race bail semantics.
+     A release during `ensureSession()` in `InputBox` (mic not yet opened) still cancels, as today.
+   - Main: `VoiceStreamClient.stopRecording()` while connected but not yet `ready` must NOT
+     `cleanup()` away the buffer. Mark the stop requested, stop the source, keep buffering what is
+     already queued, and on `ready` flush the buffer, send `voice_stop`, enter `processing` and arm
+     the finalize timer exactly as the post-`ready` path does. A second stop while draining is a
+     no-op. If there is no connection yet (connect in flight), the existing generation logic applies
+     but the connect, once it lands, must proceed into the same drain rather than being dropped —
+     unless `cleanup()`/`destroy()` ran (owner death), which still discards.
+   - Ordering note to preserve: on both transports the audio frames and the stop verb travel on one
+     ordered channel (`ipcRenderer.send` + `invoke` on one webContents; frames + invoke on one WS),
+     so flushed frames reach the relay before the stop. Don't introduce a path that reorders them.
+2. **`ready` timeout.** After the voice socket connects, if `ready` hasn't arrived within 10 s, emit
+   an error ("Voice transcription didn't start. Try again.") and clean up. Cleared by `ready`/cleanup.
+3. **Error before `ready` is terminal.** A server `error` frame while `!streamReady` → emit the
+   error and clean up (today the UI stays in `connecting`). After `ready`, keep today's behaviour.
+4. **Stale voice-server port.** `ClaudeSession.voiceServerPort` must be cleared when the cli.js child
+   exits (the block around `this.activeQuery = null`, claude-session.ts ~1175), so the next start
+   asks the respawned engine for a fresh port.
+5. **Outcome messages** (mirroring cli.js's own `/voice`, whose strings are below), computed in
+   `VoiceStreamClient` from the PCM it relays (both owners pass through `pushAudio`) — never logged:
+   - per chunk, level = `sqrt(min(rms / 2000, 1))` over i16LE samples; `hadSignal` once level > 0.01;
+   - on a capture that ended normally (stop → `closed`) with NO non-empty transcript and a capture
+     duration ≥ 2 s: if `!hadSignal` → "No audio detected from microphone. Check the selected input
+     device and microphone access."; else → "No speech detected."
+   - Delivered through `emitError` (same surface as other voice errors). Not emitted after
+     owner death, a ready timeout, or an error (those already said something).
+6. **Visible start/stop failures.** `InputBox` currently only `logRelay`s a failed start. Surface the
+   message through the same store path `voice:error` uses (`useSessionStore.getState().addError(routingId, msg)`),
+   keeping the `logRelay` line. Applies to desktop and web (this also fixes the S1 regression where
+   a denied desktop mic is console-only). Keep `describeCaptureFailure`'s wording.
+7. **Owner-wide `connecting`.** Remove `announcesPendingStart`; every owner is told `connecting` when
+   its start is accepted and `idle` when that pending start is cancelled or fails (a phone gets
+   feedback during a cold spawn too). Update the remote tests that pinned the old silence, and the
+   e2e flow if it asserts on it.
+8. **`AudioContext.resume()`.** After building the context, if `state === 'suspended'`, `await
+   resume()` (with the same post-await bail checks as the other awaits).
+9. **Track faults.** `BrowserVoiceCapture` takes an optional `onFault(message)` option. Track
+   `ended` while capturing → fault "The microphone was disconnected." and the controller ends the
+   capture through the normal stop path (so what was said still finalizes). Track `mute` while
+   capturing → fault "The microphone was muted by the system." (no stop). The controller exposes a
+   fault listener; `InputBox` subscribes and routes faults to `addError` for the active session.
+10. **Worklet tail.** On halt, ask the worklet to flush its partial batch (a `port` message) and wait
+    for it, bounded at ~100 ms, before disconnecting, so the last <150 ms of speech is not dropped.
+    Worklet logic stays minimal (it is untestable); the waiting/bounding lives in the capture class.
+11. **Desktop owner release on reload/crash.** In `main/ipc/voice-feed.ts`, also release the desktop
+    owner's capture on `render-process-gone` and on a main-frame cross-document navigation
+    (`did-start-navigation` with `isMainFrame && !isSameDocument`), not only on `destroyed`.
+
+### Out of scope
+
+Device selection, level meter UI, live silence warning (S3); tap mode, touch CSS, keyboard focus,
+diagnostics (S4). No new settings.
+
+### Gates
+
+`bun run typecheck && bun run lint && bun run test` (exact tail), `bunx electron-vite build`,
+`bun run build:web`. For each item, name the guard test and confirm it fails at `a814b15b`
+(e.g. `git stash`-free: copy the test into a scratch checkout is NOT allowed — instead temporarily
+revert the one source hunk, run the test, show the failure, restore; report the commands).
+
+### Suggested commit message
+
+```
+fix(voice): never lose a short press; make every voice failure visible
+```
+(+ a body listing the items.)
+
+## Hands-on checks for Daniel (cannot be automated without probing the voice API)
+
+Run on the real Mac, with the dev build of this branch:
+1. First press after launch on a cold session, short (~1 s) phrase → transcript appears (S2 drain).
+2. Lid closed + Bluetooth headset connected, macOS default input left on the MacBook mic → after S3,
+   the preferred-device setting picks the headset; before S3, expect "No audio detected from microphone…".
+3. Deny/revoke mic permission (System Settings → Privacy → Microphone) → visible error in the session.
+4. Unplug/disconnect the Bluetooth mic mid-press → "The microphone was disconnected." and what was
+   said before still transcribes.
+5. Phone (tailnet HTTPS), short press on a cold session → transcript; with Android Auto connected →
+   note what happens (S4 adds diagnostics to the log).
