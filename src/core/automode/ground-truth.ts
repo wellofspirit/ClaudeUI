@@ -596,14 +596,18 @@ function protectedComponentsOf(components: readonly string[]): string[] {
  * and `> /tmp/x`, the commonest scratch idiom there is, would otherwise always
  * measure out-of-scope. `/private/tmp` too: `/tmp` is a symlink to it on macOS
  * and scope matching compares spellings, never resolves links.
+ *
+ * `osTmpdir` is the host's own lookup, injectable so a test that simulates one
+ * platform is not handed another host's answer (`/tmp` on a Linux runner).
  */
 export function tempDirRoots(
   env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  osTmpdir: () => string = tmpdir
 ): string[] {
   let osTemp: string | undefined
   try {
-    osTemp = tmpdir()
+    osTemp = osTmpdir()
   } catch {
     // Never throw out of the approval path for a missing temp dir; one fewer
     // scope root only ever costs an escalation.

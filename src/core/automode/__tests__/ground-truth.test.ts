@@ -470,10 +470,15 @@ describe('tempDirRoots', () => {
 
   it('adds the conventional /tmp on POSIX — macOS env temp dirs never point there', () => {
     const env = { TMPDIR: '/var/folders/x/T/' } as NodeJS.ProcessEnv
-    expect(tempDirRoots(env, 'darwin')).toEqual(expect.arrayContaining(['/tmp', '/private/tmp']))
-    expect(tempDirRoots(env, 'linux')).toContain('/tmp')
-    expect(tempDirRoots(env, 'linux')).not.toContain('/private/tmp')
-    expect(tempDirRoots(env, 'win32')).not.toContain('/tmp')
+    // The host's own tmpdir is pinned: on a Linux runner it IS /tmp, which would
+    // leak into the simulated win32 answer.
+    const osTmp = (): string => '/var/folders/x/T/'
+    expect(tempDirRoots(env, 'darwin', osTmp)).toEqual(
+      expect.arrayContaining(['/tmp', '/private/tmp'])
+    )
+    expect(tempDirRoots(env, 'linux', osTmp)).toContain('/tmp')
+    expect(tempDirRoots(env, 'linux', osTmp)).not.toContain('/private/tmp')
+    expect(tempDirRoots(env, 'win32', osTmp)).not.toContain('/tmp')
   })
 
   it('puts `> /tmp/x` in scope on macOS', () => {
