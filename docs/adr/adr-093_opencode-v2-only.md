@@ -1,6 +1,6 @@
 # ADR-093: opencode moves to 2.x only
 
-**Status:** Proposed (2026-10-06). Draft for owner review. It comes from the spike in
+**Status:** Accepted (2026-10-06, owner; arc started with S0). It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06** (Daniel):
 
@@ -10,7 +10,7 @@ transcripts this ADR relies on. **Owner decisions recorded 2026-10-06** (Daniel)
 - there is no separate sign-in import.
 
 They are folded into §5, §6, §9 and the slices.
-**Would supersede:**
+**Supersedes** (for opencode, when the arc lands at S10):
 
 - ADR-032 §non-fatal denials mechanism (`continue_loop_on_deny`).
 - ADR-024 opencode queue semantics (no dequeue).
@@ -18,7 +18,7 @@ They are folded into §5, §6, §9 and the slices.
   decided on 2026-10-06 to use opencode's native inbox (§9). ADR-053 stays in force for the other
   engines.
 
-**Would amend:**
+**Amends** (when the arc lands at S10):
 
 - [ADR-019](adr-019_opencode-engine-backend.md) (server pool, spawn, wire).
 - [ADR-022](adr-022_opencode-permission-mapping.md) (rule shape, tool ids).
@@ -139,7 +139,7 @@ with fake JWTs.
 
 - Keys: `cred_claudeui_<provider>_v<n>`, `{type:"key", key}`.
 - ChatGPT: `cred_claudeui_<account>_v<n>`,
-  `{type:"oauth", methodID:"chatgpt-browser", refresh:"", access, expires:<real expiry>, metadata:{accountID}}`,
+  `{type:"oauth", methodID:"chatgpt-browser", refresh:"", access, expires:<real expiry + 24 h>, metadata:{accountID}}`,
   `activate:true`, label `claudeui:<source>`.
 - `metadata.accountID` is mandatory. opencode takes the `chatgpt-account-id` header only from it
   (it reads JWT claims only when it refreshes the token itself).
@@ -179,8 +179,16 @@ with fake JWTs.
 4. On boot, delete stale generations of its own (every `cred_claudeui_*` but the current one per
    account; this covers a crash between POST and DELETE), and re-assert the active slot.
 
-Owner option, not taken by default: pad the vended `expires` so opencode never self-refreshes. The
-trade-off: no auth.openai.com traffic, but the row shows a false expiry to the user's opencode.
+**Padded expiry (owner decision 2026-10-06).** The vended `expires` is the token's real expiry
+plus 24 h, so opencode's own `expires <= now+5min` check never fires and it never sends the empty
+refresh token to auth.openai.com: not after sleep, not on a missed gate, not from concurrent turns,
+and a server booted near the real expiry keeps ChatGPT mode. The vault schedules from the REAL
+expiry (it decodes it from the access token, never from the row). A token that really expires is
+rejected by chatgpt.com, which reaches ClaudeUI as a failed turn and takes rule 3's refresh and
+rotate path; S7 confirms that an expired bearer surfaces as `provider.auth`, and maps whatever it
+does surface as. The pre-turn gate (rule 2) stays, as an optimisation rather than what correctness
+rests on. The cost: the user's own opencode, if it ever runs on ClaudeUI's row (only after a crash,
+since quit restores their credential), sees a later expiry than the real one.
 
 **Ownership and active slot (shared DB)**
 
@@ -308,7 +316,7 @@ adapter cannot run either line.
   the routes ClaudeUI uses changed only additively, except the form-reply `message` query, which was
   added and removed. Expect pin bumps every 1–2 weeks, gated by §8.1.
 
-## Open questions for the owner
+## Owner decisions
 
 Resolved 2026-10-06:
 
@@ -317,9 +325,9 @@ Resolved 2026-10-06:
 - native inbox replaces ADR-053 for opencode;
 - access-token-only ChatGPT.
 
-Remaining:
-
-1. Pad the vended ChatGPT `expires` so opencode never attempts a refresh, or vend the real expiry
-   plus the pre-turn gate (default)?
-2. Start trigger: now, or on the prior research's triggers (1.x EOL, 4–6 weeks without a 1.x
-   runtime release, a 2.x-only provider fix, or 2.x dropping "Experimental")?
+- padded ChatGPT expiry (real + 24 h, §5);
+- start now (S0 landed 2026-10-06). The API's "Experimental" label is mostly stale: upstream's
+  audit holds every non-`/api/experimental/*` route to its stable commitment, and of 20 releases
+  after the 2.0.4 audit cut, 14 changed no contract and none broke a route ClaudeUI uses.
+- full real-app verification of every opencode feature at S10, with real turns on a free model the
+  owner selected (Nemotron 3.5 Flash Lightning or GPT-6 Luna).

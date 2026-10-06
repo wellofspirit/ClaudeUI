@@ -7,6 +7,7 @@ per-direction liveness split superseded by the 2026-09-18 amendment below)
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 **Amended by:** [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live); [ADR-089 messaging v2](adr-089_pi-subagents-host-run.md#messaging-v2-2026-10-05) (2026-10-05: one shared `dispatch_agent` description, `src/shared/dispatch-agent-description.ts`, that steers each engine to its own subagent tool for ordinary delegation)
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — caller identity.
 
 ## Context
 

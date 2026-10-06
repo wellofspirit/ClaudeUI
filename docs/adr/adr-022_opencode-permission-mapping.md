@@ -5,6 +5,7 @@
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex phase 1 from shared-rule parity; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex now runs under the shared modes and Claude permission rules through ClaudeUI's own evaluator rather than a compiled native ruleset. Existing Claude/opencode/pi rules are unchanged.
 **Amended by:** [ADR-084](adr-084_read-only-judge-bypass.md) §3 — the `autoEdit` (`acceptEdits`) ruleset gains `edit` asks for agent-control paths, and auto mode asks for every edit and clears ordinary ones host-side. [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) — Bash deny/ask rules also compile to broad over-approximating globs, MCP rules compile to opencode keys, a host-side pre-check (deny/ask, plan refusal, session allows, the parent's rules for task children) runs on every ask, ClaudeUI never replies `always`, plan mode withholds `edit`/`bash`/`task` allows, and task children carry per-agent asks.
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md) (neutral autonomy modes), [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend)
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — rule shape and tool ids.
 
 ## Context
 

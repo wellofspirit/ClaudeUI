@@ -3,6 +3,7 @@
 **Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md)
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — server pool, spawn and wire.
 
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) supersedes only the dormant-Codex restriction below and plans a fourth engine. This opencode decision remains accepted and as built; its historical Codex removal is not reversed by documentation alone.
 

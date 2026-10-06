@@ -3,6 +3,7 @@
 **Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Amends:** [ADR-014](adr-014_native-anthropic-oauth.md), [ADR-015](adr-015_multi-account-file-credentials.md)
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — where opencode credentials live.
 
 ## Context
 

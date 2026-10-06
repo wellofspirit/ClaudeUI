@@ -4,6 +4,7 @@
 **Date:** 2026-07-07
 **Refines:** [ADR-028](adr-028_opencode-native-config-in-place.md) (stays Accepted — this narrows _how_ the in-place write reconciles)
 **Relates to:** [ADR-020](adr-020_v2-persistence-and-config-plane.md), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-029](adr-029_opencode-custom-agent-crud.md)
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — v2 config keys.
 
 ## Context
 
