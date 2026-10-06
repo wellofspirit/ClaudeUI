@@ -153,6 +153,10 @@ const UNKNOWN_WINDOW_FETCH_THROTTLE_MS = 30_000
  * Construct the User-Agent header matching the CLI's jO() function.
  * The CLI uses "claude-code/<VERSION>" where VERSION comes from its
  * embedded build config. We read it from the vendored CLI's version.json.
+ *
+ * Call it per request, never at module load or construction: it resolves the
+ * harness, so it follows a harness switch, and the singleton `usageFetcher` is
+ * built before the desktop wires its app path (`setHostPaths`).
  */
 export function getCliUserAgent(): string {
   try {
@@ -218,7 +222,6 @@ export class UsageFetcher {
   private lastUsage: AccountUsage | null = null
   private pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS
   private sessionGetter: SessionUsageGetter | null = null
-  private userAgent = getCliUserAgent()
   private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
   private activeAccount: ActiveAccount | null = null
   /**
@@ -1006,7 +1009,7 @@ export class UsageFetcher {
     const result = await resolveClaudeDirIdentity({
       credentialsPath,
       allowRefresh: claudeRefreshGuard.allowed(credentialsPath, version),
-      userAgent: this.userAgent
+      userAgent: getCliUserAgent()
     })
     if ('error' in result) {
       claudeRefreshGuard.note(result, credentialsPath, version)
@@ -1444,7 +1447,7 @@ export class UsageFetcher {
       // they share one file and one grant, and the switch that reaches this path
       // used to POST a refused token twice in a single pass.
       allowRefresh: claudeRefreshGuard.allowed(credentialsPath, version),
-      userAgent: this.userAgent,
+      userAgent: getCliUserAgent(),
       fallbackCredentials: () => this.readKeychainCredentials()
     })
     this.lastDirectFailure = 'usage' in result ? null : result.error
