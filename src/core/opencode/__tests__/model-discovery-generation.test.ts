@@ -69,7 +69,7 @@ vi.mock('../OpencodeServerManager', () => ({
     acquireDetached: mockAcquireDetached
   }
 }))
-vi.mock('../OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
+vi.mock('../OpencodeV1Client', () => ({ OpencodeV1Client: MockOpencodeClient }))
 vi.mock('../../services/persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/p' }))
 vi.mock('../../services/ui-config', () => ({ loadEngineConfig: () => ({}) }))
 vi.mock('../auth-store', () => ({ readOpencodeCredentialTypes: async () => ({}) }))

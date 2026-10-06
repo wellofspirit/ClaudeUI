@@ -8,7 +8,14 @@
  */
 
 import { opencodeServerManager } from './OpencodeServerManager'
-import { OpencodeClient } from './OpencodeClient'
+// TODO(S5): still the 1.x synchronous `POST /session/{id}/message` turn. 2.x
+// has no synchronous prompt (`session.prompt` only enqueues); the candidates
+// are `OpencodeClient.generate()` (`POST /api/session/{id}/generate`: one
+// transient completion from the session's context — create the throwaway with
+// `model` + a deny-all `permissions` ruleset first; it has no `system` field,
+// so the meta-prompt rides in the prompt text) or prompt + the event feed.
+// `/api/experimental/generate` is avoided (experimental). S5 decides.
+import { OpencodeV1Client } from './OpencodeV1Client'
 import { resolveOpencodeSpawnModel, parseModelString } from './model-discovery'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 
@@ -99,8 +106,10 @@ export async function generateAgent(
   cwd?: string
 ): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }> {
   const dir = cwd ?? PERSISTED_SESSIONS_DIR
-  const conn = await opencodeServerManager.acquire(dir)
-  const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+  // One throwaway turn with every tool denied: the hosted MCP tools are never
+  // used, so do not wait for them.
+  const conn = await opencodeServerManager.acquire(dir, { waitForHostedTools: false })
+  const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
 
   // Resolve a concrete model up front. client.prompt() is a SYNCHRONOUS turn
   // (POST /session/{id}/message blocks until completion); opencode needs to know

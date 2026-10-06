@@ -132,7 +132,7 @@ afterEach(() => {
 // SSE block parser tests (imported from client)
 describe('SSE block parsing', () => {
   it('parses a well-formed SSE data line', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const event = { id: 'evt_1', type: 'server.connected', properties: {} }
     const encoded = new TextEncoder().encode('data: ' + JSON.stringify(event) + '\n\n')
 
@@ -152,7 +152,7 @@ describe('SSE block parsing', () => {
   })
 
   it('handles chunked delivery across multiple reads', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const event = { id: 'evt_2', type: 'message.part.updated', properties: { text: 'hello' } }
     const full = 'data: ' + JSON.stringify(event) + '\n\n'
     // Split into 2 chunks
@@ -178,7 +178,7 @@ describe('SSE block parsing', () => {
   })
 
   it('handles multiple events in one chunk', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const e1 = { id: 'evt_1', type: 'server.connected', properties: {} }
     const e2 = { id: 'evt_2', type: 'session.created', properties: {} }
     const raw = 'data: ' + JSON.stringify(e1) + '\n\ndata: ' + JSON.stringify(e2) + '\n\n'
@@ -201,7 +201,7 @@ describe('SSE block parsing', () => {
   })
 
   it('skips non-data SSE lines (id:, event:, retry:)', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const event = { id: 'evt_1', type: 'server.connected', properties: {} }
     const raw =
       'id: evt_1\n' +
@@ -228,7 +228,7 @@ describe('SSE block parsing', () => {
   })
 
   it('skips malformed JSON without throwing', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const raw = 'data: {bad json}\n\ndata: {"id":"2","type":"ok","properties":{}}\n\n'
     const enc = new TextEncoder()
 
@@ -248,7 +248,7 @@ describe('SSE block parsing', () => {
   })
 
   it('respects AbortSignal', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const controller = new AbortController()
 
     let pullCount = 0
@@ -273,7 +273,7 @@ describe('SSE block parsing', () => {
   })
 
   it('yields nothing when the signal is already aborted before consumption', async () => {
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const controller = new AbortController()
     controller.abort()
 
@@ -300,7 +300,7 @@ describe('SSE block parsing', () => {
     // The crux of NOTE 3: a silent /event stream that never enqueues another
     // chunk and never closes. Pre-cancel wiring, parseSSEStream would hang on
     // reader.read() forever; wiring the signal to reader.cancel() unblocks it.
-    const { parseSSEStream } = await import('../OpencodeClient')
+    const { parseSSEStream } = await import('../OpencodeV1Client')
     const controller = new AbortController()
 
     let cancelled = false

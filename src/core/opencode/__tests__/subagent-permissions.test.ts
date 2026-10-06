@@ -18,7 +18,7 @@ import {
   TASK_BACKSTOP_FAIL_CLOSED_RULE,
   type SubagentScanEntry
 } from '../subagent-permissions'
-import type { OpencodeAgentInfo } from '../OpencodeClient'
+import type { OpencodeAgentInfo } from '../OpencodeV1Client'
 import { mergeDeep, withToolsPermission } from '../opencode-config-permissions'
 import type { OpencodePermissionRule } from '../permission-compiler'
 

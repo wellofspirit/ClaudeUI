@@ -36,6 +36,9 @@ vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
 vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
+// History still loads through the 1.x client until S4 ports the converter;
+// one mock answers both (history → listMessages, delete → deleteSession).
+vi.mock('../../../core/opencode/OpencodeV1Client', () => ({ OpencodeV1Client: MockOpencodeClient }))
 vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
@@ -312,6 +315,12 @@ describe('deleteOpencodeSession (HTTP, global-by-id)', () => {
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted')
   })
 
+  it('builds the 2.x client on the lease and skips the hosted-tools wait (no turn)', async () => {
+    await deleteOpencodeSession('ses_del')
+    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted', { waitForHostedTools: false })
+    expect(MockOpencodeClient).toHaveBeenCalledWith(await mockAcquire.mock.results[0].value)
+  })
+
   it('resolves without throwing when the server is down (best-effort)', async () => {
     mockAcquire.mockRejectedValueOnce(new Error('server down'))
     await expect(deleteOpencodeSession('ses_del')).resolves.toBeUndefined()
@@ -330,7 +339,7 @@ describe('deleteSessionByEngine (engine-neutral dispatch)', () => {
     await deleteSessionByEngine('ses_oc', 'D--WorkPlace-ClaudeUI', 'opencode')
     // opencode client delete invoked with the engine-owned sessionId
     expect(mockDeleteSession).toHaveBeenCalledWith('ses_oc')
-    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted')
+    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted', { waitForHostedTools: false })
     // Claude filesystem delete NOT invoked
     expect(mockDeleteSessionFiles).not.toHaveBeenCalled()
   })

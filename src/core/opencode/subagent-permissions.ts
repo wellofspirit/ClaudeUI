@@ -36,7 +36,10 @@ import {
   withToolsPermission,
   type OpencodePermissionConfig
 } from './opencode-config-permissions'
-import type { OpencodeAgentInfo } from './OpencodeClient'
+// TODO(S6): 1.x `GET /agent` row (`permission: {permission, pattern, action}[]`).
+// 2.x is `Agent_Info` from `OpencodeClient.agents()` with `permissions:
+// {action, resource, effect}[]` and the v2 key table (ADR-093 §3).
+import type { OpencodeAgentInfo } from './OpencodeV1Client'
 import type { OpencodeAction, OpencodePermissionRule } from './permission-compiler'
 import { opencodeMcpKey } from './permission-compiler'
 import { CLAUDEUI_MCP_SERVER, type PermissionRule } from './permission-ruleset'

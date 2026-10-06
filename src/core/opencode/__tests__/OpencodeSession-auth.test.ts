@@ -119,8 +119,8 @@ vi.mock('../OpencodeServerManager', () => ({
   }
 }))
 
-vi.mock('../OpencodeClient', () => ({
-  OpencodeClient: MockOpencodeClient
+vi.mock('../OpencodeV1Client', () => ({
+  OpencodeV1Client: MockOpencodeClient
 }))
 
 /**

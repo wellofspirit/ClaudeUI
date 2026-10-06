@@ -19,6 +19,11 @@ import path from 'path'
 import fs from 'fs'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
+// TODO(S4): history still reads the 1.x message shape (`StoredMessage` →
+// convertStoredMessage / opencodeHistoryStatusLine); the cold-history converter
+// for 2.x `Session.Message` rows is S4's. Until then this load answers nothing
+// against a 2.x server (the 1.x route 404s → the empty, best-effort result).
+import { OpencodeV1Client } from '../opencode/OpencodeV1Client'
 import { convertStoredMessage, storedCompactionMessages } from '../opencode/event-mapper'
 import { lastOpencodeModel, opencodeHistoryStatusLine } from '../opencode/history-status-line'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
@@ -95,6 +100,11 @@ function displayTitle(raw: string | null | undefined): string {
  */
 export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
   // Async signature kept for the IPC contract (and future-proofing); the read is sync.
+  // TODO(S9): a DB created by opencode 2.x has no `session` table (only
+  // `session_v2`), and a migrated 1.x DB keeps a stale v1 copy. ADR-093 §6
+  // moves this to the API: `OpencodeClient.listSessions({ parentID: 'null' })`
+  // (GET /api/session is GLOBAL in 2.x, unlike 1.x's project scope) — S9 owns
+  // the switch and when the sidebar may start a server for it.
   const rows = readOpencodeSessionRows(resolveOpencodeDbPath())
   const result: SessionInfo[] = []
   for (const row of rows) {
@@ -139,9 +149,12 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
 export async function loadOpencodeSessionHistory(sessionId: string): Promise<EngineHistoryLoad> {
   let acquired = false
   try {
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+    // A read — no turn, so no wait for the hosted MCP tools.
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
+      waitForHostedTools: false
+    })
     acquired = true
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
     const stored = await client.listMessages(sessionId)
     const messages: ChatMessage[] = []
     for (const s of stored) {
@@ -186,10 +199,13 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
 }
 
 /**
- * Delete an opencode session via the shared HTTP server (DELETE /session/{id}).
+ * Delete an opencode session via the shared HTTP server
+ * (`DELETE /api/session/{id}`).
  *
  * The delete endpoint is global-by-id — the sessionId is sufficient, no cwd
- * needed. Mirrors the acquire/release pattern of loadOpencodeSessionHistory.
+ * needed (the request's directory is the shared server's own lease, which
+ * does not scope it). Mirrors the acquire/release pattern of
+ * loadOpencodeSessionHistory.
  *
  * Best-effort: logs + swallows on any error (server may be down). Never throws
  * to the IPC layer.
@@ -197,10 +213,11 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
 export async function deleteOpencodeSession(sessionId: string): Promise<void> {
   let acquired = false
   try {
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
+      waitForHostedTools: false
+    })
     acquired = true
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
-    await client.deleteSession(sessionId)
+    await new OpencodeClient(conn).deleteSession(sessionId)
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',

@@ -7,7 +7,7 @@
  *
  * Targets are headless dispatcher-owned mini-sessions built on engine client
  * primitives — NOT SessionManager/ISession. Two directions are supported:
- *  - Claude → opencode (M1): targets use OpencodeClient directly (the
+ *  - Claude → opencode (M1): targets use OpencodeV1Client directly (the
  *    askSideQuestion / judge precedent). A turn is `POST /session/{id}/
  *    prompt_async` (204-and-forget) completed by the shared per-cwd SSE loop's
  *    `session.idle`/`session.error`, with the final text/usage read back from
@@ -38,8 +38,13 @@ import {
 } from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { OpencodeClient } from '../opencode/OpencodeClient'
-import type { OpencodeAgentInfo } from '../opencode/OpencodeClient'
+// TODO(S9): opencode targets still use the 1.x client (`prompt_async` + the
+// 1.x feed, `/session/status`). S9 ports `DispatchTargetClient` to
+// `OpencodeClient` (`prompt`, `activeSessions()` — absent = idle — and
+// `subscribeEvents`, whose `reconnected:true` replaces `onConnected`), keys
+// connections by server, and releases with `releaseIfCurrent`.
+import { OpencodeV1Client } from '../opencode/OpencodeV1Client'
+import type { OpencodeAgentInfo } from '../opencode/OpencodeV1Client'
 // NOT imported from OpencodeSession.ts — that module now imports
 // crossEngineDispatcher (ADR-033 M2 — cancel() disposes owned targets), so
 // importing it here would form a require-cycle. permission-ruleset.ts holds
@@ -361,7 +366,7 @@ export interface DispatchResult {
 }
 
 /**
- * Structural subset of OpencodeClient the dispatcher uses — injectable so
+ * Structural subset of OpencodeV1Client the dispatcher uses — injectable so
  * tests can stub the transport without HTTP.
  */
 export interface DispatchTargetClient {
@@ -380,7 +385,7 @@ export interface DispatchTargetClient {
   /**
    * The dispatcher's ACTUAL turn driver for opencode targets (`prompt` above is
    * only still in this interface because the structural type mirrors
-   * OpencodeClient, whose other callers still use it). Returns as soon as the
+   * OpencodeV1Client, whose other callers still use it). Returns as soon as the
    * server has FORKED the turn — completion arrives on the SSE stream. See
    * `resolveAndRunOpencode`.
    */
@@ -396,7 +401,7 @@ export interface DispatchTargetClient {
    *  fire-and-forget prompt has no response body to carry them). */
   listMessages(sessionId: string): Promise<StoredMessage[]>
   /** Live per-session status map — ABSENCE MEANS IDLE (see
-   *  `OpencodeClient.getSessionStatus`). Used to reconcile busy turns after an
+   *  `OpencodeV1Client.getSessionStatus`). Used to reconcile busy turns after an
    *  SSE reconnect, where a `session.idle` may have been missed. */
   getSessionStatus(): Promise<Record<string, { type?: string }>>
   deleteSession(sessionId: string): Promise<boolean>
@@ -407,10 +412,10 @@ export interface DispatchTargetClient {
     message?: string
   ): Promise<unknown>
   /** `GET /agent` — the server's agents with their computed rulesets, read for
-   *  the target's subagent backstop (ADR-085 S4, `OpencodeClient.agents`). */
+   *  the target's subagent backstop (ADR-085 S4, `OpencodeV1Client.agents`). */
   agents(): Promise<OpencodeAgentInfo[]>
   /** `onConnected` fires once the subscription is provably receiving — see
-   *  `OpencodeClient.subscribeEvents` for why the reconnect reconcile has to
+   *  `OpencodeV1Client.subscribeEvents` for why the reconnect reconcile has to
    *  hang off it rather than run before the subscribe. */
   subscribeEvents(
     signal?: AbortSignal,
@@ -3328,7 +3333,7 @@ export class CrossEngineDispatcher {
    * aborted an already-finished turn. `GET /session/status` is the
    * authoritative catch-up — ABSENCE MEANS IDLE there (the server deletes a
    * session's entry the moment it goes idle; see
-   * `OpencodeClient.getSessionStatus`) — but NOT that a missing session has
+   * `OpencodeV1Client.getSessionStatus`) — but NOT that a missing session has
    * finished, which is the subtlety this method is built around. Three-way
    * disambiguation, see the branches below:
    *   · present in the map              → alive; bump the activity clock so the
@@ -6780,7 +6785,7 @@ export class CrossEngineDispatcher {
 
 export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
-  makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
+  makeClient: (baseUrl, authHeader) => new OpencodeV1Client(baseUrl, authHeader),
   loadEngineConfig,
   codexVaultAccounts: true
 })

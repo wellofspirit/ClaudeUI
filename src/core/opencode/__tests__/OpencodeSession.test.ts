@@ -4,7 +4,7 @@
  * Unit tests for OpencodeSession — verifies the session lifecycle, event
  * dispatch, and the cross-session SSE filter, without spawning a real server.
  *
- * Strategy: stub OpencodeClient and OpencodeServerManager so no real HTTP or
+ * Strategy: stub OpencodeV1Client and OpencodeServerManager so no real HTTP or
  * process spawning occurs. The tests exercise OpencodeSession directly.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -141,8 +141,8 @@ vi.mock('../OpencodeServerManager', () => ({
   }
 }))
 
-vi.mock('../OpencodeClient', () => ({
-  OpencodeClient: MockOpencodeClient
+vi.mock('../OpencodeV1Client', () => ({
+  OpencodeV1Client: MockOpencodeClient
 }))
 
 // The auto-mode judge is ClaudeUI's own HTTP call (ADR-081). Mocked at the
@@ -236,7 +236,7 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 
 // discoverSkills (Item 3 — ISession.discoverSkills) delegates to
 // discoverOpencodeSkills; mock it directly so the test doesn't depend on the
-// module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
+// module's internal per-cwd cache or the OpencodeServerManager/OpencodeV1Client
 // mocks above.
 const mockDiscoverOpencodeSkills = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 vi.mock('../command-skill-discovery', () => ({
@@ -408,7 +408,7 @@ function setupMocks(): void {
   // not on the mock spontaneously returning.
   mockSubscribeEvents.mockImplementation(parkingStream)
 
-  // Reset the OpencodeClient constructor mock to return fresh mock instances.
+  // Reset the OpencodeV1Client constructor mock to return fresh mock instances.
   // Must use a regular function (not arrow) so it works correctly with `new`.
   MockOpencodeClient.mockReset()
   MockOpencodeClient.mockImplementation(function () {

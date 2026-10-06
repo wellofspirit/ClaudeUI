@@ -261,6 +261,19 @@ since quit restores their credential), sees a later expiry than the real one.
 - The generated file is committed with provenance (tag and spec SHA). CI fails on drift.
 - No `@opencode/client` dependency.
 
+**As built (S3, 2026-10-06).** `OpencodeClient` is a typed client over the generated
+`OPERATIONS`: Basic auth and a URI-encoded `x-opencode-directory` on every request, typed
+`OpencodeApiError` per operation, 60 s control-plane timeout, and `generate` at 240 s (under
+undici's 300 s `headersTimeout`). A permission reject without a message does not compile, and a
+blank one throws before sending. Findings: `session.create` ignores the directory header (the
+client always sends `location`); a directory's catalogs (agents, commands, skills, models,
+providers) answer empty for about 100-250 ms until its plugins load, so the client awaits
+`integration.list` once per directory before the first catalog read; re-posting a prompt id is
+idempotent within a session. The event feed has no replay: it yields `connected` with
+`reconnected:true` before any event of a new subscription, and the consumer re-reads messages,
+permissions, forms, inbox and active sessions. The server's 15 s heartbeat keeps the 45 s stall
+watchdog quiet on idle sessions. The 1.x client survives as `OpencodeV1Client` until S10.
+
 ### 8. Conditions on the GO
 
 1. Each pin bump runs the contract integration suite: the spike driver turned into

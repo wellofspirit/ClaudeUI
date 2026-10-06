@@ -2,7 +2,13 @@ import type { HostWindowHandle } from '../host'
 import { v4 as uuid } from 'uuid'
 import { opencodeServerManager } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
-import { OpencodeClient } from './OpencodeClient'
+// TODO(S5): the session still drives the 1.x wire (`prompt_async` + `/event`
+// with `properties`, `/permission/{id}/reply`, `/question/*`, `/abort`). Its
+// 2.x port is S5 on `./OpencodeClient` (inbox `prompt` with ClaudeUI ids,
+// `cancelInbox`/`setInboxDelivery`, `interrupt`, `replyPermission` whose
+// reject carries a message, `replyForm`/`cancelForm`, `subscribeEvents` with
+// its re-read-on-reconnect contract) and the S4 mapper.
+import { OpencodeV1Client } from './OpencodeV1Client'
 import type { OpencodeEvent } from './protocol/types'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
@@ -74,7 +80,7 @@ import {
   subagentBackstopRules,
   TASK_BACKSTOP_FAIL_CLOSED_RULE
 } from './subagent-permissions'
-import type { OpencodeAgentInfo } from './OpencodeClient'
+import type { OpencodeAgentInfo } from './OpencodeV1Client' // TODO(S6): 2.x `Agent_Info`
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -256,7 +262,7 @@ export class OpencodeSession extends BaseSession {
   }
 
   private conn: ServerConnection | null = null
-  private client: OpencodeClient | null = null
+  private client: OpencodeV1Client | null = null
   private openSessionId: string | null = null
   private sseAbort: AbortController | null = null
   private isProcessing = false
@@ -959,7 +965,7 @@ export class OpencodeSession extends BaseSession {
           return
         }
         this.conn = c
-        this.client = new OpencodeClient(c.baseUrl, c.authHeader)
+        this.client = new OpencodeV1Client(c.baseUrl, c.authHeader)
         // A (re)spawned server may carry a different MCP config (ADR-085 §3)
         // and different agents (ADR-085 S4) — and the next apply must PATCH
         // again rather than trust what the previous connection sent.

@@ -12,11 +12,12 @@
  *              idempotent via ON CONFLICT(message_id) DO NOTHING.
  *   opencode → sessions are enumerated GLOBALLY (across every cwd) by reading
  *              opencode's own session DB directly — the same source the sidebar
- *              uses (listOpencodeSessionsGlobal). Messages are then fetched over
- *              the HTTP API (/session/{id}/message), which IS global-by-id.
+ *              uses (listOpencodeSessionsGlobal; TODO(S9): the 2.x API list).
+ *              Messages are then fetched over the HTTP API
+ *              (GET /api/session/{id}/message?type=assistant), global-by-id.
  *              Best-effort: skipped if opencode isn't installed / no server is up.
  *
- *              Why not GET /session? It is PROJECT-scoped (only the serve-cwd's
+ *              Why not 1.x's GET /session? It was PROJECT-scoped (only the serve-cwd's
  *              git-root project — verified against vendor v1.17.14 (session
  *              module unchanged through pinned v1.18.9):
  *              session.list() → listByProject(projectID=ctx.project.id); the
@@ -25,6 +26,7 @@
  *              server at PERSISTED_SESSIONS_DIR would therefore only ever see
  *              ClaudeUI's own service sessions and never terminal `opencode` runs
  *              in real project cwds — the whole point of this reconciler (M-DB1).
+ *              (2.x's GET /api/session is global — S9 moves the enumeration.)
  *
  * Failures are swallowed (logged) — reconcile is advisory and must never throw
  * into the caller.
@@ -39,6 +41,7 @@ import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { logger } from './logger'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
+import type { Session_Message_Assistant } from '../opencode/protocol-v2/openapi'
 import { listOpencodeSessionsGlobal } from './opencode-session-list'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
@@ -120,7 +123,7 @@ class UsageReconciler {
    *      session DB directly (listOpencodeSessionsGlobal) — see the file header
    *      for why GET /session can't do this (M-DB1).
    *   2. Acquire the shared server (PERSISTED_SESSIONS_DIR) and fetch each
-   *      session's messages over HTTP — /session/{id}/message is global-by-id
+   *      session's messages over HTTP — /api/session/{id}/message is global-by-id
    *      (it requires the session by id with no project filter), so the shared
    *      server can read any cwd's messages.
    *   3. Import assistant messages that carry tokens (dedup by message id).
@@ -136,9 +139,12 @@ class UsageReconciler {
       const sessions = await listOpencodeSessionsGlobal().catch(() => [])
       if (sessions.length === 0) return
 
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+      // Reads only — no turn, so no wait for the hosted MCP tools.
+      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
+        waitForHostedTools: false
+      })
       acquired = true
-      const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+      const client = new OpencodeClient(conn)
 
       // Warm the billing-type source while we hold the server anyway, so the
       // rows below can say how each vendor was billed instead of 'unknown'.
@@ -155,9 +161,12 @@ class UsageReconciler {
         // same spend that no dedup could ever collapse. The title is the only
         // marker opencode gives us — see OPENCODE_DISPATCH_SESSION_TITLE.
         if (session.title === OPENCODE_DISPATCH_SESSION_TITLE) continue
-        const messages = await client.listMessages(session.sessionId).catch(() => [])
+        const messages = await client
+          .listMessages(session.sessionId, { type: 'assistant' })
+          .catch(() => [])
         for (const m of messages) {
-          const row = this.opencodeMessageToRow(m.info, session.sessionId)
+          if (m.type !== 'assistant') continue
+          const row = this.opencodeMessageToRow(m, session.sessionId)
           if (row) rows.push(row)
         }
       }
@@ -177,32 +186,23 @@ class UsageReconciler {
   }
 
   /**
-   * Map an opencode message `info` object to a usage_event row.
-   * Returns null for non-assistant messages or messages without a stable id.
-   * Cost = info.cost (engine-reported); equiv via the pricing table.
+   * Map an opencode 2.x assistant message to a usage_event row.
+   * Returns null for a message without a stable id.
+   * Cost = message.cost (engine-reported); equiv via the pricing table.
    */
   private opencodeMessageToRow(
-    info: Record<string, unknown> | undefined,
+    message: Session_Message_Assistant,
     sessionId: string
   ): UsageEventInsert | null {
-    if (!info) return null
-    const role = info.role as string | undefined
-    if (role !== 'assistant') return null
-    const messageId = info.id as string | undefined
+    const messageId = message.id
     if (!messageId) return null
 
-    // providerID/modelID — opencode messages carry these on info.
-    const providerID = (info.providerID as string | undefined) ?? 'opencode'
-    const modelID = (info.modelID as string | undefined) ?? 'unknown'
+    // 2.x carries the model as a ref: `{ providerID, id }`.
+    const providerID = message.model?.providerID || 'opencode'
+    const modelID = message.model?.id || 'unknown'
 
-    const tokens = info.tokens as
-      | {
-          input?: number
-          output?: number
-          reasoning?: number
-          cache?: { read?: number; write?: number }
-        }
-      | undefined
+    // Disjoint counts (input excludes cache), as in 1.x.
+    const tokens = message.tokens
     const input = tokens?.input ?? 0
     // Reasoning tokens are billed as OUTPUT tokens by every provider opencode
     // meters this way (info.cost already includes them) — fold them into the
@@ -210,11 +210,10 @@ class UsageReconciler {
     const output = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
     const cacheWrite = tokens?.cache?.write ?? 0
     const cacheRead = tokens?.cache?.read ?? 0
-    const engineCost = typeof info.cost === 'number' ? info.cost : null
+    const engineCost = typeof message.cost === 'number' ? message.cost : null
 
-    // Timestamp: opencode info.time.created is epoch ms (best-effort).
-    const time = info.time as { created?: number } | undefined
-    const ts = typeof time?.created === 'number' ? time.created : Date.now()
+    // Timestamp: epoch ms (best-effort).
+    const ts = typeof message.time?.created === 'number' ? message.time.created : Date.now()
 
     const equiv = equivalentCostUsd(providerID, modelID, {
       inputTokens: input,
@@ -250,7 +249,7 @@ class UsageReconciler {
         billingType: opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown',
         equivCostUsd: equiv,
         engineCostUsd: engineCost,
-        // opencode's `info.cost` is what it charged, not an equivalent.
+        // opencode's `cost` is what it charged, not an equivalent.
         engineCostIsEquivalent: false
       })
     }

@@ -26,7 +26,7 @@ import os from 'os'
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: vi.fn(), release: vi.fn() }
 }))
-vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
+vi.mock('../../../core/opencode/OpencodeV1Client', () => ({ OpencodeV1Client: vi.fn() }))
 vi.mock('../../../core/opencode/model-discovery', () => ({
   invalidateOpencodeModelCache: vi.fn()
 }))

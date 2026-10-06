@@ -50,6 +50,7 @@ vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
 vi.mock('../../../core/opencode/OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
 }))
+// 2.x assistant history rows: `{ id, type, model: { providerID, id }, cost, tokens, time }`.
 
 // M-DB1: enumeration now goes through the global DB reader, not GET /session.
 vi.mock('../../../core/services/opencode-session-list', () => ({
@@ -298,19 +299,21 @@ describe('reconcileOpencode', () => {
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_oc_asst',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.013,
-          tokens: { input: 2000, output: 800, cache: { read: 0, write: 0 } },
-          time: { created: 7777 }
-        }
+        id: 'msg_oc_asst',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.013,
+        tokens: { input: 2000, output: 800, cache: { read: 0, write: 0 } },
+        time: { created: 7777 }
       },
       {
-        // user message — must be skipped
-        info: { id: 'msg_oc_user', role: 'user', tokens: { input: 5 } }
+        // a user row (the server filters by type; a stray one must still be skipped)
+        id: 'msg_oc_user',
+        type: 'user',
+        text: 'hi',
+        time: { created: 7776 }
       }
     ])
 
@@ -330,6 +333,12 @@ describe('reconcileOpencode', () => {
     expect(asst!.equivCostUsd!).toBeCloseTo((2000 / 1e6) * 2.5 + (800 / 1e6) * 10)
     // user message NOT recorded
     expect(getUsageEventByMessageId('msg_oc_user')).toBeUndefined()
+    // only assistant rows are asked for; a read, so no hosted-tools wait
+    expect(mockListMessages).toHaveBeenCalledWith('ses_oc_1', { type: 'assistant' })
+    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted-sessions', {
+      waitForHostedTools: false
+    })
+    expect(MockOpencodeClient).toHaveBeenCalledWith(await mockAcquire.mock.results[0].value)
     // server released
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions')
   })
@@ -345,15 +354,14 @@ describe('reconcileOpencode', () => {
     mockBuildAccountRef.mockReturnValue({ billingType: 'subscription' })
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_oc_attr',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.013,
-          tokens: { input: 2000, output: 800, cache: { read: 0, write: 0 } },
-          time: { created: 8888 }
-        }
+        id: 'msg_oc_attr',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.013,
+        tokens: { input: 2000, output: 800, cache: { read: 0, write: 0 } },
+        time: { created: 8888 }
       }
     ])
 
@@ -387,15 +395,14 @@ describe('reconcileOpencode', () => {
     ])
     mockListMessages.mockImplementation(async (sessionId: string) => [
       {
-        info: {
-          id: sessionId === 'ses_oc_human' ? 'msg_oc_human' : 'msg_oc_dispatched',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.01,
-          tokens: { input: 1000, output: 400, cache: { read: 0, write: 0 } },
-          time: { created: 4242 }
-        }
+        id: sessionId === 'ses_oc_human' ? 'msg_oc_human' : 'msg_oc_dispatched',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.01,
+        tokens: { input: 1000, output: 400, cache: { read: 0, write: 0 } },
+        time: { created: 4242 }
       }
     ])
 
@@ -406,7 +413,7 @@ describe('reconcileOpencode', () => {
     // The skip happens before the fetch, so the dispatcher's session is never
     // even read back over HTTP.
     expect(mockListMessages).toHaveBeenCalledTimes(1)
-    expect(mockListMessages).toHaveBeenCalledWith('ses_oc_human')
+    expect(mockListMessages).toHaveBeenCalledWith('ses_oc_human', { type: 'assistant' })
   })
 
   it('falls back to an unknown account when the provider knows nothing', async () => {
@@ -419,15 +426,14 @@ describe('reconcileOpencode', () => {
     })
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_oc_unk',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.02,
-          tokens: { input: 2000, output: 800 },
-          time: { created: 9999 }
-        }
+        id: 'msg_oc_unk',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.02,
+        tokens: { input: 2000, output: 800 },
+        time: { created: 9999 }
       }
     ])
 
@@ -446,15 +452,14 @@ describe('reconcileOpencode', () => {
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_reason' }])
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_oc_reasoning',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.02,
-          tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } },
-          time: { created: 4242 }
-        }
+        id: 'msg_oc_reasoning',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.02,
+        tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } },
+        time: { created: 4242 }
       }
     ])
 
@@ -482,26 +487,24 @@ describe('reconcileOpencode', () => {
       if (sessionId === 'ses_projA')
         return [
           {
-            info: {
-              id: 'msg_A',
-              role: 'assistant',
-              providerID: 'openai',
-              modelID: 'gpt-4o',
-              cost: 0.02,
-              tokens: { input: 100, output: 50 }
-            }
+            id: 'msg_A',
+            type: 'assistant',
+            agent: 'build',
+            model: { providerID: 'openai', id: 'gpt-4o' },
+            content: [],
+            cost: 0.02,
+            tokens: { input: 100, output: 50 }
           }
         ]
       return [
         {
-          info: {
-            id: 'msg_B',
-            role: 'assistant',
-            providerID: 'openai',
-            modelID: 'gpt-4o',
-            cost: 0.03,
-            tokens: { input: 200, output: 80 }
-          }
+          id: 'msg_B',
+          type: 'assistant',
+          agent: 'build',
+          model: { providerID: 'openai', id: 'gpt-4o' },
+          content: [],
+          cost: 0.03,
+          tokens: { input: 200, output: 80 }
         }
       ]
     })
@@ -511,8 +514,8 @@ describe('reconcileOpencode', () => {
     expect(getUsageEventByMessageId('msg_A')).toBeDefined()
     expect(getUsageEventByMessageId('msg_B')).toBeDefined()
     // Both cwds' sessions were queried for messages.
-    expect(mockListMessages).toHaveBeenCalledWith('ses_projA')
-    expect(mockListMessages).toHaveBeenCalledWith('ses_projB')
+    expect(mockListMessages).toHaveBeenCalledWith('ses_projA', { type: 'assistant' })
+    expect(mockListMessages).toHaveBeenCalledWith('ses_projB', { type: 'assistant' })
   })
 
   it('skips cleanly when no opencode server is available', async () => {
@@ -546,14 +549,13 @@ describe('reconcileOpencode', () => {
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_oc_dup',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.9,
-          tokens: { input: 9999, output: 9999 }
-        }
+        id: 'msg_oc_dup',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.9,
+        tokens: { input: 9999, output: 9999 }
       }
     ])
     await usageReconciler.reconcileOpencode()
@@ -586,14 +588,13 @@ describe('reconcileAll', () => {
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_x' }])
     mockListMessages.mockResolvedValue([
       {
-        info: {
-          id: 'msg_both_oc',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.01,
-          tokens: { input: 1, output: 1 }
-        }
+        id: 'msg_both_oc',
+        type: 'assistant',
+        agent: 'build',
+        model: { providerID: 'openai', id: 'gpt-4o' },
+        content: [],
+        cost: 0.01,
+        tokens: { input: 1, output: 1 }
       }
     ])
 

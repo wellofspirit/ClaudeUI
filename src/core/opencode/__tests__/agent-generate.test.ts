@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Tests for agent-generate.ts: AI-assisted agent authoring.
- * Mocks OpencodeClient and opencodeServerManager to avoid network calls.
+ * Mocks OpencodeV1Client and opencodeServerManager to avoid network calls.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -45,8 +45,8 @@ vi.mock('../OpencodeServerManager', () => ({
   }
 }))
 
-vi.mock('../OpencodeClient', () => ({
-  OpencodeClient: MockOpencodeClient
+vi.mock('../OpencodeV1Client', () => ({
+  OpencodeV1Client: MockOpencodeClient
 }))
 
 // Keep the model-discovery dependency hermetic — no transient server spawn.
@@ -234,7 +234,8 @@ describe('generateAgent', () => {
 
     await generateAgent('Review agent', '/custom/cwd')
 
-    expect(mockAcquire).toHaveBeenCalledWith('/custom/cwd')
+    // A throwaway, tool-less turn: no wait for the hosted MCP tools.
+    expect(mockAcquire).toHaveBeenCalledWith('/custom/cwd', { waitForHostedTools: false })
     expect(mockRelease).toHaveBeenCalledWith('/custom/cwd')
   })
 
@@ -243,7 +244,9 @@ describe('generateAgent', () => {
 
     await generateAgent('Review agent')
 
-    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted-sessions')
+    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted-sessions', {
+      waitForHostedTools: false
+    })
   })
 
   it('sends the description in the prompt text', async () => {

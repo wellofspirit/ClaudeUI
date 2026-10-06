@@ -21,7 +21,11 @@ import {
   opencodeAuthEntryEquals
 } from '../opencode/auth-store'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { OpencodeClient } from '../opencode/OpencodeClient'
+// TODO(S7): still the 1.x auth surface (`/provider/auth`, `PUT /auth/{id}`,
+// `/provider/{id}/oauth/*`, the `auth.json` writer). 2.x: `OpencodeClient`
+// `integrations()`, `createCredential`/`removeCredential`/`activateCredential`
+// with `cred_claudeui_*` generations, `integration.oauth.*` (ADR-093 §5).
+import { OpencodeV1Client } from '../opencode/OpencodeV1Client'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
@@ -46,6 +50,9 @@ import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/Credentia
  * the CredentialSync feed-target section below for why).
  */
 const OPENCODE_CHATGPT_VENDOR_ID = 'openai'
+
+/** Auth calls run no turn: never wait for the hosted MCP tools (S2 readiness). */
+const NO_TURN = { waitForHostedTools: false } as const
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -98,8 +105,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    */
   private async fetchVendorMap(): Promise<VendorAuthMap> {
     try {
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-      const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+      const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
       try {
         const [configResp, authCatalog, credentialTypes] = await Promise.all([
           client.getConfigProviders().catch(() => ({ providers: [] })),
@@ -195,8 +202,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
 
   async listVendorAuthOptions(): Promise<Record<string, VendorAuthOption[]>> {
     try {
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-      const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+      const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
       try {
         const catalog = await client.getProviderAuth()
         // Cast the raw AuthOption[] to VendorAuthOption[] (shapes are compatible)
@@ -220,8 +227,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     // in flight. `{ type: 'api', key }` is the entry opencode's own `Auth.set`
     // stores for this PUT — it replaces the entry wholesale.
     if (await opencodeAuthEntryEquals(vendorId, { type: 'api', key })) return
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
     let mutated = false
     try {
       await client.setAuth(vendorId, { type: 'api', key })
@@ -262,9 +269,9 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     // its teardown. This keeps the authorize-time server (loopback + PKCE state)
     // alive until the flow completes.
     this.releaseOauthHold()
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
     this.oauthHold = { released: false }
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
     try {
       return await client.oauthAuthorize(vendorId, method, inputs)
     } catch (err) {
@@ -280,8 +287,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     // that owns the loopback + PKCE state. With no active hold (stale/duplicate
     // call) this spawns a fresh server with no pending flow — it fails with
     // ProviderAuthOauthMissing, the correct outcome for an orphan callback.
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
     let mutated = false
     try {
       const result = await client.oauthCallback(vendorId, method, code)
@@ -317,8 +324,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     if (await opencodeAuthEntryEquals(vendorId, undefined)) return
     // See PiAuthProvider.removeVendorAuth: a removal always leaves a trace.
     logger.info('OpencodeAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
     let mutated = false
     try {
       await client.removeAuth(vendorId)

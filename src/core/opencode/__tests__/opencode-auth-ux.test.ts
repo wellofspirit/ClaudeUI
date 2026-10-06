@@ -2,11 +2,11 @@
  * @vitest-environment node
  *
  * Unit tests for Feature #7 (native auto OAuth) and Feature #2 (structured 401 card):
- *   - OpencodeClient.oauthCallback optional code parameter
+ *   - OpencodeV1Client.oauthCallback optional code parameter
  *   - event-mapper session.error → auth-required vs error routing
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { OpencodeClient } from '../OpencodeClient'
+import { OpencodeV1Client } from '../OpencodeV1Client'
 import { mapEvent, type MessageAccumulator } from '../event-mapper'
 import type { OpencodeEvent } from '../protocol/types'
 
@@ -39,13 +39,13 @@ function callMapEvent(event: OpencodeEvent): ReturnType<typeof mapEvent> {
   )
 }
 
-// ── OpencodeClient.oauthCallback ──────────────────────────────────────────────
+// ── OpencodeV1Client.oauthCallback ──────────────────────────────────────────────
 
-describe('OpencodeClient.oauthCallback', () => {
-  let client: OpencodeClient
+describe('OpencodeV1Client.oauthCallback', () => {
+  let client: OpencodeV1Client
 
   beforeEach(() => {
-    client = new OpencodeClient(BASE_URL, AUTH)
+    client = new OpencodeV1Client(BASE_URL, AUTH)
   })
 
   it('auto flow: omits code from POST body when code is undefined', async () => {

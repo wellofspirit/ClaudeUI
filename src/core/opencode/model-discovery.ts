@@ -1,5 +1,9 @@
 import { opencodeServerManager, type DetachedServer } from './OpencodeServerManager'
-import { OpencodeClient } from './OpencodeClient'
+// TODO(S7): still the 1.x catalog (`/config/providers`, `/provider`,
+// `/provider/auth`). 2.x: `OpencodeClient.providers()` / `models()` /
+// `integrations()`, and never negative-cache a cold-boot empty model list
+// (`modelListIsAuthoritative`, ADR-093 §6).
+import { OpencodeV1Client } from './OpencodeV1Client'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { loadEngineConfig } from '../services/ui-config'
 import {
@@ -110,7 +114,9 @@ interface DiscoveryProbe {
   /** GET /config/providers — the providers usable now, with their models. */
   usable: ConfigProvider[]
 }
-type ConfigProvider = Awaited<ReturnType<OpencodeClient['getConfigProviders']>>['providers'][number]
+type ConfigProvider = Awaited<
+  ReturnType<OpencodeV1Client['getConfigProviders']>
+>['providers'][number]
 
 /** /config/providers as last discovered, when it listed any provider. */
 let cachedUsable: ConfigProvider[] | null = null
@@ -161,7 +167,7 @@ function probeDiscovery(): Promise<DiscoveryProbe> {
     try {
       // An invalidation cancelled us while the server started: say nothing.
       if (!current()) return EMPTY_PROBE
-      const client = new OpencodeClient(lease.baseUrl, lease.authHeader)
+      const client = new OpencodeV1Client(lease.baseUrl, lease.authHeader)
       const [providerList, configResp, authCatalog] = await Promise.all([
         settle('GET /provider', () => client.getProviders(), { all: [] } as { all?: Provider[] }),
         settle('GET /config/providers', () => client.getConfigProviders(), {
