@@ -33,13 +33,20 @@ import { fileURLToPath } from 'node:url'
 export const GENERATOR_VERSION = 1
 
 /**
- * The opencode 2.x the generated types describe. S1 moves the harness manifest
- * to 2.x; from then on `manifest.tested` must equal `version` (a test pins it).
+ * The opencode 2.x the generated types describe: the harness manifest's
+ * `tested` (one source of truth for the pin, ADR-093 §1), its release tag, and
+ * the commit that tag was reviewed at. `pinnedReader` proves the tag still
+ * names that commit, so bumping `tested` without re-reviewing `PIN_COMMIT`
+ * fails both generate and check.
  */
+const PIN_COMMIT = 'e7a34f09bfd9134dfade5a8ddb843f7030bc9a69'
+const manifest = JSON.parse(
+  readFileSync(new URL('../src/shared/harness-manifests/opencode.json', import.meta.url), 'utf8')
+)
 export const PIN = {
-  version: '2.0.23',
-  tag: 'v2.0.23',
-  commit: '0fd7e2829449b052abf0078666669302923d77af'
+  version: manifest.tested,
+  tag: `v${manifest.tested}`,
+  commit: PIN_COMMIT
 }
 
 export const SPEC_PATH = 'packages/protocol/openapi.json'

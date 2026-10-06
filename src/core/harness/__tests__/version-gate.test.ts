@@ -13,7 +13,7 @@ import type { HarnessId, HarnessManifest } from '../../../shared/harness-types'
 const { FIXED } = vi.hoisted(() => ({
   FIXED: {
     claude: { tested: '2.1.280', floor: '2.1.275', ceiling: '3.0.0' },
-    opencode: { tested: '1.18.32', floor: '1.18.32', ceiling: '2.0.0' },
+    opencode: { tested: '2.0.24', floor: '2.0.20', ceiling: '3.0.0' },
     pi: { tested: '0.87.1', floor: '0.87.1', ceiling: '1.0.0' },
     codex: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' }
   } as Record<string, { tested: string; floor: string; ceiling: string }>
@@ -29,7 +29,7 @@ vi.mock('../manifests', async (importOriginal) => {
 })
 
 const { harnessManifest } = await import('../manifests')
-const { classifyVersion, versionAccepted } = await import('../version-gate')
+const { classifyVersion, versionAccepted, versionReason } = await import('../version-gate')
 
 describe('classifyVersion', () => {
   it.each([
@@ -57,13 +57,13 @@ describe('classifyVersion', () => {
   })
 
   it.each([
-    ['1.18.32', 'tested'],
-    ['1.18.33', 'untested'],
-    ['1.19.0', 'untested'],
-    ['1.18.31', 'too-old'],
-    // opencode 2.x (`@opencode/cli`) ships an executable with the same name and
-    // an incompatible config.
-    ['2.0.20', 'incompatible']
+    ['2.0.24', 'tested'],
+    ['2.0.20', 'untested'],
+    ['2.1.0', 'untested'],
+    ['2.0.19', 'too-old'],
+    // opencode 1.x (`opencode-ai`) is the previous line: too old, not incompatible.
+    ['1.18.34', 'too-old'],
+    ['3.0.0', 'incompatible']
   ] as const)('opencode %j is %s', (version, expected) => {
     expect(classifyVersion('opencode', version)).toBe(expected)
   })
@@ -75,6 +75,15 @@ describe('classifyVersion', () => {
     ['1.0.0', 'incompatible']
   ] as const)('codex %j is %s', (version, expected) => {
     expect(classifyVersion('codex', version)).toBe(expected)
+  })
+
+  it('explains a version below the floor, naming the major line when it is a whole one behind', () => {
+    expect(versionReason('opencode', '2.0.19', 'too-old')).toBe(
+      'opencode 2.0.19 is older than 2.0.20, the oldest ClaudeUI supports'
+    )
+    expect(versionReason('opencode', '1.18.34', 'too-old')).toBe(
+      'opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.0.20 or newer)'
+    )
   })
 
   it.each(HARNESS_IDS)('%s (real manifest) accepts tested and floor, refuses the ceiling', (id) => {

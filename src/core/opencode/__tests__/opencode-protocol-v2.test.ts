@@ -20,6 +20,7 @@ import {
   renderProtocol,
   schemaToTs
 } from '../../../../scripts/generate-opencode-protocol.mjs'
+import { harnessManifest } from '../../harness/manifests'
 import provenance from '../protocol-v2/provenance.json'
 import reviewed from '../protocol-v2/events.reviewed.json'
 import { EVENT_DURABILITY, eventSessionID, isOpencodeEvent } from '../protocol-v2/events'
@@ -36,6 +37,13 @@ describe('committed output', () => {
   it('was generated, and its event closure reviewed, at the script’s pin', () => {
     expect(provenance).toMatchObject({ version: PIN.version, tag: PIN.tag, commit: PIN.commit })
     expect(reviewed).toMatchObject({ version: PIN.version, commit: PIN.commit })
+  })
+
+  it('describes the opencode the harness manifest installs (one pin, ADR-093 §1)', () => {
+    const { tested } = harnessManifest('opencode')
+    expect(PIN).toMatchObject({ version: tested, tag: `v${tested}` })
+    expect(provenance.version).toBe(tested)
+    expect(reviewed.version).toBe(tested)
   })
 
   // Runs where the upstream checkout exists (developer boxes), skips in CI.

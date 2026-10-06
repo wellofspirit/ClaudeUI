@@ -156,8 +156,9 @@ on a `--version` probe.
 
 Each harness declares its floor and ceiling in the release manifest (§5). The ceiling is exclusive
 and is the next major version, so a new major is never "untested but selectable": opencode 2.x
-(`@opencode/cli`) already ships an executable named `opencode` whose configuration is incompatible
-with 1.x. The ceilings are Claude Code 3.0.0, opencode 2.0.0, pi 2.0.0 and Codex 1.0.0. Codex is
+(`@opencode/cli`) ships an executable named `opencode` whose configuration is incompatible with
+1.x. The ceilings are Claude Code 3.0.0, opencode 3.0.0 (2.0.0 until the ADR-093 arc moved it to
+2.x), pi 2.0.0 and Codex 1.0.0. Codex is
 0.x, where a minor release may break in semver terms; its ceiling is set at 1.0.0 anyway, because
 what ClaudeUI depends on (Codex's app-server protocol) is what the tested version is checked
 against. pi has shipped breaking changes in minor and even patch releases, so its next-major
@@ -167,12 +168,13 @@ what warns.
 Every floor equals its tested version unless a lower one is measured and worth keeping (owner,
 2026-10-06; see the amendment above): a bump moves the floor with the pin. The Claude Code floor
 was 2.1.275 until then (owner, 2026-09-30), the build the protocol docs relied on
-(`--forward-subagent-text` from 2.1.211, subagent and skill fixes through 2.1.275). opencode is
-the one exception today: floor 1.18.32, the previous pin, below tested 1.18.34.
+(`--forward-subagent-text` from 2.1.211, subagent and skill fixes through 2.1.275). opencode was
+the one exception (floor 1.18.32 below tested 1.18.34) until ADR-093 moved it to 2.x with floor =
+tested.
 
 ### 4. Downloads
 
-- Sources are official only: the npm registry for opencode (`opencode-<os>-<arch>`), GitHub releases
+- Sources are official only: the npm registry for opencode (`@opencode/cli-<os>-<arch>`), GitHub releases
   for pi and Codex. The pipelines `ensure-*.mjs` use today are the reference.
 - Every download is checked before first use. A tested version is checked against a SHA-256 reviewed
   into this repo, in the harness's release manifest (§5). Any
@@ -193,7 +195,8 @@ the one exception today: floor 1.18.32, the previous pin, below tested 1.18.34.
 As built (arc 2, S3; `src/core/harness/install/`):
 
 - Hosts. opencode comes from `registry.npmjs.org` only: the metadata of
-  `opencode-<os>-<arch>@<version>` names the tarball, which must itself be on
+  `@opencode/cli-<os>-<arch>@<version>` (1.x: `opencode-<os>-<arch>`; ADR-093 §1) names the
+  tarball, which must itself be on
   `https://registry.npmjs.org/`, and only `package/bin/opencode[.exe]` is kept. pi and Codex come
   from `github.com/<owner>/<repo>/releases/download/...`, whose redirect may go only to
   `release-assets.githubusercontent.com` (the one host those assets redirected to when this was
@@ -245,8 +248,7 @@ the tested version, the floor, the ceiling, the download coordinates per platfor
 digests. It replaces the `package.json` pins (`opencodeCliVersion`, `piCliVersion`,
 `codexCliVersion`) and the `scripts/*-digests.json` files as the source of truth for what "Tested"
 means; the `ensure-*` scripts and CI cache keys read it. `claudeCliVersion` stays, because Claude
-Code stays bundled; the Claude manifest's `tested` matches it. Floors equal tested versions (§3),
-opencode's excepted.
+Code stays bundled; the Claude manifest's `tested` matches it. Floors equal tested versions (§3).
 
 ### 6. Updates
 

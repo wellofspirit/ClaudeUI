@@ -1,6 +1,6 @@
 {
-  "version": "2.0.23",
-  "commit": "0fd7e2829449b052abf0078666669302923d77af",
+  "version": "2.0.24",
+  "commit": "e7a34f09bfd9134dfade5a8ddb843f7030bc9a69",
   "sources": {
     "packages/protocol/src/groups/event.ts": "de5857bb0a9baf94e165f95978c0ae1affe70abce5182ffb01225afae507fbd0",
     "packages/schema/src/event.ts": "cf68654e57726a376c0c57e27740606f276952f14407dc3dedfdad9e8a62ac16",

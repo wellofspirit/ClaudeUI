@@ -129,7 +129,22 @@ describe('harnessCandidates', () => {
     })
   })
 
-  it('finds opencode 2.x too (so it can be labelled incompatible)', () => {
+  it("finds opencode 2.x's opencode2 on PATH beside (or instead of) opencode", () => {
+    const v1Dir = path.join(tmp, 'v1')
+    const v2Dir = path.join(tmp, 'v2')
+    const v1 = writeNative(path.join(v1Dir, `opencode${EXE}`))
+    const v2 = writeNative(path.join(v2Dir, `opencode2${EXE}`))
+    const both = writeNative(path.join(v2Dir, `opencode${EXE}`))
+    expect(candidates('opencode', { ...deps, pathEntries: [v1Dir, v2Dir] })).toEqual([
+      { id: 'opencode', kind: 'file', path: v1 },
+      { id: 'opencode', kind: 'file', path: both },
+      { id: 'opencode', kind: 'file', path: v2 }
+    ])
+    // Only opencode's alias: no other harness looks for it.
+    expect(candidates('pi', { ...deps, pathEntries: [v2Dir] })).toEqual([])
+  })
+
+  it('finds opencode 1.x too (so it can be labelled too old)', () => {
     writeNative(path.join(deps.env.BUN_INSTALL as string, 'install', 'global', 'node_modules', 'x'))
     const root = path.join(deps.env.BUN_INSTALL as string, 'install', 'global', 'node_modules')
     const v1 = writePackage(path.join(root, 'opencode-ai'), { name: 'opencode-ai' })

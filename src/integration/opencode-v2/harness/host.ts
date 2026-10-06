@@ -35,16 +35,28 @@ import {
   type OpencodeEvent,
   type OpencodeEventType
 } from '../../../core/opencode/protocol-v2/events'
+import { harnessManifest } from '../../../core/harness/manifests'
+import { installDir } from '../../../core/harness/store'
 import { formatRequests, formatTrace, redact } from './diagnostics'
 import { startFixtureProvider, type FixtureProvider } from './fixture-provider'
 
 // --- Gate -------------------------------------------------------------------
 
 export const V2_ENABLED = process.env.OPENCODE_V2_INTEGRATION === '1'
-export const V2_BIN = process.env.OPENCODE_V2_BIN ?? ''
-if (V2_ENABLED && !(V2_BIN && existsSync(V2_BIN)))
+/**
+ * The binary under test: `OPENCODE_V2_BIN`, else the managed store's copy of
+ * the manifest's tested version (`bun run ensure-opencode`; honours
+ * `CLAUDEUI_HARNESS_STORE`).
+ */
+export const V2_BIN =
+  process.env.OPENCODE_V2_BIN ||
+  join(
+    installDir('opencode', harnessManifest('opencode').tested),
+    process.platform === 'win32' ? 'opencode.exe' : 'opencode'
+  )
+if (V2_ENABLED && !existsSync(V2_BIN))
   throw new Error(
-    'OPENCODE_V2_INTEGRATION=1 needs OPENCODE_V2_BIN=<absolute path to an opencode 2.x binary>'
+    `OPENCODE_V2_INTEGRATION=1: no opencode at ${V2_BIN}. Run \`bun run ensure-opencode\`, or set OPENCODE_V2_BIN=<absolute path to an opencode 2.x binary>`
   )
 /** Skips cleanly unless the suite is explicitly enabled. */
 export const describeV2 = describe.skipIf(!V2_ENABLED)

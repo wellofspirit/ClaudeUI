@@ -13,10 +13,10 @@ import { fakeFetch, type Route } from './fixtures'
 
 const OPENCODE: HarnessManifest = {
   id: 'opencode',
-  tested: '1.18.32',
-  floor: '1.18.30',
-  ceiling: '2.0.0',
-  platforms: { 'linux-x64': { package: 'opencode-linux-x64' } }
+  tested: '2.0.24',
+  floor: '2.0.20',
+  ceiling: '3.0.0',
+  platforms: { 'linux-x64': { package: '@opencode/cli-linux-x64' } }
 }
 const PI: HarnessManifest = {
   id: 'pi',
@@ -25,7 +25,8 @@ const PI: HarnessManifest = {
   ceiling: '1.0.0',
   platforms: { 'linux-x64': { asset: 'pi-linux-x64.tar.gz' } }
 }
-const REGISTRY = 'https://registry.npmjs.org/opencode-linux-x64'
+// npm's escaped form of a scoped package name.
+const REGISTRY = 'https://registry.npmjs.org/@opencode%2fcli-linux-x64'
 const RELEASES = 'https://api.github.com/repos/earendil-works/pi/releases?per_page=100'
 
 function upstream(routes: Record<string, Route>, now = { t: 0 }) {
@@ -44,15 +45,16 @@ function upstream(routes: Record<string, Route>, now = { t: 0 }) {
 const opencodeDoc = {
   body: JSON.stringify({
     versions: {
-      '1.18.29': {},
-      '1.18.30': {},
-      '1.18.32': {},
-      '1.18.33': {},
-      '1.18.34': { deprecated: 'broken' },
-      '1.19.0-beta.1': {},
-      '0.0.0-dev-202609292145': {},
-      '2.0.0': {},
-      '2.1.0': {}
+      '1.18.34': {},
+      '2.0.18': {},
+      '2.0.20': {},
+      '2.0.24': {},
+      '2.0.25': {},
+      '2.0.26': { deprecated: 'broken' },
+      '2.1.0-beta.1': {},
+      '0.0.0-dev-20640': {},
+      '3.0.0': {},
+      '3.1.0': {}
     }
   })
 }
@@ -70,9 +72,9 @@ function release(tag: string, extra: Record<string, unknown> = {}) {
 describe('opencode', () => {
   it('lists stable, non-deprecated versions in [floor, ceiling), newest first', async () => {
     const { u, f } = upstream({ [REGISTRY]: opencodeDoc })
-    expect(await u.latestVersion('opencode')).toBe('1.18.33')
-    expect(await u.availableVersions('opencode')).toEqual(['1.18.33', '1.18.32', '1.18.30'])
-    expect(await u.availableVersions('opencode', 2)).toEqual(['1.18.33', '1.18.32'])
+    expect(await u.latestVersion('opencode')).toBe('2.0.25')
+    expect(await u.availableVersions('opencode')).toEqual(['2.0.25', '2.0.24', '2.0.20'])
+    expect(await u.availableVersions('opencode', 2)).toEqual(['2.0.25', '2.0.24'])
     // One request serves every call within the hour.
     expect(f.calls).toEqual([REGISTRY])
   })
@@ -87,6 +89,25 @@ describe('opencode', () => {
     })
     await u.latestVersion('opencode')
     expect(accept).toBe('application/vnd.npm.install-v1+json')
+  })
+})
+
+describe('opencode package names', () => {
+  it('reads only an @opencode/cli-* platform package (never 1.x’s opencode-<plat>)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const f = fakeFetch({})
+    const u = createUpstream({
+      fetch: async () => f.fetch,
+      manifest: (id: HarnessId) =>
+        id === 'opencode'
+          ? { ...OPENCODE, platforms: { 'linux-x64': { package: 'opencode-linux-x64' } } }
+          : harnessManifest(id),
+      platform: 'linux',
+      arch: 'x64'
+    })
+    expect(await u.latestVersion('opencode')).toBeNull()
+    expect(f.calls).toEqual([])
+    warn.mockRestore()
   })
 })
 
@@ -163,7 +184,7 @@ describe('caching and failures', () => {
     expect(f.calls).toHaveLength(1)
     now.t += UPSTREAM_FAILURE_TTL_MS
     f.routes.set(REGISTRY, opencodeDoc)
-    expect(await u.latestVersion('opencode')).toBe('1.18.33')
+    expect(await u.latestVersion('opencode')).toBe('2.0.25')
     warn.mockRestore()
   })
 

@@ -3,7 +3,7 @@
  * dropdown:
  *
  *   opencode  the npm registry's abbreviated document of this host's platform
- *             package (`opencode-<os>-<arch>`), so every version listed has a
+ *             package (`@opencode/cli-<os>-<arch>`), so every version listed has a
  *             binary for this host; deprecated versions are skipped
  *   pi        GitHub's release list for `earendil-works/pi` (the newest 100),
  *             not drafts or prereleases, and only releases that carry this
@@ -23,7 +23,12 @@ import { pickNetFetch } from '../../services/net-fetch'
 import { harnessManifest } from '../manifests'
 import { compareVersions } from '../store'
 import { GITHUB_API, NPM_REGISTRY, fetchJson } from './download'
-import { opencodePlatformKey, piPlatformKey } from './sources'
+import {
+  OPENCODE_PLATFORM_PACKAGE,
+  npmPackageUrl,
+  opencodePlatformKey,
+  piPlatformKey
+} from './sources'
 
 export const UPSTREAM_TTL_MS = 60 * 60 * 1000
 export const UPSTREAM_FAILURE_TTL_MS = 5 * 60 * 1000
@@ -83,8 +88,9 @@ export function createUpstream(deps: UpstreamDeps = {}): Upstream {
     const key = opencodePlatformKey(platform, arch)
     const pkg =
       key && Object.hasOwn(manifest.platforms, key) ? manifest.platforms[key].package : null
-    if (typeof pkg !== 'string') throw new Error(`no opencode package for ${platform}-${arch}`)
-    const doc = await fetchJson(`https://registry.npmjs.org/${pkg}`, {
+    if (typeof pkg !== 'string' || !OPENCODE_PLATFORM_PACKAGE.test(pkg))
+      throw new Error(`no opencode package for ${platform}-${arch}`)
+    const doc = await fetchJson(npmPackageUrl(pkg), {
       fetch: await getFetch(),
       policy: NPM_REGISTRY,
       headers: { Accept: 'application/vnd.npm.install-v1+json' },

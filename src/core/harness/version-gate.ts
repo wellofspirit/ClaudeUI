@@ -60,8 +60,15 @@ export function versionReason(
   const { tested, floor, ceiling } = harnessManifest(id)
   const label = LABELS[id]
   switch (verdict) {
-    case 'too-old':
+    case 'too-old': {
+      // A whole major behind (opencode 1.x on PATH under a 2.x floor) is a
+      // different product line, not a stale build: say so.
+      const major = (v: string): number => Number(v.split('.')[0])
+      if (major(version) < major(floor)) {
+        return `${label} ${version} is from the ${major(version)}.x line; ClaudeUI uses ${label} ${major(floor)}.x (${floor} or newer)`
+      }
       return `${label} ${version} is older than ${floor}, the oldest ClaudeUI supports`
+    }
     case 'incompatible':
       return `${label} ${version} is not supported: ClaudeUI needs a version from ${floor} up to, not including, ${ceiling}`
     case 'untested':

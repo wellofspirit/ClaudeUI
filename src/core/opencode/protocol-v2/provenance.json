@@ -1,7 +1,7 @@
 {
-  "version": "2.0.23",
-  "tag": "v2.0.23",
-  "commit": "0fd7e2829449b052abf0078666669302923d77af",
+  "version": "2.0.24",
+  "tag": "v2.0.24",
+  "commit": "e7a34f09bfd9134dfade5a8ddb843f7030bc9a69",
   "spec": "packages/protocol/openapi.json",
   "specSha256": "0612418392961ef22f0337ce0e1e520270917665fc85f29c4af1c94d1e1873ee",
   "specInfo": {
@@ -15,6 +15,6 @@
     "operations": 141
   },
   "files": {
-    "openapi.ts": "bf19a4fffc13313997cce30cea2ba8b2913f7d894d561768d5a390aec07a2ead"
+    "openapi.ts": "18222145b6d9aac7efcae296a2f340e4c453c70ba2fa48520dccfd6a0a722f62"
   }
 }

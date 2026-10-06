@@ -5,8 +5,8 @@
  * old `scripts/ensure-{opencode,pi,codex}.mjs`, which are now thin wrappers
  * over the installer (ADR-082 §8).
  *
- *   opencode  npm registry: `<platform-package>/<version>` metadata gives
- *             `dist.tarball` (must be on registry.npmjs.org) and
+ *   opencode  npm registry: `@opencode/cli-<os>-<arch>@<version>` metadata
+ *             gives `dist.tarball` (must be on registry.npmjs.org) and
  *             `dist.integrity`. Only `package/bin/opencode[.exe]` is kept.
  *             Tested: the reviewed `integrity` and `binarySha256` must match.
  *             Otherwise npm's `integrity` only (`publisher`).
@@ -147,6 +147,18 @@ export function opencodePlatformKey(platform: string, arch: string): string | nu
   return null
 }
 
+/**
+ * opencode 2.x's platform packages (ADR-093 §1): `@opencode/cli-<os>-<arch>`.
+ * The manifest names them; anything else (1.x's `opencode-<os>-<arch>`
+ * included) is refused before a request is made.
+ */
+export const OPENCODE_PLATFORM_PACKAGE = /^@opencode\/cli-[a-z0-9]+-[a-z0-9]+$/
+
+/** A package's registry document URL (`@scope/name` → `@scope%2fname`, as npm escapes it). */
+export function npmPackageUrl(pkg: string): string {
+  return `https://registry.npmjs.org/${pkg.replace('/', '%2f')}`
+}
+
 /** The sha512 entries of an SRI string (`sha512-<b64> sha1-<b64>`), base64. */
 function sriSha512s(integrity: string): string[] {
   return integrity
@@ -160,7 +172,7 @@ async function acquireOpencode(ctx: AcquireContext): Promise<Acquired> {
   const key = opencodePlatformKey(ctx.platform, ctx.arch)
   const entry = key ? platformEntry(ctx.manifest, key) : null
   const pkg = entry?.package
-  if (!entry || typeof pkg !== 'string' || !/^opencode-[a-z0-9]+-[a-z0-9]+$/.test(pkg)) {
+  if (!entry || typeof pkg !== 'string' || !OPENCODE_PLATFORM_PACKAGE.test(pkg)) {
     throw new VerifyError(`opencode has no release for ${ctx.platform}-${ctx.arch}`)
   }
   const reviewedIntegrity = entry.integrity
@@ -174,7 +186,7 @@ async function acquireOpencode(ctx: AcquireContext): Promise<Acquired> {
     throw new VerifyError(`the opencode manifest has no reviewed digests for ${key}`)
   }
 
-  const meta = await fetchJson(`https://registry.npmjs.org/${pkg}/${ctx.version}`, {
+  const meta = await fetchJson(`${npmPackageUrl(pkg)}/${ctx.version}`, {
     fetch: ctx.fetch,
     policy: NPM_REGISTRY,
     signal: ctx.signal,
@@ -202,7 +214,9 @@ async function acquireOpencode(ctx: AcquireContext): Promise<Acquired> {
     throw new VerifyError(`npm lists no sha512 integrity for ${pkg}@${ctx.version}`)
   }
 
-  const tgz = await download(ctx, tarballUrl.href, `${pkg}-${ctx.version}.tgz`, NPM_REGISTRY)
+  // `@opencode/cli-x` → `opencode-cli-x`: a plain file name in downloadsDir.
+  const tgzName = `${pkg.slice(1).replace('/', '-')}-${ctx.version}.tgz`
+  const tgz = await download(ctx, tarballUrl.href, tgzName, NPM_REGISTRY)
   ctx.phase('verifying')
   const actual = `sha512-${tgz.sha512}`
   if (!publisher.includes(tgz.sha512)) {

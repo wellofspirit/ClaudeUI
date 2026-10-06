@@ -81,13 +81,19 @@ export function isolationEnv(id: HarnessId, probeDir: string): Record<string, st
 
 const CLAUDE_VERSION = /^(\d+\.\d+\.\d+\S*)\s+\(Claude Code\)/
 const CODEX_VERSION = /^codex-cli (\S+)$/
+/** opencode 2.x: `opencode v2.0.24` (a source build without a version: `opencode vlocal`). */
+const OPENCODE_V2_VERSION = /^opencode v(\S+)$/
 
-/** The version in a `--version` answer, per harness (research §3). */
+/**
+ * The version in a `--version` answer, per harness (research §3). opencode 1.x
+ * and pi print a bare version; opencode 2.x prints `opencode v<version>`.
+ */
 export function parseVersionOutput(id: HarnessId, stdout: string): ProbeResult {
   const lines = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
+    .map((line) => (id === 'opencode' ? (OPENCODE_V2_VERSION.exec(line)?.[1] ?? line) : line))
   for (const line of lines) {
     if (id === 'claude') {
       const m = CLAUDE_VERSION.exec(line)
@@ -99,8 +105,8 @@ export function parseVersionOutput(id: HarnessId, stdout: string): ProbeResult {
       return { status: 'ok', version: line }
     }
   }
-  // opencode and pi print a bare version; a lone other word (a source build's
-  // `local`) is an answer, just not a version.
+  // A lone other word (a source build's `local`, either opencode line) is an
+  // answer, just not a version.
   if ((id === 'opencode' || id === 'pi') && lines.length === 1 && /^\S+$/.test(lines[0])) {
     return { status: 'not-a-version', output: lines[0].slice(0, 80) }
   }

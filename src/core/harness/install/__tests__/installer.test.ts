@@ -19,7 +19,7 @@ import { invalidateHarness, resolveHarness } from '../../resolve'
 import { harnessesConfigPath } from '../../selection-store'
 import { HARNESS_STORE_ENV, LAST_USED_FILE, readInstallRecord } from '../../store'
 import { createInstaller, type InstallerDeps, type InstallProgress } from '../installer'
-import { opencodePlatformKey, piPlatformKey } from '../sources'
+import { npmPackageUrl, opencodePlatformKey, piPlatformKey } from '../sources'
 import { STAGING_DIR, TRASH_DIR } from '../store-writer'
 import {
   fakeFetch,
@@ -113,6 +113,7 @@ interface OpencodeFixture {
   manifest: HarnessManifest
   bin: Buffer
   tarball: Buffer
+  tarballUrl: string
 }
 
 function opencodeFixture(
@@ -125,9 +126,10 @@ function opencodeFixture(
     tarEntry(`package/bin/${exe('opencode')}`, bin, { mode: 0o755 })
   ])
   const integrity = `sha512-${sha512b64(tarball)}`
-  const tarballUrl = `https://registry.npmjs.org/${OC_PKG}/-/${OC_PKG}-${version}.tgz`
+  // npm's layout for a scoped package: `/@opencode/cli-<plat>/-/cli-<plat>-<version>.tgz`.
+  const tarballUrl = `https://registry.npmjs.org/${OC_PKG}/-/${OC_PKG.split('/')[1]}-${version}.tgz`
   const f = fakeFetch({
-    [`https://registry.npmjs.org/${OC_PKG}/${version}`]: {
+    [`${npmPackageUrl(OC_PKG)}/${version}`]: {
       body: JSON.stringify({
         dist: { tarball: tarballUrl, integrity: opts.npmIntegrity ?? integrity }
       })
@@ -141,7 +143,7 @@ function opencodeFixture(
       binarySha256: opts.reviewedBinary ?? sha256(bin)
     }
   })
-  return { f, manifest, bin, tarball }
+  return { f, manifest, bin, tarball, tarballUrl }
 }
 
 function installerFor(
@@ -223,7 +225,7 @@ describe.skipIf(!OC_KEY)('opencode', () => {
 
   it('refuses a tarball URL off the registry', async () => {
     const fx = opencodeFixture(OC_TESTED)
-    fx.f.routes.set(`https://registry.npmjs.org/${OC_PKG}/${OC_TESTED}`, {
+    fx.f.routes.set(`${npmPackageUrl(OC_PKG)}/${OC_TESTED}`, {
       body: JSON.stringify({ dist: { tarball: 'https://evil.test/x.tgz', integrity: 'sha512-A' } })
     })
     const result = await installerFor(fx, OC_TESTED).installHarness('opencode', 'tested')
@@ -231,6 +233,17 @@ describe.skipIf(!OC_KEY)('opencode', () => {
       /outside https:\/\/registry\.npmjs\.org/
     )
     expect(fx.f.calls).not.toContain('https://evil.test/x.tgz')
+  })
+
+  it('refuses a platform package that is not @opencode/cli-* (1.x names too) without a request', async () => {
+    for (const pkg of ['opencode-darwin-arm64', '@evil/cli-darwin-arm64', '@opencode/cli']) {
+      const fx = opencodeFixture(OC_TESTED)
+      const entry = fx.manifest.platforms[OC_KEY as string]
+      fx.manifest.platforms[OC_KEY as string] = { ...entry, package: pkg }
+      const result = await installerFor(fx, OC_TESTED).installHarness('opencode', 'tested')
+      expect(result.status === 'failed' && result.reason).toMatch(/opencode has no release for/)
+      expect(fx.f.calls).toEqual([])
+    }
   })
 
   it('fails when --version reports another version, or does not run', async () => {
@@ -352,10 +365,9 @@ describe.skipIf(!OC_KEY)('opencode', () => {
   it('cancels on abort and removes its staging area', async () => {
     const fx = opencodeFixture(OC_TESTED)
     const controller = new AbortController()
-    const tarballUrl = `https://registry.npmjs.org/${OC_PKG}/-/${OC_PKG}-${OC_TESTED}.tgz`
     // Abort once the first bytes are in the staging area.
     fx.f.routes.set(
-      tarballUrl,
+      fx.tarballUrl,
       hangingBody(fx.tarball.subarray(0, 10), () => setTimeout(() => controller.abort(), 10))
     )
     const installer = installerFor(fx, OC_TESTED)

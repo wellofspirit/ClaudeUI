@@ -2,7 +2,7 @@
  * opencode 2.x contract: server lease, a streamed turn, interrupt, subagent
  * child sessions, the session list, and cold history (ADR-093 §2, §5, §6, §8.1).
  *
- *   OPENCODE_V2_INTEGRATION=1 OPENCODE_V2_BIN=/path/to/opencode \
+ *   OPENCODE_V2_INTEGRATION=1 [OPENCODE_V2_BIN=/path/to/opencode] \
  *     bun run test:integration src/integration/opencode-v2
  */
 import { execFileSync } from 'node:child_process'

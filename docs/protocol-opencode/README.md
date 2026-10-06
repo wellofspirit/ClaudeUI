@@ -5,12 +5,41 @@ it out. The spike's findings are in [`docs/opencode-v2-spike.md`](../opencode-v2
 
 ## Pin
 
-- opencode **2.0.23**, tag `v2.0.23`, commit `0fd7e2829449b052abf0078666669302923d77af`.
-- The pin lives in `scripts/generate-opencode-protocol.mjs` (`PIN`) until S1 moves the harness
-  manifest to `@opencode/cli`; from then on `manifest.tested` must equal it.
+- opencode **2.0.24**, tag `v2.0.24`, commit `e7a34f09bfd9134dfade5a8ddb843f7030bc9a69` (verified
+  against upstream's `refs/tags/v2.0.24`). Spec and event sources are byte-identical to 2.0.23, the
+  S0 pin; only the packages' `version` fields moved.
+- **One pin.** The version is the harness manifest's `tested`
+  (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
+  and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
+  test pins `manifest.tested` = `provenance.json#version` = `events.reviewed.json#version`.
 - Source checkout: `vendor/opencode-v2-src` at the tag (gitignored, like every `vendor/*-src`).
-  The generator also honours `OPENCODE_V2_SRC`, and from an agent worktree falls back to the main
-  checkout's `vendor/opencode-v2-src`.
+  The generator reads the pinned commit with `git show`, so the checkout's HEAD does not matter; it
+  also honours `OPENCODE_V2_SRC`, and from an agent worktree falls back to the main checkout's
+  `vendor/opencode-v2-src`.
+
+## Acquisition (ADR-082 §4, ADR-093 §1)
+
+- npm: `@opencode/cli` (bins `opencode` and `opencode2`, both `bin/opencode.exe`, a placeholder its
+  postinstall replaces with a hard link to the platform build on every OS) and one package per host,
+  `@opencode/cli-<os>-<arch>` (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
+  `windows-x64`, `windows-arm64`, plus `-baseline` / `-musl` variants). Each platform tarball holds
+  exactly `package/package.json` and `package/bin/opencode[.exe]`.
+- ClaudeUI's managed copy: the installer reads `@opencode%2fcli-<os>-<arch>/<version>` from
+  `registry.npmjs.org`, checks the tarball against npm's `integrity` and, for the tested version,
+  the reviewed `integrity` and `binarySha256` in the manifest, and keeps only the binary
+  (`~/.claude/ui/harnesses/opencode/<version>/opencode[.exe]`). Windows on arm64 still runs the x64
+  build. `bun run ensure-opencode` installs the tested version; `update-opencode` reinstalls it.
+- Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
+  published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
+  `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
+- `--version` prints `opencode v2.0.24` (1.x printed the bare version; a source build without a
+  version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.0.24 or newer)"), and
+  `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
+  build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
+  System and labelled by its version like any other (on 2026-10-06 the formula was 2.0.20, below
+  the 2.0.24 floor: too old).
+- Floor = tested, ceiling `3.0.0`.
 
 ## Generated types
 
@@ -47,9 +76,12 @@ the upstream checkout is present.
 fixture model. It is gated and skips cleanly without the gate:
 
 ```sh
-OPENCODE_V2_INTEGRATION=1 OPENCODE_V2_BIN=/abs/path/to/opencode \
-  bun run test:integration src/integration/opencode-v2
+bun run ensure-opencode   # the tested version into the managed store, once
+OPENCODE_V2_INTEGRATION=1 bun run test:integration src/integration/opencode-v2
 ```
+
+The binary defaults to the managed store's copy of the manifest's `tested` (honouring
+`CLAUDEUI_HARNESS_STORE`); `OPENCODE_V2_BIN=/abs/path/to/opencode` overrides it.
 
 - Every server runs with `HOME`/`XDG_*` under `.cache/opencode-v2-it/`, a refusing proxy in every
   proxy variable, models.dev fetch and autoupdate off, and on darwin under a loopback-only
@@ -61,6 +93,8 @@ OPENCODE_V2_INTEGRATION=1 OPENCODE_V2_BIN=/abs/path/to/opencode \
   `OPENCODE_V2_ALLOW_VERSION_MISMATCH=1`.
 - The ChatGPT credential case needs `sandbox-exec`, so it runs on darwin only.
 
-Bump procedure: move the source checkout to the new tag, update `PIN`, run
-`generate-opencode-protocol` (review the drift report and any event-source diff), then run the
-contract suite with the new binary.
+Bump procedure: fetch upstream tags into the source checkout, set the manifest's `tested` and
+`floor` with each platform package's reviewed `integrity` and `binarySha256`, set `PIN_COMMIT` to
+the tag's commit (check it against `git ls-remote origin refs/tags/v<version>`), run
+`generate-opencode-protocol` (review the drift report and any event-source diff), `ensure-opencode`,
+then the contract suite.
