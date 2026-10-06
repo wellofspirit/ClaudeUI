@@ -529,8 +529,8 @@ describe('TaskCard — inline task approval', () => {
 //
 // dispatch_agent maps to the 'task' ToolKind via hostedMcpKind/OpencodeEngineToolMap
 // (see ClaudeEngineToolMap.test.ts / OpencodeEngineToolMap.test.ts), and its
-// ToolView normalizes to description:'Dispatch: <engine>' + subagent:'<engine> · <model>'
-// (the badge slot — no ToolView extension). This exercises TaskCard's rendering
+// ToolView normalizes to description:'Dispatch: <engine>' + the structured
+// `dispatch: { engine, model }` field (ADR-093). This exercises TaskCard's rendering
 // of that view directly with item-streamed subagent output, mirroring how the
 // dispatcher's item lifecycle lands in the store while a dispatch is in flight.
 
@@ -558,15 +558,18 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     kind: 'task' as const,
     description: 'Dispatch: opencode',
     prompt: 'Get a second opinion',
-    subagent: 'opencode · openai/gpt-5'
+    dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
   }
 
-  it('shows the "<engine> · <model>" badge in the subagent slot while running', () => {
+  it('shows the X tile and the "<engine> · <model>" chip while running', () => {
     seed.subagentStreamText(ROUTE, 'toolu_dispatch_1', 'Working on it')
     render(<TaskCard block={dispatchBlock} view={dispatchView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
     expect(screen.getByText('opencode · openai/gpt-5')).toBeInTheDocument()
+    const tile = screen.getAllByTestId('TaskCard.typeTile')[0]
+    expect(tile).toHaveTextContent('X')
+    expect(tile).toHaveAttribute('title', 'Dispatch → opencode · openai/gpt-5')
   })
 
   it('renders live-streamed text forwarded from the dispatch target', () => {
@@ -625,7 +628,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
           kind: 'task',
           description: 'Dispatch: claude',
           prompt: 'review',
-          subagent: 'claude · haiku'
+          dispatch: { engine: 'claude', model: 'haiku' }
         }}
       />
     )
@@ -646,7 +649,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
           kind: 'task',
           description: 'Dispatch: claude',
           prompt: 'review',
-          subagent: 'claude · sonnet'
+          dispatch: { engine: 'claude', model: 'sonnet' }
         }}
       />
     )

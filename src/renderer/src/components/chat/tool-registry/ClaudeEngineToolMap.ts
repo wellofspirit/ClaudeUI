@@ -6,7 +6,7 @@
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
-import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { isAgentTool } from '../../../../../shared/types'
 import { claudeToolSpec } from './claude-tool-specs'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
@@ -178,16 +178,9 @@ function claudeNormalize(
       // a DIFFERENT input shape than Claude's native Task tool:
       // { engine, prompt, model?, session_id? } — no description/subagent_type.
       // `engine` is the reliable discriminator (native Task never has it).
-      // The badge slot (TaskCard's `subagent`) carries "<engine> · <model>"
-      // instead of extending ToolView with dispatch-specific fields.
-      if (typeof inp.engine === 'string') {
-        return {
-          kind: 'task',
-          description: `Dispatch: ${inp.engine}`,
-          prompt: inp.prompt != null ? String(inp.prompt) : '',
-          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
-        }
-      }
+      // The view's structured `dispatch` field marks it (ADR-093).
+      if (typeof inp.engine === 'string')
+        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
       // `name` is what SendMessage addresses the agent by, and the only thing
       // that tells two siblings of the same type apart in a roster (ADR-073).
       const subagentType =

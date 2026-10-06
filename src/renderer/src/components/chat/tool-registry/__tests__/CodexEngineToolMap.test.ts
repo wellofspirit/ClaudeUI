@@ -91,7 +91,7 @@ describe('CodexEngineToolMap — dispatch_agent', () => {
     expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
   })
 
-  it('task: the target engine is the discriminator, the model rides the subtitle', () => {
+  it('task: the target engine is the discriminator, the model rides the dispatch field', () => {
     expect(
       CodexEngineToolMap.normalize('task', {
         engine: 'claude',
@@ -102,7 +102,7 @@ describe('CodexEngineToolMap — dispatch_agent', () => {
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'summarise the repo',
-      subagent: 'claude · haiku'
+      dispatch: { engine: 'claude', model: 'haiku' }
     })
   })
 
@@ -111,7 +111,7 @@ describe('CodexEngineToolMap — dispatch_agent', () => {
       kind: 'task',
       description: 'Dispatch: pi',
       prompt: 'run tests',
-      subagent: 'pi'
+      dispatch: { engine: 'pi' }
     })
   })
 })
@@ -151,7 +151,7 @@ describe('CodexEngineToolMap — collab agent tools', () => {
       kind: 'task',
       description: 'Agent',
       prompt: 'survey the tests',
-      subagent: 'gpt-mock',
+      // The model is a model, not an agent TYPE: no `subagent` (ADR-093).
       model: 'gpt-mock'
     })
   })
@@ -175,9 +175,9 @@ describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
       kind: 'task',
       description: 'Agent',
       prompt: '',
-      // The path's leaf is also the agent's roster name (ADR-073).
-      name: 'fixture_child',
-      subagent: '/root/fixture_child'
+      // The path's leaf is also the agent's roster name (ADR-073). The path is
+      // not a type, so there is no `subagent` (ADR-093).
+      name: 'fixture_child'
     })
   })
 
@@ -188,7 +188,18 @@ describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
         model: 'gpt-mock',
         receiverThreadIds: ['child-1']
       })
-    ).toMatchObject({ subagent: 'gpt-mock', model: 'gpt-mock' })
+    ).toMatchObject({ model: 'gpt-mock', name: 'fixture_child' })
+  })
+
+  it('task: neither a Codex model nor an agent path is ever a type (the wire carries no role)', () => {
+    for (const input of [
+      { receiverThreadIds: ['c'], model: 'gpt-mock', agentPath: '/root/fixture_child' },
+      { receiverThreadIds: ['c'], agentPath: '/root/fixture_child' },
+      { receiverThreadIds: ['c'], model: 'gpt-mock' }
+    ]) {
+      const view = CodexEngineToolMap.normalize('task', input)
+      expect((view as { subagent?: string }).subagent).toBeUndefined()
+    }
   })
 })
 

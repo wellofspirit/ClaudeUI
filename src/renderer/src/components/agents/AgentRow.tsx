@@ -12,20 +12,25 @@
  *
  * One DOM, two shapes (ADR-073 §9), chosen by the roster's own width
  * (`@container/roster` in AgentRosterList) and never by the viewport. Wide, the
- * row is a single line in the order dot · name · badge · resumed · description ·
- * metrics · Stop, and it must never overflow: Stop and the metrics keep their
- * size, the description gives way first (down to a floor), then the badge, then
- * the name. Narrow (< 480px), the same elements regroup into two lines:
- * name · resumed · metrics over badge · description, with Stop centred at the
- * right. There the name keeps a floor and the metrics shorten before it does,
- * the badge stays whole and the description gives way, and under 400px the
- * metrics also leave out the current tool. Both shapes come from CSS alone; the
- * wide order is carried by `order-*`, which is also what puts each element on
- * its own narrow line in the right place.
+ * row is a single line in the order dot · name · type tile · resumed ·
+ * description · metrics · Stop, and it must never overflow: Stop, the tile and
+ * the metrics keep their size, the description gives way first (down to a
+ * floor), then the name. Narrow (< 480px), the same elements regroup into two
+ * lines: name · resumed · metrics over tile · description, with Stop centred at
+ * the right. There the name keeps a floor and the metrics shorten before it
+ * does, the tile stays whole and leads line 2, the description gives way, and
+ * under 400px the metrics also leave out the current tool. Both shapes come
+ * from CSS alone; the wide order is carried by `order-*`, which is also what
+ * puts each element on its own narrow line in the right place.
+ *
+ * The type is a 16px letter tile (ADR-093), not a text badge: it costs 16px of
+ * the description's line where the badge cost 60-140px. The engine's default
+ * type has no tile, and then line 2 is the description alone.
  */
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { formatElapsed, formatTokens } from '../chat/TaskCard'
+import { AgentTile, useAgentTile } from './AgentTypeTile'
 import type { AgentRosterRow } from '../../hooks/useAgentRoster'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
@@ -133,6 +138,8 @@ export function AgentRow({
   const hasLifecycle = useActiveSession((s) => !!s.activeTasks[row.toolUseId])
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const tile = useAgentTile(engineId, row.type, row.dispatch)
 
   const isStopping = stoppingTaskIds.includes(row.toolUseId)
 
@@ -220,15 +227,16 @@ export function AgentRow({
             </span>
           )}
         </div>
-        {(row.badge || row.description) && (
+        {(tile || row.description) && (
           <div className={LINE}>
-            {row.badge && (
-              <span
-                data-testid="AgentRow.badge"
-                className="order-2 text-[10px] font-mono px-1 py-px rounded bg-bg-tertiary text-text-secondary border border-border min-w-0 shrink-[10] truncate @max-[480px]/roster:shrink-0"
-              >
-                {row.badge}
-              </span>
+            {tile && (
+              <AgentTile
+                testId="AgentRow.typeTile"
+                letter={tile.letter}
+                colorId={tile.colorId}
+                title={tile.title}
+                className="order-2"
+              />
             )}
             <span
               data-testid="AgentRow.description"

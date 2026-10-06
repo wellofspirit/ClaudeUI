@@ -132,13 +132,16 @@ describe('PAGES structure', () => {
         'providers',
         'defaults'
       ],
-      dispatch: ['concurrency', 'into', 'limits'],
+      // 'tile' (ADR-093): the X tile's one colour, app-level like the cap.
+      dispatch: ['concurrency', 'tile', 'into', 'limits'],
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
       harnesses: ['harnesses', 'updates'],
       // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
-      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
+      // 'agent-colours' (ADR-093): one group on each harness page, after that page's own
+      // settings groups (last on Claude, before 'raw' on opencode, pi and Codex's 'mcp').
+      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
       opencode: [
         'session',
         'tool-output',
@@ -148,9 +151,20 @@ describe('PAGES structure', () => {
         'diagnostics',
         'managed',
         'agents',
+        'agent-colours',
         'raw'
       ],
-      pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw'],
+      pi: [
+        'session',
+        'retry',
+        'tools',
+        'attachments',
+        'workspace',
+        'resources',
+        'network',
+        'agent-colours',
+        'raw'
+      ],
       // Slice 5a (ADR-068 §6): the Codex page grew the curated groups over
       // `config.toml`, in the one-home table's order.
       codex: [
@@ -162,6 +176,7 @@ describe('PAGES structure', () => {
         'shell',
         'tools',
         'agents',
+        'agent-colours',
         'mcp',
         'history',
         'managed',
@@ -172,30 +187,38 @@ describe('PAGES structure', () => {
   })
 
   it('engine-native groups say when they apply, with the three-value badge vocabulary', () => {
+    // Agent colours (ADR-093) are ClaudeUI's own setting and bind on the spot: no badge.
+    const immediate = (g: { id: string }): boolean => g.id === 'agent-colours'
     for (const g of pageOf('opencode').groups) {
-      if (g.id === 'managed' || g.id === 'agents') continue
+      if (g.id === 'managed' || g.id === 'agents' || immediate(g)) continue
       expect(g.appliesOn, `opencode/${g.id}`).toBe('next-server-start')
       expect(g.note, `opencode/${g.id}`).toBeTruthy()
     }
     for (const g of pageOf('pi').groups) {
+      if (immediate(g)) continue
       expect(g.appliesOn, `pi/${g.id}`).toBe('next-session')
       expect(g.note, `pi/${g.id}`).toBeTruthy()
     }
-    for (const g of pageOf('claude').groups) expect(g.appliesOn).toBe('next-session')
+    for (const g of pageOf('claude').groups) {
+      if (!immediate(g)) expect(g.appliesOn).toBe('next-session')
+    }
     // Codex writes ONE file, and the binary does not hot-reload the
     // session-static keys on it, so every group that writes says "next session"
     // with the same tag. Account, Managed and Raw config write nothing.
     for (const g of pageOf('codex').groups) {
-      if (['account', 'managed', 'raw'].includes(g.id)) {
+      if (['account', 'managed', 'raw', 'agent-colours'].includes(g.id)) {
         expect(g.appliesOn, `codex/${g.id}`).toBeUndefined()
         continue
       }
       expect(g.appliesOn, `codex/${g.id}`).toBe('next-session')
       expect(g.note, `codex/${g.id}`).toBeTruthy()
     }
+    // Codex's Agent colours says why its cards show no tile today (no role on the wire).
+    const codexColours = pageOf('codex').groups.find((g) => g.id === 'agent-colours')
+    expect(codexColours?.note).toContain('no role')
     for (const g of pageOf('codex').groups) {
       expect(storageOf(g, 'codex'), `codex/${g.id}`).toBe(
-        g.id === 'account' ? undefined : 'config.toml'
+        g.id === 'account' || g.id === 'agent-colours' ? undefined : 'config.toml'
       )
     }
     // ClaudeUI's own settings apply at once — no badge, no note.
@@ -423,7 +446,13 @@ describe('inventory guard', () => {
       'codexNativeAccount',
       'usageHub',
       'harnessesInstalled',
-      'harnessUpdates'
+      'harnessUpdates',
+      // ADR-093: one Agent colours item per harness page, and the dispatch tile.
+      'claudeAgentColours',
+      'opencodeAgentColours',
+      'piAgentColours',
+      'codexAgentColours',
+      'dispatchTileColour'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -479,7 +508,8 @@ describe('visibleGroups', () => {
       'endpoint',
       'model-mapping',
       'sandbox',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 
@@ -488,13 +518,15 @@ describe('visibleGroups', () => {
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
       'endpoint',
-      'model-mapping'
+      'model-mapping',
+      'agent-colours'
     ])
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
       'endpoint',
       'model-mapping',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 
@@ -691,7 +723,8 @@ describe('harnesses that do not run', () => {
       visibleGroups(pageOf('dispatch'), undefined, except('opencode', 'pi', 'codex')).map(
         (g) => g.id
       )
-    ).toEqual(['concurrency'])
+      // The dispatch tile's colour is app-level, like the cap: it stays.
+    ).toEqual(['concurrency', 'tile'])
   })
 
   it('API providers is hidden, and out of search, while neither opencode nor pi runs', () => {

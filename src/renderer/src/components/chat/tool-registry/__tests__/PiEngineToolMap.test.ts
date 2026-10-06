@@ -293,7 +293,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toEqual({ kind: 'mockup', directory: undefined, title: undefined })
   })
 
-  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / "<engine> · <model>"', () => {
+  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / the dispatch field', () => {
     const view = PiEngineToolMap.normalize('task', {
       engine: 'opencode',
       prompt: 'do X',
@@ -303,17 +303,17 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: opencode',
       prompt: 'do X',
-      subagent: 'opencode · openai/gpt-5'
+      dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
     })
   })
 
-  it('task: dispatch_agent without a model -> subagent is just the engine name', () => {
+  it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
     expect(view).toEqual({
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'do X',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 
@@ -399,7 +399,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'x',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 })

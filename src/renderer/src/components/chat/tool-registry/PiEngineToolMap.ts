@@ -54,9 +54,10 @@
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
-import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
 import { isPiAsyncLaunchResult } from '../../../../../shared/pi-agent-result'
+import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -218,14 +219,8 @@ function piNormalize(
       // discriminator, mirroring Claude/OpencodeEngineToolMap's identical
       // dispatch branch verbatim. Checked FIRST since dispatch_agent's input
       // shape never overlaps with subagent's (below).
-      if (typeof inp.engine === 'string') {
-        return {
-          kind: 'task',
-          description: `Dispatch: ${inp.engine}`,
-          prompt: inp.prompt != null ? String(inp.prompt) : '',
-          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
-        }
-      }
+      if (typeof inp.engine === 'string')
+        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
       // Host-run subagents (ADR-089) — the `agent` tool: { description,
       // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
       // description, none of engine/agent/tasks): piNormalize never sees the
@@ -245,7 +240,7 @@ function piNormalize(
           kind: 'task',
           description: inp.description,
           prompt: inp.prompt,
-          subagent: type ?? 'general-purpose',
+          subagent: type ?? DEFAULT_SUBAGENT_TYPE.pi,
           ...(name ? { name } : {}),
           ...(typeof inp.model === 'string' && inp.model !== '' ? { model: inp.model } : {}),
           // Once a result exists it decides (ADR-089 S3): only the host's

@@ -1,5 +1,6 @@
 import { presentShellCommand } from '../../../lib/present-shell-command'
 import type { EngineToolMap } from '../../../../../shared/tool-kinds'
+import { dispatchTaskView } from '../../../../../shared/tool-kinds'
 import type { AskUserQuestion, ContentBlock, FileDiff } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -157,24 +158,20 @@ export const CodexEngineToolMap: EngineToolMap = {
           ...(input?.agentPath != null
             ? { name: String(input.agentPath).split('/').filter(Boolean).pop() }
             : {}),
-          ...(input?.model != null
-            ? { subagent: String(input.model), model: String(input.model) }
-            : input?.agentPath != null
-              ? { subagent: String(input.agentPath) }
-              : {})
+          // No `subagent`: that is the agent TYPE (a role, for Codex), and the
+          // spawn item carries none — `ThreadItem::CollabAgentToolCall` has no
+          // role field, and `SubAgentActivity` only the path (ADR-093). A model
+          // or a path must never read as a type, so it is a `model` and nothing.
+          ...(input?.model != null ? { model: String(input.model) } : {})
         }
       // dispatch_agent args: { engine, prompt, model?, session_id? } — the same
       // field names on every engine, so this branch is Pi/Claude/Opencode's
       // dispatch normalizer verbatim.
-      return {
-        kind,
-        description: `Dispatch: ${String(input?.engine ?? '')}`,
-        prompt: input?.prompt != null ? String(input.prompt) : '',
-        subagent:
-          input?.model != null
-            ? `${String(input?.engine ?? '')} · ${String(input.model)}`
-            : String(input?.engine ?? '')
-      }
+      return dispatchTaskView({
+        engine: String(input?.engine ?? ''),
+        prompt: input?.prompt,
+        model: input?.model
+      })
     }
     // create_mockup args: { html, title? }; show_mockup args: { directory }.
     if (kind === 'mockup')

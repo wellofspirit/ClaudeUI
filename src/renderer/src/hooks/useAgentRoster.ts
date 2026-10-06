@@ -32,7 +32,7 @@ import type {
   EngineId,
   TaskNotification
 } from '../../../shared/types'
-import type { ToolView } from '../../../shared/tool-kinds'
+import { dispatchLabel, type ToolView } from '../../../shared/tool-kinds'
 import { useActiveSession } from '../stores/session-store'
 import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps'
 import {
@@ -52,8 +52,14 @@ export interface AgentRosterRow {
   kind: 'agent' | 'shell'
   /** What to call it: the spawn call's name, its type, or the command. */
   name: string
-  /** The type/model chip beside the name; absent when it would repeat `name`. */
-  badge?: string
+  /**
+   * The agent TYPE the spawn call named (a custom type's tile, ADR-093); absent
+   * when it named none, and for a cross-engine dispatch. The default type is
+   * carried like any other: the tile decides it has nothing to say.
+   */
+  type?: string
+  /** Set exactly when this row is a cross-engine dispatch: the tile is an X. */
+  dispatch?: { engine: string; model?: string }
   description: string
   /** 0 for a spawn in the main transcript; one more per agent it is nested in. Shells are 0. */
   depth: number
@@ -90,7 +96,8 @@ export interface ScannedEntry {
   toolUseId: string
   kind: 'agent' | 'shell'
   name: string
-  badge?: string
+  type?: string
+  dispatch?: { engine: string; model?: string }
   description: string
   hasResult: boolean
   resultIsError: boolean
@@ -179,13 +186,20 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
       // before launch must not read as a background run with no notification.
       const result = results.get(block.toolUseId)
       const view = map.normalize('task', block.toolInput, result, block.toolName) as TaskView
-      const name = view?.name || view?.subagent || map.displayName(block.toolName)
-      const badge = view?.subagent !== name ? view?.subagent : undefined
+      const name =
+        view?.name ||
+        (view?.dispatch ? dispatchLabel(view.dispatch) : undefined) ||
+        view?.subagent ||
+        // A Codex v1 spawn names no type and no path, only its model: it has
+        // always been listed under that, not as a bare "Agent".
+        view?.model ||
+        map.displayName(block.toolName)
       return {
         toolUseId: block.toolUseId,
         kind: 'agent' as const,
         name,
-        ...(badge ? { badge } : {}),
+        ...(view?.subagent ? { type: view.subagent } : {}),
+        ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
         description: view?.description || view?.prompt || '',
         hasResult: !!result,
         resultIsError: !!result?.isError,
@@ -321,7 +335,8 @@ function toRow(
     toolUseId: entry.toolUseId,
     kind: entry.kind,
     name: entry.name,
-    ...(entry.badge ? { badge: entry.badge } : {}),
+    ...(entry.type ? { type: entry.type } : {}),
+    ...(entry.dispatch ? { dispatch: entry.dispatch } : {}),
     description: entry.description,
     depth: entry.depth,
     ...(entry.parentToolUseId ? { parentToolUseId: entry.parentToolUseId } : {}),

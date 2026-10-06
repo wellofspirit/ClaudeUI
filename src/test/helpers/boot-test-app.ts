@@ -393,6 +393,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setProviderModelAllowlist: (engine, providerId, models) =>
       unwrap('models:set-provider-allowlist', engine, providerId, models),
     listOpencodeAgents: async () => [],
+    listAgentTypes: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
     deleteOpencodeAgent: async () => {},

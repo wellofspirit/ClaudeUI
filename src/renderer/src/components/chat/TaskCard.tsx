@@ -17,6 +17,13 @@ import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/Per
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
 import { modelDisplayName } from '../../lib/model-display-name'
+import { dispatchLabel } from '../../../../shared/tool-kinds'
+import {
+  AGENT_CHIP_CLASS,
+  AgentTile,
+  useAgentTile,
+  type AgentTileSpec
+} from '../agents/AgentTypeTile'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -213,24 +220,31 @@ const NARROW_WRAP = '@max-[480px]/taskcard:flex-wrap @max-[480px]/taskcard:gap-y
 const MODEL_FLOOR_MIN_CHARS = 11
 
 /**
- * The card's footer row — type, model, background, resumed, usage, Open in
- * panel. The collapsed card and the expanded card both end in it; only the
- * wrapper differs (`className`). Every chip is `whitespace-nowrap shrink-0`
- * except the model, the one that gives way: at phone width a `general-purpose`
- * chip breaking mid-token is worse than a truncated model id. But it gives way
- * to a floor (5rem): a model of "D." tells nobody anything. Wide, the usage
- * text and the model both give way; narrow, the usage is gone and "Open in
- * panel" is an icon, so the row stays one line wherever it can. Narrow, the
- * footer can wrap, and `flex-wrap` breaks a line on the items' BASIS sizes
- * before anything shrinks, so the model's natural width (about 130px, or 246px
- * for a raw id) would push the chips after it onto a second row even though
- * shrinking it to its floor fits them all. Hence `basis-[5rem]` (the floor, so
- * line-breaking sees 5rem) with `grow` and `max-w-fit` (it takes the leftover
- * space, never more than its own text).
+ * The card's footer row, left to right: type, background, model, then resumed,
+ * usage and Open in panel at the right. The collapsed card and the expanded card
+ * both end in it; only the wrapper differs (`className`).
+ *
+ * The type (ADR-093) is its tile: the engine's default type has none, and
+ * neither a chip nor a tile is drawn. Below 480px it is the 16px letter tile
+ * alone; wide, one element draws a chip in the type's colour, led by that same
+ * tile and followed by the name, so phone and desktop read alike. A dispatch is
+ * the X tile.
+ *
+ * Every chip is `whitespace-nowrap shrink-0` except the model, the one that
+ * gives way: at phone width a chip breaking mid-token is worse than a truncated
+ * model id. But it gives way to a floor (5rem): a model of "D." tells nobody
+ * anything. Wide, the usage text and the model both give way; narrow, the usage
+ * is gone, "Open in panel" is an icon and so is "background", so the row stays
+ * one line wherever it can. Narrow, the footer can wrap, and `flex-wrap` breaks
+ * a line on the items' BASIS sizes before anything shrinks, so the model's
+ * natural width (about 130px, or 246px for a raw id) would push the chips after
+ * it onto a second row even though shrinking it to its floor fits them all.
+ * Hence `basis-[5rem]` (the floor, so line-breaking sees 5rem) with `grow` and
+ * `max-w-fit` (it takes the leftover space, never more than its own text).
  */
 function TaskFooter({
   className,
-  subagentType,
+  tile,
   model,
   modelName,
   isBackground,
@@ -240,7 +254,9 @@ function TaskFooter({
   onOpenPanel
 }: {
   className: string
-  subagentType: string
+  /** The type tile's spec; `null` for the default type (no tile, no chip). */
+  tile: AgentTileSpec | null
+  /** The raw model id, or a dispatch's "<engine> · <model>". */
   model: string | null
   /** The model's catalog name, when the picker has one; the raw id otherwise. */
   modelName: string | undefined
@@ -252,9 +268,35 @@ function TaskFooter({
 }): React.JSX.Element {
   return (
     <div className={`${className} ${NARROW_WRAP}`}>
-      {subagentType && (
-        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent whitespace-nowrap shrink-0">
-          {subagentType}
+      {tile && (
+        // One element, two faces (ADR-093): the tile alone below 480px, a chip in
+        // the type's colour wide. The chip's padding and tint drop away narrow.
+        <span
+          data-testid="TaskCard.type"
+          className={`inline-flex items-center gap-1 text-[10px] font-mono pl-0.5 pr-1.5 py-px rounded whitespace-nowrap shrink-0 @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`}
+        >
+          <AgentTile
+            testId="TaskCard.typeTile"
+            letter={tile.letter}
+            colorId={tile.colorId}
+            title={tile.title}
+          />
+          <span className={NARROW_ONLY_HIDE}>{tile.label}</span>
+        </span>
+      )}
+      {isBackground && (
+        // One chip, two faces: the word wide, the tray icon below 480px (a word-only chip
+        // left the ↗ alone on row 2 at chat ~1.22). The glyph is shared with Send to
+        // background on purpose: that button shows only on FOREGROUND tasks, this chip
+        // only on BACKGROUND ones, so the two never share a card.
+        <span
+          data-testid="TaskCard.background"
+          title="Running in the background"
+          aria-label="Running in the background"
+          className="text-[10px] font-mono px-1.5 py-0.5 @max-[480px]/taskcard:p-1 rounded bg-warning/10 text-warning whitespace-nowrap shrink-0"
+        >
+          <span className={NARROW_ONLY_HIDE}>background</span>
+          <BackgroundIcon testId="TaskCard.background.icon" />
         </span>
       )}
       {model && (
@@ -268,11 +310,6 @@ function TaskFooter({
           } ${modelName ? '' : 'font-mono'}`}
         >
           {modelName ?? model}
-        </span>
-      )}
-      {isBackground && (
-        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning whitespace-nowrap shrink-0">
-          background
         </span>
       )}
       {runIndex > 1 && (
@@ -408,9 +445,13 @@ export function TaskCard({
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
-  const subagentType = view.subagent ?? ''
-  const model = view.model ?? null
-  const modelName = model ? modelDisplayName(availableModels, engineId, model) : undefined
+  // The type tile (ADR-093): a dispatch is an X, the engine's default type has
+  // none. `view.subagent` is a TYPE on every engine, and a Codex spawn has none.
+  const tile = useAgentTile(engineId, view.subagent, view.dispatch)
+  // A dispatch has no model of its own to name: its chip says where it went.
+  const model = view.dispatch ? dispatchLabel(view.dispatch) : (view.model ?? null)
+  const modelName =
+    model && !view.dispatch ? modelDisplayName(availableModels, engineId, model) : undefined
 
   const progress = taskProgressMap[toolUseId]
   const startedAt = isRunning ? activeTasks[toolUseId]?.startedAt : undefined
@@ -545,7 +586,7 @@ export function TaskCard({
 
   // Both footers (collapsed, expanded) say the same thing; only the wrapper differs.
   const footerProps = {
-    subagentType,
+    tile,
     model,
     modelName,
     isBackground,

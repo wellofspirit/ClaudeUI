@@ -4,6 +4,7 @@ import { VOICE_LANGUAGES } from '../../../shared/types'
 import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
+import type { AgentColorId, AgentTypeColorOverrides } from '../../../shared/agent-type-colors'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
@@ -570,6 +571,16 @@ export interface AppSettings {
    * clear the key rather than bake today's default into every profile on disk.
    */
   dispatchMaxConcurrent?: number
+  /**
+   * Per-engine overrides of an agent type's tile colour (ADR-093): engine →
+   * type name → palette colour id. A type with no entry is coloured by its
+   * engine's own agent colour, else by a stable hash. Like
+   * `dispatchMaxConcurrent`, absent from {@link DEFAULT_SETTINGS}: "no
+   * override" is the unset state, and Reset deletes the key.
+   */
+  agentTypeColors?: AgentTypeColorOverrides
+  /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
+  dispatchTileColor?: AgentColorId
 }
 
 /** Exported for the replica's settings projection (one merge base, not two). */

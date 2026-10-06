@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines. Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-093](adr-093_agent-type-colour-coding.md)). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -441,21 +441,26 @@ the composer box because that is the overlay's containing block (the nearest pos
 
 **A row has two shapes, chosen by the roster's own width.** `AgentRosterList` is a named container
 (`@container/roster`). Below **480px** of roster width a row is two lines: status dot, then a column
-holding name, resumed chip and metrics over badge and description, then Stop, centred at the right with a
+holding name, resumed chip and metrics over the type tile and description, then Stop, centred at the right with a
 taller touch target. At 480px and above it is one line. The threshold was first 400, which left the
-420px desktop overlay on one line; in the real app a Claude row (name, badge, resumed chip, `Bash · 2m 15s ·
+420px desktop overlay on one line; in the real app a Claude row (name, type badge, resumed chip, `Bash · 2m 15s ·
 8720.9k`, Stop) cannot be read there, and the shrink weights left a name of "m13…" and a badge of "g.". So the
 420px overlay is two-line too, and only a panel wider than 480px keeps one line. It is a container query, not
 a viewport one, so the zoom cannot fool it and the panel's roster, which can also be narrow, gets the same
 behaviour.
 
 **What each shape protects.** Narrow, line 1 gives the name a floor (`min-w-[4.5rem]`) and lets the metrics
-truncate before the name does (to a 3rem floor, so a 43-character name cannot take the clock and the tokens too); line 2 keeps the badge whole and lets the description give way; under
+truncate before the name does (to a 3rem floor, so a 43-character name cannot take the clock and the tokens too); line 2 keeps the type tile whole and lets the description give way; under
 **400px** the metrics also drop the current tool (`Bash`, `Read`), leaving `2m 15s · 2270.0k` (every phone list is under 400px: about 350px at uiFontScale 1.1, where the token count was being cut to `872…`; the 420px overlay keeps the tool), as one
 `AgentRow.metrics` element with the tool in its own hidden-when-narrow span. Wide, Stop and the metrics never
-shrink and the description gives way first (to a 3rem floor), then the badge, then the name (still capped at
-140px). These are flex-shrink weights (description 10000, badge 10, name 1), large enough apart that the
-description absorbs the cut before the badge loses a pixel.
+shrink and the description gives way first (to a 3rem floor), then the name (still capped at 140px); the tile
+never shrinks. These are flex-shrink weights (description 10000, name 1), far enough apart that the description
+absorbs the cut before the name loses a pixel.
+
+**The type is a tile, not a badge (2026-10-06, [ADR-093](adr-093_agent-type-colour-coding.md)).** The text
+badge (`general-purpose`, `migration-reviewer`) cost 60-140px of line 2, which is what the description lost on a
+phone. It is replaced by a 16px letter tile in the type's colour: it leads line 2 when narrow and sits where the
+badge was when wide (`AgentRow.typeTile`; `AgentRow.badge` is gone), and the engine's default type has no tile.
 
 **Option A, not "drop by priority".** The alternative was to keep one line on the phone and drop the
 badge, the current tool and the Stop label. It is denser but throws information away and leaves a
@@ -472,14 +477,19 @@ The Task card has the same trap and the same cure (`@container/taskcard`, 480px)
 "Task" under 480px and the clock under 300px (one row, never wrapped; under 300px the description floor drops from 3rem to 2rem, which a blocked review's chip plus Approve needs), and its footer turns "Open in panel" into
 an icon and keeps the model chip at least 5rem wide. Narrow, the footer may wrap whole chips; `flex-wrap` breaks
 a line on the items' basis sizes before anything shrinks, so the model chip's basis is its 5rem floor
-(`basis-[5rem] grow max-w-fit`), not its text.
+(`basis-[5rem] grow max-w-fit`), not its text. The yellow "background" chip is an icon (the tray glyph, with
+`title`/`aria-label` "Running in the background") under 480px: as a word it left a row about 23px short, and the
+↗ alone on row 2, at chat scale ~1.22. The glyph is Send to background's on purpose; that button shows only on
+foreground tasks and this chip only on background ones. The footer reads, left to right, type tile · background · model, then ↗ (ADR-093): the 16px tile took the type chip's place, which is what lets the common row stay on one line at every chat scale.
 
 **Two zooms, two surfaces.** The roster (the composer's overlay, the panel) lives under the app zoom,
 `uiFontScale`. A Task card lives in the chat's message list, which ChatPanel zooms again by
 `chatFontScale / uiFontScale`, so the card's own zoom is `chatFontScale` and `uiFontScale` does not touch it.
-The card is also narrower than the window by more than a margin: scroller `mr-2`, column `px-3`, and, when a
-message holds two or more tool calls, the bordered `p-2` group. On a 412px phone that is
-`(412 - 8) / chatFontScale - 42` CSS px: 362, 325, 282 and 228px at chat scale 1, 1.1, 1.25 and 1.5. A layout
+The card is also narrower than the window by more than a margin: scroller `mr-2` and its 7px classic scrollbar
+(`.chat-scroll`, `main.css`; overlay scrollbars on Android take none, so the classic case is the narrower one),
+column `px-3`, and, when a message holds two or more tool calls, the bordered `p-2` group. On a 412px phone that
+is `(412 - 8 - 7) / chatFontScale - 42` CSS px: 355, 319, 276 and 223px at chat scale 1, 1.1, 1.25 and 1.5
+(measured in the real app: 354.4, 318.5, 275.5, 222.9). A layout
 test uses the zoom and the container chain of the surface it tests. The browser layout tests (`docs/testing-strategy.md`,
 Layer 2b) assert readability, not just containment: the roster at uiFontScale 1, 1.1, 1.25 and 1.5, the card
 at the same four values of chatFontScale.

@@ -54,7 +54,8 @@ const view = {
   kind: 'task' as const,
   description: DESCRIPTION,
   prompt: 'Read every controller in the batch and report schema drift.',
-  subagent: 'general-purpose',
+  // A custom type: the engine's default (`general-purpose`) has no tile (ADR-093).
+  subagent: 'migration-reviewer',
   model: RAW_MODEL,
   background: true
 }
@@ -175,6 +176,19 @@ const SCALES = [...FONT_SCALES, 1.25].sort((a, b) => a - b)
 /** The model chip's floor (5rem), in the card's own (zoomed) px. */
 const MODEL_FLOOR = 5 * 16
 
+/** Narrow footer order, left to right: type tile, background icon, model, then the open icon. */
+function expectNarrowOrder(footer: HTMLElement): void {
+  const order = [
+    byTestId(footer, 'TaskCard.typeTile'),
+    byTestId(footer, 'TaskCard.background.icon'),
+    byTestId(footer, 'TaskCard.model'),
+    byTestId(footer, 'TaskCard.openInPanel.icon')
+  ]
+  for (let i = 1; i < order.length; i++) {
+    expect(rectOf(order[i]).left).toBeGreaterThanOrEqual(rectOf(order[i - 1]).right - 1)
+  }
+}
+
 function openButton(card: HTMLElement, expanded: boolean): HTMLElement {
   return byTestId(card, expanded ? 'TaskCard.expanded.openInPanel' : 'TaskCard.openInPanel')
 }
@@ -197,7 +211,7 @@ function expectFooterSound(footer: HTMLElement): void {
     expect(isOneLine(child)).toBe(true)
   }
   const whole = Array.from(footer.querySelectorAll<HTMLElement>('span, button')).filter((el) =>
-    ['general-purpose', 'background', 'resumed ×1'].includes(el.textContent ?? '')
+    ['migration-reviewer', 'background', 'resumed ×1'].includes(el.textContent ?? '')
   )
   for (const chip of whole) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
 }
@@ -266,11 +280,12 @@ describe('Task card on the phone', () => {
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
           expect(footer.innerText).not.toContain('tokens')
 
-          // One line wherever the chips fit (1.0, 1.1), else WHOLE chips wrap — the
-          // icon stays last, at the right of its line.
+          // ONE line at every chat scale, 1.5 (222px) included: the type is a 16px
+          // tile and the background chip an icon (a word-only chip left the ↗ alone
+          // on row 2 at ~1.22). Only a resumed chip at 1.5 wraps (next test).
           const kids = visibleChildren(footer)
-          const rows = rowCount(kids)
-          expect(rows).toBe(chatScale <= 1.1 ? 1 : 2)
+          expect(rowCount(kids)).toBe(1)
+          expectNarrowOrder(footer)
 
           const open = openButton(card, expanded)
           expect(open.getAttribute('aria-label')).toBe('Open in panel')
@@ -291,6 +306,10 @@ describe('Task card on the phone', () => {
           expectFooterSound(footer)
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
           expect(byTestId(footer, 'TaskCard.resumed').textContent).toBe('resumed ×1')
+          // The one case that wraps, as WHOLE chips with the icon last: resumed at 1.5.
+          const kids = visibleChildren(footer)
+          expect(rowCount(kids)).toBe(chatScale >= 1.5 ? 2 : 1)
+          expect(kids[kids.length - 1]).toBe(openButton(card, expanded))
         })
       })
     }
@@ -315,12 +334,14 @@ describe('Task card on the phone', () => {
       expect(getComputedStyle(chip).fontFamily).toMatch(/mono/i)
       // It is the chip that gives way — and it still reads (floor). It takes the
       // leftover space of its line, but cannot claim a line of its own: the
-      // footer is as many rows as without the long id.
-      expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
+      // footer is one row at every scale. The 246px id fits whole at chat 1
+      // (a 355px card), and is cut from 1.1 on.
+      if (chatScale === 1) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
+      else expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
       expectModelReadable(chip)
       const footer = footerOf(card, false)
       expectFooterSound(footer)
-      expect(rowCount(visibleChildren(footer))).toBe(chatScale <= 1.1 ? 1 : 2)
+      expect(rowCount(visibleChildren(footer))).toBe(1)
       cleanup()
       seed([])
     }
@@ -440,6 +461,175 @@ duration_ms: 135000
     }
   })
 
+  // The yellow "background" chip: the word wide, the tray icon below 480px. A
+  // word-only chip left the ↗ alone on row 2 at chat ~1.22 (about 23px short).
+  describe('the background chip', () => {
+    const HAIKU: ModelInfo = {
+      value: 'haiku',
+      displayName: 'Haiku 4.5',
+      description: '',
+      engineId: 'claude'
+    }
+
+    it('is an icon below 480px, with the words kept for assistive tech and hover', async () => {
+      const card = await mountCard(1.25)
+      const chip = byTestId(card, 'TaskCard.background')
+      expect(chip.getAttribute('aria-label')).toBe('Running in the background')
+      expect(chip.title).toBe('Running in the background')
+      expect(chip.innerText.trim()).toBe('') // the word is display:none
+      expect(chip.textContent).toContain('background')
+      expect(byTestId(chip, 'TaskCard.background.icon').getClientRects().length).toBeGreaterThan(0)
+      // The warning colours stay.
+      expect(chip.className).toContain('text-warning')
+      expect(isOneLine(chip)).toBe(true)
+    })
+
+    it('keeps the word and no icon when the card is wide', async () => {
+      const card = await mountCard(1, { width: '610px' })
+      const chip = byTestId(card, 'TaskCard.background')
+      expect(chip.innerText.trim()).toBe('background')
+      expect(byTestId(chip, 'TaskCard.background.icon').getClientRects().length).toBe(0)
+      expect(chip.getAttribute('aria-label')).toBe('Running in the background')
+    })
+
+    // A short catalog name (Haiku 4.5): the common phone case that wrapped, the
+    // ↗ alone on row 2.
+    for (const chatScale of [1, 1.1, 1.25]) {
+      it(`keeps tile · background · Haiku 4.5 · ↗ on ONE row, in that order (chat ${chatScale})`, async () => {
+        cleanup()
+        seed([HAIKU], { engineId: 'claude' })
+        const card = await mountCard(chatScale, { model: 'haiku' })
+        const footer = footerOf(card, false)
+        expect(byTestId(footer, 'TaskCard.model').textContent).toBe('Haiku 4.5')
+        expectFooterSound(footer)
+        const kids = visibleChildren(footer)
+        expect(rowCount(kids)).toBe(1)
+        const open = openButton(card, false)
+        expect(byTestId(open, 'TaskCard.openInPanel.icon').getClientRects().length).toBeGreaterThan(
+          0
+        )
+        expect(kids[kids.length - 1]).toBe(open)
+        expect(
+          byTestId(footer, 'TaskCard.background.icon').getClientRects().length
+        ).toBeGreaterThan(0)
+        expectNarrowOrder(footer)
+      })
+    }
+  })
+
+  // The type tile (ADR-093): type · background · model, then ↗. The default type
+  // has none; a dispatch is an X; a Codex spawn (a model, never a type) has none.
+  describe('the type tile', () => {
+    const HAIKU: ModelInfo = {
+      value: 'haiku',
+      displayName: 'Haiku 4.5',
+      description: '',
+      engineId: 'claude'
+    }
+
+    for (const chatScale of SCALES) {
+      it(`leads the narrow footer, left of the background icon and the model (chat ${chatScale})`, async () => {
+        cleanup()
+        seed([HAIKU], { engineId: 'claude' })
+        const card = await mountCard(chatScale, { model: 'haiku' })
+        const footer = footerOf(card, false)
+        const tile = byTestId(footer, 'TaskCard.typeTile')
+        expect(tile.innerText.trim()).toBe('M')
+        expect(tile.title).toBe('migration-reviewer')
+        expect(tile.getAttribute('aria-label')).toBe('migration-reviewer')
+        expect(tile.clientHeight).toBe(16)
+        expectNarrowOrder(footer)
+        // The name is the tile's tooltip below 480px, not text.
+        expect(byTestId(footer, 'TaskCard.type').innerText.trim()).toBe('M')
+        expect(visibleChildren(footer)[0]).toBe(byTestId(footer, 'TaskCard.type'))
+        // One row at every chat scale for this common fixture.
+        expect(rowCount(visibleChildren(footer))).toBe(1)
+      })
+    }
+
+    it('is a chip in the type colour, tile first then the name, when the card is wide', async () => {
+      cleanup()
+      seed([HAIKU], { engineId: 'claude' })
+      const card = await mountCard(1, { width: '610px', model: 'haiku' })
+      const footer = footerOf(card, false)
+      const chip = byTestId(footer, 'TaskCard.type')
+      expect(visibleChildren(footer)[0]).toBe(chip)
+      expect(chip.innerText.replace(/\s+/g, ' ').trim()).toBe('M migration-reviewer')
+      const tile = byTestId(chip, 'TaskCard.typeTile')
+      // The chip's own colour is the tile's colour; its tint shows (not transparent).
+      expect(getComputedStyle(chip).color).toBe(getComputedStyle(tile).color)
+      expect(getComputedStyle(chip).backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
+      // type · background · model, then usage, then the words.
+      const order = [
+        chip,
+        byTestId(footer, 'TaskCard.background'),
+        byTestId(footer, 'TaskCard.model'),
+        openButton(card, false)
+      ]
+      for (let i = 1; i < order.length; i++) {
+        expect(rectOf(order[i]).left).toBeGreaterThanOrEqual(rectOf(order[i - 1]).right - 1)
+      }
+      expect(rowCount(visibleChildren(footer))).toBe(1)
+    })
+
+    it('has no chip and no tile for the default type, wide or narrow', async () => {
+      cleanup()
+      seed([HAIKU], { engineId: 'claude' })
+      for (const width of [undefined, '610px']) {
+        const card = await mountCard(1, {
+          width,
+          model: 'haiku',
+          view: { ...view, subagent: 'general-purpose' }
+        })
+        expect(card.querySelector('[data-testid="TaskCard.type"]')).toBeNull()
+        expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
+        // The footer starts with the background chip, as it did.
+        expect(visibleChildren(footerOf(card, false))[0]).toBe(
+          byTestId(card, 'TaskCard.background')
+        )
+        cleanup()
+        seed([HAIKU], { engineId: 'claude' })
+      }
+    })
+
+    it('never makes a Codex model a type: a spawn that carries only a model has no tile', async () => {
+      cleanup()
+      seed([], { engineId: 'claude' })
+      const card = await mountCard(1, {
+        view: { ...view, subagent: undefined as unknown as string, model: 'gpt-5.6-luna' }
+      })
+      expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
+      expect(byTestId(card, 'TaskCard.model').textContent).toBe('gpt-5.6-luna')
+    })
+
+    it('is an X for a dispatch, telling where it went, with the chip saying so wide', async () => {
+      cleanup()
+      seed([], { engineId: 'claude' })
+      const dispatchView = {
+        kind: 'task' as const,
+        description: 'Dispatch: opencode',
+        prompt: 'review it',
+        dispatch: { engine: 'opencode', model: 'deepseek-v4' }
+      }
+      const narrow = await mountCard(1.1, { view: dispatchView as unknown as typeof view })
+      const tile = byTestId(narrow, 'TaskCard.typeTile')
+      expect(tile.innerText.trim()).toBe('X')
+      expect(tile.title).toBe('Dispatch \u2192 opencode \u00b7 deepseek-v4')
+      expect(tile.getAttribute('data-color')).toBe('orange')
+      expect(byTestId(narrow, 'TaskCard.model').textContent).toBe('opencode · deepseek-v4')
+      expect(rowCount(visibleChildren(footerOf(narrow, false)))).toBe(1)
+      cleanup()
+      seed([], { engineId: 'claude' })
+      const wide = await mountCard(1, {
+        width: '610px',
+        view: dispatchView as unknown as typeof view
+      })
+      expect(byTestId(wide, 'TaskCard.type').innerText.replace(/\s+/g, ' ').trim()).toBe(
+        'X dispatch'
+      )
+    })
+  })
+
   it('does not resolve a name from another engine’s catalog', async () => {
     cleanup()
     seed([{ ...DEEPSEEK, engineId: 'opencode' }])
@@ -467,7 +657,7 @@ duration_ms: 135000
     })
 
     // Just above the breakpoint the footer does not wrap, so the chips that must
-    // not shrink are the only thing standing between "general-purpose" and a
+    // not shrink are the only thing standing between "migration-reviewer" and a
     // mid-token break. The raw model id and the usage text are what give way.
     for (const expanded of [false, true]) {
       it(`keeps the chips whole under pressure (${expanded ? 'expanded' : 'collapsed'})`, async () => {
@@ -478,17 +668,20 @@ duration_ms: 135000
         const footer = footerOf(card, expanded)
         expectFooterSound(footer)
         expectModelReadable(byTestId(footer, 'TaskCard.model'))
-        const chips = (Array.from(footer.children) as HTMLElement[]).filter((el) =>
-          ['general-purpose', 'background', 'resumed ×1', 'Open in panel'].includes(
-            el.textContent ?? ''
-          )
-        )
-        expect(chips.map((c) => c.textContent)).toEqual([
-          'general-purpose',
+        // type chip (tile + name) · background · resumed · the words, each whole.
+        const chips = [
+          byTestId(footer, 'TaskCard.type'),
+          byTestId(footer, 'TaskCard.background'),
+          byTestId(footer, 'TaskCard.resumed'),
+          openButton(card, expanded)
+        ]
+        expect(chips.map((c) => c.innerText.replace(/\s+/g, ' ').trim())).toEqual([
+          'M migration-reviewer',
           'background',
           'resumed ×1',
           'Open in panel'
         ])
+        for (const chip of chips) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
       })
     }
   })

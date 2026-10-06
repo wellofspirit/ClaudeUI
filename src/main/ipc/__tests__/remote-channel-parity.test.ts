@@ -222,8 +222,23 @@ const MODEL_ALLOWLIST_SWEEP: Record<string, { capability: Capability; kind: 'com
     'models:set-provider-allowlist': { capability: 'config', kind: 'command' }
   }
 
+/**
+ * ADR-093 — the agent types an engine can spawn, for the type tile's settings.
+ * Its own table for the reason {@link TRUST_LIST_SWEEP} has one. `config` and a
+ * `query`: it reads agent definitions (names and colours, never a prompt) and
+ * the engine is checked against the closed `EngineId` set at the perimeter.
+ */
+const AGENT_TYPE_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'config:list-agent-types': { capability: 'config', kind: 'query' }
+}
+
 /** Every channel the two shared config modules declare: S1b plus what followed. */
-const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP, ...MODEL_ALLOWLIST_SWEEP }
+const SHARED_CONFIG_SWEEP = {
+  ...S1B_SWEEP,
+  ...TRUST_LIST_SWEEP,
+  ...MODEL_ALLOWLIST_SWEEP,
+  ...AGENT_TYPE_SWEEP
+}
 
 /**
  * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and

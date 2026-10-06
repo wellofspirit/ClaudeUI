@@ -7,8 +7,10 @@
  * spilled 15px off a 412px screen; the row's `shrink-0` children summed past the
  * row, clipping Stop; and once nothing overflowed, the shrink weights left a name
  * of one character and a badge of "g." — contained, but unreadable. So these
- * assert READABILITY (a name floor, a whole badge, a description that shows),
- * not just containment.
+ * assert READABILITY (a name floor, a whole type tile, a description that shows),
+ * not just containment. The type is a 16px letter tile (ADR-093) that leads
+ * line 2 when narrow and sits before the description when wide; the fixtures
+ * use NON-default types, because the engine's default type has no tile.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, cleanup } from '@testing-library/react'
@@ -69,7 +71,7 @@ function seedWorstCaseRoster(
         messages: [
           spawn('m-top', TOP, {
             name,
-            subagent_type: 'general-purpose',
+            subagent_type: 'migration-reviewer',
             description,
             run_in_background: true
           })
@@ -78,7 +80,7 @@ function seedWorstCaseRoster(
           [TOP]: [
             spawn('m-nested', NESTED, {
               name: nestedName,
-              subagent_type: 'general-purpose',
+              subagent_type: 'Explore',
               description,
               run_in_background: true
             })
@@ -136,6 +138,8 @@ function PanelRoster(): React.JSX.Element {
   return <AgentRosterList roster={roster} selectedIds={[]} onOpen={() => {}} />
 }
 
+const centreY = (el: HTMLElement): number => rectOf(el).top + rectOf(el).height / 2
+
 /** The name is readable: at least its floor (4.5rem), or all of it if it is shorter. */
 function expectNameReadable(row: HTMLElement): void {
   const name = byTestId(row, 'AgentRow.name')
@@ -144,10 +148,13 @@ function expectNameReadable(row: HTMLElement): void {
   expect(name.clientWidth).toBeGreaterThanOrEqual(Math.min(name.scrollWidth, floor) - 1)
 }
 
-/** The badge shows whole: a `general-purpo…` is a broken chip. */
-function expectBadgeWhole(row: HTMLElement): void {
-  const badge = byTestId(row, 'AgentRow.badge')
-  expect(badge.scrollWidth).toBeLessThanOrEqual(badge.clientWidth + 1)
+/** The tile shows whole, a 16px square: a clipped letter is a broken tile. */
+function expectTileWhole(row: HTMLElement): void {
+  const tile = byTestId(row, 'AgentRow.typeTile')
+  expect(tile.scrollWidth).toBeLessThanOrEqual(tile.clientWidth + 1)
+  expect(tile.clientHeight).toBe(16)
+  expect(tile.clientWidth).toBeGreaterThanOrEqual(16)
+  expect(tile.innerText.trim()).toMatch(/^[A-Z0-9]$/)
 }
 
 describe('agent roster overlay on the phone', () => {
@@ -181,28 +188,32 @@ describe('agent roster overlay on the phone', () => {
           expect(hasNoHorizontalOverflow(row)).toBe(true)
 
           const name = byTestId(row, 'AgentRow.name')
-          const badge = byTestId(row, 'AgentRow.badge')
+          const tile = byTestId(row, 'AgentRow.typeTile')
           const description = byTestId(row, 'AgentRow.description')
           const metrics = byTestId(row, 'AgentRow.metrics')
           const stop = byTestId(row, 'AgentRow.stop')
           const resumed = row.querySelector<HTMLElement>('[data-testid="AgentRow.resumed"]')
 
           // Everything the row draws lies inside the row.
-          for (const el of [name, badge, description, metrics, stop, resumed]) {
+          for (const el of [name, tile, description, metrics, stop, resumed]) {
             if (el) expect(isInside(el, row)).toBe(true)
           }
           // One line each: a chip or button that wraps is the bug.
-          for (const el of [name, badge, metrics, stop, resumed]) {
+          for (const el of [name, metrics, stop, resumed]) {
             if (el) expect(isOneLine(el)).toBe(true)
           }
           // Readable, not just contained.
           expectNameReadable(row)
-          expectBadgeWhole(row)
+          expectTileWhole(row)
           expect(rectOf(description).width).toBeGreaterThanOrEqual(40)
 
-          // Two lines: badge and description sit BELOW the name; metrics share its line.
+          // Two lines: the tile and the description sit BELOW the name; metrics share its line.
           expect(rectOf(description).top).toBeGreaterThanOrEqual(rectOf(name).bottom - 1)
-          expect(rectOf(badge).top).toBeGreaterThanOrEqual(rectOf(name).bottom - 1)
+          expect(rectOf(tile).top).toBeGreaterThanOrEqual(rectOf(name).bottom - 1)
+          // The tile LEADS line 2: before the description, on its line.
+          expect(rectOf(tile).right).toBeLessThanOrEqual(rectOf(description).left + 1)
+          expect(Math.abs(centreY(tile) - centreY(description))).toBeLessThanOrEqual(2)
+          expect(rectOf(tile).left).toBeLessThanOrEqual(rectOf(name).left + 1)
           expect(Math.abs(rectOf(metrics).top - rectOf(name).top)).toBeLessThan(rectOf(name).height)
 
           // Stop is vertically centred on the row.
@@ -276,12 +287,21 @@ describe('agent roster overlay on the phone', () => {
       const description = byTestId(row, 'AgentRow.description')
       expect(rectOf(description).top).toBeGreaterThanOrEqual(rectOf(name).bottom - 1)
       expect(hasNoHorizontalOverflow(row)).toBe(true)
-      for (const id of ['AgentRow.name', 'AgentRow.badge', 'AgentRow.metrics', 'AgentRow.stop']) {
+      for (const id of [
+        'AgentRow.name',
+        'AgentRow.typeTile',
+        'AgentRow.metrics',
+        'AgentRow.stop'
+      ]) {
         expect(isInside(byTestId(row, id), row)).toBe(true)
       }
       // The 1-character name and "g." badge this replaced.
       expectNameReadable(row)
-      expectBadgeWhole(row)
+      expectTileWhole(row)
+      // Line 2 leads with the tile.
+      expect(rectOf(byTestId(row, 'AgentRow.typeTile')).right).toBeLessThanOrEqual(
+        rectOf(description).left + 1
+      )
       expect(rectOf(description).width).toBeGreaterThanOrEqual(40)
       // 420px is not under 400px: the tool name stays, and so do the whole tokens.
       const metrics = byTestId(row, 'AgentRow.metrics')
@@ -303,24 +323,33 @@ describe('agent roster overlay on the phone', () => {
       return view.container
     }
 
-    it('keeps a 12-character name and the badge whole on one line', async () => {
+    it('keeps a 12-character name and the tile whole on one line', async () => {
       cleanup()
       seedWorstCaseRoster('abcdefghijkl', 1, 'nested-agent')
       for (const row of allByTestId(await mountPanel(), 'AgentRow')) {
         const name = byTestId(row, 'AgentRow.name')
-        const badge = byTestId(row, 'AgentRow.badge')
+        const tile = byTestId(row, 'AgentRow.typeTile')
         const description = byTestId(row, 'AgentRow.description')
-        // One line: the description shares the name's line.
+        // One line: the tile and the description share the name's line, the tile
+        // between them (where the badge was).
         expect(Math.abs(rectOf(description).top - rectOf(name).top)).toBeLessThan(
           rectOf(name).height
         )
+        expect(Math.abs(centreY(tile) - centreY(name))).toBeLessThanOrEqual(3)
+        expect(rectOf(tile).left).toBeGreaterThanOrEqual(rectOf(name).right - 1)
+        expect(rectOf(tile).right).toBeLessThanOrEqual(rectOf(description).left + 1)
         expect(hasNoHorizontalOverflow(row)).toBe(true)
-        for (const id of ['AgentRow.name', 'AgentRow.badge', 'AgentRow.metrics', 'AgentRow.stop']) {
+        for (const id of [
+          'AgentRow.name',
+          'AgentRow.typeTile',
+          'AgentRow.metrics',
+          'AgentRow.stop'
+        ]) {
           expect(isInside(byTestId(row, id), row)).toBe(true)
         }
-        // Readable: neither the name nor the badge is truncated.
+        // Readable: neither the name nor the tile is truncated.
         expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth + 1)
-        expect(badge.scrollWidth).toBeLessThanOrEqual(badge.clientWidth + 1)
+        expectTileWhole(row)
         expect(rectOf(description).width).toBeGreaterThanOrEqual(40)
         expect(isOneLine(byTestId(row, 'AgentRow.stop'))).toBe(true)
       }
@@ -338,5 +367,127 @@ describe('agent roster overlay on the phone', () => {
         expect(rectOf(byTestId(row, 'AgentRow.description')).width).toBeGreaterThanOrEqual(40)
       }
     })
+  })
+})
+
+/**
+ * Three rows of one roster: a custom type, the engine's default type (no tile)
+ * and a cross-engine dispatch (an X). Settled running, so Stop shows.
+ */
+function seedTypeRows(): void {
+  const description = 'Scan fixed widths in the mobile surfaces'
+  const mk = (id: string, name: string, input: Record<string, unknown>, tool = 'Agent') => ({
+    message: {
+      id: `m-${id}`,
+      role: 'assistant' as const,
+      content: [{ type: 'tool_use' as const, toolUseId: id, toolName: tool, toolInput: input }],
+      timestamp: 0
+    },
+    name
+  })
+  const rows = [
+    mk('tu-custom', 'scan', { name: 'scan', subagent_type: 'Explore', description }),
+    mk('tu-default', 'plain', { name: 'plain', subagent_type: 'general-purpose', description }),
+    mk(
+      'tu-dispatch',
+      'dispatch',
+      { engine: 'opencode', model: 'deepseek-v4', prompt: 'review it' },
+      'mcp__claude-ui-collab__dispatch_agent'
+    )
+  ]
+  useSessionStore.setState({
+    activeSessionId: ROUTE,
+    settings: { ...DEFAULT_SETTINGS },
+    sessions: {
+      [ROUTE]: {
+        ...EMPTY_SESSION_STATE,
+        status: { ...EMPTY_SESSION_STATE.status, engineId: 'claude' },
+        messages: rows.map((r) => r.message),
+        activeTasks: Object.fromEntries(
+          rows.map((r) => [
+            r.message.content[0].toolUseId,
+            {
+              taskId: `t-${r.message.id}`,
+              taskType: 'local_agent',
+              runIndex: 1,
+              isBackgrounded: true
+            }
+          ])
+        )
+      }
+    }
+  })
+}
+
+describe('the type tile in the agent list (ADR-093)', () => {
+  beforeEach(() => seedTypeRows())
+  afterEach(() => {
+    cleanup()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const rowOf = (root: HTMLElement, toolUseId: string): HTMLElement =>
+    root.querySelector<HTMLElement>(`[data-tool-use-id="${toolUseId}"]`)!
+
+  it('shows a letter tile for a custom type, none for the default, an X for a dispatch', async () => {
+    const overlay = await openOverlay(1.1)
+    const custom = rowOf(overlay, 'tu-custom')
+    const tile = byTestId(custom, 'AgentRow.typeTile')
+    expect(tile.innerText.trim()).toBe('E')
+    // The full type name for a hover and a screen reader.
+    expect(tile.title).toBe('Explore')
+    expect(tile.getAttribute('aria-label')).toBe('Explore')
+    // The default type has nothing to say: no tile, and the description leads line 2.
+    const plain = rowOf(overlay, 'tu-default')
+    expect(plain.querySelector('[data-testid="AgentRow.typeTile"]')).toBeNull()
+    expect(rectOf(byTestId(plain, 'AgentRow.description')).left).toBeLessThanOrEqual(
+      rectOf(byTestId(plain, 'AgentRow.name')).left + 1
+    )
+    // A dispatch is an X, and says where it went.
+    const dispatch = byTestId(rowOf(overlay, 'tu-dispatch'), 'AgentRow.typeTile')
+    expect(dispatch.innerText.trim()).toBe('X')
+    expect(dispatch.title).toBe('Dispatch \u2192 opencode \u00b7 deepseek-v4')
+  })
+
+  it('takes the default dispatch colour, and the one in settings when set', async () => {
+    const overlay = await openOverlay(1)
+    const x = byTestId(rowOf(overlay, 'tu-dispatch'), 'AgentRow.typeTile')
+    expect(x.getAttribute('data-color')).toBe('orange')
+    cleanup()
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, dispatchTileColor: 'teal' }
+    }))
+    const again = await openOverlay(1)
+    expect(
+      byTestId(rowOf(again, 'tu-dispatch'), 'AgentRow.typeTile').getAttribute('data-color')
+    ).toBe('teal')
+  })
+
+  it('leads line 2 on a phone and sits before the description when wide', async () => {
+    const narrow = await openOverlay(1.1)
+    const nRow = rowOf(narrow, 'tu-custom')
+    const nTile = byTestId(nRow, 'AgentRow.typeTile')
+    expect(rectOf(nTile).top).toBeGreaterThanOrEqual(
+      rectOf(byTestId(nRow, 'AgentRow.name')).bottom - 1
+    )
+    expect(rectOf(nTile).right).toBeLessThanOrEqual(
+      rectOf(byTestId(nRow, 'AgentRow.description')).left + 1
+    )
+    cleanup()
+    const view = render(
+      <ZoomFrame scale={1} width="520px">
+        <PanelRoster />
+      </ZoomFrame>
+    )
+    await settle()
+    const wRow = rowOf(view.container, 'tu-custom')
+    const wTile = byTestId(wRow, 'AgentRow.typeTile')
+    const wName = byTestId(wRow, 'AgentRow.name')
+    // One line, in the badge's old place: after the name, before the description.
+    expect(Math.abs(centreY(wTile) - centreY(wName))).toBeLessThanOrEqual(3)
+    expect(rectOf(wTile).left).toBeGreaterThanOrEqual(rectOf(wName).right - 1)
+    expect(rectOf(wTile).right).toBeLessThanOrEqual(
+      rectOf(byTestId(wRow, 'AgentRow.description')).left + 1
+    )
   })
 })

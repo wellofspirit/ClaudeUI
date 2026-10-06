@@ -384,6 +384,7 @@ const SESSION_IPC_CHANNELS = [
   'config:save-opencode-settings',
   'config:read-opencode-native-raw',
   'config:patch-opencode-native',
+  'config:list-agent-types',
   'opencode-agents:list',
   'opencode-agents:read',
   'opencode-agents:save',

@@ -505,6 +505,8 @@ const api: ClaudeAPI = {
     models: string[] | null
   ) => unwrap('models:set-provider-allowlist', engine, providerId, models),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
+  listAgentTypes: (engine: import('../shared/types').EngineId, cwd?: string) =>
+    unwrap('config:list-agent-types', engine, cwd),
   readOpencodeAgent: (
     name: string,
     scope: import('../shared/types').OpencodeAgentScope,
