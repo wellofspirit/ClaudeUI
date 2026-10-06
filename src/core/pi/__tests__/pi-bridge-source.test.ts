@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 12 (ADR-089 messaging v2: S2 reworded the agent and send_message descriptions)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('12')
+  it('is version 13 (ADR-094: registers the shared MCP catalog)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('13')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -119,9 +119,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("bridgeUrl + '/tool-call'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("baseUrl + '/wait'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('parsed.pending !== true')
-    // Exactly two fetch() call sites' worth of URL construction: the helper's
-    // own fetch, and nothing else.
-    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(1)
+    // Exactly two fetch() call sites: the helper's own (every long-polled
+    // exchange), and the one-shot, time-bounded MCP catalog load (ADR-094),
+    // which is not an exchange — nothing is held open for a decision.
+    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(2)
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("fetch(bridgeUrl + '/mcp-servers'")
   })
 
   it('references the hosted-tools and dispatch-enabled env vars', () => {
@@ -263,7 +265,8 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
-  'CLAUDEUI_PI_SEND_MESSAGE'
+  'CLAUDEUI_PI_SEND_MESSAGE',
+  'CLAUDEUI_PI_MCP'
 ] as const
 
 type BridgeEnvVar = (typeof BRIDGE_ENV_VARS)[number]
@@ -1506,5 +1509,127 @@ describe('Electron-as-Node cleanup (ADR-082 §2)', () => {
     expect(
       envAfterLoad({ ELECTRON_RUN_AS_NODE: '1', CLAUDEUI_PI_ELECTRON_NODE: undefined })
     ).toEqual({ runAsNode: '1', marker: undefined })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-094)', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  /** A fake pi with the MCP registration API; `refuse` names servers registerMcpServer throws for. */
+  function mcpPi(refuse: string[] = []): {
+    pi: FakePi & { registerMcpServer: (name: string, config: unknown) => void }
+    registered: Array<{ name: string; config: unknown }>
+    handlers: Map<string, Array<(...args: unknown[]) => unknown>>
+  } {
+    const registered: Array<{ name: string; config: unknown }> = []
+    const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>()
+    const pi = {
+      on: (event: string, handler: (...args: unknown[]) => unknown) =>
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+      registerTool: () => {},
+      registerCommand: () => {},
+      getActiveTools: () => [],
+      setActiveTools: () => {},
+      sendMessage: () => {},
+      registerMcpServer: (name: string, config: unknown) => {
+        if (refuse.includes(name))
+          throw new Error(`server "${name}": url must be an http or https URL`)
+        registered.push({ name, config })
+      }
+    }
+    return { pi, registered, handlers }
+  }
+
+  function notifiesAtSessionStart(
+    handlers: Map<string, Array<(...args: unknown[]) => unknown>>
+  ): string[] {
+    const notes: string[] = []
+    const ctx = { ui: { notify: (message: string) => notes.push(message) } }
+    for (const h of handlers.get('session_start') ?? []) h({ type: 'session_start' }, ctx)
+    return notes
+  }
+
+  it('without CLAUDEUI_PI_MCP the factory stays synchronous and never asks for servers', () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (url: string) => {
+      calls.push(url)
+      return { ok: true, status: 200, json: async () => ({}) } as Response
+    }) as typeof fetch
+    withEnv({ ...BRIDGE_CREDS }, () => {
+      const { pi, registered } = mcpPi()
+      expect(loadExtensionFactory()(pi)).toBeUndefined()
+      expect(calls).toEqual([])
+      expect(registered).toEqual([])
+    })
+  })
+
+  it('fetches /mcp-servers with the bearer token and registers every server WHILE loading', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const servers = {
+      fixture: { type: 'stdio', command: 'node', exposure: 'direct' },
+      docs: { type: 'http', url: 'https://x/mcp', exposure: 'direct' }
+    }
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return { ok: true, status: 200, json: async () => ({ servers }) } as Response
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_MCP: '1' }, async () => {
+      const { pi, registered, handlers } = mcpPi()
+      const loading = loadExtensionFactory()(pi) as unknown
+      expect(loading).toBeInstanceOf(Promise)
+      await loading
+      expect(calls).toHaveLength(1)
+      expect(calls[0].url).toBe('http://127.0.0.1:9/mcp-servers')
+      expect((calls[0].init.headers as Record<string, string>).authorization).toBe('Bearer tok')
+      expect(registered).toEqual([
+        { name: 'fixture', config: servers.fixture },
+        { name: 'docs', config: servers.docs }
+      ])
+      expect(notifiesAtSessionStart(handlers)).toEqual([])
+    })
+  })
+
+  it('a server pi refuses costs only itself, and is reported once as an "MCP " warning', async () => {
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ servers: { bad: { url: 'x' }, good: { command: 'node' } } })
+      }) as Response) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_MCP: '1' }, async () => {
+      const { pi, registered, handlers } = mcpPi(['bad'])
+      await loadExtensionFactory()(pi)
+      expect(registered.map((r) => r.name)).toEqual(['good'])
+      const notes = notifiesAtSessionStart(handlers)
+      expect(notes).toHaveLength(1)
+      expect(notes[0]).toMatch(/^MCP servers from ClaudeUI could not be registered:\n {2}bad: /)
+    })
+  })
+
+  it('an unreachable host never throws out of the factory (that would discard the gate too)', async () => {
+    globalThis.fetch = (async () => ({ ok: false, status: 401 }) as Response) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_MCP: '1' }, async () => {
+      const { pi, handlers } = mcpPi()
+      await expect(loadExtensionFactory()(pi)).resolves.toBeUndefined()
+      expect(handlers.has('tool_call')).toBe(true)
+      expect(notifiesAtSessionStart(handlers)).toEqual([
+        'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (HTTP 401)'
+      ])
+    })
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed http://127.0.0.1:9 tok')
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_MCP: '1' }, async () => {
+      const { pi, handlers } = mcpPi()
+      await loadExtensionFactory()(pi)
+      const notes = notifiesAtSessionStart(handlers)
+      // The error class only: never the message, which could carry the URL or token.
+      expect(notes).toEqual([
+        'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (TypeError)'
+      ])
+    })
   })
 })

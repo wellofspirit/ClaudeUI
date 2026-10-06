@@ -39,6 +39,7 @@ import {
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL,
   PLAN_EXIT_OUTSIDE_PLAN_REASON
 } from '../permission-engine'
+import { piMcpRuleKey } from '../pi-mcp-bridge'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
   return {
@@ -1723,5 +1724,50 @@ describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', (
     expect(decide('edit', { path: 'src/a.ts' }, ctx('/repo', 'default'))).toBe('ask')
     expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'full'))).toBe('allow')
     expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'plan'))).toBe('deny')
+  })
+})
+
+/**
+ * ADR-094. pi names an MCP tool `mcp__<server>__<tool>` passed through its
+ * sanitizer (everything but `[A-Za-z0-9_]` → `_`), so `my-server`'s `get-issue`
+ * is called `mcp__my_server__get_issue`. A rule the user wrote for Claude
+ * (`mcp__my-server__get-issue`, `mcp__my-server`) must bind to that call; pi's
+ * gates pass `mcpRuleKey: piMcpRuleKey` for it. Without the key (Codex, which
+ * names MCP calls in Claude's own form) rules compare as written.
+ */
+describe('decide — MCP rules against pi-sanitized tool names (ADR-094)', () => {
+  const ctx = (partial: Partial<MergedClaudeRules>, keyed = true) => ({
+    mode: 'default',
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    cwd: '/repo',
+    ...(keyed ? { mcpRuleKey: piMcpRuleKey } : {})
+  })
+  const TOOL = 'mcp__my_server__get_issue'
+
+  it('a Claude-form tool rule binds in every tier', () => {
+    expect(decideWithSource(TOOL, {}, ctx({ allow: ['mcp__my-server__get-issue'] }))).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'mcp__my-server__get-issue'
+    })
+    expect(decide(TOOL, {}, ctx({ deny: ['mcp__my-server__get-issue'] }))).toBe('deny')
+    expect(
+      decide(TOOL, {}, ctx({ ask: ['mcp__my-server__get-issue'], allow: ['mcp__my-server'] }))
+    ).toBe('ask')
+  })
+
+  it('the server forms (`mcp__s`, `mcp__s__*`) cover every tool of that server only', () => {
+    expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server'] }))).toBe('allow')
+    expect(decide(TOOL, {}, ctx({ deny: ['mcp__my-server__*'] }))).toBe('deny')
+    expect(decide('mcp__my_server_two__x', {}, ctx({ allow: ['mcp__my-server'] }))).toBe('ask')
+  })
+
+  it('a rule for another tool does not match', () => {
+    expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server__close-issue'] }))).toBe('ask')
+  })
+
+  it('without the key the hyphenated rule stays inert (the gap this closes)', () => {
+    expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server__get-issue'] }, false))).toBe('ask')
   })
 })

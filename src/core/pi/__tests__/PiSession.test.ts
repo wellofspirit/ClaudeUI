@@ -379,6 +379,18 @@ vi.mock('node:fs', () => ({
 // read-only bypass never clears a git command and no gitConfigArmed meta line
 // appears unless a test says the repo config was measured. The other captures
 // stay real (the `/cwd` fixture is not a repository, so they fail, by design).
+// ADR-094: the shared MCP catalog. The I/O reads are stubbed (never the
+// developer's own ~/.claude/.mcp.json); the pure helpers stay real.
+const mcpCatalogMock = vi.hoisted(() => ({
+  collect: vi.fn(() => ({ servers: {}, skipped: [] }) as Record<string, unknown>),
+  native: vi.fn((): string[] => [])
+}))
+vi.mock('../pi-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../pi-mcp-bridge')>()),
+  collectClaudeMcpForPi: mcpCatalogMock.collect,
+  readPiNativeMcpServerNames: mcpCatalogMock.native
+}))
+
 const mockCaptureGitConfigArmed = vi.hoisted(() => vi.fn())
 vi.mock('../../automode/ground-truth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../automode/ground-truth')>()),
@@ -410,7 +422,9 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
     .normalizeBlockHoldSeconds
 }))
 
-import { PiSession } from '../PiSession'
+import { allowRuleActionFor, PiSession } from '../PiSession'
+import { allowRuleGate } from '../../automode/allow-rule-gate'
+import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
@@ -747,6 +761,8 @@ describe('PiSession.run — sends a prompt', () => {
         env: {
           CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
+          // ADR-094: the shared MCP catalog, always registered by a session.
+          CLAUDEUI_PI_MCP: '1',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
@@ -7596,5 +7612,121 @@ describe('PiSession — the headline follows the cost rule (ADR-071 §2)', () =>
     expect(after.billedCostUsd).toBe(0)
     expect(after.totalCostUsd).toBeCloseTo(1.25, 6)
     expect(after.unknownCostMessages).toBeUndefined()
+  })
+})
+
+describe('PiSession — shared MCP catalog (ADR-094)', () => {
+  const FIXTURE_ENTRY = { type: 'stdio', command: 'node', args: ['srv.js'], exposure: 'direct' }
+
+  beforeEach(() => {
+    mcpCatalogMock.collect.mockReset().mockReturnValue({ servers: {}, skipped: [] })
+    mcpCatalogMock.native.mockReset().mockReturnValue([])
+  })
+
+  it('hands the catalog to the bridge host (never the env) and turns the bridge MCP block on', async () => {
+    mcpCatalogMock.collect.mockReturnValue({ servers: { 'my-srv': FIXTURE_ENTRY }, skipped: [] })
+    const win = new MockWindow()
+    const session = new PiSession('rid-mcp-catalog', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(mcpCatalogMock.collect).toHaveBeenCalledWith('/cwd')
+    const options = MockPiBridgeHost.mock.calls.at(-1)?.[2] as { mcpServers?: unknown }
+    expect(options.mcpServers).toEqual({ 'my-srv': FIXTURE_ENTRY })
+    const env = lastSpawnOpts().env as Record<string, string>
+    expect(env.CLAUDEUI_PI_MCP).toBe('1')
+    expect(JSON.stringify(env)).not.toContain('srv.js')
+  })
+
+  it('warns ONCE per session about catalog servers pi cannot take, not on every respawn', async () => {
+    mcpCatalogMock.collect.mockReturnValue({
+      servers: {},
+      skipped: [{ name: 'legacy', reason: 'pi does not support legacy SSE' }]
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-mcp-skip', win as never, '/cwd', {})
+    await session.run('hi')
+    await session.cancel()
+    await session.run('again')
+    expect(mcpCatalogMock.collect).toHaveBeenCalledTimes(2)
+    const warnings = sentPayloads(win, 'session:warning') as string[]
+    expect(warnings).toEqual([
+      'MCP servers not available in pi: legacy (pi does not support legacy SSE)'
+    ])
+  })
+
+  it("a Claude-form rule matches pi's sanitized MCP tool name at the gate (allow, deny, server-level)", async () => {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: ['mcp__my-srv__get-issue'],
+            deny: ['mcp__other-srv'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-mcp-rules', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(await gate('c1', 'mcp__my_srv__get_issue', {})).toEqual({ behavior: 'allow' })
+    expect(await gate('c2', 'mcp__other_srv__wipe', {})).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: mcp__other-srv'
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('surfaces pi MCP warnings (notify) as session warnings', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-mcp-notice', win as never, '/cwd', {})
+    await session.run('hi')
+    const onEvent = mockOnEvent.mock.calls.at(-1)?.[0] as (ev: unknown) => void
+    onEvent({
+      type: 'extension_ui_request',
+      id: 'n1',
+      method: 'notify',
+      notifyType: 'warning',
+      message: 'MCP servers need attention:\n  docs: needs sign-in\nRun /mcp to fix.'
+    })
+    expect(sentPayloads(win, 'session:warning')).toContain(
+      'MCP servers need attention:\n  docs: needs sign-in\nRun /mcp to fix.'
+    )
+  })
+})
+
+describe('allowRuleActionFor — auto-mode allow skip for pi MCP calls (ADR-094)', () => {
+  it("maps pi's sanitized server back to the one known Claude name it stands for", () => {
+    expect(allowRuleActionFor('mcp__my_srv__get_issue', {}, ['my-srv', 'other'])).toEqual({
+      kind: 'mcp',
+      server: 'my-srv',
+      tool: 'get_issue'
+    })
+    // Ambiguous or unknown: the pi form stays (the judge decides — never a wider skip).
+    expect(allowRuleActionFor('mcp__a_b__x', {}, ['a-b', 'a.b'])).toMatchObject({ server: 'a_b' })
+    expect(allowRuleActionFor('mcp__x__y', {})).toMatchObject({ server: 'x', tool: 'y' })
+  })
+
+  it('a Claude-form allow rule skips the judge for the matching pi call only', () => {
+    const gateFor = (toolName: string) =>
+      allowRuleGate({
+        action: allowRuleActionFor(toolName, {}, ['my-srv'])!,
+        toolName,
+        cwd: '/cwd',
+        permissions: {
+          allow: ['mcp__my-srv__get-issue'],
+          ask: [],
+          deny: [],
+          additionalDirectories: []
+        },
+        autoModeActive: () => true,
+        logSource: 'test',
+        classifyAllShell: false,
+        mcpToolKey: piMcpName
+      })
+    expect(gateFor('mcp__my_srv__get_issue')).toMatchObject({
+      allow: true,
+      rule: 'mcp__my-srv__get-issue'
+    })
+    expect(gateFor('mcp__my_srv__close_issue').allow).toBe(false)
   })
 })

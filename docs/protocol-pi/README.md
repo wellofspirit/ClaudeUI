@@ -379,6 +379,45 @@ session file + ClaudeUI log; no new probe run):
   `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
   (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-090).
 
+## MCP (pi 1.0 + ClaudeUI's shared catalog, ADR-094)
+
+Source-read at v1.0.4 (`vendor/pi-src/packages/coding-agent/src/core/mcp-servers.ts`,
+`src/extensions/mcp/`) and proven credential-free end to end by
+`src/integration/pi/pi-mcp.integration.test.ts` (isolated `PI_CODING_AGENT_DIR`, a localhost
+OpenAI-compatible provider in `models.json`, a stdio fixture server):
+
+- **pi's own MCP** is a built-in extension: servers from `~/.pi/agent/mcp.json` and the trusted
+  project's `.pi/mcp.json` (the bridge trusts every project ClaudeUI opens). ClaudeUI never passes
+  `--no-mcp` and never edits those files.
+- **`pi.registerMcpServer(name, config)`** adds a session-only server (config = one `mcpServers`
+  entry). Registered while extensions load, it connects at `session_start`; later, right away.
+  Re-register on every load: `fork` / `switch_session` / `new_session` rebuild the runtime and re-run
+  every extension factory. A `mcp.json` server with the same namespace wins. Invalid names
+  (outside `[A-Za-z0-9_-]`), legacy SSE and non-http(s) URLs throw; registrations staged in one load
+  are NOT clash-checked against each other (ClaudeUI dedupes namespaces itself).
+- **Tool names** are `mcp__<server>__<tool>` with `[^A-Za-z0-9_]` → `_` (`my-server` →
+  `my_server`), hash-suffixed past 64 chars. Every call runs the `tool_call` hook (the gate).
+- **Exposure**: default `codemode` hides tools behind the `codemode` script tool; ClaudeUI registers
+  `direct` (declared like built-ins). The first prompt waits up to 10 s for `direct` servers.
+- **Config values are templates** in `env` and `headers` (`core/resolve-config-value.ts`): a leading
+  `!` RUNS A SHELL COMMAND, `$NAME`/`${NAME}` interpolate, `$$`/`$!` escape. ClaudeUI expands
+  Claude's `${VAR}`/`${VAR:-default}` itself and escapes the result.
+- **Stdio servers inherit pi's env** (`{...process.env, ...env}`), bridge token included.
+- **Warnings reach RPC only as `extension_ui_request` notifies** (`method: "notify"`,
+  `notifyType`): "MCP servers need attention: … needs sign-in / failed …", "MCP failed to load …".
+  The event mapper surfaces warning/error notifies starting `MCP ` as `session:warning`.
+- **OAuth**: an HTTP server without an `Authorization` header that answers 401 is "needs sign-in";
+  nothing prompts and nothing hangs. `/mcp login` opens a browser and waits on an `input` dialog
+  ClaudeUI does not answer (untested from ClaudeUI).
+- **`--tools` without an `mcp__` entry** keeps MCP tools registered but never activates a `direct`
+  one (`agent-session.ts` `_isActivatable`), so a subagent with an explicit list gets none —
+  Claude's rule.
+
+ClaudeUI's side: `src/core/pi/pi-mcp-bridge.ts` (translation, filtering, escaping, pi's own
+names), `PiBridgeHost` `POST /mcp-servers` (the spawn-time snapshot, bearer-authenticated,
+repeatable), bridge v13's `CLAUDEUI_PI_MCP=1` block (fetch, `registerMcpServer` per entry, one
+`session_start` notify for failures; the factory returns that promise so pi waits).
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next

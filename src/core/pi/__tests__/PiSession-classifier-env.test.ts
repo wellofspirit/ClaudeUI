@@ -44,6 +44,12 @@ const {
 }))
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: vi.fn(() => ({})) }))
+// ADR-094: never read the developer's own MCP catalog in a unit test.
+vi.mock('../pi-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../pi-mcp-bridge')>()),
+  collectClaudeMcpForPi: () => ({ servers: {}, skipped: [] }),
+  readPiNativeMcpServerNames: () => []
+}))
 vi.mock('../pi-locate', () => ({
   locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
   piBinaryAvailable: () => true

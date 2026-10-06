@@ -59,6 +59,16 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
 import { piUsageEvent } from './usage-row'
+// ADR-094: the shared MCP catalog, registered by the bridge extension.
+import {
+  claudeServerForPi,
+  collectClaudeMcpForPi,
+  piMcpName,
+  piMcpRuleKey,
+  piNativeCollisions,
+  readPiNativeMcpServerNames,
+  type PiMcpCatalog
+} from './pi-mcp-bridge'
 // Host-run subagents (ADR-089): the manager owns the children; this session
 // owns their gating (decideToolCall, parametrized by the child scope).
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
@@ -196,13 +206,16 @@ function unknownHostedTool(toolName: string): PiHostedToolResult {
  * has no `workdir`: an input carrying one — or a `cwd` — says the call runs
  * somewhere this check cannot tell, as the read-only gate refuses it); an
  * `mcp__<server>__<tool>` name → that server and tool (split at the FIRST `__`
- * after the prefix; pi compares rule tool names as written). Every other pi
+ * after the prefix; the server mapped back to its Claude-form name when
+ * `knownMcpServers` names exactly one, the tool compared in pi's form via
+ * `mcpToolKey: piMcpName`). Every other pi
  * tool (edit/write/read/find/ls/grep, the hosted tools, exit_plan, unknown):
  * no skip.
  */
-function allowRuleActionFor(
+export function allowRuleActionFor(
   toolName: string,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  knownMcpServers: readonly string[] = []
 ): AllowSkipAction | undefined {
   if (toolName === 'bash') {
     const has = (v: unknown): boolean => v !== undefined && v !== null && v !== ''
@@ -212,9 +225,14 @@ function allowRuleActionFor(
   if (!toolName.startsWith('mcp__')) return undefined
   const rest = toolName.slice('mcp__'.length)
   const sep = rest.indexOf('__')
-  const server = sep < 0 ? rest : rest.slice(0, sep)
-  if (!server) return undefined
+  const piServer = sep < 0 ? rest : rest.slice(0, sep)
+  if (!piServer) return undefined
   const tool = sep < 0 ? '' : rest.slice(sep + 2)
+  // pi sanitizes server names (`my-server` → `my_server`, ADR-094): the skip
+  // compares the rule's server in Claude's form, so map back when exactly one
+  // known server (the bridged catalog + pi's own mcp.json) stands for it. The
+  // tool part stays pi's; the caller's `mcpToolKey` spells the rule's the same.
+  const server = claudeServerForPi(piServer, knownMcpServers)
   return { kind: 'mcp', server, ...(tool ? { tool } : {}) }
 }
 
@@ -434,6 +452,16 @@ export class PiSession extends BaseSession {
   >()
   /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
   private sessionAllows = new Set<string>()
+  /**
+   * The MCP catalog this session's pi registers (ADR-094): read at each spawn,
+   * served to the bridge extension by the bridge host's `/mcp-servers`, and
+   * handed to host-run subagents. Null until the first spawn.
+   */
+  private mcpCatalog: PiMcpCatalog | null = null
+  /** Bridged + pi-native MCP server names at the last spawn — what maps a pi tool's server back to its Claude name. */
+  private knownMcpServers: string[] = []
+  /** The skipped-servers warning is shown once per session, not on every respawn. */
+  private mcpSkipWarned = false
   /** Lazily loaded, cached merge of the user/project/local Claude permission scopes. Invalidated by notifySettingsChanged() and by persistAllowRules() (so a just-persisted rule is honored on the very next gate call in this same session). */
   private cachedRules: MergedClaudeRules | null = null
 
@@ -584,6 +612,7 @@ export class PiSession extends BaseSession {
         },
         currentModel: () => session._model,
         skillDirsEnv: () => session.computeSkillDirsEnv(),
+        bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
         send: (channel, data) => session.send(channel, data),
         gateChild: (scope, payload) => session.gateChild(scope, payload),
         childAbandoned: (info) => {
@@ -805,6 +834,31 @@ export class PiSession extends BaseSession {
     return existing.length > 0 ? { CLAUDEUI_PI_SKILL_DIRS: existing.join(delimiter) } : {}
   }
 
+  /**
+   * Read the shared MCP catalog for this spawn (ADR-094) and remember it, the
+   * names pi will know its MCP tools by, and pi's own same-named servers.
+   * Never throws (`collectClaudeMcpForPi` degrades to an empty catalog).
+   */
+  private loadMcpCatalog(): PiMcpCatalog {
+    const catalog = collectClaudeMcpForPi(this.cwd)
+    const bridged = Object.keys(catalog.servers)
+    const native = readPiNativeMcpServerNames(this.cwd)
+    for (const name of piNativeCollisions(bridged, native)) {
+      // pi's rule: its own mcp.json entry wins over a registered one.
+      logger.info('PiSession', `MCP server "${name}" is also in pi's mcp.json; pi's entry is used`)
+    }
+    this.mcpCatalog = catalog
+    this.knownMcpServers = [...new Set([...bridged, ...native])]
+    if (catalog.skipped.length > 0 && !this.mcpSkipWarned) {
+      this.mcpSkipWarned = true
+      this.send(
+        'session:warning',
+        `MCP servers not available in pi: ${catalog.skipped.map((s) => `${s.name} (${s.reason})`).join('; ')}`
+      )
+    }
+    return catalog
+  }
+
   private async doStart(): Promise<void> {
     const launch = locatePiLaunch()
     if (!launch) throw new Error(harnessUnavailableMessage('pi'))
@@ -832,10 +886,14 @@ export class PiSession extends BaseSession {
     // protocol"): hold/abandon budgets stay at their defaults, but the
     // abandonment callback is wired so a pi child that stops polling can't
     // leave a live approval card or an orphaned dispatched child behind.
+    // The shared MCP catalog (ADR-094), read fresh at every spawn: the bridge
+    // extension fetches it from this host while pi loads (secrets never touch
+    // an env var or a file), and a respawn picks up McpDialog's edits.
+    const mcpCatalog = this.loadMcpCatalog()
     const bridgeHost = new PiBridgeHost(
       this.gateToolCall,
       this.capabilities.hostedMcp ? this.handleHostedTool : undefined,
-      { onAbandoned: this.handleBridgeAbandoned }
+      { onAbandoned: this.handleBridgeAbandoned, mcpServers: mcpCatalog.servers }
     )
     let bridge: { url: string; token: string }
     try {
@@ -881,6 +939,9 @@ export class PiSession extends BaseSession {
         env: {
           CLAUDEUI_PI_BRIDGE_URL: bridge.url,
           CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+          // The bridge registers the shared MCP catalog (ADR-094). Always on:
+          // the configs themselves come over the host channel, not from here.
+          CLAUDEUI_PI_MCP: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
           ...(this.capabilities.crossEngineDispatch
             ? {
@@ -1714,6 +1775,13 @@ export class PiSession extends BaseSession {
         }
         break
 
+      case 'mcp_notice':
+        // pi's MCP warnings (a server failed, needs a sign-in, or was refused
+        // at registration — ADR-094): a warning, never a turn error.
+        logger.info('PiSession', output.message)
+        this.send('session:warning', output.message)
+        break
+
       case 'ignore':
         break
     }
@@ -2070,7 +2138,9 @@ export class PiSession extends BaseSession {
       mode: autoMode ? 'acceptEdits' : mode,
       rules: autoMode ? withoutAllowRules(rules) : rules,
       sessionAllows: this.sessionAllows,
-      cwd: this.cwd
+      cwd: this.cwd,
+      // pi's MCP tool names are sanitized (ADR-094): spell rules the same way.
+      mcpRuleKey: piMcpRuleKey
     })
 
     // Spawn-call rung (ADR-089 Q1, Claude Code parity): launching an agent
@@ -2891,7 +2961,9 @@ export class PiSession extends BaseSession {
         autoModeActive: () => this.isAutoMode(this.gateMode(scope)),
         permissions: () => this.currentRules(),
         honoursWorkdir: false,
-        allowRuleAction: allowRuleActionFor,
+        allowRuleAction: (name, input) => allowRuleActionFor(name, input, this.knownMcpServers),
+        // A rule's MCP tool part in pi's spelling (ADR-094), as the action's is.
+        mcpToolKey: piMcpName,
         // A configured judge model that no longer exists fails CLOSED — never
         // judged by a stand-in (see judgeModelUnavailable).
         judgeAvailable: async () => !(await this.judgeModelUnavailable()),

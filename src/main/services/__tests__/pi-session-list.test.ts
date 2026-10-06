@@ -376,6 +376,74 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     ])
   })
 
+  it('replays a bridged MCP call (ADR-094) as the same tool_use/tool_result pair the live mapper sends', async () => {
+    writeSessionFile('--proj-mcp--', 'x_sess-mcp.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-mcp',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/mcp'
+      },
+      userEntry('u1', null, 'echo'),
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_m',
+              name: 'mcp__fixture__echo',
+              arguments: { text: 'hi' }
+            }
+          ],
+          api: 'a',
+          provider: 'p',
+          model: 'm',
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
+          stopReason: 'toolUse',
+          timestamp: 2
+        }
+      },
+      {
+        type: 'message',
+        id: 'tr1',
+        parentId: 'a1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_m',
+          toolName: 'mcp__fixture__echo',
+          content: [{ type: 'text', text: 'tag:hi' }],
+          // pi's MCP tool details (extensions/mcp/tools.ts McpToolDetails).
+          details: { server: 'fixture', tool: 'echo' },
+          isError: false,
+          timestamp: 3
+        }
+      }
+    ])
+    const { messages } = await loadPiSessionHistory('sess-mcp')
+    expect(messages.find((m) => m.id === 'a1')!.content).toEqual([
+      {
+        type: 'tool_use',
+        toolUseId: 'call_m',
+        toolName: 'mcp__fixture__echo',
+        toolInput: { text: 'hi' }
+      },
+      { type: 'tool_result', toolUseId: 'call_m', toolResult: 'tag:hi', isError: false }
+    ])
+  })
+
   it("carries a toolResult's image content onto the folded tool_result block", async () => {
     // pi's read tool on an image returns `{type:'image', data, mimeType}` content
     // blocks alongside (or instead of) text; the replay used to keep only text.
