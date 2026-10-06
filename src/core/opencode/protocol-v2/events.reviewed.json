@@ -1,0 +1,20 @@
+{
+  "version": "2.0.23",
+  "commit": "0fd7e2829449b052abf0078666669302923d77af",
+  "sources": {
+    "packages/protocol/src/groups/event.ts": "de5857bb0a9baf94e165f95978c0ae1affe70abce5182ffb01225afae507fbd0",
+    "packages/schema/src/event.ts": "cf68654e57726a376c0c57e27740606f276952f14407dc3dedfdad9e8a62ac16",
+    "packages/schema/src/event-manifest.ts": "e07189cf22530bb195afe98f89da87cbf9289cf457ecbddf9eef8a28af3f24cb",
+    "packages/schema/src/session-event.ts": "5d5adb64afd74130d2376beb69004a51a068b253c42983cabdd214ca56ebd68e",
+    "packages/schema/src/session-inbox.ts": "61f9b9fd57409e4c8982da998142563a5d9fbd2148c47c383ad48f3897b73d51",
+    "packages/schema/src/session-error.ts": "2c059373d8a90aebab5e29b49a5348c8f826479e7f5e273da08fa7e9d95a977d",
+    "packages/schema/src/permission.ts": "5248a0717ebf30196ba25ed0a8cd5fef8c0b5bd8a039239822ccb34940999be7",
+    "packages/schema/src/form.ts": "a0caefe1dc74e0c97bacb13ff46ed30126ef1d0b101cdaf198a7fb000b4620be",
+    "packages/schema/src/credential.ts": "f0d15c01abe752458ee26527a7a840021bee59378dc044b48d114cfd7a98df57",
+    "packages/schema/src/provider.ts": "279f8f2da703070c65ae7af682dbe208ad13bcd89fa1250d8065e0df34859409",
+    "packages/schema/src/model.ts": "a90c419508aa0d81b5e992508052c49fe9cd2714aca9303bfdc4f71435aabfe7",
+    "packages/schema/src/server-event.ts": "763922b807a559c3bf4dfda5336656e30ef373bbb1efe0e83d073a44b21caa12",
+    "packages/schema/src/llm.ts": "f5c851d7688c0d2e420f712a971f38a0210cc0c6e8b0b9202018f04cddadb915",
+    "packages/schema/src/location.ts": "cc899b5b9430c1edf62f353c8f49611a382511a544c09889e2da24f9ab2ddec4"
+  }
+}
