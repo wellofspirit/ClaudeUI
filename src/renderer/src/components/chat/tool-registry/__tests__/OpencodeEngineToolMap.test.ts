@@ -209,7 +209,7 @@ describe('OpencodeEngineToolMap.normalize', () => {
   // Cross-engine dispatch (ADR-033 M3): `engine` present discriminates
   // claudeui_dispatch_agent's input from opencode's native task tool.
   describe('task: dispatch_agent (engine present)', () => {
-    it('builds "Dispatch: <engine>" description + "<engine> · <model>" badge', () => {
+    it('builds "Dispatch: <engine>" description + the structured dispatch field', () => {
       const view = OpencodeEngineToolMap.normalize('task', {
         engine: 'claude',
         prompt: 'review this',
@@ -219,13 +219,13 @@ describe('OpencodeEngineToolMap.normalize', () => {
         kind: 'task',
         description: 'Dispatch: claude',
         prompt: 'review this',
-        subagent: 'claude · haiku'
+        dispatch: { engine: 'claude', model: 'haiku' }
       })
     })
 
-    it('badge falls back to bare engine name when model is omitted', () => {
+    it('the dispatch field has no model when none is given', () => {
       const view = OpencodeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x' })
-      expect(view).toMatchObject({ kind: 'task', subagent: 'claude' })
+      expect(view).toMatchObject({ kind: 'task', dispatch: { engine: 'claude' } })
       if (view.kind === 'task') {
         expect(view.model).toBeUndefined()
       }

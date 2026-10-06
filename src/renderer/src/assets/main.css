@@ -56,6 +56,19 @@ pre .token.table {
   --color-mode-auto: #d97706;
   --color-mode-auto-dim: #92400e;
 
+  /* Agent type tiles (ADR-094): the one palette every engine shares. The letter
+     is the colour, on a tint of it. Keep these hues in step with PALETTE_HUE in
+     shared/agent-type-colors.ts, which maps an engine's own colour to the
+     nearest one. Light is darker so the letter holds 4.5:1 on its tint. */
+  --color-agent-sky: #4fc3e8;
+  --color-agent-violet: #b28bf0;
+  --color-agent-green: #7bc47f;
+  --color-agent-orange: #f0965a;
+  --color-agent-rose: #f2708a;
+  --color-agent-amber: #e3c45a;
+  --color-agent-teal: #3fcfb4;
+  --color-agent-pink: #ec82c8;
+
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -82,6 +95,15 @@ pre .token.table {
   --color-mode-plan-dim: #4bbcac;
   --color-mode-auto: #b45309;
   --color-mode-auto-dim: #d97706;
+
+  --color-agent-sky: #07567b;
+  --color-agent-violet: #5a2fa8;
+  --color-agent-green: #125c2c;
+  --color-agent-orange: #843905;
+  --color-agent-rose: #961e3a;
+  --color-agent-amber: #634500;
+  --color-agent-teal: #065b50;
+  --color-agent-pink: #8c2468;
 }
 
 /* ── Monokai theme ── */

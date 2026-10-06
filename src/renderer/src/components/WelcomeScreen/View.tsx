@@ -5,6 +5,7 @@ export interface WelcomeScreenViewProps {
 
 export function WelcomeScreenView({ loading, onOpen }: WelcomeScreenViewProps): React.JSX.Element {
   return (
+    // eslint-disable-next-line no-restricted-syntax -- not mounted anywhere in production (no importer outside its own tests)
     <div data-testid="WelcomeScreen" className="h-screen flex flex-col bg-bg-primary">
       <div className="h-12 shrink-0 [-webkit-app-region:drag]" />
 
