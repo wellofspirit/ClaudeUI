@@ -21,6 +21,18 @@ import {
 } from '../../../../stores/session-store'
 import { reloadActiveTranscript } from '../../../../lib/session-history-load'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import {
+  dispatchScroll,
+  dispatchWheel,
+  distanceFromBottom,
+  fireResize,
+  geo,
+  installScrollGeometry,
+  maxScrollTop,
+  observedElements,
+  setDefaultGeometry
+} from '@test/helpers/scroll-geometry'
+import type { ChatMessage } from '../../../../../../shared/types'
 
 let mockIsMobile = true
 vi.mock('../../../../hooks/useIsMobile', () => ({
@@ -42,7 +54,11 @@ vi.mock('../../BtwCard', () => ({ BtwCard: () => null }))
 vi.mock('../../FloatingError', () => ({ FloatingError: () => null }))
 vi.mock('../../VendorAuthRequiredCard', () => ({ VendorAuthRequiredCard: () => null }))
 vi.mock('../../SandboxViolationToast', () => ({ SandboxViolationToast: () => null }))
-vi.mock('../../ChatSearch', () => ({ ChatSearchOverlay: () => null }))
+// A close button while active, so a test can end a search the way the real bar does.
+vi.mock('../../ChatSearch', () => ({
+  ChatSearchOverlay: ({ active, onClose }: { active: boolean; onClose: () => void }) =>
+    active ? <button data-testid="ChatSearchOverlay.close" onClick={onClose} /> : null
+}))
 vi.mock('../../../TodoWidget', () => ({ TodoWidget: () => null }))
 vi.mock('../../../SentFilesWidget', () => ({ SentFilesWidget: () => null }))
 
@@ -313,6 +329,181 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
     })
 
     expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
+    unmount()
+  })
+})
+
+/**
+ * The scroll behaviour ChatPanel keeps on top of useStickToBottom (the hook's own
+ * decision logic is covered by hooks/__tests__/useStickToBottom.unit.test.tsx):
+ * the scroll-to-bottom button, landing at the bottom on a session switch, the
+ * find bar holding the view still, and the typing indicator being inside the
+ * observed content so it is never left below the fold.
+ */
+describe('ChatPanel — stick to bottom', () => {
+  let app: TestApp
+  let restoreGeometry: () => void
+  let clock = 1000
+  const originalMatchMedia = window.matchMedia
+  const OTHER = 'route-chat-panel-other'
+
+  const message = (id: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: id }],
+    timestamp: 1
+  })
+
+  const scroller = (): HTMLElement => screen.getByTestId('ChatPanel.scroll')
+  const content = (): HTMLElement => {
+    const el = scroller().firstElementChild
+    if (!(el instanceof HTMLElement)) throw new Error('content not mounted')
+    return el
+  }
+
+  /** Content grows after commit with no DOM mutation (a cv-auto swap, an image). */
+  function growLayoutOnly(by: number): void {
+    geo(scroller()).scrollHeight += by
+    act(() => fireResize(content()))
+  }
+
+  /** The user scrolls: input, the offset change, the scroll event. */
+  function userScrollTo(top: number): void {
+    act(() => dispatchWheel(scroller(), top < scroller().scrollTop ? -120 : 120))
+    scroller().scrollTop = top
+    act(() => dispatchScroll(scroller()))
+    clock += 1000
+  }
+
+  async function renderChatPanel(): Promise<{ unmount: () => void }> {
+    const { ChatPanel } = await import('../ChatPanel')
+    let result!: { unmount: () => void }
+    await act(async () => {
+      result = render(<ChatPanel />)
+    })
+    return result
+  }
+
+  beforeEach(async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    restoreGeometry = installScrollGeometry()
+    setDefaultGeometry({ scrollHeight: 4000, clientHeight: 600 })
+    clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    mockIsMobile = false
+    window.localStorage.setItem(HINT_KEY, '1')
+
+    app = await bootTestApp()
+    for (const id of [ROUTE, OTHER]) {
+      useSessionStore.getState().createNewSession(id, '/d/repo')
+    }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [message('a1'), message('a2')] },
+        [OTHER]: { ...state.sessions[OTHER], messages: [message('b1')] }
+      }
+    }))
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    window.localStorage.clear()
+    window.matchMedia = originalMatchMedia
+    vi.restoreAllMocks()
+    restoreGeometry()
+  })
+
+  it('opens at the bottom and follows layout-only growth', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(distanceFromBottom(scroller())).toBe(0)
+    growLayoutOnly(900)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('shows the scroll-to-bottom button only away from the bottom, and it re-arms following', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+
+    userScrollTo(1000)
+    expect(screen.getByTestId('ChatPanel.scrollToBottom')).toBeInTheDocument()
+    // Not following: growth leaves the view where the user put it.
+    growLayoutOnly(300)
+    expect(distanceFromBottom(scroller())).toBe(2700)
+
+    // Far from the bottom the click jumps instantly (no animation to outrun the swaps).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ChatPanel.scrollToBottom'))
+    })
+    expect(geo(scroller()).scrollToCalls).toEqual([])
+    expect(distanceFromBottom(scroller())).toBe(0)
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+    growLayoutOnly(500)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('lands at the bottom, following, after a session switch from a scrolled-up view', async () => {
+    const { unmount } = await renderChatPanel()
+    userScrollTo(200)
+    expect(screen.getByTestId('ChatPanel.scrollToBottom')).toBeInTheDocument()
+
+    await act(async () => {
+      useSessionStore.setState({ activeSessionId: OTHER })
+    })
+    expect(distanceFromBottom(scroller())).toBe(0)
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+    growLayoutOnly(700)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('holds the view still while the find bar is open, and stays put after it closes', async () => {
+    const { unmount } = await renderChatPanel()
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'f', ctrlKey: true })
+    })
+    expect(screen.getByTestId('ChatSearchOverlay.close')).toBeInTheDocument()
+
+    // A search jump scrolled somewhere; streaming growth must not pin it away.
+    scroller().scrollTop = 1200
+    act(() => dispatchScroll(scroller()))
+    growLayoutOnly(500)
+    expect(scroller().scrollTop).toBe(1200)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ChatSearchOverlay.close'))
+    })
+    // Opening the bar stopped following; closing it does not resume it.
+    growLayoutOnly(500)
+    expect(scroller().scrollTop).toBe(1200)
+
+    // Reaching the bottom again does.
+    userScrollTo(maxScrollTop(scroller()))
+    growLayoutOnly(500)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('keeps the typing indicator inside the observed content', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], status: { state: 'running' } as never }
+      }
+    }))
+    const { unmount } = await renderChatPanel()
+    const indicator = screen.getByTestId('ChatPanel.typingIndicator')
+    const watched = observedElements().filter((el) => el !== scroller())
+    expect(watched.some((el) => el.contains(indicator))).toBe(true)
     unmount()
   })
 })

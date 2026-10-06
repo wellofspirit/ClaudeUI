@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
 import { overlayItemStreams } from '../../../../../core/shared/sync/item-stream'
 import {
   useActiveSession,
@@ -14,6 +14,7 @@ import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
+import { useStickToBottom } from '../../../hooks/useStickToBottom'
 import {
   canUseFullscreenGesture,
   useFullscreenDoubleTap
@@ -77,149 +78,24 @@ export function ChatPanel(): React.JSX.Element {
   const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [isAtBottom, setIsAtBottom] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  // Read by the mutation-driven auto-scroll, which must not re-arm while the
-  // find bar is open (it would yank the view off a search jump mid-stream).
-  const searchOpenRef = useRef(false)
-  searchOpenRef.current = searchOpen
+  // The find bar holds the view still: a search jump must not be pinned away
+  // by a streaming turn.
+  const {
+    scrollerRef,
+    contentRef,
+    scrollerEl: scrollRef,
+    isAtBottom,
+    scrollToBottom,
+    jumpToBottom,
+    stopFollowing
+  } = useStickToBottom<HTMLDivElement>({ paused: searchOpen })
 
-  const shouldAutoScroll = useRef(true)
-  const lastScrollTop = useRef(0)
-  const isAutoScrolling = useRef(false)
-  const wasNearBottom = useRef(true)
-
-  const checkAtBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-
-    if (!isAutoScrolling.current) {
-      if (el.scrollTop < lastScrollTop.current - 10) {
-        shouldAutoScroll.current = false
-      } else if (distFromBottom < 100) {
-        shouldAutoScroll.current = true
-      }
-    }
-    lastScrollTop.current = el.scrollTop
-
-    const nearBottom = distFromBottom < 100
-    wasNearBottom.current = nearBottom
-    setIsAtBottom(nearBottom)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.addEventListener('scroll', checkAtBottom, { passive: true })
-    return () => el.removeEventListener('scroll', checkAtBottom)
-  }, [checkAtBottom])
-
-  // Scroll to bottom when switching sessions
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    shouldAutoScroll.current = true
-    setIsAtBottom(true)
-
-    el.scrollTop = el.scrollHeight
-    lastScrollTop.current = el.scrollTop
-
-    const timers = [
-      requestAnimationFrame(() => {
-        if (el) {
-          el.scrollTop = el.scrollHeight
-          lastScrollTop.current = el.scrollTop
-        }
-      }),
-      setTimeout(() => {
-        requestAnimationFrame(() => {
-          if (el) {
-            el.scrollTop = el.scrollHeight
-            lastScrollTop.current = el.scrollTop
-          }
-        })
-      }, 80) as unknown as number
-    ]
-    return () => {
-      cancelAnimationFrame(timers[0])
-      clearTimeout(timers[1])
-    }
-  }, [activeSessionId])
-
-  const smoothGuardRaf = useRef(0)
-  const smoothGuardTimeout = useRef<ReturnType<typeof setTimeout>>(null)
-  const doAutoScroll = useCallback((el: HTMLDivElement, smooth = true) => {
-    isAutoScrolling.current = true
-    cancelAnimationFrame(smoothGuardRaf.current)
-    if (smoothGuardTimeout.current) clearTimeout(smoothGuardTimeout.current)
-    if (smooth) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      const clearGuard = (): void => {
-        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-        if (dist < 10) {
-          isAutoScrolling.current = false
-          lastScrollTop.current = el.scrollTop
-          wasNearBottom.current = true
-        } else {
-          smoothGuardRaf.current = requestAnimationFrame(clearGuard)
-        }
-      }
-      smoothGuardRaf.current = requestAnimationFrame(clearGuard)
-      smoothGuardTimeout.current = setTimeout(() => {
-        cancelAnimationFrame(smoothGuardRaf.current)
-        isAutoScrolling.current = false
-        lastScrollTop.current = el.scrollTop
-        wasNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-      }, 500)
-    } else {
-      el.scrollTop = el.scrollHeight
-      lastScrollTop.current = el.scrollTop
-      wasNearBottom.current = true
-      requestAnimationFrame(() => {
-        isAutoScrolling.current = false
-      })
-    }
-  }, [])
-
-  // Universal auto-scroll via MutationObserver
-  const scrollRafRef = useRef(0)
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-
-    const scheduleScroll = (): void => {
-      cancelAnimationFrame(scrollRafRef.current)
-      scrollRafRef.current = requestAnimationFrame(() => {
-        if (!el) return
-        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-        setIsAtBottom(dist < 100)
-        if (!shouldAutoScroll.current && wasNearBottom.current && !searchOpenRef.current) {
-          shouldAutoScroll.current = true
-        }
-        if (shouldAutoScroll.current) doAutoScroll(el, true)
-      })
-    }
-
-    const observer = new MutationObserver(scheduleScroll)
-    observer.observe(el, { childList: true, subtree: true, characterData: true })
-
-    let lastScrollHeight = el.scrollHeight
-    const resizeObserver = new ResizeObserver(() => {
-      if (el.scrollHeight === lastScrollHeight) return
-      lastScrollHeight = el.scrollHeight
-      scheduleScroll()
-    })
-    resizeObserver.observe(el)
-
-    return () => {
-      observer.disconnect()
-      resizeObserver.disconnect()
-      cancelAnimationFrame(scrollRafRef.current)
-    }
-  }, [doAutoScroll])
+  // Land at the bottom when switching sessions (and keep following from there).
+  useLayoutEffect(() => {
+    jumpToBottom()
+  }, [activeSessionId, jumpToBottom])
 
   useEffect(() => {
     if (!activeSessionId) return
@@ -239,17 +115,8 @@ export function ChatPanel(): React.JSX.Element {
   }, [activeSessionId])
 
   useEffect(() => {
-    if (searchOpen) {
-      shouldAutoScroll.current = false
-    }
-  }, [searchOpen])
-
-  const scrollToBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    shouldAutoScroll.current = true
-    doAutoScroll(el, true)
-  }, [doAutoScroll])
+    if (searchOpen) stopFollowing()
+  }, [searchOpen, stopFollowing])
 
   const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
@@ -309,7 +176,11 @@ export function ChatPanel(): React.JSX.Element {
         />
         <div className="h-8 bg-gradient-to-b from-bg-primary to-transparent pointer-events-none -mb-8 relative z-[1]" />
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto chat-scroll mr-2">
+        <div
+          data-testid="ChatPanel.scroll"
+          ref={scrollerRef}
+          className="flex-1 overflow-y-auto chat-scroll mr-2"
+        >
           {showEmptyScreen ? (
             <div className="h-full flex items-center justify-center">
               <WelcomeState />
@@ -349,6 +220,7 @@ export function ChatPanel(): React.JSX.Element {
             </div>
           ) : (
             <div
+              ref={contentRef}
               style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }}
               className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}
             >
@@ -509,7 +381,7 @@ function LoadingState({ label = 'Thinking...' }: { label?: string }): React.JSX.
 
 function TypingIndicator(): React.JSX.Element {
   return (
-    <div className="flex items-start animate-fade-in">
+    <div data-testid="ChatPanel.typingIndicator" className="flex items-start animate-fade-in">
       <div className="bg-bg-tertiary rounded-2xl px-4 py-3 flex items-center gap-[5px]">
         {[0, 150, 300].map((delay) => (
           <span
