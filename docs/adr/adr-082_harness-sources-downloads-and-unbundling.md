@@ -24,6 +24,12 @@ this also drops 2.1.285–2.1.287, whose background-Bash timeout did not exempt 
 entrypoint), Codex 0.160.1 (was 0.156.0), pi 1.0.4 (was 0.87.1). opencode stays at floor 1.18.32
 below its pin 1.18.34 pending the 2.x decision. pi reached 1.x, so its ceiling is the next major
 like the others, 2.0.0; the temporary 1.1.0 of the 1.0.2 bump is retired.
+**Amended 2026-10-07 (incident), the managed store is shared by every build.** "Latest" means the
+newest installed version THIS build can run (floor ≤ v < ceiling), and retention never removes a
+version at or past the ceiling: it belongs to a newer ClaudeUI using the same
+`~/.claude/ui/harnesses`. Before this, "Latest" took the newest installed version outright, so once
+an opencode-2.x build installed 2.0.24, a 1.x build launched it, and the 2.x binary migrated the
+user's shared opencode database and imported `auth.json`.
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — a harness change re-fetches only that engine's models in the composer (per-engine reload counters), not every engine's.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).

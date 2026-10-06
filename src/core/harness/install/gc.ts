@@ -40,6 +40,7 @@ import { invalidateHarness, resolveHarness } from '../resolve'
 import { HARNESS_VERSION_RE, harnessSelection } from '../selection-store'
 import { LAST_USED_FILE, harnessStoreRoot, installedVersions, readInstallRecord } from '../store'
 import { cleanStaleEntries, moveToTrash } from './store-writer'
+import { aboveCeiling, withinRange } from '../version-gate'
 
 export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -94,7 +95,7 @@ function protectedVersions(
   const keep = new Set([manifest.tested])
   if (resolved.source === 'managed' && resolved.version) keep.add(resolved.version)
   if (selection.version === 'latest') {
-    const newest = installedVersions(id)[0]
+    const newest = installedVersions(id).find((v) => withinRange(manifest, v))
     if (newest) keep.add(newest)
   } else if (selection.version && selection.version !== 'tested') {
     keep.add(selection.version)
@@ -125,11 +126,18 @@ export async function collectHarnessGarbage(deps: GcDeps = {}): Promise<GcResult
       } catch {
         continue
       }
-      const keep = protectedVersions(id, manifestOf(id), selectionOf(id), resolvedOf(id))
+      const manifest = manifestOf(id)
+      const keep = protectedVersions(id, manifest, selectionOf(id), resolvedOf(id))
       let removedAny = false
       for (const version of names) {
         const dir = path.join(root, version)
-        if (keep.has(version) || now - lastUsed(id, version, dir) < RETENTION_MS) {
+        // Past this build's ceiling: another (newer) ClaudeUI's install in the
+        // shared store, never this build's to retire.
+        if (
+          keep.has(version) ||
+          aboveCeiling(manifest, version) ||
+          now - lastUsed(id, version, dir) < RETENTION_MS
+        ) {
           result.kept++
           continue
         }
