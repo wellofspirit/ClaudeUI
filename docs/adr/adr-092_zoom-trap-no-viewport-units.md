@@ -21,8 +21,8 @@ It shipped broken twice, in two places, and neither was visible to a jsdom test 
 - **The desktop dialogs in a small window** (1280 x 640): the MCP dialog's `maxHeight: 85vh` is 106% of the window at
   1.25 and 128% at 1.5. Its top edge measured -16 px and -83 px; the header and the footer's Close button were
   off-window. The same shape sat in the Skills, Permissions, Remote access, provider-editor and sign-in dialogs, and
-  in the mobile config sheet (`min(80dvh, 32rem)`: harmless today only because its content is shorter than the
-  cap; at 1.5 the cap itself is taller than a 728 px phone).
+  in the mobile config sheet (`min(80dvh, 32rem)`: harmless only while its content was shorter than the cap,
+  since at 1.5 the cap itself was taller than a 728 px phone).
 
 ## Decision
 
