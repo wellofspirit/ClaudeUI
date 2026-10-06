@@ -552,7 +552,11 @@ describe('useAgentRoster', () => {
         messages: [
           assistantWithTool('m1', 'tu-denied', 'agent', { description: 'd', prompt: 'go' }),
           piResult('tu-denied', 'Auto mode blocked this call', true),
-          assistantWithTool('m2', 'tu-nomodel', 'agent', { description: 'd', prompt: 'go', model: 'x/y' }),
+          assistantWithTool('m2', 'tu-nomodel', 'agent', {
+            description: 'd',
+            prompt: 'go',
+            model: 'x/y'
+          }),
           piResult('tu-nomodel', 'Model not found: x/y', true)
         ]
       })
