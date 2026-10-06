@@ -258,7 +258,7 @@ describe('ClaudeEngineToolMap.normalize', () => {
           prompt: 'Get a second opinion',
           dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
         })
-        // A dispatch has no agent TYPE: the tile reads `dispatch`, never `subagent` (ADR-093).
+        // A dispatch has no agent TYPE: the tile reads `dispatch`, never `subagent` (ADR-094).
         expect((view as { subagent?: string }).subagent).toBeUndefined()
       })
 

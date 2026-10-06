@@ -23,7 +23,7 @@
  * from CSS alone; the wide order is carried by `order-*`, which is also what
  * puts each element on its own narrow line in the right place.
  *
- * The type is a 16px letter tile (ADR-093), not a text badge: it costs 16px of
+ * The type is a 16px letter tile (ADR-094), not a text badge: it costs 16px of
  * the description's line where the badge cost 60-140px. The engine's default
  * type has no tile, and then line 2 is the description alone.
  */

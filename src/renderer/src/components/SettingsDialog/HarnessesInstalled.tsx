@@ -745,7 +745,7 @@ export function HarnessInstallPill({
         <div
           data-testid="HarnessInstallPill.list"
           // Not inside a backdrop, so no % to size against: cap at the window,
-          // divided by the zoom the app renders under (ADR-092).
+          // divided by the zoom the app renders under (ADR-093).
           // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           style={{ maxWidth: `calc((100vw - 32px) / ${uiFontScale})` }}
           className="absolute right-0 top-full mt-1 w-[300px] z-30 bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 divide-y divide-border/55"

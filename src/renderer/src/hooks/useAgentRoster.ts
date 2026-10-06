@@ -53,7 +53,7 @@ export interface AgentRosterRow {
   /** What to call it: the spawn call's name, its type, or the command. */
   name: string
   /**
-   * The agent TYPE the spawn call named (a custom type's tile, ADR-093); absent
+   * The agent TYPE the spawn call named (a custom type's tile, ADR-094); absent
    * when it named none, and for a cross-engine dispatch. The default type is
    * carried like any other: the tile decides it has nothing to say.
    */

@@ -139,7 +139,7 @@ describe('useAgentRoster', () => {
     expect(seen?.runningShellCount).toBe(1)
   })
 
-  it('names a Codex v1 spawn after its model, and gives it no type (ADR-093)', async () => {
+  it('names a Codex v1 spawn after its model, and gives it no type (ADR-094)', async () => {
     setSession({
       ...withEngine('codex'),
       messages: [
@@ -163,7 +163,7 @@ describe('useAgentRoster', () => {
     expect(seen?.agents.map((r) => r.type)).toEqual([undefined, undefined, undefined])
   })
 
-  it('marks a cross-engine dispatch with the structured field, not a type (ADR-093)', async () => {
+  it('marks a cross-engine dispatch with the structured field, not a type (ADR-094)', async () => {
     setSession({
       messages: [
         assistantWithTool('m1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {

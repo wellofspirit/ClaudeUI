@@ -82,7 +82,7 @@ describe('task ToolView — agent name', () => {
 
   it('leaves cross-engine dispatch cards unnamed on every engine', () => {
     // Dispatch has no agent identity and no type — it is marked by the
-    // structured `dispatch` field (ADR-093), on every engine.
+    // structured `dispatch` field (ADR-094), on every engine.
     for (const map of [ClaudeEngineToolMap, OpencodeEngineToolMap, PiEngineToolMap]) {
       const view = map.normalize('task', { engine: 'codex', model: 'gpt-5', prompt: 'p' })
       expect(nameOf(view)).toBeUndefined()

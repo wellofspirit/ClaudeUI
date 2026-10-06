@@ -1,5 +1,5 @@
 /**
- * Layer 2b: a desktop dialog inside SessionView's zoom (ADR-092) — real Chromium,
+ * Layer 2b: a desktop dialog inside SessionView's zoom (ADR-093) — real Chromium,
  * real Tailwind, a SMALL desktop window (1280x640), under `zoom: uiFontScale`.
  *
  * The MCP dialog sized itself `maxHeight: 85vh`. Inside the zoomed root that

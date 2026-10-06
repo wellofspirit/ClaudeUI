@@ -1,5 +1,5 @@
 /**
- * Agent colours (ADR-093): Settings › <engine> › Agent colours, and the one
+ * Agent colours (ADR-094): Settings › <engine> › Agent colours, and the one
  * colour of the cross-engine dispatch tile on Cross-engine dispatch.
  *
  * Each engine lists the agent types it knows (`config:list-agent-types`): a

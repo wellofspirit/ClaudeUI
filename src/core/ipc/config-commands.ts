@@ -654,7 +654,7 @@ export function configCommands(
       kind: 'query',
       handler: safeHandler(async (cwd?: string) => listAgents(cwd))
     },
-    // The agent types an engine can spawn, with their native colours (ADR-093):
+    // The agent types an engine can spawn, with their native colours (ADR-094):
     // read-only, and engine-neutral, so it is not an `opencode-agents:*` verb.
     {
       channel: 'config:list-agent-types',

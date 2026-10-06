@@ -639,7 +639,7 @@ export function McpDialogView({
     >
       <div
         className="bg-bg-primary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
-        // % of the fixed backdrop: vh/vw would be multiplied by the zoom (ADR-092)
+        // % of the fixed backdrop: vh/vw would be multiplied by the zoom (ADR-093)
         style={{ width: 920, height: 580, maxHeight: '85%', maxWidth: '95%' }}
         onClick={(e) => e.stopPropagation()}
       >

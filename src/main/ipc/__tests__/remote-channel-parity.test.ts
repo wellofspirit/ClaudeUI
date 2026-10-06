@@ -223,7 +223,7 @@ const MODEL_ALLOWLIST_SWEEP: Record<string, { capability: Capability; kind: 'com
   }
 
 /**
- * ADR-093 — the agent types an engine can spawn, for the type tile's settings.
+ * ADR-094 — the agent types an engine can spawn, for the type tile's settings.
  * Its own table for the reason {@link TRUST_LIST_SWEEP} has one. `config` and a
  * `query`: it reads agent definitions (names and colours, never a prompt) and
  * the engine is checked against the closed `EngineId` set at the perimeter.

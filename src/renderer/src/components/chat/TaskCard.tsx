@@ -224,7 +224,7 @@ const MODEL_FLOOR_MIN_CHARS = 11
  * usage and Open in panel at the right. The collapsed card and the expanded card
  * both end in it; only the wrapper differs (`className`).
  *
- * The type (ADR-093) is its tile: the engine's default type has none, and
+ * The type (ADR-094) is its tile: the engine's default type has none, and
  * neither a chip nor a tile is drawn. Below 480px it is the 16px letter tile
  * alone; wide, one element draws a chip in the type's colour, led by that same
  * tile and followed by the name, so phone and desktop read alike. A dispatch is
@@ -269,7 +269,7 @@ function TaskFooter({
   return (
     <div className={`${className} ${NARROW_WRAP}`}>
       {tile && (
-        // One element, two faces (ADR-093): the tile alone below 480px, a chip in
+        // One element, two faces (ADR-094): the tile alone below 480px, a chip in
         // the type's colour wide. The chip's padding and tint drop away narrow.
         <span
           data-testid="TaskCard.type"
@@ -445,7 +445,7 @@ export function TaskCard({
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
-  // The type tile (ADR-093): a dispatch is an X, the engine's default type has
+  // The type tile (ADR-094): a dispatch is an X, the engine's default type has
   // none. `view.subagent` is a TYPE on every engine, and a Codex spawn has none.
   const tile = useAgentTile(engineId, view.subagent, view.dispatch)
   // A dispatch has no model of its own to name: its chip says where it went.

@@ -1,4 +1,4 @@
-# ADR-092: No viewport units inside SessionView's zoom: size against a zoomed box, or divide by `uiFontScale`
+# ADR-093: No viewport units inside SessionView's zoom: size against a zoomed box, or divide by `uiFontScale`
 
 **Status:** Accepted (2026-10-06).
 **Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) §9 (the roster overlay, where the trap

@@ -8,7 +8,7 @@
  * row, clipping Stop; and once nothing overflowed, the shrink weights left a name
  * of one character and a badge of "g." — contained, but unreadable. So these
  * assert READABILITY (a name floor, a whole type tile, a description that shows),
- * not just containment. The type is a 16px letter tile (ADR-093) that leads
+ * not just containment. The type is a 16px letter tile (ADR-094) that leads
  * line 2 when narrow and sits before the description when wide; the fixtures
  * use NON-default types, because the engine's default type has no tile.
  */
@@ -419,7 +419,7 @@ function seedTypeRows(): void {
   })
 }
 
-describe('the type tile in the agent list (ADR-093)', () => {
+describe('the type tile in the agent list (ADR-094)', () => {
   beforeEach(() => seedTypeRows())
   afterEach(() => {
     cleanup()

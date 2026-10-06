@@ -1,7 +1,7 @@
 /**
  * Layer 2: the type tile reads the user's override, the engine's native colour
  * (from the host's catalog) and the dispatch colour from the live store, and
- * draws nothing for the engine's default type (ADR-093).
+ * draws nothing for the engine's default type (ADR-094).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'

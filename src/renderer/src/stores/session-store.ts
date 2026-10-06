@@ -572,7 +572,7 @@ export interface AppSettings {
    */
   dispatchMaxConcurrent?: number
   /**
-   * Per-engine overrides of an agent type's tile colour (ADR-093): engine →
+   * Per-engine overrides of an agent type's tile colour (ADR-094): engine →
    * type name → palette colour id. A type with no entry is coloured by its
    * engine's own agent colour, else by a stable hash. Like
    * `dispatchMaxConcurrent`, absent from {@link DEFAULT_SETTINGS}: "no

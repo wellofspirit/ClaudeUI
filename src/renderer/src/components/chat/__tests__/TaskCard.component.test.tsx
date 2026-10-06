@@ -530,7 +530,7 @@ describe('TaskCard — inline task approval', () => {
 // dispatch_agent maps to the 'task' ToolKind via hostedMcpKind/OpencodeEngineToolMap
 // (see ClaudeEngineToolMap.test.ts / OpencodeEngineToolMap.test.ts), and its
 // ToolView normalizes to description:'Dispatch: <engine>' + the structured
-// `dispatch: { engine, model }` field (ADR-093). This exercises TaskCard's rendering
+// `dispatch: { engine, model }` field (ADR-094). This exercises TaskCard's rendering
 // of that view directly with item-streamed subagent output, mirroring how the
 // dispatcher's item lifecycle lands in the store while a dispatch is in flight.
 

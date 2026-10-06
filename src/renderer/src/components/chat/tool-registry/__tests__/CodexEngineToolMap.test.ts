@@ -151,7 +151,7 @@ describe('CodexEngineToolMap — collab agent tools', () => {
       kind: 'task',
       description: 'Agent',
       prompt: 'survey the tests',
-      // The model is a model, not an agent TYPE: no `subagent` (ADR-093).
+      // The model is a model, not an agent TYPE: no `subagent` (ADR-094).
       model: 'gpt-mock'
     })
   })
@@ -176,7 +176,7 @@ describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
       description: 'Agent',
       prompt: '',
       // The path's leaf is also the agent's roster name (ADR-073). The path is
-      // not a type, so there is no `subagent` (ADR-093).
+      // not a type, so there is no `subagent` (ADR-094).
       name: 'fixture_child'
     })
   })

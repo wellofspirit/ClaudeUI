@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * ADR-093 — `config:list-agent-types`: the agent types an engine can spawn, for
+ * ADR-094 — `config:list-agent-types`: the agent types an engine can spawn, for
  * the type tile's settings page. A `config` query, so an ordinary authenticated
  * remote connection reaches it (`remote-channel-parity.test.ts` pins that
  * half). What THIS file pins is the perimeter: the engine is one of the four

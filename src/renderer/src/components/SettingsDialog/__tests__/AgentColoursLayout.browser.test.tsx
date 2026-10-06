@@ -1,5 +1,5 @@
 /**
- * Layer 2b: Settings › <engine> › Agent colours on a phone (ADR-093) — real
+ * Layer 2b: Settings › <engine> › Agent colours on a phone (ADR-094) — real
  * Chromium, real Tailwind, the owner's S25 Ultra size, under the app's `zoom`.
  *
  * The group has to work in the phone's settings view: eight swatches and a

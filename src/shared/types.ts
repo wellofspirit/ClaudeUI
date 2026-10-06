@@ -712,7 +712,7 @@ export interface OpencodeAgentSummary {
 }
 
 /**
- * One agent type an engine can spawn, for the type tile's settings (ADR-093).
+ * One agent type an engine can spawn, for the type tile's settings (ADR-094).
  * `source` says where it comes from: the engine itself, the user's own agent
  * files, or the project's. `nativeColor` is the colour the engine's own agent
  * definition names (Claude Code's `color` frontmatter, opencode's `color`), when
@@ -1862,7 +1862,7 @@ interface SessionAPI {
   ): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   /**
-   * The agent types `engine` can spawn (ADR-093): built-ins plus the agent
+   * The agent types `engine` can spawn (ADR-094): built-ins plus the agent
    * definitions found for `cwd` (user and project). Read-only.
    */
   listAgentTypes(engine: EngineId, cwd?: string): Promise<AgentTypeInfo[]>

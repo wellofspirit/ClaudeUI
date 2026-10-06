@@ -1,5 +1,5 @@
 /**
- * Layer 2: the shared agent-type catalog hook (ADR-093).
+ * Layer 2: the shared agent-type catalog hook (ADR-094).
  *
  * What has to hold: a failed read is never remembered (a reconnect must not leave
  * every tile on its hash colour for the life of the window); a tile already on

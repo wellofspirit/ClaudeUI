@@ -278,7 +278,7 @@ const HARNESS_UPDATES: SettingItem = {
   render: () => <HarnessUpdateSettings />
 }
 /**
- * ADR-093: one engine's agent types and their tile colours. Page-local, one item
+ * ADR-094: one engine's agent types and their tile colours. Page-local, one item
  * per engine page: the types come from the host (`config:list-agent-types`), the
  * overrides are ClaudeUI's own `agentTypeColors` setting.
  */
@@ -297,7 +297,7 @@ const PI_AGENT_COLOURS = agentColoursItem('pi')
 const CODEX_AGENT_COLOURS = agentColoursItem('codex')
 
 /**
- * ADR-093: the cross-engine dispatch tile's one colour. It belongs to no engine
+ * ADR-094: the cross-engine dispatch tile's one colour. It belongs to no engine
  * (it marks work handed to ANOTHER harness), so it lives on the dispatch page,
  * beside the other app-level dispatch setting.
  */
@@ -682,7 +682,7 @@ export const PAGES: SettingsPage[] = [
       },
       {
         // App-level too: the X tile on a dispatched agent is one colour, whatever
-        // harness it left from or went to (ADR-093). Its own card, like the cap.
+        // harness it left from or went to (ADR-094). Its own card, like the cap.
         id: 'tile',
         label: 'Dispatch tile',
         note: 'The tile marks an agent handed to another harness. Hover it for where it went.',
@@ -1104,7 +1104,7 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'agent-colours',
         label: 'Agent colours',
-        note: `${AGENT_COLOURS_NOTE} Codex cards show no tile today: its spawn items carry no role (ADR-093).`,
+        note: `${AGENT_COLOURS_NOTE} Codex cards show no tile today: its spawn items carry no role (ADR-094).`,
         items: [CODEX_AGENT_COLOURS]
       },
       {

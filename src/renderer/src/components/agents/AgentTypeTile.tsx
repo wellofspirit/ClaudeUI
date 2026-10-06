@@ -1,5 +1,5 @@
 /**
- * The agent type tile (ADR-093): a 16px rounded square, a bold mono letter, the
+ * The agent type tile (ADR-094): a 16px rounded square, a bold mono letter, the
  * type's colour on a tint of itself. The ONE renderer for every surface that
  * shows an agent's type: the agent list (`AgentRow`), the Task card's footer and
  * Settings › <engine> › Agent colours. Which letter, which colour and whether

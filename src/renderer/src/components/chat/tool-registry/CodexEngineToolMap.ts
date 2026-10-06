@@ -160,7 +160,7 @@ export const CodexEngineToolMap: EngineToolMap = {
             : {}),
           // No `subagent`: that is the agent TYPE (a role, for Codex), and the
           // spawn item carries none — `ThreadItem::CollabAgentToolCall` has no
-          // role field, and `SubAgentActivity` only the path (ADR-093). A model
+          // role field, and `SubAgentActivity` only the path (ADR-094). A model
           // or a path must never read as a type, so it is a `model` and nothing.
           ...(input?.model != null ? { model: String(input.model) } : {})
         }

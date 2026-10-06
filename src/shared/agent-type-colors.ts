@@ -1,5 +1,5 @@
 /**
- * Agent type colour coding (ADR-093): the pure half.
+ * Agent type colour coding (ADR-094): the pure half.
  *
  * Every surface that shows which TYPE of agent a card or roster row is (the
  * agent list, the Task card, Settings › <engine> › Agent colours) reads its

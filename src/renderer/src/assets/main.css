@@ -56,7 +56,7 @@ pre .token.table {
   --color-mode-auto: #d97706;
   --color-mode-auto-dim: #92400e;
 
-  /* Agent type tiles (ADR-093): the one palette every engine shares. The letter
+  /* Agent type tiles (ADR-094): the one palette every engine shares. The letter
      is the colour, on a tint of it. Keep these hues in step with PALETTE_HUE in
      shared/agent-type-colors.ts, which maps an engine's own colour to the
      nearest one. Light is darker so the letter holds 4.5:1 on its tint. */

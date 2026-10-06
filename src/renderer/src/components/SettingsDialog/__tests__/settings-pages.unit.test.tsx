@@ -132,14 +132,14 @@ describe('PAGES structure', () => {
         'providers',
         'defaults'
       ],
-      // 'tile' (ADR-093): the X tile's one colour, app-level like the cap.
+      // 'tile' (ADR-094): the X tile's one colour, app-level like the cap.
       dispatch: ['concurrency', 'tile', 'into', 'limits'],
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
       harnesses: ['harnesses', 'updates'],
       // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
-      // 'agent-colours' (ADR-093): one group on each harness page, after that page's own
+      // 'agent-colours' (ADR-094): one group on each harness page, after that page's own
       // settings groups (last on Claude, before 'raw' on opencode, pi and Codex's 'mcp').
       claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
       opencode: [
@@ -187,7 +187,7 @@ describe('PAGES structure', () => {
   })
 
   it('engine-native groups say when they apply, with the three-value badge vocabulary', () => {
-    // Agent colours (ADR-093) are ClaudeUI's own setting and bind on the spot: no badge.
+    // Agent colours (ADR-094) are ClaudeUI's own setting and bind on the spot: no badge.
     const immediate = (g: { id: string }): boolean => g.id === 'agent-colours'
     for (const g of pageOf('opencode').groups) {
       if (g.id === 'managed' || g.id === 'agents' || immediate(g)) continue
@@ -447,7 +447,7 @@ describe('inventory guard', () => {
       'usageHub',
       'harnessesInstalled',
       'harnessUpdates',
-      // ADR-093: one Agent colours item per harness page, and the dispatch tile.
+      // ADR-094: one Agent colours item per harness page, and the dispatch tile.
       'claudeAgentColours',
       'opencodeAgentColours',
       'piAgentColours',

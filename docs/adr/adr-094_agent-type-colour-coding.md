@@ -1,7 +1,7 @@
-# ADR-093: Agent type colour coding: a letter tile in one shared palette
+# ADR-094: Agent type colour coding: a letter tile in one shared palette
 
 **Status:** Accepted (2026-10-06).
-**Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) §9 (the roster and Task card on a narrow screen; the text badge this replaces), [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the settings page model the colour pickers live in), [ADR-092](adr-092_zoom-trap-no-viewport-units.md) (the zoom the layout tests run under), [ADR-033](adr-033_cross-engine-dispatch.md) (the dispatch card the X tile marks), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockup `e76a9d48`.
+**Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) §9 (the roster and Task card on a narrow screen; the text badge this replaces), [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the settings page model the colour pickers live in), [ADR-093](adr-093_zoom-trap-no-viewport-units.md) (the zoom the layout tests run under), [ADR-033](adr-033_cross-engine-dispatch.md) (the dispatch card the X tile marks), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockup `e76a9d48`.
 
 ## Context
 

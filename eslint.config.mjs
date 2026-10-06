@@ -25,7 +25,7 @@ const TEST_AND_SCRIPT_FILES = [
   '**/*.config.{ts,mts,cts,js,mjs,cjs}'
 ]
 
-// THE ZOOM TRAP (ADR-092). SessionView renders the whole app under CSS
+// THE ZOOM TRAP (ADR-093). SessionView renders the whole app under CSS
 // `zoom: uiFontScale`, and inside that subtree every vw/vh/dvh/svh/lvh length is
 // multiplied by the zoom: a `max-h-[85vh]` dialog is 106% of a 1280x640 window at
 // 1.25, and its header and footer land off-screen. Flags a number followed by a
@@ -36,7 +36,7 @@ const ZOOM_TRAP_RE = String.raw`/\d(vw|vh|dvh|svh|lvh)\b|(^|[\s:])(min-|max-)?(h
 const ZOOM_TRAP = (selector) => ({
   selector,
   message:
-    'THE ZOOM TRAP (ADR-092): inside SessionView `zoom: uiFontScale` multiplies every ' +
+    'THE ZOOM TRAP (ADR-093): inside SessionView `zoom: uiFontScale` multiplies every ' +
     'vw/vh/dvh/svh/lvh length, so this box is scaled past the window. Size against a ' +
     'zoomed box (%), or divide by uiFontScale. See shared/use-anchored-menu.ts. If this ' +
     'site is outside the zoomed root, already divides by uiFontScale, or is not mounted, ' +
@@ -218,7 +218,7 @@ export default defineConfig(
             'writer. Route the change through stores/replica.ts (patchLocalApp / seedLocalApp). ' +
             'See stores/sealed-fields.ts.'
         },
-        // THE ZOOM TRAP (ADR-092). Appended to THIS array on purpose: a second
+        // THE ZOOM TRAP (ADR-093). Appended to THIS array on purpose: a second
         // `no-restricted-syntax` config object for the same files would REPLACE the
         // sealed-field selectors above, not add to them.
         ZOOM_TRAP('Literal[value=' + ZOOM_TRAP_RE + ']'),

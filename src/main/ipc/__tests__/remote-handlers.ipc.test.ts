@@ -1768,7 +1768,7 @@ const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-
  */
 const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
 
-/** ADR-093 — the agent types an engine can spawn (read-only, `config`). */
+/** ADR-094 — the agent types an engine can spawn (read-only, `config`). */
 const AGENT_TYPE_CHANNELS = ['config:list-agent-types'] as const
 
 /**

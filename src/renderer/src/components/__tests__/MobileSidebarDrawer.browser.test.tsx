@@ -1,5 +1,5 @@
 /**
- * Layer 2b: the phone's sidebar drawer under SessionView's zoom (ADR-092).
+ * Layer 2b: the phone's sidebar drawer under SessionView's zoom (ADR-093).
  *
  * `w-[280px]` is 280 ZOOMED px: 420px of a 412px screen at uiFontScale 1.5, so
  * the drawer's right edge was off-screen. It is now capped at 85% of the window.

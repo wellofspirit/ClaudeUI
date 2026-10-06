@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-093](adr-093_agent-type-colour-coding.md)). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -429,7 +429,7 @@ the reason was only visible when the subagent produced nothing.
 
 On the owner's phone (Samsung S25 Ultra, Edge, 412 x 728 CSS px, `uiFontScale` 1.1) the overlay hung 15px
 off the left edge, each row lost its description, and Stop was clipped. Two causes, both layout, neither
-visible to jsdom. The rule that came out of the first is [ADR-092](adr-092_zoom-trap-no-viewport-units.md).
+visible to jsdom. The rule that came out of the first is [ADR-093](adr-093_zoom-trap-no-viewport-units.md).
 
 **The zoom trap.** The overlay was `w-[min(420px,calc(100vw-32px))]`. SessionView renders the app under
 CSS `zoom: uiFontScale`, and inside a zoomed subtree `vw` lengths are multiplied by the zoom: that box
@@ -457,7 +457,7 @@ shrink and the description gives way first (to a 3rem floor), then the name (sti
 never shrinks. These are flex-shrink weights (description 10000, name 1), far enough apart that the description
 absorbs the cut before the name loses a pixel.
 
-**The type is a tile, not a badge (2026-10-06, [ADR-093](adr-093_agent-type-colour-coding.md)).** The text
+**The type is a tile, not a badge (2026-10-06, [ADR-094](adr-094_agent-type-colour-coding.md)).** The text
 badge (`general-purpose`, `migration-reviewer`) cost 60-140px of line 2, which is what the description lost on a
 phone. It is replaced by a 16px letter tile in the type's colour: it leads line 2 when narrow and sits where the
 badge was when wide (`AgentRow.typeTile`; `AgentRow.badge` is gone), and the engine's default type has no tile.
@@ -480,7 +480,7 @@ a line on the items' basis sizes before anything shrinks, so the model chip's ba
 (`basis-[5rem] grow max-w-fit`), not its text. The yellow "background" chip is an icon (the tray glyph, with
 `title`/`aria-label` "Running in the background") under 480px: as a word it left a row about 23px short, and the
 ↗ alone on row 2, at chat scale ~1.22. The glyph is Send to background's on purpose; that button shows only on
-foreground tasks and this chip only on background ones. The footer reads, left to right, type tile · background · model, then ↗ (ADR-093): the 16px tile took the type chip's place, which is what lets the common row stay on one line at every chat scale.
+foreground tasks and this chip only on background ones. The footer reads, left to right, type tile · background · model, then ↗ (ADR-094): the 16px tile took the type chip's place, which is what lets the common row stay on one line at every chat scale.
 
 **Two zooms, two surfaces.** The roster (the composer's overlay, the panel) lives under the app zoom,
 `uiFontScale`. A Task card lives in the chat's message list, which ChatPanel zooms again by

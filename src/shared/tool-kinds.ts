@@ -86,7 +86,7 @@ export type ToolView =
        * The agent TYPE the spawning call named: Claude's `subagent_type`,
        * opencode's, pi's, never a model and never a path. Absent on a
        * cross-engine dispatch (see `dispatch`) and on a Codex spawn, whose wire
-       * carries no role (ADR-093): a Codex model is not a type.
+       * carries no role (ADR-094): a Codex model is not a type.
        */
       subagent?: string
       model?: string
@@ -187,7 +187,7 @@ export interface EngineToolMap {
  * A cross-engine dispatch (ADR-033) as a 'task' view. All four engine tool maps
  * build it the same way from `dispatch_agent`'s `{ engine, prompt, model? }`
  * input, so the structured `dispatch` field (what the type tile and the roster
- * read, ADR-093) is set in one place.
+ * read, ADR-094) is set in one place.
  *
  * It carries no `name` (a dispatch has no agent identity) and no `subagent`
  * (that field is an agent TYPE, and a dispatch has none): the card's chip and

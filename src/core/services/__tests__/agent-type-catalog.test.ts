@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The agent types an engine can spawn (ADR-093). Every filesystem read is an
+ * The agent types an engine can spawn (ADR-094). Every filesystem read is an
  * isolated temp dir: HOME / USERPROFILE (Claude's and pi's user agents),
  * OPENCODE_CONFIG_DIR (opencode's) and the project `cwd` are all redirected, so
  * the user's real agent files are never read.

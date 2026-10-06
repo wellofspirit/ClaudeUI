@@ -178,7 +178,7 @@ function claudeNormalize(
       // a DIFFERENT input shape than Claude's native Task tool:
       // { engine, prompt, model?, session_id? } — no description/subagent_type.
       // `engine` is the reliable discriminator (native Task never has it).
-      // The view's structured `dispatch` field marks it (ADR-093).
+      // The view's structured `dispatch` field marks it (ADR-094).
       if (typeof inp.engine === 'string')
         return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
       // `name` is what SendMessage addresses the agent by, and the only thing
