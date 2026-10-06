@@ -1,6 +1,7 @@
-import { useMemo, useRef, useEffect } from 'react'
+import { useMemo } from 'react'
 import { AnsiUp } from 'ansi_up'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
+import { useStickToBottom } from '../../hooks/useStickToBottom'
 
 interface Props {
   text: string
@@ -20,7 +21,9 @@ function terminalColors(theme: ThemeId): { bg: string; fg: string } {
 export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
   const theme = useSessionStore((s) => s.settings.theme)
   const { bg, fg } = terminalColors(theme)
-  const preRef = useRef<HTMLPreElement>(null)
+  // The pre is the scroll box and its max-height keeps its own size fixed, so
+  // the growing thing is the wrapper inside it.
+  const { scrollerRef, contentRef } = useStickToBottom<HTMLPreElement>()
 
   // Fresh AnsiUp per conversion: AnsiUp carries SGR state across calls, so a
   // shared module-level instance bled colors between unrelated tool cards. Each
@@ -32,30 +35,10 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
     return ansi.ansi_to_html(text)
   }, [text])
 
-  // Show the tail: pin to the bottom on mount and whenever the content changes.
-  // NOT by reading `scrollHeight` right in the effect — that forces a layout of
-  // the card even while its message is skipped by `content-visibility: auto`
-  // (`.cv-auto`), and on a transcript with hundreds of tool cards those forced
-  // layouts were most of the time it took to open the session. A ResizeObserver
-  // reports only once the card is actually laid out (skipped content is not),
-  // after layout and before paint, so the pin is cheap and never flashes the
-  // top first. A card already on screen reports right away; one scrolled past
-  // reports when it is scrolled back into view.
-  useEffect(() => {
-    const el = preRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => {
-      el.scrollTop = el.scrollHeight
-      ro.disconnect()
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [html])
-
   return (
     <pre
       data-testid="TerminalView"
-      ref={preRef}
+      ref={scrollerRef}
       className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
       style={{
         background: bg,
@@ -64,7 +47,8 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
         flex: maxHeight === 'none' ? 1 : undefined,
         minHeight: maxHeight === 'none' ? 0 : undefined
       }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    >
+      <div ref={contentRef} dangerouslySetInnerHTML={{ __html: html }} />
+    </pre>
   )
 }

@@ -6,8 +6,18 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import { TerminalView } from '../TerminalView'
+import {
+  dispatchScroll,
+  dispatchWheel,
+  distanceFromBottom,
+  fireResize,
+  geo,
+  installScrollGeometry,
+  observedElements,
+  setDefaultGeometry
+} from '@test/helpers/scroll-geometry'
 
 const ESC = String.fromCharCode(27)
 
@@ -68,9 +78,81 @@ describe('TerminalView — pin to the tail without forcing layout', () => {
 
       fire?.()
       expect(pre.scrollTop).toBe(500)
-      expect(disconnect).toHaveBeenCalled()
     } finally {
       scrollHeight.mockRestore()
     }
+  })
+})
+
+/**
+ * The output box is a max-height scroller: its own border box never grows with
+ * its text, so what is observed is the wrapper inside it. It used to pin only
+ * when the html string changed, never after layout-only growth, and a pinned box
+ * could not be left by the user.
+ */
+describe('TerminalView — following the bottom', () => {
+  let restoreGeometry: () => void
+  let clock = 1000
+
+  const pre = (): HTMLElement => screen.getByTestId('TerminalView')
+  const inner = (): HTMLElement => {
+    const el = pre().firstElementChild
+    if (!(el instanceof HTMLElement)) throw new Error('wrapper missing')
+    return el
+  }
+
+  beforeEach(() => {
+    restoreGeometry = installScrollGeometry()
+    setDefaultGeometry({ scrollHeight: 600, clientHeight: 172 })
+    clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    restoreGeometry()
+  })
+
+  it('renders its text inside the observed wrapper, unchanged', () => {
+    render(<TerminalView text={'line one\nline two'} />)
+    expect(pre().textContent).toBe('line one\nline two')
+    expect(observedElements()).toContain(inner())
+  })
+
+  it('opens at the bottom and follows growth that changes no text', () => {
+    render(<TerminalView text="output" />)
+    expect(distanceFromBottom(pre())).toBe(0)
+    geo(pre()).scrollHeight += 300
+    act(() => fireResize(inner()))
+    expect(distanceFromBottom(pre())).toBe(0)
+  })
+
+  it('follows new output', () => {
+    const view = render(<TerminalView text="one" />)
+    geo(pre()).scrollHeight += 200
+    view.rerender(<TerminalView text={'one\ntwo'} />)
+    act(() => fireResize(inner()))
+    expect(distanceFromBottom(pre())).toBe(0)
+  })
+
+  it('a finished box a find reveal scrolled does not snap back', () => {
+    render(<TerminalView text="output" />)
+    clock += 1000
+    // find-in-chat centres a match: a programmatic scroll, no input, no size change.
+    pre().scrollTop = 40
+    act(() => dispatchScroll(pre()))
+    // The observer reports size changes only, and none happened: nothing re-pins.
+    expect(pre().scrollTop).toBe(40)
+  })
+
+  it('a user who scrolled up inside a growing box is left alone', () => {
+    render(<TerminalView text="output" />)
+    act(() => dispatchWheel(pre(), -120))
+    pre().scrollTop = 100
+    act(() => dispatchScroll(pre()))
+    clock += 1000
+    geo(pre()).scrollHeight += 300
+    act(() => fireResize(inner()))
+    expect(pre().scrollTop).toBe(100)
   })
 })

@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
@@ -58,9 +59,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
   const [expanded, setExpanded] = useState(true)
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const [following, setFollowing] = useState(true)
-  const isAutoScrolling = useRef(false)
+  // The body is the scroller; the elements inside it are what grow. It only
+  // exists while expanded, and which child holds the growing content depends on
+  // the branch, so both are attached where they render.
+  const { scrollerRef, contentRef, following, scrollToBottom } = useStickToBottom<HTMLDivElement>()
 
   // Nested-aware: a nested agent's call and result live in its parent's bucket,
   // while its own transcript is `subagentMsgs[toolUseId]` as for any agent.
@@ -70,42 +72,12 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     subagentMsgs
   )
 
-  // Referenced by the autoscroll effect below, so they must be computed before
-  // it; they default to empty when the task block isn't present yet. `msgs` is
-  // memoized so its identity is stable across renders (it's an effect dep).
+  // Computed before the early return below (rules-of-hooks); empty while the
+  // task block isn't present yet.
   const msgs = useMemo(
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
-
-  useEffect(() => {
-    const el = bodyRef.current
-    if (!el || !following) return
-    isAutoScrolling.current = true
-    el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [msgs, bashOutput, following])
-
-  const handleScroll = useCallback(() => {
-    if (isAutoScrolling.current) return
-    const el = bodyRef.current
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setFollowing(nearBottom)
-  }, [])
-
-  const scrollToBottom = useCallback(() => {
-    const el = bodyRef.current
-    if (!el) return
-    isAutoScrolling.current = true
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    setFollowing(true)
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [])
 
   // A live record is running by construction here (isHistorical is false), so
   // its start alone decides whether the clock ticks.
@@ -286,12 +258,12 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
       {expanded && (
         <div className="relative flex-1 min-h-0">
           <div
-            ref={bodyRef}
-            onScroll={handleScroll}
+            data-testid="TaskEntry.body"
+            ref={scrollerRef}
             className="px-4 py-3 h-full overflow-y-auto flex flex-col"
           >
             {hasSubagentOutput ? (
-              <div>
+              <div ref={contentRef}>
                 <SubagentOutputBody
                   msgs={msgs}
                   isRunning={isRunning}
@@ -310,7 +282,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             ) : isBash && hasResult && resultText ? (
               <TerminalView text={resultText} maxHeight="none" />
             ) : hasResult && resultText && !isBackground ? (
-              <div className="text-[12px] text-text-primary/80 leading-[1.6]">
+              <div ref={contentRef} className="text-[12px] text-text-primary/80 leading-[1.6]">
                 <MarkdownRenderer content={resultText} />
               </div>
             ) : isRunning ? (
