@@ -9,7 +9,7 @@ Exposes the CLI's built-in voice transcription pipeline (Deepgram via Anthropic'
 | Component              | Version at time of discovery | Last re-anchored |
 | ---------------------- | ---------------------------- | ---------------- |
 | SDK package            | 0.2.81                       | —                |
-| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)         | **2.1.285**      |
+| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)         | **2.1.289**      |
 
 The SDK bundles its own CLI, independent of the native `claude` binary.
 
@@ -250,15 +250,21 @@ The optional third parameter appeared in 2.1.241 (credentials). The body-prefix 
 the match; the exported name comes from parsing that chunk's `export{…}` list for the captured
 local name (2.1.261: `export{_nn,bnn,Snn}` → `Snn` is exported under its own name).
 
-**successFn** — found globally by `),X(MSG,{})}catch` (2 sites in 2.1.261, both `Xe`; the script
-requires all sites to agree on the name _and_ to live in the anchor's chunk):
+**successFn** — found by the `X(MSG,{})` reply sites in the control-request anchor's chunk
+(2.1.289: five sites, all `Xe`). The script searches the whole concat, filters matches by the
+anchor chunk, then requires every retained site to agree on the helper name:
 
 ```js
-const successRe = /\),([\w$]+)\(r,\{\}\)\}catch/ // "r" = the captured msgVar
+const successRe = new RegExp(`([\\w$]+)\\(${escMsg},\\{\\}\\)`, 'g')
+const successMatches = [...src.matchAll(successRe)].filter(
+  (m) => chunkAt(m.index).spec === anchorChunk.spec
+)
 ```
 
 A windowed search around the anchor is wrong here: sibling patches shift the anchor and push the
-original site out of any fixed lookback window.
+original site out of any fixed lookback window. Requiring every global match to be in the anchor
+chunk is also wrong: 2.1.289 has `io(I,{})` in an unrelated attestation chunk while the dispatch
+message variable is also `I`.
 
 #### finalize timeouts — the trap that used to need `us1()`
 
@@ -635,10 +641,12 @@ surfaced:
 
 ## Files
 
-| File        | Purpose       |
-| ----------- | ------------- |
-| `README.md` | This document |
-| `apply.mjs` | Patch script  |
+| File               | Purpose                                                    |
+| ------------------ | ---------------------------------------------------------- |
+| `README.md`        | This document                                              |
+| `apply.mjs`        | Patch script                                               |
+| `anchors.mjs`      | Pure reply-helper anchor resolver used by the patch script |
+| `anchors.test.mjs` | Regression tests for cross-chunk and same-chunk matches    |
 
 ## 2.1.280 reply-helper anchor
 
@@ -654,3 +662,12 @@ import. Verified at runtime on the rebundled binary with a stream-json probe:
 `voice_server_start` returned a port and a TCP connect to it succeeded, a second start returned
 the same port, `voice_server_stop` returned `{stopped:true}`, and an unknown subtype still drew
 cli.js's own `Unsupported control request subtype: …` error.
+
+## 2.1.289 reply-helper chunk filter
+
+The dispatch message variable became `I`, and an unrelated attestation chunk already contained
+`io(I,{})`. The old global agreement check therefore found both `io` and the real dispatch reply
+helper `Xe` and aborted. The locator now filters `X(I,{})` matches to the fallback anchor's chunk
+before requiring name agreement. Five retained sites resolve to `Xe`; the voice function is `oEr`
+in `chunk-6t02be4p.js`, dynamically imported from the dispatch loop in
+`chunk-6vwtcget.js`. This is anchor drift only; the injected protocol and behavior are unchanged.

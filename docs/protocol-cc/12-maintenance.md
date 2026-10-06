@@ -92,7 +92,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    cli.js takes that credential with `refreshToken:null`, so it cannot rotate the
    refresh token the app's vault holds.
 
-   The integration project is the one that catches real-world wire drift. `test:patch` runs two suites (`subagent-streaming`, `bash-output-streaming`, both live); `voice-server` has none, so its apply script's checks are its only guard. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
+   The integration project is the one that catches real-world wire drift. `test:patch` runs two live suites (`subagent-streaming`, `bash-output-streaming`) plus the local `voice-server-anchors` locator regression suite. Voice transcription itself still has no behavioral suite, so its control/TCP probe and the apply script's checks guard that path. `CLAUDEUI_TEST_MODEL` picks a cheaper model for the live ones.
 
 8. **Re-verify the context-window mirror**
 

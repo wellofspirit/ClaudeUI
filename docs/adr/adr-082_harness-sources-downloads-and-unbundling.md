@@ -1,6 +1,6 @@
 # ADR-082: Harnesses run from ClaudeUI's managed copy or the system install, ClaudeUI downloads and updates its copies, and the installer stops shipping opencode, pi and Codex
 
-**Status:** Accepted (2026-09-30, confirmed by the owner; arcs 2 and 3 landed; proposed 2026-09-28). The design is
+**Status:** Accepted (2026-09-30, confirmed by the owner; arcs 2 and 3 landed; proposed 2026-09-28; §3 and §5 amended 2026-10-06). The design is
 owner-ruled from mockups `8bf84c23` (design 1, the Harnesses rows), `04c3853c` (the sidebar update
 button) and `b51cb3df` (the upgrade sheet and the download offers). Implementation is arcs 2 and 3
 of the 3.6 line, after [ADR-081](adr-081_claudeui-owned-judge-transport.md); arc 3 (§8,
@@ -15,6 +15,15 @@ harness), [ADR-061](adr-061_ci-build-gates-and-release-artifact-matrix.md) (rele
 three engine directories), [ADR-066](adr-066_codex-fourth-engine.md) (Codex is downloaded, not
 bundled; ClaudeUI's own copy stays at the pin, and a System Codex from the floor up to the ceiling
 runs as untested, §3).
+**Amended 2026-10-06 (owner ruling), every floor equals its tested version.** The floor exists
+so a release can rely on what its pin does without keeping a second code path for older builds,
+and ClaudeUI's own copy (bundled Claude Code, the managed opencode, pi and Codex) is always the
+pin, so a lower floor only ever served a System install. Each bump therefore moves the floor with
+the pin unless a lower version is measured and worth keeping: Claude Code 2.1.290 (was 2.1.275 —
+this also drops 2.1.285–2.1.287, whose background-Bash timeout did not exempt the `claude-desktop`
+entrypoint), Codex 0.160.1 (was 0.156.0), pi 1.0.4 (was 0.87.1). opencode stays at floor 1.18.32
+below its pin 1.18.34 pending the 2.x decision. pi reached 1.x, so its ceiling is the next major
+like the others, 2.0.0; the temporary 1.1.0 of the 1.0.2 bump is retired.
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — a harness change re-fetches only that engine's models in the composer (per-engine reload counters), not every engine's.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
@@ -147,17 +156,18 @@ on a `--version` probe.
 Each harness declares its floor and ceiling in the release manifest (§5). The ceiling is exclusive
 and is the next major version, so a new major is never "untested but selectable": opencode 2.x
 (`@opencode/cli`) already ships an executable named `opencode` whose configuration is incompatible
-with 1.x. The ceilings are Claude Code 3.0.0, opencode 2.0.0, pi 1.0.0 and Codex 1.0.0. pi and Codex
-are 0.x, where a minor release may break in semver terms; their ceilings are set at 1.0.0 anyway,
-because what ClaudeUI depends on (pi's RPC and extension API, Codex's app-server protocol) is what
-the tested version is checked against. This is a judgement call, not a guarantee.
+with 1.x. The ceilings are Claude Code 3.0.0, opencode 2.0.0, pi 2.0.0 and Codex 1.0.0. Codex is
+0.x, where a minor release may break in semver terms; its ceiling is set at 1.0.0 anyway, because
+what ClaudeUI depends on (Codex's app-server protocol) is what the tested version is checked
+against. pi has shipped breaking changes in minor and even patch releases, so its next-major
+ceiling is no stronger a promise. This is a judgement call, not a guarantee; the untested label is
+what warns.
 
-The Claude Code floor is 2.1.275 (owner, 2026-09-30). `--forward-subagent-text`, which ClaudeUI
-always passes, first appeared in 2.1.211; older builds exit on it with `unknown option`. The
-behaviour the protocol docs describe also depends on later fixes: nested subagent forwarding
-(2.1.219), headless `/reload-plugins` (2.1.260), forked skills streaming (2.1.265), a subagent's
-final messages after it moves to the background (2.1.273) and `context: fork` skill subagents
-(2.1.275). opencode, pi and Codex keep floor = tested until someone measures lower.
+Every floor equals its tested version unless a lower one is measured and worth keeping (owner,
+2026-10-06; see the amendment above): a bump moves the floor with the pin. The Claude Code floor
+was 2.1.275 until then (owner, 2026-09-30), the build the protocol docs relied on
+(`--forward-subagent-text` from 2.1.211, subagent and skill fixes through 2.1.275). opencode is
+the one exception today: floor 1.18.32, the previous pin, below tested 1.18.34.
 
 ### 4. Downloads
 
@@ -234,8 +244,8 @@ the tested version, the floor, the ceiling, the download coordinates per platfor
 digests. It replaces the `package.json` pins (`opencodeCliVersion`, `piCliVersion`,
 `codexCliVersion`) and the `scripts/*-digests.json` files as the source of truth for what "Tested"
 means; the `ensure-*` scripts and CI cache keys read it. `claudeCliVersion` stays, because Claude
-Code stays bundled; the Claude manifest's `tested` matches it. The Claude Code floor is below its
-tested version (§3); the other floors equal their tested versions until measured.
+Code stays bundled; the Claude manifest's `tested` matches it. Floors equal tested versions (§3),
+opencode's excepted.
 
 ### 6. Updates
 

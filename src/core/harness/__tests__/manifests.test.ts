@@ -26,11 +26,10 @@ describe('harness manifests', () => {
     expect(typeof manifest.platforms).toBe('object')
   })
 
-  it('floors Claude Code at 2.1.275, the build the protocol docs rely on', () => {
-    // 2.1.211 added --forward-subagent-text (older builds exit on it); fixes
-    // through 2.1.275 (background-moved and forked-skill subagents) are what
-    // docs/protocol-cc describes.
-    expect(harnessManifest('claude').floor).toBe('2.1.275')
+  it('floors Claude Code at 2.1.290, the bundled build (owner, 2026-10-06)', () => {
+    // The bundled build is the baseline: floor = tested. A deliberate floor
+    // decision, so a bump that moves it has to touch this test too.
+    expect(harnessManifest('claude').floor).toBe('2.1.290')
   })
 
   it('keeps Claude Code on the bundled build that package.json pins', () => {

@@ -9,6 +9,7 @@
  * {@link resolveCodexHome} so its callers and tests are unchanged.
  */
 
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -27,9 +28,39 @@ export function resolveCodexHome(): string {
  * to this process's `homedir()`.
  */
 export function codexHomeForEnv(env: NodeJS.ProcessEnv | undefined): string {
+  return operatorCodexHome(env) ?? join(env ? homeDirIn(env) : homedir(), '.codex')
+}
+
+/** A `CODEX_HOME` someone set — non-empty, as Codex itself reads it — or undefined. */
+function operatorCodexHome(env: NodeJS.ProcessEnv | undefined): string | undefined {
   const fromEnv = (env ?? process.env).CODEX_HOME
-  if (fromEnv && fromEnv.length > 0) return fromEnv
-  return join(env ? homeDirIn(env) : homedir(), '.codex')
+  return fromEnv && fromEnv.length > 0 ? fromEnv : undefined
+}
+
+/**
+ * Create the home a child spawned with `env` will use, when ClaudeUI DERIVED it
+ * (no non-empty `CODEX_HOME` in that env). Returns whether it made a directory.
+ *
+ * Codex creates only the IMPLICIT `~/.codex` on demand; an explicitly set
+ * `CODEX_HOME` "must exist and be a directory"
+ * (`codex-rs/utils/home-dir/src/lib.rs` `find_codex_home`), or the app-server
+ * exits 1 before `initialize`. ClaudeUI always passes the home explicitly (see
+ * `CodexAppServerClient.childEnv`), so on a fresh HOME — a first-time user on
+ * the managed install — the derived path has to be made here, where Codex
+ * itself would have made it (`codex-rs/arg0/src/lib.rs`
+ * `prepare_path_entry_for_codex_aliases`, `create_dir_all`).
+ *
+ * Owner-only (0o700, through the umask) rather than Codex's umask default: the
+ * directory is where `auth.json` lands. An existing directory is left exactly
+ * as it is — recursive `mkdir` neither fails on it nor changes its mode.
+ *
+ * An operator's own `CODEX_HOME` is never created: that is native Codex
+ * behaviour, and its error is the honest one to surface. Throws what `mkdir`
+ * throws; callers decide whether that blocks a spawn.
+ */
+export function ensureDerivedCodexHome(env: NodeJS.ProcessEnv | undefined): boolean {
+  if (operatorCodexHome(env) !== undefined) return false
+  return mkdirSync(codexHomeForEnv(env), { recursive: true, mode: 0o700 }) !== undefined
 }
 
 /** `homedir()`'s own rule applied to a replacement environment. */

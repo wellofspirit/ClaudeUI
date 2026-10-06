@@ -16,6 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const tests = [
   { name: 'subagent-streaming', script: resolve(__dirname, 'subagent-streaming/test.mjs') },
+  { name: 'voice-server-anchors', script: resolve(__dirname, 'voice-server/anchors.test.mjs') },
   { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') }
 ]
 

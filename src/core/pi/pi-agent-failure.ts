@@ -12,7 +12,7 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 0.87.1
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.0.4
  * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
@@ -33,12 +33,13 @@ export type PiAgentFailureInput =
   /** A `/cui-` prompt the runner refused to send. */
   | { kind: 'refused-command' }
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 0.87.1) ─
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.0.4) ──
 // OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS and the Cerebras body-less case.
 // The silent-overflow cases (usage vs. context window) are not message
 // patterns and need the assistant message, so they are not ported.
 const OVERFLOW_PATTERNS: readonly RegExp[] = [
   /prompt (?:is )?too long/i, // Anthropic and z.ai token overflow
+  /prompt exceeds max length/i, // z.ai CN endpoint token overflow
   /request_too_large/i, // Anthropic request byte-size overflow (HTTP 413)
   /input is too long for requested model/i, // Amazon Bedrock
   /exceeds the context window/i, // OpenAI (Completions & Responses API)
@@ -74,7 +75,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 0.87.1) ────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.0.4) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -96,7 +97,11 @@ const PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
   'insufficient_quota',
   'out of budget',
   'quota exceeded',
-  'billing'
+  'billing',
+
+  // Sign in with ChatGPT: the subscription's shared usage limit, which resets
+  // after hours rather than seconds.
+  'subscription_sharing_usage_limit_exceeded'
 ])
 
 /** RETRYABLE_PROVIDER_ERROR_PATTERN: pi's own "restart the turn" errors. */
@@ -104,6 +109,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   // Generic provider load, HTTP status, and server-side transient failures.
   'overloaded',
   'currently experiencing high demand',
+  'model is at capacity',
   'rate.?limit',
   'too many requests',
   '429',
@@ -153,6 +159,9 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'stream ended before message_stop',
   'stream ended before a terminal response event',
   'http2 request did not get a response',
+  // Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
+  // sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
+  'pending stream has been canceled',
 
   // Provider-requested retry delay cap failures should flow through the outer
   // retry policy so callers can surface/abort the backoff (#1123).
@@ -165,7 +174,12 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'please retry your request',
 
   // gRPC based providers (e.g. NVIDIA NIM)
-  'ResourceExhausted'
+  'ResourceExhausted',
+
+  // Sign in with ChatGPT: usage or user data temporarily unavailable. Usage
+  // failures can arrive mid-stream without an HTTP 503 in the message.
+  'subscription_sharing_usage_unavailable',
+  'subscription_sharing_user_unavailable'
 ])
 
 /** pi's `isContextOverflow`, message-pattern half. */

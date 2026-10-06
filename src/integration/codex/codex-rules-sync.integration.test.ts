@@ -435,6 +435,10 @@ it.skipIf(!enabled)(
     // missing from the list is the rule at work. `echo hi` is the control.
     expect(askedAbout(active)).toEqual(['rule-echo'])
     expect(String(callOutput(fixture, 'rule-ls'))).not.toContain('policy forbids')
+    // Exit 0 is deterministic despite the containment: an execpolicy `allow`
+    // that matches every segment also bypasses Codex's sandbox on the first
+    // attempt (`exec_policy.rs` `Skip { bypass_sandbox }`), so no nested
+    // seatbelt and no denial-classification race is involved.
     expect(callOutput(fixture, 'rule-ls')).toMatch(/Process exited with code 0|Exit code: 0/)
   },
   240000

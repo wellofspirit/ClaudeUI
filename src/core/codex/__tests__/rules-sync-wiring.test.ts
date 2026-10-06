@@ -31,6 +31,14 @@ const rulesSyncMocks = vi.hoisted(() => ({
 }))
 vi.mock('../rules-sync', () => rulesSyncMocks)
 
+// The spawn prep creates a DERIVED Codex home before it syncs (see
+// `codex-home.ts`); mocked so nothing here creates a real directory.
+const codexHomeMocks = vi.hoisted(() => ({ ensureDerivedCodexHome: vi.fn() }))
+vi.mock('../codex-home', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../codex-home')>()),
+  ...codexHomeMocks
+}))
+
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), applyFilter: vi.fn() }
 }))
@@ -151,6 +159,23 @@ describe('codex spawn prep', () => {
     expect(result).toEqual({ resolvedModel: 'gpt-5.6-codex' })
   })
 
+  it('creates a derived Codex home BEFORE the sync, so a fresh home gets its rules', async () => {
+    // A first-time user has no home: the sync skips a missing one, and Codex
+    // loads rule files once per thread, so the home must exist by this point or
+    // the first thread starts without the user's Bash deny rules.
+    await import('../../providers/register-engines')
+    const { spawnPrepRegistry } = await import('../../providers/SpawnPrepRegistry')
+
+    await spawnPrepRegistry.require('codex')('gpt-5.6-codex', {})
+
+    expect(codexHomeMocks.ensureDerivedCodexHome).toHaveBeenCalledTimes(1)
+    // The process's own environment: the same home the session's host derives.
+    expect(codexHomeMocks.ensureDerivedCodexHome).toHaveBeenCalledWith(undefined)
+    expect(codexHomeMocks.ensureDerivedCodexHome.mock.invocationCallOrder[0]).toBeLessThan(
+      rulesSyncMocks.syncCodexRulesFile.mock.invocationCallOrder[0]
+    )
+  })
+
   it('does not sync when Codex is not installed — the prep fails first', async () => {
     await import('../../providers/register-engines')
     const { spawnPrepRegistry } = await import('../../providers/SpawnPrepRegistry')
@@ -160,6 +185,7 @@ describe('codex spawn prep', () => {
     // what this checkout vendors; only that it failed matters here.
     await expect(spawnPrepRegistry.require('codex')('gpt-5.6-codex', {})).rejects.toThrow(/Codex/)
     expect(rulesSyncMocks.syncCodexRulesFile).not.toHaveBeenCalled()
+    expect(codexHomeMocks.ensureDerivedCodexHome).not.toHaveBeenCalled()
   })
 })
 
